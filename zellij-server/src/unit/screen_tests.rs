@@ -28,6 +28,7 @@ use crate::os_input_output::AsyncReader;
 use crate::pty_writer::PtyWriteInstruction;
 use std::collections::HashSet;
 use std::env::set_var;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use crate::{
@@ -330,6 +331,7 @@ fn create_new_screen(
         false, // mouse_click_through
         web_server_ip,
         web_server_port,
+        Arc::new(AtomicBool::new(false)),
     );
     screen
 }
@@ -392,6 +394,7 @@ impl MockScreen {
                     config,
                     debug,
                     Box::new(Layout::default()),
+                    Arc::new(AtomicBool::new(false)),
                 )
                 .expect("TEST")
             })
@@ -478,6 +481,7 @@ impl MockScreen {
                     config,
                     debug,
                     Box::new(Layout::default()),
+                    Arc::new(AtomicBool::new(false)),
                 )
                 .expect("TEST")
             })
@@ -5366,6 +5370,7 @@ fn create_new_screen_with_message_capture(
         false, // mouse_click_through
         web_server_ip,
         web_server_port,
+        Arc::new(AtomicBool::new(false)),
     );
     (screen, messages)
 }

@@ -34,6 +34,8 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::str;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::route::NotificationEnd;
@@ -1419,6 +1421,7 @@ pub(crate) struct Screen {
     pane_render_subscribers: HashMap<ClientId, PaneRenderSubscription>,
     plugins_need_ansi_pane_contents: bool,
     background_plugin_subscriptions: HashMap<(PluginId, ClientId), HashSet<EventType>>,
+    has_clients_flag: Arc<AtomicBool>,
     /// Monotonic counter used to tag each forwarded host-terminal query
     /// with a unique token. 0 is reserved as a sentinel (see
     /// `STARTUP_SENTINEL_TOKEN`); real forwards start at 1.
@@ -1536,6 +1539,7 @@ impl Screen {
         mouse_click_through: bool,
         web_server_ip: IpAddr,
         web_server_port: u16,
+        has_clients_flag: Arc<AtomicBool>,
     ) -> Self {
         let session_name = mode_info.session_name.clone().unwrap_or_default();
         let session_info = SessionInfo::new(session_name.clone());
@@ -1601,6 +1605,7 @@ impl Screen {
             pane_render_subscribers: HashMap::new(),
             plugins_need_ansi_pane_contents: false,
             background_plugin_subscriptions: HashMap::new(),
+            has_clients_flag,
             next_forward_token: 1, // 0 is reserved as the startup sentinel
             pending_forwarded_queries: HashMap::new(),
             forward_queue: VecDeque::new(),
@@ -2400,6 +2405,13 @@ impl Screen {
         }
     }
 
+    /// Returns true if there are any clients, watchers, or subscribers that need render output.
+    fn has_render_recipients(&self) -> bool {
+        !self.connected_clients.borrow().is_empty()
+            || !self.watcher_clients.is_empty()
+            || !self.pane_render_subscribers.is_empty()
+    }
+
     pub fn render(&mut self, plugin_render_assets: Option<Vec<PluginRenderAsset>>) -> Result<()> {
         // here we schedule the RenderToClients background job which debounces renders every 10ms
         // rather than actually rendering
@@ -2407,10 +2419,12 @@ impl Screen {
         // when this job decides to render, it sends back the ScreenInstruction::RenderToClients
         // message, triggering our render_to_clients method which does the actual rendering
 
-        let _ = self
-            .bus
-            .senders
-            .send_to_background_jobs(BackgroundJob::RenderToClients);
+        if self.has_render_recipients() {
+            let _ = self
+                .bus
+                .senders
+                .send_to_background_jobs(BackgroundJob::RenderToClients);
+        }
         if let Some(plugin_render_assets) = plugin_render_assets {
             let _ = self
                 .bus
@@ -2425,6 +2439,14 @@ impl Screen {
         // this method does the actual rendering and is triggered by a debounced BackgroundJob (see
         // the render method for more details)
         let err_context = "failed to render screen";
+
+        // Fast path: skip all work when nobody is listening
+        if self.connected_clients.borrow().is_empty()
+            && self.watcher_clients.is_empty()
+            && self.pane_render_subscribers.is_empty()
+        {
+            return Ok(());
+        }
 
         // Separate rendering for regular clients and watchers
         let has_regular_clients = self
@@ -3059,6 +3081,7 @@ impl Screen {
         self.connected_clients
             .borrow_mut()
             .insert(client_id, is_web_client);
+        self.has_clients_flag.store(true, Ordering::Relaxed);
         self.tab_history.insert(client_id, tab_history);
         self.tabs
             .get_mut(&tab_index)
@@ -3101,6 +3124,10 @@ impl Screen {
             self.tab_history.remove(&client_id);
         }
         self.connected_clients.borrow_mut().remove(&client_id);
+        self.has_clients_flag.store(
+            !self.connected_clients.borrow().is_empty(),
+            Ordering::Relaxed,
+        );
         self.pane_render_subscribers.remove(&client_id);
         self.log_and_report_session_state()
             .with_context(err_context)
@@ -5536,6 +5563,7 @@ pub(crate) fn screen_thread_main(
     config: Config,
     debug: bool,
     default_layout: Box<Layout>,
+    has_clients_flag: Arc<AtomicBool>,
 ) -> Result<()> {
     // Resolve `theme_dark` / `theme_light` to concrete `Styling` from the
     // bundled themes BEFORE `config.options` is moved out below. These
@@ -5662,6 +5690,7 @@ pub(crate) fn screen_thread_main(
         mouse_click_through,
         web_server_ip,
         web_server_port,
+        has_clients_flag,
     );
     screen.host_theme_dark_styling = host_theme_dark_styling;
     screen.host_theme_light_styling = host_theme_light_styling;
@@ -5704,10 +5733,12 @@ pub(crate) fn screen_thread_main(
                         .or_default()
                         .push(ScreenInstruction::PtyBytes(pid, vte_bytes));
                 }
-                let _ = screen
-                    .bus
-                    .senders
-                    .send_to_background_jobs(BackgroundJob::RenderToClients);
+                if screen.has_render_recipients() {
+                    let _ = screen
+                        .bus
+                        .senders
+                        .send_to_background_jobs(BackgroundJob::RenderToClients);
+                }
             },
             ScreenInstruction::PluginBytes(mut plugin_render_assets) => {
                 for plugin_render_asset in plugin_render_assets.iter_mut() {

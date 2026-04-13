@@ -32,7 +32,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::{
     net::{IpAddr, Ipv4Addr},
     path::PathBuf,
-    sync::{Arc, RwLock},
+    sync::{atomic::AtomicBool, Arc, RwLock},
     thread,
 };
 use zellij_utils::envs;
@@ -2043,6 +2043,8 @@ fn init_session(
         })
         .unwrap();
 
+    let has_clients_flag = Arc::new(AtomicBool::new(false));
+
     let screen_thread = thread::Builder::new()
         .name("screen".to_string())
         .spawn({
@@ -2063,6 +2065,7 @@ fn init_session(
             let debug = cli_assets.is_debug;
             let layout = layout.clone();
             let config = config.clone();
+            let has_clients_flag = has_clients_flag.clone();
             move || {
                 screen_thread_main(
                     screen_bus,
@@ -2071,6 +2074,7 @@ fn init_session(
                     config,
                     debug,
                     layout,
+                    has_clients_flag,
                 )
                 .fatal();
             }
@@ -2169,12 +2173,14 @@ fn init_session(
                 has_certificate,
                 enforce_https_for_localhost,
             );
+            let has_clients_flag = has_clients_flag.clone();
             move || {
                 background_jobs_main(
                     background_jobs_bus,
                     serialization_interval,
                     disable_session_metadata,
                     web_server_base_url,
+                    has_clients_flag,
                 )
                 .fatal()
             }
