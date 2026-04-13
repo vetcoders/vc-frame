@@ -1,5 +1,6 @@
 use super::{KeyResponse, LayoutListScreen, OptimisticUpdate, Screen};
-use crate::errors::{format_kdl_error, ErrorScreen};
+use crate::errors::format_kdl_error;
+use crate::screens::ErrorScreen;
 use crate::text_input::{InputAction, TextInput};
 use crate::ui::{truncate_with_ellipsis_start, LayoutDetail, Title};
 use crate::{DisplayLayout, LayoutInfo};

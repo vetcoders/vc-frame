@@ -1,9 +1,8 @@
-mod active_component;
 mod pages;
 mod tips;
 use zellij_tile::prelude::*;
 
-use pages::Page;
+use pages::{ActiveComponent, Page};
 use rand::prelude::*;
 use rand::rng;
 use std::cell::RefCell;
@@ -11,7 +10,6 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 use tips::MAX_TIP_INDEX;
 
-use crate::active_component::ActiveComponent;
 use crate::pages::{ComponentLine, TextOrCustomRender};
 
 const UI_ROWS: usize = 20;
@@ -178,7 +176,7 @@ impl App {
                     format!("Release Notes {}", self.zellij_version.borrow()),
                 );
             } else {
-                rename_plugin_pane(own_plugin_id, "About Zellij");
+                rename_plugin_pane(own_plugin_id, "About VibeCrafted Shell");
             }
         }
     }

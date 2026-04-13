@@ -2,18 +2,22 @@ mod new_session_info;
 mod resurrectable_sessions;
 mod session_list;
 mod single_screen;
+mod single_screen_data;
+mod single_screen_render;
 mod ui;
 use std::collections::BTreeMap;
 use uuid::Uuid;
 use zellij_tile::prelude::*;
 
 use new_session_info::NewSessionInfo;
-use single_screen::{SingleScreenMode, SingleScreenState, UnifiedSearchResult};
+use single_screen::{SingleScreenMode, SingleScreenState};
+use single_screen_data::UnifiedSearchResult;
+use single_screen_render::render_unified_results;
 use ui::{
     components::{
         render_controls_line, render_error, render_new_session_block, render_prompt,
         render_renaming_session_screen, render_screen_toggle, render_single_screen_prompt,
-        render_unified_results, render_unsaved_changes_line, Colors,
+        render_unsaved_changes_line, Colors,
     },
     welcome_screen::{render_banner, render_welcome_boundaries},
     SessionUiInfo,
@@ -87,7 +91,12 @@ impl ZellijPlugin for State {
             EventType::Timer,
             EventType::Visible,
         ]);
-        rename_plugin_pane(get_plugin_ids().plugin_id, "Session Manager");
+        let pane_title = if self.is_welcome_screen {
+            "𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Shell"
+        } else {
+            "Session Manager"
+        };
+        rename_plugin_pane(get_plugin_ids().plugin_id, pane_title);
         self.refresh_session_list();
         if !self.is_welcome_screen {
             self.arm_refresh_timer();

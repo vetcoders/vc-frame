@@ -731,10 +731,22 @@ pub use not_wasm::*;
 #[cfg(not(target_family = "wasm"))]
 mod not_wasm {
     use super::*;
-    use crate::channels::{SenderWithContext, ASYNCOPENCALLS, OPENCALLS};
     use miette::{Diagnostic, GraphicalReportHandler, GraphicalTheme, Report};
+    use std::cell::RefCell;
     use std::panic::PanicHookInfo;
     use thiserror::Error as ThisError;
+
+    thread_local!(
+        /// A key to some thread local storage (TLS) that holds a representation of the thread's
+        /// call stack in the form of an [`ErrorContext`].
+        pub static OPENCALLS: RefCell<ErrorContext> = RefCell::default()
+    );
+
+    tokio::task_local! {
+        /// A key to some task local storage that holds a representation of the task's call stack
+        /// in the form of an [`ErrorContext`].
+        pub static ASYNCOPENCALLS: RefCell<ErrorContext>;
+    }
 
     /// The maximum amount of calls an [`ErrorContext`] will keep track
     /// of in its stack representation. This is a per-thread maximum.
@@ -778,8 +790,10 @@ mod not_wasm {
     }
 
     /// Custom panic handler/hook. Prints the [`ErrorContext`].
-    pub fn handle_panic<T>(info: &PanicHookInfo<'_>, sender: Option<&SenderWithContext<T>>)
-    where
+    pub fn handle_panic<T>(
+        info: &PanicHookInfo<'_>,
+        sender: Option<&crate::channels::SenderWithContext<T>>,
+    ) where
         T: ErrorInstruction + Clone,
     {
         use std::{process, thread};
@@ -924,7 +938,7 @@ mod not_wasm {
     /// Takes the `SendError` and creates an `anyhow` error type with the message that was sent
     /// (formatted as string), attaching the [`ErrorContext`] as anyhow context to it.
     impl<T: std::fmt::Debug, U> ToAnyhow<U>
-        for Result<U, crate::channels::SendError<(T, ErrorContext)>>
+        for Result<U, crossbeam::channel::SendError<(T, ErrorContext)>>
     {
         fn to_anyhow(self) -> anyhow::Result<U> {
             match self {

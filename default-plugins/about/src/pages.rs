@@ -3,8 +3,6 @@ use zellij_tile::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::active_component::{ActiveComponent, ClickAction};
-
 #[derive(Debug)]
 pub struct Page {
     title: Option<Text>,
@@ -13,6 +11,160 @@ pub struct Page {
     hovering_over_link: bool,
     menu_item_is_selected: bool,
     pub is_main_screen: bool,
+}
+
+#[derive(Debug)]
+pub struct ActiveComponent {
+    text_no_hover: TextOrCustomRender,
+    text_hover: Option<TextOrCustomRender>,
+    left_click_action: Option<ClickAction>,
+    last_rendered_coordinates: Option<ComponentCoordinates>,
+    pub is_active: bool,
+}
+
+impl ActiveComponent {
+    pub fn new(text_no_hover: TextOrCustomRender) -> Self {
+        ActiveComponent {
+            text_no_hover,
+            text_hover: None,
+            left_click_action: None,
+            is_active: false,
+            last_rendered_coordinates: None,
+        }
+    }
+    pub fn with_hover(mut self, text_hover: TextOrCustomRender) -> Self {
+        self.text_hover = Some(text_hover);
+        self
+    }
+    pub fn with_left_click_action(mut self, left_click_action: ClickAction) -> Self {
+        self.left_click_action = Some(left_click_action);
+        self
+    }
+    pub fn render(&mut self, x: usize, y: usize, rows: usize, columns: usize) -> usize {
+        let component_width = match self.text_hover.as_mut() {
+            Some(text) if self.is_active => text.render(x, y, rows, columns),
+            _ => self.text_no_hover.render(x, y, rows, columns),
+        };
+        self.last_rendered_coordinates = Some(ComponentCoordinates::new(x, y, 1, columns));
+        component_width
+    }
+    pub fn left_click_action(&mut self) -> Option<Page> {
+        match self.left_click_action.take() {
+            Some(ClickAction::ChangePage(go_to_page)) => Some(go_to_page()),
+            Some(ClickAction::OpenLink(link, executable)) => {
+                self.left_click_action =
+                    Some(ClickAction::OpenLink(link.clone(), executable.clone()));
+                run_command(&[&executable.borrow(), &link], Default::default());
+                None
+            },
+            Some(ClickAction::LaunchPlugin(plugin_url)) => {
+                open_plugin_pane_floating(
+                    &plugin_url,
+                    Default::default(),
+                    None,
+                    Default::default(),
+                );
+                self.left_click_action = Some(ClickAction::LaunchPlugin(plugin_url));
+                None
+            },
+            None => None,
+        }
+    }
+    pub fn handle_left_click_at_position(&mut self, x: usize, y: usize) -> Option<Page> {
+        let Some(last_rendered_coordinates) = &self.last_rendered_coordinates else {
+            return None;
+        };
+        if last_rendered_coordinates.contains(x, y) {
+            self.left_click_action()
+        } else {
+            None
+        }
+    }
+    pub fn handle_hover_at_position(&mut self, x: usize, y: usize) -> bool {
+        let Some(last_rendered_coordinates) = &self.last_rendered_coordinates else {
+            return false;
+        };
+        if last_rendered_coordinates.contains(x, y) && self.text_hover.is_some() {
+            self.is_active = true;
+            true
+        } else {
+            false
+        }
+    }
+    pub fn handle_selection(&mut self) -> Option<Page> {
+        if self.is_active {
+            self.left_click_action()
+        } else {
+            None
+        }
+    }
+    pub fn column_count(&self) -> usize {
+        match self.text_hover.as_ref() {
+            Some(text) if self.is_active => text.len(),
+            _ => self.text_no_hover.len(),
+        }
+    }
+    pub fn clear_hover(&mut self) {
+        self.is_active = false;
+    }
+}
+
+#[derive(Debug)]
+struct ComponentCoordinates {
+    x: usize,
+    y: usize,
+    rows: usize,
+    columns: usize,
+}
+
+impl ComponentCoordinates {
+    fn new(x: usize, y: usize, rows: usize, columns: usize) -> Self {
+        ComponentCoordinates {
+            x,
+            y,
+            rows,
+            columns,
+        }
+    }
+
+    fn contains(&self, x: usize, y: usize) -> bool {
+        x >= self.x && x < self.x + self.columns && y >= self.y && y < self.y + self.rows
+    }
+}
+
+pub enum ClickAction {
+    ChangePage(Box<dyn FnOnce() -> Page>),
+    OpenLink(String, Rc<RefCell<String>>),
+    LaunchPlugin(String),
+}
+
+impl std::fmt::Debug for ClickAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClickAction::ChangePage(_) => write!(f, "ChangePage"),
+            ClickAction::OpenLink(destination, executable) => {
+                write!(f, "OpenLink: {}, {:?}", destination, executable)
+            },
+            ClickAction::LaunchPlugin(url) => {
+                write!(f, "LaunchPlugin: {}", url)
+            },
+        }
+    }
+}
+
+impl ClickAction {
+    pub fn new_change_page<F>(go_to_page: F) -> Self
+    where
+        F: FnOnce() -> Page + 'static,
+    {
+        ClickAction::ChangePage(Box::new(go_to_page))
+    }
+    pub fn new_open_link(destination: String, executable: Rc<RefCell<String>>) -> Self {
+        ClickAction::OpenLink(destination, executable)
+    }
+    pub fn new_launch_plugin(plugin_url: String) -> Self {
+        ClickAction::LaunchPlugin(plugin_url)
+    }
 }
 
 impl Page {
@@ -785,10 +937,10 @@ fn whats_new_title() -> Text {
 
 fn main_screen_title(version: String, is_release_notes: bool) -> Text {
     if is_release_notes {
-        let title_text = format!("Hi there, welcome to Zellij {}!", &version);
-        Text::new(title_text).color_range(2, 21..=27 + version.chars().count())
+        let title_text = format!("Hi there, welcome to VibeCrafted Shell {}!", &version);
+        Text::new(title_text).color_range(2, 21..=38 + version.chars().count())
     } else {
-        let title_text = format!("Zellij {}", &version);
+        let title_text = format!("VibeCrafted Shell {}", &version);
         Text::new(title_text).color_range(2, ..)
     }
 }
@@ -856,7 +1008,7 @@ fn main_menu_item(item_name: &str) -> Text {
 }
 
 fn support_the_developer_text() -> Text {
-    let support_text = format!("Please support the Zellij developer <3: ");
+    let support_text = format!("Please support the VibeCrafted / Zellij craft <3: ");
     Text::new(support_text).color_range(3, ..)
 }
 

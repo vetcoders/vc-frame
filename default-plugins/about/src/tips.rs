@@ -3,8 +3,9 @@ use zellij_tile::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::active_component::{ActiveComponent, ClickAction};
-use crate::pages::{BulletinList, ComponentLine, Page, TextOrCustomRender};
+use crate::pages::{
+    ActiveComponent, BulletinList, ClickAction, ComponentLine, Page, TextOrCustomRender,
+};
 
 pub const MAX_TIP_INDEX: usize = 11;
 
@@ -815,7 +816,7 @@ fn theme_list_selected_len() -> usize {
 }
 
 fn support_the_developer_text() -> Text {
-    let support_text = format!("Please support the Zellij developer <3: ");
+    let support_text = format!("Please support the VibeCrafted / Zellij craft <3: ");
     Text::new(support_text).color_range(3, ..)
 }
 

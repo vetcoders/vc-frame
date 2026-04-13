@@ -114,6 +114,36 @@ pub const WELCOME_LAYOUT: &[u8] = include_bytes!(concat!(
     "assets/layouts/welcome.kdl"
 ));
 
+pub const VC_DASHBOARD_LAYOUT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/",
+    "assets/layouts/vc-dashboard.kdl"
+));
+
+pub const VIBECRAFTED_LAYOUT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/",
+    "assets/layouts/vibecrafted.kdl"
+));
+
+pub const VC_WORKFLOW_LAYOUT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/",
+    "assets/layouts/vc-workflow.kdl"
+));
+
+pub const VC_MARBLES_LAYOUT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/",
+    "assets/layouts/vc-marbles.kdl"
+));
+
+pub const VC_RESEARCH_LAYOUT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/",
+    "assets/layouts/vc-research.kdl"
+));
+
 pub const FISH_EXTRA_COMPLETION: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/",

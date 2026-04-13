@@ -1649,6 +1649,31 @@ impl Layout {
                 Self::stringified_welcome_from_assets()?,
                 None,
             )),
+            Some("vc-dashboard") => Ok((
+                "VibeCrafted mission control layout".into(),
+                Self::stringified_vc_dashboard_from_assets()?,
+                None,
+            )),
+            Some("vibecrafted") => Ok((
+                "VibeCrafted operator layout".into(),
+                Self::stringified_vibecrafted_from_assets()?,
+                None,
+            )),
+            Some("vc-workflow") => Ok((
+                "VibeCrafted workflow layout".into(),
+                Self::stringified_vc_workflow_from_assets()?,
+                None,
+            )),
+            Some("vc-marbles") => Ok((
+                "VibeCrafted marbles layout".into(),
+                Self::stringified_vc_marbles_from_assets()?,
+                None,
+            )),
+            Some("vc-research") => Ok((
+                "VibeCrafted research layout".into(),
+                Self::stringified_vc_research_from_assets()?,
+                None,
+            )),
             None | Some(_) => Err(ConfigError::IoPath(
                 std::io::Error::new(std::io::ErrorKind::Other, "The layout was not found"),
                 path.into(),
@@ -1690,6 +1715,21 @@ impl Layout {
 
     pub fn stringified_welcome_from_assets() -> Result<String, ConfigError> {
         Ok(String::from_utf8(setup::WELCOME_LAYOUT.to_vec())?)
+    }
+    pub fn stringified_vc_dashboard_from_assets() -> Result<String, ConfigError> {
+        Ok(String::from_utf8(setup::VC_DASHBOARD_LAYOUT.to_vec())?)
+    }
+    pub fn stringified_vibecrafted_from_assets() -> Result<String, ConfigError> {
+        Ok(String::from_utf8(setup::VIBECRAFTED_LAYOUT.to_vec())?)
+    }
+    pub fn stringified_vc_workflow_from_assets() -> Result<String, ConfigError> {
+        Ok(String::from_utf8(setup::VC_WORKFLOW_LAYOUT.to_vec())?)
+    }
+    pub fn stringified_vc_marbles_from_assets() -> Result<String, ConfigError> {
+        Ok(String::from_utf8(setup::VC_MARBLES_LAYOUT.to_vec())?)
+    }
+    pub fn stringified_vc_research_from_assets() -> Result<String, ConfigError> {
+        Ok(String::from_utf8(setup::VC_RESEARCH_LAYOUT.to_vec())?)
     }
 
     pub fn new_tab(&self) -> (TiledPaneLayout, Vec<FloatingPaneLayout>) {

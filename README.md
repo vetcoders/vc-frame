@@ -92,6 +92,23 @@ For more build commands, see [CONTRIBUTING.md](CONTRIBUTING.md).
 ## Configuration
 For configuring Zellij, please see the [Configuration Documentation](https://zellij.dev/documentation/configuration.html).
 
+## VibeCrafted Shell Layouts
+This fork also ships built-in VibeCrafted operator layouts meant to back the
+`vibecrafted` flow when repo-owned config is not available:
+
+- `vibecrafted` — operator-first shell surface
+- `vc-dashboard` — mission control monitoring grid
+- `vc-workflow` — implementation workspace
+- `vc-marbles` — convergence workspace
+- `vc-research` — synthesis + research swarm workspace
+
+Use them the same way as the stock built-ins, for example:
+
+```bash
+zellij -l vibecrafted
+zellij -l vc-dashboard
+```
+
 ## About issues in this repository
 Issues in this repository, whether open or closed, do not necessarily indicate a problem or a bug in the software. They only indicate that the reporter wanted to communicate their experiences or thoughts to the maintainers. The Zellij maintainers do their best to go over and reply to all issue reports, but unfortunately cannot promise these will always be dealt with or even read. Your understanding is appreciated.
 

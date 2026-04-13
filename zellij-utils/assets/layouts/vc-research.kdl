@@ -1,0 +1,47 @@
+// vc-research — triple-agent research workspace
+// Launch: vibecrafted dashboard vc-research
+//
+// VibeCrafted with AI Agents (c)2026 VetCoders
+layout {
+    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="compact-bar"
+        }
+        children
+        pane size=1 borderless=true {
+            plugin location="status-bar"
+        }
+    }
+
+    tab name="𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Research" {
+        pane split_direction="vertical" {
+            pane name="synthesis" size="55%" focus=true command="zsh"
+            pane split_direction="horizontal" size="45%" {
+                pane name="claude" command="zsh"
+                pane name="codex" command="zsh"
+                pane name="gemini" command="zsh"
+            }
+        }
+    }
+
+    swap_tiled_layout name="grid" {
+        tab {
+            pane split_direction="horizontal" {
+                pane split_direction="vertical" size="50%" {
+                    pane name="claude" command="zsh"
+                    pane name="codex" command="zsh"
+                }
+                pane split_direction="vertical" size="50%" {
+                    pane name="gemini" command="zsh"
+                    pane name="synthesis" focus=true command="zsh"
+                }
+            }
+        }
+    }
+
+    swap_tiled_layout name="synthesis" {
+        tab {
+            pane name="synthesis" focus=true
+        }
+    }
+}

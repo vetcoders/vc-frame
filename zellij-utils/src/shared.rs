@@ -1,12 +1,11 @@
 //! Some general utility functions.
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 use std::{iter, str::from_utf8};
 
 use crate::data::{Palette, PaletteColor, PaletteSource, ThemeHue};
 use crate::envs::get_session_name;
 use crate::errors::prelude::*;
-use crate::input::options::Options;
 use colorsys::{Ansi256, Rgb};
 use strip_ansi_escapes::strip;
 use unicode_width::UnicodeWidthStr;
@@ -191,22 +190,6 @@ pub fn web_server_base_url(
         "https"
     };
     format!("{}://{}:{}", url_prefix, web_server_ip, web_server_port)
-}
-
-pub fn web_server_base_url_from_config(config_options: Options) -> String {
-    let web_server_ip = config_options
-        .web_server_ip
-        .unwrap_or_else(|| IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
-    let web_server_port = config_options.web_server_port.unwrap_or_else(|| 8082);
-    let has_certificate =
-        config_options.web_server_cert.is_some() && config_options.web_server_key.is_some();
-    let enforce_https_for_localhost = config_options.enforce_https_for_localhost.unwrap_or(false);
-    web_server_base_url(
-        web_server_ip,
-        web_server_port,
-        has_certificate,
-        enforce_https_for_localhost,
-    )
 }
 
 pub struct ServerAddress {
