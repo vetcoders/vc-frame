@@ -18,7 +18,14 @@ use clap::{Args, IntoApp};
 use clap_complete::Shell;
 use log::info;
 use serde::{Deserialize, Serialize};
-use std::{convert::TryFrom, fmt::Write as FmtWrite, fs, io::Write, path::PathBuf, process};
+use std::{
+    convert::TryFrom,
+    fmt::Write as FmtWrite,
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+    process,
+};
 
 const CONFIG_NAME: &str = "config.kdl";
 static ARROW_SEPARATOR: &str = "";
@@ -196,29 +203,26 @@ pub fn dump_default_config() -> std::io::Result<()> {
 }
 
 pub fn dump_specified_layout(layout: &str) -> std::io::Result<()> {
-    match layout {
-        "strider" => dump_asset(STRIDER_LAYOUT),
-        "default" => dump_asset(DEFAULT_LAYOUT),
-        "compact" => dump_asset(COMPACT_BAR_LAYOUT),
-        "disable-status" => dump_asset(NO_STATUS_LAYOUT),
-        "classic" => dump_asset(CLASSIC_LAYOUT),
-        custom => {
-            info!("Dump {custom} layout");
-            let custom = add_layout_ext(custom);
-            let home = default_layout_dir();
-            let path = home.map(|h| h.join(&custom));
-            let layout_exists = path.as_ref().map(|p| p.exists()).unwrap_or_default();
+    if let Ok((_layout_name, stringified_layout, _swap_layouts)) =
+        Layout::stringified_from_default_assets(Path::new(layout))
+    {
+        return std::io::stdout().write_all(stringified_layout.as_bytes());
+    }
 
-            match (path, layout_exists) {
-                (Some(path), true) => {
-                    let content = fs::read_to_string(path)?;
-                    std::io::stdout().write_all(content.as_bytes())
-                },
-                _ => {
-                    log::error!("No layout named {custom} found");
-                    return Ok(());
-                },
-            }
+    info!("Dump {layout} layout");
+    let custom = add_layout_ext(layout);
+    let home = default_layout_dir();
+    let path = home.map(|h| h.join(&custom));
+    let layout_exists = path.as_ref().map(|p| p.exists()).unwrap_or_default();
+
+    match (path, layout_exists) {
+        (Some(path), true) => {
+            let content = fs::read_to_string(path)?;
+            std::io::stdout().write_all(content.as_bytes())
+        },
+        _ => {
+            log::error!("No layout named {custom} found");
+            Ok(())
         },
     }
 }

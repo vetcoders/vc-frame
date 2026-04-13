@@ -107,7 +107,13 @@ Use them the same way as the stock built-ins, for example:
 ```bash
 zellij -l vibecrafted
 zellij -l vc-dashboard
+zellij setup --dump-layout vibecrafted
+zellij setup --dump-layout vc-dashboard
 ```
+
+They are exposed as first-class built-ins, so they also surface in layout
+discovery flows such as the session/layout management UIs instead of behaving
+like ad-hoc repo-only files.
 
 ## About issues in this repository
 Issues in this repository, whether open or closed, do not necessarily indicate a problem or a bug in the software. They only indicate that the reporter wanted to communicate their experiences or thoughts to the maintainers. The Zellij maintainers do their best to go over and reply to all issue reports, but unfortunately cannot promise these will always be dealt with or even read. Your understanding is appreciated.

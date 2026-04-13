@@ -1,5 +1,7 @@
 use super::super::layout::*;
+use crate::input::config::Config;
 use insta::assert_snapshot;
+use std::path::{Path, PathBuf};
 
 #[cfg(not(windows))]
 fn normalize_layout_debug(s: String) -> String {
@@ -250,6 +252,80 @@ fn layout_with_floating_panes_template() {
         ..Default::default()
     };
     assert_eq!(layout, expected_layout);
+}
+
+#[test]
+fn vibecrafted_layouts_are_available_as_builtins() {
+    let layout_dir = Some(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("test-fixtures")
+            .join("config-dirs")
+            .join("custom-default-layout")
+            .join("layouts"),
+    );
+    let (available_layouts, layout_errors) =
+        Layout::list_available_layouts(layout_dir, &Some("default".to_owned()));
+    assert!(
+        layout_errors.is_empty(),
+        "expected no layout parsing errors in test fixture, got: {layout_errors:#?}"
+    );
+
+    let available_builtin_layouts: Vec<_> = available_layouts
+        .into_iter()
+        .filter(|layout_info| layout_info.is_builtin())
+        .map(|layout_info| layout_info.name().to_owned())
+        .collect();
+
+    for layout_name in [
+        "vibecrafted",
+        "vc-dashboard",
+        "vc-workflow",
+        "vc-marbles",
+        "vc-research",
+    ] {
+        assert!(
+            available_builtin_layouts.contains(&layout_name.to_owned()),
+            "expected {layout_name} to be available as a built-in layout"
+        );
+    }
+}
+
+#[test]
+fn vibecrafted_layouts_can_be_loaded_from_builtin_assets() {
+    for layout_name in [
+        "vibecrafted",
+        "vc-dashboard",
+        "vc-workflow",
+        "vc-marbles",
+        "vc-research",
+    ] {
+        let (_path, raw_layout, _swap_layout) =
+            Layout::stringified_from_default_assets(Path::new(layout_name)).unwrap();
+        assert!(
+            raw_layout.contains("VibeCrafted with AI Agents")
+                || raw_layout.contains("𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍."),
+            "expected {layout_name} to resolve from built-in assets"
+        );
+    }
+}
+
+#[test]
+fn vibecrafted_layouts_parse_from_builtin_assets() {
+    for layout_name in [
+        "vibecrafted",
+        "vc-dashboard",
+        "vc-workflow",
+        "vc-marbles",
+        "vc-research",
+    ] {
+        let (layout, _config) =
+            Layout::from_default_assets(Path::new(layout_name), None, Config::default()).unwrap();
+        assert!(
+            layout.has_tabs() || !layout.is_empty(),
+            "expected {layout_name} to parse into a non-empty layout"
+        );
+    }
 }
 
 #[test]

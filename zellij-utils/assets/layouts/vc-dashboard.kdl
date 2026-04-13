@@ -14,7 +14,10 @@
 layout {
     default_tab_template {
         pane size=1 borderless=true {
-            plugin location="compact-bar"
+            plugin location="compact-bar" {
+                brand_text " 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. "
+                brand_text_short " VC. "
+            }
         }
         children
         pane size=1 borderless=true {
@@ -40,6 +43,18 @@ layout {
                     args "-lc" "for root in \"${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/skills/vc-agents\" \"${VIBECRAFTED_ROOT:+$VIBECRAFTED_ROOT/.vibecrafted/skills/vc-agents}\" \"${VIBECRAFTED_ROOT:+$VIBECRAFTED_ROOT/skills/vc-agents}\" \"./skills/vc-agents\"; do if [[ -n \"$root\" && -x \"$root/scripts/mission-control/recent-sessions.sh\" ]]; then exec \"$root/scripts/mission-control/recent-sessions.sh\"; fi; done; printf 'Mission control helper not found: recent-sessions.sh\\n'; exec /bin/zsh -l"
                 }
             }
+        }
+    }
+
+    tab name="𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Sessions" {
+        pane name="session atlas" focus=true {
+            plugin location="session-manager"
+        }
+    }
+
+    tab name="𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Layouts" {
+        pane name="layout forge" focus=true {
+            plugin location="zellij:layout-manager"
         }
     }
 

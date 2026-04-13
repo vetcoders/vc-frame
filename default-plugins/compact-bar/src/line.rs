@@ -11,6 +11,8 @@ pub fn tab_line(
     cols: usize,
     toggle_tooltip_key: Option<String>,
     tooltip_is_active: bool,
+    brand_text: Option<String>,
+    brand_text_short: Option<String>,
 ) -> Vec<LinePart> {
     let config = TabLineConfig {
         session_name: mode_info.session_name.to_owned(),
@@ -20,6 +22,8 @@ pub fn tab_line(
         is_swap_layout_dirty: tab_data.is_swap_layout_dirty,
         toggle_tooltip_key,
         tooltip_is_active,
+        brand_text,
+        brand_text_short,
     };
 
     let builder = TabLineBuilder::new(config, mode_info.style.colors, mode_info.capabilities, cols);
@@ -35,6 +39,8 @@ pub struct TabLineConfig {
     pub is_swap_layout_dirty: bool,
     pub toggle_tooltip_key: Option<String>,
     pub tooltip_is_active: bool,
+    pub brand_text: Option<String>,
+    pub brand_text_short: Option<String>,
 }
 
 fn calculate_total_length(parts: &[LinePart]) -> usize {
@@ -266,16 +272,27 @@ enum TabAction {
 
 struct TabLinePrefixBuilder {
     palette: Styling,
+    capabilities: PluginCapabilities,
     cols: usize,
 }
 
 impl TabLinePrefixBuilder {
-    fn new(palette: Styling, cols: usize) -> Self {
-        Self { palette, cols }
+    fn new(palette: Styling, capabilities: PluginCapabilities, cols: usize) -> Self {
+        Self {
+            palette,
+            capabilities,
+            cols,
+        }
     }
 
-    fn build(&self, session_name: Option<&str>, mode: InputMode) -> Vec<LinePart> {
-        let mut parts = vec![self.create_zellij_part()];
+    fn build(
+        &self,
+        session_name: Option<&str>,
+        mode: InputMode,
+        brand_text: Option<&str>,
+        brand_text_short: Option<&str>,
+    ) -> Vec<LinePart> {
+        let mut parts = vec![self.create_brand_part(brand_text, brand_text_short)];
         let mut used_len = parts.get(0).map_or(0, |p| p.len);
 
         if let Some(name) = session_name {
@@ -292,17 +309,73 @@ impl TabLinePrefixBuilder {
         parts
     }
 
-    fn create_zellij_part(&self) -> LinePart {
-        let prefix_text = " Zellij ";
-        let colors = self.get_text_colors();
+    fn create_brand_part(
+        &self,
+        brand_text: Option<&str>,
+        brand_text_short: Option<&str>,
+    ) -> LinePart {
+        let prefix_text = self.select_brand_text(brand_text, brand_text_short);
+        let is_branded = brand_text.is_some();
+        let colors = if is_branded {
+            self.get_brand_colors()
+        } else {
+            self.get_text_colors()
+        };
+
+        if !is_branded {
+            return LinePart {
+                part: style!(colors.text, colors.background)
+                    .bold()
+                    .paint(prefix_text.clone())
+                    .to_string(),
+                len: prefix_text.width(),
+                tab_index: None,
+            };
+        }
+
+        let separator = tab_separator(self.capabilities);
+        let prefix_len = prefix_text.width() + (separator.width() * 2);
+        let styled_part = if separator.is_empty() {
+            style!(colors.text, colors.background)
+                .bold()
+                .paint(prefix_text.clone())
+                .to_string()
+        } else {
+            let styled_parts = [
+                style!(self.palette.text_unselected.background, colors.background).paint(separator),
+                style!(colors.text, colors.background)
+                    .bold()
+                    .paint(prefix_text.clone()),
+                style!(colors.background, self.palette.text_unselected.background).paint(separator),
+            ];
+            ANSIStrings(&styled_parts).to_string()
+        };
 
         LinePart {
-            part: style!(colors.text, colors.background)
-                .bold()
-                .paint(prefix_text)
-                .to_string(),
-            len: prefix_text.chars().count(),
+            part: styled_part,
+            len: prefix_len,
             tab_index: None,
+        }
+    }
+
+    fn select_brand_text(
+        &self,
+        brand_text: Option<&str>,
+        brand_text_short: Option<&str>,
+    ) -> String {
+        let default_brand = " Zellij ".to_owned();
+        match (brand_text, brand_text_short) {
+            (Some(long_brand), Some(short_brand))
+                if long_brand.width() + 2 <= self.cols
+                    && long_brand.width() >= short_brand.width() =>
+            {
+                long_brand.to_owned()
+            },
+            (Some(_long_brand), Some(short_brand)) if short_brand.width() + 2 <= self.cols => {
+                short_brand.to_owned()
+            },
+            (Some(long_brand), _) if long_brand.width() + 2 <= self.cols => long_brand.to_owned(),
+            _ => default_brand,
         }
     }
 
@@ -355,6 +428,14 @@ impl TabLinePrefixBuilder {
         IndicatorColors {
             text: self.palette.text_unselected.base,
             background: self.palette.text_unselected.background,
+            separator: self.palette.text_unselected.background,
+        }
+    }
+
+    fn get_brand_colors(&self) -> IndicatorColors {
+        IndicatorColors {
+            text: self.palette.ribbon_selected.base,
+            background: self.palette.ribbon_selected.background,
             separator: self.palette.text_unselected.background,
         }
     }
@@ -521,14 +602,19 @@ impl TabLineBuilder {
         let (tabs_before_active, active_tab, tabs_after_active) =
             self.split_tabs(all_tabs, active_tab_index);
 
-        let prefix_builder = TabLinePrefixBuilder::new(self.palette, self.cols);
+        let prefix_builder = TabLinePrefixBuilder::new(self.palette, self.capabilities, self.cols);
         let session_name = if self.config.hide_session_name {
             None
         } else {
             self.config.session_name.as_deref()
         };
 
-        let mut prefix = prefix_builder.build(session_name, self.config.mode);
+        let mut prefix = prefix_builder.build(
+            session_name,
+            self.config.mode,
+            self.config.brand_text.as_deref(),
+            self.config.brand_text_short.as_deref(),
+        );
         let prefix_len = calculate_total_length(&prefix);
 
         if prefix_len + active_tab.len > self.cols {

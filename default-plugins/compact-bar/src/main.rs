@@ -21,6 +21,8 @@ static ARROW_SEPARATOR: &str = "";
 
 const CONFIG_IS_TOOLTIP: &str = "is_tooltip";
 const CONFIG_TOGGLE_TOOLTIP_KEY: &str = "tooltip";
+const CONFIG_BRAND_TEXT: &str = "brand_text";
+const CONFIG_BRAND_TEXT_SHORT: &str = "brand_text_short";
 const MSG_TOGGLE_TOOLTIP: &str = "toggle_tooltip";
 const MSG_TOGGLE_PERSISTED_TOOLTIP: &str = "toggle_persisted_tooltip";
 const MSG_LAUNCH_TOOLTIP: &str = "launch_tooltip_if_not_launched";
@@ -52,6 +54,8 @@ struct State {
     config: BTreeMap<String, String>,
     own_plugin_id: Option<u32>,
     toggle_tooltip_key: Option<String>,
+    brand_text: Option<String>,
+    brand_text_short: Option<String>,
 
     // Tooltip state
     is_tooltip: bool,
@@ -152,6 +156,8 @@ impl State {
             if let Some(tooltip_toggle_key) = configuration.get(CONFIG_TOGGLE_TOOLTIP_KEY) {
                 self.toggle_tooltip_key = Some(tooltip_toggle_key.clone());
             }
+            self.brand_text = configuration.get(CONFIG_BRAND_TEXT).cloned();
+            self.brand_text_short = configuration.get(CONFIG_BRAND_TEXT_SHORT).cloned();
         }
 
         if self.is_tooltip {
@@ -520,6 +526,8 @@ impl State {
             cols,
             self.toggle_tooltip_key.clone(),
             self.tooltip_is_active,
+            self.brand_text.clone(),
+            self.brand_text_short.clone(),
         );
 
         let output = self

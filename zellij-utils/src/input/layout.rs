@@ -1233,6 +1233,19 @@ impl Default for LayoutParts {
     }
 }
 
+const BUILTIN_LAYOUT_NAMES: &[&str] = &[
+    "default",
+    "strider",
+    "disable-status-bar",
+    "compact",
+    "classic",
+    "vc-dashboard",
+    "vibecrafted",
+    "vc-workflow",
+    "vc-marbles",
+    "vc-research",
+];
+
 impl Layout {
     pub fn list_available_layouts(
         layout_dir: Option<PathBuf>,
@@ -1305,11 +1318,11 @@ impl Layout {
             .as_ref()
             .map(|d| d.as_str())
             .unwrap_or("default");
-        available_layouts.push(LayoutInfo::BuiltIn("default".to_owned()));
-        available_layouts.push(LayoutInfo::BuiltIn("strider".to_owned()));
-        available_layouts.push(LayoutInfo::BuiltIn("disable-status-bar".to_owned()));
-        available_layouts.push(LayoutInfo::BuiltIn("compact".to_owned()));
-        available_layouts.push(LayoutInfo::BuiltIn("classic".to_owned()));
+        available_layouts.extend(
+            BUILTIN_LAYOUT_NAMES
+                .iter()
+                .map(|layout_name| LayoutInfo::BuiltIn((*layout_name).to_owned())),
+        );
         available_layouts.sort_by(|a, b| {
             let a_name = a.name();
             let b_name = b.name();
