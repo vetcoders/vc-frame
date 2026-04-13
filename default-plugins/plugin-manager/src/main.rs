@@ -501,6 +501,10 @@ register_plugin!(State);
 
 impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
+        let pane_title = configuration
+            .get("pane_title")
+            .cloned()
+            .unwrap_or_else(|| "Plugin Manager".to_owned());
         self.userspace_configuration = configuration;
         subscribe(&[
             EventType::ModeUpdate,
@@ -510,7 +514,7 @@ impl ZellijPlugin for State {
             EventType::SessionUpdate,
         ]);
         let own_plugin_id = get_plugin_ids().plugin_id;
-        rename_plugin_pane(own_plugin_id, "Plugin Manager");
+        rename_plugin_pane(own_plugin_id, pane_title);
     }
     fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
         if pipe_message.name == "filepicker_result" {

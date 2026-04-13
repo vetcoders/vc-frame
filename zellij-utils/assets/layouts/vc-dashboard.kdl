@@ -5,7 +5,8 @@
 // live system state. Agent tabs spawned during monitoring sessions get
 // branded chrome via default_tab_template.
 // Dashboard tabs expose the native Zellij control surfaces we rely on for
-// operators: sessions, layouts, workspace navigation, and shell guidance.
+// operators: sessions, layouts, configuration, plugin curation, workspace
+// navigation, sharing, and shell guidance.
 //
 // Swap layouts:
 //   "default"  — 2x2 grid (balanced monitoring)
@@ -64,10 +65,34 @@ layout {
         }
     }
 
+    tab name="𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Control" {
+        pane name="control deck" focus=true {
+            plugin location="zellij:configuration" {
+                pane_title "VibeCrafted Control Deck"
+            }
+        }
+    }
+
+    tab name="𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Plugins" {
+        pane name="plugin forge" focus=true {
+            plugin location="zellij:plugin-manager" {
+                pane_title "VibeCrafted Plugin Forge"
+            }
+        }
+    }
+
     tab name="𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Workspace" {
         pane name="workspace atlas" focus=true {
             plugin location="strider" {
                 pane_title "VibeCrafted Workspace Atlas"
+            }
+        }
+    }
+
+    tab name="𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Share" {
+        pane name="share relay" focus=true {
+            plugin location="zellij:share" {
+                pane_title "VibeCrafted Share Relay"
             }
         }
     }

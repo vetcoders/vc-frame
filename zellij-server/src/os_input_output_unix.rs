@@ -1,4 +1,4 @@
-use crate::os_input_output::{command_exists, AsyncReader};
+use crate::os_input_output_api::{command_exists, AsyncReader};
 use crate::panes::PaneId;
 
 use nix::{

@@ -4,9 +4,9 @@ use crate::{
     ClientInstruction, CommandIsExecuting, InputInstruction,
 };
 use zellij_utils::{
-    channels::{Receiver, SenderWithContext, OPENCALLS},
+    channels::{Receiver, SenderWithContext},
     data::{InputMode, KeyWithModifier},
-    errors::{ContextType, ErrorContext, FatalError},
+    errors::{ContextType, ErrorContext, FatalError, OPENCALLS},
     input::{
         actions::Action,
         cast_termwiz_key,

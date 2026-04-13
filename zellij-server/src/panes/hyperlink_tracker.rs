@@ -1,5 +1,5 @@
-use crate::panes::grid::Row;
 use crate::panes::link_handler::LinkHandler;
+use crate::panes::row::Row;
 use crate::panes::terminal_character::{Cursor, LinkAnchor};
 use std::collections::VecDeque;
 
@@ -293,8 +293,8 @@ impl HyperlinkTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::panes::grid::Row;
     use crate::panes::link_handler::LinkHandler;
+    use crate::panes::row::Row;
     use crate::panes::terminal_character::{LinkAnchor, TerminalCharacter};
     use std::collections::VecDeque;
 

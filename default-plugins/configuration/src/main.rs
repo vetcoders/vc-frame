@@ -95,6 +95,10 @@ impl ZellijPlugin for State {
             .get("is_setup_wizard")
             .map(|v| v == "true")
             .unwrap_or(false);
+        let pane_title = configuration
+            .get("pane_title")
+            .cloned()
+            .unwrap_or_else(|| "Configuration".to_owned());
         subscribe(&[
             EventType::Key,
             EventType::FailedToWriteConfigToDisk,
@@ -109,7 +113,7 @@ impl ZellijPlugin for State {
             resize_focused_pane(Resize::Increase);
             resize_focused_pane(Resize::Increase);
         } else {
-            rename_plugin_pane(own_plugin_id, "Configuration");
+            rename_plugin_pane(own_plugin_id, pane_title);
         }
     }
     fn update(&mut self, event: Event) -> bool {
