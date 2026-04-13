@@ -2070,12 +2070,56 @@ fn collect_leaf_panes(
 }
 
 impl LayoutInfo {
+    fn branded_builtin_label(name: &str) -> Option<&'static str> {
+        match name {
+            "vibecrafted" => Some("VibeCrafted Operator Shell"),
+            "vc-dashboard" => Some("VibeCrafted Mission Control"),
+            "vc-workflow" => Some("VibeCrafted Workflow Surface"),
+            "vc-marbles" => Some("VibeCrafted Marbles Surface"),
+            "vc-research" => Some("VibeCrafted Research Surface"),
+            _ => None,
+        }
+    }
+
     pub fn name(&self) -> &str {
         match self {
             LayoutInfo::BuiltIn(name) => &name,
             LayoutInfo::File(name, _) => &name,
             LayoutInfo::Url(url) => &url,
             LayoutInfo::Stringified(layout) => &layout,
+        }
+    }
+    pub fn display_name(&self) -> String {
+        match self {
+            LayoutInfo::BuiltIn(name) => match Self::branded_builtin_label(name) {
+                Some(label) => format!("{name} ({label})"),
+                None => name.clone(),
+            },
+            LayoutInfo::File(name, _) => name.clone(),
+            LayoutInfo::Url(url) => url.clone(),
+            LayoutInfo::Stringified(layout) => layout.clone(),
+        }
+    }
+    pub fn searchable_name(&self) -> String {
+        self.display_name()
+    }
+    pub fn builtin_sort_priority(&self) -> Option<usize> {
+        match self {
+            LayoutInfo::BuiltIn(name) => Some(match name.as_str() {
+                "default" => 0,
+                "vibecrafted" => 1,
+                "vc-dashboard" => 2,
+                "vc-workflow" => 3,
+                "vc-marbles" => 4,
+                "vc-research" => 5,
+                "compact" => 10,
+                "classic" => 11,
+                "strider" => 12,
+                "disable-status-bar" => 13,
+                "welcome" => 14,
+                _ => 20,
+            }),
+            _ => None,
         }
     }
     pub fn is_builtin(&self) -> bool {

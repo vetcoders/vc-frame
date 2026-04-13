@@ -311,6 +311,21 @@ fn vibecrafted_layouts_can_be_loaded_from_builtin_assets() {
 }
 
 #[test]
+fn vibecrafted_layouts_include_companion_repo_fallbacks() {
+    let expected_companion_root =
+        "${VIBECRAFTED_COMPANION_ROOT:-$HOME/Libraxis/vibecrafted}/skills/vc-agents";
+
+    for layout_name in ["vibecrafted", "vc-dashboard", "vc-marbles"] {
+        let (_path, raw_layout, _swap_layout) =
+            Layout::stringified_from_default_assets(Path::new(layout_name)).unwrap();
+        assert!(
+            raw_layout.contains(expected_companion_root),
+            "expected {layout_name} to resolve mission-control helpers from the companion repo"
+        );
+    }
+}
+
+#[test]
 fn vibecrafted_layouts_parse_from_builtin_assets() {
     for layout_name in [
         "vibecrafted",

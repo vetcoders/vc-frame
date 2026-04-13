@@ -115,6 +115,13 @@ They are exposed as first-class built-ins, so they also surface in layout
 discovery flows such as the session/layout management UIs instead of behaving
 like ad-hoc repo-only files.
 
+The shell-provider layouts resolve mission-control helpers from the standard
+home store first, then from a companion repo checkout at
+`~/Libraxis/vibecrafted` via `VIBECRAFTED_COMPANION_ROOT`, and finally from
+repo-local stores. `vc-dashboard` also acts as a branded control hub for the
+native Zellij surfaces we lean on most: live monitoring, session atlas, layout
+forge, workspace navigation, and the VibeCrafted shell guide.
+
 ## About issues in this repository
 Issues in this repository, whether open or closed, do not necessarily indicate a problem or a bug in the software. They only indicate that the reporter wanted to communicate their experiences or thoughts to the maintainers. The Zellij maintainers do their best to go over and reply to all issue reports, but unfortunately cannot promise these will always be dealt with or even read. Your understanding is appreciated.
 

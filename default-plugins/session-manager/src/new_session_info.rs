@@ -225,9 +225,19 @@ pub struct LayoutList {
     pub layout_search_term: String,
 }
 
+fn layout_sort_key(layout_info: &LayoutInfo) -> (usize, usize, String) {
+    match layout_info.builtin_sort_priority() {
+        Some(priority @ 0..=5) => (0, priority, layout_info.display_name().to_lowercase()),
+        None => (1, 0, layout_info.name().to_lowercase()),
+        Some(priority) => (2, priority, layout_info.display_name().to_lowercase()),
+    }
+}
+
 impl LayoutList {
     pub fn update_layout_list(&mut self, layout_list: Vec<LayoutInfo>) {
         let old_layout_length = self.layout_list.len();
+        let mut layout_list = layout_list;
+        layout_list.sort_by(|a, b| layout_sort_key(a).cmp(&layout_sort_key(b)));
         self.layout_list = layout_list;
         if old_layout_length != self.layout_list.len() {
             // honestly, this is just the UX choice that sucks the least...
@@ -278,7 +288,7 @@ impl LayoutList {
             let matcher = SkimMatcherV2::default().use_cache(true);
             for layout_info in &self.layout_list {
                 if let Some((score, indices)) =
-                    matcher.fuzzy_indices(&layout_info.name(), &self.layout_search_term)
+                    matcher.fuzzy_indices(&layout_info.searchable_name(), &self.layout_search_term)
                 {
                     matches.push(LayoutSearchResult {
                         layout_info: layout_info.clone(),
@@ -445,6 +455,47 @@ mod tests {
         // The selected layout should be within the visible window
         let selected_visible = rendered.iter().any(|(_, _, is_selected)| *is_selected);
         assert!(selected_visible);
+    }
+
+    #[test]
+    fn test_6_6_vibecrafted_layouts_rank_ahead_of_stock_builtins() {
+        let mut ll = make_layout_list(&[
+            "compact",
+            "vc-dashboard",
+            "classic",
+            "vibecrafted",
+            "default",
+            "vc-workflow",
+        ]);
+        ll.update_layout_list(ll.layout_list.clone());
+
+        let ordered_names: Vec<&str> = ll.layout_list.iter().map(|layout| layout.name()).collect();
+        assert_eq!(
+            ordered_names,
+            vec![
+                "default",
+                "vibecrafted",
+                "vc-dashboard",
+                "vc-workflow",
+                "compact",
+                "classic",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_6_7_layout_search_matches_vibecrafted_labels() {
+        let mut ll = make_layout_list(&["compact", "vc-dashboard", "vibecrafted"]);
+        ll.update_layout_list(ll.layout_list.clone());
+        ll.layout_search_term = "mission control".to_owned();
+        ll.update_search_term();
+
+        assert_eq!(
+            ll.layout_search_results
+                .first()
+                .map(|result| result.layout_info.name()),
+            Some("vc-dashboard")
+        );
     }
 
     // ---------------------------------------------------------------

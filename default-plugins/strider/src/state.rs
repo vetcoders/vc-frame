@@ -1,11 +1,8 @@
 use crate::file_list_view::{FileListView, FsEntry};
 use crate::platform::Platform;
 use crate::search_view::SearchView;
-use crate::shared::{calculate_list_bounds, render_list_tip};
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-};
+use crate::shared::{calculate_list_bounds, refresh_directory, render_list_tip};
+use std::{collections::BTreeMap, path::PathBuf};
 use unicode_width::UnicodeWidthStr;
 use zellij_tile::prelude::*;
 
@@ -373,8 +370,4 @@ impl State {
             _ => {},
         }
     }
-}
-
-pub(crate) fn refresh_directory(full_path: &Path) {
-    change_host_folder(PathBuf::from(full_path));
 }

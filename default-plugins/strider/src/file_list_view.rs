@@ -1,6 +1,5 @@
 use crate::platform::Platform;
-use crate::shared::{calculate_list_bounds, render_list_tip};
-use crate::state::refresh_directory;
+use crate::shared::{calculate_list_bounds, refresh_directory, render_list_tip};
 use pretty_bytes::converter::convert as pretty_bytes;
 use std::collections::HashMap;
 use std::path::PathBuf;

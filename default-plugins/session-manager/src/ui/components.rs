@@ -880,7 +880,7 @@ pub fn render_layout_selection_list(
         .into_iter()
         .enumerate()
     {
-        let layout_name = layout_info.name();
+        let layout_name = layout_info.display_name();
         let layout_name_len = layout_name.width();
         let is_builtin = layout_info.is_builtin();
         if i > max_rows_of_new_session_block.saturating_sub(1) {
@@ -892,7 +892,7 @@ pub fn render_layout_selection_list(
                     .color_range(0, layout_name_len + 1..)
                     .color_indices(3, indices)
             } else {
-                Text::new(format!("{}", layout_name))
+                Text::new(layout_name)
                     .color_range(1, ..)
                     .color_indices(3, indices)
             };

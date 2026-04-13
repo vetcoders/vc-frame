@@ -92,9 +92,15 @@ impl ZellijPlugin for State {
             EventType::Visible,
         ]);
         let pane_title = if self.is_welcome_screen {
-            "𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Shell"
+            configuration
+                .get("pane_title")
+                .cloned()
+                .unwrap_or_else(|| "𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Shell".to_owned())
         } else {
-            "Session Manager"
+            configuration
+                .get("pane_title")
+                .cloned()
+                .unwrap_or_else(|| "Session Manager".to_owned())
         };
         rename_plugin_pane(get_plugin_ids().plugin_id, pane_title);
         self.refresh_session_list();
@@ -365,7 +371,7 @@ impl ZellijPlugin for State {
                             .into_iter()
                             .enumerate()
                         {
-                            let layout_name = layout_info.name();
+                            let layout_name = layout_info.display_name();
                             let layout_name_len = layout_name.len();
                             let is_builtin = layout_info.is_builtin();
                             if i > max_layout_rows.saturating_sub(1) {
@@ -377,7 +383,7 @@ impl ZellijPlugin for State {
                                     .color_range(0, layout_name_len + 1..)
                                     .color_indices(3, indices)
                             } else {
-                                Text::new(format!("{}", layout_name))
+                                Text::new(layout_name)
                                     .color_range(1, ..)
                                     .color_indices(3, indices)
                             };

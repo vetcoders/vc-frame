@@ -6,9 +6,10 @@ mod state;
 
 use platform::Platform;
 use shared::{
-    render_current_path, render_instruction_line, render_search_term, render_virtual_root_header,
+    refresh_directory, render_current_path, render_instruction_line, render_search_term,
+    render_virtual_root_header,
 };
-use state::{refresh_directory, State};
+use state::State;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use zellij_tile::prelude::*;
@@ -17,6 +18,11 @@ register_plugin!(State);
 
 impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
+        let pane_title = configuration
+            .get("pane_title")
+            .cloned()
+            .unwrap_or_else(|| "Strider".to_owned());
+        rename_plugin_pane(get_plugin_ids().plugin_id, pane_title);
         let plugin_ids = get_plugin_ids();
         let initial_cwd_str = plugin_ids.initial_cwd.to_string_lossy().to_string();
         let platform = Platform::detect(&initial_cwd_str);

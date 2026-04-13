@@ -1,5 +1,5 @@
 use crate::platform::Platform;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use unicode_width::UnicodeWidthStr;
 use zellij_tile::prelude::*;
 
@@ -167,4 +167,8 @@ fn truncate_path(path: PathBuf, mut char_count_to_remove: usize, platform: Platf
         }
     }
     truncated
+}
+
+pub fn refresh_directory(full_path: &Path) {
+    change_host_folder(PathBuf::from(full_path));
 }
