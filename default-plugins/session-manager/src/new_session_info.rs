@@ -3,6 +3,8 @@ use fuzzy_matcher::FuzzyMatcher;
 use std::path::PathBuf;
 use zellij_tile::prelude::*;
 
+use crate::list_navigation::{move_wrapping_index_down, move_wrapping_index_up, range_to_render};
+
 #[derive(Default)]
 pub struct NewSessionInfo {
     name: String,
@@ -44,7 +46,7 @@ impl NewSessionInfo {
             },
             EnteringState::EnteringLayoutSearch => {
                 self.layout_list.layout_search_term.push(character);
-                self.update_layout_search_term();
+                self.layout_list.update_search_term();
             },
         }
     }
@@ -55,7 +57,7 @@ impl NewSessionInfo {
             },
             EnteringState::EnteringLayoutSearch => {
                 self.layout_list.layout_search_term.pop();
-                self.update_layout_search_term();
+                self.layout_list.update_search_term();
             },
         }
     }
@@ -67,7 +69,7 @@ impl NewSessionInfo {
             EnteringState::EnteringLayoutSearch => {
                 self.layout_list.layout_search_term.clear();
                 self.entering_new_session_info = EnteringState::EnteringName;
-                self.update_layout_search_term();
+                self.layout_list.update_search_term();
             },
         }
     }
@@ -86,10 +88,10 @@ impl NewSessionInfo {
                 self.add_char(character);
             },
             BareKey::Up if key.has_no_modifiers() => {
-                self.move_selection_up();
+                self.layout_list.move_selection_up();
             },
             BareKey::Down if key.has_no_modifiers() => {
-                self.move_selection_down();
+                self.layout_list.move_selection_down();
             },
             _ => {},
         }
@@ -203,15 +205,6 @@ impl NewSessionInfo {
     pub fn selected_layout_info(&self) -> Option<LayoutInfo> {
         self.layout_list.selected_layout_info()
     }
-    fn update_layout_search_term(&mut self) {
-        self.layout_list.update_search_term();
-    }
-    fn move_selection_up(&mut self) {
-        self.layout_list.move_selection_up();
-    }
-    fn move_selection_down(&mut self) {
-        self.layout_list.move_selection_down();
-    }
     pub fn get_layout_list_clone(&self) -> LayoutList {
         self.layout_list.clone()
     }
@@ -257,27 +250,15 @@ impl LayoutList {
         self.selected_layout_index = 0;
     }
     pub fn max_index(&self) -> usize {
-        if self.layout_search_term.is_empty() {
-            self.layout_list.len().saturating_sub(1)
-        } else {
-            self.layout_search_results.len().saturating_sub(1)
-        }
+        self.current_results_len().saturating_sub(1)
     }
     pub fn move_selection_up(&mut self) {
-        let max_index = self.max_index();
-        if self.selected_layout_index > 0 {
-            self.selected_layout_index -= 1;
-        } else {
-            self.selected_layout_index = max_index;
-        }
+        let current_results_len = self.current_results_len();
+        move_wrapping_index_up(&mut self.selected_layout_index, current_results_len);
     }
     pub fn move_selection_down(&mut self) {
-        let max_index = self.max_index();
-        if self.selected_layout_index < max_index {
-            self.selected_layout_index += 1;
-        } else {
-            self.selected_layout_index = 0;
-        }
+        let current_results_len = self.current_results_len();
+        move_wrapping_index_down(&mut self.selected_layout_index, current_results_len);
     }
     pub fn update_search_term(&mut self) {
         if self.layout_search_term.is_empty() {
@@ -300,6 +281,13 @@ impl LayoutList {
             matches.sort_by(|a, b| b.score.cmp(&a.score));
             self.layout_search_results = matches;
             self.clear_selection();
+        }
+    }
+    fn current_results_len(&self) -> usize {
+        if self.layout_search_term.is_empty() {
+            self.layout_list.len()
+        } else {
+            self.layout_search_results.len()
         }
     }
     pub fn layouts_to_render(&self, max_rows: usize) -> Vec<(LayoutInfo, Vec<usize>, bool)> {
@@ -345,25 +333,6 @@ impl LayoutList {
             .take(range_to_render.1)
             .skip(range_to_render.0)
             .collect()
-    }
-}
-
-pub fn range_to_render(
-    table_rows: usize,
-    results_len: usize,
-    selected_index: Option<usize>,
-) -> (usize, usize) {
-    if table_rows <= results_len {
-        let row_count_to_render = table_rows.saturating_sub(1); // 1 for the title
-        let first_row_index_to_render = selected_index
-            .unwrap_or(0)
-            .saturating_sub(row_count_to_render / 2);
-        let last_row_index_to_render = first_row_index_to_render + row_count_to_render;
-        (first_row_index_to_render, last_row_index_to_render)
-    } else {
-        let first_row_index_to_render = 0;
-        let last_row_index_to_render = results_len;
-        (first_row_index_to_render, last_row_index_to_render)
     }
 }
 
@@ -498,6 +467,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_6_8_layout_search_matches_dashboard_surface_aliases() {
+        let mut ll = make_layout_list(&["compact", "vc-dashboard", "vibecrafted"]);
+        ll.update_layout_list(ll.layout_list.clone());
+
+        ll.layout_search_term = "session atlas".to_owned();
+        ll.update_search_term();
+        assert_eq!(
+            ll.layout_search_results
+                .first()
+                .map(|result| result.layout_info.name()),
+            Some("vc-dashboard")
+        );
+
+        ll.layout_search_term = "operator shell".to_owned();
+        ll.update_search_term();
+        assert_eq!(
+            ll.layout_search_results
+                .first()
+                .map(|result| result.layout_info.name()),
+            Some("vibecrafted")
+        );
+    }
+
     // ---------------------------------------------------------------
     // Section 7: Viewport Scrolling (range_to_render tests)
     // ---------------------------------------------------------------
@@ -505,7 +498,7 @@ mod tests {
     #[test]
     fn test_7_1_all_results_fit_in_viewport() {
         // When table_rows > results_len, all results are shown
-        let (start, end) = range_to_render(10, 5, None);
+        let (start, end) = crate::list_navigation::range_to_render(10, 5, None);
         assert_eq!(start, 0);
         assert_eq!(end, 5);
     }
@@ -515,7 +508,7 @@ mod tests {
         // table_rows=6, results_len=20, selected=10
         // row_count_to_render = 6-1 = 5, half = 2
         // first = 10-2 = 8, last = 8+5 = 13
-        let (start, end) = range_to_render(6, 20, Some(10));
+        let (start, end) = crate::list_navigation::range_to_render(6, 20, Some(10));
         assert_eq!(start, 8);
         assert_eq!(end, 13);
     }
@@ -527,7 +520,7 @@ mod tests {
         // first = 19-2 = 17, last = 17+5 = 22 > 20
         // Note: range_to_render does NOT clamp — it returns (17, 22)
         // The actual clamping happens in the caller via .take().skip()
-        let (start, end) = range_to_render(6, 20, Some(19));
+        let (start, end) = crate::list_navigation::range_to_render(6, 20, Some(19));
         assert_eq!(start, 17);
         assert_eq!(end, 22);
     }
@@ -537,7 +530,7 @@ mod tests {
         // table_rows=6, results_len=20, selected=0
         // row_count_to_render = 5, half = 2
         // first = 0.saturating_sub(2) = 0, last = 0+5 = 5
-        let (start, end) = range_to_render(6, 20, Some(0));
+        let (start, end) = crate::list_navigation::range_to_render(6, 20, Some(0));
         assert_eq!(start, 0);
         assert_eq!(end, 5);
     }

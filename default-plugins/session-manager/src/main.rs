@@ -1,3 +1,4 @@
+mod list_navigation;
 mod new_session_info;
 mod resurrectable_sessions;
 mod session_list;

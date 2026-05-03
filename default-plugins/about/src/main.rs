@@ -26,6 +26,7 @@ struct App {
     own_plugin_id: Option<u32>,
     is_release_notes: bool,
     is_startup_tip: bool,
+    guide_mode: Option<String>,
     tip_index: usize,
     waiting_for_config_to_be_written: bool,
     error: Option<String>,
@@ -51,6 +52,7 @@ impl Default for App {
             own_plugin_id: None,
             is_release_notes: false,
             is_startup_tip: false,
+            guide_mode: None,
             tip_index: 0,
             waiting_for_config_to_be_written: false,
             error: None,
@@ -70,6 +72,7 @@ impl ZellijPlugin for App {
             .get("is_startup_tip")
             .map(|v| v == "true")
             .unwrap_or(false);
+        self.guide_mode = configuration.get("guide_mode").cloned();
         subscribe(&[
             EventType::Key,
             EventType::Mouse,
@@ -91,6 +94,12 @@ impl ZellijPlugin for App {
                 self.link_executable.clone(),
                 self.base_mode.clone(),
                 self.tip_index,
+            )
+        } else if self.guide_mode.as_deref() == Some("mission-control") {
+            Page::new_vibecrafted_mission_control(
+                self.link_executable.clone(),
+                self.zellij_version.borrow().clone(),
+                self.base_mode.clone(),
             )
         } else {
             Page::new_main_screen(
@@ -175,6 +184,8 @@ impl App {
                     own_plugin_id,
                     format!("Release Notes {}", self.zellij_version.borrow()),
                 );
+            } else if self.guide_mode.as_deref() == Some("mission-control") {
+                rename_plugin_pane(own_plugin_id, "VibeCrafted Shell Guide");
             } else {
                 rename_plugin_pane(own_plugin_id, "About VibeCrafted Shell");
             }

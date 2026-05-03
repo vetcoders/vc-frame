@@ -326,6 +326,20 @@ fn vibecrafted_layouts_include_companion_repo_fallbacks() {
 }
 
 #[test]
+fn vc_dashboard_guide_tab_uses_branded_mission_control_mode() {
+    let (_path, raw_layout, _swap_layout) =
+        Layout::stringified_from_default_assets(Path::new("vc-dashboard")).unwrap();
+    assert!(
+        raw_layout.contains("guide_mode \"mission-control\""),
+        "expected vc-dashboard to configure the about plugin for the mission-control guide"
+    );
+    assert!(
+        raw_layout.contains("pane_title \"VibeCrafted Shell Guide\""),
+        "expected vc-dashboard guide tab to set a branded pane title"
+    );
+}
+
+#[test]
 fn vibecrafted_layouts_parse_from_builtin_assets() {
     for layout_name in [
         "vibecrafted",

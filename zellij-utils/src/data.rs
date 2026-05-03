@@ -2081,6 +2081,45 @@ impl LayoutInfo {
         }
     }
 
+    fn branded_builtin_keywords(name: &str) -> &'static [&'static str] {
+        match name {
+            "vibecrafted" => &["operator shell", "operator mode", "vc start", "vc-start"],
+            "vc-dashboard" => &[
+                "dashboard",
+                "mission control",
+                "session atlas",
+                "layout forge",
+                "control deck",
+                "plugin forge",
+                "workspace atlas",
+                "share relay",
+                "shell guide",
+            ],
+            "vc-workflow" => &[
+                "workflow",
+                "implementation",
+                "delivery surface",
+                "coding",
+                "pairing",
+            ],
+            "vc-marbles" => &[
+                "marbles",
+                "convergence",
+                "stabilization",
+                "loop",
+                "runtime truth",
+            ],
+            "vc-research" => &[
+                "research",
+                "synthesis",
+                "triple agent",
+                "analysis",
+                "discovery",
+            ],
+            _ => &[],
+        }
+    }
+
     pub fn name(&self) -> &str {
         match self {
             LayoutInfo::BuiltIn(name) => &name,
@@ -2101,7 +2140,18 @@ impl LayoutInfo {
         }
     }
     pub fn searchable_name(&self) -> String {
-        self.display_name()
+        match self {
+            LayoutInfo::BuiltIn(name) => {
+                let display_name = self.display_name();
+                let keywords = Self::branded_builtin_keywords(name);
+                if keywords.is_empty() {
+                    display_name
+                } else {
+                    format!("{display_name} {}", keywords.join(" "))
+                }
+            },
+            _ => self.display_name(),
+        }
     }
     pub fn builtin_sort_priority(&self) -> Option<usize> {
         match self {

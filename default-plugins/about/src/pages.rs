@@ -284,6 +284,125 @@ impl Page {
                 })
             })
     }
+    pub fn new_vibecrafted_mission_control(
+        link_executable: Rc<RefCell<String>>,
+        zellij_version: String,
+        _base_mode: Rc<RefCell<InputMode>>,
+    ) -> Self {
+        Page::new()
+            .main_screen()
+            .with_title(Text::new("VibeCrafted Mission Control").color_range(0, ..))
+            .with_paragraph(vec![
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("A branded shell-provider surface built on top of native Zellij control decks."),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(format!(
+                        "This guide is wired into Zellij {} so operators can jump from telemetry into action without leaving the dashboard.",
+                        zellij_version
+                    ))
+                    .color_substring(2, "operators")
+                    .color_substring(3, "dashboard"),
+                ))]),
+            ])
+            .with_bulletin_list(
+                BulletinList::new(Text::new("Open a deck:").color_range(2, ..)).with_items(vec![
+                    ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
+                        "Session Atlas",
+                    )))
+                    .with_hover(TextOrCustomRender::Text(
+                        main_menu_item("Session Atlas").selected(),
+                    ))
+                    .with_left_click_action(ClickAction::new_launch_plugin(
+                        "zellij:session-manager".to_owned(),
+                    )),
+                    ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
+                        "Layout Forge",
+                    )))
+                    .with_hover(TextOrCustomRender::Text(
+                        main_menu_item("Layout Forge").selected(),
+                    ))
+                    .with_left_click_action(ClickAction::new_launch_plugin(
+                        "zellij:layout-manager".to_owned(),
+                    )),
+                    ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
+                        "Control Deck",
+                    )))
+                    .with_hover(TextOrCustomRender::Text(
+                        main_menu_item("Control Deck").selected(),
+                    ))
+                    .with_left_click_action(ClickAction::new_launch_plugin(
+                        "zellij:configuration".to_owned(),
+                    )),
+                    ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
+                        "Plugin Forge",
+                    )))
+                    .with_hover(TextOrCustomRender::Text(
+                        main_menu_item("Plugin Forge").selected(),
+                    ))
+                    .with_left_click_action(ClickAction::new_launch_plugin(
+                        "zellij:plugin-manager".to_owned(),
+                    )),
+                    ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
+                        "Workspace Atlas",
+                    )))
+                    .with_hover(TextOrCustomRender::Text(
+                        main_menu_item("Workspace Atlas").selected(),
+                    ))
+                    .with_left_click_action(ClickAction::new_launch_plugin(
+                        "zellij:strider".to_owned(),
+                    )),
+                    ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
+                        "Share Relay",
+                    )))
+                    .with_hover(TextOrCustomRender::Text(
+                        main_menu_item("Share Relay").selected(),
+                    ))
+                    .with_left_click_action(ClickAction::new_launch_plugin(
+                        "zellij:share".to_owned(),
+                    )),
+                ]),
+            )
+            .with_paragraph(vec![
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("Operator shell: vibecrafted start").color_substring(
+                        3,
+                        "vibecrafted start",
+                    ),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("Implementation surface: vibecrafted dashboard vc-workflow")
+                        .color_substring(3, "vibecrafted dashboard vc-workflow"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("Convergence surface: vibecrafted dashboard vc-marbles")
+                        .color_substring(3, "vibecrafted dashboard vc-marbles"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("Research surface: vibecrafted dashboard vc-research")
+                        .color_substring(3, "vibecrafted dashboard vc-research"),
+                ))]),
+            ])
+            .with_paragraph(vec![ComponentLine::new(vec![
+                ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("Learn more about the native Zellij surfaces behind this shell: ")
+                        .color_range(2, ..),
+                )),
+                ActiveComponent::new(TextOrCustomRender::Text(Text::new(
+                    "https://zellij.dev/documentation/",
+                )))
+                .with_hover(TextOrCustomRender::Text(
+                    Text::new("https://zellij.dev/documentation/").selected(),
+                ))
+                .with_left_click_action(ClickAction::new_open_link(
+                    "https://zellij.dev/documentation/".to_owned(),
+                    link_executable.clone(),
+                )),
+            ])])
+            .with_help(Box::new(|hovering_over_link, menu_item_is_selected| {
+                main_screen_help_text(hovering_over_link, menu_item_is_selected)
+            }))
+    }
     fn new_windows_support() -> Page {
         Page::new()
             .with_title(Text::new("Windows Support").color_range(0, ..))

@@ -99,7 +99,10 @@ layout {
 
     tab name="𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Guide" {
         pane name="shell guide" focus=true {
-            plugin location="about"
+            plugin location="about" {
+                pane_title "VibeCrafted Shell Guide"
+                guide_mode "mission-control"
+            }
         }
     }
 
