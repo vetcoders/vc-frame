@@ -1347,7 +1347,7 @@ impl From<crate::input::actions::Action>
                 tab_position: tab_position.map(|p| p as u32),
                 pane_id: pane_id.map(|(id, is_plugin)| PaneIdWithPlugin {
                     pane_id: id,
-                    is_plugin: is_plugin,
+                    is_plugin,
                 }),
                 layout: layout.as_ref().map(|l| l.clone().into()),
                 cwd: cwd.as_ref().map(|p| p.to_string_lossy().to_string()),

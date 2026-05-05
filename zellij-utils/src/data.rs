@@ -1780,7 +1780,7 @@ impl ModeInfo {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Default, Clone, Eq, Deserialize, Serialize)]
 pub struct SessionInfo {
     pub name: String,
     pub tabs: Vec<TabInfo>,
@@ -1794,6 +1794,23 @@ pub struct SessionInfo {
     pub tab_history: BTreeMap<ClientId, Vec<usize>>,
     pub pane_history: BTreeMap<ClientId, Vec<PaneId>>,
     pub creation_time: Duration,
+}
+
+impl PartialEq for SessionInfo {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.tabs == other.tabs
+            && self.panes == other.panes
+            && self.connected_clients == other.connected_clients
+            && self.is_current_session == other.is_current_session
+            && self.available_layouts == other.available_layouts
+            && self.plugins == other.plugins
+            && self.web_clients_allowed == other.web_clients_allowed
+            && self.web_client_count == other.web_client_count
+            && self.tab_history == other.tab_history
+            && self.pane_history == other.pane_history
+            && self.creation_time == other.creation_time
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -2293,7 +2310,6 @@ impl LayoutInfo {
     }
 }
 
-#[allow(clippy::derive_hash_xor_eq)]
 impl Hash for SessionInfo {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.name.hash(state);

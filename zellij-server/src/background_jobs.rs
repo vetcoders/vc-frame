@@ -46,6 +46,7 @@ pub enum BackgroundJob {
     ReportSessionInfo(String, SessionInfo),               // String - session name
     ReportPluginList(BTreeMap<PluginId, RunPlugin>),      // String - session name
     ReportLayoutInfo((String, BTreeMap<String, String>)), // BTreeMap<file_name, pane_contents>
+    ReadAllSessionInfosOnMachine,
     RunCommand(
         PluginId,
         ClientId,
@@ -87,6 +88,7 @@ impl From<&BackgroundJob> for BackgroundJobContext {
             },
             BackgroundJob::ReportSessionInfo(..) => BackgroundJobContext::ReportSessionInfo,
             BackgroundJob::ReportLayoutInfo(..) => BackgroundJobContext::ReportLayoutInfo,
+            BackgroundJob::ReadAllSessionInfosOnMachine => BackgroundJobContext::ListWebSessions,
             BackgroundJob::RunCommand(..) => BackgroundJobContext::RunCommand,
             BackgroundJob::WebRequest(..) => BackgroundJobContext::WebRequest,
             BackgroundJob::ReportPluginList(..) => BackgroundJobContext::ReportPluginList,
@@ -330,8 +332,11 @@ pub(crate) fn background_jobs_main(
                                     .as_millis()
                                     as u64;
                             }
-                            let mut session_infos_on_machine =
-                                read_other_live_session_states(&current_session_name);
+                            let mut session_infos_on_machine = read_other_live_session_states(
+                                &current_session_name,
+                                &*ZELLIJ_SOCK_DIR,
+                                &*ZELLIJ_SESSION_INFO_CACHE_DIR,
+                            );
                             for (session_name, session_info) in session_infos_on_machine.iter_mut()
                             {
                                 if session_name == &current_session_name {
@@ -342,8 +347,10 @@ pub(crate) fn background_jobs_main(
                                     session_info.available_layouts = available_layouts.clone();
                                 }
                             }
-                            let resurrectable_sessions =
-                                find_resurrectable_sessions(&session_infos_on_machine);
+                            let resurrectable_sessions = find_resurrectable_sessions(
+                                &session_infos_on_machine,
+                                &*ZELLIJ_SESSION_INFO_CACHE_DIR,
+                            );
                             let _ = senders.send_to_screen(ScreenInstruction::UpdateSessionInfos(
                                 session_infos_on_machine,
                                 resurrectable_sessions,
@@ -364,9 +371,9 @@ pub(crate) fn background_jobs_main(
                                 *last_serialization_time.lock().unwrap() = Instant::now();
                             }
                             let sleep_ms = if has_clients.load(Ordering::Relaxed) {
-                                SESSION_READ_DURATION
+                                SESSION_METADATA_WRITE_INTERVAL_MS
                             } else {
-                                SESSION_READ_DURATION * 5 // 5s when detached
+                                SESSION_METADATA_WRITE_INTERVAL_MS * 5 // 5s when detached
                             };
                             tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
                         }

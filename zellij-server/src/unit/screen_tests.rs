@@ -8441,6 +8441,7 @@ fn create_new_screen_with_forward_capture(size: Size) -> (Screen, ForwardCapture
         false, // mouse_click_through
         web_server_ip,
         web_server_port,
+        Arc::new(AtomicBool::new(true)),
     );
     (
         screen,
@@ -9024,6 +9025,7 @@ fn create_new_screen_with_theme_capture(size: Size) -> (Screen, ThemeCapture) {
         false,
         web_server_ip,
         web_server_port,
+        Arc::new(AtomicBool::new(true)),
     );
     (
         screen,

@@ -213,7 +213,7 @@ impl Dimension {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum Constraint {
     /// Constrains the dimension to a fixed, integer number of rows / columns
     Fixed(usize),
@@ -232,7 +232,6 @@ impl Display for Constraint {
     }
 }
 
-#[allow(clippy::derive_hash_xor_eq)]
 impl Hash for Constraint {
     fn hash<H: Hasher>(&self, state: &mut H) {
         match self {
@@ -243,6 +242,16 @@ impl Hash for Constraint {
 }
 
 impl Eq for Constraint {}
+
+impl PartialEq for Constraint {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Constraint::Fixed(a), Constraint::Fixed(b)) => a == b,
+            (Constraint::Percent(a), Constraint::Percent(b)) => a == b,
+            _ => false,
+        }
+    }
+}
 
 impl PaneGeom {
     pub fn contains(&self, point: &Position) -> bool {
