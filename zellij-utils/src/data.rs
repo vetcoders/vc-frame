@@ -2713,6 +2713,24 @@ pub enum GetSessionListResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum KillSessionsResponse {
+    Ok,
+    Err(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum DeleteDeadSessionResponse {
+    Ok,
+    Err(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum DeleteAllDeadSessionsResponse {
+    Ok,
+    Err(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum GetPaneCwdResponse {
     Ok(PathBuf),
     Err(String),
@@ -3699,6 +3717,9 @@ pub enum PluginCommand {
     },
     ListWindowsVolumes,
     GetSessionList,
+    KillSessionsAndReply(Vec<String>), // one or more session names; sends a response back
+    DeleteDeadSessionAndReply(String), // session name; sends a response back
+    DeleteAllDeadSessionsAndReply,     // no payload; sends a response back
 }
 
 // Response type for plugin API methods that open a pane in a new tab

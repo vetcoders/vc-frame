@@ -20,6 +20,88 @@ impl Default for SingleScreenMode {
     }
 }
 
+#[derive(Debug)]
+pub enum UnifiedSearchResult {
+    ActiveSession {
+        score: i64,
+        indices: Vec<usize>,
+        session_name: String,
+        connected_users: usize,
+        tab_count: usize,
+        pane_count: usize,
+        is_current_session: bool,
+        creation_time: Duration,
+    },
+    ResurrectableSession {
+        score: i64,
+        indices: Vec<usize>,
+        session_name: String,
+        ctime: Duration,
+    },
+}
+
+/// Which kind of entry was under the cursor when the user pressed `Delete`.
+/// Carries the session name so the host code can issue the right shim call
+/// (`kill_sessions` vs `delete_dead_session`) without re-borrowing the
+/// underlying `UnifiedSearchResult`.
+#[derive(Debug, Clone)]
+pub enum DeleteTarget {
+    Active(String),
+    Resurrectable(String),
+}
+
+impl UnifiedSearchResult {
+    pub fn as_delete_target(&self) -> DeleteTarget {
+        match self {
+            UnifiedSearchResult::ActiveSession { session_name, .. } => {
+                DeleteTarget::Active(session_name.clone())
+            },
+            UnifiedSearchResult::ResurrectableSession { session_name, .. } => {
+                DeleteTarget::Resurrectable(session_name.clone())
+            },
+        }
+    }
+    pub fn session_name(&self) -> &str {
+        match self {
+            UnifiedSearchResult::ActiveSession { session_name, .. } => session_name.as_str(),
+            UnifiedSearchResult::ResurrectableSession { session_name, .. } => session_name.as_str(),
+        }
+    }
+    fn score(&self) -> i64 {
+        match self {
+            UnifiedSearchResult::ActiveSession { score, .. } => *score,
+            UnifiedSearchResult::ResurrectableSession { score, .. } => *score,
+        }
+    }
+    /// Ordering by type (active before resurrectable), then by creation time ascending
+    /// (smaller elapsed duration = more recently created = appears first).
+    fn cmp_by_type_then_recency(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (
+                UnifiedSearchResult::ActiveSession {
+                    creation_time: ct_a,
+                    ..
+                },
+                UnifiedSearchResult::ActiveSession {
+                    creation_time: ct_b,
+                    ..
+                },
+            ) => ct_a.cmp(ct_b),
+            (
+                UnifiedSearchResult::ResurrectableSession { ctime: ct_a, .. },
+                UnifiedSearchResult::ResurrectableSession { ctime: ct_b, .. },
+            ) => ct_a.cmp(ct_b),
+            (
+                UnifiedSearchResult::ActiveSession { .. },
+                UnifiedSearchResult::ResurrectableSession { .. },
+            ) => std::cmp::Ordering::Less,
+            (
+                UnifiedSearchResult::ResurrectableSession { .. },
+                UnifiedSearchResult::ActiveSession { .. },
+            ) => std::cmp::Ordering::Greater,
+        }
+    }
+}
 #[derive(Default)]
 pub struct SingleScreenState {
     pub search_term: String,
@@ -87,6 +169,21 @@ impl SingleScreenState {
                 .iter()
                 .position(|r| r.session_name() == prev_name);
         }
+    }
+
+    /// After deleting an entry, ensure the cursor stays on a sensible row.
+    /// `update_search_term` already keeps the selection on the same entry by
+    /// name if it still exists; this method picks up the case where the
+    /// deleted entry **was** the selected one, by falling back to the same
+    /// numeric row clamped to the new `unified_results` length.
+    pub fn restore_selection_after_delete(&mut self, previous_index: Option<usize>) {
+        if self.selected_index.is_some() {
+            return;
+        }
+        self.selected_index = crate::session_list::clamp_index_after_delete(
+            previous_index,
+            self.unified_results.len(),
+        );
     }
 
     fn collect_all_sessions(
