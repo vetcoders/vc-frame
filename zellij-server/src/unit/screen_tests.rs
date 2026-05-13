@@ -9529,6 +9529,7 @@ fn create_non_mirrored_screen(size: Size) -> Screen {
         false, // mouse_click_through
         IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
         8080,
+        Arc::new(AtomicBool::new(false)),
     )
 }
 
