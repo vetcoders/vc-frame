@@ -200,9 +200,8 @@ impl FloatingPanes {
         is_first_run: bool,
         run_command: RunCommand,
     ) {
-        self.panes
-            .get_mut(&pane_id)
-            .map(|p| p.hold(exit_status, is_first_run, run_command));
+        if let Some(p) = self.panes
+            .get_mut(&pane_id) { p.hold(exit_status, is_first_run, run_command) }
     }
     pub fn get(&self, pane_id: &PaneId) -> Option<&Box<dyn Pane>> {
         self.panes.get(pane_id)
@@ -285,7 +284,7 @@ impl FloatingPanes {
         &mut self,
         floating_pane_layout: &FloatingPaneLayout,
     ) -> Result<PaneGeom> {
-        let err_context = || format!("failed to find position for floating pane");
+        let err_context = || "failed to find position for floating pane".to_string();
         let display_area = *self.display_area.borrow();
         let viewport = *self.viewport.borrow();
         let floating_pane_grid = FloatingPaneGrid::new(
@@ -298,10 +297,10 @@ impl FloatingPanes {
             .find_room_for_new_pane()
             .with_context(err_context)?;
         position.apply_floating_pane_position(
-            floating_pane_layout.x.clone(),
-            floating_pane_layout.y.clone(),
-            floating_pane_layout.width.clone(),
-            floating_pane_layout.height.clone(),
+            floating_pane_layout.x,
+            floating_pane_layout.y,
+            floating_pane_layout.width,
+            floating_pane_layout.height,
             viewport.cols,
             viewport.rows,
         );
@@ -337,16 +336,12 @@ impl FloatingPanes {
     }
     pub fn last_selectable_floating_pane_id(&self) -> Option<PaneId> {
         self.panes
-            .iter()
-            .filter(|(_p_id, p)| p.selectable())
-            .last()
+            .iter().rfind(|(_p_id, p)| p.selectable())
             .map(|(p_id, _p)| *p_id)
     }
     pub fn has_selectable_panes(&self) -> bool {
         self.panes
-            .iter()
-            .filter(|(_p_id, p)| p.selectable())
-            .last()
+            .iter().rfind(|(_p_id, p)| p.selectable())
             .is_some()
     }
     pub fn first_active_floating_pane_id(&self) -> Option<PaneId> {
@@ -849,10 +844,10 @@ impl FloatingPanes {
         pane_id: PaneId,
         new_coordinates: FloatingPaneCoordinates,
     ) -> Result<()> {
-        let err_context = || format!("Failed to change_pane_coordinates");
+        let err_context = || "Failed to change_pane_coordinates".to_string();
 
         {
-            let viewport = { self.viewport.borrow().clone() };
+            let viewport = { *self.viewport.borrow() };
             let pane = self.get_pane_mut(pane_id).with_context(err_context)?;
             let mut pane_geom = pane.position_and_size();
             if let Some(pinned) = new_coordinates.pinned.as_ref() {
@@ -1064,7 +1059,7 @@ impl FloatingPanes {
                     .unwrap_or(0),
             )
         });
-        panes.iter().find(|(_, p)| p.contains(point)).is_some()
+        panes.iter().any(|(_, p)| p.contains(point))
     }
     pub fn get_pane_at_mut(
         &mut self,
@@ -1104,7 +1099,7 @@ impl FloatingPanes {
             return false;
         }
         let move_x_by = click_position.column() as isize - previous_position.column() as isize;
-        let move_y_by = click_position.line() as isize - previous_position.line() as isize;
+        let move_y_by = click_position.line() - previous_position.line();
         let mut floating_pane_grid = FloatingPaneGrid::new(
             &mut self.panes,
             &mut self.desired_pane_positions,
@@ -1305,7 +1300,7 @@ impl FloatingPanes {
             display_area,
             viewport,
         );
-        floating_pane_grid.next_selectable_pane_id_above(&pane_id)
+        floating_pane_grid.next_selectable_pane_id_above(pane_id)
     }
     pub fn next_selectable_pane_id_below(&mut self, pane_id: &PaneId) -> Option<PaneId> {
         let display_area = *self.display_area.borrow();
@@ -1316,7 +1311,7 @@ impl FloatingPanes {
             display_area,
             viewport,
         );
-        floating_pane_grid.next_selectable_pane_id_below(&pane_id)
+        floating_pane_grid.next_selectable_pane_id_below(pane_id)
     }
     pub fn next_selectable_pane_id_to_the_left(&mut self, pane_id: &PaneId) -> Option<PaneId> {
         let display_area = *self.display_area.borrow();
@@ -1327,7 +1322,7 @@ impl FloatingPanes {
             display_area,
             viewport,
         );
-        floating_pane_grid.next_selectable_pane_id_to_the_left(&pane_id)
+        floating_pane_grid.next_selectable_pane_id_to_the_left(pane_id)
     }
     pub fn next_selectable_pane_id_to_the_right(&mut self, pane_id: &PaneId) -> Option<PaneId> {
         let display_area = *self.display_area.borrow();
@@ -1338,13 +1333,13 @@ impl FloatingPanes {
             display_area,
             viewport,
         );
-        floating_pane_grid.next_selectable_pane_id_to_the_right(&pane_id)
+        floating_pane_grid.next_selectable_pane_id_to_the_right(pane_id)
     }
     fn make_sure_pinned_panes_are_on_top(&mut self) {
         let pinned_status: std::collections::HashMap<_, _> = self
             .z_indices
             .iter()
-            .map(|id| (id.clone(), self.pane_id_is_pinned(id)))
+            .map(|id| (*id, self.pane_id_is_pinned(id)))
             .collect();
 
         self.z_indices.sort_by(|a_id, b_id| {

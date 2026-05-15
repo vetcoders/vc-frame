@@ -157,7 +157,7 @@ impl<'a> PaneResizer<'a> {
     }
 
     fn apply_spans(&mut self, spans: Vec<Span>) -> Result<()> {
-        let err_context = || format!("Failed to apply spans");
+        let err_context = || "Failed to apply spans".to_string();
         let mut geoms_changed = false;
         for span in spans {
             let pane_is_stacked = self

@@ -162,7 +162,7 @@ pub fn zellij_exports(linker: &mut Linker<PluginEnv>) {
 }
 
 fn host_run_plugin_command(mut caller: Caller<'_, PluginEnv>) {
-    let env = caller.data_mut();
+    let mut env = caller.data_mut();
     let plugin_command = env.name();
     let err_context = || format!("failed to run plugin command {}", plugin_command);
     wasi_read_bytes(env)

@@ -31,9 +31,7 @@ impl PendingPipes {
         client_id: &ClientId,
     ) {
         if self.pipes.contains_key(pipe_id) {
-            self.pipes.get_mut(pipe_id).map(|pending_pipe_info| {
-                pending_pipe_info.add_processing_plugin(plugin_id, client_id)
-            });
+            if let Some(pending_pipe_info) = self.pipes.get_mut(pipe_id) { pending_pipe_info.add_processing_plugin(plugin_id, client_id) }
         } else {
             self.pipes.insert(
                 pipe_id.to_owned(),
@@ -121,19 +119,14 @@ impl PendingPipeInfo {
         };
         self.currently_being_processed_by
             .remove(&(*plugin_id, *client_id));
-        let pipe_should_be_unblocked =
-            self.currently_being_processed_by.is_empty() && !self.is_explicitly_blocked;
-        pipe_should_be_unblocked
+        
+        self.currently_being_processed_by.is_empty() && !self.is_explicitly_blocked
     }
     // returns true if this pipe should be unblocked
     pub fn unload_plugin(&mut self, plugin_id_to_unload: &PluginId) -> bool {
         self.currently_being_processed_by
             .retain(|(plugin_id, _)| plugin_id != plugin_id_to_unload);
-        if self.currently_being_processed_by.is_empty() && !self.is_explicitly_blocked {
-            true
-        } else {
-            false
-        }
+        self.currently_being_processed_by.is_empty() && !self.is_explicitly_blocked
     }
 }
 

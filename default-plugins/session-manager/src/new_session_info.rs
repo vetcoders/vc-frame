@@ -514,12 +514,10 @@ mod tests {
     fn test_7_3_viewport_clamps_at_bottom() {
         // table_rows=6, results_len=20, selected=19
         // row_count_to_render = 5, half = 2
-        // first = 19-2 = 17, last = 17+5 = 22 > 20
-        // Note: range_to_render does NOT clamp — it returns (17, 22)
-        // The actual clamping happens in the caller via .take().skip()
+        // Since we clamp at bottom, end = 20, start = 20 - 5 = 15
         let (start, end) = crate::list_navigation::range_to_render(6, 20, Some(19));
-        assert_eq!(start, 17);
-        assert_eq!(end, 22);
+        assert_eq!(start, 15);
+        assert_eq!(end, 20);
     }
 
     #[test]

@@ -186,14 +186,14 @@ impl std::ops::Deref for RcCharacterStyles {
     fn deref(&self) -> &Self::Target {
         match self {
             RcCharacterStyles::Reset => &RESET_STYLES,
-            RcCharacterStyles::Rc(styles) => &*styles,
+            RcCharacterStyles::Rc(styles) => styles,
         }
     }
 }
 
 impl Display for RcCharacterStyles {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let styles: &CharacterStyles = &*self;
+        let styles: &CharacterStyles = self;
         Display::fmt(&styles, f)
     }
 }
@@ -771,31 +771,25 @@ pub enum LinkAnchor {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[derive(Default)]
 pub enum CharsetIndex {
+    #[default]
     G0,
     G1,
     G2,
     G3,
 }
 
-impl Default for CharsetIndex {
-    fn default() -> Self {
-        CharsetIndex::G0
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Default)]
 pub enum StandardCharset {
+    #[default]
     Ascii,
     UK,
     SpecialCharacterAndLineDrawing,
 }
 
-impl Default for StandardCharset {
-    fn default() -> Self {
-        StandardCharset::Ascii
-    }
-}
 
 impl StandardCharset {
     /// Switch/Map character to the active charset. Ascii is the common case and
@@ -1045,7 +1039,7 @@ pub fn render_first_run_banner(
             )
         },
         None => {
-            let bare_text = format!("Waiting to start...");
+            let bare_text = "Waiting to start...".to_string();
             let bare_text_width = bare_text.width();
             let column_start_postion = middle_column.saturating_sub(bare_text_width / 2);
             let bold_text = RESET_STYLES.bold(Some(AnsiCode::On));

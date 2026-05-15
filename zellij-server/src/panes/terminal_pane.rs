@@ -101,9 +101,9 @@ impl From<ZellijUtilsPaneId> for PaneId {
     }
 }
 
-impl Into<ZellijUtilsPaneId> for PaneId {
-    fn into(self) -> ZellijUtilsPaneId {
-        match self {
+impl From<PaneId> for ZellijUtilsPaneId {
+    fn from(val: PaneId) -> Self {
+        match val {
             PaneId::Terminal(id) => ZellijUtilsPaneId::Terminal(id),
             PaneId::Plugin(id) => ZellijUtilsPaneId::Plugin(id),
         }
@@ -301,20 +301,18 @@ impl Pane for TerminalPane {
                     _ => None,
                 }
             }
+        } else if self.grid.supports_kitty_keyboard_protocol {
+            self.adjust_input_to_terminal_with_kitty_keyboard_protocol(
+                key_with_modifier,
+                raw_input_bytes,
+                raw_input_bytes_are_kitty,
+            )
         } else {
-            if self.grid.supports_kitty_keyboard_protocol {
-                self.adjust_input_to_terminal_with_kitty_keyboard_protocol(
-                    key_with_modifier,
-                    raw_input_bytes,
-                    raw_input_bytes_are_kitty,
-                )
-            } else {
-                self.adjust_input_to_terminal_without_kitty_keyboard_protocol(
-                    key_with_modifier,
-                    raw_input_bytes,
-                    raw_input_bytes_are_kitty,
-                )
-            }
+            self.adjust_input_to_terminal_without_kitty_keyboard_protocol(
+                key_with_modifier,
+                raw_input_bytes,
+                raw_input_bytes_are_kitty,
+            )
         }
     }
     fn position_and_size(&self) -> PaneGeom {
@@ -366,9 +364,9 @@ impl Pane for TerminalPane {
             match self.grid.render(content_x, content_y, &self.style) {
                 Ok(rendered_assets) => {
                     self.set_should_render(false);
-                    return Ok(rendered_assets);
+                    Ok(rendered_assets)
                 },
-                e => return e,
+                e => e,
             }
         } else {
             Ok(None)
@@ -936,7 +934,7 @@ impl Pane for TerminalPane {
         })
     }
     fn update_theme(&mut self, theme: Styling) {
-        self.style.colors = theme.clone();
+        self.style.colors = theme;
         self.grid.update_theme(theme);
         if self.banner.is_some() {
             // we do this so that the banner will be updated with the new theme colors
@@ -1102,7 +1100,7 @@ impl TerminalPane {
             link_handler,
             character_cell_size,
             sixel_image_store,
-            style.clone(),
+            style,
             debug,
             arrow_fonts,
             styled_underlines,
@@ -1230,7 +1228,7 @@ impl TerminalPane {
         raw_input_bytes_are_kitty: bool,
     ) -> Option<AdjustedInput> {
         if self.grid.new_line_mode {
-            let key_is_enter = raw_input_bytes.as_slice() == &[13]
+            let key_is_enter = raw_input_bytes.as_slice() == [13]
                 || key
                     .as_ref()
                     .map(|k| k.is_key_without_modifier(BareKey::Enter))

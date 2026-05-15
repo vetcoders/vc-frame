@@ -549,7 +549,7 @@ impl MouseHandler {
         let start_geom = tab
             .pane_being_resized_with_mouse
             .as_ref()
-            .map(|p| p.start_geom.clone());
+            .map(|p| p.start_geom);
         let pane_id = tab
             .pane_being_resized_with_mouse
             .as_ref()
@@ -960,8 +960,8 @@ impl MouseHandler {
             } else {
                 let relative_position = pane_with_selection.relative_position(&position);
                 pane_with_selection.end_selection(&relative_position, client_id);
-                if pane_with_selection.supports_mouse_selection() {
-                    if copy_on_release {
+                if pane_with_selection.supports_mouse_selection()
+                    && copy_on_release {
                         let selected_text = pane_with_selection.get_selected_text(client_id);
                         if let Some(selected_text) = selected_text {
                             leave_clipboard_message = true;
@@ -969,7 +969,6 @@ impl MouseHandler {
                                 .with_context(err_context)?;
                         }
                     }
-                }
                 tab.selecting_with_mouse_in_pane = None;
             }
         }
@@ -1140,7 +1139,7 @@ impl MouseHandler {
                 .get_pane_with_id(pane_id)
                 .ok_or_else(|| anyhow!("Failed to find pane {pane_id:?}"))?;
             let relative_position = pane.relative_position(&event.position);
-            let mut event_for_pane = event.clone();
+            let mut event_for_pane = event;
             event_for_pane.position = relative_position;
             if let Some(mouse_event) = pane.mouse_event(&event_for_pane, client_id) {
                 if !pane.position_is_on_frame(&event.position) {

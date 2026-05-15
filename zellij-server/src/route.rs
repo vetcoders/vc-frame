@@ -1157,8 +1157,8 @@ pub(crate) fn route_action(
             if name != current_session_name {
                 let connect_to_session = ConnectToSession {
                     name: Some(name.clone()),
-                    tab_position: tab_position.clone(),
-                    pane_id: pane_id.clone(),
+                    tab_position,
+                    pane_id,
                     layout: layout.clone(),
                     cwd: cwd.clone(),
                 };
@@ -2341,7 +2341,7 @@ pub(crate) fn route_thread_main(
                                     action,
                                     client_id,
                                     Some(cli_client_id),
-                                    maybe_pane_id.map(|p| PaneId::Terminal(p)),
+                                    maybe_pane_id.map(PaneId::Terminal),
                                     senders,
                                     default_shell,
                                     Some(&mut seen_cli_pipes),
@@ -2933,9 +2933,7 @@ fn extract_command(entry: &PaneListEntry) -> String {
 
 fn extract_cwd(entry: &PaneListEntry) -> String {
     entry
-        .pane_cwd
-        .as_ref()
-        .map(|s| s.as_str())
+        .pane_cwd.as_deref()
         .unwrap_or("-")
         .to_string()
 }

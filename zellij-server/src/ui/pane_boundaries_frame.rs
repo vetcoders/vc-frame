@@ -15,11 +15,8 @@ fn foreground_color(characters: &str, color: Option<PaletteColor>) -> Vec<Termin
         let mut styles = RcCharacterStyles::reset();
         styles.update(|styles| {
             styles.bold = Some(AnsiCode::On);
-            match color {
-                Some(palette_color) => {
-                    styles.foreground = Some(AnsiCode::from(palette_color));
-                },
-                None => {},
+            if let Some(palette_color) = color {
+                styles.foreground = Some(AnsiCode::from(palette_color));
             }
         });
         let terminal_character = TerminalCharacter::new_styled(character, styles);
@@ -32,12 +29,9 @@ fn background_color(characters: &str, color: Option<PaletteColor>) -> Vec<Termin
     let mut colored_string = Vec::new();
     for character in characters.chars() {
         let mut styles = RcCharacterStyles::reset();
-        styles.update(|styles| match color {
-            Some(palette_color) => {
-                styles.background = Some(AnsiCode::from(palette_color));
-                styles.bold(Some(AnsiCode::On));
-            },
-            None => {},
+        styles.update(|styles| if let Some(palette_color) = color {
+            styles.background = Some(AnsiCode::from(palette_color));
+            styles.bold(Some(AnsiCode::On));
         });
         let terminal_character = TerminalCharacter::new_styled(character, styles);
         colored_string.push(terminal_character);
@@ -192,8 +186,8 @@ impl PaneFrame {
                     Some((mut pin_indication, pin_indication_len)),
                     Some((mut scroll_indication, scroll_indication_len)),
                 ) => {
-                    let mut characters: Vec<_> = scroll_indication.drain(..).collect();
-                    let mut separator = foreground_color(&format!("|"), self.color);
+                    let mut characters: Vec<_> = std::mem::take(&mut scroll_indication);
+                    let mut separator = foreground_color("|", self.color);
                     characters.append(&mut separator);
                     characters.append(&mut pin_indication);
                     Some((characters, pin_indication_len + scroll_indication_len + 1))
@@ -862,23 +856,21 @@ impl PaneFrame {
             } else {
                 self.empty_undertitle(max_undertitle_length)
             }
-        } else {
-            if first_part_len <= max_undertitle_length {
-                // render first part
-                let full_text_len = first_part_len;
-                let mut padding = String::new();
-                for _ in full_text_len..max_undertitle_length {
-                    padding.push_str(boundary_type::HORIZONTAL);
-                }
-                let mut ret = vec![];
-                ret.append(&mut left_boundary);
-                ret.append(&mut first_part);
-                ret.append(&mut foreground_color(&padding, self.color));
-                ret.append(&mut right_boundary);
-                ret
-            } else {
-                self.empty_undertitle(max_undertitle_length)
+        } else if first_part_len <= max_undertitle_length {
+            // render first part
+            let full_text_len = first_part_len;
+            let mut padding = String::new();
+            for _ in full_text_len..max_undertitle_length {
+                padding.push_str(boundary_type::HORIZONTAL);
             }
+            let mut ret = vec![];
+            ret.append(&mut left_boundary);
+            ret.append(&mut first_part);
+            ret.append(&mut foreground_color(&padding, self.color));
+            ret.append(&mut right_boundary);
+            ret
+        } else {
+            self.empty_undertitle(max_undertitle_length)
         };
         Ok(res)
     }

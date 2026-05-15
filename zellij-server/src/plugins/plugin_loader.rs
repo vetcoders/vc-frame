@@ -48,10 +48,10 @@ fn open_dir(path: &std::path::Path) -> std::io::Result<std::fs::File> {
 fn create_plugin_fs_entries(plugin_own_data_dir: &PathBuf, plugin_own_cache_dir: &PathBuf) {
     // Create filesystem entries mounted into WASM.
     // We create them here to get expressive error messages in case they fail.
-    if let Err(e) = fs::create_dir_all(&plugin_own_data_dir) {
+    if let Err(e) = fs::create_dir_all(plugin_own_data_dir) {
         log::error!("Failed to create plugin data dir: {}", e);
     };
-    if let Err(e) = fs::create_dir_all(&plugin_own_cache_dir) {
+    if let Err(e) = fs::create_dir_all(plugin_own_cache_dir) {
         log::error!("Failed to create plugin cache dir: {}", e);
     }
     if let Err(e) = fs::create_dir_all(ZELLIJ_TMP_DIR.as_path()) {
@@ -171,7 +171,7 @@ impl<'a> PluginLoader<'a> {
         instance: &Instance,
     ) -> Result<()> {
         let err_context = || format!("failed to load plugin from instance {instance:#?}");
-        let main_user_instance = instance.clone();
+        let main_user_instance = *instance;
         let start_function = instance
             .get_typed_func::<(), ()>(&mut store, "_start")
             .with_context(err_context)?;
@@ -193,7 +193,7 @@ impl<'a> PluginLoader<'a> {
                     .call(&mut store, ())
                     .with_context(err_context)?;
 
-                let worker = RunningWorker::new(store, instance, &function_name);
+                let worker = RunningWorker::new(store, instance, function_name);
                 let worker_sender = plugin_worker(worker);
                 workers.insert(function_name.into(), worker_sender);
             }
@@ -274,7 +274,7 @@ impl<'a> PluginLoader<'a> {
             input_pipes_to_unblock: Arc::new(Mutex::new(HashSet::new())),
             input_pipes_to_block: Arc::new(Mutex::new(HashSet::new())),
             layout_dir: self.layout_dir.clone(),
-            default_mode: self.default_mode.clone(),
+            default_mode: self.default_mode,
             subscriptions: Arc::new(Mutex::new(HashSet::new())),
             keybinds: self.keybinds.clone(),
             intercepting_key_presses: false,
@@ -386,7 +386,7 @@ impl<'a> PluginLoader<'a> {
             input_pipes_to_unblock: Arc::new(Mutex::new(HashSet::new())),
             input_pipes_to_block: Arc::new(Mutex::new(HashSet::new())),
             layout_dir: self.layout_dir.clone(),
-            default_mode: self.default_mode.clone(),
+            default_mode: self.default_mode,
             subscriptions: Arc::new(Mutex::new(HashSet::new())),
             keybinds: self.keybinds.clone(),
             intercepting_key_presses: false,
@@ -427,7 +427,7 @@ impl<'a> PluginLoader<'a> {
         stdin_pipe: Arc<Mutex<VecDeque<u8>>>,
         stdout_pipe: Arc<Mutex<VecDeque<u8>>>,
     ) -> Result<WasiCtx> {
-        let _err_context = || format!("Failed to create wasi_ctx");
+        let _err_context = || "Failed to create wasi_ctx".to_string();
         let dirs = vec![
             ("/host".to_owned(), host_dir.clone()),
             ("/data".to_owned(), data_dir.clone()),

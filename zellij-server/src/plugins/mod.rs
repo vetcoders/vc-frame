@@ -560,9 +560,8 @@ if let Some(t) = tab_layout.as_mut() {
     }
 }
                 floating_panes_layout.iter_mut().for_each(|f| {
-                    f.run
-                        .as_mut()
-                        .map(|f| f.populate_run_plugin_if_needed(&plugin_aliases));
+                    if let Some(f) = f.run
+                        .as_mut() { f.populate_run_plugin_if_needed(&plugin_aliases) }
                 });
                 let extracted_run_instructions = tab_layout
                     .clone()
@@ -650,9 +649,8 @@ if let Some(t) = tab_layout.as_mut() {
                         .tiled_layout
                         .populate_plugin_aliases_in_layout(&plugin_aliases);
                     tab_layout_info.floating_layouts.iter_mut().for_each(|f| {
-                        f.run
-                            .as_mut()
-                            .map(|r| r.populate_run_plugin_if_needed(&plugin_aliases));
+                        if let Some(r) = f.run
+                            .as_mut() { r.populate_run_plugin_if_needed(&plugin_aliases) }
                     });
 
                     // Extract run instructions from tiled layout
@@ -861,7 +859,7 @@ if let Some(t) = tab_layout.as_mut() {
                         wasm_bridge.update_plugins(updates, shutdown_send.clone())?;
                     },
                     Err(e) => {
-                        let error_msg = format!("{}", e);
+                        let error_msg = e.to_string();
                         let response = DumpSessionLayoutResponse {
                             layout_result: Err(error_msg.clone()),
                             metadata: None,
@@ -1336,7 +1334,7 @@ fn pipe_to_all_plugins(
         pipe_messages.push((
             Some(plugin_id),
             Some(client_id),
-            PipeMessage::new(pipe_source.clone(), name, payload, &args, is_private),
+            PipeMessage::new(pipe_source.clone(), name, payload, args, is_private),
         ));
     }
 }
@@ -1364,7 +1362,7 @@ fn pipe_to_specific_plugins(
     let is_private = true;
     let size = Size::default();
     match RunPluginOrAlias::from_url(
-        &plugin_url,
+        plugin_url,
         configuration,
         Some(plugin_aliases),
         cwd.clone(),
@@ -1379,7 +1377,7 @@ fn pipe_to_specific_plugins(
                 should_float,
                 pane_id_to_replace.is_some(),
                 pane_title.clone(),
-                pane_id_to_replace.clone(),
+                *pane_id_to_replace,
                 cli_client_id,
                 floating_pane_coordinates,
                 should_focus.unwrap_or(false),
@@ -1414,7 +1412,7 @@ fn load_background_plugin(
     plugin_aliases: &PluginAliases,
     client_id: ClientId,
 ) {
-    run_plugin_or_alias.populate_run_plugin_if_needed(&plugin_aliases);
+    run_plugin_or_alias.populate_run_plugin_if_needed(plugin_aliases);
     let cwd = run_plugin_or_alias.get_initial_cwd();
     let run_plugin = run_plugin_or_alias.get_run_plugin();
     let size = Size::default();

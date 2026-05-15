@@ -26,12 +26,10 @@ pub fn table(
         for (cell_index, cell) in row.into_iter().enumerate() {
             let declaration = if is_title_row {
                 style.colors.table_title
+            } else if cell.selected {
+                style.colors.table_cell_selected
             } else {
-                if cell.selected {
-                    style.colors.table_cell_selected
-                } else {
-                    style.colors.table_cell_unselected
-                }
+                style.colors.table_cell_unselected
             };
 
             let text_style = if cell.opaque || cell.selected {
@@ -58,7 +56,7 @@ pub fn table(
         let next_row_instruction = coordinates
             .as_ref()
             .map(|c| c.stringify_with_y_offset(row_index + 1))
-            .unwrap_or_else(|| format!("\n\r"));
+            .unwrap_or_else(|| "\n\r".to_string());
         stringified.push_str(&next_row_instruction);
     }
     if let Some(coordinates) = coordinates {
@@ -76,7 +74,7 @@ fn stringify_table_columns(contents: Vec<Text>, columns: usize) -> BTreeMap<usiz
         let column_index = i % columns;
         stringified_columns
             .entry(column_index)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(cell);
     }
     stringified_columns
@@ -101,7 +99,7 @@ fn stringify_table_rows(
     let mut row_width = 0;
     for (_, column) in stringified_columns.into_iter() {
         let max_column_width = max_table_column_width(&column);
-        if is_too_wide(max_column_width + 1, row_width, &coordinates) {
+        if is_too_wide(max_column_width + 1, row_width, coordinates) {
             break;
         }
         row_width += max_column_width + 1;
@@ -109,7 +107,7 @@ fn stringify_table_rows(
             cell.pad_text(max_column_width);
             stringified_rows
                 .entry(row_index)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(cell);
         }
     }
