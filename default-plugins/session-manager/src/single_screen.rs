@@ -9,16 +9,13 @@ use crate::single_screen_render::UnifiedResultsRenderCache;
 use crate::ui::SessionUiInfo;
 
 #[derive(Debug, Clone, PartialEq)]
+#[derive(Default)]
 pub enum SingleScreenMode {
+    #[default]
     SearchAndSelect,
     SelectingLayout,
 }
 
-impl Default for SingleScreenMode {
-    fn default() -> Self {
-        SingleScreenMode::SearchAndSelect
-    }
-}
 
 #[derive(Default)]
 pub struct SingleScreenState {

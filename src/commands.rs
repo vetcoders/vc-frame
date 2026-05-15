@@ -90,7 +90,7 @@ pub(crate) fn delete_all_sessions(yes: bool, force: bool) {
         .map(|s| s.0.clone())
         .collect();
     let (_live_sessions, resurrectable_map) =
-        scan_session_list_default_dirs(&String::new(), &[], &BTreeMap::new());
+        scan_session_list_default_dirs("", &[], &BTreeMap::new());
     let mut resurrectable_sessions: Vec<(String, Duration)> =
         resurrectable_map.into_iter().collect();
     if force {
@@ -800,7 +800,7 @@ pub(crate) fn start_client(opts: CliArgs) {
             } else {
                 let config_options = match options.as_deref() {
                     Some(SessionCommand::Options(o)) => {
-                        config_options.merge_from_cli(o.to_owned().into())
+                        config_options.merge_from_cli(o.to_owned())
                     },
                     None => config_options,
                 };
@@ -815,12 +815,12 @@ pub(crate) fn start_client(opts: CliArgs) {
                 } else {
                     let session_exists = session_name
                         .as_ref()
-                        .and_then(|s| session_exists(&s).ok())
+                        .and_then(|s| session_exists(s).ok())
                         .unwrap_or(false);
                     let resurrection_layout =
                         session_name
                             .as_ref()
-                            .and_then(|s| match resurrection_layout(&s) {
+                            .and_then(|s| match resurrection_layout(s) {
                                 Ok(layout) => layout,
                                 Err(e) => {
                                     eprintln!("{}", e);
@@ -869,10 +869,10 @@ pub(crate) fn start_client(opts: CliArgs) {
 
                 let tab_position_to_focus = reconnect_to_session
                     .as_ref()
-                    .and_then(|r| r.tab_position.clone());
+                    .and_then(|r| r.tab_position);
                 let pane_id_to_focus = reconnect_to_session
                     .as_ref()
-                    .and_then(|r| r.pane_id.clone());
+                    .and_then(|r| r.pane_id);
                 reconnect_to_session = start_client_impl(
                     Box::new(os_input),
                     opts,
@@ -885,91 +885,89 @@ pub(crate) fn start_client(opts: CliArgs) {
                     should_create_detached,
                 );
             }
+        } else if let Some(session_name) = opts.session.clone() {
+            start_client_plan(session_name.clone());
+            reconnect_to_session = start_client_impl(
+                Box::new(os_input),
+                opts,
+                config,
+                config_options,
+                ClientInfo::New(session_name, layout_info, new_session_cwd),
+                None,
+                None,
+                is_a_reconnect,
+                should_create_detached,
+            );
         } else {
-            if let Some(session_name) = opts.session.clone() {
-                start_client_plan(session_name.clone());
-                reconnect_to_session = start_client_impl(
-                    Box::new(os_input),
-                    opts,
-                    config,
-                    config_options,
-                    ClientInfo::New(session_name, layout_info, new_session_cwd),
-                    None,
-                    None,
-                    is_a_reconnect,
-                    should_create_detached,
-                );
-            } else {
-                if let Some(session_name) = config_options.session_name.as_ref() {
-                    if let Ok(val) = envs::get_session_name() {
-                        // This prevents the same type of recursion as above, only that here we
-                        // don't get the command to "attach", but to start a new session instead.
-                        // This occurs for example when declaring the session name inside a layout
-                        // file and then, from within this session, trying to open a new zellij
-                        // session with the same layout. This causes an infinite recursion in the
-                        // `zellij_server::terminal_bytes::listen` task, flooding the server and
-                        // clients with infinite `Render` requests.
-                        if *session_name == val {
-                            eprintln!("You are trying to attach to the current session (\"{}\"). Zellij does not support nesting a session in itself.", session_name);
-                            process::exit(1);
-                        }
+            if let Some(session_name) = config_options.session_name.as_ref() {
+                if let Ok(val) = envs::get_session_name() {
+                    // This prevents the same type of recursion as above, only that here we
+                    // don't get the command to "attach", but to start a new session instead.
+                    // This occurs for example when declaring the session name inside a layout
+                    // file and then, from within this session, trying to open a new zellij
+                    // session with the same layout. This causes an infinite recursion in the
+                    // `zellij_server::terminal_bytes::listen` task, flooding the server and
+                    // clients with infinite `Render` requests.
+                    if *session_name == val {
+                        eprintln!("You are trying to attach to the current session (\"{}\"). Zellij does not support nesting a session in itself.", session_name);
+                        process::exit(1);
                     }
-                    match config_options.attach_to_session {
-                        Some(true) => {
-                            let client = attach_with_session_name(
-                                Some(session_name.clone()),
-                                config_options.clone(),
-                                true,
-                            );
-                            reconnect_to_session = start_client_impl(
-                                Box::new(os_input),
-                                opts,
-                                config,
-                                config_options,
-                                client,
-                                None,
-                                None,
-                                is_a_reconnect,
-                                should_create_detached,
-                            );
-                        },
-                        _ => {
-                            start_client_plan(session_name.clone());
-                            reconnect_to_session = start_client_impl(
-                                Box::new(os_input),
-                                opts,
-                                config,
-                                config_options.clone(),
-                                ClientInfo::New(session_name.clone(), layout_info, new_session_cwd),
-                                None,
-                                None,
-                                is_a_reconnect,
-                                should_create_detached,
-                            );
-                        },
-                    }
-                    if reconnect_to_session.is_some() {
-                        continue;
-                    }
-                    // after we detach, this happens and so we need to exit before the rest of the
-                    // function happens
-                    process::exit(0);
                 }
-
-                let session_name = generate_unique_session_name_or_exit();
-                start_client_plan(session_name.clone());
-                reconnect_to_session = start_client_impl(
-                    Box::new(os_input),
-                    opts,
-                    config,
-                    config_options,
-                    ClientInfo::New(session_name, layout_info, new_session_cwd),
-                    None,
-                    None,
-                    is_a_reconnect,
-                    should_create_detached,
-                );
+                match config_options.attach_to_session {
+                    Some(true) => {
+                        let client = attach_with_session_name(
+                            Some(session_name.clone()),
+                            config_options.clone(),
+                            true,
+                        );
+                        reconnect_to_session = start_client_impl(
+                            Box::new(os_input),
+                            opts,
+                            config,
+                            config_options,
+                            client,
+                            None,
+                            None,
+                            is_a_reconnect,
+                            should_create_detached,
+                        );
+                    },
+                    _ => {
+                        start_client_plan(session_name.clone());
+                        reconnect_to_session = start_client_impl(
+                            Box::new(os_input),
+                            opts,
+                            config,
+                            config_options.clone(),
+                            ClientInfo::New(session_name.clone(), layout_info, new_session_cwd),
+                            None,
+                            None,
+                            is_a_reconnect,
+                            should_create_detached,
+                        );
+                    },
+                }
+                if reconnect_to_session.is_some() {
+                    continue;
+                }
+                // after we detach, this happens and so we need to exit before the rest of the
+                // function happens
+                process::exit(0);
             }
+
+            let session_name = generate_unique_session_name_or_exit();
+            start_client_plan(session_name.clone());
+            reconnect_to_session = start_client_impl(
+                Box::new(os_input),
+                opts,
+                config,
+                config_options,
+                ClientInfo::New(session_name, layout_info, new_session_cwd),
+                None,
+                None,
+                is_a_reconnect,
+                should_create_detached,
+            );
         }
         if reconnect_to_session.is_none() {
             break;
@@ -1083,7 +1081,7 @@ fn reload_config_from_disk(
     config_options_without_layout: &mut Options,
     opts: &CliArgs,
 ) {
-    match Setup::from_cli_args(&opts) {
+    match Setup::from_cli_args(opts) {
         Ok((_, _, _, reloaded_config_without_layout, reloaded_config_options_without_layout)) => {
             *config_without_layout = reloaded_config_without_layout;
             *config_options_without_layout = reloaded_config_options_without_layout;
@@ -1095,7 +1093,7 @@ fn reload_config_from_disk(
 }
 
 pub fn get_config_options_from_cli_args(opts: &CliArgs) -> Result<Options, String> {
-    Setup::from_cli_args(&opts)
+    Setup::from_cli_args(opts)
         .map(|(_, _, config_options, _, _)| config_options)
         .map_err(|e| e.to_string())
 }

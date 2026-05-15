@@ -154,7 +154,7 @@ pub fn zellij_server_listener(
                             Some(ServerToClientMsg::Connected) => {},
                             Some(ServerToClientMsg::CliPipeOutput { .. } ) => {},
                             Some(ServerToClientMsg::UnblockCliPipeInput { .. } ) => {},
-                            Some(ServerToClientMsg::StartWebServer { .. } ) => {},
+                            Some(ServerToClientMsg::StartWebServer ) => {},
                             Some(ServerToClientMsg::Exit{exit_reason}) => {
                                 handle_exit_reason(&mut client_connection_bus, exit_reason);
                                 os_input.send_to_server(ClientToServerMsg::ClientExited);
@@ -198,7 +198,7 @@ pub fn zellij_server_listener(
                             Some(ServerToClientMsg::ConfigFileUpdated) => {
 
                                 if let Some(config_file_path) = &config_file_path {
-                                    if let Ok(new_config) = Config::from_path(&config_file_path, Some(config.clone())) {
+                                    if let Ok(new_config) = Config::from_path(config_file_path, Some(config.clone())) {
                                         // Re-seed host-query cache for this client
                                         // so OSC 10/11/4 replies follow the new theme.
                                         for seed in build_host_query_seed_msgs(&new_config, &config_options) {
@@ -292,9 +292,7 @@ fn handle_exit_reason(client_connection_bus: &mut ClientConnectionBus, exit_reas
             return;
         },
         ExitReason::WebClientsForbidden => {
-            client_connection_bus.send_stdout(format!(
-                "\u{1b}[2J\n Web Clients are not allowed to attach to this session."
-            ));
+            client_connection_bus.send_stdout("\u{1b}[2J\n Web Clients are not allowed to attach to this session.".to_string());
         },
         ExitReason::Error(e) => {
             let goto_start_of_last_line = format!("\u{1b}[{};{}H", 1, 1);

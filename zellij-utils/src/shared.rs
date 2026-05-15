@@ -72,7 +72,7 @@ pub fn make_terminal_title(pane_title: &str) -> String {
         "\u{1b}]0;{}{}\u{07}",
         get_session_name()
             .map(|n| if pane_title.is_empty() {
-                format!("{}", n)
+                n.to_string()
             } else {
                 format!("{} | ", n)
             })

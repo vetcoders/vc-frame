@@ -52,7 +52,7 @@ pub fn spawn_new_session(
     let debug = false;
     envs::set_session_name(session_name.to_owned());
     os_input.update_session_name(session_name.to_owned());
-    spawn_server(&*zellij_ipc_pipe, debug).unwrap();
+    spawn_server(zellij_ipc_pipe, debug).unwrap();
 }
 
 pub fn create_first_message(
@@ -64,11 +64,11 @@ pub fn create_first_message(
     session_name: &str,
     initial_layout: Option<LayoutInfo>,
 ) -> ClientToServerMsg {
-    let resurrection_layout = resurrection_layout(&session_name).ok().flatten();
+    let resurrection_layout = resurrection_layout(session_name).ok().flatten();
 
     let layout_info = if resurrection_layout.is_some() {
         Some(LayoutInfo::File(
-            session_layout_cache_file_name(&session_name)
+            session_layout_cache_file_name(session_name)
                 .display()
                 .to_string(),
             LayoutMetadata::default(),

@@ -251,7 +251,7 @@ impl SessionList {
         for (list_item, session_name, tab_position, pane_id, is_current_session) in
             flattened_assets.drain(..)
         {
-            if let Some((score, indices)) = matcher.fuzzy_indices(&list_item.name, &search_term) {
+            if let Some((score, indices)) = matcher.fuzzy_indices(&list_item.name, search_term) {
                 matches.push(SearchResult::new(
                     score,
                     indices,

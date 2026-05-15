@@ -45,8 +45,8 @@ impl Keybinds {
         self.0
             .get(mode)
             .and_then(|mode_keybindings| {
-                if raw_bytes == &[10] {
-                    handle_ctrl_j(&mode_keybindings, &raw_bytes, key_is_kitty_protocol)
+                if raw_bytes == [10] {
+                    handle_ctrl_j(mode_keybindings, &raw_bytes, key_is_kitty_protocol)
                 } else {
                     mode_keybindings.get(key_with_modifier).cloned()
                 }
@@ -65,7 +65,7 @@ impl Keybinds {
         &mut self,
         input_mode: &InputMode,
     ) -> &mut HashMap<KeyWithModifier, Vec<Action>> {
-        self.0.entry(*input_mode).or_insert_with(HashMap::new)
+        self.0.entry(*input_mode).or_default()
     }
     pub fn default_action_for_mode(
         &self,
@@ -108,7 +108,7 @@ impl Keybinds {
             let input_mode_keybinds = self
                 .0
                 .entry(other_input_mode)
-                .or_insert_with(|| Default::default());
+                .or_default();
             for (other_action, other_action_keybinds) in other_input_mode_keybinds.drain() {
                 input_mode_keybinds.insert(other_action, other_action_keybinds);
             }

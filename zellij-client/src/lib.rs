@@ -366,7 +366,7 @@ pub fn spawn_server(socket_path: &Path, debug: bool) -> io::Result<()> {
             Some(c) => format!("{}: {}", msg, c),
             None => msg.to_string(),
         };
-        Err(io::Error::new(io::ErrorKind::Other, err_msg))
+        Err(io::Error::other(err_msg))
     }
 }
 
@@ -410,10 +410,7 @@ impl ClientInfo {
         }
     }
     pub fn set_layout_info(&mut self, new_layout_info: LayoutInfo) {
-        match self {
-            ClientInfo::New(_, layout_info, _) => *layout_info = Some(new_layout_info),
-            _ => {},
-        }
+        if let ClientInfo::New(_, layout_info, _) = self { *layout_info = Some(new_layout_info) }
     }
     pub fn set_cwd(&mut self, new_cwd: PathBuf) {
         match self {
@@ -457,7 +454,7 @@ pub async fn run_remote_client_terminal_loop(
     let mut async_stdin: Box<dyn AsyncStdin> = os_input.get_async_stdin_reader();
     let mut async_signals: Box<dyn AsyncSignals> = os_input
         .get_async_signal_listener()
-        .map_err(|e| RemoteClientError::IoError(e))?;
+        .map_err(RemoteClientError::IoError)?;
 
     let create_resize_message = |size: Size| {
         Message::Text(
@@ -774,7 +771,7 @@ pub fn start_client(
     let web_server_ip = config_options
         .web_server_ip
         .unwrap_or_else(|| IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
-    let web_server_port = config_options.web_server_port.unwrap_or_else(|| 8082);
+    let web_server_port = config_options.web_server_port.unwrap_or(8082);
     let has_certificate =
         config_options.web_server_cert.is_some() && config_options.web_server_key.is_some();
     let enforce_https_for_localhost = config_options.enforce_https_for_localhost.unwrap_or(false);
@@ -876,7 +873,7 @@ pub fn start_client(
             os_input.update_session_name(name);
             let ipc_pipe = create_ipc_pipe();
 
-            spawn_server(&*ipc_pipe, cli_args.debug).unwrap();
+            spawn_server(&ipc_pipe, cli_args.debug).unwrap();
             if should_start_web_server {
                 if let Err(e) = spawn_web_server(&cli_args) {
                     log::error!("Failed to start web server: {}", e);
@@ -930,7 +927,7 @@ pub fn start_client(
             os_input.update_session_name(name);
             let ipc_pipe = create_ipc_pipe();
 
-            spawn_server(&*ipc_pipe, cli_args.debug).unwrap();
+            spawn_server(&ipc_pipe, cli_args.debug).unwrap();
             if should_start_web_server {
                 if let Err(e) = spawn_web_server(&cli_args) {
                     log::error!("Failed to start web server: {}", e);
@@ -949,7 +946,7 @@ pub fn start_client(
         },
     };
 
-    os_input.connect_to_server(&*ipc_pipe);
+    os_input.connect_to_server(&ipc_pipe);
     os_input.send_to_server(first_msg);
 
     let mut command_is_executing = CommandIsExecuting::new();
@@ -1204,13 +1201,13 @@ pub fn start_client(
                 );
                 match spawn_web_server(&cli_args) {
                     Ok(_) => {
-                        let _ = os_input.send_to_server(ClientToServerMsg::WebServerStarted {
+                        os_input.send_to_server(ClientToServerMsg::WebServerStarted {
                             base_url: web_server_base_url,
                         });
                     },
                     Err(e) => {
                         log::error!("Failed to start web_server: {}", e);
-                        let _ = os_input
+                        os_input
                             .send_to_server(ClientToServerMsg::FailedToStartWebServer { error: e });
                     },
                 }
@@ -1328,7 +1325,7 @@ pub fn start_server_detached(
             os_input.update_session_name(name);
             let ipc_pipe = create_ipc_pipe();
 
-            spawn_server(&*ipc_pipe, cli_args.debug).unwrap();
+            spawn_server(&ipc_pipe, cli_args.debug).unwrap();
             if should_start_web_server {
                 if let Err(e) = spawn_web_server(&cli_args) {
                     log::error!("Failed to start web server: {}", e);
@@ -1383,7 +1380,7 @@ pub fn start_server_detached(
             os_input.update_session_name(name);
             let ipc_pipe = create_ipc_pipe();
 
-            spawn_server(&*ipc_pipe, cli_args.debug).unwrap();
+            spawn_server(&ipc_pipe, cli_args.debug).unwrap();
             if should_start_web_server {
                 if let Err(e) = spawn_web_server(&cli_args) {
                     log::error!("Failed to start web server: {}", e);
@@ -1405,7 +1402,7 @@ pub fn start_server_detached(
         },
     };
 
-    os_input.connect_to_server(&*ipc_pipe);
+    os_input.connect_to_server(&ipc_pipe);
     os_input.send_to_server(first_msg);
 }
 

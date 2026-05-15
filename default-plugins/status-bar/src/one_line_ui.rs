@@ -548,12 +548,12 @@ fn render_mode_key_indicators(
         },
         None => {
             if let Some(default_keys) = default_keys.get(&help.mode) {
-                let full_shortcut_list = full_modes_shortcut_list(&default_keys, help);
+                let full_shortcut_list = full_modes_shortcut_list(default_keys, help);
                 if line_part_to_render.len + full_shortcut_list.len <= max_len {
                     line_part_to_render.append(&full_shortcut_list);
                 } else {
                     let shortened_shortcut_list =
-                        shortened_modes_shortcut_list(&default_keys, help);
+                        shortened_modes_shortcut_list(default_keys, help);
                     if line_part_to_render.len + shortened_shortcut_list.len <= max_len {
                         line_part_to_render.append(&shortened_shortcut_list);
                     }
@@ -581,7 +581,7 @@ fn full_inline_keys_modes_shortcut_list(
             key.key
                 .as_ref()
                 .map(|k| vec![k.clone()])
-                .unwrap_or_else(|| vec![]),
+                .unwrap_or_else(std::vec::Vec::new),
             is_selected,
         );
         full_shortcut_list.append(&shortcut);
@@ -601,7 +601,7 @@ fn shortened_inline_keys_modes_shortcut_list(
             key.key
                 .as_ref()
                 .map(|k| vec![k.clone()])
-                .unwrap_or_else(|| vec![]),
+                .unwrap_or_else(std::vec::Vec::new),
             is_selected,
         );
         shortened_shortcut_list.append(&shortcut);
@@ -619,7 +619,7 @@ fn full_modes_shortcut_list(default_keys: &Vec<KeyShortcut>, help: &ModeInfo) ->
             &key.key
                 .as_ref()
                 .map(|k| vec![k.clone()])
-                .unwrap_or_else(|| vec![]),
+                .unwrap_or_else(std::vec::Vec::new),
             is_selected,
             Some(3),
         ));
@@ -637,7 +637,7 @@ fn shortened_modes_shortcut_list(default_keys: &Vec<KeyShortcut>, help: &ModeInf
             &key.key
                 .as_ref()
                 .map(|k| vec![k.clone()])
-                .unwrap_or_else(|| vec![]),
+                .unwrap_or_else(std::vec::Vec::new),
             is_selected,
             Some(3),
         ));
@@ -655,7 +655,7 @@ fn common_modifiers_in_all_modes(
     }) else {
         return None;
     };
-    for (_mode, key_shortcuts) in key_shortcuts {
+    for key_shortcuts in key_shortcuts.values() {
         if key_shortcuts.is_empty() {
             return None;
         }
@@ -734,7 +734,7 @@ fn render_secondary_info(
     let mut secondary_info = LinePart::default();
     let supports_arrow_fonts = !help.capabilities.arrow_fonts;
     let colored_elements = color_elements(help.style.colors, !supports_arrow_fonts);
-    let secondary_keybinds = secondary_keybinds(&help, tab_info, max_len);
+    let secondary_keybinds = secondary_keybinds(help, tab_info, max_len);
     secondary_info.append(&secondary_keybinds);
     let remaining_space = max_len.saturating_sub(secondary_info.len).saturating_sub(1); // 1 for the end padding of the line
     let mut padding = String::new();
@@ -780,7 +780,7 @@ fn secondary_keybinds(help: &ModeInfo, tab_info: Option<&TabInfo>, max_len: usiz
     let mut new_pane_key_to_display = new_pane_action_key
         .iter()
         .find(|k| k.is_key_with_alt_modifier(BareKey::Char('n')))
-        .or_else(|| new_pane_action_key.iter().next());
+        .or_else(|| new_pane_action_key.first());
     let new_pane_key_to_display =
         if let Some(new_pane_key_to_display) = new_pane_key_to_display.take() {
             vec![new_pane_key_to_display.clone()]
@@ -799,7 +799,7 @@ fn secondary_keybinds(help: &ModeInfo, tab_info: Option<&TabInfo>, max_len: usiz
     let resize_increase_key = resize_increase_action_key
         .iter()
         .find(|k| k.bare_key == BareKey::Char('+'))
-        .or_else(|| resize_increase_action_key.iter().next());
+        .or_else(|| resize_increase_action_key.first());
     let resize_decrease_action_key = action_key(
         binds,
         &[Action::Resize {
@@ -810,7 +810,7 @@ fn secondary_keybinds(help: &ModeInfo, tab_info: Option<&TabInfo>, max_len: usiz
     let resize_decrease_key = resize_decrease_action_key
         .iter()
         .find(|k| k.bare_key == BareKey::Char('-'))
-        .or_else(|| resize_increase_action_key.iter().next());
+        .or_else(|| resize_increase_action_key.first());
     let mut resize_shortcuts = vec![];
     if let Some(resize_increase_key) = resize_increase_key {
         resize_shortcuts.push(resize_increase_key.clone());
@@ -832,7 +832,7 @@ fn secondary_keybinds(help: &ModeInfo, tab_info: Option<&TabInfo>, max_len: usiz
     let move_focus_left_key = move_focus_left_action_key
         .iter()
         .find(|k| k.bare_key == BareKey::Left)
-        .or_else(|| move_focus_left_action_key.iter().next());
+        .or_else(|| move_focus_left_action_key.first());
     if let Some(move_focus_left_key) = move_focus_left_key {
         move_focus_shortcuts.push(move_focus_left_key.clone());
     }
@@ -846,7 +846,7 @@ fn secondary_keybinds(help: &ModeInfo, tab_info: Option<&TabInfo>, max_len: usiz
     let move_focus_left_key = move_focus_left_action_key
         .iter()
         .find(|k| k.bare_key == BareKey::Down)
-        .or_else(|| move_focus_left_action_key.iter().next());
+        .or_else(|| move_focus_left_action_key.first());
     if let Some(move_focus_left_key) = move_focus_left_key {
         move_focus_shortcuts.push(move_focus_left_key.clone());
     }
@@ -860,7 +860,7 @@ fn secondary_keybinds(help: &ModeInfo, tab_info: Option<&TabInfo>, max_len: usiz
     let move_focus_left_key = move_focus_left_action_key
         .iter()
         .find(|k| k.bare_key == BareKey::Up)
-        .or_else(|| move_focus_left_action_key.iter().next());
+        .or_else(|| move_focus_left_action_key.first());
     if let Some(move_focus_left_key) = move_focus_left_key {
         move_focus_shortcuts.push(move_focus_left_key.clone());
     }
@@ -874,7 +874,7 @@ fn secondary_keybinds(help: &ModeInfo, tab_info: Option<&TabInfo>, max_len: usiz
     let move_focus_left_key = move_focus_left_action_key
         .iter()
         .find(|k| k.bare_key == BareKey::Right)
-        .or_else(|| move_focus_left_action_key.iter().next());
+        .or_else(|| move_focus_left_action_key.first());
     if let Some(move_focus_left_key) = move_focus_left_key {
         move_focus_shortcuts.push(move_focus_left_key.clone());
     }
@@ -883,7 +883,7 @@ fn secondary_keybinds(help: &ModeInfo, tab_info: Option<&TabInfo>, max_len: usiz
     let mut toggle_floating_action_key = toggle_floating_action_key
         .iter()
         .find(|k| k.is_key_with_alt_modifier(BareKey::Char('f')))
-        .or_else(|| toggle_floating_action_key.iter().next());
+        .or_else(|| toggle_floating_action_key.first());
     let toggle_floating_key_to_display =
         if let Some(toggle_floating_key_to_display) = toggle_floating_action_key.take() {
             vec![toggle_floating_key_to_display.clone()]
@@ -1138,12 +1138,12 @@ fn add_shortcut(
         return ret;
     }
 
-    ret.append(&style_key_with_modifier(&keys, key_color_index)); // TODO: alternate
+    ret.append(&style_key_with_modifier(keys, key_color_index)); // TODO: alternate
                                                                   //
     let ribbon = if selected {
-        serialize_ribbon(&Text::new(format!("{}", text)).selected())
+        serialize_ribbon(&Text::new(text.to_string()).selected())
     } else {
-        serialize_ribbon(&Text::new(format!("{}", text)))
+        serialize_ribbon(&Text::new(text.to_string()))
     };
     ret.part = format!("{}{}", ret.part, ribbon);
     let supports_arrow_fonts = !help.capabilities.arrow_fonts;
@@ -1185,13 +1185,10 @@ fn add_shortcut_with_inline_key(
         _ => "|",
     };
 
-    let key_string = format!(
-        "{}",
-        key.iter()
+    let key_string = key.iter()
             .map(|k| k.to_string())
             .collect::<Vec<_>>()
-            .join(key_separator)
-    );
+            .join(key_separator).to_string();
 
     let ribbon = if is_selected {
         serialize_ribbon(
@@ -1226,22 +1223,19 @@ fn add_shortcut_with_key_only(
         return ret;
     }
 
-    let key_string = format!(
-        "{}",
-        key.iter()
+    let key_string = key.iter()
             .map(|k| k.to_string())
             .collect::<Vec<_>>()
-            .join("-")
-    );
+            .join("-").to_string();
 
     let ribbon = if is_selected {
         serialize_ribbon(
-            &Text::new(format!("{}", key_string))
+            &Text::new(key_string.to_string())
                 .color_range(0, ..)
                 .selected(),
         )
     } else {
-        serialize_ribbon(&Text::new(format!("{}", key_string)).color_range(0, ..))
+        serialize_ribbon(&Text::new(key_string.to_string()).color_range(0, ..))
     };
     ret.part = ribbon;
     let supports_arrow_fonts = !help.capabilities.arrow_fonts;
@@ -1289,21 +1283,21 @@ fn add_keygroup_separator(help: &ModeInfo, max_len: usize) -> Option<LinePart> {
             .fg(bg_color)
             .on(separator_color)
             .bold()
-            .paint(format!("{}", separator)),
+            .paint(separator.to_string()),
     );
     bits.push(
         Style::new()
             .fg(separator_color)
             .on(separator_color)
             .bold()
-            .paint(format!(" ")),
+            .paint(" ".to_string()),
     );
     bits.push(
         Style::new()
             .fg(separator_color)
             .on(bg_color)
             .bold()
-            .paint(format!("{}", separator)),
+            .paint(separator.to_string()),
     );
     ret.part = format!("{}{}", ret.part, ANSIStrings(&bits));
     ret.len += 3; // padding and arrow fonts
@@ -1579,8 +1573,7 @@ fn session_manager_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWith
     let mut matching = keymap.iter().find_map(|(key, acvec)| {
         let has_match = acvec
             .iter()
-            .find(|a| a.launches_plugin("session-manager"))
-            .is_some();
+            .any(|a| a.launches_plugin("session-manager"));
         if has_match {
             Some(key.clone())
         } else {
@@ -1598,8 +1591,7 @@ fn share_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithModifier> 
     let mut matching = keymap.iter().find_map(|(key, acvec)| {
         let has_match = acvec
             .iter()
-            .find(|a| a.launches_plugin("zellij:share"))
-            .is_some();
+            .any(|a| a.launches_plugin("zellij:share"));
         if has_match {
             Some(key.clone())
         } else {
@@ -1617,8 +1609,7 @@ fn plugin_manager_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithM
     let mut matching = keymap.iter().find_map(|(key, acvec)| {
         let has_match = acvec
             .iter()
-            .find(|a| a.launches_plugin("plugin-manager"))
-            .is_some();
+            .any(|a| a.launches_plugin("plugin-manager"));
         if has_match {
             Some(key.clone())
         } else {
@@ -1636,8 +1627,7 @@ fn layout_manager_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithM
     let mut matching = keymap.iter().find_map(|(key, acvec)| {
         let has_match = acvec
             .iter()
-            .find(|a| a.launches_plugin("zellij:layout-manager"))
-            .is_some();
+            .any(|a| a.launches_plugin("zellij:layout-manager"));
         if has_match {
             Some(key.clone())
         } else {
@@ -1655,8 +1645,7 @@ fn about_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithModifier> 
     let mut matching = keymap.iter().find_map(|(key, acvec)| {
         let has_match = acvec
             .iter()
-            .find(|a| a.launches_plugin("zellij:about"))
-            .is_some();
+            .any(|a| a.launches_plugin("zellij:about"));
         if has_match {
             Some(key.clone())
         } else {
@@ -1674,8 +1663,7 @@ fn configuration_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithMo
     let mut matching = keymap.iter().find_map(|(key, acvec)| {
         let has_match = acvec
             .iter()
-            .find(|a| a.launches_plugin("configuration"))
-            .is_some();
+            .any(|a| a.launches_plugin("configuration"));
         if has_match {
             Some(key.clone())
         } else {
@@ -1741,7 +1729,7 @@ fn style_key_with_modifier(keyvec: &[KeyWithModifier], color_index: Option<usize
             len: key_string_text.width(),
         }
     } else {
-        let key_string_without_modifier = format!("{}", key.join(key_separator));
+        let key_string_without_modifier = key.join(key_separator).to_string();
         let key_string_text = format!(" {} <{}> ", modifier_str, key_string_without_modifier);
         let text = if let Some(color_index) = color_index {
             Text::new(&key_string_text)

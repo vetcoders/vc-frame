@@ -16,28 +16,25 @@ pub fn convert_old_yaml_files(opts: &CliArgs) {
     let mut layout_files_to_convert = vec![];
     let mut theme_files_to_convert = vec![];
     if let Some(layout) = opts.layout.as_ref() {
-        if layout.extension().map(|s| s.to_string_lossy().to_string()) == Some("yaml".into()) {
-            if layout.exists() {
+        if layout.extension().map(|s| s.to_string_lossy().to_string()) == Some("yaml".into())
+            && layout.exists() {
                 layout_files_to_convert.push((layout.clone(), true));
             }
-        }
     }
     layout_files_to_convert.dedup();
     if let Some(layout_dir) = layout_dir {
         if let Ok(files) = std::fs::read_dir(layout_dir) {
-            for file in files {
-                if let Ok(file) = file {
-                    if file
-                        .path()
-                        .extension()
-                        .map(|s| s.to_string_lossy().to_string())
-                        == Some("yaml".into())
-                    {
-                        let mut new_file_path = file.path().clone();
-                        new_file_path.set_extension("kdl");
-                        if !new_file_path.exists() {
-                            layout_files_to_convert.push((file.path().clone(), false));
-                        }
+            for file in files.flatten() {
+                if file
+                    .path()
+                    .extension()
+                    .map(|s| s.to_string_lossy().to_string())
+                    == Some("yaml".into())
+                {
+                    let mut new_file_path = file.path().clone();
+                    new_file_path.set_extension("kdl");
+                    if !new_file_path.exists() {
+                        layout_files_to_convert.push((file.path().clone(), false));
                     }
                 }
             }
@@ -81,9 +78,9 @@ pub fn convert_old_yaml_files(opts: &CliArgs) {
                 }
             },
             Err(e) => {
-                eprintln!("");
+                eprintln!();
                 eprintln!("\u{1b}[1;31mFailed to convert yaml config\u{1b}[m: {}", e);
-                eprintln!("");
+                eprintln!();
                 std::process::exit(1);
             },
         }
@@ -91,7 +88,7 @@ pub fn convert_old_yaml_files(opts: &CliArgs) {
 }
 
 fn print_conversion_title_message() {
-    println!("");
+    println!();
     println!("\u{1b}[1mZellij has moved to a new configuration format (KDL - https://kdl.dev) and has now been run with an old YAML configuration/layout/theme file.\u{1b}[m");
 }
 
@@ -142,7 +139,7 @@ fn print_remain_unmodified_message(will_exit: bool) {
     if !will_exit {
         println!("Will then use the new converted file(s) for this and the next runs.");
     }
-    println!("");
+    println!();
 }
 
 fn print_flag_help_message(
@@ -167,13 +164,11 @@ fn print_flag_help_message(
                     kdl_config_file_path
                         .as_path()
                         .as_os_str()
-                        .to_string_lossy()
-                        .to_string(),
+                        .to_string_lossy(),
                     kdl_explicitly_specified_layout
                         .as_path()
                         .as_os_str()
-                        .to_string_lossy()
-                        .to_string(),
+                        .to_string_lossy(),
                 );
             } else {
                 println!("Since a YAML layout was explicitly specified, you'll need to re-run Zellij and point it to the new layout:");
@@ -182,8 +177,7 @@ fn print_flag_help_message(
                     kdl_explicitly_specified_layout
                         .as_path()
                         .as_os_str()
-                        .to_string_lossy()
-                        .to_string(),
+                        .to_string_lossy(),
                 );
             }
         },
@@ -197,13 +191,12 @@ fn print_flag_help_message(
                     kdl_config_file_path
                         .as_path()
                         .as_os_str()
-                        .to_string_lossy()
-                        .to_string(),
+                        .to_string_lossy(),
                 );
             }
         },
     }
-    println!("");
+    println!();
     println!("\u{1b}[1;32mPress ENTER to continue.\u{1b}[m");
     std::io::stdin()
         .read_line(&mut String::new())
@@ -314,8 +307,8 @@ fn convert_yaml(
         return Err(
             format!(
                 "Specified old YAML format config (--config {}) but a new KDL file exists in that location. To fix, point to it the new file instead: zellij --config {}",
-                yaml_config_file.as_path().as_os_str().to_string_lossy().to_string(),
-                new_config_file.as_path().as_os_str().to_string_lossy().to_string()
+                yaml_config_file.as_path().as_os_str().to_string_lossy(),
+                new_config_file.as_path().as_os_str().to_string_lossy()
             )
         );
     } else if layout_was_explicitly_set && explicitly_set_layout_files_kdl_equivalent_exists {

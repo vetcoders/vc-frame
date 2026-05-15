@@ -36,10 +36,7 @@ pub fn get_default_themes() -> Themes {
     for file in ZELLIJ_DEFAULT_THEMES.files() {
         if let Some(content) = file.contents_utf8() {
             let sourced_from_external_file = true;
-            match Themes::from_string(&content.to_string(), sourced_from_external_file) {
-                Ok(theme) => themes = themes.merge(theme),
-                Err(_) => {},
-            }
+            if let Ok(theme) = Themes::from_string(&content.to_string(), sourced_from_external_file) { themes = themes.merge(theme) }
         }
     }
     themes
@@ -238,8 +235,7 @@ pub fn dump_specified_swap_layout(swap_layout: &str) -> std::io::Result<()> {
         "default" => dump_asset(DEFAULT_SWAP_LAYOUT),
         "compact" => dump_asset(COMPACT_BAR_SWAP_LAYOUT),
         "classic" => dump_asset(CLASSIC_SWAP_LAYOUT),
-        not_found => Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        not_found => Err(std::io::Error::other(
             format!("Swap Layout not found for: {}", not_found),
         )),
     }
@@ -341,14 +337,14 @@ impl Setup {
         let config = Config::try_from(cli_args)?;
         let cli_config_options: Option<Options> =
             if let Some(Command::Options(options)) = cli_args.command.clone() {
-                Some(options.into())
+                Some(options)
             } else {
                 None
             };
 
         // the attach CLI command can also have its own Options, we need to merge them if they
         // exist
-        let cli_config_options = merge_attach_command_options(cli_config_options, &cli_args);
+        let cli_config_options = merge_attach_command_options(cli_config_options, cli_args);
 
         let mut config_without_layout = config.clone();
         let (layout_info, mut config) =
@@ -422,7 +418,7 @@ impl Setup {
         }
 
         if let Some(layout) = &self.dump_layout {
-            dump_specified_layout(&layout)?;
+            dump_specified_layout(layout)?;
             std::process::exit(0);
         }
 
@@ -449,7 +445,7 @@ impl Setup {
             };
 
             println!("Dumping plugins to '{}'", dir.display());
-            dump_builtin_plugins(&dir)?;
+            dump_builtin_plugins(dir)?;
             std::process::exit(0);
         }
 
@@ -703,9 +699,9 @@ fn merge_attach_command_options(
         match options.clone().as_deref() {
             Some(SessionCommand::Options(options)) => match cli_config_options {
                 Some(cli_config_options) => {
-                    Some(cli_config_options.merge_from_cli(options.to_owned().into()))
+                    Some(cli_config_options.merge_from_cli(options.to_owned()))
                 },
-                None => Some(options.to_owned().into()),
+                None => Some(options.to_owned()),
             },
             _ => cli_config_options,
         }

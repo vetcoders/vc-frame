@@ -104,7 +104,7 @@ impl NewLayoutFromCurrentSessionScreen {
                 })),
                 Err(error_msg) => Some(Screen::Error(super::ErrorScreen {
                     message: format!("Failed to dump session layout: {}", error_msg),
-                    return_to_screen: Box::new(Default::default()),
+                    return_to_screen: Box::default(),
                 })),
             }
         } else {
@@ -120,7 +120,7 @@ impl NewLayoutFromCurrentSessionScreen {
                 })),
                 Err(error_msg) => Some(Screen::Error(super::ErrorScreen {
                     message: format!("Failed to dump session layout: {}", error_msg),
-                    return_to_screen: Box::new(Default::default()),
+                    return_to_screen: Box::default(),
                 })),
             }
         }

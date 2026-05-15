@@ -26,7 +26,7 @@ pub fn render_instruction_line(y: usize, max_cols: usize) {
 }
 
 pub fn render_list_tip(y: usize, max_cols: usize) {
-    let tip = Text::new(format!("(<↓↑> - Navigate, <TAB> - Select)"))
+    let tip = Text::new("(<↓↑> - Navigate, <TAB> - Select)".to_string())
         .color_range(3, 1..5)
         .color_range(3, 18..23);
     print_text_with_coordinates(tip, 0, y, Some(max_cols), None);
@@ -76,7 +76,7 @@ pub fn render_search_term(search_term: &str) {
         .color_range(2, 0..prompt.len())
         .color_range(3, prompt.len()..);
     print_text(text);
-    println!("")
+    println!()
 }
 
 pub fn render_virtual_root_header(_cols: usize) {

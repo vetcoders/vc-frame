@@ -98,7 +98,7 @@ impl Diagnostic for KdlError {
     fn help<'a>(&'a self) -> Option<Box<dyn Display + 'a>> {
         match &self.help_message {
             Some(help_message) => Some(Box::new(help_message)),
-            None => Some(Box::new(format!("For more information, please see our configuration guide: https://zellij.dev/documentation/configuration.html")))
+            None => Some(Box::new("For more information, please see our configuration guide: https://zellij.dev/documentation/configuration.html".to_string()))
         }
     }
     fn labels(&self) -> Option<Box<dyn Iterator<Item = LabeledSpan> + '_>> {
@@ -153,7 +153,7 @@ impl ConfigError {
             src: None,
             offset: Some(offset),
             len: Some(len),
-            help_message: Some(format!("For more information, please see our layout guide: https://zellij.dev/documentation/creating-a-layout.html")),
+            help_message: Some("For more information, please see our layout guide: https://zellij.dev/documentation/creating-a-layout.html".to_string()),
         })
     }
 }
@@ -358,7 +358,7 @@ impl Config {
         let config_file_name = config_file_path
             .file_name()
             .and_then(|f| f.to_str())
-            .unwrap_or_else(|| DEFAULT_CONFIG_FILE_NAME);
+            .unwrap_or(DEFAULT_CONFIG_FILE_NAME);
         for i in 0..100 {
             let new_file_name = if i == 0 {
                 format!("{}.bak", config_file_name)
@@ -379,9 +379,9 @@ impl Config {
         current_config_file_path: &PathBuf,
         backup_config_path: &PathBuf,
     ) -> bool {
-        let _ = std::fs::copy(current_config_file_path, &backup_config_path);
-        match std::fs::read_to_string(&backup_config_path) {
-            Ok(backed_up_config) => current_config == &backed_up_config,
+        let _ = std::fs::copy(current_config_file_path, backup_config_path);
+        match std::fs::read_to_string(backup_config_path) {
+            Ok(backed_up_config) => current_config == backed_up_config,
             Err(e) => {
                 log::error!(
                     "Failed to back up config file {}: {:?}",
@@ -397,17 +397,17 @@ impl Config {
     ) -> Result<Option<PathBuf>, Option<PathBuf>> {
         // if we fail, try to return the PathBuf of the file we were not able to write to
         // if let Some(config_file_path) = Config::config_file_path(&opts) {
-        match std::fs::read_to_string(&config_file_path) {
+        match std::fs::read_to_string(config_file_path) {
             Ok(current_config) => {
                 let Some(backup_config_path) =
-                    Config::find_free_backup_file_name(&config_file_path)
+                    Config::find_free_backup_file_name(config_file_path)
                 else {
                     log::error!("Failed to find a file name to back up the configuration to, ran out of files.");
                     return Err(None);
                 };
                 if Config::backup_config_with_written_content_confirmation(
                     &current_config,
-                    &config_file_path,
+                    config_file_path,
                     &backup_config_path,
                 ) {
                     Ok(Some(backup_config_path))

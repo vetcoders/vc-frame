@@ -217,9 +217,9 @@ impl App {
     fn update_all_client_grouped_panes(&mut self, pane_manifest: &PaneManifest) {
         self.all_client_grouped_panes.clear();
 
-        for (_tab_index, pane_infos) in &pane_manifest.panes {
+        for pane_infos in pane_manifest.panes.values() {
             for pane_info in pane_infos {
-                for (client_id, _index_in_pane_group) in &pane_info.index_in_pane_group {
+                for client_id in pane_info.index_in_pane_group.keys() {
                     let pane_id = if pane_info.is_plugin {
                         PaneId::Plugin(pane_info.id)
                     } else {
@@ -228,7 +228,7 @@ impl App {
 
                     self.all_client_grouped_panes
                         .entry(*client_id)
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(pane_id);
                 }
             }
@@ -240,7 +240,7 @@ impl App {
         let mut count = 0;
         let mut panes_with_index = Vec::new();
 
-        for (_tab_index, pane_infos) in &pane_manifest.panes {
+        for pane_infos in pane_manifest.panes.values() {
             for pane_info in pane_infos {
                 if let Some(index_in_pane_group) = pane_info.index_in_pane_group.get(&own_client_id)
                 {
@@ -271,13 +271,12 @@ impl App {
             if previous_count != count {
                 rename_plugin_pane(own_plugin_id, "Multiple Pane Select".to_string());
             }
-            if previous_count != 0 && count != 0 && previous_count != count {
-                if self.doherty_threshold_elapsed_since_highlight() {
+            if previous_count != 0 && count != 0 && previous_count != count
+                && self.doherty_threshold_elapsed_since_highlight() {
                     self.highlighted_at = Some(Instant::now());
                     highlight_and_unhighlight_panes(vec![PaneId::Plugin(own_plugin_id)], vec![]);
                     set_timeout(0.4);
                 }
-            }
         }
     }
 
@@ -668,7 +667,7 @@ fn render_follow_focus_ribbon(
     mode_info: &ModeInfo,
 ) {
     let follow_text = format!("<{}> Follow Focus", group_mark_key);
-    let key_highlight = format!("{}", group_mark_key);
+    let key_highlight = group_mark_key.to_string();
 
     let mut ribbon = Text::new(&follow_text).color_substring(0, &key_highlight);
 
@@ -681,7 +680,7 @@ fn render_follow_focus_ribbon(
 
 fn render_toggle_group_ribbon(pane_group_key: &str, base_x: usize, base_y: usize) -> usize {
     let toggle_text = format!("<{}> Toggle", pane_group_key);
-    let key_highlight = format!("{}", pane_group_key);
+    let key_highlight = pane_group_key.to_string();
 
     print_ribbon_with_coordinates(
         Text::new(&toggle_text).color_substring(0, &key_highlight),

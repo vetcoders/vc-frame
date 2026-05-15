@@ -6,6 +6,12 @@ pub struct Table {
     contents: Vec<Vec<Text>>,
 }
 
+impl Default for Table {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Table {
     pub fn new() -> Self {
         Table { contents: vec![] }
@@ -21,8 +27,7 @@ impl Table {
     }
     pub fn serialize(&self) -> String {
         let columns = self
-            .contents
-            .get(0)
+            .contents.first()
             .map(|first_row| first_row.len())
             .unwrap_or(0);
         let rows = self.contents.len();

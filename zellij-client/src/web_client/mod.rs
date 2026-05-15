@@ -95,7 +95,7 @@ pub fn start_web_client(
             .unwrap_or_else(|| IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)))
     });
     let web_server_port =
-        custom_port.unwrap_or_else(|| config_options.web_server_port.unwrap_or_else(|| 8082));
+        custom_port.unwrap_or_else(|| config_options.web_server_port.unwrap_or(8082));
     let web_server_cert = custom_server_cert.or_else(|| config.options.web_server_cert.clone());
     let web_server_key = custom_server_key.or_else(|| config.options.web_server_key.clone());
     let has_https_certificate = web_server_cert.is_some() && web_server_key.is_some();
@@ -126,8 +126,8 @@ pub fn start_web_client(
             (Some(web_server_cert), Some(web_server_key)) => {
                 let tls_config = runtime.block_on(async move {
                     RustlsConfig::from_pem_file(
-                        PathBuf::from(web_server_cert),
-                        PathBuf::from(web_server_key),
+                        web_server_cert,
+                        web_server_key,
                     )
                     .await
                 });
@@ -186,7 +186,7 @@ pub async fn serve_web_client(
     web_server_ip: IpAddr,
     web_server_port: u16,
 ) {
-    let Some(config_file_path) = config_file_path.or_else(|| Config::default_config_file_path())
+    let Some(config_file_path) = config_file_path.or_else(Config::default_config_file_path)
     else {
         log::error!("Failed to find default config file path");
         return;
@@ -223,7 +223,7 @@ pub async fn serve_web_client(
         async move {
             listen_to_web_server_instructions(
                 server_handle,
-                &format!("{}", id),
+                &id.to_string(),
                 web_server_ip,
                 web_server_port,
             )
@@ -306,8 +306,8 @@ fn daemonize_web_server(
                     (Some(web_server_cert), Some(web_server_key)) => {
                         let tls_config = runtime.block_on(async move {
                             RustlsConfig::from_pem_file(
-                                PathBuf::from(web_server_cert),
-                                PathBuf::from(web_server_key),
+                                web_server_cert,
+                                web_server_key,
                             )
                             .await
                         });
@@ -342,7 +342,7 @@ fn daemonize_web_server(
                 let mut buf = [0; 1];
                 match exit_status_rx.read_exact(&mut buf) {
                     Ok(_) => {
-                        let exit_status = buf.iter().next().copied().unwrap_or(0) as i32;
+                        let exit_status = buf.first().copied().unwrap_or(0) as i32;
                         let mut message = String::new();
                         let mut reader = BufReader::new(exit_message_rx);
                         let _ = reader.read_line(&mut message);

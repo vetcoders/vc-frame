@@ -14,7 +14,7 @@ fn pane_line(
     focus: Option<bool>,
     borderless: bool,
 ) -> String {
-    let mut pane_line = format!("pane");
+    let mut pane_line = "pane".to_string();
     if let Some(pane_name) = pane_name {
         // we use debug print here so that quotes and backslashes will be escaped
         pane_line.push_str(&format!(" name={:?}", pane_name));
@@ -37,7 +37,7 @@ fn tab_line(
     focus: Option<bool>,
     borderless: bool,
 ) -> String {
-    let mut pane_line = format!("tab");
+    let mut pane_line = "tab".to_string();
     if let Some(pane_name) = pane_name {
         // we use debug print here so that quotes and backslashes will be escaped
         pane_line.push_str(&format!(" name={:?}", pane_name));
@@ -61,7 +61,7 @@ fn pane_line_with_children(
     borderless: bool,
     split_direction: OldDirection,
 ) -> String {
-    let mut pane_line = format!("pane");
+    let mut pane_line = "pane".to_string();
     if let Some(pane_name) = pane_name {
         // we use debug print here so that quotes and backslashes will be escaped
         pane_line.push_str(&format!(" name={:?}", pane_name));
@@ -110,7 +110,7 @@ fn tab_line_with_children(
     borderless: bool,
     split_direction: OldDirection,
 ) -> String {
-    let mut pane_line = format!("tab");
+    let mut pane_line = "tab".to_string();
     if let Some(pane_name) = pane_name {
         // we use debug print here so that quotes and backslashes will be escaped
         pane_line.push_str(&format!(" name={:?}", pane_name));
@@ -170,7 +170,7 @@ fn stringify_template(
         for part in &template.parts {
             let child_indentation = format!("{}    ", &indentation);
             stringified.push_str(&stringify_template(
-                &part,
+                part,
                 child_indentation,
                 has_no_tabs,
                 false,
@@ -298,7 +298,7 @@ pub fn layout_yaml_to_layout_kdl(raw_yaml_layout: &str) -> Result<String, String
     let template = layout_from_yaml.template;
     let tabs = layout_from_yaml.tabs;
     let has_no_tabs = tabs.is_empty()
-        || tabs.len() == 1 && tabs.get(0).map(|t| t.parts.is_empty()).unwrap_or(false);
+        || tabs.len() == 1 && tabs.first().map(|t| t.parts.is_empty()).unwrap_or(false);
     if has_no_tabs {
         let indentation = String::from("");
         kdl_layout.push_str(&stringify_template(
@@ -336,8 +336,10 @@ pub fn layout_yaml_to_layout_kdl(raw_yaml_layout: &str) -> Result<String, String
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Copy)]
+#[derive(Default)]
 pub enum OldDirection {
     #[serde(alias = "horizontal")]
+    #[default]
     Horizontal,
     #[serde(alias = "vertical")]
     Vertical,
@@ -553,11 +555,6 @@ impl Default for OldLayoutTemplate {
     }
 }
 
-impl Default for OldDirection {
-    fn default() -> Self {
-        OldDirection::Horizontal
-    }
-}
 
 // The unit test location.
 #[path = "./unit/convert_layout_tests.rs"]

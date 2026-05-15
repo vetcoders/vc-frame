@@ -348,7 +348,7 @@ impl State {
     }
 
     fn detect_tooltip_presence(&self, pane_manifest: &PaneManifest) -> bool {
-        for (_tab_index, panes) in &pane_manifest.panes {
+        for panes in pane_manifest.panes.values() {
             for pane in panes {
                 if pane.plugin_url == Some("zellij:compact-bar".to_owned())
                     && pane.pane_x != pane.pane_content_x

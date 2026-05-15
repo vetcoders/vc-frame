@@ -43,12 +43,12 @@ pub async fn serve_html(State(state): State<AppState>, request: Request) -> Html
             .unwrap_or("/".to_string()),
     );
 
-    let html = Html(
+    
+    Html(
         WEB_CLIENT_PAGE
-            .replace("IS_AUTHENTICATED", &format!("{}", auth_value))
+            .replace("IS_AUTHENTICATED", auth_value)
             .replace("BASE_URL", &base_url),
-    );
-    html
+    )
 }
 
 pub async fn login_handler(

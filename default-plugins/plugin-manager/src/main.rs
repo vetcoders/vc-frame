@@ -74,7 +74,7 @@ impl NewPluginScreen {
         }
     }
     fn render_title(&self, cols: usize) {
-        let title_text = format!("LOAD NEW PLUGIN");
+        let title_text = "LOAD NEW PLUGIN".to_string();
         let title_text_len = title_text.chars().count();
         let title = Text::new(title_text);
         print_text_with_coordinates(
@@ -99,27 +99,23 @@ impl NewPluginScreen {
         };
         print_text_with_coordinates(url_field, 0, 2, None, None);
         let url_helper =
-            NestedListItem::new(format!("<Ctrl f> - Load from Disk")).color_range(3, ..=8);
+            NestedListItem::new("<Ctrl f> - Load from Disk".to_string()).color_range(3, ..=8);
         print_nested_list_with_coordinates(vec![url_helper], 0, 3, None, None);
     }
     fn render_configuration_title(&self) {
         let configuration_title =
             if !self.editing_configuration() && self.new_plugin_config.is_empty() {
-                Text::new(format!("Plugin Configuration: <TAB> - Edit"))
+                Text::new("Plugin Configuration: <TAB> - Edit".to_string())
                     .color_range(2, ..=20)
                     .color_range(3, 22..=26)
             } else if !self.editing_configuration() {
-                Text::new(format!(
-                    "Plugin Configuration: <TAB> - Edit, <↓↑> - Navigate, <Del> - Delete"
-                ))
+                Text::new("Plugin Configuration: <TAB> - Edit, <↓↑> - Navigate, <Del> - Delete".to_string())
                 .color_range(2, ..=20)
                 .color_range(3, 22..=26)
                 .color_range(3, 36..=39)
                 .color_range(3, 53..=57)
             } else {
-                Text::new(format!(
-                    "Plugin Configuration: [Editing: <TAB> - Next, <ENTER> - Accept]"
-                ))
+                Text::new("Plugin Configuration: [Editing: <TAB> - Next, <ENTER> - Accept]".to_string())
                 .color_range(2, ..=20)
                 .color_range(3, 32..=36)
                 .color_range(3, 46..=52)
@@ -183,12 +179,12 @@ impl NewPluginScreen {
         let config_key_max_len = config_line_max_len / 2;
         let config_val_max_len = config_line_max_len.saturating_sub(config_key_max_len);
         let config_key = if config_key.chars().count() > config_key_max_len {
-            truncate_string_start(&config_key, config_key_max_len)
+            truncate_string_start(config_key, config_key_max_len)
         } else {
             config_key.to_owned()
         };
         let config_val = if config_val.chars().count() > config_val_max_len {
-            truncate_string_start(&config_val, config_val_max_len)
+            truncate_string_start(config_val, config_val_max_len)
         } else {
             config_val.to_owned()
         };
@@ -234,13 +230,13 @@ impl NewPluginScreen {
         let config_key_max_len = config_line_max_len / 2;
         let config_val_max_len = config_line_max_len.saturating_sub(config_key_max_len);
         let config_key = if config_key.chars().count() > config_key_max_len {
-            truncate_string_start(&config_key, config_key_max_len)
+            truncate_string_start(config_key, config_key_max_len)
         } else {
             config_key.to_owned()
         };
 
         let config_val = if config_val.chars().count() > config_val_max_len {
-            truncate_string_start(&config_val, config_val_max_len)
+            truncate_string_start(config_val, config_val_max_len)
         } else {
             config_val.to_owned()
         };
@@ -253,7 +249,7 @@ impl NewPluginScreen {
         item
     }
     fn render_background_toggle(&self, y_coordinates: usize) {
-        let key_shortcuts_text = format!("Ctrl l");
+        let key_shortcuts_text = "Ctrl l".to_string();
         print_text_with_coordinates(
             Text::new(&key_shortcuts_text).color_range(3, ..).opaque(),
             0,
@@ -272,8 +268,8 @@ impl NewPluginScreen {
             key_shortcuts_text.chars().count() + 1,
             bg_color
         );
-        let load_in_background_text = format!("Load in Background");
-        let load_in_foreground_text = format!("Load in Foreground");
+        let load_in_background_text = "Load in Background".to_string();
+        let load_in_foreground_text = "Load in Foreground".to_string();
         let (load_in_background_ribbon, load_in_foreground_ribbon) = if self.load_in_background {
             (
                 Text::new(&load_in_background_text).selected(),
@@ -301,9 +297,7 @@ impl NewPluginScreen {
         );
     }
     fn render_help(&self, rows: usize) {
-        let enter_line = Text::new(format!(
-            "Help: <ENTER> - Accept and Load Plugin, <ESC> - Cancel"
-        ))
+        let enter_line = Text::new("Help: <ENTER> - Accept and Load Plugin, <ESC> - Cancel".to_string())
         .color_range(3, 6..=12)
         .color_range(3, 40..=44);
         print_text_with_coordinates(enter_line, 0, rows, None, None);
@@ -372,7 +366,7 @@ impl NewPluginScreen {
                 } else {
                     let plugin_url: String = self.new_plugin_url.drain(..).collect();
                     self.add_edit_buffer_to_config();
-                    let config = self.new_plugin_config.drain(..).into_iter().collect();
+                    let config = self.new_plugin_config.drain(..).collect();
                     let load_in_background = self.load_in_background;
                     let skip_plugin_cache = true;
                     load_new_plugin(plugin_url, config, load_in_background, skip_plugin_cache);
@@ -518,29 +512,26 @@ impl ZellijPlugin for State {
     }
     fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
         if pipe_message.name == "filepicker_result" {
-            match (pipe_message.payload, pipe_message.args.get("request_id")) {
-                (Some(payload), Some(request_id)) => {
-                    match self
-                        .new_plugin_screen
-                        .as_mut()
-                        .and_then(|n| n.request_ids.iter().position(|p| p == request_id))
-                    {
-                        Some(request_id_position) => {
-                            self.new_plugin_screen
-                                .as_mut()
-                                .map(|n| n.request_ids.remove(request_id_position));
-                            let chosen_plugin_location = std::path::PathBuf::from(payload);
-                            self.new_plugin_screen.as_mut().map(|n| {
-                                n.new_plugin_url =
-                                    format!("file:{}", chosen_plugin_location.display())
-                            });
-                        },
-                        None => {
-                            eprintln!("request id not found");
-                        },
-                    }
-                },
-                _ => {},
+            if let (Some(payload), Some(request_id)) = (pipe_message.payload, pipe_message.args.get("request_id")) {
+                match self
+                    .new_plugin_screen
+                    .as_mut()
+                    .and_then(|n| n.request_ids.iter().position(|p| p == request_id))
+                {
+                    Some(request_id_position) => {
+                        self.new_plugin_screen
+                            .as_mut()
+                            .map(|n| n.request_ids.remove(request_id_position));
+                        let chosen_plugin_location = std::path::PathBuf::from(payload);
+                        self.new_plugin_screen.as_mut().map(|n| {
+                            n.new_plugin_url =
+                                format!("file:{}", chosen_plugin_location.display())
+                        });
+                    },
+                    None => {
+                        eprintln!("request id not found");
+                    },
+                }
             }
             true
         } else {
@@ -738,7 +729,7 @@ impl State {
             let tab_line = self.render_tab_line(plugin_id, cols);
             items.push(tab_line);
             if !plugin_info.configuration.is_empty() {
-                let config_line = NestedListItem::new(format!("Configuration:"))
+                let config_line = NestedListItem::new("Configuration:".to_string())
                     .color_range(2, ..=13)
                     .indent(1);
                 items.push(config_line);
@@ -760,13 +751,13 @@ impl State {
         let config_key_max_len = config_line_max_len / 2;
         let config_val_max_len = config_line_max_len.saturating_sub(config_key_max_len);
         let config_key = if config_key.chars().count() > config_key_max_len {
-            truncate_string_start(&config_key, config_key_max_len)
+            truncate_string_start(config_key, config_key_max_len)
         } else {
             config_key.to_owned()
         };
 
         let config_val = if config_val.chars().count() > config_val_max_len {
-            truncate_string_start(&config_val, config_val_max_len)
+            truncate_string_start(config_val, config_val_max_len)
         } else {
             config_val.to_owned()
         };
@@ -813,7 +804,7 @@ impl State {
             let tab_line = self.render_tab_line(plugin_id, cols);
             items.push(tab_line);
             if !plugin_info.configuration.is_empty() {
-                let config_line = NestedListItem::new(format!("Configuration:"))
+                let config_line = NestedListItem::new("Configuration:".to_string())
                     .color_range(2, ..=13)
                     .indent(1);
                 items.push(config_line);
@@ -830,7 +821,7 @@ impl State {
         plus_indication: usize,
         indices: Option<Vec<usize>>,
     ) -> NestedListItem {
-        let mut item = NestedListItem::new(&format!("{} [+{}]", location_string, plus_indication))
+        let mut item = NestedListItem::new(format!("{} [+{}]", location_string, plus_indication))
             .color_range(0, ..)
             .color_range(1, location_string.chars().count() + 1..);
         if let Some(indices) = indices {
@@ -904,7 +895,7 @@ impl State {
     pub fn selected_plugin_id(&self) -> Option<u32> {
         if self.is_searching() {
             self.selected_index
-                .and_then(|i| self.search_results.iter().nth(i))
+                .and_then(|i| self.search_results.get(i))
                 .map(|search_result| search_result.plugin_id)
         } else {
             self.selected_index
@@ -1044,7 +1035,7 @@ impl State {
         should_render
     }
     pub fn is_searching(&self) -> bool {
-        self.search_term.len() > 0
+        !self.search_term.is_empty()
     }
     fn truncate_list_to_screen(
         &self,
@@ -1088,7 +1079,7 @@ fn truncate_search_result(
     max_location_len: usize,
     indices: &Vec<usize>,
 ) -> (String, Vec<usize>) {
-    let truncated_location = truncate_string_start(&plugin_location, max_location_len);
+    let truncated_location = truncate_string_start(plugin_location, max_location_len);
     let truncated_count = plugin_location
         .chars()
         .count()

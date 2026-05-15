@@ -15,16 +15,13 @@ pub struct NewSessionInfo {
 }
 
 #[derive(Eq, PartialEq)]
+#[derive(Default)]
 enum EnteringState {
+    #[default]
     EnteringName,
     EnteringLayoutSearch,
 }
 
-impl Default for EnteringState {
-    fn default() -> Self {
-        EnteringState::EnteringName
-    }
-}
 
 impl NewSessionInfo {
     pub fn name(&self) -> &str {
@@ -108,7 +105,7 @@ impl NewSessionInfo {
                 if new_session_name != current_session_name.as_ref().map(|s| s.as_str()) {
                     match new_session_layout {
                         Some(new_session_layout) => {
-                            let cwd = self.new_session_folder.as_ref().map(|c| PathBuf::from(c));
+                            let cwd = self.new_session_folder.as_ref().map(PathBuf::from);
                             switch_session_with_layout(new_session_name, new_session_layout, cwd);
                             if self.is_welcome_screen {
                                 // the welcome screen has done its job and now we need to quit this temporary
@@ -230,7 +227,7 @@ impl LayoutList {
     pub fn update_layout_list(&mut self, layout_list: Vec<LayoutInfo>) {
         let old_layout_length = self.layout_list.len();
         let mut layout_list = layout_list;
-        layout_list.sort_by(|a, b| layout_sort_key(a).cmp(&layout_sort_key(b)));
+        layout_list.sort_by_key(layout_sort_key);
         self.layout_list = layout_list;
         if old_layout_length != self.layout_list.len() {
             // honestly, this is just the UX choice that sucks the least...

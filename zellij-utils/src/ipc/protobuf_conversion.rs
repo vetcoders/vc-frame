@@ -669,7 +669,7 @@ impl From<crate::input::options::Options>
             theme: options.theme,
             theme_dark: options.theme_dark,
             theme_light: options.theme_light,
-            default_mode: options.default_mode.map(|m| input_mode_to_proto_i32(m)),
+            default_mode: options.default_mode.map(input_mode_to_proto_i32),
             default_shell: options
                 .default_shell
                 .map(|p| p.to_string_lossy().to_string()),
@@ -755,7 +755,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Options>
             theme_light: options.theme_light,
             default_mode: options
                 .default_mode
-                .map(|m| proto_i32_to_input_mode(m))
+                .map(proto_i32_to_input_mode)
                 .transpose()?,
             default_shell: options.default_shell.map(std::path::PathBuf::from),
             default_cwd: options.default_cwd.map(std::path::PathBuf::from),
@@ -1030,7 +1030,7 @@ impl From<crate::input::actions::Action>
             crate::input::actions::Action::Resize { resize, direction } => {
                 ActionType::Resize(ResizeAction {
                     resize: resize_to_proto_i32(resize),
-                    direction: direction.map(|d| direction_to_proto_i32(d)),
+                    direction: direction.map(direction_to_proto_i32),
                 })
             },
             crate::input::actions::Action::FocusNextPane => {
@@ -1054,7 +1054,7 @@ impl From<crate::input::actions::Action>
             },
             crate::input::actions::Action::MovePane { direction } => {
                 ActionType::MovePane(MovePaneAction {
-                    direction: direction.map(|d| direction_to_proto_i32(d)),
+                    direction: direction.map(direction_to_proto_i32),
                 })
             },
             crate::input::actions::Action::MovePaneBackwards => {
@@ -1130,7 +1130,7 @@ impl From<crate::input::actions::Action>
                 pane_name,
                 start_suppressed,
             } => ActionType::NewPane(NewPaneAction {
-                direction: direction.map(|d| direction_to_proto_i32(d)),
+                direction: direction.map(direction_to_proto_i32),
                 pane_name,
                 start_suppressed,
                 near_current_pane: false,
@@ -1148,7 +1148,7 @@ impl From<crate::input::actions::Action>
                 ..
             } => ActionType::EditFile(EditFileAction {
                 payload: Some(payload.into()),
-                direction: direction.map(|d| direction_to_proto_i32(d)),
+                direction: direction.map(direction_to_proto_i32),
                 floating,
                 in_place,
                 close_replaced_pane,
@@ -1180,7 +1180,7 @@ impl From<crate::input::actions::Action>
                 tab_id,
                 ..
             } => ActionType::NewTiledPane(NewTiledPaneAction {
-                direction: direction.map(|d| direction_to_proto_i32(d)),
+                direction: direction.map(direction_to_proto_i32),
                 command: command.map(|c| c.into()),
                 pane_name,
                 near_current_pane,
@@ -1227,7 +1227,7 @@ impl From<crate::input::actions::Action>
                 placement: Some(placement.into()),
                 pane_name,
                 command: command.map(|c| c.into()),
-                unblock_condition: unblock_condition.map(|c| unblock_condition_to_proto_i32(c)),
+                unblock_condition: unblock_condition.map(unblock_condition_to_proto_i32),
                 near_current_pane,
                 tab_id: tab_id.map(|t| t as u32),
             }),
@@ -1289,7 +1289,7 @@ impl From<crate::input::actions::Action>
                     .map(|panes| panes.into_iter().map(|p| p.into()).collect())
                     .unwrap_or_default(),
                 first_pane_unblock_condition: first_pane_unblock_condition
-                    .map(|c| unblock_condition_to_proto_i32(c)),
+                    .map(unblock_condition_to_proto_i32),
             }),
             crate::input::actions::Action::NoOp => ActionType::NoOp(NoOpAction {}),
             crate::input::actions::Action::GoToNextTab => {
@@ -1739,13 +1739,13 @@ impl From<crate::input::actions::Action>
                 pane_id: Some(pane_id.into()),
                 resize_action: Some(ResizeAction {
                     resize: resize_to_proto_i32(resize),
-                    direction: direction.map(|d| direction_to_proto_i32(d)),
+                    direction: direction.map(direction_to_proto_i32),
                 }),
             }),
             crate::input::actions::Action::MovePaneByPaneId { pane_id, direction } => {
                 ActionType::MovePaneByPaneId(MovePaneByPaneIdAction {
                     pane_id: Some(pane_id.into()),
-                    direction: direction.map(|d| direction_to_proto_i32(d)),
+                    direction: direction.map(direction_to_proto_i32),
                 })
             },
             crate::input::actions::Action::MovePaneBackwardsByPaneId { pane_id } => {
@@ -1900,7 +1900,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                 resize: proto_i32_to_resize(resize_action.resize)?,
                 direction: resize_action
                     .direction
-                    .map(|d| proto_i32_to_direction(d))
+                    .map(proto_i32_to_direction)
                     .transpose()?,
             }),
             ActionType::FocusNextPane(_) => Ok(crate::input::actions::Action::FocusNextPane),
@@ -1921,7 +1921,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
             ActionType::MovePane(move_pane_action) => Ok(crate::input::actions::Action::MovePane {
                 direction: move_pane_action
                     .direction
-                    .map(|d| proto_i32_to_direction(d))
+                    .map(proto_i32_to_direction)
                     .transpose()?,
             }),
             ActionType::MovePaneBackwards(_) => {
@@ -1984,7 +1984,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
             ActionType::NewPane(new_pane_action) => Ok(crate::input::actions::Action::NewPane {
                 direction: new_pane_action
                     .direction
-                    .map(|d| proto_i32_to_direction(d))
+                    .map(proto_i32_to_direction)
                     .transpose()?,
                 pane_name: new_pane_action.pane_name,
                 start_suppressed: new_pane_action.start_suppressed,
@@ -1996,7 +1996,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                     .try_into()?,
                 direction: edit_file_action
                     .direction
-                    .map(|d| proto_i32_to_direction(d))
+                    .map(proto_i32_to_direction)
                     .transpose()?,
                 floating: edit_file_action.floating,
                 in_place: edit_file_action.in_place,
@@ -2028,7 +2028,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                 Ok(crate::input::actions::Action::NewTiledPane {
                     direction: new_tiled_action
                         .direction
-                        .map(|d| proto_i32_to_direction(d))
+                        .map(proto_i32_to_direction)
                         .transpose()?,
                     command: new_tiled_action.command.map(|c| c.try_into()).transpose()?,
                     pane_name: new_tiled_action.pane_name,
@@ -2076,7 +2076,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                         .transpose()?,
                     unblock_condition: new_blocking_action
                         .unblock_condition
-                        .map(|c| proto_i32_to_unblock_condition(c))
+                        .map(proto_i32_to_unblock_condition)
                         .transpose()?,
                     near_current_pane: new_blocking_action.near_current_pane,
                     tab_id: new_blocking_action.tab_id.map(|t| t as usize),
@@ -2163,7 +2163,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
 
                 first_pane_unblock_condition: new_tab_action
                     .first_pane_unblock_condition
-                    .map(|c| proto_i32_to_unblock_condition(c))
+                    .map(proto_i32_to_unblock_condition)
                     .transpose()?,
             }),
             ActionType::NoOp(_) => Ok(crate::input::actions::Action::NoOp),
@@ -2628,7 +2628,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                 let resize = proto_i32_to_resize(resize_action.resize)?;
                 let direction = resize_action
                     .direction
-                    .map(|d| proto_i32_to_direction(d))
+                    .map(proto_i32_to_direction)
                     .transpose()?;
                 Ok(crate::input::actions::Action::ResizeByPaneId {
                     pane_id: a
@@ -2640,7 +2640,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                 })
             },
             ActionType::MovePaneByPaneId(a) => {
-                let direction = a.direction.map(|d| proto_i32_to_direction(d)).transpose()?;
+                let direction = a.direction.map(proto_i32_to_direction).transpose()?;
                 Ok(crate::input::actions::Action::MovePaneByPaneId {
                     pane_id: a
                         .pane_id
@@ -2777,7 +2777,7 @@ impl From<crate::data::KeyWithModifier>
             key_modifiers: key
                 .key_modifiers
                 .into_iter()
-                .map(|modifier| key_modifier_to_proto_i32(modifier))
+                .map(key_modifier_to_proto_i32)
                 .collect(),
             character: char_data,
         }
@@ -2813,7 +2813,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::KeyWithModif
         let key_modifiers: Result<BTreeSet<_>> = key
             .key_modifiers
             .into_iter()
-            .map(|modifier| key_modifier_from_proto_i32(modifier))
+            .map(key_modifier_from_proto_i32)
             .collect();
 
         Ok(Self {
@@ -3597,7 +3597,7 @@ impl From<crate::input::command::RunCommandAction>
             command: action.command.to_string_lossy().to_string(),
             args: action.args,
             cwd: action.cwd.map(|p| p.to_string_lossy().to_string()),
-            direction: action.direction.map(|d| direction_to_proto_i32(d)),
+            direction: action.direction.map(direction_to_proto_i32),
             hold_on_close: action.hold_on_close,
             hold_on_start: action.hold_on_start,
             originating_plugin: action.originating_plugin.map(|op| op.into()),
@@ -3613,7 +3613,7 @@ impl From<crate::data::OriginatingPlugin>
     fn from(orig: crate::data::OriginatingPlugin) -> Self {
         use std::collections::HashMap;
         let context: HashMap<String, String> =
-            orig.context.into_iter().map(|(k, v)| (k, v)).collect();
+            orig.context.into_iter().collect();
 
         Self {
             plugin_id: orig.plugin_id,

@@ -655,17 +655,14 @@ struct AppState {
 }
 
 #[derive(Debug, Clone)]
+#[derive(Default)]
 enum Screen {
+    #[default]
     Main,
     Token(String),
     ManageTokens,
 }
 
-impl Default for Screen {
-    fn default() -> Self {
-        Screen::Main
-    }
-}
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct CoordinatesInLine {

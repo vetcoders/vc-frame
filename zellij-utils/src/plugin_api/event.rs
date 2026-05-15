@@ -221,7 +221,7 @@ impl TryFrom<ProtobufEvent> for Event {
                     }
                     Ok(Event::SessionUpdate(
                         session_infos,
-                        resurrectable_sessions.into(),
+                        resurrectable_sessions,
                     ))
                 },
                 _ => Err("Malformed payload for the SessionUpdate Event"),
@@ -1197,19 +1197,19 @@ impl TryFrom<SessionInfo> for ProtobufSessionManifest {
             plugins: session_info
                 .plugins
                 .into_iter()
-                .map(|p| ProtobufPluginInfo::from(p))
+                .map(ProtobufPluginInfo::from)
                 .collect(),
             web_clients_allowed: session_info.web_clients_allowed,
             web_client_count: session_info.web_client_count as u32,
             tab_history: session_info
                 .tab_history
                 .into_iter()
-                .map(|t| ProtobufClientTabHistory::from(t))
+                .map(ProtobufClientTabHistory::from)
                 .collect(),
             pane_history: session_info
                 .pane_history
                 .into_iter()
-                .map(|p| ProtobufClientPaneHistory::from(p))
+                .map(ProtobufClientPaneHistory::from)
                 .collect(),
             creation_time: session_info.creation_time.as_secs(),
         })
@@ -1889,12 +1889,12 @@ impl TryFrom<ProtobufModeUpdatePayload> for ModeInfo {
         let session_name = protobuf_mode_update_payload.session_name;
         let editor = protobuf_mode_update_payload
             .editor
-            .map(|e| PathBuf::from(e));
-        let shell = protobuf_mode_update_payload.shell.map(|s| PathBuf::from(s));
+            .map(PathBuf::from);
+        let shell = protobuf_mode_update_payload.shell.map(PathBuf::from);
         let web_clients_allowed = protobuf_mode_update_payload.web_clients_allowed;
         let web_sharing = protobuf_mode_update_payload
             .web_sharing
-            .and_then(|w| ProtobufWebSharing::from_i32(w))
+            .and_then(ProtobufWebSharing::from_i32)
             .map(|w| w.into());
         let capabilities = PluginCapabilities {
             arrow_fonts: protobuf_mode_update_payload.arrow_fonts_support,
@@ -2874,9 +2874,9 @@ impl TryFrom<PaneId> for ProtobufPaneId {
     }
 }
 
-impl Into<ProtobufWebSharing> for WebSharing {
-    fn into(self) -> ProtobufWebSharing {
-        match self {
+impl From<WebSharing> for ProtobufWebSharing {
+    fn from(val: WebSharing) -> Self {
+        match val {
             WebSharing::On => ProtobufWebSharing::On,
             WebSharing::Off => ProtobufWebSharing::Off,
             WebSharing::Disabled => ProtobufWebSharing::Disabled,
@@ -2884,9 +2884,9 @@ impl Into<ProtobufWebSharing> for WebSharing {
     }
 }
 
-impl Into<WebSharing> for ProtobufWebSharing {
-    fn into(self) -> WebSharing {
-        match self {
+impl From<ProtobufWebSharing> for WebSharing {
+    fn from(val: ProtobufWebSharing) -> Self {
+        match val {
             ProtobufWebSharing::On => WebSharing::On,
             ProtobufWebSharing::Off => WebSharing::Off,
             ProtobufWebSharing::Disabled => WebSharing::Disabled,
@@ -2904,7 +2904,7 @@ impl TryFrom<WebServerStatus> for ProtobufWebServerStatusPayload {
             }),
             WebServerStatus::DifferentVersion(version) => Ok(ProtobufWebServerStatusPayload {
                 web_server_status_indication: WebServerStatusIndication::DifferentVersion as i32,
-                payload: Some(format!("{}", version)),
+                payload: Some(version.to_string()),
             }),
             WebServerStatus::Offline => Ok(ProtobufWebServerStatusPayload {
                 web_server_status_indication: WebServerStatusIndication::Offline as i32,

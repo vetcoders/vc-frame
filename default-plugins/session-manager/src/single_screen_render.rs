@@ -337,8 +337,8 @@ pub fn render_unified_results(
                 (&above_summary_full, above_active, above_resurrectable)
             };
             Text::new(summary_text)
-                .color_substring(2, &format!("+{active_count}"))
-                .color_substring(2, &format!("+{resurrectable_count}"))
+                .color_substring(2, format!("+{active_count}"))
+                .color_substring(2, format!("+{resurrectable_count}"))
         } else if row_index == 0 && selected_index.is_none() {
             let tab_hint_text = if abbreviate_fourth_col {
                 tab_header_short
@@ -353,8 +353,8 @@ pub fn render_unified_results(
                 (&below_summary_full, below_active, below_resurrectable)
             };
             Text::new(summary_text)
-                .color_substring(2, &format!("+{active_count}"))
-                .color_substring(2, &format!("+{resurrectable_count}"))
+                .color_substring(2, format!("+{active_count}"))
+                .color_substring(2, format!("+{resurrectable_count}"))
         } else {
             Text::new(" ")
         };

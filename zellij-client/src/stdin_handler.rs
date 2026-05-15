@@ -164,7 +164,7 @@ pub(crate) fn stdin_loop(
                                     send_input_instructions
                                         .send(InputInstruction::KeyWithModifierEvent(
                                             key_with_modifier,
-                                            current_buffer.drain(..).collect(),
+                                            std::mem::take(&mut current_buffer),
                                             true,
                                         ))
                                         .unwrap();
@@ -196,7 +196,7 @@ pub(crate) fn stdin_loop(
                             send_input_instructions
                                 .send(InputInstruction::KeyEvent(
                                     input_event,
-                                    current_buffer.drain(..).collect(),
+                                    std::mem::take(&mut current_buffer),
                                 ))
                                 .unwrap();
                         }
@@ -262,7 +262,7 @@ fn finalize_events(
         send_input_instructions
             .send(InputInstruction::KeyEvent(
                 input_event,
-                current_buffer.drain(..).collect(),
+                std::mem::take(current_buffer),
             ))
             .unwrap();
     }

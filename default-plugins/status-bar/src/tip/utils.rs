@@ -60,9 +60,7 @@ pub fn get_cached_tip_name() -> String {
     }
 
     let usable_tips = local_cache
-        .get_cached_data()
-        .iter()
-        .map(|(k, _)| k.to_string())
+        .get_cached_data().keys().map(|k| k.to_string())
         .collect::<Vec<String>>();
 
     if usable_tips.is_empty() {

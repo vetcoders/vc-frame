@@ -61,7 +61,7 @@ type Result<T> = std::result::Result<T, TokenError>;
 
 fn get_db_path() -> Result<PathBuf> {
     let data_dir = ZELLIJ_PROJ_DIR.data_dir();
-    std::fs::create_dir_all(&data_dir)?;
+    std::fs::create_dir_all(data_dir)?;
 
     let db_path = if cfg!(debug_assertions) {
         data_dir.join("tokens_for_dev.db")

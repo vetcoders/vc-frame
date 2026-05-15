@@ -105,7 +105,7 @@ impl TryFrom<ProtobufStyling> for Styling {
     type Error = &'static str;
 
     fn try_from(proto: ProtobufStyling) -> std::result::Result<Self, Self::Error> {
-        let frame_unselected = if proto.frame_unselected.len() > 0 {
+        let frame_unselected = if !proto.frame_unselected.is_empty() {
             Some(color_definitions!(proto, frame_unselected, 6))
         } else {
             None

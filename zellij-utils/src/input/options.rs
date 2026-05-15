@@ -9,18 +9,15 @@ use std::str::FromStr;
 use std::net::IpAddr;
 
 #[derive(Copy, Clone, Debug, PartialEq, Deserialize, Serialize, ArgEnum)]
+#[derive(Default)]
 pub enum OnForceClose {
     #[serde(alias = "quit")]
     Quit,
     #[serde(alias = "detach")]
+    #[default]
     Detach,
 }
 
-impl Default for OnForceClose {
-    fn default() -> Self {
-        Self::Detach
-    }
-}
 
 impl FromStr for OnForceClose {
     type Err = Box<dyn std::error::Error>;
@@ -281,18 +278,15 @@ pub struct Options {
 }
 
 #[derive(ArgEnum, Deserialize, Serialize, Debug, Clone, Copy, PartialEq)]
+#[derive(Default)]
 pub enum Clipboard {
     #[serde(alias = "system")]
+    #[default]
     System,
     #[serde(alias = "primary")]
     Primary,
 }
 
-impl Default for Clipboard {
-    fn default() -> Self {
-        Self::System
-    }
-}
 
 impl FromStr for Clipboard {
     type Err = String;
@@ -307,11 +301,7 @@ impl FromStr for Clipboard {
 
 impl Options {
     pub fn from_yaml(from_yaml: Option<Options>) -> Options {
-        if let Some(opts) = from_yaml {
-            opts
-        } else {
-            Options::default()
-        }
+        from_yaml.unwrap_or_default()
     }
     /// Merges two [`Options`] structs, a `Some` in `other`
     /// will supersede a `Some` in `self`
@@ -343,7 +333,7 @@ impl Options {
         let session_name = other.session_name.or_else(|| self.session_name.clone());
         let attach_to_session = other
             .attach_to_session
-            .or_else(|| self.attach_to_session.clone());
+            .or(self.attach_to_session);
         let session_serialization = other.session_serialization.or(self.session_serialization);
         let serialize_pane_viewport = other
             .serialize_pane_viewport
@@ -482,10 +472,10 @@ impl Options {
         let session_name = other.session_name.or_else(|| self.session_name.clone());
         let attach_to_session = other
             .attach_to_session
-            .or_else(|| self.attach_to_session.clone());
+            .or(self.attach_to_session);
         let scrollback_lines_to_serialize = other
             .scrollback_lines_to_serialize
-            .or_else(|| self.scrollback_lines_to_serialize.clone());
+            .or(self.scrollback_lines_to_serialize);
         let styled_underlines = other.styled_underlines.or(self.styled_underlines);
         let serialization_interval = other.serialization_interval.or(self.serialization_interval);
         let disable_session_metadata = other
@@ -573,7 +563,7 @@ impl Options {
 
     pub fn from_cli(&self, other: Option<Command>) -> Options {
         if let Some(Command::Options(options)) = other {
-            Options::merge_from_cli(self, options.into())
+            Options::merge_from_cli(self, options)
         } else {
             self.to_owned()
         }

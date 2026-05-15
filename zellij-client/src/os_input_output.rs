@@ -40,6 +40,12 @@ pub struct AsyncStdinReader {
     buffer: Vec<u8>,
 }
 
+impl Default for AsyncStdinReader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AsyncStdinReader {
     pub fn new() -> Self {
         Self {

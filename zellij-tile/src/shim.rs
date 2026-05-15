@@ -489,7 +489,7 @@ pub fn open_file_in_place_of_plugin(
 }
 /// Open a new terminal pane to the specified location on the host filesystem
 pub fn open_terminal<P: AsRef<Path>>(path: P) -> Option<PaneId> {
-    let file_to_open = FileToOpen::new(path.as_ref().to_path_buf());
+    let file_to_open = FileToOpen::new(path.as_ref());
     let plugin_command = PluginCommand::OpenTerminal(file_to_open);
     let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
     object_to_stdout(&protobuf_plugin_command.encode_to_vec());
@@ -504,7 +504,7 @@ pub fn open_terminal<P: AsRef<Path>>(path: P) -> Option<PaneId> {
 /// This variant is identical to open_terminal, excpet it opens it near the plugin regardless of
 /// whether the user was focused on it or not
 pub fn open_terminal_near_plugin<P: AsRef<Path>>(path: P) -> Option<PaneId> {
-    let file_to_open = FileToOpen::new(path.as_ref().to_path_buf());
+    let file_to_open = FileToOpen::new(path.as_ref());
     let plugin_command = PluginCommand::OpenTerminalNearPlugin(file_to_open);
     let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
     object_to_stdout(&protobuf_plugin_command.encode_to_vec());
@@ -521,7 +521,7 @@ pub fn open_terminal_floating<P: AsRef<Path>>(
     path: P,
     coordinates: Option<FloatingPaneCoordinates>,
 ) -> Option<PaneId> {
-    let file_to_open = FileToOpen::new(path.as_ref().to_path_buf());
+    let file_to_open = FileToOpen::new(path.as_ref());
     let plugin_command = PluginCommand::OpenTerminalFloating(file_to_open, coordinates);
     let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
     object_to_stdout(&protobuf_plugin_command.encode_to_vec());
@@ -540,7 +540,7 @@ pub fn open_terminal_floating_near_plugin<P: AsRef<Path>>(
     path: P,
     coordinates: Option<FloatingPaneCoordinates>,
 ) -> Option<PaneId> {
-    let file_to_open = FileToOpen::new(path.as_ref().to_path_buf());
+    let file_to_open = FileToOpen::new(path.as_ref());
     let plugin_command = PluginCommand::OpenTerminalFloatingNearPlugin(file_to_open, coordinates);
     let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
     object_to_stdout(&protobuf_plugin_command.encode_to_vec());
@@ -556,7 +556,7 @@ pub fn open_terminal_floating_near_plugin<P: AsRef<Path>>(
 /// Open a new terminal pane to the specified location on the host filesystem, temporarily
 /// replacing the focused pane
 pub fn open_terminal_in_place<P: AsRef<Path>>(path: P) -> Option<PaneId> {
-    let file_to_open = FileToOpen::new(path.as_ref().to_path_buf());
+    let file_to_open = FileToOpen::new(path.as_ref());
     let plugin_command = PluginCommand::OpenTerminalInPlace(file_to_open);
     let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
     object_to_stdout(&protobuf_plugin_command.encode_to_vec());
@@ -574,7 +574,7 @@ pub fn open_terminal_in_place_of_plugin<P: AsRef<Path>>(
     path: P,
     close_plugin_after_replace: bool,
 ) -> Option<PaneId> {
-    let file_to_open = FileToOpen::new(path.as_ref().to_path_buf());
+    let file_to_open = FileToOpen::new(path.as_ref());
     let plugin_command =
         PluginCommand::OpenTerminalInPlaceOfPlugin(file_to_open, close_plugin_after_replace);
     let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
@@ -1060,9 +1060,9 @@ pub fn go_to_previous_tab() {
 
 pub fn report_panic(info: &std::panic::PanicHookInfo) {
     let panic_payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
-        format!("{}", s)
+        s.to_string()
     } else {
-        format!("<NO PAYLOAD>")
+        "<NO PAYLOAD>".to_string()
     };
     let panic_stringified = format!("{}\n\r{:#?}", panic_payload, info).replace("\n", "\r\n");
     let plugin_command = PluginCommand::ReportPanic(panic_stringified);
@@ -1614,7 +1614,7 @@ where
     S: ToString,
 {
     let plugin_command = PluginCommand::KillSessionsAndReply(
-        session_names.into_iter().map(|s| s.to_string()).collect(),
+        session_names.iter().map(|s| s.to_string()).collect(),
     );
     let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
     object_to_stdout(&protobuf_plugin_command.encode_to_vec());
@@ -2733,7 +2733,7 @@ pub fn get_focused_tab(tab_infos: &Vec<TabInfo>) -> Option<TabInfo> {
             return Some(tab_info.clone());
         }
     }
-    return None;
+    None
 }
 
 #[allow(unused)]

@@ -73,7 +73,7 @@ impl SessionManager for RealSessionManager {
         if !session_exists {
             spawn_new_session(session_name, os_input.clone(), zellij_ipc_pipe);
         }
-        os_input.connect_to_server(&zellij_ipc_pipe);
+        os_input.connect_to_server(zellij_ipc_pipe);
         os_input.send_to_server(first_message);
     }
 }

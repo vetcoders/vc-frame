@@ -851,7 +851,7 @@ fn parse_sgr_mouse(buf: &[u8]) -> Option<(InputEvent, usize)> {
 /// Returns `None` if the buffer doesn't start with `\x1b[`, contains a
 /// non-CSI byte, or hasn't yet received its final byte.
 fn complete_csi_len(buf: &[u8]) -> Option<usize> {
-    if buf.get(0) != Some(&0x1b) || buf.get(1) != Some(&b'[') {
+    if buf.first() != Some(&0x1b) || buf.get(1) != Some(&b'[') {
         return None;
     }
     let mut i = 2;
@@ -860,7 +860,7 @@ fn complete_csi_len(buf: &[u8]) -> Option<usize> {
         let b = buf[i];
         match b {
             // Parameters (digits, ;, :, ?, <, =, >) and intermediates (space..'/').
-            0x30..=0x3F | 0x20..=0x2F => i += 1,
+            0x20..=0x3F => i += 1,
             // Any byte in the final-byte range terminates a CSI sequence.
             0x40..=0x7E => return Some(i + 1),
             // Anything else means this isn't a well-formed CSI.
@@ -871,7 +871,7 @@ fn complete_csi_len(buf: &[u8]) -> Option<usize> {
 }
 
 fn parse_csi_report(buf: &[u8]) -> Option<(InputEvent, usize)> {
-    if buf.get(0) != Some(&0x1b) || buf.get(1) != Some(&b'[') {
+    if buf.first() != Some(&0x1b) || buf.get(1) != Some(&b'[') {
         return None;
     }
     // Scan forward looking for a final byte in the whitelist, or bail if
@@ -925,7 +925,7 @@ fn parse_csi_report(buf: &[u8]) -> Option<(InputEvent, usize)> {
 
 fn parse_osc(buf: &[u8]) -> Option<(InputEvent, usize)> {
     // OSC sequences start with ESC ] (0x1b 0x5d)
-    if buf.get(0) != Some(&0x1b) || buf.get(1) != Some(&b']') {
+    if buf.first() != Some(&0x1b) || buf.get(1) != Some(&b']') {
         return None;
     }
     let mut i = 2;
@@ -1265,7 +1265,7 @@ impl InputParser {
             // Ctrl-[A..=Z] are sent as 1..=26
             let ctrl = [alpha & 0x1f];
             map.insert(
-                &ctrl,
+                ctrl,
                 InputEvent::Key(KeyEvent {
                     key: KeyCode::Char((alpha as char).to_ascii_lowercase()),
                     modifiers: Modifiers::CTRL,
@@ -1275,7 +1275,7 @@ impl InputParser {
             // ALT A-Z is often sent with a leading ESC
             let alt = [0x1b, alpha];
             map.insert(
-                &alt,
+                alt,
                 InputEvent::Key(KeyEvent {
                     key: KeyCode::Char(alpha as char),
                     modifiers: Modifiers::ALT,
@@ -1328,7 +1328,7 @@ impl InputParser {
             // Arrow keys in normal mode encoded using CSI
             let arrow = [0x1b, b'[', *dir];
             map.insert(
-                &arrow,
+                arrow,
                 InputEvent::Key(KeyEvent {
                     key: *keycode,
                     modifiers: Modifiers::NONE,
@@ -1357,7 +1357,7 @@ impl InputParser {
                 ([0x1b, b'O', dir], Modifiers::CTRL),
             ] {
                 map.insert(
-                    &seq,
+                    seq,
                     InputEvent::Key(KeyEvent {
                         key: keycode,
                         modifiers: mods,
@@ -1375,7 +1375,7 @@ impl InputParser {
             // Arrow keys in application cursor mode encoded using SS3
             let app = [0x1b, b'O', *dir];
             map.insert(
-                &app,
+                app,
                 InputEvent::Key(KeyEvent {
                     key: *keycode,
                     modifiers: Modifiers::NONE,
@@ -1402,7 +1402,7 @@ impl InputParser {
         ] {
             let key = [0x1b, b'O', *c];
             map.insert(
-                &key,
+                key,
                 InputEvent::Key(KeyEvent {
                     key: *keycode,
                     modifiers: Modifiers::NONE,
@@ -1486,7 +1486,7 @@ impl InputParser {
         }
 
         map.insert(
-            &[0x7f],
+            [0x7f],
             InputEvent::Key(KeyEvent {
                 key: KeyCode::Backspace,
                 modifiers: Modifiers::NONE,
@@ -1494,7 +1494,7 @@ impl InputParser {
         );
 
         map.insert(
-            &[0x8],
+            [0x8],
             InputEvent::Key(KeyEvent {
                 key: KeyCode::Backspace,
                 modifiers: Modifiers::NONE,
@@ -1502,7 +1502,7 @@ impl InputParser {
         );
 
         map.insert(
-            &[0x1b],
+            [0x1b],
             InputEvent::Key(KeyEvent {
                 key: KeyCode::Escape,
                 modifiers: Modifiers::NONE,
@@ -1689,7 +1689,7 @@ impl InputParser {
                     // alone, then a mouse motion in the next read) would dispatch
                     // as a spurious ALT+`[` because the keymap registers `\x1b[`
                     // as Alt+`[`.
-                    if self.buf.as_slice().get(0) == Some(&b'\x1b') {
+                    if self.buf.as_slice().first() == Some(&b'\x1b') {
                         if let Some((event, len)) = parse_sgr_mouse(self.buf.as_slice()) {
                             self.flush_parked_esc_if_held(&mut callback);
                             self.buf.advance(len);

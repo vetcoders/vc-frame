@@ -163,7 +163,7 @@ impl ZellijPlugin for State {
                         ));
                     },
                     None => {
-                        self.notification = Some(format!("Failed to write configuration file."));
+                        self.notification = Some("Failed to write configuration file.".to_string());
                     },
                 }
                 should_render = true;
@@ -207,11 +207,7 @@ impl State {
         match &self.current_screen {
             Screen::RebindLeaders(_) => true,
             Screen::Presets(presets_screen) => {
-                if self.is_setup_wizard || presets_screen.rebinding_leaders() {
-                    false
-                } else {
-                    true
-                }
+                !(self.is_setup_wizard || presets_screen.rebinding_leaders())
             },
         }
     }

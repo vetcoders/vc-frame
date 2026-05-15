@@ -785,7 +785,7 @@ mod not_wasm {
 -> To help us fix this, please open an issue: https://github.com/zellij-org/zellij/issues
 
 ",
-                crate::consts::ZELLIJ_TMP_LOG_FILE.display().to_string()
+                crate::consts::ZELLIJ_TMP_LOG_FILE.display()
             )
         }
     }

@@ -67,7 +67,7 @@ impl Page {
                     Box::new(screencasts_link_selected_len()),
                 ))
                 .with_left_click_action(ClickAction::new_open_link(
-                    format!("https://zellij.dev/screencasts"),
+                    "https://zellij.dev/screencasts".to_string(),
                     link_executable.clone(),
                 )),
             ])])
@@ -184,15 +184,15 @@ impl Page {
             ])
             .with_bulletin_list(
                 BulletinList::new(
-                    Text::new(format!("Floating panes can be \"pinned\": ")).color_range(2, ..),
+                    Text::new("Floating panes can be \"pinned\": ".to_string()).color_range(2, ..),
                 )
                 .with_items(vec![
                     ActiveComponent::new(TextOrCustomRender::Text(
-                        Text::new(format!("With a mouse click on their top right corner"))
+                        Text::new("With a mouse click on their top right corner".to_string())
                             .color_range(3, 7..=17),
                     )),
                     ActiveComponent::new(TextOrCustomRender::Text(match *base_mode.borrow() {
-                        InputMode::Locked => Text::new(format!("With Ctrl g + p + i"))
+                        InputMode::Locked => Text::new("With Ctrl g + p + i".to_string())
                             .color_range(3, 5..=10)
                             .color_range(3, 14..15)
                             .color_range(3, 18..19),
@@ -207,9 +207,7 @@ impl Page {
                     Text::new("A great use case for these is to tail log files or to show"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new(format!(
-                        "real-time compiler output while working in other panes."
-                    )),
+                    Text::new("real-time compiler output while working in other panes.".to_string()),
                 ))]),
             ])
             .with_paragraph(vec![ComponentLine::new(vec![
@@ -816,7 +814,7 @@ fn theme_list_selected_len() -> usize {
 }
 
 fn support_the_developer_text() -> Text {
-    let support_text = format!("Please support the VibeCrafted / Zellij craft <3: ");
+    let support_text = "Please support the VibeCrafted / Zellij craft <3: ".to_string();
     Text::new(support_text).color_range(3, ..)
 }
 
@@ -837,14 +835,12 @@ fn screencasts_link_selected_len() -> Box<dyn Fn() -> usize> {
 
 fn tips_help_text(hovering_over_link: bool) -> Text {
     if hovering_over_link {
-        let help_text = format!("Help: Click or Shift-Click to open in browser");
+        let help_text = "Help: Click or Shift-Click to open in browser".to_string();
         Text::new(help_text)
             .color_range(3, 6..=10)
             .color_range(3, 15..=25)
     } else {
-        let help_text = format!(
-            "Help: <ESC> - Dismiss, <↓↑> - Browse tips, <Ctrl c> - Don't show tips on startup"
-        );
+        let help_text = "Help: <ESC> - Dismiss, <↓↑> - Browse tips, <Ctrl c> - Don't show tips on startup".to_string();
         Text::new(help_text)
             .color_range(1, 6..=10)
             .color_range(1, 23..=26)

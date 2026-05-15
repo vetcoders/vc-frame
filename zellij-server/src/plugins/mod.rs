@@ -553,14 +553,12 @@ pub(crate) fn plugin_thread_main(
                         }
                     }
                 }
-
-                tab_layout.as_mut().map(|t| {
-                    t.populate_plugin_aliases_in_layout(&plugin_aliases);
-                    if let Some(cwd) = cwd.as_ref() {
-                        t.add_cwd_to_layout(cwd);
-                    }
-                    t
-                });
+if let Some(t) = tab_layout.as_mut() {
+    t.populate_plugin_aliases_in_layout(&plugin_aliases);
+    if let Some(cwd) = cwd.as_ref() {
+        t.add_cwd_to_layout(cwd);
+    }
+}
                 floating_panes_layout.iter_mut().for_each(|f| {
                     f.run
                         .as_mut()

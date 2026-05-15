@@ -83,7 +83,7 @@ async fn handle_ws_control(
             },
         };
 
-        let _ = client_connection.send_to_server(client_msg);
+        client_connection.send_to_server(client_msg);
     };
 
     let mut set_client_control_channel = false;

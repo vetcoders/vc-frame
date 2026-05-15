@@ -196,7 +196,7 @@ impl TryFrom<ProtobufAction> for Action {
                 Some(OptionalPayload::MovePanePayload(payload)) => {
                     let direction: Option<Direction> = payload
                         .direction
-                        .and_then(|d| ProtobufResizeDirection::from_i32(d))
+                        .and_then(ProtobufResizeDirection::from_i32)
                         .and_then(|d| d.try_into().ok());
                     Ok(Action::MovePane { direction })
                 },
@@ -306,7 +306,7 @@ impl TryFrom<ProtobufAction> for Action {
                 Some(OptionalPayload::NewPanePayload(payload)) => {
                     let direction: Option<Direction> = payload
                         .direction
-                        .and_then(|d| ProtobufResizeDirection::from_i32(d))
+                        .and_then(ProtobufResizeDirection::from_i32)
                         .and_then(|d| d.try_into().ok());
                     let pane_name = payload.pane_name;
                     Ok(Action::NewPane {
@@ -321,10 +321,10 @@ impl TryFrom<ProtobufAction> for Action {
                 Some(OptionalPayload::EditFilePayload(payload)) => {
                     let file_to_edit = PathBuf::from(payload.file_to_edit);
                     let line_number: Option<usize> = payload.line_number.map(|l| l as usize);
-                    let cwd: Option<PathBuf> = payload.cwd.map(|p| PathBuf::from(p));
+                    let cwd: Option<PathBuf> = payload.cwd.map(PathBuf::from);
                     let direction: Option<Direction> = payload
                         .direction
-                        .and_then(|d| ProtobufResizeDirection::from_i32(d))
+                        .and_then(ProtobufResizeDirection::from_i32)
                         .and_then(|d| d.try_into().ok());
                     let near_current_pane = payload.near_current_pane;
                     let should_float = payload.should_float;
@@ -372,7 +372,7 @@ impl TryFrom<ProtobufAction> for Action {
                 Some(OptionalPayload::NewTiledPanePayload(payload)) => {
                     let direction: Option<Direction> = payload
                         .direction
-                        .and_then(|d| ProtobufResizeDirection::from_i32(d))
+                        .and_then(ProtobufResizeDirection::from_i32)
                         .and_then(|d| d.try_into().ok());
                     let near_current_pane = payload.near_current_pane;
                     let borderless = payload.borderless;
@@ -510,7 +510,7 @@ impl TryFrom<ProtobufAction> for Action {
 
                         let first_pane_unblock_condition = payload
                             .first_pane_unblock_condition
-                            .and_then(|uc| ProtobufUnblockCondition::from_i32(uc))
+                            .and_then(ProtobufUnblockCondition::from_i32)
                             .and_then(|uc| uc.try_into().ok());
 
                         Ok(Action::NewTab {
@@ -658,7 +658,7 @@ impl TryFrom<ProtobufAction> for Action {
                             .and_then(|p| PluginUserConfiguration::try_from(p).ok())
                             .unwrap_or_default();
                         let run_plugin_or_alias = RunPluginOrAlias::from_url(
-                            &payload.plugin_url.as_str(),
+                            payload.plugin_url.as_str(),
                             &Some(configuration.inner().clone()),
                             None,
                             None,
@@ -688,7 +688,7 @@ impl TryFrom<ProtobufAction> for Action {
                         .and_then(|p| PluginUserConfiguration::try_from(p).ok())
                         .unwrap_or_default();
                     let run_plugin_or_alias = RunPluginOrAlias::from_url(
-                        &payload.plugin_url.as_str(),
+                        payload.plugin_url.as_str(),
                         &Some(configuration.inner().clone()),
                         None,
                         None,
@@ -862,7 +862,7 @@ impl TryFrom<ProtobufAction> for Action {
                 match protobuf_action.optional_payload {
                     Some(OptionalPayload::StartOrReloadPluginPayload(payload)) => {
                         let run_plugin_or_alias =
-                            RunPluginOrAlias::from_url(&payload.as_str(), &None, None, None)
+                            RunPluginOrAlias::from_url(payload.as_str(), &None, None, None)
                                 .map_err(|_| "Malformed LaunchOrFocusPlugin payload")?;
 
                         Ok(Action::StartOrReloadPlugin {
@@ -1018,7 +1018,7 @@ impl TryFrom<ProtobufAction> for Action {
                     let command = payload.command.and_then(|c| c.try_into().ok());
                     let unblock_condition = payload
                         .unblock_condition
-                        .and_then(|uc| ProtobufUnblockCondition::from_i32(uc))
+                        .and_then(ProtobufUnblockCondition::from_i32)
                         .and_then(|uc| uc.try_into().ok());
                     let near_current_pane = payload.near_current_pane;
                     Ok(Action::NewBlockingPane {
@@ -1499,11 +1499,10 @@ impl TryFrom<Action> for ProtobufAction {
                     .unwrap_or_default();
 
                 let protobuf_first_pane_unblock_condition = first_pane_unblock_condition
-                    .map(|uc| {
+                    .and_then(|uc| {
                         let protobuf_uc: ProtobufUnblockCondition = uc.try_into().ok()?;
                         Some(protobuf_uc as i32)
-                    })
-                    .flatten();
+                    });
 
                 Ok(ProtobufAction {
                     name: ProtobufActionName::NewTab as i32,
@@ -1834,15 +1833,15 @@ impl TryFrom<Action> for ProtobufAction {
                 name: ProtobufActionName::KeybindPipe as i32,
                 optional_payload: None,
             }),
-            Action::TogglePanePinned { .. } => Ok(ProtobufAction {
+            Action::TogglePanePinned => Ok(ProtobufAction {
                 name: ProtobufActionName::TogglePanePinned as i32,
                 optional_payload: None,
             }),
-            Action::TogglePaneInGroup { .. } => Ok(ProtobufAction {
+            Action::TogglePaneInGroup => Ok(ProtobufAction {
                 name: ProtobufActionName::TogglePaneInGroup as i32,
                 optional_payload: None,
             }),
-            Action::ToggleGroupMarking { .. } => Ok(ProtobufAction {
+            Action::ToggleGroupMarking => Ok(ProtobufAction {
                 name: ProtobufActionName::ToggleGroupMarking as i32,
                 optional_payload: None,
             }),
@@ -1869,11 +1868,10 @@ impl TryFrom<Action> for ProtobufAction {
                     Some(protobuf_command)
                 });
                 let unblock_condition = unblock_condition
-                    .map(|uc| {
+                    .and_then(|uc| {
                         let protobuf_uc: ProtobufUnblockCondition = uc.try_into().ok()?;
                         Some(protobuf_uc as i32)
-                    })
-                    .flatten();
+                    });
                 Ok(ProtobufAction {
                     name: ProtobufActionName::NewBlockingPane as i32,
                     optional_payload: Some(OptionalPayload::NewBlockingPanePayload(
@@ -2020,10 +2018,10 @@ impl TryFrom<ProtobufRunCommandAction> for RunCommandAction {
     ) -> Result<Self, &'static str> {
         let command = PathBuf::from(protobuf_run_command_action.command);
         let args: Vec<String> = protobuf_run_command_action.args;
-        let cwd: Option<PathBuf> = protobuf_run_command_action.cwd.map(|c| PathBuf::from(c));
+        let cwd: Option<PathBuf> = protobuf_run_command_action.cwd.map(PathBuf::from);
         let direction: Option<Direction> = protobuf_run_command_action
             .direction
-            .and_then(|d| ProtobufResizeDirection::from_i32(d))
+            .and_then(ProtobufResizeDirection::from_i32)
             .and_then(|d| d.try_into().ok());
         let hold_on_close = protobuf_run_command_action.hold_on_close;
         let hold_on_start = protobuf_run_command_action.hold_on_start;
@@ -2087,19 +2085,19 @@ impl TryFrom<ProtobufMouseEventPayload> for MouseEvent {
     type Error = &'static str;
     fn try_from(protobuf_event: ProtobufMouseEventPayload) -> Result<Self, &'static str> {
         Ok(MouseEvent {
-            event_type: match protobuf_event.event_type as u32 {
+            event_type: match protobuf_event.event_type {
                 0 => MouseEventType::Press,
                 1 => MouseEventType::Release,
                 _ => MouseEventType::Motion,
             },
-            left: protobuf_event.left as bool,
-            right: protobuf_event.right as bool,
-            middle: protobuf_event.middle as bool,
-            wheel_up: protobuf_event.wheel_up as bool,
-            wheel_down: protobuf_event.wheel_down as bool,
-            shift: protobuf_event.shift as bool,
-            alt: protobuf_event.alt as bool,
-            ctrl: protobuf_event.ctrl as bool,
+            left: protobuf_event.left,
+            right: protobuf_event.right,
+            middle: protobuf_event.middle,
+            wheel_up: protobuf_event.wheel_up,
+            wheel_down: protobuf_event.wheel_down,
+            shift: protobuf_event.shift,
+            alt: protobuf_event.alt,
+            ctrl: protobuf_event.ctrl,
             position: Position::new(protobuf_event.line as i32, protobuf_event.column as u16),
         })
     }
@@ -2114,14 +2112,14 @@ impl TryFrom<MouseEvent> for ProtobufMouseEventPayload {
                 MouseEventType::Release => 1,
                 MouseEventType::Motion => 2,
             } as u32,
-            left: event.left as bool,
-            right: event.right as bool,
-            middle: event.middle as bool,
-            wheel_up: event.wheel_up as bool,
-            wheel_down: event.wheel_down as bool,
-            shift: event.shift as bool,
-            alt: event.alt as bool,
-            ctrl: event.ctrl as bool,
+            left: event.left,
+            right: event.right,
+            middle: event.middle,
+            wheel_up: event.wheel_up,
+            wheel_down: event.wheel_down,
+            shift: event.shift,
+            alt: event.alt,
+            ctrl: event.ctrl,
             line: event.position.line.0 as i64,
             column: event.position.column.0 as i64,
         })
@@ -2453,7 +2451,7 @@ impl TryFrom<ProtobufNewPanePlacement> for NewPanePlacement {
             Some(PlacementVariant::Tiled(tiled)) => {
                 let direction = tiled
                     .direction
-                    .and_then(|d| ProtobufResizeDirection::from_i32(d))
+                    .and_then(ProtobufResizeDirection::from_i32)
                     .and_then(|d| d.try_into().ok());
                 Ok(NewPanePlacement::Tiled {
                     direction,

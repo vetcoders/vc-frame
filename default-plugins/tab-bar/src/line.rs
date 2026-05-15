@@ -400,7 +400,7 @@ pub fn style_key_with_modifier(keyvec: &[KeyWithModifier], color_index: Option<u
             ..Default::default()
         }
     } else {
-        let key_string_without_modifier = format!("{}", key.join(key_separator));
+        let key_string_without_modifier = key.join(key_separator).to_string();
         let key_string_text = format!(" {} <{}> ", modifier_str, key_string_without_modifier);
         let text = if let Some(color_index) = color_index {
             Text::new(&key_string_text)

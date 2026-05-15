@@ -95,8 +95,8 @@ fn serialize_tab(
     match get_tiled_panes_layout_from_panegeoms(tiled_panes, None) {
         Some(tiled_panes_layout) => {
             let floating_panes_layout = get_floating_panes_layout_from_panegeoms(floating_panes);
-            let tiled_panes = if &tiled_panes_layout.children_split_direction
-                != &SplitDirection::default()
+            let tiled_panes = if tiled_panes_layout.children_split_direction
+                != SplitDirection::default()
                 || tiled_panes_layout.children_are_stacked
             {
                 vec![tiled_panes_layout]
@@ -129,7 +129,7 @@ fn serialize_tab(
             Some(serialized_tab)
         },
         None => {
-            return None;
+            None
         },
     }
 }
@@ -183,7 +183,7 @@ fn serialize_tiled_pane(
         &mut tiled_pane_node,
     );
 
-    serialize_tiled_layout_attributes(&layout, ignore_size, &mut tiled_pane_node);
+    serialize_tiled_layout_attributes(layout, ignore_size, &mut tiled_pane_node);
     if let Some(ref fg) = layout.default_fg {
         tiled_pane_node
             .entries_mut()
@@ -216,7 +216,7 @@ fn serialize_tiled_pane(
                     .push(KdlNode::new("children"));
             } else {
                 let ignore_size = layout.children_are_stacked;
-                let child_pane_node = serialize_tiled_pane(&pane, ignore_size, pane_contents);
+                let child_pane_node = serialize_tiled_pane(pane, ignore_size, pane_contents);
                 tiled_pane_node_children.nodes_mut().push(child_pane_node);
             }
         }
@@ -266,7 +266,7 @@ pub fn extract_edit_and_line_number(layout_run: &Option<Run>) -> (Option<String>
     match &layout_run {
         // TODO: line number in layouts?
         Some(Run::EditFile(path, line_number, _cwd)) => {
-            (Some(path.display().to_string()), line_number.clone())
+            (Some(path.display().to_string()), *line_number)
         },
         _ => (None, None),
     }
@@ -465,13 +465,10 @@ fn serialize_floating_layout_attributes(
         },
         None => {},
     }
-    match layout.pinned {
-        Some(true) => {
-            let mut node = KdlNode::new("pinned");
-            node.entries_mut().push(KdlEntry::new(KdlValue::Bool(true)));
-            pane_node_children.nodes_mut().push(node);
-        },
-        _ => {},
+    if let Some(true) = layout.pinned {
+        let mut node = KdlNode::new("pinned");
+        node.entries_mut().push(KdlEntry::new(KdlValue::Bool(true)));
+        pane_node_children.nodes_mut().push(node);
     }
 }
 
@@ -499,7 +496,7 @@ fn serialize_new_tab_template(
     layout_children_node: &mut KdlDocument,
 ) {
     if let Some((tiled_panes, floating_panes)) = new_tab_template {
-        let tiled_panes = if &tiled_panes.children_split_direction != &SplitDirection::default() {
+        let tiled_panes = if tiled_panes.children_split_direction != SplitDirection::default() {
             vec![tiled_panes]
         } else {
             tiled_panes.children
@@ -535,7 +532,7 @@ fn serialize_swap_tiled_layouts(
 
         for (layout_constraint, tiled_panes_layout) in swap_tiled_layout.0 {
             let tiled_panes_layout =
-                if &tiled_panes_layout.children_split_direction != &SplitDirection::default() {
+                if tiled_panes_layout.children_split_direction != SplitDirection::default() {
                     vec![tiled_panes_layout]
                 } else {
                     tiled_panes_layout.children
@@ -682,7 +679,7 @@ fn serialize_floating_pane(
             .push(KdlEntry::new_prop("default_bg", bg.to_owned()));
     }
     serialize_start_suspended(&command, &mut floating_pane_node_children);
-    serialize_floating_layout_attributes(&layout, &mut floating_pane_node_children);
+    serialize_floating_layout_attributes(layout, &mut floating_pane_node_children);
     serialize_args(args, &mut floating_pane_node_children);
     serialize_plugin(plugin, plugin_config, &mut floating_pane_node_children);
     floating_pane_node.set_children(floating_pane_node_children);
@@ -698,7 +695,7 @@ fn stack_layout_from_manifest(
         if let Some(stack_id) = p.geom.stacked {
             children_stacks
                 .entry(stack_id)
-                .or_insert_with(Default::default)
+                .or_default()
                 .push(p.clone());
         }
     }
@@ -716,7 +713,7 @@ fn stack_layout_from_manifest(
     }
     if stack_nodes.len() == 1 {
         // if there's only one stack, we return it without a wrapper
-        stack_nodes.iter().next().cloned()
+        stack_nodes.first().cloned()
     } else {
         // here there is more than one stack, so we wrap it in a logical container node
         Some(TiledPaneLayout {
@@ -781,7 +778,7 @@ fn get_tiled_panes_layout_from_panegeoms(
     geoms: &Vec<PaneLayoutManifest>,
     split_size: Option<SplitSize>,
 ) -> Option<TiledPaneLayout> {
-    let (children_split_direction, splits) = match get_splits(&geoms) {
+    let (children_split_direction, splits) = match get_splits(geoms) {
         Some(x) => x,
         None => {
             if geoms.len() > 1 {
@@ -827,7 +824,7 @@ fn get_tiled_panes_layout_from_panegeoms(
     let new_split_sizes = get_split_sizes(&new_constraints);
 
     for (subgeoms, subsplit_size) in new_geoms.iter().zip(new_split_sizes) {
-        match get_tiled_panes_layout_from_panegeoms(&subgeoms, subsplit_size) {
+        match get_tiled_panes_layout_from_panegeoms(subgeoms, subsplit_size) {
             Some(child) => {
                 children.push(child);
             },
@@ -865,7 +862,7 @@ fn get_floating_panes_layout_from_panegeoms(
         .map(|m| {
             let mut run = m.run.clone();
             if let Some(cwd) = &m.cwd {
-                run.as_mut().map(|r| r.add_cwd(cwd));
+                if let Some(r) = run.as_mut() { r.add_cwd(cwd) }
             }
             FloatingPaneLayout {
                 name: m.title.clone(),
@@ -921,21 +918,21 @@ fn get_splits(geoms: &Vec<PaneLayoutManifest>) -> Option<(SplitDirection, Vec<us
     if geoms.len() == 1 {
         return None;
     }
-    let (x_lims, y_lims) = match (get_x_lims(&geoms), get_y_lims(&geoms)) {
+    let (x_lims, y_lims) = match (get_x_lims(geoms), get_y_lims(geoms)) {
         (Some(x_lims), Some(y_lims)) => (x_lims, y_lims),
         _ => return None,
     };
     let mut direction = SplitDirection::default();
     let mut splits = match direction {
-        SplitDirection::Vertical => get_col_splits(&geoms, &x_lims, &y_lims),
-        SplitDirection::Horizontal => get_row_splits(&geoms, &x_lims, &y_lims),
+        SplitDirection::Vertical => get_col_splits(geoms, &x_lims, &y_lims),
+        SplitDirection::Horizontal => get_row_splits(geoms, &x_lims, &y_lims),
     };
     if splits.len() <= 2 {
         // ie only the boundaries are present and no real split has been found
         direction = !direction;
         splits = match direction {
-            SplitDirection::Vertical => get_col_splits(&geoms, &x_lims, &y_lims),
-            SplitDirection::Horizontal => get_row_splits(&geoms, &x_lims, &y_lims),
+            SplitDirection::Vertical => get_col_splits(geoms, &x_lims, &y_lims),
+            SplitDirection::Horizontal => get_row_splits(geoms, &x_lims, &y_lims),
         };
     }
     if splits.len() <= 2 {
@@ -996,7 +993,7 @@ fn get_row_splits(
         if let Some(stack_id) = pane_layout_manifest.geom.stacked {
             stack_geoms
                 .entry(stack_id)
-                .or_insert_with(Default::default)
+                .or_default()
                 .push(pane_layout_manifest)
         } else {
             all_geoms.push(pane_layout_manifest);
@@ -1041,8 +1038,8 @@ fn get_domain_constraint(
     (v_min, v_max): (usize, usize),
 ) -> Option<Constraint> {
     match split_direction {
-        SplitDirection::Horizontal => get_domain_row_constraint(&geoms, (v_min, v_max)),
-        SplitDirection::Vertical => get_domain_col_constraint(&geoms, (v_min, v_max)),
+        SplitDirection::Horizontal => get_domain_row_constraint(geoms, (v_min, v_max)),
+        SplitDirection::Vertical => get_domain_col_constraint(geoms, (v_min, v_max)),
     }
 }
 
@@ -1054,7 +1051,7 @@ fn get_domain_col_constraint(
     let mut x = x_min;
     while x != x_max {
         // we only look at one (ie the last) geom that has value `x` for `g.x`
-        let geom = geoms.iter().filter(|g| g.geom.x == x).last();
+        let geom = geoms.iter().rfind(|g| g.geom.x == x);
         match geom {
             Some(geom) => {
                 if let Some(size) = geom.geom.cols.as_percent() {
@@ -1082,7 +1079,7 @@ fn get_domain_row_constraint(
     let mut y = y_min;
     while y != y_max {
         // we only look at one (ie the last) geom that has value `y` for `g.y`
-        let geom = geoms.iter().filter(|g| g.geom.y == y).last();
+        let geom = geoms.iter().rfind(|g| g.geom.y == y);
         match geom {
             Some(geom) => {
                 if let Some(size) = geom.geom.rows.as_percent() {

@@ -122,7 +122,7 @@ impl ZellijPlugin for App {
                         Some(file_path) => {
                             format!("Failed to write config to disk at: {}", file_path)
                         },
-                        None => format!("Failed to write config to disk."),
+                        None => "Failed to write config to disk.".to_string(),
                     };
                     eprintln!("{}", error);
                     self.error = Some(error);
@@ -152,11 +152,10 @@ impl ZellijPlugin for App {
                     if exit_code == Some(0) {
                         self.update_link_executable("xdg-open".to_owned());
                     }
-                } else if is_open {
-                    if exit_code == Some(0) {
+                } else if is_open
+                    && exit_code == Some(0) {
                         self.update_link_executable("open".to_owned());
                     }
-                }
             },
             Event::Key(key) => {
                 if let Some(_error) = self.error.take() {
@@ -288,7 +287,7 @@ impl App {
     fn render_error(&self, rows: usize, cols: usize, error: String) {
         let mut error_page = Page::new()
             .main_screen()
-            .with_title(Text::new(format!("{}", error)).color_range(3, ..))
+            .with_title(Text::new(error.to_string()).color_range(3, ..))
             .with_paragraph(vec![
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new("Unable to permanently dismiss tips."),
@@ -308,7 +307,7 @@ impl App {
     fn center_own_pane(&mut self, tab_info: Vec<TabInfo>) {
         // we only take the size of the first tab because at the time of writing this is
         // identical to all tabs, but this might not always be the case...
-        if let Some(first_tab) = tab_info.get(0) {
+        if let Some(first_tab) = tab_info.first() {
             let prev_tab_columns = self.tab_columns;
             let prev_tab_rows = self.tab_rows;
             self.tab_columns = first_tab.display_area_columns;

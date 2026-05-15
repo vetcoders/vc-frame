@@ -870,181 +870,179 @@ keybinds clear-defaults=true {{
 }
 
 pub fn default_keybinds_no_modifiers() -> String {
-    format!(
-        r#"
+    r#"
 default_mode "normal"
-keybinds clear-defaults=true {{
-    normal {{}}
-    locked {{}}
-    resize {{
-        bind "h" "Left" {{ Resize "Increase Left"; }}
-        bind "j" "Down" {{ Resize "Increase Down"; }}
-        bind "k" "Up" {{ Resize "Increase Up"; }}
-        bind "l" "Right" {{ Resize "Increase Right"; }}
-        bind "H" {{ Resize "Decrease Left"; }}
-        bind "J" {{ Resize "Decrease Down"; }}
-        bind "K" {{ Resize "Decrease Up"; }}
-        bind "L" {{ Resize "Decrease Right"; }}
-        bind "=" "+" {{ Resize "Increase"; }}
-        bind "-" {{ Resize "Decrease"; }}
-    }}
-    pane {{
-        bind "h" "Left" {{ MoveFocus "Left"; }}
-        bind "l" "Right" {{ MoveFocus "Right"; }}
-        bind "j" "Down" {{ MoveFocus "Down"; }}
-        bind "k" "Up" {{ MoveFocus "Up"; }}
-        bind "p" {{ SwitchFocus; }}
-        bind "n" {{ NewPane; SwitchToMode "Normal"; }}
-        bind "d" {{ NewPane "Down"; SwitchToMode "Normal"; }}
-        bind "r" {{ NewPane "Right"; SwitchToMode "Normal"; }}
-        bind "s" {{ NewPane "stacked"; SwitchToMode "Normal"; }}
-        bind "x" {{ CloseFocus; SwitchToMode "Normal"; }}
-        bind "f" {{ ToggleFocusFullscreen; SwitchToMode "Normal"; }}
-        bind "z" {{ TogglePaneFrames; SwitchToMode "Normal"; }}
-        bind "w" {{ ToggleFloatingPanes; SwitchToMode "Normal"; }}
-        bind "e" {{ TogglePaneEmbedOrFloating; SwitchToMode "Normal"; }}
-        bind "c" {{ SwitchToMode "RenamePane"; PaneNameInput 0;}}
-        bind "i" {{ TogglePanePinned; SwitchToMode "Normal"; }}
-    }}
-    move {{
-        bind "n" "Tab" {{ MovePane; }}
-        bind "p" {{ MovePaneBackwards; }}
-        bind "h" "Left" {{ MovePane "Left"; }}
-        bind "j" "Down" {{ MovePane "Down"; }}
-        bind "k" "Up" {{ MovePane "Up"; }}
-        bind "l" "Right" {{ MovePane "Right"; }}
-    }}
-    tab {{
-        bind "r" {{ SwitchToMode "RenameTab"; TabNameInput 0; }}
-        bind "h" "Left" "Up" "k" {{ GoToPreviousTab; }}
-        bind "l" "Right" "Down" "j" {{ GoToNextTab; }}
-        bind "n" {{ NewTab; SwitchToMode "Normal"; }}
-        bind "x" {{ CloseTab; SwitchToMode "Normal"; }}
-        bind "s" {{ ToggleActiveSyncTab; SwitchToMode "Normal"; }}
-        bind "b" {{ BreakPane; SwitchToMode "Normal"; }}
-        bind "]" {{ BreakPaneRight; SwitchToMode "Normal"; }}
-        bind "[" {{ BreakPaneLeft; SwitchToMode "Normal"; }}
-        bind "1" {{ GoToTab 1; SwitchToMode "Normal"; }}
-        bind "2" {{ GoToTab 2; SwitchToMode "Normal"; }}
-        bind "3" {{ GoToTab 3; SwitchToMode "Normal"; }}
-        bind "4" {{ GoToTab 4; SwitchToMode "Normal"; }}
-        bind "5" {{ GoToTab 5; SwitchToMode "Normal"; }}
-        bind "6" {{ GoToTab 6; SwitchToMode "Normal"; }}
-        bind "7" {{ GoToTab 7; SwitchToMode "Normal"; }}
-        bind "8" {{ GoToTab 8; SwitchToMode "Normal"; }}
-        bind "9" {{ GoToTab 9; SwitchToMode "Normal"; }}
-        bind "Tab" {{ ToggleTab; }}
-    }}
-    scroll {{
-        bind "e" {{ EditScrollback; SwitchToMode "Normal"; }}
-        bind "s" {{ SwitchToMode "EnterSearch"; SearchInput 0; }}
-        bind "Ctrl c" {{ ScrollToBottom; SwitchToMode "Normal"; }}
-        bind "j" "Down" {{ ScrollDown; }}
-        bind "k" "Up" {{ ScrollUp; }}
-        bind "Ctrl f" "PageDown" "Right" "l" {{ PageScrollDown; }}
-        bind "Ctrl b" "PageUp" "Left" "h" {{ PageScrollUp; }}
-        bind "d" {{ HalfPageScrollDown; }}
-        bind "u" {{ HalfPageScrollUp; }}
-    }}
-    search {{
-        bind "Ctrl c" {{ ScrollToBottom; SwitchToMode "Normal"; }}
-        bind "j" "Down" {{ ScrollDown; }}
-        bind "k" "Up" {{ ScrollUp; }}
-        bind "Ctrl f" "PageDown" "Right" "l" {{ PageScrollDown; }}
-        bind "Ctrl b" "PageUp" "Left" "h" {{ PageScrollUp; }}
-        bind "d" {{ HalfPageScrollDown; }}
-        bind "u" {{ HalfPageScrollUp; }}
-        bind "n" {{ Search "down"; }}
-        bind "p" {{ Search "up"; }}
-        bind "c" {{ SearchToggleOption "CaseSensitivity"; }}
-        bind "w" {{ SearchToggleOption "Wrap"; }}
-        bind "o" {{ SearchToggleOption "WholeWord"; }}
-    }}
-    entersearch {{
-        bind "Ctrl c" "Esc" {{ SwitchToMode "Scroll"; }}
-        bind "Enter" {{ SwitchToMode "Search"; }}
-    }}
-    renametab {{
-        bind "Ctrl c" {{ SwitchToMode "Normal"; }}
-        bind "Esc" {{ UndoRenameTab; SwitchToMode "Tab"; }}
-    }}
-    renamepane {{
-        bind "Ctrl c" {{ SwitchToMode "Normal"; }}
-        bind "Esc" {{ UndoRenamePane; SwitchToMode "Pane"; }}
-    }}
-    session {{
-        bind "d" {{ Detach; }}
-        bind "w" {{
-            LaunchOrFocusPlugin "session-manager" {{
+keybinds clear-defaults=true {
+    normal {}
+    locked {}
+    resize {
+        bind "h" "Left" { Resize "Increase Left"; }
+        bind "j" "Down" { Resize "Increase Down"; }
+        bind "k" "Up" { Resize "Increase Up"; }
+        bind "l" "Right" { Resize "Increase Right"; }
+        bind "H" { Resize "Decrease Left"; }
+        bind "J" { Resize "Decrease Down"; }
+        bind "K" { Resize "Decrease Up"; }
+        bind "L" { Resize "Decrease Right"; }
+        bind "=" "+" { Resize "Increase"; }
+        bind "-" { Resize "Decrease"; }
+    }
+    pane {
+        bind "h" "Left" { MoveFocus "Left"; }
+        bind "l" "Right" { MoveFocus "Right"; }
+        bind "j" "Down" { MoveFocus "Down"; }
+        bind "k" "Up" { MoveFocus "Up"; }
+        bind "p" { SwitchFocus; }
+        bind "n" { NewPane; SwitchToMode "Normal"; }
+        bind "d" { NewPane "Down"; SwitchToMode "Normal"; }
+        bind "r" { NewPane "Right"; SwitchToMode "Normal"; }
+        bind "s" { NewPane "stacked"; SwitchToMode "Normal"; }
+        bind "x" { CloseFocus; SwitchToMode "Normal"; }
+        bind "f" { ToggleFocusFullscreen; SwitchToMode "Normal"; }
+        bind "z" { TogglePaneFrames; SwitchToMode "Normal"; }
+        bind "w" { ToggleFloatingPanes; SwitchToMode "Normal"; }
+        bind "e" { TogglePaneEmbedOrFloating; SwitchToMode "Normal"; }
+        bind "c" { SwitchToMode "RenamePane"; PaneNameInput 0;}
+        bind "i" { TogglePanePinned; SwitchToMode "Normal"; }
+    }
+    move {
+        bind "n" "Tab" { MovePane; }
+        bind "p" { MovePaneBackwards; }
+        bind "h" "Left" { MovePane "Left"; }
+        bind "j" "Down" { MovePane "Down"; }
+        bind "k" "Up" { MovePane "Up"; }
+        bind "l" "Right" { MovePane "Right"; }
+    }
+    tab {
+        bind "r" { SwitchToMode "RenameTab"; TabNameInput 0; }
+        bind "h" "Left" "Up" "k" { GoToPreviousTab; }
+        bind "l" "Right" "Down" "j" { GoToNextTab; }
+        bind "n" { NewTab; SwitchToMode "Normal"; }
+        bind "x" { CloseTab; SwitchToMode "Normal"; }
+        bind "s" { ToggleActiveSyncTab; SwitchToMode "Normal"; }
+        bind "b" { BreakPane; SwitchToMode "Normal"; }
+        bind "]" { BreakPaneRight; SwitchToMode "Normal"; }
+        bind "[" { BreakPaneLeft; SwitchToMode "Normal"; }
+        bind "1" { GoToTab 1; SwitchToMode "Normal"; }
+        bind "2" { GoToTab 2; SwitchToMode "Normal"; }
+        bind "3" { GoToTab 3; SwitchToMode "Normal"; }
+        bind "4" { GoToTab 4; SwitchToMode "Normal"; }
+        bind "5" { GoToTab 5; SwitchToMode "Normal"; }
+        bind "6" { GoToTab 6; SwitchToMode "Normal"; }
+        bind "7" { GoToTab 7; SwitchToMode "Normal"; }
+        bind "8" { GoToTab 8; SwitchToMode "Normal"; }
+        bind "9" { GoToTab 9; SwitchToMode "Normal"; }
+        bind "Tab" { ToggleTab; }
+    }
+    scroll {
+        bind "e" { EditScrollback; SwitchToMode "Normal"; }
+        bind "s" { SwitchToMode "EnterSearch"; SearchInput 0; }
+        bind "Ctrl c" { ScrollToBottom; SwitchToMode "Normal"; }
+        bind "j" "Down" { ScrollDown; }
+        bind "k" "Up" { ScrollUp; }
+        bind "Ctrl f" "PageDown" "Right" "l" { PageScrollDown; }
+        bind "Ctrl b" "PageUp" "Left" "h" { PageScrollUp; }
+        bind "d" { HalfPageScrollDown; }
+        bind "u" { HalfPageScrollUp; }
+    }
+    search {
+        bind "Ctrl c" { ScrollToBottom; SwitchToMode "Normal"; }
+        bind "j" "Down" { ScrollDown; }
+        bind "k" "Up" { ScrollUp; }
+        bind "Ctrl f" "PageDown" "Right" "l" { PageScrollDown; }
+        bind "Ctrl b" "PageUp" "Left" "h" { PageScrollUp; }
+        bind "d" { HalfPageScrollDown; }
+        bind "u" { HalfPageScrollUp; }
+        bind "n" { Search "down"; }
+        bind "p" { Search "up"; }
+        bind "c" { SearchToggleOption "CaseSensitivity"; }
+        bind "w" { SearchToggleOption "Wrap"; }
+        bind "o" { SearchToggleOption "WholeWord"; }
+    }
+    entersearch {
+        bind "Ctrl c" "Esc" { SwitchToMode "Scroll"; }
+        bind "Enter" { SwitchToMode "Search"; }
+    }
+    renametab {
+        bind "Ctrl c" { SwitchToMode "Normal"; }
+        bind "Esc" { UndoRenameTab; SwitchToMode "Tab"; }
+    }
+    renamepane {
+        bind "Ctrl c" { SwitchToMode "Normal"; }
+        bind "Esc" { UndoRenamePane; SwitchToMode "Pane"; }
+    }
+    session {
+        bind "d" { Detach; }
+        bind "w" {
+            LaunchOrFocusPlugin "session-manager" {
                 floating true
                 move_to_focused_tab true
-            }};
+            };
             SwitchToMode "Normal"
-        }}
-        bind "c" {{
-            LaunchOrFocusPlugin "configuration" {{
+        }
+        bind "c" {
+            LaunchOrFocusPlugin "configuration" {
                 floating true
                 move_to_focused_tab true
-            }};
+            };
             SwitchToMode "Normal"
-        }}
-        bind "p" {{
-            LaunchOrFocusPlugin "plugin-manager" {{
+        }
+        bind "p" {
+            LaunchOrFocusPlugin "plugin-manager" {
                 floating true
                 move_to_focused_tab true
-            }};
+            };
             SwitchToMode "Normal"
-        }}
-        bind "a" {{
-            LaunchOrFocusPlugin "zellij:about" {{
+        }
+        bind "a" {
+            LaunchOrFocusPlugin "zellij:about" {
                 floating true
                 move_to_focused_tab true
-            }};
+            };
             SwitchToMode "Normal"
-        }}
-        bind "s" {{
-            LaunchOrFocusPlugin "zellij:share" {{
+        }
+        bind "s" {
+            LaunchOrFocusPlugin "zellij:share" {
                 floating true
                 move_to_focused_tab true
-            }};
+            };
             SwitchToMode "Normal"
-        }}
-        bind "l" {{
-            LaunchOrFocusPlugin "zellij:layout-manager" {{
+        }
+        bind "l" {
+            LaunchOrFocusPlugin "zellij:layout-manager" {
                 floating true
                 move_to_focused_tab true
-            }};
+            };
             SwitchToMode "Normal"
-        }}
-    }}
-    tmux {{
-        bind "[" {{ SwitchToMode "Scroll"; }}
-        bind "\"" {{ NewPane "Down"; SwitchToMode "Normal"; }}
-        bind "%" {{ NewPane "Right"; SwitchToMode "Normal"; }}
-        bind "z" {{ ToggleFocusFullscreen; SwitchToMode "Normal"; }}
-        bind "c" {{ NewTab; SwitchToMode "Normal"; }}
-        bind "," {{ SwitchToMode "RenameTab"; }}
-        bind "p" {{ GoToPreviousTab; SwitchToMode "Normal"; }}
-        bind "n" {{ GoToNextTab; SwitchToMode "Normal"; }}
-        bind "Left" {{ MoveFocus "Left"; SwitchToMode "Normal"; }}
-        bind "Right" {{ MoveFocus "Right"; SwitchToMode "Normal"; }}
-        bind "Down" {{ MoveFocus "Down"; SwitchToMode "Normal"; }}
-        bind "Up" {{ MoveFocus "Up"; SwitchToMode "Normal"; }}
-        bind "h" {{ MoveFocus "Left"; SwitchToMode "Normal"; }}
-        bind "l" {{ MoveFocus "Right"; SwitchToMode "Normal"; }}
-        bind "j" {{ MoveFocus "Down"; SwitchToMode "Normal"; }}
-        bind "k" {{ MoveFocus "Up"; SwitchToMode "Normal"; }}
-        bind "o" {{ FocusNextPane; }}
-        bind "d" {{ Detach; }}
-        bind "Space" {{ NextSwapLayout; }}
-        bind "x" {{ CloseFocus; SwitchToMode "Normal"; }}
-    }}
-    shared_except "normal" "locked" {{
-        bind "Enter" "Esc" {{ SwitchToMode "Normal"; }}
-    }}
-}}
-"#
-    )
+        }
+    }
+    tmux {
+        bind "[" { SwitchToMode "Scroll"; }
+        bind "\"" { NewPane "Down"; SwitchToMode "Normal"; }
+        bind "%" { NewPane "Right"; SwitchToMode "Normal"; }
+        bind "z" { ToggleFocusFullscreen; SwitchToMode "Normal"; }
+        bind "c" { NewTab; SwitchToMode "Normal"; }
+        bind "," { SwitchToMode "RenameTab"; }
+        bind "p" { GoToPreviousTab; SwitchToMode "Normal"; }
+        bind "n" { GoToNextTab; SwitchToMode "Normal"; }
+        bind "Left" { MoveFocus "Left"; SwitchToMode "Normal"; }
+        bind "Right" { MoveFocus "Right"; SwitchToMode "Normal"; }
+        bind "Down" { MoveFocus "Down"; SwitchToMode "Normal"; }
+        bind "Up" { MoveFocus "Up"; SwitchToMode "Normal"; }
+        bind "h" { MoveFocus "Left"; SwitchToMode "Normal"; }
+        bind "l" { MoveFocus "Right"; SwitchToMode "Normal"; }
+        bind "j" { MoveFocus "Down"; SwitchToMode "Normal"; }
+        bind "k" { MoveFocus "Up"; SwitchToMode "Normal"; }
+        bind "o" { FocusNextPane; }
+        bind "d" { Detach; }
+        bind "Space" { NextSwapLayout; }
+        bind "x" { CloseFocus; SwitchToMode "Normal"; }
+    }
+    shared_except "normal" "locked" {
+        bind "Enter" "Esc" { SwitchToMode "Normal"; }
+    }
+}
+"#.to_string()
 }
 
 pub fn non_colliding_default_keybinds(

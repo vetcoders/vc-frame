@@ -11,8 +11,8 @@ use zellij_utils::web_server_contract::web_server_contract::WebServerResponse as
 pub async fn create_webserver_receiver(
     id: &str,
 ) -> Result<interprocess::local_socket::tokio::Stream, Box<dyn std::error::Error + Send + Sync>> {
-    std::fs::create_dir_all(&WEBSERVER_SOCKET_PATH.as_path())?;
-    let socket_path = WEBSERVER_SOCKET_PATH.join(format!("{}", id));
+    std::fs::create_dir_all(WEBSERVER_SOCKET_PATH.as_path())?;
+    let socket_path = WEBSERVER_SOCKET_PATH.join(id);
 
     if socket_path.exists() {
         tokio::fs::remove_file(&socket_path).await?;
@@ -37,12 +37,12 @@ pub async fn receive_webserver_instruction(
 
     // Decode protobuf message
     let proto_instruction = ProtoInstructionForWebServer::decode(&buffer[..])
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
 
     // Convert to Rust type
     proto_instruction
         .try_into()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        .map_err(std::io::Error::other)
 }
 
 pub async fn send_webserver_response(

@@ -10,7 +10,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use url::Url;
 
-const ON_FORCE_CLOSE_DESCRIPTION: &'static str = "
+const ON_FORCE_CLOSE_DESCRIPTION: &str = "
 // Choose what to do when zellij receives SIGTERM, SIGINT, SIGQUIT or SIGHUP
 // eg. when terminal window with an active zellij session is closed
 // Options:
@@ -19,7 +19,7 @@ const ON_FORCE_CLOSE_DESCRIPTION: &'static str = "
 //
 ";
 
-const SIMPLIFIED_UI_DESCRIPTION: &'static str = "
+const SIMPLIFIED_UI_DESCRIPTION: &str = "
 // Send a request for a simplified ui (without arrow fonts) to plugins
 // Options:
 //   - true
@@ -27,13 +27,13 @@ const SIMPLIFIED_UI_DESCRIPTION: &'static str = "
 //
 ";
 
-const DEFAULT_SHELL_DESCRIPTION: &'static str = "
+const DEFAULT_SHELL_DESCRIPTION: &str = "
 // Choose the path to the default shell that zellij will use for opening new panes
 // Default: $SHELL
 //
 ";
 
-const PANE_FRAMES_DESCRIPTION: &'static str = "
+const PANE_FRAMES_DESCRIPTION: &str = "
 // Toggle between having pane frames around the panes
 // Options:
 //   - true (default)
@@ -41,19 +41,19 @@ const PANE_FRAMES_DESCRIPTION: &'static str = "
 //
 ";
 
-const DEFAULT_THEME_DESCRIPTION: &'static str = "
+const DEFAULT_THEME_DESCRIPTION: &str = "
 // Choose the theme that is specified in the themes section.
 // Default: default
 //
 ";
 
-const DEFAULT_MODE_DESCRIPTION: &'static str = "
+const DEFAULT_MODE_DESCRIPTION: &str = "
 // Choose the mode that zellij uses when starting up.
 // Default: normal
 //
 ";
 
-const MOUSE_MODE_DESCRIPTION: &'static str = "
+const MOUSE_MODE_DESCRIPTION: &str = "
 // Toggle enabling the mouse mode.
 // On certain configurations, or terminals this could
 // potentially interfere with copying text.
@@ -63,7 +63,7 @@ const MOUSE_MODE_DESCRIPTION: &'static str = "
 //
 ";
 
-const SCROLL_BUFFER_SIZE_DESCRIPTION: &'static str = "
+const SCROLL_BUFFER_SIZE_DESCRIPTION: &str = "
 // Configure the scroll back buffer size
 // This is the number of lines zellij stores for each pane in the scroll back
 // buffer. Excess number of lines are discarded in a FIFO fashion.
@@ -72,7 +72,7 @@ const SCROLL_BUFFER_SIZE_DESCRIPTION: &'static str = "
 //
 ";
 
-const COPY_COMMAND_DESCRIPTION: &'static str = "
+const COPY_COMMAND_DESCRIPTION: &str = "
 // Provide a command to execute when copying text. The text will be piped to
 // the stdin of the program to perform the copy. This can be used with
 // terminal emulators which do not support the OSC 52 ANSI control sequence
@@ -84,7 +84,7 @@ const COPY_COMMAND_DESCRIPTION: &'static str = "
 // copy_command \"pbcopy\"                     // osx
 ";
 
-const COPY_CLIPBOARD_DESCRIPTION: &'static str = "
+const COPY_CLIPBOARD_DESCRIPTION: &str = "
 // Choose the destination for copied text
 // Allows using the primary selection buffer (on x11/wayland) instead of the system clipboard.
 // Does not apply when using copy_command.
@@ -94,19 +94,19 @@ const COPY_CLIPBOARD_DESCRIPTION: &'static str = "
 //
 ";
 
-const COPY_ON_SELECT_DESCRIPTION: &'static str = "
+const COPY_ON_SELECT_DESCRIPTION: &str = "
 // Enable or disable automatic copy (and clear) of selection when releasing mouse
 // Default: true
 //
 ";
 
-const SCROLLBACK_EDITOR_DESCRIPTION: &'static str = "
+const SCROLLBACK_EDITOR_DESCRIPTION: &str = "
 // Path to the default editor to use to edit pane scrollbuffer
 // Default: $EDITOR or $VISUAL
 //
 ";
 
-const MIRROR_SESSION_DESCRIPTION: &'static str = "
+const MIRROR_SESSION_DESCRIPTION: &str = "
 // When attaching to an existing session with other users,
 // should the session be mirrored (true)
 // or should each user have their own cursor (false)
@@ -114,18 +114,18 @@ const MIRROR_SESSION_DESCRIPTION: &'static str = "
 //
 ";
 
-const DEFAULT_LAYOUT_DESCRIPTION: &'static str = "
+const DEFAULT_LAYOUT_DESCRIPTION: &str = "
 // The name of the default layout to load on startup
 // Default: \"default\"
 //
 ";
 
-const LAYOUT_DIR_DESCRIPTION: &'static str = "
+const LAYOUT_DIR_DESCRIPTION: &str = "
 // The folder in which Zellij will look for layouts
 //
 ";
 
-const THEME_DIR_DESCRIPTION: &'static str = "
+const THEME_DIR_DESCRIPTION: &str = "
 // The folder in which Zellij will look for themes
 //
 ";
@@ -277,7 +277,7 @@ fn env_yaml_to_env_kdl(env_yaml: &OldEnvironmentVariablesFromYaml) -> String {
 fn plugins_yaml_to_plugins_kdl(plugins_yaml_to_plugins_kdl: &OldPluginsConfigFromYaml) -> String {
     let mut plugins_kdl = String::new();
     if !&plugins_yaml_to_plugins_kdl.0.is_empty() {
-        plugins_kdl.push_str("\n");
+        plugins_kdl.push('\n');
         plugins_kdl.push_str("plugins {\n")
     }
     for plugin_config in &plugins_yaml_to_plugins_kdl.0 {
@@ -302,7 +302,7 @@ fn plugins_yaml_to_plugins_kdl(plugins_yaml_to_plugins_kdl: &OldPluginsConfigFro
 fn ui_config_yaml_to_ui_config_kdl(ui_config_yaml: &OldUiConfigFromYaml) -> String {
     let mut kdl_ui_config = String::new();
     if ui_config_yaml.pane_frames.rounded_corners {
-        kdl_ui_config.push_str("\n");
+        kdl_ui_config.push('\n');
         kdl_ui_config.push_str("ui {\n");
         kdl_ui_config.push_str("    pane_frames {\n");
         kdl_ui_config.push_str("        rounded_corners true\n");
@@ -310,7 +310,7 @@ fn ui_config_yaml_to_ui_config_kdl(ui_config_yaml: &OldUiConfigFromYaml) -> Stri
         kdl_ui_config.push_str("}\n");
     } else {
         // I'm not sure this is a thing, but since it's possible, why not?
-        kdl_ui_config.push_str("\n");
+        kdl_ui_config.push('\n');
         kdl_ui_config.push_str("ui {\n");
         kdl_ui_config.push_str("    pane_frames {\n");
         kdl_ui_config.push_str("        rounded_corners false\n");
@@ -688,26 +688,25 @@ struct OldPluginConfigFromYaml {
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 enum OldPluginTypeFromYaml {
     Headless,
+    #[default]
     Pane,
 }
 
-impl Default for OldPluginTypeFromYaml {
-    fn default() -> Self {
-        Self::Pane
-    }
-}
 
 /// Tag used to identify the plugin in layout and config yaml files
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 struct OldPluginTag(String);
 
 #[derive(Copy, Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Default)]
 pub enum OldOnForceClose {
     #[serde(alias = "quit")]
     Quit,
     #[serde(alias = "detach")]
+    #[default]
     Detach,
 }
 
@@ -720,15 +719,12 @@ impl std::fmt::Display for OldOnForceClose {
     }
 }
 
-impl Default for OldOnForceClose {
-    fn default() -> Self {
-        Self::Detach
-    }
-}
 
 #[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq)]
+#[derive(Default)]
 pub enum OldClipboard {
     #[serde(alias = "system")]
+    #[default]
     System,
     #[serde(alias = "primary")]
     Primary,
@@ -743,11 +739,6 @@ impl std::fmt::Display for OldClipboard {
     }
 }
 
-impl Default for OldClipboard {
-    fn default() -> Self {
-        Self::System
-    }
-}
 
 #[derive(Clone, Default, Debug, PartialEq, Deserialize, Serialize)]
 pub struct OldOptions {
@@ -917,7 +908,9 @@ enum OldCharOrArrow {
 
 /// The four directions (left, right, up, down).
 #[derive(Eq, Clone, Copy, Debug, PartialEq, Hash, Deserialize, Serialize, PartialOrd, Ord)]
+#[derive(Default)]
 enum OldDirection {
+    #[default]
     Left,
     Right,
     Up,
@@ -935,11 +928,6 @@ impl std::fmt::Display for OldDirection {
     }
 }
 
-impl Default for OldDirection {
-    fn default() -> Self {
-        OldDirection::Left
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 enum OldAction {

@@ -143,12 +143,12 @@ fn add_keybinds<'a>(help: &'a ModeInfo) -> Keygroups<'a> {
     let move_focus = if arrows.is_empty() && letters.is_empty() {
         vec![Style::new().bold().paint("UNBOUND")]
     } else if arrows.is_empty() || letters.is_empty() {
-        arrows.into_iter().chain(letters.into_iter()).collect()
+        arrows.into_iter().chain(letters).collect()
     } else {
         arrows
             .into_iter()
-            .chain(vec![Style::new().paint(" or ")].into_iter())
-            .chain(letters.into_iter())
+            .chain(vec![Style::new().paint(" or ")])
+            .chain(letters)
             .collect()
     };
 

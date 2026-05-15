@@ -29,7 +29,7 @@ fn create_table_row(
             text.color_all(1)
         };
 
-        text = text.color_indices(3, indices.iter().cloned().collect());
+        text = text.color_indices(3, indices.to_vec());
 
         text
     } else {
@@ -245,7 +245,7 @@ impl Controls {
             toggle_word
         );
         let short_text = format!("<Alt+w> Override, <?> {} options", toggle_word);
-        let minimum_text = format!("<Alt+w>/<?> ...");
+        let minimum_text = "<Alt+w>/<?> ...".to_string();
         let text = if max_cols >= long_text.chars().count() {
             long_text
         } else if max_cols >= short_text.chars().count() {

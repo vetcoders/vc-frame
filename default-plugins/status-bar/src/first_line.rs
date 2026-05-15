@@ -408,7 +408,7 @@ fn swap_layout_status(
             );
             let (part, full_len) = if mode_info.mode == InputMode::Locked {
                 (
-                    format!("{}", swap_layout_indicator),
+                    swap_layout_indicator.to_string(),
                     swap_layout_name_len, // 1 is the space between
                 )
             } else {
