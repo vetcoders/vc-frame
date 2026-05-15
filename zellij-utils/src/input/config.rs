@@ -523,7 +523,9 @@ pub async fn watch_layout_dir_changes<F, Fut>(
     Fut: std::future::Future<Output = ()> + Send,
 {
     use crate::input::layout::Layout;
-    use notify::{self, Config as WatcherConfig, Event, PollWatcher, RecursiveMode, Watcher};
+    use notify::{
+        self, Config as WatcherConfig, Event, RecommendedWatcher, RecursiveMode, Watcher,
+    };
     use std::time::Duration;
     use tokio::sync::mpsc;
 
@@ -531,11 +533,14 @@ pub async fn watch_layout_dir_changes<F, Fut>(
         if layout_dir.exists() {
             let (tx, mut rx) = mpsc::unbounded_channel();
 
-            let mut watcher = match PollWatcher::new(
+            // Use the platform watcher here rather than PollWatcher. The layout directory is
+            // user-controlled and may contain dangling symlinks; PollWatcher follows links while
+            // walking the tree and can continuously emit scan errors for them.
+            let mut watcher = match RecommendedWatcher::new(
                 move |res: Result<Event, notify::Error>| {
                     let _ = tx.send(res);
                 },
-                WatcherConfig::default().with_poll_interval(Duration::from_secs(1)),
+                WatcherConfig::default(),
             ) {
                 Ok(watcher) => watcher,
                 Err(_) => break,
@@ -588,7 +593,51 @@ mod config_test {
     use crate::input::theme::{FrameConfig, Theme, Themes, UiConfig};
     use std::collections::{BTreeMap, HashMap};
     use std::io::Write;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
+    #[cfg(unix)]
+    use std::time::Duration;
     use tempfile::tempdir;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn watch_layout_dir_changes_handles_dangling_symlinks() {
+        let tmp = tempdir().unwrap();
+        let layout_dir = tmp.path().join("layouts");
+        let missing_dir = tmp.path().join("missing");
+        std::fs::create_dir(&layout_dir).unwrap();
+        symlink(
+            missing_dir.join("dangling-layout.kdl"),
+            layout_dir.join("dangling-layout.kdl"),
+        )
+        .unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let watcher = tokio::spawn(watch_layout_dir_changes(
+            layout_dir.clone(),
+            None,
+            move |layouts, layout_errors| {
+                let tx = tx.clone();
+                async move {
+                    let _ = tx.send((layouts, layout_errors));
+                }
+            },
+        ));
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        std::fs::write(layout_dir.join("smoke-layout.kdl"), "layout { pane; }").unwrap();
+
+        let (layouts, _layout_errors) = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(layouts.iter().any(|layout| {
+            matches!(layout, LayoutInfo::File(layout_name, _) if layout_name == "smoke-layout")
+        }));
+
+        watcher.abort();
+    }
 
     #[test]
     fn try_from_cli_args_with_config() {
