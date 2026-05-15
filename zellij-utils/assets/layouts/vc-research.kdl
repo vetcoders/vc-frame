@@ -18,11 +18,11 @@ layout {
 
     tab name="𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Research" {
         pane split_direction="vertical" {
-            pane name="synthesis" size="55%" focus=true command="zsh"
+            pane name="synthesis" size="55%" focus=true
             pane split_direction="horizontal" size="45%" {
-                pane name="claude" command="zsh"
-                pane name="codex" command="zsh"
-                pane name="gemini" command="zsh"
+                pane name="claude"
+                pane name="codex"
+                pane name="gemini"
             }
         }
     }
@@ -31,12 +31,12 @@ layout {
         tab {
             pane split_direction="horizontal" {
                 pane split_direction="vertical" size="50%" {
-                    pane name="claude" command="zsh"
-                    pane name="codex" command="zsh"
+                    pane name="claude"
+                    pane name="codex"
                 }
                 pane split_direction="vertical" size="50%" {
-                    pane name="gemini" command="zsh"
-                    pane name="synthesis" focus=true command="zsh"
+                    pane name="gemini"
+                    pane name="synthesis" focus=true
                 }
             }
         }

@@ -170,55 +170,7 @@ pub(crate) fn background_jobs_main(
     // We needn't do anything with the runtime, but it should exist at this point.
     let runtime = crate::global_async_runtime::get_tokio_runtime();
 
-    {
-        let senders = bus.senders.clone();
-        let serialization_ms = serialization_interval.unwrap_or(DEFAULT_SERIALIZATION_INTERVAL);
-        runtime.spawn(async move {
-            let mut ticker =
-                tokio::time::interval(std::time::Duration::from_millis(serialization_ms));
-            ticker.tick().await;
-            loop {
-                ticker.tick().await;
-                let _ = senders.send_to_screen(ScreenInstruction::SerializeLayoutForResurrection);
-            }
-        });
-    }
-
-    {
-        let senders = bus.senders.clone();
-        runtime.spawn(async move {
-            let mut ticker = tokio::time::interval(std::time::Duration::from_millis(
-                UPDATE_AND_REPORT_CWDS_INTERVAL_MS,
-            ));
-            ticker.tick().await;
-            loop {
-                ticker.tick().await;
-                let _ = senders.send_to_pty(PtyInstruction::UpdateAndReportCwds);
-            }
-        });
-    }
-
-    if !disable_session_metadata {
-        let current_session_name = current_session_name.clone();
-        let current_session_info = current_session_info.clone();
-        let current_session_layout = current_session_layout.clone();
-        runtime.spawn(async move {
-            let mut ticker = tokio::time::interval(std::time::Duration::from_millis(
-                SESSION_METADATA_WRITE_INTERVAL_MS,
-            ));
-            ticker.tick().await;
-            loop {
-                ticker.tick().await;
-                let name = current_session_name.lock().unwrap().clone();
-                if name.is_empty() {
-                    continue;
-                }
-                let info = current_session_info.lock().unwrap().clone();
-                let layout = current_session_layout.lock().unwrap().clone();
-                write_session_state_to_disk(name, info, layout);
-            }
-        });
-    }
+    let _ = bus.senders.send_to_background_jobs(BackgroundJob::ReadAllSessionInfosOnMachine);
 
     loop {
         let (event, mut err_ctx) = bus.recv().with_context(err_context)?;
@@ -326,11 +278,12 @@ pub(crate) fn background_jobs_main(
                                 );
 
                                 // Send SavedCurrentSession instruction to plugin thread
-                                let _timestamp_millis = std::time::SystemTime::now()
+                                let timestamp_millis = std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_default()
                                     .as_millis()
                                     as u64;
+                                let _ = senders.send_to_plugin(PluginInstruction::UpdateSessionSaveTime(timestamp_millis));
                             }
                             let mut session_infos_on_machine = read_other_live_session_states(
                                 &current_session_name,

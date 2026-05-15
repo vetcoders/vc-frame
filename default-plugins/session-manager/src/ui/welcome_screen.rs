@@ -33,7 +33,9 @@ pub fn render_banner(x: usize, y: usize, rows: usize, cols: usize) {
             for line in BANNER.lines() {
                 println!("\u{1b}[{}C{}", x.saturating_sub(1), line);
             }
-            render_brand_subtitle(cols, banner_y + 8);
+            if rows >= 10 {
+                render_brand_subtitle(cols, banner_y + 8);
+            }
         } else if cols > 63 {
             let banner_y = y + rows.saturating_sub(8) / 2;
             println!("\u{1b}[{}H", banner_y);
@@ -41,7 +43,9 @@ pub fn render_banner(x: usize, y: usize, rows: usize, cols: usize) {
             for line in MEDIUM_BANNER.lines() {
                 println!("\u{1b}[{}C{}", x, line);
             }
-            render_brand_subtitle(cols, banner_y + 8);
+            if rows >= 10 {
+                render_brand_subtitle(cols, banner_y + 8);
+            }
         } else {
             let banner_y = y + rows.saturating_sub(8) / 2;
             println!("\u{1b}[{}H", banner_y);

@@ -234,6 +234,7 @@ impl Display for Constraint {
 
 impl Hash for Constraint {
     fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
         match self {
             Constraint::Fixed(size) => size.hash(state),
             Constraint::Percent(size) => (*size as usize).hash(state),

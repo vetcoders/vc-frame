@@ -1,5 +1,11 @@
 use std::time::Duration;
 
+#[derive(Debug, Clone)]
+pub enum DeleteTarget {
+    Active(String),
+    Resurrectable(String),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum UnifiedSearchResult {
     ActiveSession {
@@ -32,6 +38,17 @@ impl UnifiedSearchResult {
         match self {
             UnifiedSearchResult::ActiveSession { score, .. } => *score,
             UnifiedSearchResult::ResurrectableSession { score, .. } => *score,
+        }
+    }
+
+    pub fn as_delete_target(&self) -> DeleteTarget {
+        match self {
+            UnifiedSearchResult::ActiveSession { session_name, .. } => {
+                DeleteTarget::Active(session_name.clone())
+            },
+            UnifiedSearchResult::ResurrectableSession { session_name, .. } => {
+                DeleteTarget::Resurrectable(session_name.clone())
+            },
         }
     }
 

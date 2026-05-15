@@ -3,15 +3,19 @@ pub fn range_to_render(
     results_len: usize,
     selected_index: Option<usize>,
 ) -> (usize, usize) {
-    if table_rows <= results_len {
-        let row_count_to_render = table_rows.saturating_sub(1); // 1 for the title
-        let first_row_index_to_render = selected_index
-            .unwrap_or(0)
-            .saturating_sub(row_count_to_render / 2);
-        let last_row_index_to_render = first_row_index_to_render + row_count_to_render;
-        (first_row_index_to_render, last_row_index_to_render)
-    } else {
+    let data_rows = table_rows.saturating_sub(1); // 1 for the title
+    if data_rows >= results_len {
         (0, results_len)
+    } else {
+        let anchor = selected_index.unwrap_or(0);
+        let half = data_rows / 2;
+        let mut s = anchor.saturating_sub(half);
+        let mut e = s + data_rows;
+        if e > results_len {
+            e = results_len;
+            s = results_len.saturating_sub(data_rows);
+        }
+        (s, e)
     }
 }
 

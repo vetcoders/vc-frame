@@ -185,7 +185,8 @@ impl App {
                     format!("Release Notes {}", self.zellij_version.borrow()),
                 );
             } else if self.guide_mode.as_deref() == Some("mission-control") {
-                rename_plugin_pane(own_plugin_id, "VibeCrafted Shell Guide");
+                let pane_title = self.pane_title.clone().unwrap_or_else(|| "VibeCrafted Shell Guide".to_owned());
+                rename_plugin_pane(own_plugin_id, &pane_title);
             } else {
                 rename_plugin_pane(own_plugin_id, "About VibeCrafted Shell");
             }
