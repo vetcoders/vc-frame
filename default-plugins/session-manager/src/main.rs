@@ -11,8 +11,8 @@ use uuid::Uuid;
 use zellij_tile::prelude::*;
 
 use new_session_info::NewSessionInfo;
-use single_screen_data::{DeleteTarget, UnifiedSearchResult};
 use single_screen::{SingleScreenMode, SingleScreenState};
+use single_screen_data::{DeleteTarget, UnifiedSearchResult};
 use single_screen_render::render_unified_results;
 use ui::{
     components::{

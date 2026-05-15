@@ -53,7 +53,9 @@ pub fn render_banner(x: usize, y: usize, rows: usize, cols: usize) {
             for line in SMALL_BANNER.lines() {
                 println!("\u{1b}[{}C{}", x, line);
             }
-            render_brand_subtitle(cols, banner_y + 8);
+            if rows >= 10 {
+                render_brand_subtitle(cols, banner_y + 8);
+            }
         }
     } else if rows > 2 {
         println!(

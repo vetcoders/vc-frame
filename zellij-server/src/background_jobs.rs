@@ -113,7 +113,6 @@ static LONG_FLASH_DURATION_MS: u64 = 1000;
 static FLASH_DURATION_MS: u64 = 400; // Doherty threshold
 static PLUGIN_ANIMATION_OFFSET_DURATION_MD: u64 = 500;
 static SESSION_METADATA_WRITE_INTERVAL_MS: u64 = 1000;
-static UPDATE_AND_REPORT_CWDS_INTERVAL_MS: u64 = 1000;
 static DEFAULT_SERIALIZATION_INTERVAL: u64 = 60000;
 static REPAINT_DELAY_MS: u64 = 10;
 static HELP_TEXT_DEBOUNCE_DURATION: u64 = 5000;
@@ -170,7 +169,9 @@ pub(crate) fn background_jobs_main(
     // We needn't do anything with the runtime, but it should exist at this point.
     let runtime = crate::global_async_runtime::get_tokio_runtime();
 
-    let _ = bus.senders.send_to_background_jobs(BackgroundJob::ReadAllSessionInfosOnMachine);
+    let _ = bus
+        .senders
+        .send_to_background_jobs(BackgroundJob::ReadAllSessionInfosOnMachine);
 
     loop {
         let (event, mut err_ctx) = bus.recv().with_context(err_context)?;
@@ -283,7 +284,9 @@ pub(crate) fn background_jobs_main(
                                     .unwrap_or_default()
                                     .as_millis()
                                     as u64;
-                                let _ = senders.send_to_plugin(PluginInstruction::UpdateSessionSaveTime(timestamp_millis));
+                                let _ = senders.send_to_plugin(
+                                    PluginInstruction::UpdateSessionSaveTime(timestamp_millis),
+                                );
                             }
                             let mut session_infos_on_machine = read_other_live_session_states(
                                 &current_session_name,
