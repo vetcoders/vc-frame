@@ -17,6 +17,8 @@ pub mod position;
 pub mod session_serialization;
 pub mod setup;
 pub mod shared;
+#[cfg(not(target_family = "wasm"))]
+pub mod vibecrafted_install;
 
 // The following modules can't be used when targeting wasm
 #[cfg(not(target_family = "wasm"))]

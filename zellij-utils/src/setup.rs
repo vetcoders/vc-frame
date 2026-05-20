@@ -317,6 +317,19 @@ pub struct Setup {
     /// Generates auto-start script for the specified shell
     #[clap(long, value_name = "SHELL", value_parser)]
     pub generate_auto_start: Option<String>,
+
+    /// Install / refresh the Vibecrafted zellij layouts into the user's
+    /// `~/.config/zellij/layouts/` directory. Resolution order for the
+    /// framework root: `--vibecrafted-root` flag → `$VIBECRAFTED_HOME` env →
+    /// `which vibecrafted` walk-up. Idempotent.
+    #[clap(long, value_parser)]
+    pub install_vibecrafted_layouts: bool,
+
+    /// Explicit path to the Vibecrafted framework root (the directory
+    /// containing `config/zellij/layouts/`). Used by
+    /// `--install-vibecrafted-layouts`; overrides env / PATH lookup.
+    #[clap(long, value_name = "PATH", value_parser)]
+    pub vibecrafted_root: Option<PathBuf>,
 }
 
 impl Setup {
@@ -424,6 +437,25 @@ impl Setup {
         if let Some(swap_layout) = &self.dump_swap_layout {
             dump_specified_swap_layout(swap_layout)?;
             std::process::exit(0);
+        }
+
+        if self.install_vibecrafted_layouts {
+            #[cfg(not(target_family = "wasm"))]
+            {
+                match crate::vibecrafted_install::install(
+                    self.vibecrafted_root.clone(),
+                    None,
+                ) {
+                    Ok(summary) => {
+                        print!("{}", summary.render());
+                        std::process::exit(0);
+                    },
+                    Err(err) => {
+                        eprintln!("vibecrafted layout install failed: {err}");
+                        std::process::exit(1);
+                    },
+                }
+            }
         }
 
         Ok(())

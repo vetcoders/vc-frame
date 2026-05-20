@@ -123,6 +123,66 @@ native Zellij surfaces we lean on most: live monitoring, session atlas, layout
 forge, configuration control, plugin curation, workspace navigation, sharing,
 and the VibeCrafted shell guide.
 
+### Installing repo-owned layouts into `~/.config/zellij/layouts/`
+
+The Vibecrafted framework ships its canonical layouts (`dashboard`, `marbles`,
+`operator`, `research`, `workflow`) as real `.kdl` files under
+`<vibecrafted-root>/config/zellij/layouts/`. To make them visible to stock
+`zellij --layout <name>` invocations, run:
+
+```bash
+zellij setup --install-vibecrafted-layouts
+# or with explicit root:
+zellij setup --install-vibecrafted-layouts --vibecrafted-root /path/to/vibecrafted
+```
+
+The installer:
+
+1. **Resolves the framework root dynamically.** Order: `--vibecrafted-root`
+   flag → `$VIBECRAFTED_HOME` env (with a `tools/vibecrafted-current` fallback
+   for the standard `$HOME/.vibecrafted` user-home convention) → `which
+   vibecrafted` canonicalized and walked up until a directory containing
+   `config/zellij/layouts/` is found. If none of these succeed, or if the
+   resolved path lacks a populated layouts directory, the installer exits
+   non-zero with a clear error — silent installs against a wrong path are
+   refused.
+2. **Enumerates layouts from the live filesystem listing** of
+   `<root>/config/zellij/layouts/*.kdl`. There is no hardcoded list in the
+   Rust source. Add a `foo.kdl` to the repo, re-run the installer, and
+   `~/.config/zellij/layouts/foo.kdl` appears without any code change.
+3. **Cleans up stale symlinks.** On every run, symlinks under
+   `~/.config/zellij/layouts/` whose target either no longer exists or points
+   into the vibecrafted tree are removed. Non-symlink files (your hand-written
+   layouts) and symlinks pointing at unrelated frameworks are left alone.
+4. **Applies a data-driven alias map.** If
+   `<root>/config/zellij/layouts/aliases.txt` exists, each line in the form
+   `old=new` installs a compatibility symlink at
+   `~/.config/zellij/layouts/<old>` pointing at the current
+   `<root>/config/zellij/layouts/<new>` layout file. Lines starting with `#`
+   and blank lines are ignored. Aliases whose `<new>` target no longer exists
+   are dropped (and any pre-existing broken symlink for `<old>` is removed)
+   rather than silently kept as broken links. Edit `aliases.txt`, re-run the
+   installer — no rebuild needed.
+5. **Prints a summary** listing every symlink created, re-pointed, already
+   correct, stale-removed, alias installed, alias dropped, and non-symlink
+   file preserved. Re-runs are idempotent — running the installer twice in a
+   row produces identical filesystem state and identical summary output.
+
+Example `aliases.txt` mapping the legacy names the Vibecrafted framework
+shipped before the canonical rename:
+
+```
+# Legacy compatibility map — keeps old layout names working after rename.
+vc-dashboard.kdl=dashboard.kdl
+vc-marbles.kdl=marbles.kdl
+vc-research.kdl=research.kdl
+vc-workflow.kdl=workflow.kdl
+implement-dual.kdl=workflow.kdl
+research-grid.kdl=research.kdl
+vibecraft.kdl=operator.kdl
+vibecrafted.kdl=operator.kdl
+```
+
 ## About issues in this repository
 Issues in this repository, whether open or closed, do not necessarily indicate a problem or a bug in the software. They only indicate that the reporter wanted to communicate their experiences or thoughts to the maintainers. The Zellij maintainers do their best to go over and reply to all issue reports, but unfortunately cannot promise these will always be dealt with or even read. Your understanding is appreciated.
 
