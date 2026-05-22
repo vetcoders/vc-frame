@@ -10,7 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 ## [0.45.1] - 2026-05-13
 * fix: skip render pipeline work and reduce polling when all clients are detached
 * fix: use macOS FSEvents for file watching instead of the kqueue backend
-* feat: add Vibecrafted shell layouts, dashboard surfaces, and mission-control guidance
+* feat: add VibeCrafted shell layouts, dashboard surfaces, and mission-control guidance
 * refactor: split session-manager rendering/navigation state and pane row rendering utilities
 * refactor: split server background jobs and OS input/output APIs
 * chore: bump Zellij workspace packages to 0.45.1

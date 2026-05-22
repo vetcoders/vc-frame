@@ -203,6 +203,11 @@ pub fn dump_default_config() -> std::io::Result<()> {
 }
 
 pub fn dump_specified_layout(layout: &str) -> std::io::Result<()> {
+    let layout = if layout == "disable-status" {
+        "disable-status-bar"
+    } else {
+        layout
+    };
     if let Ok((_layout_name, stringified_layout, _swap_layouts)) =
         Layout::stringified_from_default_assets(Path::new(layout))
     {

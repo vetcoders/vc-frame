@@ -594,38 +594,6 @@ pub fn clamp_index_after_delete(prev_index: Option<usize>, new_len: usize) -> Op
     Some(prev_index.unwrap_or(0).min(new_len - 1))
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct SelectedIndex(pub Option<usize>, pub Option<usize>, pub Option<usize>);
-
-impl SelectedIndex {
-    pub fn tabs_are_visible(&self) -> bool {
-        self.1.is_some()
-    }
-    pub fn panes_are_visible(&self) -> bool {
-        self.2.is_some()
-    }
-    pub fn selected_tab_index(&self) -> Option<usize> {
-        self.1
-    }
-    pub fn session_index_is_selected(&self, index: usize) -> bool {
-        self.0 == Some(index)
-    }
-    pub fn result_shrink(&mut self) {
-        match self {
-            SelectedIndex(Some(_selected_session), None, None) => self.0 = None,
-            SelectedIndex(Some(_selected_session), Some(_selected_tab), None) => self.1 = None,
-            SelectedIndex(Some(_selected_session), Some(_selected_tab), Some(_selected_pane)) => {
-                self.2 = None
-            },
-            _ => {},
-        }
-    }
-    pub fn reset(&mut self) {
-        self.0 = None;
-        self.1 = None;
-        self.2 = None;
-    }
-}
 #[derive(Debug)]
 pub struct SearchResult {
     score: i64,

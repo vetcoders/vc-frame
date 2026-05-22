@@ -18,8 +18,8 @@ layout {
 
     tab name="𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Workflow" {
         pane split_direction="vertical" {
-            pane name="main" size="75%" focus=true command="zsh"
-            pane name="agent" size="25%" command="zsh"
+            pane name="main" size="75%" focus=true
+            pane name="agent" size="25%"
         }
     }
 
@@ -32,8 +32,8 @@ layout {
     swap_tiled_layout name="dual" {
         tab {
             pane split_direction="vertical" {
-                pane name="main" size="50%" focus=true command="zsh"
-                pane name="agent" size="50%" command="zsh"
+                pane name="main" size="50%" focus=true
+                pane name="agent" size="50%"
             }
         }
     }

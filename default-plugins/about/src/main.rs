@@ -27,6 +27,7 @@ struct App {
     is_release_notes: bool,
     is_startup_tip: bool,
     guide_mode: Option<String>,
+    pane_title: Option<String>,
     tip_index: usize,
     waiting_for_config_to_be_written: bool,
     error: Option<String>,
@@ -53,6 +54,7 @@ impl Default for App {
             is_release_notes: false,
             is_startup_tip: false,
             guide_mode: None,
+            pane_title: None,
             tip_index: 0,
             waiting_for_config_to_be_written: false,
             error: None,
@@ -73,6 +75,7 @@ impl ZellijPlugin for App {
             .map(|v| v == "true")
             .unwrap_or(false);
         self.guide_mode = configuration.get("guide_mode").cloned();
+        self.pane_title = configuration.get("pane_title").cloned();
         subscribe(&[
             EventType::Key,
             EventType::Mouse,
@@ -185,12 +188,17 @@ impl App {
                     format!("Release Notes {}", self.zellij_version.borrow()),
                 );
             } else if self.guide_mode.as_deref() == Some("mission-control") {
-                rename_plugin_pane(own_plugin_id, "VibeCrafted Shell Guide");
+                let pane_title = self
+                    .pane_title
+                    .clone()
+                    .unwrap_or_else(|| "VibeCrafted Shell Guide".to_owned());
+                rename_plugin_pane(own_plugin_id, &pane_title);
             } else {
                 rename_plugin_pane(own_plugin_id, "About VibeCrafted Shell");
             }
         }
     }
+
     pub fn query_link_executable(&self) {
         let mut xdg_open_context = BTreeMap::new();
         xdg_open_context.insert("xdg_open_cli".to_owned(), String::new());
