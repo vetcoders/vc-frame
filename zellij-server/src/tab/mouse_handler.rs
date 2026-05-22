@@ -960,15 +960,14 @@ impl MouseHandler {
             } else {
                 let relative_position = pane_with_selection.relative_position(&position);
                 pane_with_selection.end_selection(&relative_position, client_id);
-                if pane_with_selection.supports_mouse_selection()
-                    && copy_on_release {
-                        let selected_text = pane_with_selection.get_selected_text(client_id);
-                        if let Some(selected_text) = selected_text {
-                            leave_clipboard_message = true;
-                            tab.write_selection_to_clipboard(&selected_text)
-                                .with_context(err_context)?;
-                        }
+                if pane_with_selection.supports_mouse_selection() && copy_on_release {
+                    let selected_text = pane_with_selection.get_selected_text(client_id);
+                    if let Some(selected_text) = selected_text {
+                        leave_clipboard_message = true;
+                        tab.write_selection_to_clipboard(&selected_text)
+                            .with_context(err_context)?;
                     }
+                }
                 tab.selecting_with_mouse_in_pane = None;
             }
         }

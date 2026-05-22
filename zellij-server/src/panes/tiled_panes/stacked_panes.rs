@@ -174,8 +174,8 @@ impl<'a> StackedPanes<'a> {
         let position_of_flexible_pane = self
             .position_of_flexible_pane(&all_stacked_pane_positions)
             .ok()?;
-        let (_flexible_pane_id, flexible_pane) = all_stacked_pane_positions
-            .get(position_of_flexible_pane)?;
+        let (_flexible_pane_id, flexible_pane) =
+            all_stacked_pane_positions.get(position_of_flexible_pane)?;
         let (_, first_pane_in_stack) = all_stacked_pane_positions.first()?;
         let (_, last_pane_in_stack) = all_stacked_pane_positions.last()?;
         let mut rows = flexible_pane.rows;
@@ -797,7 +797,8 @@ impl<'a> StackedPanes<'a> {
                 &mut all_stacked_pane_positions,
             )?
         };
-        let stack_id = all_stacked_pane_positions.first()
+        let stack_id = all_stacked_pane_positions
+            .first()
             .and_then(|(_, first_geom)| first_geom.stacked)?;
         let flexible_pane_id = self.get_flexible_pane_id(&all_stacked_pane_positions)?;
         self.set_geom_of_broken_out_pane(
@@ -829,7 +830,9 @@ impl<'a> StackedPanes<'a> {
         let mut positions_and_sizes_of_all_stacks = HashMap::new();
         for pane in panes.values() {
             if let Some(stack_id) = pane.current_geom().stacked {
-                if let std::collections::hash_map::Entry::Vacant(e) = positions_and_sizes_of_all_stacks.entry(stack_id) {
+                if let std::collections::hash_map::Entry::Vacant(e) =
+                    positions_and_sizes_of_all_stacks.entry(stack_id)
+                {
                     e.insert(self.position_and_size_of_stack(&pane.pid())?);
                 }
             }

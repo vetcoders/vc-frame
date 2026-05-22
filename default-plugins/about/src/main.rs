@@ -152,10 +152,9 @@ impl ZellijPlugin for App {
                     if exit_code == Some(0) {
                         self.update_link_executable("xdg-open".to_owned());
                     }
-                } else if is_open
-                    && exit_code == Some(0) {
-                        self.update_link_executable("open".to_owned());
-                    }
+                } else if is_open && exit_code == Some(0) {
+                    self.update_link_executable("open".to_owned());
+                }
             },
             Event::Key(key) => {
                 if let Some(_error) = self.error.take() {

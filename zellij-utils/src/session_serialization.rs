@@ -40,6 +40,16 @@ pub struct PaneLayoutManifest {
     pub default_bg: Option<String>,
 }
 
+struct PaneNodeAttributes<'a> {
+    command: &'a Option<String>,
+    edit: &'a Option<String>,
+    name: &'a Option<String>,
+    cwd: Option<PathBuf>,
+    focus: Option<bool>,
+    initial_pane_contents: &'a Option<String>,
+    has_children: bool,
+}
+
 pub fn serialize_session_layout(
     global_layout_manifest: GlobalLayoutManifest,
 ) -> Result<(String, BTreeMap<String, String>), &'static str> {
@@ -86,8 +96,8 @@ fn serialize_tab(
     tab_name: String,
     is_focused: bool,
     hide_floating_panes: bool,
-    tiled_panes: &Vec<PaneLayoutManifest>,
-    floating_panes: &Vec<PaneLayoutManifest>,
+    tiled_panes: &[PaneLayoutManifest],
+    floating_panes: &[PaneLayoutManifest],
     pane_contents: &mut BTreeMap<String, String>,
 ) -> Option<KdlNode> {
     let mut serialized_tab = KdlNode::new("tab");
@@ -128,14 +138,12 @@ fn serialize_tab(
             serialized_tab.set_children(serialized_tab_children);
             Some(serialized_tab)
         },
-        None => {
-            None
-        },
+        None => None,
     }
 }
 
 fn serialize_tiled_and_floating_panes(
-    tiled_panes: &Vec<TiledPaneLayout>,
+    tiled_panes: &[TiledPaneLayout],
     floating_panes_layout: Vec<FloatingPaneLayout>,
     pane_contents: &mut BTreeMap<String, String>,
     serialized_tab_children: &mut KdlDocument,
@@ -172,14 +180,16 @@ fn serialize_tiled_pane(
 
     let mut tiled_pane_node = KdlNode::new("pane");
     serialize_pane_title_and_attributes(
-        &command,
-        &edit,
-        &layout.name,
-        cwd,
-        layout.focus,
-        &layout.pane_initial_contents,
+        PaneNodeAttributes {
+            command: &command,
+            edit: &edit,
+            name: &layout.name,
+            cwd,
+            focus: layout.focus,
+            initial_pane_contents: &layout.pane_initial_contents,
+            has_children,
+        },
         pane_contents,
-        has_children,
         &mut tiled_pane_node,
     );
 
@@ -273,17 +283,20 @@ pub fn extract_edit_and_line_number(layout_run: &Option<Run>) -> (Option<String>
 }
 
 fn serialize_pane_title_and_attributes(
-    command: &Option<String>,
-    edit: &Option<String>,
-    name: &Option<String>,
-    cwd: Option<PathBuf>,
-    focus: Option<bool>,
-    initial_pane_contents: &Option<String>,
+    attributes: PaneNodeAttributes<'_>,
     pane_contents: &mut BTreeMap<String, String>,
-    has_children: bool,
     kdl_node: &mut KdlNode,
 ) {
-    match (&command, &edit) {
+    let PaneNodeAttributes {
+        command,
+        edit,
+        name,
+        cwd,
+        focus,
+        initial_pane_contents,
+        has_children,
+    } = attributes;
+    match (command, edit) {
         (Some(command), _) => kdl_node
             .entries_mut()
             .push(KdlEntry::new_prop("command", command.to_owned())),
@@ -658,14 +671,16 @@ fn serialize_floating_pane(
     let cwd = layout.run.as_ref().and_then(|r| r.get_cwd());
     let has_children = false;
     serialize_pane_title_and_attributes(
-        &command,
-        &edit,
-        &layout.name,
-        cwd,
-        layout.focus,
-        &layout.pane_initial_contents,
+        PaneNodeAttributes {
+            command: &command,
+            edit: &edit,
+            name: &layout.name,
+            cwd,
+            focus: layout.focus,
+            initial_pane_contents: &layout.pane_initial_contents,
+            has_children,
+        },
         pane_contents,
-        has_children,
         &mut floating_pane_node,
     );
     if let Some(ref fg) = layout.default_fg {
@@ -687,16 +702,13 @@ fn serialize_floating_pane(
 }
 
 fn stack_layout_from_manifest(
-    geoms: &Vec<PaneLayoutManifest>,
+    geoms: &[PaneLayoutManifest],
     split_size: Option<SplitSize>,
 ) -> Option<TiledPaneLayout> {
     let mut children_stacks: HashMap<usize, Vec<PaneLayoutManifest>> = HashMap::new();
     for p in geoms {
         if let Some(stack_id) = p.geom.stacked {
-            children_stacks
-                .entry(stack_id)
-                .or_default()
-                .push(p.clone());
+            children_stacks.entry(stack_id).or_default().push(p.clone());
         }
     }
     let mut stack_nodes = vec![];
@@ -775,7 +787,7 @@ fn tiled_pane_layout_from_manifest(
 
 /// Tab-level parsing
 fn get_tiled_panes_layout_from_panegeoms(
-    geoms: &Vec<PaneLayoutManifest>,
+    geoms: &[PaneLayoutManifest],
     split_size: Option<SplitSize>,
 ) -> Option<TiledPaneLayout> {
     let (children_split_direction, splits) = match get_splits(geoms) {
@@ -794,7 +806,7 @@ fn get_tiled_panes_layout_from_panegeoms(
         },
     };
     let mut children = Vec::new();
-    let mut remaining_geoms = geoms.clone();
+    let mut remaining_geoms = geoms.to_vec();
     let mut new_geoms = Vec::new();
     let mut new_constraints = Vec::new();
     for i in 1..splits.len() {
@@ -844,7 +856,7 @@ fn get_tiled_panes_layout_from_panegeoms(
     })
 }
 
-fn all_geoms_are_from_the_same_stack(manifests: &Vec<Vec<PaneLayoutManifest>>) -> bool {
+fn all_geoms_are_from_the_same_stack(manifests: &[Vec<PaneLayoutManifest>]) -> bool {
     let mut stack_ids = HashSet::new();
     for manifest_group in manifests {
         for pane_layout_manifest in manifest_group {
@@ -855,14 +867,16 @@ fn all_geoms_are_from_the_same_stack(manifests: &Vec<Vec<PaneLayoutManifest>>) -
 }
 
 fn get_floating_panes_layout_from_panegeoms(
-    manifests: &Vec<PaneLayoutManifest>,
+    manifests: &[PaneLayoutManifest],
 ) -> Vec<FloatingPaneLayout> {
     manifests
         .iter()
         .map(|m| {
             let mut run = m.run.clone();
             if let Some(cwd) = &m.cwd {
-                if let Some(r) = run.as_mut() { r.add_cwd(cwd) }
+                if let Some(r) = run.as_mut() {
+                    r.add_cwd(cwd)
+                }
             }
             FloatingPaneLayout {
                 name: m.title.clone(),
@@ -884,7 +898,7 @@ fn get_floating_panes_layout_from_panegeoms(
         .collect()
 }
 
-fn get_x_lims(geoms: &Vec<PaneLayoutManifest>) -> Option<(usize, usize)> {
+fn get_x_lims(geoms: &[PaneLayoutManifest]) -> Option<(usize, usize)> {
     match (
         geoms.iter().map(|g| g.geom.x).min(),
         geoms
@@ -897,7 +911,7 @@ fn get_x_lims(geoms: &Vec<PaneLayoutManifest>) -> Option<(usize, usize)> {
     }
 }
 
-fn get_y_lims(geoms: &Vec<PaneLayoutManifest>) -> Option<(usize, usize)> {
+fn get_y_lims(geoms: &[PaneLayoutManifest]) -> Option<(usize, usize)> {
     match (
         geoms.iter().map(|g| g.geom.y).min(),
         geoms
@@ -914,7 +928,7 @@ fn get_y_lims(geoms: &Vec<PaneLayoutManifest>) -> Option<(usize, usize)> {
 /// perpendicular the `SplitDirection`, for which there is a split spanning
 /// the max_cols or max_rows of the domain. The values are ordered
 /// increasingly and contains the boundaries of the domain.
-fn get_splits(geoms: &Vec<PaneLayoutManifest>) -> Option<(SplitDirection, Vec<usize>)> {
+fn get_splits(geoms: &[PaneLayoutManifest]) -> Option<(SplitDirection, Vec<usize>)> {
     if geoms.len() == 1 {
         return None;
     }
@@ -946,13 +960,13 @@ fn get_splits(geoms: &Vec<PaneLayoutManifest>) -> Option<(SplitDirection, Vec<us
 /// Returns a vector containing the abscisse (x) of the cols that split the
 /// domain including the boundaries, ie the min and max abscisse values.
 fn get_col_splits(
-    geoms: &Vec<PaneLayoutManifest>,
+    geoms: &[PaneLayoutManifest],
     (_, x_max): &(usize, usize),
     (y_min, y_max): &(usize, usize),
 ) -> Vec<usize> {
     let max_rows = y_max - y_min;
     let mut splits = Vec::new();
-    let mut sorted_geoms = geoms.clone();
+    let mut sorted_geoms = geoms.to_vec();
     sorted_geoms.sort_by_key(|g| g.geom.x);
     for x in sorted_geoms.iter().map(|g| g.geom.x) {
         if splits.contains(&x) {
@@ -975,13 +989,13 @@ fn get_col_splits(
 /// Returns a vector containing the coordinate (y) of the rows that split the
 /// domain including the boundaries, ie the min and max coordinate values.
 fn get_row_splits(
-    geoms: &Vec<PaneLayoutManifest>,
+    geoms: &[PaneLayoutManifest],
     (x_min, x_max): &(usize, usize),
     (_, y_max): &(usize, usize),
 ) -> Vec<usize> {
     let max_cols = x_max - x_min;
     let mut splits = Vec::new();
-    let mut sorted_geoms = geoms.clone();
+    let mut sorted_geoms = geoms.to_vec();
     sorted_geoms.sort_by_key(|g| g.geom.y);
 
     //  here we make sure the various panes in all the stacks aren't counted as splits, since
@@ -1033,7 +1047,7 @@ fn get_row_splits(
 /// Get the constraint of the domain considered, base on the rows or columns,
 /// depending on the split direction provided.
 fn get_domain_constraint(
-    geoms: &Vec<PaneLayoutManifest>,
+    geoms: &[PaneLayoutManifest],
     split_direction: &SplitDirection,
     (v_min, v_max): (usize, usize),
 ) -> Option<Constraint> {
@@ -1044,7 +1058,7 @@ fn get_domain_constraint(
 }
 
 fn get_domain_col_constraint(
-    geoms: &Vec<PaneLayoutManifest>,
+    geoms: &[PaneLayoutManifest],
     (x_min, x_max): (usize, usize),
 ) -> Option<Constraint> {
     let mut percent = 0.0;
@@ -1072,7 +1086,7 @@ fn get_domain_col_constraint(
 }
 
 fn get_domain_row_constraint(
-    geoms: &Vec<PaneLayoutManifest>,
+    geoms: &[PaneLayoutManifest],
     (y_min, y_max): (usize, usize),
 ) -> Option<Constraint> {
     let mut percent = 0.0;
@@ -1101,7 +1115,7 @@ fn get_domain_row_constraint(
 
 /// Returns split sizes for all the children of a `TiledPaneLayout` based on
 /// their constraints.
-fn get_split_sizes(constraints: &Vec<Constraint>) -> Vec<Option<SplitSize>> {
+fn get_split_sizes(constraints: &[Constraint]) -> Vec<Option<SplitSize>> {
     let mut split_sizes = Vec::new();
     let max_percent = constraints
         .iter()
@@ -2108,8 +2122,10 @@ mod tests {
             FloatingPaneLayout::default(),
             FloatingPaneLayout::default(),
         ];
-        let mut default_layout = Layout::default();
-        default_layout.template = Some((tiled_panes_layout, floating_panes_layout));
+        let default_layout = Layout {
+            template: Some((tiled_panes_layout, floating_panes_layout)),
+            ..Default::default()
+        };
         let default_layout = Box::new(default_layout);
         let global_layout_manifest = GlobalLayoutManifest {
             default_layout,

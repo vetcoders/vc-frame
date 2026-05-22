@@ -1,13 +1,11 @@
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Platform {
     #[default]
     Unix,
     Windows,
 }
-
 
 impl Platform {
     /// Detect the host platform from the initial_cwd string.

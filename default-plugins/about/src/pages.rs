@@ -1286,10 +1286,14 @@ impl BulletinList {
         });
     }
     pub fn set_active_bulletin(&mut self, new_index: usize) {
-        if let Some(i) = self.items.get_mut(new_index) { i.is_active = true; }
+        if let Some(i) = self.items.get_mut(new_index) {
+            i.is_active = true;
+        }
     }
     pub fn set_last_active_bulletin(&mut self) {
-        if let Some(i) = self.items.last_mut() { i.is_active = true; }
+        if let Some(i) = self.items.last_mut() {
+            i.is_active = true;
+        }
     }
     pub fn render(&mut self, x: usize, y: usize, rows: usize, columns: usize) {
         print_text_with_coordinates(self.title.clone(), x, y, Some(columns), Some(rows));

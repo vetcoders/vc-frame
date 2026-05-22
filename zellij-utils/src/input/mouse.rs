@@ -44,7 +44,6 @@ pub enum MouseEventType {
 
 impl MouseEvent {
     pub fn new() -> Self {
-        
         MouseEvent {
             event_type: MouseEventType::Motion,
             left: false,
@@ -59,7 +58,6 @@ impl MouseEvent {
         }
     }
     pub fn new_buttonless_motion(position: Position) -> Self {
-        
         MouseEvent {
             event_type: MouseEventType::Motion,
             left: false,
@@ -74,7 +72,6 @@ impl MouseEvent {
         }
     }
     pub fn new_left_press_event(position: Position) -> Self {
-        
         MouseEvent {
             event_type: MouseEventType::Press,
             left: true,
@@ -89,7 +86,6 @@ impl MouseEvent {
         }
     }
     pub fn new_right_press_event(position: Position) -> Self {
-        
         MouseEvent {
             event_type: MouseEventType::Press,
             left: false,
@@ -104,7 +100,6 @@ impl MouseEvent {
         }
     }
     pub fn new_middle_press_event(position: Position) -> Self {
-        
         MouseEvent {
             event_type: MouseEventType::Press,
             left: false,
@@ -119,7 +114,6 @@ impl MouseEvent {
         }
     }
     pub fn new_middle_release_event(position: Position) -> Self {
-        
         MouseEvent {
             event_type: MouseEventType::Release,
             left: false,
@@ -134,7 +128,6 @@ impl MouseEvent {
         }
     }
     pub fn new_left_release_event(position: Position) -> Self {
-        
         MouseEvent {
             event_type: MouseEventType::Release,
             left: true,
@@ -149,7 +142,6 @@ impl MouseEvent {
         }
     }
     pub fn new_left_motion_event(position: Position) -> Self {
-        
         MouseEvent {
             event_type: MouseEventType::Motion,
             left: true,
@@ -164,7 +156,6 @@ impl MouseEvent {
         }
     }
     pub fn new_right_release_event(position: Position) -> Self {
-        
         MouseEvent {
             event_type: MouseEventType::Release,
             left: false,
@@ -179,7 +170,6 @@ impl MouseEvent {
         }
     }
     pub fn new_right_motion_event(position: Position) -> Self {
-        
         MouseEvent {
             event_type: MouseEventType::Motion,
             left: false,
@@ -194,7 +184,6 @@ impl MouseEvent {
         }
     }
     pub fn new_middle_motion_event(position: Position) -> Self {
-        
         MouseEvent {
             event_type: MouseEventType::Motion,
             left: false,
@@ -209,7 +198,6 @@ impl MouseEvent {
         }
     }
     pub fn new_left_press_with_alt_event(position: Position) -> Self {
-        
         MouseEvent {
             event_type: MouseEventType::Press,
             left: true,
@@ -224,7 +212,6 @@ impl MouseEvent {
         }
     }
     pub fn new_right_press_with_alt_event(position: Position) -> Self {
-        
         MouseEvent {
             event_type: MouseEventType::Press,
             left: false,
@@ -239,7 +226,6 @@ impl MouseEvent {
         }
     }
     pub fn new_left_press_with_ctrl_event(position: Position) -> Self {
-        
         MouseEvent {
             event_type: MouseEventType::Press,
             left: true,
@@ -254,7 +240,6 @@ impl MouseEvent {
         }
     }
     pub fn new_left_motion_with_ctrl_event(position: Position) -> Self {
-        
         MouseEvent {
             event_type: MouseEventType::Motion,
             left: true,
@@ -269,7 +254,6 @@ impl MouseEvent {
         }
     }
     pub fn new_left_release_with_ctrl_event(position: Position) -> Self {
-        
         MouseEvent {
             event_type: MouseEventType::Release,
             left: true,
@@ -284,7 +268,6 @@ impl MouseEvent {
         }
     }
     pub fn new_left_motion_with_alt_event(position: Position) -> Self {
-        
         MouseEvent {
             event_type: MouseEventType::Motion,
             left: true,
@@ -299,7 +282,6 @@ impl MouseEvent {
         }
     }
     pub fn new_scroll_up_event(position: Position) -> Self {
-        
         MouseEvent {
             event_type: MouseEventType::Press,
             left: false,
@@ -314,7 +296,6 @@ impl MouseEvent {
         }
     }
     pub fn new_scroll_down_event(position: Position) -> Self {
-        
         MouseEvent {
             event_type: MouseEventType::Press,
             left: false,
@@ -329,7 +310,6 @@ impl MouseEvent {
         }
     }
     pub fn new_ctrl_scroll_up_event(position: Position) -> Self {
-        
         MouseEvent {
             event_type: MouseEventType::Press,
             left: false,
@@ -344,7 +324,6 @@ impl MouseEvent {
         }
     }
     pub fn new_ctrl_scroll_down_event(position: Position) -> Self {
-        
         MouseEvent {
             event_type: MouseEventType::Press,
             left: false,

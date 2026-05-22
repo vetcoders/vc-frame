@@ -78,7 +78,9 @@ pub fn stringify_text(
         }
     }
     let coordinates_width = coordinates.as_ref().and_then(|c| c.width);
-    if let (Some(coordinates_width), Some(_background_style)) = (coordinates_width, base_text_style.background) {
+    if let (Some(coordinates_width), Some(_background_style)) =
+        (coordinates_width, base_text_style.background)
+    {
         let text_width_with_left_padding = text_width + left_padding.unwrap_or(0);
         let background_padding_length =
             coordinates_width.saturating_sub(text_width_with_left_padding);

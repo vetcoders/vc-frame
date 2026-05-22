@@ -106,7 +106,11 @@ impl PluginMap {
         plugin_id: PluginId,
         client_id: ClientId,
     ) -> Option<(Arc<Mutex<RunningPlugin>>, Arc<Mutex<Subscriptions>>)> {
-        self.plugin_assets.get(&(plugin_id, client_id)).map(|(running_plugin, subscriptions, _)| (running_plugin.clone(), subscriptions.clone()))
+        self.plugin_assets
+            .get(&(plugin_id, client_id))
+            .map(|(running_plugin, subscriptions, _)| {
+                (running_plugin.clone(), subscriptions.clone())
+            })
     }
     pub fn get_running_plugin(
         &self,
@@ -116,11 +120,13 @@ impl PluginMap {
         match client_id {
             Some(client_id) => self
                 .plugin_assets
-                .get(&(plugin_id, client_id)).map(|(running_plugin, _, _)| running_plugin.clone()),
+                .get(&(plugin_id, client_id))
+                .map(|(running_plugin, _, _)| running_plugin.clone()),
             None => self
                 .plugin_assets
                 .iter()
-                .find(|((p_id, _), _)| *p_id == plugin_id).map(|(_, (running_plugin, _, _))| running_plugin.clone()),
+                .find(|((p_id, _), _)| *p_id == plugin_id)
+                .map(|(_, (running_plugin, _, _))| running_plugin.clone()),
         }
     }
     pub fn worker_sender(
@@ -325,11 +331,7 @@ impl<T: Write + Send + 'static> std::io::Write for WriteOutputStream<T> {
 impl PluginEnv {
     // Get the name (path) of the containing plugin
     pub fn name(&self) -> String {
-        format!(
-            "{} (ID {})",
-            self.plugin.path.display(),
-            self.plugin_id
-        )
+        format!("{} (ID {})", self.plugin.path.display(), self.plugin_id)
     }
 
     pub fn set_permissions(&mut self, permissions: HashSet<PermissionType>) {

@@ -654,15 +654,13 @@ struct AppState {
     info: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 enum Screen {
     #[default]
     Main,
     Token(String),
     ManageTokens,
 }
-
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct CoordinatesInLine {

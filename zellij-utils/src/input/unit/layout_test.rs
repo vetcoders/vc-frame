@@ -1345,7 +1345,8 @@ fn error_on_multiple_layout_nodes_in_file() {
     let kdl_layout = "
         layout
         layout
-    ".to_string();
+    "
+    .to_string();
     let layout_error =
         Layout::from_kdl(&kdl_layout, Some("layout_file_name".into()), None, None).unwrap_err();
     assert_snapshot!(normalize_layout_debug(format!("{:?}", layout_error)));
@@ -1359,7 +1360,8 @@ fn error_on_unknown_layout_node() {
             i_am_not_a_proper_node
             pane
         }
-    ".to_string();
+    "
+    .to_string();
     let layout_error =
         Layout::from_kdl(&kdl_layout, Some("layout_file_name".into()), None, None).unwrap_err();
     assert_snapshot!(normalize_layout_debug(format!("{:?}", layout_error)));
@@ -1371,7 +1373,8 @@ fn error_on_unknown_layout_pane_property() {
         layout {
             pane spit_size=1
         }
-    ".to_string();
+    "
+    .to_string();
     let layout_error =
         Layout::from_kdl(&kdl_layout, Some("layout_file_name".into()), None, None).unwrap_err();
     assert_snapshot!(normalize_layout_debug(format!("{:?}", layout_error)));
@@ -1383,7 +1386,8 @@ fn error_on_unknown_layout_pane_template_property() {
         layout {
             pane_template name=\"my_cool_template\" spit_size=1
         }
-    ".to_string();
+    "
+    .to_string();
     let layout_error =
         Layout::from_kdl(&kdl_layout, Some("layout_file_name".into()), None, None).unwrap_err();
     assert_snapshot!(normalize_layout_debug(format!("{:?}", layout_error)));
@@ -1395,7 +1399,8 @@ fn error_on_unknown_layout_tab_property() {
         layout {
             tab spit_size=1
         }
-    ".to_string();
+    "
+    .to_string();
     let layout_error =
         Layout::from_kdl(&kdl_layout, Some("layout_file_name".into()), None, None).unwrap_err();
     assert_snapshot!(normalize_layout_debug(format!("{:?}", layout_error)));
@@ -1407,7 +1412,8 @@ fn error_on_unknown_layout_tab_template_property() {
         layout {
             tab_template name=\"my_cool_template\" spit_size=1
         }
-    ".to_string();
+    "
+    .to_string();
     let layout_error =
         Layout::from_kdl(&kdl_layout, Some("layout_file_name".into()), None, None).unwrap_err();
     assert_snapshot!(normalize_layout_debug(format!("{:?}", layout_error)));
@@ -1423,7 +1429,8 @@ fn error_on_pane_templates_without_a_name() {
                 pane
             }
         }
-    ".to_string();
+    "
+    .to_string();
     let layout_error =
         Layout::from_kdl(&kdl_layout, Some("layout_file_name".into()), None, None).unwrap_err();
     assert_snapshot!(normalize_layout_debug(format!("{:?}", layout_error)));
@@ -1439,7 +1446,8 @@ fn error_on_tab_templates_without_a_name() {
                 pane
             }
         }
-    ".to_string();
+    "
+    .to_string();
     let layout_error =
         Layout::from_kdl(&kdl_layout, Some("layout_file_name".into()), None, None).unwrap_err();
     assert_snapshot!(normalize_layout_debug(format!("{:?}", layout_error)));

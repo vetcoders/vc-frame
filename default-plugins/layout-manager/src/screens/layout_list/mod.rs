@@ -247,10 +247,13 @@ impl LayoutListScreen {
     }
 
     fn start_rename_layout(&self, display_layouts: &[DisplayLayout]) -> Option<Screen> {
-        self.get_selected_file_name(display_layouts).map(|layout_file_name| Screen::RenameLayout(super::RenameLayoutScreen::new(
-                layout_file_name,
-                self.selected_layout_index,
-            )))
+        self.get_selected_file_name(display_layouts)
+            .map(|layout_file_name| {
+                Screen::RenameLayout(super::RenameLayoutScreen::new(
+                    layout_file_name,
+                    self.selected_layout_index,
+                ))
+            })
     }
 
     fn navigate_up(&mut self, display_layouts: &[DisplayLayout]) {

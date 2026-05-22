@@ -1,5 +1,5 @@
 use super::{config_yaml_to_config_kdl, layout_yaml_to_layout_kdl};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use zellij_utils::{
     cli::CliArgs,
     home::{find_default_config_dir, get_layout_dir, get_theme_dir},
@@ -17,9 +17,10 @@ pub fn convert_old_yaml_files(opts: &CliArgs) {
     let mut theme_files_to_convert = vec![];
     if let Some(layout) = opts.layout.as_ref() {
         if layout.extension().map(|s| s.to_string_lossy().to_string()) == Some("yaml".into())
-            && layout.exists() {
-                layout_files_to_convert.push((layout.clone(), true));
-            }
+            && layout.exists()
+        {
+            layout_files_to_convert.push((layout.clone(), true));
+        }
     }
     layout_files_to_convert.dedup();
     if let Some(layout_dir) = layout_dir {
@@ -144,7 +145,7 @@ fn print_remain_unmodified_message(will_exit: bool) {
 
 fn print_flag_help_message(
     layout_files_to_convert: Vec<(PathBuf, bool)>,
-    yaml_config_file: &PathBuf,
+    yaml_config_file: &Path,
     yaml_config_was_explicitly_set: bool,
 ) -> Result<(), String> {
     println!("\u{1b}[1;32mWhat do you need to do?\u{1b}[m");
@@ -153,7 +154,7 @@ fn print_flag_help_message(
         .find(|(_f, explicit)| *explicit)
     {
         Some((explicitly_specified_layout, _)) => {
-            let mut kdl_config_file_path = yaml_config_file.clone();
+            let mut kdl_config_file_path = yaml_config_file.to_path_buf();
             let mut kdl_explicitly_specified_layout = explicitly_specified_layout.clone();
             kdl_config_file_path.set_extension("kdl");
             kdl_explicitly_specified_layout.set_extension("kdl");
@@ -161,10 +162,7 @@ fn print_flag_help_message(
                 println!("Since both the YAML config and a YAML layout file were explicitly specified, you'll need to re-run Zellij and point it to the new files:");
                 println!(
                     "\u{1b}[1;33mzellij --config {} --layout {}\u{1b}[m",
-                    kdl_config_file_path
-                        .as_path()
-                        .as_os_str()
-                        .to_string_lossy(),
+                    kdl_config_file_path.as_path().as_os_str().to_string_lossy(),
                     kdl_explicitly_specified_layout
                         .as_path()
                         .as_os_str()
@@ -183,15 +181,12 @@ fn print_flag_help_message(
         },
         None => {
             if yaml_config_was_explicitly_set {
-                let mut kdl_config_file_path = yaml_config_file.clone();
+                let mut kdl_config_file_path = yaml_config_file.to_path_buf();
                 kdl_config_file_path.set_extension("kdl");
                 println!("Since the YAML config was explicitly specified, you'll need to re-run Zellij and point it to the new config:");
                 println!(
                     "\u{1b}[1;33mzellij --config {}\u{1b}[m",
-                    kdl_config_file_path
-                        .as_path()
-                        .as_os_str()
-                        .to_string_lossy(),
+                    kdl_config_file_path.as_path().as_os_str().to_string_lossy(),
                 );
             }
         },

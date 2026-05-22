@@ -553,15 +553,16 @@ pub(crate) fn plugin_thread_main(
                         }
                     }
                 }
-if let Some(t) = tab_layout.as_mut() {
-    t.populate_plugin_aliases_in_layout(&plugin_aliases);
-    if let Some(cwd) = cwd.as_ref() {
-        t.add_cwd_to_layout(cwd);
-    }
-}
+                if let Some(t) = tab_layout.as_mut() {
+                    t.populate_plugin_aliases_in_layout(&plugin_aliases);
+                    if let Some(cwd) = cwd.as_ref() {
+                        t.add_cwd_to_layout(cwd);
+                    }
+                }
                 floating_panes_layout.iter_mut().for_each(|f| {
-                    if let Some(f) = f.run
-                        .as_mut() { f.populate_run_plugin_if_needed(&plugin_aliases) }
+                    if let Some(f) = f.run.as_mut() {
+                        f.populate_run_plugin_if_needed(&plugin_aliases)
+                    }
                 });
                 let extracted_run_instructions = tab_layout
                     .clone()
@@ -649,8 +650,9 @@ if let Some(t) = tab_layout.as_mut() {
                         .tiled_layout
                         .populate_plugin_aliases_in_layout(&plugin_aliases);
                     tab_layout_info.floating_layouts.iter_mut().for_each(|f| {
-                        if let Some(r) = f.run
-                            .as_mut() { r.populate_run_plugin_if_needed(&plugin_aliases) }
+                        if let Some(r) = f.run.as_mut() {
+                            r.populate_run_plugin_if_needed(&plugin_aliases)
+                        }
                     });
 
                     // Extract run instructions from tiled layout
@@ -1361,12 +1363,7 @@ fn pipe_to_specific_plugins(
 ) {
     let is_private = true;
     let size = Size::default();
-    match RunPluginOrAlias::from_url(
-        plugin_url,
-        configuration,
-        Some(plugin_aliases),
-        cwd.clone(),
-    ) {
+    match RunPluginOrAlias::from_url(plugin_url, configuration, Some(plugin_aliases), cwd.clone()) {
         Ok(run_plugin_or_alias) => {
             let initial_cwd = run_plugin_or_alias.get_initial_cwd();
             let all_plugin_ids = wasm_bridge.get_or_load_plugins(

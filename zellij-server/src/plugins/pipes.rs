@@ -31,7 +31,9 @@ impl PendingPipes {
         client_id: &ClientId,
     ) {
         if self.pipes.contains_key(pipe_id) {
-            if let Some(pending_pipe_info) = self.pipes.get_mut(pipe_id) { pending_pipe_info.add_processing_plugin(plugin_id, client_id) }
+            if let Some(pending_pipe_info) = self.pipes.get_mut(pipe_id) {
+                pending_pipe_info.add_processing_plugin(plugin_id, client_id)
+            }
         } else {
             self.pipes.insert(
                 pipe_id.to_owned(),
@@ -119,7 +121,7 @@ impl PendingPipeInfo {
         };
         self.currently_being_processed_by
             .remove(&(*plugin_id, *client_id));
-        
+
         self.currently_being_processed_by.is_empty() && !self.is_explicitly_blocked
     }
     // returns true if this pipe should be unblocked

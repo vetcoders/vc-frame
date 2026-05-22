@@ -335,8 +335,7 @@ pub fn layout_yaml_to_layout_kdl(raw_yaml_layout: &str) -> Result<String, String
     Ok(kdl_layout)
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Copy)]
-#[derive(Default)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Copy, Default)]
 pub enum OldDirection {
     #[serde(alias = "horizontal")]
     #[default]
@@ -554,7 +553,6 @@ impl Default for OldLayoutTemplate {
         }
     }
 }
-
 
 // The unit test location.
 #[path = "./unit/convert_layout_tests.rs"]

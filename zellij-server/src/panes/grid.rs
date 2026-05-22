@@ -787,8 +787,7 @@ impl Click {
     }
 }
 
-#[derive(Clone, Debug)]
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 pub enum MouseMode {
     #[default]
     NoEncoding,
@@ -796,9 +795,7 @@ pub enum MouseMode {
     Sgr,
 }
 
-
-#[derive(Clone, Debug, PartialEq)]
-#[derive(Default)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub enum MouseTracking {
     #[default]
     Off,
@@ -806,7 +803,6 @@ pub enum MouseTracking {
     ButtonEventTracking,
     AnyEventTracking,
 }
-
 
 impl Debug for Grid {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -2286,10 +2282,7 @@ impl Grid {
         highlights: Vec<RegexHighlight>,
         style: &Style,
     ) {
-        let slot = self
-            .plugin_highlights
-            .entry(plugin_id)
-            .or_default();
+        let slot = self.plugin_highlights.entry(plugin_id).or_default();
         for h in highlights {
             let (fg, bg) = resolve_highlight_colors(&h.style, style);
             if let Ok(regex) = regex::Regex::new(&h.pattern) {
@@ -3974,8 +3967,7 @@ impl Perform for Grid {
                         },
                         1049 => {
                             // enter alternate buffer
-                            let current_lines_above =
-                                std::mem::take(&mut self.lines_above);
+                            let current_lines_above = std::mem::take(&mut self.lines_above);
                             let current_viewport = std::mem::replace(
                                 &mut self.viewport,
                                 VecDeque::from(vec![Row::new().canonical()]),

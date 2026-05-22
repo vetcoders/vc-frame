@@ -36,13 +36,11 @@ pub async fn receive_webserver_instruction(
     receiver.read_exact(&mut buffer).await?;
 
     // Decode protobuf message
-    let proto_instruction = ProtoInstructionForWebServer::decode(&buffer[..])
-        .map_err(std::io::Error::other)?;
+    let proto_instruction =
+        ProtoInstructionForWebServer::decode(&buffer[..]).map_err(std::io::Error::other)?;
 
     // Convert to Rust type
-    proto_instruction
-        .try_into()
-        .map_err(std::io::Error::other)
+    proto_instruction.try_into().map_err(std::io::Error::other)
 }
 
 pub async fn send_webserver_response(

@@ -380,9 +380,7 @@ pub fn list_sessions(no_formatting: bool, short: bool, reverse: bool) {
                 print_sessions(
                     all_sessions
                         .iter()
-                        .map(|(name, (timestamp, is_dead))| {
-                            (name.clone(), *timestamp, *is_dead)
-                        })
+                        .map(|(name, (timestamp, is_dead))| (name.clone(), *timestamp, *is_dead))
                         .collect(),
                     no_formatting,
                     short,
@@ -564,8 +562,6 @@ pub fn generate_unique_session_name() -> Option<String> {
         eprintln!("Failed to list existing sessions: {:?}", sessions);
         return None;
     };
-
-    
 
     get_name_generator()
         .take(1000)

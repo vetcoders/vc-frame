@@ -5,11 +5,11 @@
 //!
 //! ### Interesting things in this libary:
 //! - The [`ZellijPlugin`] trait for implementing plugins combined with the
-//! [`register_plugin!`](register_plugin) macro to register them.
+//!   [`register_plugin!`](register_plugin) macro to register them.
 //! - The list of [commands](shim) representing what a plugin can do.
 //! - The list of [`Events`](prelude::Event) a plugin can subscribe to
 //! - The [`ZellijWorker`] trait for implementing background workers combined with the
-//! [`register_worker!`](register_worker) macro to register them
+//!   [`register_worker!`](register_worker) macro to register them
 //!
 //! ### Full Example and Development Environment
 //! For a working plugin example as well as a development environment, please see:

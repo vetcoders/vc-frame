@@ -240,9 +240,11 @@ mod tests {
 
     #[test]
     fn web_server_base_url_from_config_uses_https_with_certificates() {
-        let mut options = Options::default();
-        options.web_server_cert = Some("/tmp/server.crt".into());
-        options.web_server_key = Some("/tmp/server.key".into());
+        let options = Options {
+            web_server_cert: Some("/tmp/server.crt".into()),
+            web_server_key: Some("/tmp/server.key".into()),
+            ..Default::default()
+        };
 
         let url = web_server_base_url_from_config(options);
         assert_eq!(url, "https://127.0.0.1:8082");

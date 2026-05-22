@@ -18,7 +18,7 @@ pub mod event {
 #[derive(Clone, PartialEq, ::prost::Oneof)]
     pub enum Payload {
         #[prost(message, tag="2")]
-        ModeUpdatePayload(super::ModeUpdatePayload),
+        ModeUpdatePayload(::prost::alloc::boxed::Box<super::ModeUpdatePayload>),
         #[prost(message, tag="3")]
         TabUpdatePayload(super::TabUpdatePayload),
         #[prost(message, tag="4")]
@@ -78,7 +78,7 @@ pub mod event {
         #[prost(message, tag="31")]
         UserActionPayload(super::UserActionPayload),
         #[prost(message, tag="32")]
-        ActionCompletePayload(super::ActionCompletePayload),
+        ActionCompletePayload(::prost::alloc::boxed::Box<super::ActionCompletePayload>),
         #[prost(message, tag="33")]
         CwdChangedPayload(super::CwdChangedPayload),
         #[prost(message, tag="34")]
@@ -487,6 +487,11 @@ pub struct KdlError {
     pub len: ::core::option::Option<u64>,
     #[prost(string, optional, tag="4")]
     pub help_message: ::core::option::Option<::prost::alloc::string::String>,
+}
+impl KdlError {
+    pub fn is_empty(&self) -> bool {
+        self.len == Some(0)
+    }
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

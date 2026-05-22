@@ -207,7 +207,9 @@ impl Page {
                     Text::new("A great use case for these is to tail log files or to show"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("real-time compiler output while working in other panes.".to_string()),
+                    Text::new(
+                        "real-time compiler output while working in other panes.".to_string(),
+                    ),
                 ))]),
             ])
             .with_paragraph(vec![ComponentLine::new(vec![
@@ -840,7 +842,9 @@ fn tips_help_text(hovering_over_link: bool) -> Text {
             .color_range(3, 6..=10)
             .color_range(3, 15..=25)
     } else {
-        let help_text = "Help: <ESC> - Dismiss, <↓↑> - Browse tips, <Ctrl c> - Don't show tips on startup".to_string();
+        let help_text =
+            "Help: <ESC> - Dismiss, <↓↑> - Browse tips, <Ctrl c> - Don't show tips on startup"
+                .to_string();
         Text::new(help_text)
             .color_range(1, 6..=10)
             .color_range(1, 23..=26)

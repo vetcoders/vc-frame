@@ -14,14 +14,12 @@ pub struct NewSessionInfo {
     pub new_session_folder: Option<PathBuf>,
 }
 
-#[derive(Eq, PartialEq)]
-#[derive(Default)]
+#[derive(Eq, PartialEq, Default)]
 enum EnteringState {
     #[default]
     EnteringName,
     EnteringLayoutSearch,
 }
-
 
 impl NewSessionInfo {
     pub fn name(&self) -> &str {

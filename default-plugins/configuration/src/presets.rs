@@ -1042,7 +1042,8 @@ keybinds clear-defaults=true {
         bind "Enter" "Esc" { SwitchToMode "Normal"; }
     }
 }
-"#.to_string()
+"#
+    .to_string()
 }
 
 pub fn non_colliding_default_keybinds(

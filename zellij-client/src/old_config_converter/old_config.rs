@@ -695,13 +695,11 @@ enum OldPluginTypeFromYaml {
     Pane,
 }
 
-
 /// Tag used to identify the plugin in layout and config yaml files
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 struct OldPluginTag(String);
 
-#[derive(Copy, Clone, Debug, PartialEq, Deserialize, Serialize)]
-#[derive(Default)]
+#[derive(Copy, Clone, Debug, PartialEq, Deserialize, Serialize, Default)]
 pub enum OldOnForceClose {
     #[serde(alias = "quit")]
     Quit,
@@ -719,9 +717,7 @@ impl std::fmt::Display for OldOnForceClose {
     }
 }
 
-
-#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq)]
-#[derive(Default)]
+#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Default)]
 pub enum OldClipboard {
     #[serde(alias = "system")]
     #[default]
@@ -738,7 +734,6 @@ impl std::fmt::Display for OldClipboard {
         }
     }
 }
-
 
 #[derive(Clone, Default, Debug, PartialEq, Deserialize, Serialize)]
 pub struct OldOptions {
@@ -907,8 +902,9 @@ enum OldCharOrArrow {
 }
 
 /// The four directions (left, right, up, down).
-#[derive(Eq, Clone, Copy, Debug, PartialEq, Hash, Deserialize, Serialize, PartialOrd, Ord)]
-#[derive(Default)]
+#[derive(
+    Eq, Clone, Copy, Debug, PartialEq, Hash, Deserialize, Serialize, PartialOrd, Ord, Default,
+)]
 enum OldDirection {
     #[default]
     Left,
@@ -927,7 +923,6 @@ impl std::fmt::Display for OldDirection {
         }
     }
 }
-
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 enum OldAction {

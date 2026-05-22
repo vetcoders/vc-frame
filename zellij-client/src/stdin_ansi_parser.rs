@@ -19,8 +19,8 @@ use zellij_utils::{
 /// Describe the terminal implementation of synchronised output
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum SyncOutput {
-    DCS,
-    CSI,
+    Dcs,
+    Csi,
 }
 
 impl SyncOutput {
@@ -28,8 +28,8 @@ impl SyncOutput {
         static CSI_BSU_SEQ: &[u8] = "\u{1b}[?2026h".as_bytes();
         static DCS_BSU_SEQ: &[u8] = "\u{1b}P=1s\u{1b}".as_bytes();
         match self {
-            SyncOutput::DCS => DCS_BSU_SEQ,
-            SyncOutput::CSI => CSI_BSU_SEQ,
+            SyncOutput::Dcs => DCS_BSU_SEQ,
+            SyncOutput::Csi => CSI_BSU_SEQ,
         }
     }
 
@@ -37,8 +37,8 @@ impl SyncOutput {
         static CSI_ESU_SEQ: &[u8] = "\u{1b}[?2026l".as_bytes();
         static DCS_ESU_SEQ: &[u8] = "\u{1b}P=2s\u{1b}".as_bytes();
         match self {
-            SyncOutput::DCS => DCS_ESU_SEQ,
-            SyncOutput::CSI => CSI_ESU_SEQ,
+            SyncOutput::Dcs => DCS_ESU_SEQ,
+            SyncOutput::Csi => CSI_ESU_SEQ,
         }
     }
 }
@@ -140,7 +140,7 @@ impl HostReply {
         if let Some(caps) = SYNC_RE.captures(s) {
             let code: usize = caps[1].parse().ok()?;
             return match code {
-                1..=3 => Some(HostReply::SynchronizedOutput(Some(SyncOutput::CSI))),
+                1..=3 => Some(HostReply::SynchronizedOutput(Some(SyncOutput::Csi))),
                 _ => Some(HostReply::SynchronizedOutput(None)),
             };
         }

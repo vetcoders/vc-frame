@@ -706,8 +706,7 @@ impl WasmBridge {
             new_plugins.insert(plugin_id);
         }
         for plugin_id in new_plugins {
-            let Some(run_plugin) = self.run_plugin_of_plugin_id(plugin_id)
-            else {
+            let Some(run_plugin) = self.run_plugin_of_plugin_id(plugin_id) else {
                 log::error!("Failed to find plugin with id: {}", plugin_id);
                 return Ok(());
             };
@@ -805,11 +804,13 @@ impl WasmBridge {
             .lock()
             .unwrap()
             .running_plugins()
-            .iter().filter(|&(plugin_id, _client_id, _running_plugin)| {
+            .iter()
+            .filter(|&(plugin_id, _client_id, _running_plugin)| {
                 !self
                     .cached_resizes_for_pending_plugins
                     .contains_key(plugin_id)
-            }).cloned()
+            })
+            .cloned()
             .collect();
         for (plugin_id, client_id, running_plugin) in plugins_to_resize {
             if plugin_id == pid {
@@ -897,11 +898,15 @@ impl WasmBridge {
             .lock()
             .unwrap()
             .running_plugins_and_subscriptions()
-            .iter().filter(|&(plugin_id, _client_id, _running_plugin, _subscriptions)| {
-                !&self
-                    .cached_events_for_pending_plugins
-                    .contains_key(plugin_id)
-            }).cloned()
+            .iter()
+            .filter(
+                |&(plugin_id, _client_id, _running_plugin, _subscriptions)| {
+                    !&self
+                        .cached_events_for_pending_plugins
+                        .contains_key(plugin_id)
+                },
+            )
+            .cloned()
             .collect();
 
         // Execute each plugin update on its respective pinned thread
@@ -1014,7 +1019,8 @@ impl WasmBridge {
             .plugin_map
             .lock()
             .unwrap()
-            .running_plugins_and_subscriptions().to_vec();
+            .running_plugins_and_subscriptions()
+            .to_vec();
 
         // Execute directly on pinned thread (no async I/O needed for directory check/change)
         self.plugin_executor
@@ -1112,11 +1118,15 @@ impl WasmBridge {
             .lock()
             .unwrap()
             .running_plugins_and_subscriptions()
-            .iter().filter(|&(plugin_id, _client_id, _running_plugin, _subscriptions)| {
-                !&self
-                    .cached_events_for_pending_plugins
-                    .contains_key(plugin_id)
-            }).cloned()
+            .iter()
+            .filter(
+                |&(plugin_id, _client_id, _running_plugin, _subscriptions)| {
+                    !&self
+                        .cached_events_for_pending_plugins
+                        .contains_key(plugin_id)
+                },
+            )
+            .cloned()
             .collect();
 
         // Execute each pipe message on its respective plugin's pinned thread

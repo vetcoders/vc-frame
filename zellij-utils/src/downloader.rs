@@ -213,10 +213,10 @@ impl Downloader {
             .ok_or_else(|| DownloaderError::NotFoundFileName(url.to_string()))
             .map(|s| s.to_string())
     }
-    async fn acquire_download_lock(&self, file_name: &String) -> Arc<Mutex<()>> {
+    async fn acquire_download_lock(&self, file_name: &str) -> Arc<Mutex<()>> {
         let mut lock_dict = self.download_locks.lock().await;
         let download_lock = lock_dict
-            .entry(file_name.clone())
+            .entry(file_name.to_owned())
             .or_insert_with(Default::default);
         download_lock.clone()
     }

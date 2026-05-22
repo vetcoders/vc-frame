@@ -1199,7 +1199,7 @@ impl From<crate::input::actions::Action>
                 command: command.map(|c| c.into()),
                 pane_name,
                 near_current_pane,
-                pane_id_to_replace: pane_id_to_replace.and_then(|p| p.try_into().ok()),
+                pane_id_to_replace: pane_id_to_replace.map(Into::into),
                 close_replaced_pane,
                 tab_id: tab_id.map(|t| t as u32),
             }),
@@ -1273,7 +1273,7 @@ impl From<crate::input::actions::Action>
                 cwd,
                 initial_panes,
                 first_pane_unblock_condition,
-            } => ActionType::NewTab(NewTabAction {
+            } => ActionType::NewTab(Box::new(NewTabAction {
                 tiled_layout: tiled_layout.map(|l| l.into()),
                 floating_layouts: floating_layouts.into_iter().map(|l| l.into()).collect(),
                 swap_tiled_layouts: swap_tiled_layouts
@@ -1290,7 +1290,7 @@ impl From<crate::input::actions::Action>
                     .unwrap_or_default(),
                 first_pane_unblock_condition: first_pane_unblock_condition
                     .map(unblock_condition_to_proto_i32),
-            }),
+            })),
             crate::input::actions::Action::NoOp => ActionType::NoOp(NoOpAction {}),
             crate::input::actions::Action::GoToNextTab => {
                 ActionType::GoToNextTab(GoToNextTabAction {})
@@ -2114,58 +2114,61 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                 })
             },
             ActionType::UndoRenamePane(_) => Ok(crate::input::actions::Action::UndoRenamePane),
-            ActionType::NewTab(new_tab_action) => Ok(crate::input::actions::Action::NewTab {
-                tiled_layout: new_tab_action
-                    .tiled_layout
-                    .map(|l| l.try_into())
-                    .transpose()?,
-                floating_layouts: new_tab_action
-                    .floating_layouts
-                    .into_iter()
-                    .map(|l| l.try_into())
-                    .collect::<Result<Vec<_>>>()?,
-                swap_tiled_layouts: if new_tab_action.swap_tiled_layouts.is_empty() {
-                    None
-                } else {
-                    Some(
-                        new_tab_action
-                            .swap_tiled_layouts
-                            .into_iter()
-                            .map(|l| l.try_into())
-                            .collect::<Result<Vec<_>>>()?,
-                    )
-                },
-                swap_floating_layouts: if new_tab_action.swap_floating_layouts.is_empty() {
-                    None
-                } else {
-                    Some(
-                        new_tab_action
-                            .swap_floating_layouts
-                            .into_iter()
-                            .map(|l| l.try_into())
-                            .collect::<Result<Vec<_>>>()?,
-                    )
-                },
-                tab_name: new_tab_action.tab_name,
-                should_change_focus_to_new_tab: new_tab_action.should_change_focus_to_new_tab,
-                cwd: new_tab_action.cwd.map(PathBuf::from),
-                initial_panes: if new_tab_action.initial_panes.is_empty() {
-                    None
-                } else {
-                    Some(
-                        new_tab_action
-                            .initial_panes
-                            .into_iter()
-                            .map(|p| p.try_into())
-                            .collect::<Result<Vec<_>>>()?,
-                    )
-                },
+            ActionType::NewTab(new_tab_action) => {
+                let new_tab_action = *new_tab_action;
+                Ok(crate::input::actions::Action::NewTab {
+                    tiled_layout: new_tab_action
+                        .tiled_layout
+                        .map(|l| l.try_into())
+                        .transpose()?,
+                    floating_layouts: new_tab_action
+                        .floating_layouts
+                        .into_iter()
+                        .map(|l| l.try_into())
+                        .collect::<Result<Vec<_>>>()?,
+                    swap_tiled_layouts: if new_tab_action.swap_tiled_layouts.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            new_tab_action
+                                .swap_tiled_layouts
+                                .into_iter()
+                                .map(|l| l.try_into())
+                                .collect::<Result<Vec<_>>>()?,
+                        )
+                    },
+                    swap_floating_layouts: if new_tab_action.swap_floating_layouts.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            new_tab_action
+                                .swap_floating_layouts
+                                .into_iter()
+                                .map(|l| l.try_into())
+                                .collect::<Result<Vec<_>>>()?,
+                        )
+                    },
+                    tab_name: new_tab_action.tab_name,
+                    should_change_focus_to_new_tab: new_tab_action.should_change_focus_to_new_tab,
+                    cwd: new_tab_action.cwd.map(PathBuf::from),
+                    initial_panes: if new_tab_action.initial_panes.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            new_tab_action
+                                .initial_panes
+                                .into_iter()
+                                .map(|p| p.try_into())
+                                .collect::<Result<Vec<_>>>()?,
+                        )
+                    },
 
-                first_pane_unblock_condition: new_tab_action
-                    .first_pane_unblock_condition
-                    .map(proto_i32_to_unblock_condition)
-                    .transpose()?,
-            }),
+                    first_pane_unblock_condition: new_tab_action
+                        .first_pane_unblock_condition
+                        .map(proto_i32_to_unblock_condition)
+                        .transpose()?,
+                })
+            },
             ActionType::NoOp(_) => Ok(crate::input::actions::Action::NoOp),
             ActionType::GoToNextTab(_) => Ok(crate::input::actions::Action::GoToNextTab),
             ActionType::GoToPreviousTab(_) => Ok(crate::input::actions::Action::GoToPreviousTab),
@@ -3612,8 +3615,7 @@ impl From<crate::data::OriginatingPlugin>
 {
     fn from(orig: crate::data::OriginatingPlugin) -> Self {
         use std::collections::HashMap;
-        let context: HashMap<String, String> =
-            orig.context.into_iter().collect();
+        let context: HashMap<String, String> = orig.context.into_iter().collect();
 
         Self {
             plugin_id: orig.plugin_id,

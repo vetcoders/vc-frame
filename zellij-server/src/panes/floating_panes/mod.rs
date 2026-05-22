@@ -200,8 +200,9 @@ impl FloatingPanes {
         is_first_run: bool,
         run_command: RunCommand,
     ) {
-        if let Some(p) = self.panes
-            .get_mut(&pane_id) { p.hold(exit_status, is_first_run, run_command) }
+        if let Some(p) = self.panes.get_mut(&pane_id) {
+            p.hold(exit_status, is_first_run, run_command)
+        }
     }
     pub fn get(&self, pane_id: &PaneId) -> Option<&Box<dyn Pane>> {
         self.panes.get(pane_id)
@@ -336,12 +337,14 @@ impl FloatingPanes {
     }
     pub fn last_selectable_floating_pane_id(&self) -> Option<PaneId> {
         self.panes
-            .iter().rfind(|(_p_id, p)| p.selectable())
+            .iter()
+            .rfind(|(_p_id, p)| p.selectable())
             .map(|(p_id, _p)| *p_id)
     }
     pub fn has_selectable_panes(&self) -> bool {
         self.panes
-            .iter().rfind(|(_p_id, p)| p.selectable())
+            .iter()
+            .rfind(|(_p_id, p)| p.selectable())
             .is_some()
     }
     pub fn first_active_floating_pane_id(&self) -> Option<PaneId> {

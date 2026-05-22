@@ -455,13 +455,11 @@ impl Action {
             "WriteChars" => Ok(Action::WriteChars { chars: string }),
             "SwitchToMode" => match InputMode::from_str(string.as_str()) {
                 Ok(input_mode) => Ok(Action::SwitchToMode { input_mode }),
-                Err(_e) => {
-                    Err(ConfigError::new_kdl_error(
-                        format!("Unknown InputMode '{}'", string),
-                        action_node.span().offset(),
-                        action_node.span().len(),
-                    ))
-                },
+                Err(_e) => Err(ConfigError::new_kdl_error(
+                    format!("Unknown InputMode '{}'", string),
+                    action_node.span().offset(),
+                    action_node.span().len(),
+                )),
             },
             "Resize" => {
                 let mut resize: Option<Resize> = None;
@@ -1952,7 +1950,8 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                     .and_then(|c_m| kdl_child_string_value_for_entry(c_m, "direction"))
                     .and_then(|direction_string| Direction::from_str(direction_string).ok());
                 let hold_on_close = command_metadata
-                    .and_then(|c_m| kdl_child_bool_value_for_entry(c_m, "close_on_exit")).map(|close_on_exit| !close_on_exit)
+                    .and_then(|c_m| kdl_child_bool_value_for_entry(c_m, "close_on_exit"))
+                    .map(|close_on_exit| !close_on_exit)
                     .unwrap_or(true);
                 let hold_on_start = command_metadata
                     .and_then(|c_m| kdl_child_bool_value_for_entry(c_m, "start_suspended"))
@@ -2061,8 +2060,8 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                     .unwrap_or(false);
                 let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
                 let configuration = KdlLayoutParser::parse_plugin_user_configuration(kdl_action)?;
-                let initial_cwd = kdl_get_string_property_or_child_value!(kdl_action, "cwd")
-                    .map(PathBuf::from);
+                let initial_cwd =
+                    kdl_get_string_property_or_child_value!(kdl_action, "cwd").map(PathBuf::from);
                 let run_plugin_or_alias = RunPluginOrAlias::from_url(
                     &plugin_path,
                     &Some(configuration.inner().clone()),
@@ -2182,8 +2181,8 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                 } else {
                     Some(configuration.inner().clone())
                 };
-                let cwd = kdl_get_string_property_or_child_value!(kdl_action, "cwd")
-                    .map(PathBuf::from);
+                let cwd =
+                    kdl_get_string_property_or_child_value!(kdl_action, "cwd").map(PathBuf::from);
 
                 let name = name
                     // first we try to take the explicitly supplied message name
@@ -2874,7 +2873,7 @@ impl Options {
             client_async_worker_tasks,
         })
     }
-    pub fn from_string(stringified_keybindings: &String) -> Result<Self, ConfigError> {
+    pub fn from_string(stringified_keybindings: &str) -> Result<Self, ConfigError> {
         let document: KdlDocument = stringified_keybindings.parse()?;
         Options::from_kdl(&document)
     }
@@ -4471,10 +4470,8 @@ impl EnvironmentVariables {
         let mut env: HashMap<String, String> = HashMap::new();
         for env_var in kdl_children_nodes_or_error!(kdl_env_variables, "empty env variable block") {
             let env_var_name = kdl_name!(env_var);
-            let env_var_str_value =
-                kdl_first_entry_as_string!(env_var).map(|s| s.to_string());
-            let env_var_int_value =
-                kdl_first_entry_as_i64!(env_var).map(|s| format!("{}", s));
+            let env_var_str_value = kdl_first_entry_as_string!(env_var).map(|s| s.to_string());
+            let env_var_int_value = kdl_first_entry_as_i64!(env_var).map(|s| format!("{}", s));
             let env_var_value =
                 env_var_str_value
                     .or(env_var_int_value)
@@ -4678,7 +4675,9 @@ impl Keybinds {
         let mut minimized: BTreeMap<BTreeSet<InputMode>, BTreeMap<KeyWithModifier, Vec<Action>>> =
             BTreeMap::new();
         let mut flattened: Vec<BTreeMap<KeyWithModifier, Vec<Action>>> = self
-            .0.values().map(|keybind| keybind.clone().into_iter().collect())
+            .0
+            .values()
+            .map(|keybind| keybind.clone().into_iter().collect())
             .collect();
         for keybind in flattened.drain(..) {
             for (key, actions) in keybind.into_iter() {
@@ -5071,8 +5070,8 @@ fn load_plugins_from_kdl(
             let url_node = plugin_block.name();
             let string_url = url_node.value();
             let configuration = KdlLayoutParser::parse_plugin_user_configuration(plugin_block)?;
-            let cwd = kdl_get_string_property_or_child_value!(&plugin_block, "cwd")
-                .map(PathBuf::from);
+            let cwd =
+                kdl_get_string_property_or_child_value!(&plugin_block, "cwd").map(PathBuf::from);
             let run_plugin_or_alias = RunPluginOrAlias::from_url(
                 string_url,
                 &Some(configuration.inner().clone()),
@@ -5325,7 +5324,7 @@ impl Themes {
     }
 
     pub fn from_string(
-        raw_string: &String,
+        raw_string: &str,
         sourced_from_external_file: bool,
     ) -> Result<Self, ConfigError> {
         let kdl_config: KdlDocument = raw_string.parse()?;
@@ -5659,7 +5658,7 @@ impl SessionInfo {
             creation_time,
         })
     }
-    pub fn to_string(&self) -> String {
+    fn to_kdl_string(&self) -> String {
         let mut kdl_document = KdlDocument::new();
 
         let mut name = KdlNode::new("name");
@@ -5766,6 +5765,12 @@ impl SessionInfo {
 
         kdl_document.fmt();
         kdl_document.to_string()
+    }
+}
+
+impl std::fmt::Display for SessionInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_kdl_string())
     }
 }
 
@@ -5961,8 +5966,7 @@ impl PaneManifest {
                 if let Some(pane_document) = node.children() {
                     if let Ok((tab_position, pane_info)) = PaneInfo::decode_from_kdl(pane_document)
                     {
-                        let panes_in_tab_position =
-                            panes.entry(tab_position).or_default();
+                        let panes_in_tab_position = panes.entry(tab_position).or_default();
                         panes_in_tab_position.push(pane_info);
                     }
                 }
@@ -6188,12 +6192,12 @@ pub fn parse_plugin_user_configuration(
             if KdlLayoutParser::is_a_reserved_plugin_property(config_entry_name) {
                 continue;
             }
-            let config_entry_str_value = kdl_first_entry_as_string!(user_configuration_entry)
-                .map(|s| s.to_string());
-            let config_entry_int_value = kdl_first_entry_as_i64!(user_configuration_entry)
-                .map(|s| format!("{}", s));
-            let config_entry_bool_value = kdl_first_entry_as_bool!(user_configuration_entry)
-                .map(|s| format!("{}", s));
+            let config_entry_str_value =
+                kdl_first_entry_as_string!(user_configuration_entry).map(|s| s.to_string());
+            let config_entry_int_value =
+                kdl_first_entry_as_i64!(user_configuration_entry).map(|s| format!("{}", s));
+            let config_entry_bool_value =
+                kdl_first_entry_as_bool!(user_configuration_entry).map(|s| format!("{}", s));
             let config_entry_children = user_configuration_entry
                 .children()
                 .map(|s| s.to_string().trim().to_string());

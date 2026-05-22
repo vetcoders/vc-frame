@@ -458,6 +458,7 @@ impl TryFrom<ProtobufAction> for Action {
             Some(ProtobufActionName::NewTab) => {
                 match protobuf_action.optional_payload {
                     Some(OptionalPayload::NewTabPayload(payload)) => {
+                        let payload = *payload;
                         // New behavior: extract all fields from payload
                         let tiled_layout =
                             payload.tiled_layout.map(|l| l.try_into()).transpose()?;
@@ -1381,7 +1382,6 @@ impl TryFrom<Action> for ProtobufAction {
                 let command = run_command_action.and_then(|r| {
                     let mut protobuf_run_command_action: ProtobufRunCommandAction =
                         r.try_into().ok()?;
-                    let pane_name = pane_name.and_then(|n| n.try_into().ok());
                     protobuf_run_command_action.pane_name = pane_name;
                     Some(protobuf_run_command_action)
                 });
@@ -1498,25 +1498,27 @@ impl TryFrom<Action> for ProtobufAction {
                     .transpose()?
                     .unwrap_or_default();
 
-                let protobuf_first_pane_unblock_condition = first_pane_unblock_condition
-                    .and_then(|uc| {
+                let protobuf_first_pane_unblock_condition =
+                    first_pane_unblock_condition.and_then(|uc| {
                         let protobuf_uc: ProtobufUnblockCondition = uc.try_into().ok()?;
                         Some(protobuf_uc as i32)
                     });
 
                 Ok(ProtobufAction {
                     name: ProtobufActionName::NewTab as i32,
-                    optional_payload: Some(OptionalPayload::NewTabPayload(NewTabPayload {
-                        tiled_layout: protobuf_tiled_layout,
-                        floating_layouts: protobuf_floating_layouts,
-                        swap_tiled_layouts: protobuf_swap_tiled_layouts,
-                        swap_floating_layouts: protobuf_swap_floating_layouts,
-                        tab_name: tab_name.clone(),
-                        should_change_focus_to_new_tab,
-                        cwd: cwd_string,
-                        initial_panes: protobuf_initial_panes,
-                        first_pane_unblock_condition: protobuf_first_pane_unblock_condition,
-                    })),
+                    optional_payload: Some(OptionalPayload::NewTabPayload(Box::new(
+                        NewTabPayload {
+                            tiled_layout: protobuf_tiled_layout,
+                            floating_layouts: protobuf_floating_layouts,
+                            swap_tiled_layouts: protobuf_swap_tiled_layouts,
+                            swap_floating_layouts: protobuf_swap_floating_layouts,
+                            tab_name: tab_name.clone(),
+                            should_change_focus_to_new_tab,
+                            cwd: cwd_string,
+                            initial_panes: protobuf_initial_panes,
+                            first_pane_unblock_condition: protobuf_first_pane_unblock_condition,
+                        },
+                    ))),
                 })
             },
             Action::GoToNextTab => Ok(ProtobufAction {
@@ -1867,11 +1869,10 @@ impl TryFrom<Action> for ProtobufAction {
                     let protobuf_command: ProtobufRunCommandAction = c.try_into().ok()?;
                     Some(protobuf_command)
                 });
-                let unblock_condition = unblock_condition
-                    .and_then(|uc| {
-                        let protobuf_uc: ProtobufUnblockCondition = uc.try_into().ok()?;
-                        Some(protobuf_uc as i32)
-                    });
+                let unblock_condition = unblock_condition.and_then(|uc| {
+                    let protobuf_uc: ProtobufUnblockCondition = uc.try_into().ok()?;
+                    Some(protobuf_uc as i32)
+                });
                 Ok(ProtobufAction {
                     name: ProtobufActionName::NewBlockingPane as i32,
                     optional_payload: Some(OptionalPayload::NewBlockingPanePayload(
@@ -1896,7 +1897,6 @@ impl TryFrom<Action> for ProtobufAction {
                 let command = run_command_action.and_then(|r| {
                     let mut protobuf_run_command_action: ProtobufRunCommandAction =
                         r.try_into().ok()?;
-                    let pane_name = pane_name.and_then(|n| n.try_into().ok());
                     protobuf_run_command_action.pane_name = pane_name;
                     Some(protobuf_run_command_action)
                 });

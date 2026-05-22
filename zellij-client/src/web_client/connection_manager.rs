@@ -41,8 +41,9 @@ impl ConnectionTable {
         client_id: &str,
         control_channel_tx: UnboundedSender<Message>,
     ) {
-        if let Some(c) = self.client_id_to_channels
-            .get_mut(client_id) { c.add_control_tx(control_channel_tx) }
+        if let Some(c) = self.client_id_to_channels.get_mut(client_id) {
+            c.add_control_tx(control_channel_tx)
+        }
     }
 
     pub fn add_client_terminal_tx(
@@ -50,8 +51,9 @@ impl ConnectionTable {
         client_id: &str,
         terminal_channel_tx: UnboundedSender<String>,
     ) {
-        if let Some(c) = self.client_id_to_channels
-            .get_mut(client_id) { c.add_terminal_tx(terminal_channel_tx) }
+        if let Some(c) = self.client_id_to_channels.get_mut(client_id) {
+            c.add_terminal_tx(terminal_channel_tx)
+        }
     }
 
     pub fn add_client_terminal_channel_cancellation_token(
@@ -59,11 +61,15 @@ impl ConnectionTable {
         client_id: &str,
         terminal_channel_cancellation_token: CancellationToken,
     ) {
-        if let Some(c) = self.client_id_to_channels.get_mut(client_id) { c.add_terminal_channel_cancellation_token(terminal_channel_cancellation_token) }
+        if let Some(c) = self.client_id_to_channels.get_mut(client_id) {
+            c.add_terminal_channel_cancellation_token(terminal_channel_cancellation_token)
+        }
     }
 
-    pub fn get_client_os_api(&self, client_id: &str) -> Option<&Box<dyn ClientOsApi>> {
-        self.client_id_to_channels.get(client_id).map(|c| &c.os_api)
+    pub fn get_client_os_api(&self, client_id: &str) -> Option<&dyn ClientOsApi> {
+        self.client_id_to_channels
+            .get(client_id)
+            .map(|c| c.os_api.as_ref())
     }
 
     pub fn get_client_terminal_tx(&self, client_id: &str) -> Option<UnboundedSender<String>> {

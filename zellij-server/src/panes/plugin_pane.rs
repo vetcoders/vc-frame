@@ -241,10 +241,7 @@ impl Pane for PluginPane {
         grid.reset_cursor_position();
         grid.render_full_viewport();
 
-        let vte_parser = self
-            .vte_parsers
-            .entry(client_id)
-            .or_default();
+        let vte_parser = self.vte_parsers.entry(client_id).or_default();
 
         for &byte in &vte_bytes {
             vte_parser.advance(grid, byte);

@@ -53,8 +53,7 @@ impl FromStr for ResizeDirection {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub enum SearchDirection {
     #[default]
     Down,
@@ -75,8 +74,7 @@ impl FromStr for SearchDirection {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-#[derive(Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub enum SearchOption {
     #[default]
     CaseSensitivity,
@@ -654,9 +652,6 @@ pub enum Action {
         direction: Direction,
     },
 }
-
-
-
 
 impl Action {
     /// Checks that two Action are match except their mutable attributes.
@@ -1261,9 +1256,7 @@ impl Action {
             } => {
                 let mut file = file;
                 let current_dir = get_current_dir();
-                let cwd = cwd
-                    .map(|cwd| current_dir.join(cwd))
-                    .or(Some(current_dir));
+                let cwd = cwd.map(|cwd| current_dir.join(cwd)).or(Some(current_dir));
                 if file.is_relative() {
                     if let Some(cwd) = cwd.as_ref() {
                         file = cwd.join(file);
@@ -1726,8 +1719,7 @@ impl Action {
                 .map_err(|e| {
                     let stringified_error = match e {
                         ConfigError::KdlError(kdl_error) => {
-                            let error = kdl_error
-                                .add_src(layout_source_name.clone(), raw_layout);
+                            let error = kdl_error.add_src(layout_source_name.clone(), raw_layout);
                             let report: Report = error.into();
                             format!("{:?}", report)
                         },
@@ -2182,8 +2174,9 @@ impl Action {
             | Action::NewTiledPane { command, .. }
             | Action::NewInPlacePane { command, .. }
             | Action::NewStackedPane { command, .. } => {
-                if let Some(c) = command
-                    .as_mut() { c.populate_originating_plugin(originating_plugin) }
+                if let Some(c) = command.as_mut() {
+                    c.populate_originating_plugin(originating_plugin)
+                }
             },
             Action::Run { command, .. } => {
                 command.populate_originating_plugin(originating_plugin);

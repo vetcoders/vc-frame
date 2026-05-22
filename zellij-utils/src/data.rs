@@ -351,7 +351,8 @@ impl BareKey {
             Ok("57424") => Some(BareKey::End),
             Ok("57425") => Some(BareKey::Insert),
             Ok("57426") => Some(BareKey::Delete),
-            Ok(num) => u32::from_str_radix(num, 10)
+            Ok(num) => num
+                .parse::<u32>()
                 .ok()
                 .and_then(char::from_u32)
                 .map(BareKey::Char),
@@ -417,7 +418,7 @@ impl KeyModifier {
     pub fn from_bytes(bytes: &[u8]) -> BTreeSet<KeyModifier> {
         let modifier_flags = str::from_utf8(bytes)
             .ok() // convert to string: (eg. "16")
-            .and_then(|s| u8::from_str_radix(s, 10).ok()) // convert to u8: (eg. 16)
+            .and_then(|s| s.parse::<u8>().ok()) // convert to u8: (eg. 16)
             .map(|s| s.saturating_sub(1)) // subtract 1: (eg. 15)
             .and_then(ModifierFlags::from_bits); // bitflags: (0b0000_1111: Shift, Alt, Control, Super)
         let mut key_modifiers = BTreeSet::new();
@@ -510,7 +511,7 @@ impl KeyWithModifier {
             _ => None,
         }
     }
-    pub fn strip_common_modifiers(&self, common_modifiers: &Vec<KeyModifier>) -> Self {
+    pub fn strip_common_modifiers(&self, common_modifiers: &[KeyModifier]) -> Self {
         let common_modifiers: BTreeSet<&KeyModifier> = common_modifiers.iter().collect();
         KeyWithModifier {
             bare_key: self.bare_key,
@@ -630,8 +631,9 @@ impl KeyWithModifier {
     }
 }
 
-#[derive(Eq, Clone, Copy, Debug, PartialEq, Hash, Deserialize, Serialize, PartialOrd, Ord)]
-#[derive(Default)]
+#[derive(
+    Eq, Clone, Copy, Debug, PartialEq, Hash, Deserialize, Serialize, PartialOrd, Ord, Default,
+)]
 pub enum Direction {
     #[default]
     Left,
@@ -639,7 +641,6 @@ pub enum Direction {
     Up,
     Down,
 }
-
 
 impl Direction {
     pub fn invert(&self) -> Direction {
@@ -688,14 +689,12 @@ impl FromStr for Direction {
 }
 
 /// Resize operation to perform.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Deserialize, Serialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Deserialize, Serialize, Default)]
 pub enum Resize {
     #[default]
     Increase,
     Decrease,
 }
-
 
 impl Resize {
     pub fn invert(&self) -> Self {
@@ -1133,8 +1132,8 @@ impl PluginPermission {
     ArgEnum,
     PartialOrd,
     Ord,
+    Default,
 )]
-#[derive(Default)]
 pub enum InputMode {
     /// In `Normal` mode, input is always written to the terminal, except for the shortcuts leading
     /// to other modes
@@ -1183,9 +1182,7 @@ pub enum InputMode {
     Tmux,
 }
 
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 pub enum ThemeHue {
     Light,
     #[default]
@@ -1207,15 +1204,15 @@ impl Default for PaletteColor {
 /// Higher-priority layers take visual precedence over lower ones
 /// when highlights overlap.  Built-in highlights (mouse selection,
 /// search results) always take precedence over all plugin layers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default,
+)]
 pub enum HighlightLayer {
     #[default]
-    Hint,           // lowest: pure pattern matching (paths, URLs, IPs)
+    Hint, // lowest: pure pattern matching (paths, URLs, IPs)
     Tool,           // middle: backed by runtime domain knowledge (git, docker, k8s)
     ActionFeedback, // highest: result of an explicit user action (search, bookmarks)
 }
-
 
 /// Style for a plugin-supplied regex highlight.
 /// Theme-based variants reference `style.colors.text_unselected.*`.
@@ -1320,8 +1317,7 @@ impl FromStr for InputMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 pub enum PaletteSource {
     #[default]
     Default,
@@ -2205,9 +2201,7 @@ impl LayoutInfo {
             // Attempt to interpret the layout as bare layout name from the layout application
             // directory. This is described in the docs:
             // <https://zellij.dev/documentation/layouts.html#layout-default-directory>
-            if let Some(layout_dir) = layout_dir.clone()
-                .or_else(default_layout_dir)
-            {
+            if let Some(layout_dir) = layout_dir.clone().or_else(default_layout_dir) {
                 let file_path = layout_dir.join(&layout_path);
                 if file_path.exists() {
                     return Some(LayoutInfo::File(
@@ -2244,11 +2238,7 @@ impl LayoutInfo {
         if layout_path.starts_with("http://") || layout_path.starts_with("https://") {
             Some(LayoutInfo::Url(layout_path.display().to_string()))
         } else if layout_path.extension().is_some() || layout_path.components().count() > 1 {
-            let Some(layout_dir) = layout_dir.clone()
-                .or_else(default_layout_dir)
-            else {
-                return None;
-            };
+            let layout_dir = layout_dir.clone().or_else(default_layout_dir)?;
             let file_path = layout_dir.join(layout_path);
             Some(LayoutInfo::File(
                 // layout_dir.join(layout_path).display().to_string(),
@@ -2259,9 +2249,7 @@ impl LayoutInfo {
             // Attempt to interpret the layout as bare layout name from the layout application
             // directory. This is described in the docs:
             // <https://zellij.dev/documentation/layouts.html#layout-default-directory>
-            if let Some(layout_dir) = layout_dir.clone()
-                .or_else(default_layout_dir)
-            {
+            if let Some(layout_dir) = layout_dir.clone().or_else(default_layout_dir) {
                 let file_path = layout_dir.join(&layout_path);
                 if file_path.exists() {
                     return Some(LayoutInfo::File(
@@ -2483,10 +2471,7 @@ impl PaneRenderReport {
         pane_contents: PaneContents,
     ) {
         for client_id in client_ids {
-            let p = self
-                .all_pane_contents
-                .entry(*client_id)
-                .or_default();
+            let p = self.all_pane_contents.entry(*client_id).or_default();
             p.insert(pane_id, pane_contents.clone());
         }
     }
@@ -2922,15 +2907,18 @@ impl FromStr for PaneId {
     type Err = Box<dyn std::error::Error>;
     fn from_str(stringified_pane_id: &str) -> Result<Self, Self::Err> {
         if let Some(terminal_stringified_pane_id) = stringified_pane_id.strip_prefix("terminal_") {
-            u32::from_str_radix(terminal_stringified_pane_id, 10)
+            terminal_stringified_pane_id
+                .parse::<u32>()
                 .map(PaneId::Terminal)
                 .map_err(|e| e.into())
         } else if let Some(plugin_pane_id) = stringified_pane_id.strip_prefix("plugin_") {
-            u32::from_str_radix(plugin_pane_id, 10)
+            plugin_pane_id
+                .parse::<u32>()
                 .map(PaneId::Plugin)
                 .map_err(|e| e.into())
         } else {
-            u32::from_str_radix(stringified_pane_id, 10)
+            stringified_pane_id
+                .parse::<u32>()
                 .map(PaneId::Terminal)
                 .map_err(|e| e.into())
         }
@@ -3031,7 +3019,7 @@ pub struct ConnectToSession {
 }
 
 impl ConnectToSession {
-    pub fn apply_layout_dir(&mut self, layout_dir: &PathBuf) {
+    pub fn apply_layout_dir(&mut self, layout_dir: &Path) {
         if let Some(LayoutInfo::File(file_path, _layout_metadata)) = self.layout.as_mut() {
             *file_path = Path::join(layout_dir, &file_path)
                 .to_string_lossy()
@@ -3248,8 +3236,7 @@ impl OriginatingPlugin {
     }
 }
 
-#[derive(ArgEnum, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(ArgEnum, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WebSharing {
     #[serde(alias = "on")]
     On,
@@ -3260,25 +3247,15 @@ pub enum WebSharing {
     Disabled,
 }
 
-
 impl WebSharing {
     pub fn is_on(&self) -> bool {
-        match self {
-            WebSharing::On => true,
-            _ => false,
-        }
+        matches!(self, WebSharing::On)
     }
     pub fn web_clients_allowed(&self) -> bool {
-        match self {
-            WebSharing::On => true,
-            _ => false,
-        }
+        matches!(self, WebSharing::On)
     }
     pub fn sharing_is_disabled(&self) -> bool {
-        match self {
-            WebSharing::Disabled => true,
-            _ => false,
-        }
+        matches!(self, WebSharing::Disabled)
     }
     pub fn set_sharing(&mut self) -> bool {
         // returns true if successfully set sharing
@@ -3390,10 +3367,7 @@ impl NewPanePlacement {
         }
     }
     pub fn should_stack(&self) -> bool {
-        match self {
-            NewPanePlacement::Stacked { .. } => true,
-            _ => false,
-        }
+        matches!(self, NewPanePlacement::Stacked { .. })
     }
     pub fn id_of_stack_root(&self) -> Option<PaneId> {
         match self {
@@ -3625,7 +3599,7 @@ pub enum PluginCommand {
     ClearKeyPressesIntercepts,
     ReplacePaneWithExistingPane(PaneId, PaneId, bool), // (pane id to replace, pane id of existing,
     // suppress_replaced_pane)
-    RunAction(Action, BTreeMap<String, String>),
+    RunAction(Box<Action>, BTreeMap<String, String>),
     CopyToClipboard(String), // text to copy
     OverrideLayout(
         LayoutInfo,

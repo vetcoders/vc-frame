@@ -215,10 +215,12 @@ impl RebindLeadersScreen {
                 if self.selected_primary_key_index < POSSIBLE_MODIFIERS.len().saturating_sub(1) {
                     self.selected_primary_key_index += 1;
                 }
-            } else if key.bare_key == BareKey::Up && key.has_no_modifiers()
-                && self.selected_primary_key_index > 0 {
-                    self.selected_primary_key_index -= 1;
-                }
+            } else if key.bare_key == BareKey::Up
+                && key.has_no_modifiers()
+                && self.selected_primary_key_index > 0
+            {
+                self.selected_primary_key_index -= 1;
+            }
         } else if self.browsing_secondary_modifier {
             if key.bare_key == BareKey::Left && key.has_no_modifiers() {
                 self.browsing_secondary_modifier = false;
@@ -232,10 +234,12 @@ impl RebindLeadersScreen {
                 if self.selected_secondary_key_index < POSSIBLE_MODIFIERS.len().saturating_sub(1) {
                     self.selected_secondary_key_index += 1;
                 }
-            } else if key.bare_key == BareKey::Up && key.has_no_modifiers()
-                && self.selected_secondary_key_index > 0 {
-                    self.selected_secondary_key_index -= 1;
-                }
+            } else if key.bare_key == BareKey::Up
+                && key.has_no_modifiers()
+                && self.selected_secondary_key_index > 0
+            {
+                self.selected_secondary_key_index -= 1;
+            }
         } else {
             self.set_primary_modifier_selected();
         }

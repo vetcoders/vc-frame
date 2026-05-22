@@ -52,19 +52,21 @@ pub fn start_cli_client(
             } => {
                 pipe_client(
                     &mut os_input,
-                    pipe_id,
-                    name,
-                    payload,
-                    plugin,
-                    args,
-                    configuration,
-                    launch_new,
-                    skip_cache,
-                    floating,
-                    in_place,
-                    pane_id,
-                    cwd,
-                    pane_title,
+                    PipeClientParams {
+                        pipe_id,
+                        name,
+                        payload,
+                        plugin,
+                        args,
+                        configuration,
+                        launch_new,
+                        skip_cache,
+                        floating,
+                        in_place,
+                        pane_id,
+                        cwd,
+                        pane_title,
+                    },
                 );
             },
             action => {
@@ -75,14 +77,13 @@ pub fn start_cli_client(
     os_input.send_to_server(ClientToServerMsg::ClientExited);
 }
 
-fn pipe_client(
-    os_input: &mut Box<dyn ClientOsApi>,
+struct PipeClientParams {
     pipe_id: String,
-    mut name: Option<String>,
-    mut payload: Option<String>,
+    name: Option<String>,
+    payload: Option<String>,
     plugin: Option<String>,
     args: Option<BTreeMap<String, String>>,
-    mut configuration: Option<BTreeMap<String, String>>,
+    configuration: Option<BTreeMap<String, String>>,
     launch_new: bool,
     skip_cache: bool,
     floating: Option<bool>,
@@ -90,7 +91,24 @@ fn pipe_client(
     pane_id: Option<u32>,
     cwd: Option<PathBuf>,
     pane_title: Option<String>,
-) {
+}
+
+fn pipe_client(os_input: &mut Box<dyn ClientOsApi>, params: PipeClientParams) {
+    let PipeClientParams {
+        pipe_id,
+        mut name,
+        mut payload,
+        plugin,
+        args,
+        mut configuration,
+        launch_new,
+        skip_cache,
+        floating,
+        in_place,
+        pane_id,
+        cwd,
+        pane_title,
+    } = params;
     let mut stdin = os_input.get_stdin_reader();
     let name = name
         // first we try to take the explicitly supplied message name
@@ -156,17 +174,17 @@ fn pipe_client(
         loop {
             // wait for a response and act accordingly
             match os_input.recv_from_server() {
-                Some((ServerToClientMsg::UnblockCliPipeInput { pipe_name }, _)) => {
+                Some((ServerToClientMsg::UnblockCliPipeInput { pipe_name }, _))
+                    if pipe_name == pipe_id =>
+                {
                     // unblock this pipe, meaning we need to stop waiting for a response and read
                     // once more from STDIN
-                    if pipe_name == pipe_id {
-                        if !is_piped {
-                            // if this client is not piped, we need to exit the process completely
-                            // rather than wait for more data
-                            process::exit(0);
-                        } else {
-                            break;
-                        }
+                    if !is_piped {
+                        // if this client is not piped, we need to exit the process completely
+                        // rather than wait for more data
+                        process::exit(0);
+                    } else {
+                        break;
                     }
                 },
                 Some((ServerToClientMsg::CliPipeOutput { pipe_name, output }, _)) => {

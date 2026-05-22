@@ -29,9 +29,11 @@ fn background_color(characters: &str, color: Option<PaletteColor>) -> Vec<Termin
     let mut colored_string = Vec::new();
     for character in characters.chars() {
         let mut styles = RcCharacterStyles::reset();
-        styles.update(|styles| if let Some(palette_color) = color {
-            styles.background = Some(AnsiCode::from(palette_color));
-            styles.bold(Some(AnsiCode::On));
+        styles.update(|styles| {
+            if let Some(palette_color) = color {
+                styles.background = Some(AnsiCode::from(palette_color));
+                styles.bold(Some(AnsiCode::On));
+            }
         });
         let terminal_character = TerminalCharacter::new_styled(character, styles);
         colored_string.push(terminal_character);

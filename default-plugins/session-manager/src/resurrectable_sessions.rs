@@ -275,8 +275,7 @@ impl ResurrectableSessions {
         let mut matches = vec![];
         let matcher = SkimMatcherV2::default().use_cache(true);
         for (session_name, ctime) in &self.all_resurrectable_sessions {
-            if let Some((score, indices)) = matcher.fuzzy_indices(session_name, &self.search_term)
-            {
+            if let Some((score, indices)) = matcher.fuzzy_indices(session_name, &self.search_term) {
                 matches.push(SearchResult {
                     session_name: session_name.to_owned(),
                     ctime: *ctime,

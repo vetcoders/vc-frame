@@ -171,8 +171,7 @@ impl UiSpan {
 }
 
 #[allow(dead_code)] // in the future this will be moved to be its own component
-#[derive(Debug)]
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub enum SpanStyle {
     #[default]
     None,
@@ -205,7 +204,6 @@ impl SpanStyle {
         }
     }
 }
-
 
 #[derive(Debug, Default)]
 pub struct TruncatableUiSpan {
@@ -423,10 +421,7 @@ pub fn build_session_ui_line(session_ui_info: &SessionUiInfo, colors: Colors) ->
     ui_spans.push(connected_users_count);
     if session_ui_info.is_current_session {
         let current_session_indication = UiSpan::UiSpanTelescope(UiSpanTelescope::new(vec![
-            StringAndLength::new(
-                colors.current_session_marker(" <CURRENT SESSION>"),
-                18,
-            ),
+            StringAndLength::new(colors.current_session_marker(" <CURRENT SESSION>"), 18),
             StringAndLength::new(colors.current_session_marker(" <CURRENT>"), 10),
             StringAndLength::new(colors.current_session_marker(" <C>"), 4),
         ]));
@@ -471,7 +466,7 @@ pub fn build_pane_ui_line(pane_ui_info: &PaneUiInfo, colors: Colors) -> Vec<UiSp
     let pane_name = pane_ui_info.name.clone();
     let exit_code = pane_ui_info.exit_code.map(|exit_code_number| {
         let exit_code = format!("{}", exit_code_number);
-        
+
         if exit_code_number == 0 {
             colors.session_and_folder_entry(&exit_code)
         } else {

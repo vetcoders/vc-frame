@@ -52,7 +52,7 @@ async fn handle_ws_control(
     session_token_hash: SessionTokenHash,
 ) {
     let payload = SetConfigPayload::from(&*state.config.lock().unwrap());
-    let set_config_msg = WebServerToWebClientControlMessage::SetConfig(payload);
+    let set_config_msg = WebServerToWebClientControlMessage::SetConfig(Box::new(payload));
 
     let (control_socket_tx, mut control_socket_rx) = socket.split();
 

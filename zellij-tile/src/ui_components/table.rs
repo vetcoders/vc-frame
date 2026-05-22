@@ -27,7 +27,8 @@ impl Table {
     }
     pub fn serialize(&self) -> String {
         let columns = self
-            .contents.first()
+            .contents
+            .first()
             .map(|first_row| first_row.len())
             .unwrap_or(0);
         let rows = self.contents.len();

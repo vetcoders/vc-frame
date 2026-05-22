@@ -474,10 +474,7 @@ impl ServerOsApi for ServerOsInputOutput {
     fn get_all_cmds_by_ppid(&self, post_hook: &Option<String>) -> HashMap<String, Vec<String>> {
         // the key is the stringified ppid
         let mut cmds = HashMap::new();
-        if let Ok(output) = Command::new("ps")
-            .args(vec!["-ao", "ppid,args"])
-            .output()
-        {
+        if let Ok(output) = Command::new("ps").args(vec!["-ao", "ppid,args"]).output() {
             let output = String::from_utf8(output.stdout.clone())
                 .unwrap_or_else(|_| String::from_utf8_lossy(&output.stdout).to_string());
             for line in output.lines() {

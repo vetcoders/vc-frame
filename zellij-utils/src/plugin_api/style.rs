@@ -30,7 +30,7 @@ impl TryFrom<Style> for ProtobufStyle {
     type Error = &'static str;
     fn try_from(style: Style) -> Result<Self, &'static str> {
         let s = ProtobufStyling::try_from(style.colors)?;
-        let palette = Palette::try_from(style.colors).map_err(|_| "malformed style payload")?;
+        let palette = Palette::from(style.colors);
         Ok(ProtobufStyle {
             palette: Some(palette.try_into()?),
             rounded_corners: style.rounded_corners,
@@ -300,7 +300,6 @@ impl TryFrom<Palette> for ProtobufPalette {
             silver: Some(palette.silver.try_into()?),
             pink: Some(palette.pink.try_into()?),
             brown: Some(palette.brown.try_into()?),
-            ..Default::default()
         })
     }
 }

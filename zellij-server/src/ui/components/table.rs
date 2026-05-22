@@ -105,10 +105,7 @@ fn stringify_table_rows(
         row_width += max_column_width + 1;
         for (row_index, mut cell) in column.into_iter().enumerate() {
             cell.pad_text(max_column_width);
-            stringified_rows
-                .entry(row_index)
-                .or_default()
-                .push(cell);
+            stringified_rows.entry(row_index).or_default().push(cell);
         }
     }
     stringified_rows

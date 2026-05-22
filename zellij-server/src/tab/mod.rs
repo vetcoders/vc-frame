@@ -513,7 +513,6 @@ pub trait Pane {
     }
     // TODO: get rid of this in favor of intercept_mouse_event_on_frame
     fn intercept_left_mouse_click(&mut self, _position: &Position, _client_id: ClientId) -> bool {
-        
         false
     }
     fn intercept_mouse_event_on_frame(
@@ -521,7 +520,6 @@ pub trait Pane {
         _event: &MouseEvent,
         _client_id: ClientId,
     ) -> bool {
-        
         false
     }
     fn store_pane_name(&mut self);
@@ -1307,9 +1305,9 @@ impl Tab {
     }
     pub fn remove_client(&mut self, client_id: ClientId) {
         self.focus_pane_id = None;
-        if let Some(c) = self.mode_info
-            .borrow_mut()
-            .get_mut(&client_id) { c.change_to_default_mode() } // TODO: no races?
+        if let Some(c) = self.mode_info.borrow_mut().get_mut(&client_id) {
+            c.change_to_default_mode()
+        } // TODO: no races?
         self.connected_clients.borrow_mut().remove(&client_id);
         self.mouse_help_text_visible.remove(&client_id);
         self.last_mouse_activity_time.remove(&client_id);
@@ -4330,14 +4328,16 @@ impl Tab {
         }
     }
     pub fn get_dump_terminal_screen(&mut self, pane_id: PaneId, full: bool) -> Option<String> {
-        self.get_pane_with_id(pane_id).map(|pane| pane.dump_screen(full, None))
+        self.get_pane_with_id(pane_id)
+            .map(|pane| pane.dump_screen(full, None))
     }
     pub fn get_dump_with_ansi_terminal_screen(
         &mut self,
         pane_id: PaneId,
         full: bool,
     ) -> Option<String> {
-        self.get_pane_with_id(pane_id).map(|pane| pane.dump_screen_with_ansi(full, None))
+        self.get_pane_with_id(pane_id)
+            .map(|pane| pane.dump_screen_with_ansi(full, None))
     }
     pub fn edit_scrollback(
         &mut self,
@@ -4776,9 +4776,8 @@ impl Tab {
                     .and_then(|serialized_output| {
                         self.senders
                             .send_to_server(ServerInstruction::Render(Some(serialized_output)))
-                    }).map(|_| Event::CopyToClipboard(
-                            self.clipboard_provider.as_copy_destination(),
-                        ))
+                    })
+                    .map(|_| Event::CopyToClipboard(self.clipboard_provider.as_copy_destination()))
                     .with_context(err_context)?,
                 Err(err) => {
                     Err::<(), _>(err).with_context(err_context).non_fatal();
@@ -5352,7 +5351,8 @@ impl Tab {
                 }
             },
             None => {
-                let expand_panes_success = !self.tiled_panes.expand_pane_in_stack(pane_id).is_empty();
+                let expand_panes_success =
+                    !self.tiled_panes.expand_pane_in_stack(pane_id).is_empty();
                 if !expand_panes_success {
                     log::error!(
                         "Could not find suppressed or stacked pane with id: {:?}",
@@ -6179,7 +6179,10 @@ pub fn pane_info_for_pane(
     let index_in_pane_group: BTreeMap<ClientId, usize> = current_pane_group
         .iter()
         .filter_map(|(client_id, pane_ids)| {
-            pane_ids.iter().position(|p_id| p_id == &pane.pid()).map(|position| (*client_id, position))
+            pane_ids
+                .iter()
+                .position(|p_id| p_id == &pane.pid())
+                .map(|position| (*client_id, position))
         })
         .collect();
     pane_info.index_in_pane_group = index_in_pane_group;

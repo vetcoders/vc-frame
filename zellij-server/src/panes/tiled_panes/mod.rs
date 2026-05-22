@@ -397,13 +397,7 @@ impl TiledPanes {
                         pane.set_geom(new_pane_geom);
                         self.panes.insert(pane_id, pane); // TODO: is set_geom the right one?
                     },
-                    Err(_e) => {
-                        self.add_pane_without_stacked_resize(
-                            pane_id,
-                            pane,
-                            should_relayout,
-                        )
-                    },
+                    Err(_e) => self.add_pane_without_stacked_resize(pane_id, pane, should_relayout),
                 }
             },
         }
@@ -537,7 +531,8 @@ impl TiledPanes {
             SplitDirection::Vertical => {
                 pane_grid.layout(direction, self.display_area.borrow().rows)
             },
-        }.map_err(|e| anyError::msg(e))
+        }
+        .map_err(|e| anyError::msg(e))
         .with_context(|| format!("{:?} relayout of tab failed", direction))
         .non_fatal();
 
@@ -1355,8 +1350,9 @@ impl TiledPanes {
         // true - successfully resized
         let mut strategy = ResizeStrategy::new(Resize::Increase, Some(Direction::Up));
         strategy.invert_on_boundaries = false;
-        let successfully_resized_up =
-            self.resize_pane_with_id(strategy, pane_id, Some(resize_percent)).is_ok();
+        let successfully_resized_up = self
+            .resize_pane_with_id(strategy, pane_id, Some(resize_percent))
+            .is_ok();
         if successfully_resized_up {
             return true;
         } else {
@@ -1382,8 +1378,9 @@ impl TiledPanes {
         // true - successfully resized
         let mut strategy = ResizeStrategy::new(Resize::Increase, Some(Direction::Down));
         strategy.invert_on_boundaries = false;
-        let successfully_resized_up =
-            self.resize_pane_with_id(strategy, pane_id, Some(resize_percent)).is_ok();
+        let successfully_resized_up = self
+            .resize_pane_with_id(strategy, pane_id, Some(resize_percent))
+            .is_ok();
         if successfully_resized_up {
             return true;
         } else {
@@ -1409,8 +1406,9 @@ impl TiledPanes {
         // true - successfully resized
         let mut strategy = ResizeStrategy::new(Resize::Increase, Some(Direction::Left));
         strategy.invert_on_boundaries = false;
-        let successfully_resized_up =
-            self.resize_pane_with_id(strategy, pane_id, Some(resize_percent)).is_ok();
+        let successfully_resized_up = self
+            .resize_pane_with_id(strategy, pane_id, Some(resize_percent))
+            .is_ok();
         if successfully_resized_up {
             return true;
         } else {
@@ -1436,8 +1434,9 @@ impl TiledPanes {
         // true - successfully resized
         let mut strategy = ResizeStrategy::new(Resize::Increase, Some(Direction::Right));
         strategy.invert_on_boundaries = false;
-        let successfully_resized_up =
-            self.resize_pane_with_id(strategy, pane_id, Some(resize_percent)).is_ok();
+        let successfully_resized_up = self
+            .resize_pane_with_id(strategy, pane_id, Some(resize_percent))
+            .is_ok();
         if successfully_resized_up {
             return true;
         } else {
@@ -1544,8 +1543,9 @@ impl TiledPanes {
                         if let Some(last_state) = tombstone_pane_state.pop() {
                             if last_state.len() == self.panes.len() {
                                 for (pane_id, pane_geom) in last_state {
-                                    if let Some(pane) = self.panes
-                                        .get_mut(&pane_id) { pane.set_geom(pane_geom) }
+                                    if let Some(pane) = self.panes.get_mut(&pane_id) {
+                                        pane.set_geom(pane_geom)
+                                    }
                                 }
                                 self.reapply_pane_frames();
                                 return Ok(true);
@@ -1582,25 +1582,29 @@ impl TiledPanes {
                     )
                 };
                 if !direct_neighboring_pane_ids_above.is_empty()
-                    && self.resize_or_stack_pane_up(pane_id, resize_percent) {
-                        self.update_tombstones_before_increase(pane_id, current_pane_state);
-                        return Ok(true);
-                    }
+                    && self.resize_or_stack_pane_up(pane_id, resize_percent)
+                {
+                    self.update_tombstones_before_increase(pane_id, current_pane_state);
+                    return Ok(true);
+                }
                 if !direct_neighboring_pane_ids_below.is_empty()
-                    && self.resize_or_stack_pane_down(pane_id, resize_percent) {
-                        self.update_tombstones_before_increase(pane_id, current_pane_state);
-                        return Ok(true);
-                    }
+                    && self.resize_or_stack_pane_down(pane_id, resize_percent)
+                {
+                    self.update_tombstones_before_increase(pane_id, current_pane_state);
+                    return Ok(true);
+                }
                 if !direct_neighboring_pane_ids_to_the_left.is_empty()
-                    && self.resize_or_stack_pane_left(pane_id, resize_percent) {
-                        self.update_tombstones_before_increase(pane_id, current_pane_state);
-                        return Ok(true);
-                    }
+                    && self.resize_or_stack_pane_left(pane_id, resize_percent)
+                {
+                    self.update_tombstones_before_increase(pane_id, current_pane_state);
+                    return Ok(true);
+                }
                 if !direct_neighboring_pane_ids_to_the_right.is_empty()
-                    && self.resize_or_stack_pane_right(pane_id, resize_percent) {
-                        self.update_tombstones_before_increase(pane_id, current_pane_state);
-                        return Ok(true);
-                    }
+                    && self.resize_or_stack_pane_right(pane_id, resize_percent)
+                {
+                    self.update_tombstones_before_increase(pane_id, current_pane_state);
+                    return Ok(true);
+                }
                 // normal resize if we can't do anything...
                 match self.resize_pane_with_id(*strategy, pane_id, None) {
                     Ok(size_changed) => {
@@ -1630,8 +1634,9 @@ impl TiledPanes {
                         if let Some(last_state) = tombstone_pane_state.pop() {
                             if last_state.len() == self.panes.len() {
                                 for (pane_id, pane_geom) in last_state {
-                                    if let Some(pane) = self.panes
-                                        .get_mut(&pane_id) { pane.set_geom(pane_geom) }
+                                    if let Some(pane) = self.panes.get_mut(&pane_id) {
+                                        pane.set_geom(pane_geom)
+                                    }
                                 }
                                 self.reapply_pane_frames();
                                 return Ok(true);
@@ -2463,8 +2468,9 @@ impl TiledPanes {
         is_first_run: bool,
         run_command: RunCommand,
     ) {
-        if let Some(p) = self.panes
-            .get_mut(&pane_id) { p.hold(exit_status, is_first_run, run_command) }
+        if let Some(p) = self.panes.get_mut(&pane_id) {
+            p.hold(exit_status, is_first_run, run_command)
+        }
     }
     pub fn panes_to_hide_contains(&self, pane_id: PaneId) -> bool {
         self.panes_to_hide.contains(&pane_id)

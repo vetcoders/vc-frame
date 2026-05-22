@@ -588,9 +588,7 @@ mod web_client_tests {
             }),
         };
         control_sink
-            .send(Message::Text(
-                serde_json::to_string(&resize_msg).unwrap(),
-            ))
+            .send(Message::Text(serde_json::to_string(&resize_msg).unwrap()))
             .await
             .expect("Failed to send TerminalResize");
 

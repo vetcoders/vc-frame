@@ -125,11 +125,7 @@ pub fn start_web_client(
         let tls_config = match (web_server_cert, web_server_key) {
             (Some(web_server_cert), Some(web_server_key)) => {
                 let tls_config = runtime.block_on(async move {
-                    RustlsConfig::from_pem_file(
-                        web_server_cert,
-                        web_server_key,
-                    )
-                    .await
+                    RustlsConfig::from_pem_file(web_server_cert, web_server_key).await
                 });
                 let tls_config = match tls_config {
                     Ok(tls_config) => tls_config,
@@ -186,8 +182,7 @@ pub async fn serve_web_client(
     web_server_ip: IpAddr,
     web_server_port: u16,
 ) {
-    let Some(config_file_path) = config_file_path.or_else(Config::default_config_file_path)
-    else {
+    let Some(config_file_path) = config_file_path.or_else(Config::default_config_file_path) else {
         log::error!("Failed to find default config file path");
         return;
     };
@@ -305,11 +300,7 @@ fn daemonize_web_server(
                 let tls_config = match (web_server_cert, web_server_key) {
                     (Some(web_server_cert), Some(web_server_key)) => {
                         let tls_config = runtime.block_on(async move {
-                            RustlsConfig::from_pem_file(
-                                web_server_cert,
-                                web_server_key,
-                            )
-                            .await
+                            RustlsConfig::from_pem_file(web_server_cert, web_server_key).await
                         });
                         let tls_config = match tls_config {
                             Ok(tls_config) => tls_config,

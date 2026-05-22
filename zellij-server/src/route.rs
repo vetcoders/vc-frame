@@ -2932,10 +2932,7 @@ fn extract_command(entry: &PaneListEntry) -> String {
 }
 
 fn extract_cwd(entry: &PaneListEntry) -> String {
-    entry
-        .pane_cwd.as_deref()
-        .unwrap_or("-")
-        .to_string()
+    entry.pane_cwd.as_deref().unwrap_or("-").to_string()
 }
 
 fn format_tabs_as_json(tab_infos: &[TabInfo]) -> Vec<String> {

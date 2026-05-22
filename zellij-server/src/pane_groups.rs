@@ -36,7 +36,9 @@ impl PaneGroups {
             .unwrap_or_default()
     }
     pub fn clear_pane_group(&mut self, client_id: &ClientId) {
-        if let Some(p) = self.panes_in_group.get_mut(client_id) { p.clear() }
+        if let Some(p) = self.panes_in_group.get_mut(client_id) {
+            p.clear()
+        }
     }
     pub fn toggle_pane_id_in_group(
         &mut self,
@@ -45,10 +47,7 @@ impl PaneGroups {
         client_id: &ClientId,
     ) {
         let previous_groups = self.clone_inner();
-        let client_pane_group = self
-            .panes_in_group
-            .entry(*client_id)
-            .or_default();
+        let client_pane_group = self.panes_in_group.entry(*client_id).or_default();
         if client_pane_group.contains(&pane_id) {
             client_pane_group.retain(|p| p != &pane_id);
         } else {
@@ -65,10 +64,7 @@ impl PaneGroups {
         client_id: &ClientId,
     ) {
         let previous_groups = self.clone_inner();
-        let client_pane_group = self
-            .panes_in_group
-            .entry(*client_id)
-            .or_default();
+        let client_pane_group = self.panes_in_group.entry(*client_id).or_default();
         if !client_pane_group.contains(&pane_id) {
             client_pane_group.push(pane_id);
         }
@@ -84,10 +80,7 @@ impl PaneGroups {
         client_id: &ClientId,
     ) {
         let previous_groups = self.clone_inner();
-        let client_pane_group = self
-            .panes_in_group
-            .entry(*client_id)
-            .or_default();
+        let client_pane_group = self.panes_in_group.entry(*client_id).or_default();
         client_pane_group.append(&mut pane_ids_to_group);
         client_pane_group.retain(|p| !pane_ids_to_ungroup.contains(p));
         if self.should_launch_plugin(&previous_groups, client_id) {
@@ -105,10 +98,7 @@ impl PaneGroups {
         let all_connected_clients: Vec<ClientId> = self.panes_in_group.keys().copied().collect();
 
         for client_id in &all_connected_clients {
-            let client_pane_group = self
-                .panes_in_group
-                .entry(*client_id)
-                .or_default();
+            let client_pane_group = self.panes_in_group.entry(*client_id).or_default();
             client_pane_group.append(&mut pane_ids_to_group.clone());
             client_pane_group.retain(|p| !pane_ids_to_ungroup.contains(p));
 

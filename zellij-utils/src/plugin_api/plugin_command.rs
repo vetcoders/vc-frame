@@ -821,9 +821,9 @@ impl TryFrom<ProtobufPluginCommand> for PluginCommand {
                 _ => Err("Mismatched payload for OpenCommandPaneFloating"),
             },
             Some(CommandName::SwitchTabTo) => match protobuf_plugin_command.payload {
-                Some(Payload::SwitchTabToPayload(switch_to_tab_payload)) => Ok(
-                    PluginCommand::SwitchTabTo(switch_to_tab_payload.tab_index),
-                ),
+                Some(Payload::SwitchTabToPayload(switch_to_tab_payload)) => {
+                    Ok(PluginCommand::SwitchTabTo(switch_to_tab_payload.tab_index))
+                },
                 _ => Err("Mismatched payload for SwitchToTab"),
             },
             Some(CommandName::SetTimeout) => match protobuf_plugin_command.payload {
@@ -1120,9 +1120,7 @@ impl TryFrom<ProtobufPluginCommand> for PluginCommand {
                 _ => Err("Mismatched payload for FocusOrCreateTab"),
             },
             Some(CommandName::GoToTab) => match protobuf_plugin_command.payload {
-                Some(Payload::GoToTabPayload(tab_index)) => {
-                    Ok(PluginCommand::GoToTab(tab_index))
-                },
+                Some(Payload::GoToTabPayload(tab_index)) => Ok(PluginCommand::GoToTab(tab_index)),
                 _ => Err("Mismatched payload for GoToTab"),
             },
             Some(CommandName::StartOrReloadPlugin) => match protobuf_plugin_command.payload {
@@ -1385,7 +1383,8 @@ impl TryFrom<ProtobufPluginCommand> for PluginCommand {
                         message_name,
                         message_payload,
                         message_args,
-                        new_plugin_args: new_plugin_args.map(|protobuf_new_plugin_args| NewPluginArgs {
+                        new_plugin_args: new_plugin_args.map(|protobuf_new_plugin_args| {
+                            NewPluginArgs {
                                 should_float: protobuf_new_plugin_args.should_float,
                                 pane_id_to_replace: protobuf_new_plugin_args
                                     .pane_id_to_replace
@@ -1394,10 +1393,10 @@ impl TryFrom<ProtobufPluginCommand> for PluginCommand {
                                 cwd: protobuf_new_plugin_args.cwd.map(PathBuf::from),
                                 skip_cache: protobuf_new_plugin_args.skip_cache,
                                 should_focus: protobuf_new_plugin_args.should_focus,
-                            }),
+                            }
+                        }),
                         destination_plugin_id,
-                        floating_pane_coordinates: floating_pane_coordinates
-                            .and_then(|f| f.try_into().ok()),
+                        floating_pane_coordinates: floating_pane_coordinates.map(Into::into),
                     }))
                 },
                 _ => Err("Mismatched payload for MessageToPlugin"),
@@ -1984,7 +1983,7 @@ impl TryFrom<ProtobufPluginCommand> for PluginCommand {
                             .filter_map(|p_id_a_fp| {
                                 let pane_id: PaneId = p_id_a_fp.pane_id?.try_into().ok()?;
                                 let floating_pane_coordinates: FloatingPaneCoordinates =
-                                    p_id_a_fp.floating_pane_coordinates?.try_into().ok()?;
+                                    p_id_a_fp.floating_pane_coordinates?.into();
                                 Some((pane_id, floating_pane_coordinates))
                             })
                             .collect(),
@@ -2372,6 +2371,7 @@ impl TryFrom<ProtobufPluginCommand> for PluginCommand {
             },
             Some(CommandName::RunAction) => match protobuf_plugin_command.payload {
                 Some(Payload::RunActionPayload(protobuf_payload)) => {
+                    let protobuf_payload = *protobuf_payload;
                     let action = Action::try_from(
                         protobuf_payload
                             .action
@@ -2385,7 +2385,7 @@ impl TryFrom<ProtobufPluginCommand> for PluginCommand {
                         .map(|item| (item.name, item.value))
                         .collect();
 
-                    Ok(PluginCommand::RunAction(action, context))
+                    Ok(PluginCommand::RunAction(Box::new(action), context))
                 },
                 _ => Err("Mismatched payload for RunAction"),
             },
@@ -3263,7 +3263,7 @@ impl TryFrom<PluginCommand> for ProtobufPluginCommand {
                         destination_plugin_id: message_to_plugin.destination_plugin_id,
                         floating_pane_coordinates: message_to_plugin
                             .floating_pane_coordinates
-                            .and_then(|f| f.try_into().ok()),
+                            .map(Into::into),
                     })),
                 })
             },
@@ -3779,7 +3779,7 @@ impl TryFrom<PluginCommand> for ProtobufPluginCommand {
                                     Some(PaneIdAndFloatingPaneCoordinates {
                                         pane_id: Some(p_id.try_into().ok()?),
                                         floating_pane_coordinates: Some(
-                                            floating_pane_coordinates.try_into().ok()?,
+                                            floating_pane_coordinates.into(),
                                         ),
                                     })
                                 })
@@ -4087,7 +4087,7 @@ impl TryFrom<PluginCommand> for ProtobufPluginCommand {
                 )),
             }),
             PluginCommand::RunAction(action, context) => {
-                let protobuf_action = ProtobufAction::try_from(action)
+                let protobuf_action = ProtobufAction::try_from(*action)
                     .map_err(|_| "Failed to convert action to protobuf")?;
 
                 let context_items: Vec<ContextItem> = context
@@ -4097,10 +4097,10 @@ impl TryFrom<PluginCommand> for ProtobufPluginCommand {
 
                 Ok(ProtobufPluginCommand {
                     name: CommandName::RunAction as i32,
-                    payload: Some(Payload::RunActionPayload(RunActionPayload {
+                    payload: Some(Payload::RunActionPayload(Box::new(RunActionPayload {
                         action: Some(protobuf_action),
                         context: context_items,
-                    })),
+                    }))),
                 })
             },
             PluginCommand::CopyToClipboard(text) => Ok(ProtobufPluginCommand {

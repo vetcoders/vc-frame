@@ -1171,8 +1171,7 @@ impl ExistingTabState {
         if let Some(current_pane_id_with_same_logical_position) =
             self.find_pane_id_with_same_logical_position(&candidates, logical_position)
         {
-            self
-                .existing_panes
+            self.existing_panes
                 .remove(&current_pane_id_with_same_logical_position)
         } else {
             None
@@ -1186,8 +1185,7 @@ impl ExistingTabState {
         if let Some(current_pane_id_with_same_logical_position) =
             self.find_pane_id_with_same_logical_position(&candidates, logical_position)
         {
-            self
-                .existing_panes
+            self.existing_panes
                 .remove(&current_pane_id_with_same_logical_position)
         } else {
             match candidates.first().map(|(pid, _p)| *pid).copied() {
@@ -1235,12 +1233,14 @@ impl ExistingTabState {
                 .map(|(pid, _p)| *pid)
                 .copied()
                 .or_else(|| {
-                    panes_with_same_contents.first()
+                    panes_with_same_contents
+                        .first()
                         .map(|(pid, _p)| *pid)
                         .copied()
                 })
         } else {
-            panes_with_same_contents.first()
+            panes_with_same_contents
+                .first()
                 .map(|(pid, _p)| *pid)
                 .copied()
         }

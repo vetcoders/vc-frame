@@ -2701,7 +2701,6 @@ pub fn watcher_client_functionality() {
         main_client = main_client.add_step(Step {
             name: "Wait for first output",
             instruction: |remote_terminal: RemoteTerminal| -> bool {
-                
                 remote_terminal.snapshot_contains("WATCHER_OUTPUT_1")
             },
         });

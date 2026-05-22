@@ -770,8 +770,7 @@ pub enum LinkAnchor {
     End,
 }
 
-#[derive(Clone, Copy, Debug)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub enum CharsetIndex {
     #[default]
     G0,
@@ -780,16 +779,13 @@ pub enum CharsetIndex {
     G3,
 }
 
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
 pub enum StandardCharset {
     #[default]
     Ascii,
     UK,
     SpecialCharacterAndLineDrawing,
 }
-
 
 impl StandardCharset {
     /// Switch/Map character to the active charset. Ascii is the common case and

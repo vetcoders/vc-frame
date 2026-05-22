@@ -43,6 +43,13 @@ pub struct KdlLayoutParser<'a> {
     file_name: Option<PathBuf>,
 }
 
+struct SingleTabLayoutOptions {
+    tab_name: Option<String>,
+    split_direction: SplitDirection,
+    hide_floating_panes: bool,
+    tab_cwd: Option<PathBuf>,
+}
+
 impl<'a> KdlLayoutParser<'a> {
     pub fn new(
         raw_layout: &'a str,
@@ -365,12 +372,12 @@ impl<'a> KdlLayoutParser<'a> {
                 if KdlLayoutParser::is_a_reserved_plugin_property(config_entry_name) {
                     continue;
                 }
-                let config_entry_str_value = kdl_first_entry_as_string!(user_configuration_entry)
-                    .map(|s| s.to_string());
-                let config_entry_int_value = kdl_first_entry_as_i64!(user_configuration_entry)
-                    .map(|s| format!("{}", s));
-                let config_entry_bool_value = kdl_first_entry_as_bool!(user_configuration_entry)
-                    .map(|s| format!("{}", s));
+                let config_entry_str_value =
+                    kdl_first_entry_as_string!(user_configuration_entry).map(|s| s.to_string());
+                let config_entry_int_value =
+                    kdl_first_entry_as_i64!(user_configuration_entry).map(|s| format!("{}", s));
+                let config_entry_bool_value =
+                    kdl_first_entry_as_bool!(user_configuration_entry).map(|s| format!("{}", s));
                 let config_entry_children = user_configuration_entry
                     .children()
                     .map(|s| s.to_string().trim().to_string());
@@ -451,7 +458,7 @@ impl<'a> KdlLayoutParser<'a> {
             )?;
         }
         let hold_on_close = close_on_exit.map(|c| !c).unwrap_or(true);
-        let hold_on_start = start_suspended.map(|c| c).unwrap_or(false);
+        let hold_on_start = start_suspended.unwrap_or(false);
         match (command, edit, cwd) {
             (None, None, Some(cwd)) => Ok(Some(Run::Cwd(cwd))),
             (Some(command), None, cwd) => Ok(Some(Run::Command(RunCommand {
@@ -480,12 +487,7 @@ impl<'a> KdlLayoutParser<'a> {
     ) -> Result<Option<Run>, ConfigError> {
         let mut run = self.parse_pane_command(kdl_node, false)?;
         if let Some(plugin_block) = kdl_get_child!(kdl_node, "plugin") {
-            let has_non_cwd_run_prop = run
-                .map(|r| match r {
-                    Run::Cwd(_) => false,
-                    _ => true,
-                })
-                .unwrap_or(false);
+            let has_non_cwd_run_prop = run.map(|r| !matches!(r, Run::Cwd(_))).unwrap_or(false);
             if has_non_cwd_run_prop {
                 return Err(ConfigError::new_layout_kdl_error(
                     "Cannot have both a command/edit and a plugin block for a single pane".into(),
@@ -503,12 +505,7 @@ impl<'a> KdlLayoutParser<'a> {
     ) -> Result<Option<Run>, ConfigError> {
         let mut run = self.parse_pane_command(kdl_node, true)?;
         if let Some(plugin_block) = kdl_get_child!(kdl_node, "plugin") {
-            let has_non_cwd_run_prop = run
-                .map(|r| match r {
-                    Run::Cwd(_) => false,
-                    _ => true,
-                })
-                .unwrap_or(false);
+            let has_non_cwd_run_prop = run.map(|r| !matches!(r, Run::Cwd(_))).unwrap_or(false);
             if has_non_cwd_run_prop {
                 return Err(ConfigError::new_layout_kdl_error(
                     "Cannot have both a command/edit and a plugin block for a single pane".into(),
@@ -1326,7 +1323,6 @@ impl<'a> KdlLayoutParser<'a> {
                 if child_node_name == "pane"
                     || child_node_name == "children"
                     || child_node_name == "tab"
-                    || child_node_name == "children"
                 {
                     return true;
                 } else if let Some((_pane_template, _pane_template_kdl_node)) =
@@ -1522,10 +1518,7 @@ impl<'a> KdlLayoutParser<'a> {
         let has_cwd_prop = self.parse_path(kdl_node, "cwd")?.is_some();
         let has_non_cwd_run_prop = self
             .parse_command_plugin_or_edit_block(kdl_node)?
-            .map(|r| match r {
-                Run::Cwd(_) => false,
-                _ => true,
-            })
+            .map(|r| !matches!(r, Run::Cwd(_)))
             .unwrap_or(false);
         let has_nested_nodes_or_children_block = self.has_child_panes_tabs_or_templates(kdl_node);
         if has_nested_nodes_or_children_block
@@ -2149,11 +2142,14 @@ impl<'a> KdlLayoutParser<'a> {
         floating_panes: Vec<FloatingPaneLayout>,
         swap_tiled_layouts: Vec<SwapTiledLayout>,
         swap_floating_layouts: Vec<SwapFloatingLayout>,
-        tab_name: Option<String>,
-        split_direction: SplitDirection,
-        hide_floating_panes: bool,
-        tab_cwd: Option<PathBuf>,
+        options: SingleTabLayoutOptions,
     ) -> Result<Layout, ConfigError> {
+        let SingleTabLayoutOptions {
+            tab_name,
+            split_direction,
+            hide_floating_panes,
+            tab_cwd,
+        } = options;
         let mut main_tab_layout = TiledPaneLayout {
             children: panes,
             children_split_direction: split_direction,
@@ -2200,11 +2196,14 @@ impl<'a> KdlLayoutParser<'a> {
         child_floating_panes: Vec<FloatingPaneLayout>,
         swap_tiled_layouts: Vec<SwapTiledLayout>,
         swap_floating_layouts: Vec<SwapFloatingLayout>,
-        tab_name: Option<String>,
-        split_direction: SplitDirection,
-        hide_floating_panes: bool,
-        tab_cwd: Option<PathBuf>,
+        options: SingleTabLayoutOptions,
     ) -> Result<Layout, ConfigError> {
+        let SingleTabLayoutOptions {
+            tab_name,
+            split_direction,
+            hide_floating_panes,
+            tab_cwd,
+        } = options;
         let mut child_floating_panes = child_floating_panes;
         let template = if let Some(new_tab_template) = &self.new_tab_template {
             Some(new_tab_template.clone())
@@ -2572,10 +2571,12 @@ impl<'a> KdlLayoutParser<'a> {
                 child_floating_panes,
                 swap_tiled_layouts,
                 swap_floating_layouts,
-                tab_name,
-                split_direction,
-                hide_floating_panes,
-                tab_cwd,
+                SingleTabLayoutOptions {
+                    tab_name,
+                    split_direction,
+                    hide_floating_panes,
+                    tab_cwd,
+                },
             )
         } else {
             // Extract tab properties for layout_with_one_pane case
@@ -2591,10 +2592,12 @@ impl<'a> KdlLayoutParser<'a> {
                 child_floating_panes,
                 swap_tiled_layouts,
                 swap_floating_layouts,
-                tab_name,
-                split_direction,
-                hide_floating_panes,
-                tab_cwd,
+                SingleTabLayoutOptions {
+                    tab_name,
+                    split_direction,
+                    hide_floating_panes,
+                    tab_cwd,
+                },
             )
         }
     }

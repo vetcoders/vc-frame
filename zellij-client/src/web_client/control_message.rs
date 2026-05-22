@@ -26,7 +26,7 @@ pub struct TerminalMetricsPayload {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
 pub enum WebServerToWebClientControlMessage {
-    SetConfig(SetConfigPayload),
+    SetConfig(Box<SetConfigPayload>),
     QueryTerminalSize,
     Log { lines: Vec<String> },
     LogError { lines: Vec<String> },

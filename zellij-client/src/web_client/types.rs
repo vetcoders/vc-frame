@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::os_input_output::ClientOsApi;
 use crate::web_client::session_management::spawn_new_session;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use zellij_utils::{
     input::{config::Config, options::Options},
     ipc::ClientToServerMsg,
@@ -39,7 +39,7 @@ pub trait SessionManager: Send + Sync + std::fmt::Debug {
         session_name: &str,
         os_input: Box<dyn ClientOsApi>,
         session_exists: bool,
-        zellij_ipc_pipe: &PathBuf,
+        zellij_ipc_pipe: &Path,
         first_message: ClientToServerMsg,
     );
 }

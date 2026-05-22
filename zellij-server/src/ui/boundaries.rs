@@ -101,7 +101,6 @@ fn combine_symbols(
     let invisible = current_symbol.invisible || next_symbol.invisible;
     let color = match (current_symbol.color, next_symbol.color) {
         (Some(current_symbol_color), Some(next_symbol_color)) => {
-            
             if current_symbol_color.1 >= next_symbol_color.1 {
                 Some(current_symbol_color)
             } else {

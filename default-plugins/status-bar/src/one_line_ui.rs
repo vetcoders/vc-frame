@@ -552,8 +552,7 @@ fn render_mode_key_indicators(
                 if line_part_to_render.len + full_shortcut_list.len <= max_len {
                     line_part_to_render.append(&full_shortcut_list);
                 } else {
-                    let shortened_shortcut_list =
-                        shortened_modes_shortcut_list(default_keys, help);
+                    let shortened_shortcut_list = shortened_modes_shortcut_list(default_keys, help);
                     if line_part_to_render.len + shortened_shortcut_list.len <= max_len {
                         line_part_to_render.append(&shortened_shortcut_list);
                     }
@@ -1139,7 +1138,7 @@ fn add_shortcut(
     }
 
     ret.append(&style_key_with_modifier(keys, key_color_index)); // TODO: alternate
-                                                                  //
+                                                                 //
     let ribbon = if selected {
         serialize_ribbon(&Text::new(text.to_string()).selected())
     } else {
@@ -1185,10 +1184,12 @@ fn add_shortcut_with_inline_key(
         _ => "|",
     };
 
-    let key_string = key.iter()
-            .map(|k| k.to_string())
-            .collect::<Vec<_>>()
-            .join(key_separator).to_string();
+    let key_string = key
+        .iter()
+        .map(|k| k.to_string())
+        .collect::<Vec<_>>()
+        .join(key_separator)
+        .to_string();
 
     let ribbon = if is_selected {
         serialize_ribbon(
@@ -1223,10 +1224,12 @@ fn add_shortcut_with_key_only(
         return ret;
     }
 
-    let key_string = key.iter()
-            .map(|k| k.to_string())
-            .collect::<Vec<_>>()
-            .join("-").to_string();
+    let key_string = key
+        .iter()
+        .map(|k| k.to_string())
+        .collect::<Vec<_>>()
+        .join("-")
+        .to_string();
 
     let ribbon = if is_selected {
         serialize_ribbon(
@@ -1571,9 +1574,7 @@ fn single_action_key(
 
 fn session_manager_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithModifier> {
     let mut matching = keymap.iter().find_map(|(key, acvec)| {
-        let has_match = acvec
-            .iter()
-            .any(|a| a.launches_plugin("session-manager"));
+        let has_match = acvec.iter().any(|a| a.launches_plugin("session-manager"));
         if has_match {
             Some(key.clone())
         } else {
@@ -1589,9 +1590,7 @@ fn session_manager_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWith
 
 fn share_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithModifier> {
     let mut matching = keymap.iter().find_map(|(key, acvec)| {
-        let has_match = acvec
-            .iter()
-            .any(|a| a.launches_plugin("zellij:share"));
+        let has_match = acvec.iter().any(|a| a.launches_plugin("zellij:share"));
         if has_match {
             Some(key.clone())
         } else {
@@ -1607,9 +1606,7 @@ fn share_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithModifier> 
 
 fn plugin_manager_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithModifier> {
     let mut matching = keymap.iter().find_map(|(key, acvec)| {
-        let has_match = acvec
-            .iter()
-            .any(|a| a.launches_plugin("plugin-manager"));
+        let has_match = acvec.iter().any(|a| a.launches_plugin("plugin-manager"));
         if has_match {
             Some(key.clone())
         } else {
@@ -1643,9 +1640,7 @@ fn layout_manager_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithM
 
 fn about_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithModifier> {
     let mut matching = keymap.iter().find_map(|(key, acvec)| {
-        let has_match = acvec
-            .iter()
-            .any(|a| a.launches_plugin("zellij:about"));
+        let has_match = acvec.iter().any(|a| a.launches_plugin("zellij:about"));
         if has_match {
             Some(key.clone())
         } else {
@@ -1661,9 +1656,7 @@ fn about_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithModifier> 
 
 fn configuration_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithModifier> {
     let mut matching = keymap.iter().find_map(|(key, acvec)| {
-        let has_match = acvec
-            .iter()
-            .any(|a| a.launches_plugin("configuration"));
+        let has_match = acvec.iter().any(|a| a.launches_plugin("configuration"));
         if has_match {
             Some(key.clone())
         } else {

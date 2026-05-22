@@ -993,9 +993,7 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                         ..Default::default()
                     })
                 });
-                let cwd = cli_assets
-                    .cwd
-                    .or(runtime_config_options.default_cwd);
+                let cwd = cli_assets.cwd.or(runtime_config_options.default_cwd);
 
                 let spawn_tabs = |tab_layout,
                                   floating_panes_layout,
@@ -1720,10 +1718,8 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                         .unwrap_or(false);
                     if successfully_changed {
                         // disconnect existing web clients
-                        let web_client_ids: Vec<ClientId> = session_state
-                            .read()
-                            .unwrap()
-                            .web_client_ids().to_vec();
+                        let web_client_ids: Vec<ClientId> =
+                            session_state.read().unwrap().web_client_ids().to_vec();
                         for client_id in web_client_ids {
                             let _ = os_input.send_to_client(
                                 client_id,
@@ -1736,7 +1732,8 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                         let web_watcher_client_ids: Vec<ClientId> = session_state
                             .read()
                             .unwrap()
-                            .web_watcher_client_ids().to_vec();
+                            .web_watcher_client_ids()
+                            .to_vec();
                         for client_id in web_watcher_client_ids {
                             let _ = os_input.send_to_client(
                                 client_id,

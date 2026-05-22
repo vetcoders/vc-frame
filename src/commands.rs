@@ -10,7 +10,7 @@ use zellij_client::{
         config_yaml_to_config_kdl, convert_old_yaml_files, layout_yaml_to_layout_kdl,
     },
     os_input_output::get_client_os_input,
-    start_client as start_client_impl, ClientInfo,
+    start_client as start_client_impl, ClientInfo, StartClientOptions,
 };
 
 use zellij_utils::sessions::{
@@ -799,9 +799,7 @@ pub(crate) fn start_client(opts: CliArgs) {
                 }
             } else {
                 let config_options = match options.as_deref() {
-                    Some(SessionCommand::Options(o)) => {
-                        config_options.merge_from_cli(o.to_owned())
-                    },
+                    Some(SessionCommand::Options(o)) => config_options.merge_from_cli(o.to_owned()),
                     None => config_options,
                 };
                 should_create_detached = create_background;
@@ -867,22 +865,21 @@ pub(crate) fn start_client(opts: CliArgs) {
                     client.set_cwd(new_session_cwd);
                 }
 
-                let tab_position_to_focus = reconnect_to_session
-                    .as_ref()
-                    .and_then(|r| r.tab_position);
-                let pane_id_to_focus = reconnect_to_session
-                    .as_ref()
-                    .and_then(|r| r.pane_id);
+                let tab_position_to_focus =
+                    reconnect_to_session.as_ref().and_then(|r| r.tab_position);
+                let pane_id_to_focus = reconnect_to_session.as_ref().and_then(|r| r.pane_id);
                 reconnect_to_session = start_client_impl(
                     Box::new(os_input),
                     opts,
                     config,
                     config_options,
                     client,
-                    tab_position_to_focus,
-                    pane_id_to_focus,
-                    is_a_reconnect,
-                    should_create_detached,
+                    StartClientOptions {
+                        tab_position_to_focus,
+                        pane_id_to_focus,
+                        is_a_reconnect,
+                        start_detached_and_exit: should_create_detached,
+                    },
                 );
             }
         } else if let Some(session_name) = opts.session.clone() {
@@ -893,10 +890,12 @@ pub(crate) fn start_client(opts: CliArgs) {
                 config,
                 config_options,
                 ClientInfo::New(session_name, layout_info, new_session_cwd),
-                None,
-                None,
-                is_a_reconnect,
-                should_create_detached,
+                StartClientOptions {
+                    tab_position_to_focus: None,
+                    pane_id_to_focus: None,
+                    is_a_reconnect,
+                    start_detached_and_exit: should_create_detached,
+                },
             );
         } else {
             if let Some(session_name) = config_options.session_name.as_ref() {
@@ -926,10 +925,12 @@ pub(crate) fn start_client(opts: CliArgs) {
                             config,
                             config_options,
                             client,
-                            None,
-                            None,
-                            is_a_reconnect,
-                            should_create_detached,
+                            StartClientOptions {
+                                tab_position_to_focus: None,
+                                pane_id_to_focus: None,
+                                is_a_reconnect,
+                                start_detached_and_exit: should_create_detached,
+                            },
                         );
                     },
                     _ => {
@@ -940,10 +941,12 @@ pub(crate) fn start_client(opts: CliArgs) {
                             config,
                             config_options.clone(),
                             ClientInfo::New(session_name.clone(), layout_info, new_session_cwd),
-                            None,
-                            None,
-                            is_a_reconnect,
-                            should_create_detached,
+                            StartClientOptions {
+                                tab_position_to_focus: None,
+                                pane_id_to_focus: None,
+                                is_a_reconnect,
+                                start_detached_and_exit: should_create_detached,
+                            },
                         );
                     },
                 }
@@ -963,10 +966,12 @@ pub(crate) fn start_client(opts: CliArgs) {
                 config,
                 config_options,
                 ClientInfo::New(session_name, layout_info, new_session_cwd),
-                None,
-                None,
-                is_a_reconnect,
-                should_create_detached,
+                StartClientOptions {
+                    tab_position_to_focus: None,
+                    pane_id_to_focus: None,
+                    is_a_reconnect,
+                    start_detached_and_exit: should_create_detached,
+                },
             );
         }
         if reconnect_to_session.is_none() {
@@ -1069,10 +1074,12 @@ pub(crate) fn watch_session(session_name: Option<String>, opts: CliArgs) {
         config,
         config_options,
         client_info,
-        None,  // tab_position_to_focus
-        None,  // pane_id_to_focus
-        false, // is_a_reconnect
-        false, // should_create_detached
+        StartClientOptions {
+            tab_position_to_focus: None,
+            pane_id_to_focus: None,
+            is_a_reconnect: false,
+            start_detached_and_exit: false,
+        },
     );
 }
 

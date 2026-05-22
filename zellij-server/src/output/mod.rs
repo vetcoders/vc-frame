@@ -433,10 +433,7 @@ impl Output {
         vte_instruction: &str,
     ) {
         for client_id in client_ids {
-            let entry = self
-                .post_vte_instructions
-                .entry(client_id)
-                .or_default();
+            let entry = self.post_vte_instructions.entry(client_id).or_default();
             entry.push(String::from(vte_instruction));
         }
     }
@@ -446,10 +443,7 @@ impl Output {
         vte_instruction: &str,
     ) {
         for client_id in client_ids {
-            let entry = self
-                .pre_vte_instructions
-                .entry(client_id)
-                .or_default();
+            let entry = self.pre_vte_instructions.entry(client_id).or_default();
             entry.push(String::from(vte_instruction));
         }
     }
@@ -458,10 +452,7 @@ impl Output {
         client_id: ClientId,
         vte_instruction: &str,
     ) {
-        let entry = self
-            .post_vte_instructions
-            .entry(client_id)
-            .or_default();
+        let entry = self.post_vte_instructions.entry(client_id).or_default();
         entry.push(String::from(vte_instruction));
     }
     pub fn add_pre_vte_instruction_to_client(
@@ -469,10 +460,7 @@ impl Output {
         client_id: ClientId,
         vte_instruction: &str,
     ) {
-        let entry = self
-            .pre_vte_instructions
-            .entry(client_id)
-            .or_default();
+        let entry = self.pre_vte_instructions.entry(client_id).or_default();
         entry.push(String::from(vte_instruction));
     }
     pub fn add_sixel_image_chunks_to_client(
@@ -834,20 +822,24 @@ impl FloatingPanesStack {
         character_cell_size: &SizeInPixels,
     ) -> Vec<SixelImageChunk> {
         // round these up to the nearest cell edge
-        let rounded_sixel_image_pixel_height =
-            if !s_chunk.sixel_image_pixel_height.is_multiple_of(character_cell_size.height) {
-                let modulus = s_chunk.sixel_image_pixel_height % character_cell_size.height;
-                s_chunk.sixel_image_pixel_height + (character_cell_size.height - modulus)
-            } else {
-                s_chunk.sixel_image_pixel_height
-            };
-        let rounded_sixel_image_pixel_width =
-            if !s_chunk.sixel_image_pixel_width.is_multiple_of(character_cell_size.width) {
-                let modulus = s_chunk.sixel_image_pixel_width % character_cell_size.width;
-                s_chunk.sixel_image_pixel_width + (character_cell_size.width - modulus)
-            } else {
-                s_chunk.sixel_image_pixel_width
-            };
+        let rounded_sixel_image_pixel_height = if !s_chunk
+            .sixel_image_pixel_height
+            .is_multiple_of(character_cell_size.height)
+        {
+            let modulus = s_chunk.sixel_image_pixel_height % character_cell_size.height;
+            s_chunk.sixel_image_pixel_height + (character_cell_size.height - modulus)
+        } else {
+            s_chunk.sixel_image_pixel_height
+        };
+        let rounded_sixel_image_pixel_width = if !s_chunk
+            .sixel_image_pixel_width
+            .is_multiple_of(character_cell_size.width)
+        {
+            let modulus = s_chunk.sixel_image_pixel_width % character_cell_size.width;
+            s_chunk.sixel_image_pixel_width + (character_cell_size.width - modulus)
+        } else {
+            s_chunk.sixel_image_pixel_width
+        };
 
         let pane_top_edge = pane_geom.y * character_cell_size.height;
         let pane_left_edge = pane_geom.x * character_cell_size.width;

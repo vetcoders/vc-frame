@@ -13,7 +13,7 @@ use tokio_tungstenite::WebSocketStream;
 /// A TCP stream that may or may not be wrapped in TLS.
 pub enum MaybeTls {
     Plain(TcpStream),
-    Tls(tokio_rustls::client::TlsStream<TcpStream>),
+    Tls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
 }
 
 impl AsyncRead for MaybeTls {
@@ -158,7 +158,7 @@ async fn connect_ws(
         let connector = tokio_rustls::TlsConnector::from(config);
         let server_name = rustls_pki_types::ServerName::try_from(host.to_string())?;
         let tls_stream = connector.connect(server_name, tcp_stream).await?;
-        MaybeTls::Tls(tls_stream)
+        MaybeTls::Tls(Box::new(tls_stream))
     } else {
         MaybeTls::Plain(tcp_stream)
     };

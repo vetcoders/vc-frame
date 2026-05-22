@@ -737,10 +737,13 @@ impl<'a> TiledPaneGrid<'a> {
             .with_context(err_context)?;
         let mut result = vec![];
         let mut aligned_panes: Vec<_> = self
-            .pane_ids_aligned_with(id, alignment).map(|pane_ids| pane_ids
+            .pane_ids_aligned_with(id, alignment)
+            .map(|pane_ids| {
+                pane_ids
                     .iter()
                     .filter_map(|p_id| self.get_pane_geom(p_id).map(|pane_geom| (*p_id, pane_geom)))
-                    .collect())
+                    .collect()
+            })
             .with_context(err_context)?;
 
         use Direction::Down as D;
@@ -2294,10 +2297,7 @@ impl<'a> TiledPaneGrid<'a> {
             return None;
         }
         StackedPanes::new(self.panes.clone())
-            .combine_horizontally_aligned_panes_to_stack(
-                pane_id,
-                neighboring_pane_ids_to_the_right,
-            )
+            .combine_horizontally_aligned_panes_to_stack(pane_id, neighboring_pane_ids_to_the_right)
             .non_fatal();
         StackedPanes::new(self.panes.clone())
             .expand_pane(pane_id)

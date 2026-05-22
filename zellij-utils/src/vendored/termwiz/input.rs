@@ -838,15 +838,15 @@ fn parse_sgr_mouse(buf: &[u8]) -> Option<(InputEvent, usize)> {
 /// `ESC [` for two distinct cases — not currently disambiguated here:
 /// - truly malformed / unsupported sequence, or
 /// - incomplete input; caller handles incompleteness via `maybe_more`.
+///
 /// Return `Some(len)` if `buf` starts with a structurally complete CSI
 /// sequence (`\x1b[ <params>* <intermediates>* <final>` per ECMA-48 §5.4),
 /// regardless of whether the final byte is one we have a use for. Used by
-/// `process_bytes` to advance past CSI sequences the keymap doesn't
-/// recognise — most importantly Kitty keyboard-protocol events
-/// `\x1b[<keycode>;<mods>u`. Without this, the keymap returns
-/// `Found::NeedData` (it sees the bytes as a possible prefix of a longer
-/// registered key) and the parser wedges holding bytes that will never
-/// extend into anything.
+/// `process_bytes` to advance past CSI sequences the keymap doesn't recognise,
+/// most importantly Kitty keyboard-protocol events `\x1b[<keycode>;<mods>u`.
+/// Without this, the keymap returns `Found::NeedData` (it sees the bytes as a
+/// possible prefix of a longer registered key) and the parser wedges holding
+/// bytes that will never extend into anything.
 ///
 /// Returns `None` if the buffer doesn't start with `\x1b[`, contains a
 /// non-CSI byte, or hasn't yet received its final byte.

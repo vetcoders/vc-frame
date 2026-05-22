@@ -103,23 +103,26 @@ impl NewPluginScreen {
         print_nested_list_with_coordinates(vec![url_helper], 0, 3, None, None);
     }
     fn render_configuration_title(&self) {
-        let configuration_title =
-            if !self.editing_configuration() && self.new_plugin_config.is_empty() {
-                Text::new("Plugin Configuration: <TAB> - Edit".to_string())
-                    .color_range(2, ..=20)
-                    .color_range(3, 22..=26)
-            } else if !self.editing_configuration() {
-                Text::new("Plugin Configuration: <TAB> - Edit, <↓↑> - Navigate, <Del> - Delete".to_string())
+        let configuration_title = if !self.editing_configuration()
+            && self.new_plugin_config.is_empty()
+        {
+            Text::new("Plugin Configuration: <TAB> - Edit".to_string())
                 .color_range(2, ..=20)
                 .color_range(3, 22..=26)
-                .color_range(3, 36..=39)
-                .color_range(3, 53..=57)
-            } else {
-                Text::new("Plugin Configuration: [Editing: <TAB> - Next, <ENTER> - Accept]".to_string())
+        } else if !self.editing_configuration() {
+            Text::new(
+                "Plugin Configuration: <TAB> - Edit, <↓↑> - Navigate, <Del> - Delete".to_string(),
+            )
+            .color_range(2, ..=20)
+            .color_range(3, 22..=26)
+            .color_range(3, 36..=39)
+            .color_range(3, 53..=57)
+        } else {
+            Text::new("Plugin Configuration: [Editing: <TAB> - Next, <ENTER> - Accept]".to_string())
                 .color_range(2, ..=20)
                 .color_range(3, 32..=36)
                 .color_range(3, 46..=52)
-            };
+        };
         print_text_with_coordinates(configuration_title, 0, 5, None, None);
     }
     fn editing_configuration(&self) -> bool {
@@ -297,9 +300,10 @@ impl NewPluginScreen {
         );
     }
     fn render_help(&self, rows: usize) {
-        let enter_line = Text::new("Help: <ENTER> - Accept and Load Plugin, <ESC> - Cancel".to_string())
-        .color_range(3, 6..=12)
-        .color_range(3, 40..=44);
+        let enter_line =
+            Text::new("Help: <ENTER> - Accept and Load Plugin, <ESC> - Cancel".to_string())
+                .color_range(3, 6..=12)
+                .color_range(3, 40..=44);
         print_text_with_coordinates(enter_line, 0, rows, None, None);
     }
     fn get_field_being_edited_mut(&mut self) -> Option<&mut String> {
@@ -512,7 +516,9 @@ impl ZellijPlugin for State {
     }
     fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
         if pipe_message.name == "filepicker_result" {
-            if let (Some(payload), Some(request_id)) = (pipe_message.payload, pipe_message.args.get("request_id")) {
+            if let (Some(payload), Some(request_id)) =
+                (pipe_message.payload, pipe_message.args.get("request_id"))
+            {
                 match self
                     .new_plugin_screen
                     .as_mut()
@@ -524,8 +530,7 @@ impl ZellijPlugin for State {
                             .map(|n| n.request_ids.remove(request_id_position));
                         let chosen_plugin_location = std::path::PathBuf::from(payload);
                         self.new_plugin_screen.as_mut().map(|n| {
-                            n.new_plugin_url =
-                                format!("file:{}", chosen_plugin_location.display())
+                            n.new_plugin_url = format!("file:{}", chosen_plugin_location.display())
                         });
                     },
                     None => {

@@ -599,7 +599,11 @@ impl<'a> TokenManagementScreen<'a> {
     fn create_status_message(&self) -> Option<(String, Text)> {
         if let Some(error) = &self.error {
             Some((error.clone(), Text::new(error).color_range(3, ..)))
-        } else { self.info.as_ref().map(|info| (info.clone(), Text::new(info).color_range(1, ..))) }
+        } else {
+            self.info
+                .as_ref()
+                .map(|info| (info.clone(), Text::new(info).color_range(1, ..)))
+        }
     }
 
     fn calculate_layout(&self, content: &ScreenContent) -> Layout {

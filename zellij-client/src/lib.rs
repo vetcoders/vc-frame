@@ -44,7 +44,9 @@ use crate::web_client::control_message::{
     WebServerToWebClientControlMessage,
 };
 
+#[cfg(feature = "web_server_capability")]
 static ASYNC_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+#[cfg(feature = "web_server_capability")]
 use std::sync::OnceLock;
 
 const ENTER_ALTERNATE_SCREEN: &str = "\u{1b}[?1049h";
@@ -71,6 +73,7 @@ const QUERY_HOST_THEME: &str = "\u{1b}[?996n";
 ///
 /// The number of workers can be configured to any nonzero value. Passing zero or `None` will spawn
 /// one worker per physical CPU on the current machine.
+#[cfg(feature = "web_server_capability")]
 pub(crate) fn async_runtime(maybe_number_of_workers: Option<usize>) -> tokio::runtime::Handle {
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => handle.clone(),
@@ -410,7 +413,9 @@ impl ClientInfo {
         }
     }
     pub fn set_layout_info(&mut self, new_layout_info: LayoutInfo) {
-        if let ClientInfo::New(_, layout_info, _) = self { *layout_info = Some(new_layout_info) }
+        if let ClientInfo::New(_, layout_info, _) = self {
+            *layout_info = Some(new_layout_info)
+        }
     }
     pub fn set_cwd(&mut self, new_cwd: PathBuf) {
         match self {
@@ -447,7 +452,7 @@ pub async fn run_remote_client_terminal_loop(
     use crate::os_input_output::{AsyncSignals, AsyncStdin};
 
     let synchronised_output = match os_input.env_variable("TERM").as_deref() {
-        Some("alacritty") => Some(SyncOutput::DCS),
+        Some("alacritty") => Some(SyncOutput::Dcs),
         _ => None,
     };
 
@@ -715,17 +720,27 @@ pub fn start_remote_client(
     Ok(reconnect_to_session)
 }
 
+pub struct StartClientOptions {
+    pub tab_position_to_focus: Option<usize>,
+    pub pane_id_to_focus: Option<(u32, bool)>, // (pane_id, is_plugin)
+    pub is_a_reconnect: bool,
+    pub start_detached_and_exit: bool,
+}
+
 pub fn start_client(
     mut os_input: Box<dyn ClientOsApi>,
     cli_args: CliArgs,
     config: Config,          // saved to disk (or default?)
     config_options: Options, // CLI options merged into (getting priority over) saved config options
     info: ClientInfo,
-    tab_position_to_focus: Option<usize>,
-    pane_id_to_focus: Option<(u32, bool)>, // (pane_id, is_plugin)
-    is_a_reconnect: bool,
-    start_detached_and_exit: bool,
+    options: StartClientOptions,
 ) -> Option<ConnectToSession> {
+    let StartClientOptions {
+        tab_position_to_focus,
+        pane_id_to_focus,
+        is_a_reconnect,
+        start_detached_and_exit,
+    } = options;
     if start_detached_and_exit {
         start_server_detached(os_input, cli_args, config, config_options, info);
         return None;
@@ -736,7 +751,7 @@ pub fn start_client(
         .support_kitty_keyboard_protocol
         .map(|e| !e)
         .unwrap_or(false);
-    let should_start_web_server = config_options.web_server.map(|w| w).unwrap_or(false);
+    let should_start_web_server = config_options.web_server.unwrap_or(false);
     let mut reconnect_to_session = None;
     os_input.unset_raw_mode().unwrap();
 
@@ -1125,7 +1140,7 @@ pub fn start_client(
 
     let mut exit_msg = String::new();
     let mut synchronised_output = match os_input.env_variable("TERM").as_deref() {
-        Some("alacritty") => Some(SyncOutput::DCS),
+        Some("alacritty") => Some(SyncOutput::Dcs),
         _ => None,
     };
 
@@ -1289,7 +1304,7 @@ pub fn start_server_detached(
     envs::set_zellij("0".to_string());
     config.env.set_vars();
 
-    let should_start_web_server = config_options.web_server.map(|w| w).unwrap_or(false);
+    let should_start_web_server = config_options.web_server.unwrap_or(false);
 
     let create_ipc_pipe = || -> std::path::PathBuf {
         let mut sock_dir = ZELLIJ_SOCK_DIR.clone();

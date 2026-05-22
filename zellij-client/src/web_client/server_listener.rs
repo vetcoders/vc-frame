@@ -216,7 +216,7 @@ pub fn zellij_server_listener(
                                         };
 
                                         let config_message =
-                                            WebServerToWebClientControlMessage::SetConfig(set_config_payload);
+                                            WebServerToWebClientControlMessage::SetConfig(Box::new(set_config_payload));
                                         let config_msg_json = match serde_json::to_string(&config_message) {
                                             Ok(json) => json,
                                             Err(e) => {
@@ -292,7 +292,9 @@ fn handle_exit_reason(client_connection_bus: &mut ClientConnectionBus, exit_reas
             return;
         },
         ExitReason::WebClientsForbidden => {
-            client_connection_bus.send_stdout("\u{1b}[2J\n Web Clients are not allowed to attach to this session.".to_string());
+            client_connection_bus.send_stdout(
+                "\u{1b}[2J\n Web Clients are not allowed to attach to this session.".to_string(),
+            );
         },
         ExitReason::Error(e) => {
             let goto_start_of_last_line = format!("\u{1b}[{};{}H", 1, 1);
@@ -317,8 +319,10 @@ fn reload_config_from_disk(
     config_options_without_layout: &mut Options,
     config_file_path: &Option<PathBuf>,
 ) {
-    let mut cli_args = CliArgs::default();
-    cli_args.config = config_file_path.clone();
+    let cli_args = CliArgs {
+        config: config_file_path.clone(),
+        ..Default::default()
+    };
     match Setup::from_cli_args(&cli_args) {
         Ok((_, _, _, reloaded_config_without_layout, reloaded_config_options_without_layout)) => {
             *config_without_layout = reloaded_config_without_layout;

@@ -697,7 +697,7 @@ fn host_run_plugin_command(mut caller: Caller<'_, PluginEnv>) {
                         existing_pane_id.into(),
                         suppress_replaced_pane,
                     ),
-                    PluginCommand::RunAction(action, context) => run_action(&env, action, context),
+                    PluginCommand::RunAction(action, context) => run_action(&env, *action, context),
                     PluginCommand::GetSessionEnvironmentVariables => {
                         get_session_environment_variables(env);
                     },

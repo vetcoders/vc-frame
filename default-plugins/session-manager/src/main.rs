@@ -27,8 +27,7 @@ use ui::{
 use resurrectable_sessions::ResurrectableSessions;
 use session_list::SessionList;
 
-#[derive(Clone, Debug, Copy, PartialEq)]
-#[derive(Default)]
+#[derive(Clone, Debug, Copy, PartialEq, Default)]
 enum ActiveScreen {
     NewSession,
     #[default]
@@ -36,7 +35,6 @@ enum ActiveScreen {
     ResurrectSession,
     SingleScreen,
 }
-
 
 #[derive(Default)]
 struct State {
@@ -109,7 +107,9 @@ impl ZellijPlugin for State {
 
     fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
         if pipe_message.name == "filepicker_result" {
-            if let (Some(payload), Some(request_id)) = (pipe_message.payload, pipe_message.args.get("request_id")) {
+            if let (Some(payload), Some(request_id)) =
+                (pipe_message.payload, pipe_message.args.get("request_id"))
+            {
                 match self.request_ids.iter().position(|p| p == request_id) {
                     Some(request_id_position) => {
                         self.request_ids.remove(request_id_position);

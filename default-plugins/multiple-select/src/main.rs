@@ -271,12 +271,15 @@ impl App {
             if previous_count != count {
                 rename_plugin_pane(own_plugin_id, "Multiple Pane Select".to_string());
             }
-            if previous_count != 0 && count != 0 && previous_count != count
-                && self.doherty_threshold_elapsed_since_highlight() {
-                    self.highlighted_at = Some(Instant::now());
-                    highlight_and_unhighlight_panes(vec![PaneId::Plugin(own_plugin_id)], vec![]);
-                    set_timeout(0.4);
-                }
+            if previous_count != 0
+                && count != 0
+                && previous_count != count
+                && self.doherty_threshold_elapsed_since_highlight()
+            {
+                self.highlighted_at = Some(Instant::now());
+                highlight_and_unhighlight_panes(vec![PaneId::Plugin(own_plugin_id)], vec![]);
+                set_timeout(0.4);
+            }
         }
     }
 
