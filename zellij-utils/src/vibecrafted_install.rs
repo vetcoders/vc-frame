@@ -68,7 +68,11 @@ impl InstallSummary {
     pub fn render(&self) -> String {
         let mut out = String::new();
         let _ = writeln!(out, "Vibecrafted layout install");
-        let _ = writeln!(out, "  vibecrafted root: {}", self.vibecrafted_root.display());
+        let _ = writeln!(
+            out,
+            "  vibecrafted root: {}",
+            self.vibecrafted_root.display()
+        );
         let _ = writeln!(out, "  source layouts:   {}", self.layouts_dir.display());
         let _ = writeln!(out, "  target dir:       {}", self.target_dir.display());
         let _ = writeln!(out);
@@ -79,11 +83,7 @@ impl InstallSummary {
             "  already correct:  {}",
             fmt_list(&self.already_correct)
         );
-        let _ = writeln!(
-            out,
-            "  stale removed:    {}",
-            fmt_list(&self.stale_removed)
-        );
+        let _ = writeln!(out, "  stale removed:    {}", fmt_list(&self.stale_removed));
         let _ = writeln!(
             out,
             "  aliases:          {}",
@@ -156,9 +156,7 @@ pub enum InstallError {
 ///      for the user-home convention where `VIBECRAFTED_HOME=$HOME/.vibecrafted`)
 ///   3. `which vibecrafted` → canonicalize → walk up looking for a framework
 ///      source root marker (`config/zellij/layouts/` + `skills/`)
-pub fn resolve_vibecrafted_root(
-    root_override: Option<PathBuf>,
-) -> Result<PathBuf, InstallError> {
+pub fn resolve_vibecrafted_root(root_override: Option<PathBuf>) -> Result<PathBuf, InstallError> {
     if let Some(path) = root_override {
         return validate_root(path);
     }
@@ -245,11 +243,13 @@ fn read_alias_map(path: &Path) -> Result<BTreeMap<String, String>, InstallError>
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let (old, new) = line.split_once('=').ok_or_else(|| InstallError::AliasFile {
-            path: path.to_path_buf(),
-            line: idx + 1,
-            msg: format!("expected `old=new`, got `{line}`"),
-        })?;
+        let (old, new) = line
+            .split_once('=')
+            .ok_or_else(|| InstallError::AliasFile {
+                path: path.to_path_buf(),
+                line: idx + 1,
+                msg: format!("expected `old=new`, got `{line}`"),
+            })?;
         let old = old.trim();
         let new = new.trim();
         if old.is_empty() || new.is_empty() {
@@ -340,11 +340,7 @@ pub fn install(
         }
         let target = layouts_dir.join(new_name);
         link_or_relink(&target, &link, old_name, true, &mut summary)?;
-        if !summary
-            .aliases_installed
-            .iter()
-            .any(|(o, _)| o == old_name)
-        {
+        if !summary.aliases_installed.iter().any(|(o, _)| o == old_name) {
             summary
                 .aliases_installed
                 .push((old_name.clone(), new_name.clone()));
@@ -439,9 +435,7 @@ fn clean_stale_symlinks(
             .unwrap_or(false);
 
         let broken = !absolute.exists();
-        let path_looks_vibecrafted = target
-            .to_string_lossy()
-            .contains("/config/zellij/layouts/");
+        let path_looks_vibecrafted = target.to_string_lossy().contains("/config/zellij/layouts/");
 
         let belongs_to_us = resolves_inside || (broken && path_looks_vibecrafted);
         if !belongs_to_us {
@@ -840,6 +834,9 @@ vibecraft.kdl=operator.kdl
         let resolved = fs::read_link(&vc_old).unwrap();
         let canonical_layouts_dir = layouts_dir.canonicalize().unwrap();
         assert_eq!(resolved, canonical_layouts_dir.join("dashboard.kdl"));
-        assert!(s2.aliases_installed.iter().any(|(o, _)| o == "vc-dashboard.kdl"));
+        assert!(s2
+            .aliases_installed
+            .iter()
+            .any(|(o, _)| o == "vc-dashboard.kdl"));
     }
 }

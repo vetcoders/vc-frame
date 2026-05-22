@@ -442,10 +442,7 @@ impl Setup {
         if self.install_vibecrafted_layouts {
             #[cfg(not(target_family = "wasm"))]
             {
-                match crate::vibecrafted_install::install(
-                    self.vibecrafted_root.clone(),
-                    None,
-                ) {
+                match crate::vibecrafted_install::install(self.vibecrafted_root.clone(), None) {
                     Ok(summary) => {
                         print!("{}", summary.render());
                         std::process::exit(0);
