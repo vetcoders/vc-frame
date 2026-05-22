@@ -16,7 +16,7 @@ layout {
         }
     }
 
-    tab name="𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Marbles" focus=true {
+    tab name="Marbles" focus=true {
         pane split_direction="horizontal" {
             pane name="operator" size="75%" focus=true
             pane split_direction="vertical" size="25%" {

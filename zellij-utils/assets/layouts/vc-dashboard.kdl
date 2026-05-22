@@ -28,7 +28,7 @@ layout {
         }
     }
 
-    tab name="𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. MC" {
+    tab name="MC" {
         pane split_direction="horizontal" {
             pane split_direction="vertical" size="50%" {
                 pane name="agents" focus=true command="bash" {
@@ -49,7 +49,7 @@ layout {
         }
     }
 
-    tab name="𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Sessions" {
+    tab name="Sessions" {
         pane name="session atlas" focus=true {
             plugin location="session-manager" {
                 pane_title "VibeCrafted Session Atlas"
@@ -57,7 +57,7 @@ layout {
         }
     }
 
-    tab name="𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Layouts" {
+    tab name="Layouts" {
         pane name="layout forge" focus=true {
             plugin location="zellij:layout-manager" {
                 pane_title "VibeCrafted Layout Forge"
@@ -65,7 +65,7 @@ layout {
         }
     }
 
-    tab name="𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Control" {
+    tab name="Control" {
         pane name="control deck" focus=true {
             plugin location="zellij:configuration" {
                 pane_title "VibeCrafted Control Deck"
@@ -73,7 +73,7 @@ layout {
         }
     }
 
-    tab name="𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Plugins" {
+    tab name="Plugins" {
         pane name="plugin forge" focus=true {
             plugin location="zellij:plugin-manager" {
                 pane_title "VibeCrafted Plugin Forge"
@@ -81,7 +81,7 @@ layout {
         }
     }
 
-    tab name="𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Workspace" {
+    tab name="Workspace" {
         pane name="workspace atlas" focus=true {
             plugin location="strider" {
                 pane_title "VibeCrafted Workspace Atlas"
@@ -89,7 +89,7 @@ layout {
         }
     }
 
-    tab name="𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Share" {
+    tab name="Share" {
         pane name="share relay" focus=true {
             plugin location="zellij:share" {
                 pane_title "VibeCrafted Share Relay"
@@ -97,7 +97,7 @@ layout {
         }
     }
 
-    tab name="𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Guide" {
+    tab name="Guide" {
         pane name="shell guide" focus=true {
             plugin location="about" {
                 pane_title "VibeCrafted Shell Guide"

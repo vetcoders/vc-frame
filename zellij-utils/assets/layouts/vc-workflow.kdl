@@ -16,7 +16,7 @@ layout {
         }
     }
 
-    tab name="𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Workflow" {
+    tab name="Workflow" {
         pane split_direction="vertical" {
             pane name="main" size="75%" focus=true
             pane name="agent" size="25%"

@@ -363,7 +363,7 @@ impl TabLinePrefixBuilder {
         brand_text: Option<&str>,
         brand_text_short: Option<&str>,
     ) -> String {
-        let default_brand = " Zellij ".to_owned();
+        let default_brand = " 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. ".to_owned();
         match (brand_text, brand_text_short) {
             (Some(long_brand), Some(short_brand))
                 if long_brand.width() + 2 <= self.cols

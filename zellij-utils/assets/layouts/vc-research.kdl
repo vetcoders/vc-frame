@@ -16,7 +16,7 @@ layout {
         }
     }
 
-    tab name="𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Research" {
+    tab name="Research" {
         pane split_direction="vertical" {
             pane name="synthesis" size="55%" focus=true
             pane split_direction="horizontal" size="45%" {
