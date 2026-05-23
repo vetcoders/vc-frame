@@ -454,7 +454,7 @@ impl Pane for PluginPane {
             pane_title,
             frame_params,
         )
-        .is_pinned(is_pinned);
+        .with_pinned(is_pinned);
         if let Some((frame_color_override, _text)) = self.pane_frame_color_override.as_ref() {
             frame.override_color(*frame_color_override);
         }

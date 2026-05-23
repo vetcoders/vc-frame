@@ -96,18 +96,24 @@ impl CliArgs {
         false
     }
     pub fn options(&self) -> Option<Options> {
-        if let Some(Command::Options(options)) = &self.command {
-            return Some(options.as_ref().clone());
+        if let Some(Command::Options(cli_options)) = &self.command {
+            return Some(*cli_options.options.clone());
         }
         None
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Args)]
+pub struct CliOptions {
+    #[clap(flatten)]
+    pub options: Box<Options>,
 }
 
 #[derive(Debug, Subcommand, Clone, Serialize, Deserialize)]
 pub enum Command {
     /// Change the behaviour of zellij
     #[clap(name = "options", value_parser)]
-    Options(Box<Options>),
+    Options(CliOptions),
 
     /// Setup zellij and check its configuration
     #[clap(name = "setup", value_parser)]

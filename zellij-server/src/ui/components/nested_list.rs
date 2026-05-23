@@ -115,7 +115,7 @@ fn parse_indentation_level(stringified: &mut String) -> usize {
     indentation_level
 }
 
-fn max_nested_item_width(contents: &Vec<NestedListItem>) -> usize {
+fn max_nested_item_width(contents: &[NestedListItem]) -> usize {
     let mut width_of_longest_line = 0;
     for line_item in contents.iter() {
         let mut line_item_text_width = 0;

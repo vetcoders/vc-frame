@@ -1,6 +1,10 @@
 use super::plugin_thread_main;
 use crate::screen::ScreenInstruction;
-use crate::{channels::SenderWithContext, thread_bus::Bus, ServerInstruction};
+use crate::{
+    channels::SenderWithContext,
+    thread_bus::{Bus, ThreadSenders},
+    ServerInstruction,
+};
 use insta::assert_snapshot;
 use lazy_static::lazy_static;
 use std::collections::BTreeMap;
@@ -14,7 +18,7 @@ use zellij_utils::errors::ErrorContext;
 use zellij_utils::input::actions::Action;
 use zellij_utils::input::keybinds::Keybinds;
 use zellij_utils::input::layout::{
-    Layout, PluginAlias, PluginUserConfiguration, RunPlugin, RunPluginLocation, RunPluginOrAlias,
+    PluginAlias, PluginUserConfiguration, RunPlugin, RunPluginLocation, RunPluginOrAlias,
 };
 use zellij_utils::input::permission::PermissionCache;
 use zellij_utils::input::plugins::PluginAliases;
@@ -28,6 +32,26 @@ use std::sync::{Arc, Mutex};
 use crate::{plugins::PluginInstruction, pty::PtyInstruction};
 
 use zellij_utils::channels::{self, ChannelWithContext, Receiver};
+
+type PluginThreadOutput = (
+    SenderWithContext<PluginInstruction>,
+    Receiver<(ScreenInstruction, ErrorContext)>,
+    Box<dyn FnOnce()>,
+);
+
+type PluginThreadWithServerOutput = (
+    SenderWithContext<PluginInstruction>,
+    Receiver<(ServerInstruction, ErrorContext)>,
+    Receiver<(ScreenInstruction, ErrorContext)>,
+    Box<dyn FnOnce()>,
+);
+
+type PluginThreadWithPtyOutput = (
+    SenderWithContext<PluginInstruction>,
+    Receiver<(PtyInstruction, ErrorContext)>,
+    Receiver<(ScreenInstruction, ErrorContext)>,
+    Box<dyn FnOnce()>,
+);
 
 macro_rules! log_actions_in_thread {
     ( $arc_mutex_log:expr, $exit_event:path, $receiver:expr, $exit_after_count:expr ) => {
@@ -295,11 +319,7 @@ macro_rules! grant_permissions_and_log_actions_in_thread_struct_variant {
 fn create_plugin_thread(
     zellij_cwd: Option<PathBuf>,
     session_env_vars: Option<std::collections::BTreeMap<String, String>>,
-) -> (
-    SenderWithContext<PluginInstruction>,
-    Receiver<(ScreenInstruction, ErrorContext)>,
-    Box<dyn FnOnce()>,
-) {
+) -> PluginThreadOutput {
     let zellij_cwd = zellij_cwd.unwrap_or_else(|| PathBuf::from("."));
     let session_env_vars = session_env_vars.unwrap_or_else(|| std::env::vars().collect());
     let initiating_client_id = 1;
@@ -325,12 +345,15 @@ fn create_plugin_thread(
 
     let plugin_bus = Bus::new(
         vec![plugin_receiver],
-        Some(&to_screen),
-        Some(&to_pty),
-        Some(&to_plugin),
-        Some(&to_server),
-        Some(&to_pty_writer),
-        Some(&to_background_jobs),
+        ThreadSenders {
+            to_screen: Some(to_screen.clone()),
+            to_pty: Some(to_pty.clone()),
+            to_plugin: Some(to_plugin.clone()),
+            to_server: Some(to_server.clone()),
+            to_pty_writer: Some(to_pty_writer.clone()),
+            to_background_jobs: Some(to_background_jobs.clone()),
+            ..Default::default()
+        },
         None,
     )
     .should_silently_fail();
@@ -361,7 +384,7 @@ fn create_plugin_thread(
                 plugin_bus,
                 engine,
                 data_dir,
-                Box::new(Layout::default()),
+                Box::default(),
                 Some(layout_dir),
                 vec![],
                 vec![],
@@ -395,12 +418,7 @@ fn create_plugin_thread(
 fn create_plugin_thread_with_server_receiver(
     zellij_cwd: Option<PathBuf>,
     session_env_vars: Option<std::collections::BTreeMap<String, String>>,
-) -> (
-    SenderWithContext<PluginInstruction>,
-    Receiver<(ServerInstruction, ErrorContext)>,
-    Receiver<(ScreenInstruction, ErrorContext)>,
-    Box<dyn FnOnce()>,
-) {
+) -> PluginThreadWithServerOutput {
     let zellij_cwd = zellij_cwd.unwrap_or_else(|| PathBuf::from("."));
     let session_env_vars = session_env_vars.unwrap_or_else(|| std::env::vars().collect());
     let (to_server, server_receiver): ChannelWithContext<ServerInstruction> = channels::bounded(50);
@@ -424,12 +442,15 @@ fn create_plugin_thread_with_server_receiver(
 
     let plugin_bus = Bus::new(
         vec![plugin_receiver],
-        Some(&to_screen),
-        Some(&to_pty),
-        Some(&to_plugin),
-        Some(&to_server),
-        Some(&to_pty_writer),
-        Some(&to_background_jobs),
+        ThreadSenders {
+            to_screen: Some(to_screen.clone()),
+            to_pty: Some(to_pty.clone()),
+            to_plugin: Some(to_plugin.clone()),
+            to_server: Some(to_server.clone()),
+            to_pty_writer: Some(to_pty_writer.clone()),
+            to_background_jobs: Some(to_background_jobs.clone()),
+            ..Default::default()
+        },
         None,
     )
     .should_silently_fail();
@@ -449,7 +470,7 @@ fn create_plugin_thread_with_server_receiver(
                 plugin_bus,
                 engine,
                 data_dir,
-                Box::new(Layout::default()),
+                Box::default(),
                 None,
                 vec![],
                 vec![],
@@ -489,12 +510,7 @@ fn create_plugin_thread_with_pty_receiver(
     zellij_cwd: Option<PathBuf>,
     layout_dir: Option<PathBuf>,
     session_env_vars: Option<std::collections::BTreeMap<String, String>>,
-) -> (
-    SenderWithContext<PluginInstruction>,
-    Receiver<(PtyInstruction, ErrorContext)>,
-    Receiver<(ScreenInstruction, ErrorContext)>,
-    Box<dyn FnOnce()>,
-) {
+) -> PluginThreadWithPtyOutput {
     let zellij_cwd = zellij_cwd.unwrap_or_else(|| PathBuf::from("."));
     let session_env_vars = session_env_vars.unwrap_or_else(|| std::env::vars().collect());
     let (to_server, _server_receiver): ChannelWithContext<ServerInstruction> =
@@ -519,12 +535,15 @@ fn create_plugin_thread_with_pty_receiver(
 
     let plugin_bus = Bus::new(
         vec![plugin_receiver],
-        Some(&to_screen),
-        Some(&to_pty),
-        Some(&to_plugin),
-        Some(&to_server),
-        Some(&to_pty_writer),
-        Some(&to_background_jobs),
+        ThreadSenders {
+            to_screen: Some(to_screen.clone()),
+            to_pty: Some(to_pty.clone()),
+            to_plugin: Some(to_plugin.clone()),
+            to_server: Some(to_server.clone()),
+            to_pty_writer: Some(to_pty_writer.clone()),
+            to_background_jobs: Some(to_background_jobs.clone()),
+            ..Default::default()
+        },
         None,
     )
     .should_silently_fail();
@@ -545,7 +564,7 @@ fn create_plugin_thread_with_pty_receiver(
                 plugin_bus,
                 engine,
                 data_dir,
-                Box::new(Layout::default()),
+                Box::default(),
                 Some(layout_dir),
                 vec![],
                 vec![],
@@ -609,12 +628,15 @@ fn create_plugin_thread_with_background_jobs_receiver(
 
     let plugin_bus = Bus::new(
         vec![plugin_receiver],
-        Some(&to_screen),
-        Some(&to_pty),
-        Some(&to_plugin),
-        Some(&to_server),
-        Some(&to_pty_writer),
-        Some(&to_background_jobs),
+        ThreadSenders {
+            to_screen: Some(to_screen.clone()),
+            to_pty: Some(to_pty.clone()),
+            to_plugin: Some(to_plugin.clone()),
+            to_server: Some(to_server.clone()),
+            to_pty_writer: Some(to_pty_writer.clone()),
+            to_background_jobs: Some(to_background_jobs.clone()),
+            ..Default::default()
+        },
         None,
     )
     .should_silently_fail();
@@ -634,7 +656,7 @@ fn create_plugin_thread_with_background_jobs_receiver(
                 plugin_bus,
                 engine,
                 data_dir,
-                Box::new(Layout::default()),
+                Box::default(),
                 None,
                 vec![],
                 vec![],
@@ -5946,9 +5968,8 @@ pub fn granted_permission_request_result() {
     teardown();
 
     let permission_cache = PermissionCache::from_path_or_default(Some(cache_path));
-    let mut permissions = permission_cache
-        .get_permissions(PathBuf::from(&*PLUGIN_FIXTURE).display().to_string())
-        .clone();
+    let mut permissions =
+        permission_cache.get_permissions(PathBuf::from(&*PLUGIN_FIXTURE).display().to_string());
     let permissions = permissions.as_mut().map(|p| {
         let mut permissions = p.clone();
         permissions.sort_unstable();
@@ -10370,7 +10391,7 @@ pub fn get_focused_pane_info_plugin_command() {
         .iter()
         .find_map(|i| {
             if let ScreenInstruction::GetFocusedPaneInfo { .. } = i {
-                return Some(i.clone());
+                Some(i.clone())
             } else {
                 None
             }
@@ -11690,7 +11711,7 @@ pub fn edit_layout_plugin_command() {
             });
 
     assert_snapshot!(format!("{:#?}", spawn_terminal_instruction).replace(
-        &format!("{}", temp_layout_folder.path().display().to_string()),
+        &format!("{}", temp_layout_folder.path().display()),
         "LAYOUT_FOLDER_PATH"
     ))
 }
@@ -12061,7 +12082,7 @@ pub fn plugin_receives_config_change_event() {
         .iter()
         .filter_map(|i| {
             if let ScreenInstruction::PluginBytes(plugin_render_assets) = i {
-                for plugin_render_asset in plugin_render_assets {
+                if let Some(plugin_render_asset) = plugin_render_assets.first() {
                     let plugin_bytes = plugin_render_asset.bytes.clone();
                     let plugin_output =
                         String::from_utf8_lossy(plugin_bytes.as_slice()).to_string();
@@ -12188,7 +12209,7 @@ pub fn plugin_does_not_receive_event_when_config_unchanged() {
         .iter()
         .filter_map(|i| {
             if let ScreenInstruction::PluginBytes(plugin_render_assets) = i {
-                for plugin_render_asset in plugin_render_assets {
+                if let Some(plugin_render_asset) = plugin_render_assets.first() {
                     let plugin_bytes = plugin_render_asset.bytes.clone();
                     let plugin_output =
                         String::from_utf8_lossy(plugin_bytes.as_slice()).to_string();

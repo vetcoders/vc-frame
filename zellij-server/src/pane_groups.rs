@@ -186,9 +186,10 @@ mod tests {
     use std::collections::HashMap;
 
     fn create_mock_senders() -> ThreadSenders {
-        let mut mock = ThreadSenders::default();
-        mock.should_silently_fail = true;
-        mock
+        ThreadSenders {
+            should_silently_fail: true,
+            ..Default::default()
+        }
     }
 
     fn create_test_pane_groups() -> PaneGroups {

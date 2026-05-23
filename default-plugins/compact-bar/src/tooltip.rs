@@ -1,6 +1,8 @@
 use crate::keybind_utils::KeybindProcessor;
 use zellij_tile::prelude::*;
 
+pub type TooltipData = (Vec<(Text, Text, usize, usize)>, usize, usize);
+
 pub struct TooltipRenderer<'a> {
     mode_info: &'a ModeInfo,
 }
@@ -70,10 +72,7 @@ impl<'a> TooltipRenderer<'a> {
         }
     }
 
-    fn normal_mode_tooltip(
-        &self,
-        current_mode: InputMode,
-    ) -> (Vec<(Text, Text, usize, usize)>, usize, usize) {
+    fn normal_mode_tooltip(&self, current_mode: InputMode) -> TooltipData {
         let actions = KeybindProcessor::get_predetermined_actions(self.mode_info, current_mode);
         let y = 0;
         let mut running_x = 0;

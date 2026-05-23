@@ -4,7 +4,7 @@ use crate::plugins::pipes::{
     apply_pipe_message_to_plugin, pipes_to_block_or_unblock, PendingPipes, PipeStateChange,
 };
 use crate::plugins::plugin_loader::PluginLoader;
-use crate::plugins::plugin_map::{AtomicEvent, PluginEnv, PluginMap, RunningPlugin, Subscriptions};
+use crate::plugins::plugin_map::{AtomicEvent, PluginEnv, PluginMap, RunningPlugin};
 
 use crate::plugins::plugin_worker::MessageToWorker;
 use crate::plugins::watch_filesystem::watch_filesystem;
@@ -34,6 +34,7 @@ use zellij_utils::plugin_api::event::ProtobufEvent;
 use prost::Message;
 
 use crate::panes::PaneId;
+use crate::plugins::plugin_map::RunningPluginAndSubscriptions;
 use crate::{
     background_jobs::BackgroundJob, route::NotificationEnd, screen::ScreenInstruction,
     thread_bus::ThreadSenders, ui::loading_indication::LoadingIndication, ClientId,
@@ -64,7 +65,7 @@ fn make_plugin_url_path_safe(url: String) -> String {
 
 #[derive(Debug, Clone)]
 pub enum EventOrPipeMessage {
-    Event(Event),
+    Event(Box<Event>),
     PipeMessage(PipeMessage),
 }
 
@@ -224,7 +225,7 @@ impl WasmBridge {
             Arc::new(Mutex::new(HashMap::new()));
         let watcher = None;
         let downloader = Downloader::new(ZELLIJ_CACHE_DIR.to_path_buf());
-        let max_threads = num_cpus::get().max(4).min(16);
+        let max_threads = num_cpus::get().clamp(4, 16);
         let plugin_executor = Arc::new(PinnedExecutor::new(
             max_threads,
             &senders,
@@ -888,12 +889,7 @@ impl WasmBridge {
         mut updates: Vec<(Option<PluginId>, Option<ClientId>, Event)>,
         shutdown_sender: Sender<()>,
     ) -> Result<()> {
-        let plugins_to_update: Vec<(
-            PluginId,
-            ClientId,
-            Arc<Mutex<RunningPlugin>>,
-            Arc<Mutex<Subscriptions>>,
-        )> = self
+        let plugins_to_update: Vec<RunningPluginAndSubscriptions> = self
             .plugin_map
             .lock()
             .unwrap()
@@ -977,7 +973,7 @@ impl WasmBridge {
         for (pid, _cid, event) in updates.drain(..) {
             for (plugin_id, cached_events) in self.cached_events_for_pending_plugins.iter_mut() {
                 if pid.is_none() || pid.as_ref() == Some(plugin_id) {
-                    cached_events.push(EventOrPipeMessage::Event(event.clone()));
+                    cached_events.push(EventOrPipeMessage::Event(Box::new(event.clone())));
                 }
             }
         }
@@ -1010,12 +1006,7 @@ impl WasmBridge {
         plugin_id_to_update: PluginId,
         client_id_to_update: ClientId,
     ) -> Result<()> {
-        let plugins_to_change: Vec<(
-            PluginId,
-            ClientId,
-            Arc<Mutex<RunningPlugin>>,
-            Arc<Mutex<Subscriptions>>,
-        )> = self
+        let plugins_to_change: Vec<RunningPluginAndSubscriptions> = self
             .plugin_map
             .lock()
             .unwrap()
@@ -1108,12 +1099,7 @@ impl WasmBridge {
         shutdown_sender: Sender<()>,
         mut notification_end: Option<NotificationEnd>,
     ) -> Result<()> {
-        let plugins_to_update: Vec<(
-            PluginId,
-            ClientId,
-            Arc<Mutex<RunningPlugin>>,
-            Arc<Mutex<Subscriptions>>,
-        )> = self
+        let plugins_to_update: Vec<RunningPluginAndSubscriptions> = self
             .plugin_map
             .lock()
             .unwrap()
@@ -1534,6 +1520,7 @@ impl WasmBridge {
                             for event_or_pipe_message in events_or_pipe_messages {
                                 match event_or_pipe_message {
                                     EventOrPipeMessage::Event(event) => {
+                                        let event = *event;
                                         match EventType::from_str(&event.to_string())
                                             .with_context(err_context)
                                         {

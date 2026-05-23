@@ -27,30 +27,31 @@ use zellij_utils::{data::PermissionType, errors::prelude::*};
 // so when adding/removing from the map - everything is halted, that's life
 // but when cloning the internal RunningPlugin and Subscriptions atomics, we can call methods on
 // them without blocking other instances
+pub type PluginAssetTuple = (
+    Arc<Mutex<RunningPlugin>>,
+    Arc<Mutex<Subscriptions>>,
+    HashMap<String, UnboundedSender<MessageToWorker>>,
+);
+
+pub type RunningPluginAndSubscriptions = (
+    PluginId,
+    ClientId,
+    Arc<Mutex<RunningPlugin>>,
+    Arc<Mutex<Subscriptions>>,
+);
+
+pub type RunningPluginAndSubscriptionsRef = (Arc<Mutex<RunningPlugin>>, Arc<Mutex<Subscriptions>>);
+
 #[derive(Default)]
 pub struct PluginMap {
-    plugin_assets: HashMap<
-        (PluginId, ClientId),
-        (
-            Arc<Mutex<RunningPlugin>>,
-            Arc<Mutex<Subscriptions>>,
-            HashMap<String, UnboundedSender<MessageToWorker>>,
-        ),
-    >,
+    plugin_assets: HashMap<(PluginId, ClientId), PluginAssetTuple>,
 }
 
 impl PluginMap {
     pub fn remove_plugins(
         &mut self,
         pid: PluginId,
-    ) -> HashMap<
-        (PluginId, ClientId),
-        (
-            Arc<Mutex<RunningPlugin>>,
-            Arc<Mutex<Subscriptions>>,
-            HashMap<String, UnboundedSender<MessageToWorker>>,
-        ),
-    > {
+    ) -> HashMap<(PluginId, ClientId), PluginAssetTuple> {
         let mut removed = HashMap::new();
         let ids_in_plugin_map: Vec<(PluginId, ClientId)> =
             self.plugin_assets.keys().copied().collect();
@@ -79,14 +80,7 @@ impl PluginMap {
             })
             .collect()
     }
-    pub fn running_plugins_and_subscriptions(
-        &mut self,
-    ) -> Vec<(
-        PluginId,
-        ClientId,
-        Arc<Mutex<RunningPlugin>>,
-        Arc<Mutex<Subscriptions>>,
-    )> {
+    pub fn running_plugins_and_subscriptions(&mut self) -> Vec<RunningPluginAndSubscriptions> {
         self.plugin_assets
             .iter()
             .map(
@@ -105,7 +99,7 @@ impl PluginMap {
         &self,
         plugin_id: PluginId,
         client_id: ClientId,
-    ) -> Option<(Arc<Mutex<RunningPlugin>>, Arc<Mutex<Subscriptions>>)> {
+    ) -> Option<RunningPluginAndSubscriptionsRef> {
         self.plugin_assets
             .get(&(plugin_id, client_id))
             .map(|(running_plugin, subscriptions, _)| {

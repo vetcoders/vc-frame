@@ -9,6 +9,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use wasmi::Engine;
 
+pub type WorkFn = Box<
+    dyn FnOnce(ThreadSenders, Arc<Mutex<PluginMap>>, Arc<Mutex<Vec<ClientId>>>, PluginCache, Engine)
+        + Send
+        + 'static,
+>;
+
 /// A dynamic thread pool that pins jobs to specific threads based on plugin_id
 /// Starts with 1 thread and expands when threads are busy, shrinks when plugins unload
 pub struct PinnedExecutor {
@@ -41,18 +47,7 @@ struct ExecutionThread {
 }
 
 enum Job {
-    Work(
-        Box<
-            dyn FnOnce(
-                    ThreadSenders,
-                    Arc<Mutex<PluginMap>>,
-                    Arc<Mutex<Vec<ClientId>>>,
-                    PluginCache,
-                    Engine,
-                ) + Send
-                + 'static,
-        >,
-    ),
+    Work(WorkFn),
     Shutdown, // Signal to exit the worker loop
 }
 
@@ -396,14 +391,16 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    // Test fixtures
-    fn create_test_dependencies() -> (
+    type TestDependencies = (
         ThreadSenders,
         Arc<Mutex<PluginMap>>,
         Arc<Mutex<Vec<ClientId>>>,
         PluginCache,
         Engine,
-    ) {
+    );
+
+    // Test fixtures
+    fn create_test_dependencies() -> TestDependencies {
         use std::path::PathBuf;
         use wasmi::Module;
         use zellij_utils::channels::{self, SenderWithContext};

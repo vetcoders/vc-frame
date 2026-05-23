@@ -69,7 +69,7 @@ async fn handle_ws_control(
             .lock()
             .unwrap()
             .get_client_os_api(&deserialized_msg.web_client_id)
-            .cloned()
+            .map(|api| api.box_clone())
         else {
             log::error!("Unknown web_client_id: {}", deserialized_msg.web_client_id);
             return;
@@ -166,7 +166,7 @@ async fn handle_ws_terminal(
         .lock()
         .unwrap()
         .get_client_os_api(&web_client_id)
-        .cloned()
+        .map(|api| api.box_clone())
     else {
         log::error!("Unknown web_client_id: {}", web_client_id);
         return;
@@ -183,7 +183,7 @@ async fn handle_ws_terminal(
     let (attachment_complete_tx, attachment_complete_rx) = tokio::sync::oneshot::channel();
 
     zellij_server_listener(
-        os_input.clone(),
+        os_input.box_clone(),
         state.connection_table.clone(),
         session_name.map(|p| p.0),
         state.config.lock().unwrap().clone(),
@@ -257,7 +257,7 @@ async fn handle_ws_terminal(
                     .lock()
                     .unwrap()
                     .get_client_os_api(&web_client_id)
-                    .cloned()
+                    .map(|api| api.box_clone())
                 {
                     stdin_session.finalize(&*client_connection, &mut mouse_old_event);
                 } else {
@@ -275,14 +275,14 @@ async fn handle_ws_terminal(
                     .lock()
                     .unwrap()
                     .get_client_os_api(&web_client_id)
-                    .cloned()
+                    .map(|api| api.box_clone())
                 else {
                     log::error!("Unknown web_client_id: {}", web_client_id);
                     continue;
                 };
                 parse_stdin(
                     &buf,
-                    client_connection.clone(),
+                    client_connection.box_clone(),
                     &mut mouse_old_event,
                     &mut stdin_session,
                 );
@@ -293,14 +293,14 @@ async fn handle_ws_terminal(
                     .lock()
                     .unwrap()
                     .get_client_os_api(&web_client_id)
-                    .cloned()
+                    .map(|api| api.box_clone())
                 else {
                     log::error!("Unknown web_client_id: {}", web_client_id);
                     continue;
                 };
                 parse_stdin(
                     msg.as_bytes(),
-                    client_connection.clone(),
+                    client_connection.box_clone(),
                     &mut mouse_old_event,
                     &mut stdin_session,
                 );

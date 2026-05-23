@@ -105,7 +105,7 @@ impl TiledPanes {
             default_mode_info,
             style,
             session_is_mirrored,
-            active_panes: ActivePanes::new(&os_api),
+            active_panes: ActivePanes::new(&*os_api),
             draw_pane_frames,
             panes_to_hide: HashSet::new(),
             fullscreen_is_active: None,
@@ -532,7 +532,7 @@ impl TiledPanes {
                 pane_grid.layout(direction, self.display_area.borrow().rows)
             },
         }
-        .map_err(|e| anyError::msg(e))
+        .map_err(anyError::msg)
         .with_context(|| format!("{:?} relayout of tab failed", direction))
         .non_fatal();
 
@@ -1089,20 +1089,15 @@ impl TiledPanes {
                         && help_text_visible.get(client_id).copied().unwrap_or(false)
                 }) && selectable_pane_count > 1
                     && self.fullscreen_is_active.is_none();
-                let mut pane_contents_and_ui = PaneContentsAndUi::new(
-                    pane,
-                    output,
-                    self.style,
-                    &active_panes,
-                    multiple_users_exist_in_session,
-                    None,
-                    pane_is_stacked_under,
-                    pane_is_stacked_over,
-                    should_draw_pane_frames,
-                    mouse_hover_pane_id,
-                    current_pane_group.clone(),
-                    show_help_text,
-                );
+                let mut pane_contents_and_ui = PaneContentsAndUi::new(pane, output, self.style)
+                    .with_active_panes(&active_panes)
+                    .with_multiple_users_exist_in_session(multiple_users_exist_in_session)
+                    .with_pane_is_stacked_under(pane_is_stacked_under)
+                    .with_pane_is_stacked_over(pane_is_stacked_over)
+                    .with_should_draw_pane_frames(should_draw_pane_frames)
+                    .with_mouse_hover_pane_id(mouse_hover_pane_id)
+                    .with_current_pane_group(current_pane_group.clone())
+                    .with_show_help_text(show_help_text);
                 for client_id in &connected_clients {
                     let client_mode = self
                         .mode_info

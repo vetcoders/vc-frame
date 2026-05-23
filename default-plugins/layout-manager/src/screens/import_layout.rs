@@ -36,7 +36,7 @@ impl ImportLayoutScreen {
             },
             Err(e) => {
                 self.parsed_metadata = None;
-                self.parse_error = Some(format_kdl_error(e));
+                self.parse_error = Some(format_kdl_error(*e));
             },
         }
     }

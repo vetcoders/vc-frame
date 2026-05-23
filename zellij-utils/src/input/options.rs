@@ -556,8 +556,8 @@ impl Options {
     }
 
     pub fn from_cli(&self, other: Option<Command>) -> Options {
-        if let Some(Command::Options(options)) = other {
-            Options::merge_from_cli(self, *options)
+        if let Some(Command::Options(cli_options)) = other {
+            Options::merge_from_cli(self, *cli_options.options)
         } else {
             self.to_owned()
         }

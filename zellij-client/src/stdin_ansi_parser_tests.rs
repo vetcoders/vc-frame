@@ -439,7 +439,8 @@ fn double_dispatch_matrix_with_forward_active() {
     // covered by `forwarding_window_accumulates_and_barrier_closes`;
     // this test sweeps OSC 10, OSC 4, CSI 14t / 16t replies, and
     // DECRPM 2026.
-    let cases: Vec<(&[u8], fn(&HostReply) -> bool, &str)> = vec![
+    type Case<'a> = (&'a [u8], fn(&HostReply) -> bool, &'a str);
+    let cases: Vec<Case> = vec![
         (
             b"\x1b]10;rgb:1111/2222/3333\x1b\\",
             |r| matches!(r, HostReply::ForegroundColor(_)),
@@ -569,7 +570,7 @@ fn timer_fires_after_deadline_and_closes_slot() {
     let parser = Arc::new(Mutex::new(StdinAnsiParser::new()));
     parser.lock().unwrap().open_forward(7);
 
-    let captured: Arc<Mutex<Option<(u32, Vec<u8>)>>> = Arc::new(Mutex::new(None));
+    let captured = Arc::new(Mutex::new(None));
     let captured_clone = captured.clone();
     schedule_forward_timeout(
         rt.handle(),
@@ -716,7 +717,7 @@ fn timer_preserves_accumulated_reply_bytes_on_timeout() {
         let _ = p.feed(b"\x1b]11;rgb:1234/5678/9abc\x1b\\");
     }
 
-    let captured: Arc<Mutex<Option<(u32, Vec<u8>)>>> = Arc::new(Mutex::new(None));
+    let captured = Arc::new(Mutex::new(None));
     let captured_clone = captured.clone();
     schedule_forward_timeout(
         rt.handle(),

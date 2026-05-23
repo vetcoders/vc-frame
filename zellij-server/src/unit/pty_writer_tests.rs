@@ -1,7 +1,7 @@
 use super::*;
 use crate::os_input_output::{AsyncReader, ServerOsApi};
 use crate::panes::PaneId;
-use crate::thread_bus::Bus;
+use crate::thread_bus::{Bus, ThreadSenders};
 use interprocess::local_socket::Stream as LocalSocketStream;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -180,12 +180,7 @@ fn make_test_bus(
     let sender_with_ctx = SenderWithContext::new(sender);
     let bus = Bus::new(
         vec![receiver],
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        ThreadSenders::default(),
         Some(Box::new(mock)),
     );
     (bus, sender_with_ctx)

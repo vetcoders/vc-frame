@@ -335,7 +335,7 @@ impl<'a> StackedPanes<'a> {
         let err_context = || "Failed to position_of_current_and_flexible_pane".to_string();
         let all_stacked_pane_positions = self.positions_in_stack(current_pane_id)?;
         let panes = self.panes.borrow();
-        let pane_to_close = panes.get(current_pane_id).with_context(err_context)?;
+        let pane_to_close = &***panes.get(current_pane_id).with_context(err_context)?;
         let position_of_current_pane =
             self.position_of_current_pane(&all_stacked_pane_positions, pane_to_close)?;
         let position_of_flexible_pane =
@@ -345,7 +345,7 @@ impl<'a> StackedPanes<'a> {
     fn position_of_current_pane(
         &self,
         all_stacked_pane_positions: &Vec<(PaneId, PaneGeom)>,
-        pane_to_close: &Box<dyn Pane>,
+        pane_to_close: &dyn Pane,
     ) -> Result<usize> {
         let err_context = || "Failed to find position of current pane".to_string();
         all_stacked_pane_positions
@@ -1023,7 +1023,7 @@ impl<'a> StackedPanes<'a> {
         let err_context = || "Failed to fill_space_over_visible_stacked_pane".to_string();
         let all_stacked_pane_positions = self.positions_in_stack(id)?;
         let mut panes = self.panes.borrow_mut();
-        let pane_to_close = panes.get(id).with_context(err_context)?;
+        let pane_to_close = &***panes.get(id).with_context(err_context)?;
         let position_of_current_pane =
             self.position_of_current_pane(&all_stacked_pane_positions, pane_to_close)?;
         let only_one_pane_remaining_in_stack_after_close = all_stacked_pane_positions.len() == 2;
@@ -1067,7 +1067,7 @@ impl<'a> StackedPanes<'a> {
             || "Failed to fill_space_over_one_liner_pane_above_flexible_pane".to_string();
         let all_stacked_pane_positions = self.positions_in_stack(id)?;
         let mut panes = self.panes.borrow_mut();
-        let pane_to_close = panes.get(id).with_context(err_context)?;
+        let pane_to_close = &***panes.get(id).with_context(err_context)?;
         let position_of_current_pane =
             self.position_of_current_pane(&all_stacked_pane_positions, pane_to_close)?;
         let position_of_flexible_pane =
@@ -1099,7 +1099,7 @@ impl<'a> StackedPanes<'a> {
             || "Failed to fill_space_over_one_liner_pane_below_flexible_pane".to_string();
         let all_stacked_pane_positions = self.positions_in_stack(id)?;
         let mut panes = self.panes.borrow_mut();
-        let pane_to_close = panes.get(id).with_context(err_context)?;
+        let pane_to_close = &***panes.get(id).with_context(err_context)?;
         let position_of_current_pane =
             self.position_of_current_pane(&all_stacked_pane_positions, pane_to_close)?;
         let position_of_flexible_pane =

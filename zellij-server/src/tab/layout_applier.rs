@@ -62,7 +62,7 @@ impl<'a> LayoutApplier<'a> {
         floating_panes: &'a mut FloatingPanes,
         draw_pane_frames: bool,
         focus_pane_id: &'a mut Option<PaneId>,
-        os_api: &Box<dyn ServerOsApi>,
+        os_api: &dyn ServerOsApi,
         debug: bool,
         arrow_fonts: bool,
         styled_underlines: bool,
@@ -80,7 +80,7 @@ impl<'a> LayoutApplier<'a> {
         let connected_clients = connected_clients.clone();
         let style = *style;
         let display_area = display_area.clone();
-        let os_api = os_api.clone();
+        let os_api = os_api.box_clone();
         LayoutApplier {
             viewport,
             senders,

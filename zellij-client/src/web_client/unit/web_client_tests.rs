@@ -4,6 +4,7 @@ use futures_util::{SinkExt, StreamExt};
 use isahc::prelude::*;
 use serde_json;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::http::Request;
@@ -2890,7 +2891,7 @@ impl SessionManager for MockSessionManager {
         session_name: &str,
         _os_input: Box<dyn ClientOsApi>,
         session_exists: bool,
-        _zellij_ipc_pipe: &PathBuf,
+        _zellij_ipc_pipe: &Path,
         first_message: ClientToServerMsg,
     ) {
         // Track the message that was sent

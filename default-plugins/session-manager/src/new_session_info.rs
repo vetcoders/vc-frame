@@ -347,9 +347,10 @@ mod tests {
     }
 
     fn make_layout_list(names: &[&str]) -> LayoutList {
-        let mut ll = LayoutList::default();
-        ll.layout_list = names.iter().map(|n| make_layout(n)).collect();
-        ll
+        LayoutList {
+            layout_list: names.iter().map(|n| make_layout(n)).collect(),
+            ..Default::default()
+        }
     }
 
     // ---------------------------------------------------------------

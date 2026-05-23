@@ -599,7 +599,7 @@ fn format_key_without_modifiers(
     common_modifiers: &[KeyModifier],
 ) -> String {
     keys.first()
-        .map(|key| format!("{}", key.strip_common_modifiers(&common_modifiers.to_vec())))
+        .map(|key| format!("{}", key.strip_common_modifiers(common_modifiers)))
         .unwrap_or_else(|| "UNBOUND".to_string())
 }
 

@@ -5085,14 +5085,15 @@ impl Screen {
                         })
                         .collect();
                     let (default_fg, default_bg) = p.get_pane_default_colors();
-                    PaneLayoutMetadata::new(
-                        pane_id,
-                        p.position_and_size(),
-                        p.borderless(),
-                        p.invoked_with().clone(),
-                        p.custom_title(),
-                        !focused_clients.is_empty(),
-                        if self.serialize_pane_viewport {
+                    PaneLayoutMetadata {
+                        id: pane_id,
+                        geom: p.position_and_size(),
+                        cwd: None,
+                        is_borderless: p.borderless(),
+                        run: p.invoked_with().clone(),
+                        title: p.custom_title(),
+                        is_focused: !focused_clients.is_empty(),
+                        pane_contents: if self.serialize_pane_viewport {
                             p.serialize(self.scrollback_lines_to_serialize)
                         } else {
                             None
@@ -5100,7 +5101,7 @@ impl Screen {
                         focused_clients,
                         default_fg,
                         default_bg,
-                    )
+                    }
                 })
                 .collect();
             let floating_panes: Vec<PaneLayoutMetadata> = tab
@@ -5126,14 +5127,15 @@ impl Screen {
                         })
                         .collect();
                     let (default_fg, default_bg) = p.get_pane_default_colors();
-                    PaneLayoutMetadata::new(
-                        pane_id,
-                        p.position_and_size(),
-                        false, // floating panes are never borderless
-                        p.invoked_with().clone(),
-                        p.custom_title(),
-                        !focused_clients.is_empty(),
-                        if self.serialize_pane_viewport {
+                    PaneLayoutMetadata {
+                        id: pane_id,
+                        geom: p.position_and_size(),
+                        cwd: None,
+                        is_borderless: false, // floating panes are never borderless
+                        run: p.invoked_with().clone(),
+                        title: p.custom_title(),
+                        is_focused: !focused_clients.is_empty(),
+                        pane_contents: if self.serialize_pane_viewport {
                             p.serialize(self.scrollback_lines_to_serialize)
                         } else {
                             None
@@ -5141,7 +5143,7 @@ impl Screen {
                         focused_clients,
                         default_fg,
                         default_bg,
-                    )
+                    }
                 })
                 .collect();
             session_layout_metadata.add_tab(
@@ -7767,10 +7769,9 @@ pub(crate) fn screen_thread_main(
                         }
 
                         for idx in floating_indices {
-                            tab_layout_info
-                                .floating_layouts
-                                .get_mut(idx)
-                                .map(|f| f.already_running = true);
+                            if let Some(f) = tab_layout_info.floating_layouts.get_mut(idx) {
+                                f.already_running = true;
+                            }
                         }
 
                         processed_tab_layouts.push(tab_layout_info);

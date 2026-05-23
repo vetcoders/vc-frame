@@ -6,6 +6,8 @@ use crate::ui::{
     SelectedIndex, SessionUiInfo,
 };
 
+type FlatSessionAssets = Vec<(ListItem, String, Option<usize>, Option<(u32, bool)>, bool)>;
+
 macro_rules! render_assets {
     ($assets:expr, $line_count_to_remove:expr, $selected_index:expr, $to_render_until_selected: expr, $to_render_after_selected:expr, $has_deeper_selected_assets:expr, $max_cols:expr, $colors:expr) => {{
         let (start_index, anchor_asset_index, end_index, line_count_to_remove) =
@@ -268,10 +270,7 @@ impl SessionList {
         self.is_searching = !search_term.is_empty();
         self.selected_search_index = Some(0);
     }
-    fn flatten_assets(
-        &self,
-        colors: &Colors,
-    ) -> Vec<(ListItem, String, Option<usize>, Option<(u32, bool)>, bool)> {
+    fn flatten_assets(&self, colors: &Colors) -> FlatSessionAssets {
         // list_item, session_name, tab_position, (pane_id, is_plugin), is_current_session
         let mut list_items = vec![];
         for session in &self.session_ui_infos {

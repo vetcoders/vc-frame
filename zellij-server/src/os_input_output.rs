@@ -204,11 +204,13 @@ impl ClientSender {
     }
 }
 
+type CachedResizes = Arc<Mutex<Option<BTreeMap<u32, (u16, u16, Option<u16>, Option<u16>)>>>>;
+
 #[derive(Clone)]
 pub struct ServerOsInputOutput {
     pty_backend: PtyBackendImpl,
     client_senders: Arc<Mutex<HashMap<ClientId, ClientSender>>>,
-    cached_resizes: Arc<Mutex<Option<BTreeMap<u32, (u16, u16, Option<u16>, Option<u16>)>>>>,
+    cached_resizes: CachedResizes,
 }
 
 /// The `ServerOsApi` trait represents an abstract interface to the features of an operating system that

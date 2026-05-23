@@ -201,7 +201,7 @@ fn create_layout_applier_fixtures(
         session_is_mirrored,
         draw_pane_frames,
         default_mode_info.clone(),
-        style.clone(),
+        style,
         os_api.box_clone(),
         senders.clone(),
     );
@@ -216,7 +216,7 @@ fn create_layout_applier_fixtures(
         character_cell_size.clone(),
         session_is_mirrored,
         default_mode_info,
-        style.clone(),
+        style,
         os_api.box_clone(),
         senders.clone(),
     );
@@ -331,7 +331,7 @@ fn create_layout_applier_fixtures_with_receivers(
         session_is_mirrored,
         draw_pane_frames,
         default_mode_info.clone(),
-        style.clone(),
+        style,
         os_api.box_clone(),
         senders.clone(),
     );
@@ -346,7 +346,7 @@ fn create_layout_applier_fixtures_with_receivers(
         character_cell_size.clone(),
         session_is_mirrored,
         default_mode_info,
-        style.clone(),
+        style,
         os_api.box_clone(),
         senders.clone(),
     );
@@ -598,7 +598,7 @@ fn test_apply_empty_layout() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -683,7 +683,7 @@ fn test_apply_simple_two_pane_layout() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -769,7 +769,7 @@ fn test_apply_three_pane_layout() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -854,7 +854,7 @@ fn test_apply_horizontal_split_with_sizes() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -939,7 +939,7 @@ fn test_apply_vertical_split_with_sizes() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -1027,7 +1027,7 @@ fn test_apply_nested_layout() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -1111,7 +1111,7 @@ fn test_apply_layout_with_focus() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -1198,7 +1198,7 @@ fn test_apply_layout_with_commands() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -1282,7 +1282,7 @@ fn test_apply_layout_with_named_panes() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -1366,7 +1366,7 @@ fn test_apply_layout_with_borderless_panes() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -1459,7 +1459,7 @@ fn test_apply_layout_with_floating_panes() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -1479,7 +1479,7 @@ fn test_apply_layout_with_floating_panes() {
         )
         .unwrap();
 
-    assert_eq!(should_show_floating, true);
+    assert!(should_show_floating);
 
     assert_snapshot!(take_pane_state_snapshot(
         &tiled_panes,
@@ -1553,7 +1553,7 @@ fn test_apply_layout_with_floating_pane_with_command() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -1661,7 +1661,7 @@ fn test_apply_layout_with_mixed_tiled_and_floating_panes() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -1681,7 +1681,7 @@ fn test_apply_layout_with_mixed_tiled_and_floating_panes() {
         )
         .unwrap();
 
-    assert_eq!(should_show_floating, true);
+    assert!(should_show_floating);
 
     // Snapshot should show:
     // - 3 tiled panes with correct geometries, commands, and names
@@ -1752,7 +1752,7 @@ fn test_reapply_layout_exact_match() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -1855,7 +1855,7 @@ fn test_reapply_layout_logical_position_match() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -1959,7 +1959,7 @@ fn test_reapply_layout_with_more_positions() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -2068,7 +2068,7 @@ fn test_reapply_floating_pane_layout() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -2181,7 +2181,7 @@ fn test_apply_complex_nested_layout() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -2270,7 +2270,7 @@ fn test_apply_layout_with_stacked_panes() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -2365,7 +2365,7 @@ fn test_apply_layout_with_multiple_stacks() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -2467,7 +2467,7 @@ fn test_apply_layout_with_plugin_panes() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -2575,7 +2575,7 @@ fn test_apply_layout_with_mixed_plugin_and_terminal_panes() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -2666,7 +2666,7 @@ fn test_apply_layout_with_missing_plugin_ids() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -2743,7 +2743,7 @@ fn test_apply_layout_with_excess_terminal_ids() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -2842,7 +2842,7 @@ fn test_override_layout_basic_with_both_tiled_and_floating() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -2900,7 +2900,7 @@ fn test_override_layout_basic_with_both_tiled_and_floating() {
         .unwrap();
 
     // Should show floating panes
-    assert_eq!(should_show_floating, true);
+    assert!(should_show_floating);
 
     // Verify close messages were sent for vim (Terminal(2)) and tail (Terminal(3))
     let closed_panes = collect_close_pane_messages(&pty_receiver);
@@ -2986,7 +2986,7 @@ fn test_override_layout_hide_floating_panes_true() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -3043,7 +3043,7 @@ fn test_override_layout_hide_floating_panes_true() {
         .unwrap();
 
     // Should NOT show floating panes because of hide_floating_panes
-    assert_eq!(should_show_floating, false);
+    assert!(!should_show_floating);
 
     let closed_panes = collect_close_pane_messages(&pty_receiver);
     assert_eq!(closed_panes.len(), 0);
@@ -3118,7 +3118,7 @@ fn test_override_layout_show_floating_panes() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -3172,7 +3172,7 @@ fn test_override_layout_show_floating_panes() {
         .unwrap();
 
     // Should show floating panes
-    assert_eq!(should_show_floating, true);
+    assert!(should_show_floating);
 
     // Verify close message was sent for one tiled pane (Terminal(2))
     let closed_panes = collect_close_pane_messages(&pty_receiver);
@@ -3256,7 +3256,7 @@ fn test_override_tiled_exact_match_preservation_commands() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -3383,7 +3383,7 @@ fn test_override_tiled_exact_match_preservation_plugins() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -3508,7 +3508,7 @@ fn test_override_tiled_all_panes_closed_no_matches() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -3638,7 +3638,7 @@ fn test_override_tiled_mixed_some_matches_some_new() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -3757,7 +3757,7 @@ fn test_override_tiled_new_panes_for_unmatched_positions() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -3868,7 +3868,7 @@ fn test_override_tiled_focus_on_new_pane() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -3981,7 +3981,7 @@ fn test_override_tiled_focus_when_focused_pane_closed() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -4107,7 +4107,7 @@ fn test_override_tiled_empty_layout_closes_all() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -4246,7 +4246,7 @@ fn test_override_floating_exact_match_preservation() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -4389,7 +4389,7 @@ fn test_override_floating_all_closed_no_matches() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -4532,7 +4532,7 @@ fn test_override_floating_new_panes_created() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -4678,7 +4678,7 @@ fn test_override_floating_focus_handling() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -4811,7 +4811,7 @@ fn test_override_floating_position_and_size_update() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -4924,7 +4924,7 @@ fn test_override_floating_return_value_has_panes() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -4973,7 +4973,7 @@ fn test_override_floating_return_value_has_panes() {
         .unwrap();
 
     // Function should return true because layout has floating panes
-    assert_eq!(has_floating_panes, true);
+    assert!(has_floating_panes);
 
     assert_snapshot!(take_pane_state_snapshot(
         &tiled_panes,
@@ -5049,7 +5049,7 @@ fn test_override_floating_return_value_no_panes() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -5089,7 +5089,7 @@ fn test_override_floating_return_value_no_panes() {
         .unwrap();
 
     // Function should return false because layout has no floating panes
-    assert_eq!(has_floating_panes, false);
+    assert!(!has_floating_panes);
 
     // Verify close message was sent for floating pane (Terminal(2))
     let closed_panes = collect_close_pane_messages(&pty_receiver);
@@ -5190,7 +5190,7 @@ fn test_override_full_tiled_and_floating_together() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -5336,7 +5336,7 @@ fn test_override_viewport_adjustment_with_borderless() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -5382,7 +5382,7 @@ fn test_override_viewport_adjustment_with_borderless() {
     // Verify close message was sent for at least the extra pane (Terminal(3))
     // Generic panes without commands don't match exactly, so all 3 may be closed
     let closed_panes = collect_close_pane_messages(&pty_receiver);
-    assert!(closed_panes.len() >= 1);
+    assert!(!closed_panes.is_empty());
     assert!(closed_panes.contains(&PaneId::Terminal(3)));
 
     // No plugins should be unloaded
@@ -5460,7 +5460,7 @@ fn test_override_tiled_retain_terminal_panes_partial_match() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -5593,7 +5593,7 @@ fn test_override_tiled_retain_terminal_panes_no_matches() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -5741,7 +5741,7 @@ fn test_override_floating_retain_terminal_panes_partial_match() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -5899,7 +5899,7 @@ fn test_override_floating_retain_terminal_panes_no_matches() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -6063,7 +6063,7 @@ fn test_override_mixed_retain_terminal_panes_both_tiled_and_floating() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -6224,7 +6224,7 @@ fn test_override_retain_terminal_but_close_plugin_panes() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -6382,7 +6382,7 @@ fn test_override_tiled_retain_plugin_panes_partial_match() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -6521,7 +6521,7 @@ fn test_override_tiled_retain_plugin_panes_no_matches() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -6675,7 +6675,7 @@ fn test_override_floating_retain_plugin_panes_partial_match() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -6824,7 +6824,7 @@ fn test_override_floating_retain_plugin_panes_no_matches() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -6981,7 +6981,7 @@ fn test_override_mixed_retain_plugin_panes_both_tiled_and_floating() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,
@@ -7138,7 +7138,7 @@ fn test_override_retain_plugin_but_close_terminal_panes() {
         &mut floating_panes,
         draw_pane_frames,
         &mut focus_pane_id,
-        &os_api,
+        &*os_api,
         debug,
         arrow_fonts,
         styled_underlines,

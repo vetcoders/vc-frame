@@ -121,7 +121,7 @@ impl PaneFrame {
             highlight_tooltip: frame_params.highlight_tooltip,
         }
     }
-    pub fn is_pinned(mut self, is_pinned: bool) -> Self {
+    pub fn with_pinned(mut self, is_pinned: bool) -> Self {
         self.is_pinned = is_pinned;
         self
     }

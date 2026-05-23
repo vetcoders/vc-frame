@@ -438,7 +438,7 @@ impl Pane for TerminalPane {
             pane_title,
             frame_params,
         )
-        .is_pinned(is_pinned);
+        .with_pinned(is_pinned);
         if let Some((exit_status, is_first_run, _run_command)) = &self.is_held {
             if *is_first_run {
                 frame.indicate_first_run();

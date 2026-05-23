@@ -123,6 +123,16 @@ use crate::panes::terminal_character::{
 };
 use crate::panes::Selection;
 use crate::ui::components::UiComponentParser;
+
+pub type LogicalLineMatch = (usize, usize, String, Vec<(usize, usize)>);
+pub type RenderOutput = (Vec<CharacterChunk>, Option<String>, Vec<SixelImageChunk>);
+pub type BestHighlight = (
+    HighlightLayer,
+    u32,
+    String,
+    String,
+    BTreeMap<String, String>,
+);
 use zellij_utils::data::PaneContents;
 
 fn get_top_non_canonical_rows(rows: &mut VecDeque<Row>) -> Vec<Row> {
@@ -470,7 +480,7 @@ fn utf8_mouse_coordinates(column: usize, line: isize) -> Vec<u8> {
 fn collect_and_build_logical_line(
     viewport: &VecDeque<Row>,
     row_idx: usize,
-) -> Option<(usize, usize, String, Vec<(usize, usize)>)> {
+) -> Option<LogicalLineMatch> {
     if row_idx >= viewport.len() {
         return None;
     }
@@ -1549,7 +1559,7 @@ impl Grid {
         content_x: usize,
         content_y: usize,
         style: &Style,
-    ) -> Result<Option<(Vec<CharacterChunk>, Option<String>, Vec<SixelImageChunk>)>> {
+    ) -> Result<Option<RenderOutput>> {
         if self.lock_renders {
             return Ok(None);
         }
@@ -2354,13 +2364,7 @@ impl Grid {
         let (_canonical, _group_len, logical_text, boundaries) =
             collect_and_build_logical_line(&self.viewport, click_row)?;
 
-        let mut best: Option<(
-            HighlightLayer,
-            u32,
-            String,
-            String,
-            BTreeMap<String, String>,
-        )> = None;
+        let mut best: Option<BestHighlight> = None;
         for (plugin_id, pattern_map) in &self.plugin_highlights {
             for (pattern, compiled) in pattern_map {
                 for captures in compiled.regex.captures_iter(&logical_text) {

@@ -3,7 +3,7 @@ use crate::consts::ASSET_MAP;
 use crate::input::theme::Themes;
 #[allow(unused_imports)]
 use crate::{
-    cli::{CliArgs, Command, SessionCommand, Sessions},
+    cli::{CliArgs, CliOptions, Command, SessionCommand, Sessions},
     consts::{FEATURES, VERSION, ZELLIJ_CACHE_DIR, ZELLIJ_DEFAULT_THEMES},
     data::LayoutInfo,
     errors::prelude::*,
@@ -352,8 +352,8 @@ impl Setup {
         Setup::handle_setup_commands(cli_args);
         let config = Config::try_from(cli_args)?;
         let cli_config_options: Option<Options> =
-            if let Some(Command::Options(options)) = cli_args.command.clone() {
-                Some(*options)
+            if let Some(Command::Options(cli_options)) = cli_args.command.clone() {
+                Some(*cli_options.options)
             } else {
                 None
             };
@@ -746,7 +746,7 @@ fn merge_attach_command_options(
 #[cfg(test)]
 mod setup_test {
     use super::Setup;
-    use crate::cli::{CliArgs, Command};
+    use crate::cli::{CliArgs, CliOptions, Command};
     use crate::data::LayoutInfo;
     use crate::input::options::Options;
     use insta::assert_snapshot;
@@ -763,10 +763,12 @@ mod setup_test {
     #[test]
     fn cli_arguments_override_config_options() {
         let cli_args = CliArgs {
-            command: Some(Command::Options(Box::new(Options {
-                simplified_ui: Some(true),
-                ..Default::default()
-            }))),
+            command: Some(Command::Options(CliOptions {
+                options: Box::new(Options {
+                    simplified_ui: Some(true),
+                    ..Default::default()
+                }),
+            })),
             ..Default::default()
         };
         let (_config, _layout_info, options, _, _) = Setup::from_cli_args(&cli_args).unwrap();
@@ -801,10 +803,12 @@ mod setup_test {
                 "{}/src/test-fixtures/layout-with-options.kdl",
                 env!("CARGO_MANIFEST_DIR")
             ))),
-            command: Some(Command::Options(Box::new(Options {
-                pane_frames: Some(true),
-                ..Default::default()
-            }))),
+            command: Some(Command::Options(CliOptions {
+                options: Box::new(Options {
+                    pane_frames: Some(true),
+                    ..Default::default()
+                }),
+            })),
             ..Default::default()
         };
         let (_config, layout_info, options, _, _) = Setup::from_cli_args(&cli_args).unwrap();

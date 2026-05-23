@@ -85,7 +85,7 @@ impl FloatingPanes {
             desired_pane_positions: HashMap::new(),
             z_indices: vec![],
             show_panes: false,
-            active_panes: ActivePanes::new(&os_input),
+            active_panes: ActivePanes::new(&*os_input),
             pane_being_moved_with_mouse: None,
             senders,
             window_title: None,
@@ -457,20 +457,14 @@ impl FloatingPanes {
             let show_help_text = active_panes.iter().any(|(client_id, pane_id)| {
                 pane_id == &pane.pid() && help_text_visible.get(client_id).copied().unwrap_or(false)
             });
-            let mut pane_contents_and_ui = PaneContentsAndUi::new(
-                pane,
-                output,
-                self.style,
-                &active_panes,
-                multiple_users_exist_in_session,
-                Some(z_index + 1), // +1 because 0 is reserved for non-floating panes
-                false,
-                false,
-                true,
-                mouse_hover_pane_id,
-                current_pane_group.clone(),
-                show_help_text,
-            );
+            let mut pane_contents_and_ui = PaneContentsAndUi::new(pane, output, self.style)
+                .with_active_panes(&active_panes)
+                .with_multiple_users_exist_in_session(multiple_users_exist_in_session)
+                .with_z_index(Some(z_index + 1))
+                .with_should_draw_pane_frames(true)
+                .with_mouse_hover_pane_id(mouse_hover_pane_id)
+                .with_current_pane_group(current_pane_group.clone())
+                .with_show_help_text(show_help_text);
             for client_id in &connected_clients {
                 let client_mode = self
                     .mode_info

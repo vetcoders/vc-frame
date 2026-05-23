@@ -73,7 +73,7 @@ impl ServerOsApi for FakeInputOutput {
             .lock()
             .unwrap()
             .entry(id)
-            .or_insert_with(|| vec![])
+            .or_insert_with(std::vec::Vec::new)
             .extend_from_slice(buf);
         Ok(buf.len())
     }
@@ -7915,12 +7915,18 @@ fn layout_with_plugins_and_commands_swaped_properly() {
             .template
             .unwrap();
 
-    let mut command_1 = RunCommand::default();
-    command_1.command = PathBuf::from("command1");
-    command_1.hold_on_close = true;
-    let mut command_2 = RunCommand::default();
-    command_2.command = PathBuf::from("command2");
-    command_2.hold_on_close = true;
+    let command_1 = RunCommand {
+        command: PathBuf::from("command1"),
+        hold_on_close: true,
+        ..Default::default()
+    };
+
+    let command_2 = RunCommand {
+        command: PathBuf::from("command2"),
+        hold_on_close: true,
+        ..Default::default()
+    };
+
     let new_terminal_ids = vec![(1, Some(command_1)), (2, None), (3, Some(command_2))];
     let new_floating_terminal_ids = vec![];
     let mut new_plugin_ids = HashMap::new();
@@ -8015,10 +8021,16 @@ fn base_layout_is_included_in_swap_layouts() {
             .template
             .unwrap();
 
-    let mut command_1 = RunCommand::default();
-    command_1.command = PathBuf::from("command1");
-    let mut command_2 = RunCommand::default();
-    command_2.command = PathBuf::from("command2");
+    let command_1 = RunCommand {
+        command: PathBuf::from("command1"),
+        ..Default::default()
+    };
+
+    let command_2 = RunCommand {
+        command: PathBuf::from("command2"),
+        ..Default::default()
+    };
+
     let new_terminal_ids = vec![(1, Some(command_1)), (2, None), (3, Some(command_2))];
     let new_floating_terminal_ids = vec![];
     let mut new_plugin_ids = HashMap::new();
@@ -8208,10 +8220,16 @@ fn swap_layouts_not_including_command_panes_present_in_existing_layout() {
             .template
             .unwrap();
 
-    let mut command_1 = RunCommand::default();
-    command_1.command = PathBuf::from("command1");
-    let mut command_2 = RunCommand::default();
-    command_2.command = PathBuf::from("command2");
+    let command_1 = RunCommand {
+        command: PathBuf::from("command1"),
+        ..Default::default()
+    };
+
+    let command_2 = RunCommand {
+        command: PathBuf::from("command2"),
+        ..Default::default()
+    };
+
     let new_terminal_ids = vec![(1, Some(command_1)), (2, None), (3, Some(command_2))];
     let new_floating_terminal_ids = vec![];
     let mut new_plugin_ids = HashMap::new();
@@ -8386,10 +8404,16 @@ fn swap_layouts_not_including_plugin_panes_present_in_existing_layout() {
             .template
             .unwrap();
 
-    let mut command_1 = RunCommand::default();
-    command_1.command = PathBuf::from("command1");
-    let mut command_2 = RunCommand::default();
-    command_2.command = PathBuf::from("command2");
+    let command_1 = RunCommand {
+        command: PathBuf::from("command1"),
+        ..Default::default()
+    };
+
+    let command_2 = RunCommand {
+        command: PathBuf::from("command2"),
+        ..Default::default()
+    };
+
     let new_terminal_ids = vec![(1, Some(command_1)), (2, None), (3, Some(command_2))];
     let new_floating_terminal_ids = vec![];
     let mut new_plugin_ids = HashMap::new();
@@ -8963,10 +8987,16 @@ fn floating_layout_with_plugins_and_commands_swaped_properly() {
             .template
             .unwrap();
 
-    let mut command_1 = RunCommand::default();
-    command_1.command = PathBuf::from("command1");
-    let mut command_2 = RunCommand::default();
-    command_2.command = PathBuf::from("command2");
+    let command_1 = RunCommand {
+        command: PathBuf::from("command1"),
+        ..Default::default()
+    };
+
+    let command_2 = RunCommand {
+        command: PathBuf::from("command2"),
+        ..Default::default()
+    };
+
     let new_floating_terminal_ids = vec![(1, Some(command_1)), (2, None), (3, Some(command_2))];
     let new_terminal_ids = vec![(4, None)];
     let mut new_plugin_ids = HashMap::new();
@@ -9059,10 +9089,16 @@ fn base_floating_layout_is_included_in_swap_layouts() {
             .template
             .unwrap();
 
-    let mut command_1 = RunCommand::default();
-    command_1.command = PathBuf::from("command1");
-    let mut command_2 = RunCommand::default();
-    command_2.command = PathBuf::from("command2");
+    let command_1 = RunCommand {
+        command: PathBuf::from("command1"),
+        ..Default::default()
+    };
+
+    let command_2 = RunCommand {
+        command: PathBuf::from("command2"),
+        ..Default::default()
+    };
+
     let new_floating_terminal_ids = vec![(1, Some(command_1)), (2, None), (3, Some(command_2))];
     let new_terminal_ids = vec![(4, None)];
     let mut new_plugin_ids = HashMap::new();
@@ -9252,10 +9288,16 @@ fn swap_floating_layouts_not_including_command_panes_present_in_existing_layout(
             .template
             .unwrap();
 
-    let mut command_1 = RunCommand::default();
-    command_1.command = PathBuf::from("command1");
-    let mut command_2 = RunCommand::default();
-    command_2.command = PathBuf::from("command2");
+    let command_1 = RunCommand {
+        command: PathBuf::from("command1"),
+        ..Default::default()
+    };
+
+    let command_2 = RunCommand {
+        command: PathBuf::from("command2"),
+        ..Default::default()
+    };
+
     let new_floating_terminal_ids = vec![(1, Some(command_1)), (2, None), (3, Some(command_2))];
     let new_terminal_ids = vec![(4, None)];
     let mut new_plugin_ids = HashMap::new();
@@ -9415,10 +9457,16 @@ fn swap_floating_layouts_not_including_plugin_panes_present_in_existing_layout()
             .template
             .unwrap();
 
-    let mut command_1 = RunCommand::default();
-    command_1.command = PathBuf::from("command1");
-    let mut command_2 = RunCommand::default();
-    command_2.command = PathBuf::from("command2");
+    let command_1 = RunCommand {
+        command: PathBuf::from("command1"),
+        ..Default::default()
+    };
+
+    let command_2 = RunCommand {
+        command: PathBuf::from("command2"),
+        ..Default::default()
+    };
+
     let new_floating_terminal_ids = vec![(1, Some(command_1)), (2, None), (3, Some(command_2))];
     let new_terminal_ids = vec![(4, None)];
     let mut new_plugin_ids = HashMap::new();
@@ -14615,7 +14663,7 @@ fn osc99_namespace_denormalize_roundtrip() {
     );
 
     // Simulate a response with the namespaced ID
-    let response_payload = format!("i=p42r.mynotif:p=close;activated");
+    let response_payload = "i=p42r.mynotif:p=close;activated".to_string();
     let result = denormalize_notification_response(response_payload.as_bytes());
     assert!(result.is_some(), "Should successfully denormalize");
 
@@ -14729,7 +14777,7 @@ fn osc99_report_flag_roundtrip() {
         "a=report should produce 'r' flag in namespace, got: {:?}",
         namespaced
     );
-    let response = format!("i=p5r.myid;activated");
+    let response = "i=p5r.myid;activated".to_string();
     let (pane_id, wants_report, _is_query, _bytes) =
         denormalize_notification_response(response.as_bytes()).unwrap();
     assert_eq!(pane_id, 5);
@@ -14747,7 +14795,7 @@ fn osc99_report_flag_roundtrip() {
         "a=focus should be augmented with report for the host terminal, got: {:?}",
         namespaced
     );
-    let response = format!("i=p5.myid;activated");
+    let response = "i=p5.myid;activated".to_string();
     let (pane_id, wants_report, _is_query, _bytes) =
         denormalize_notification_response(response.as_bytes()).unwrap();
     assert_eq!(pane_id, 5);
@@ -14766,7 +14814,7 @@ fn osc99_query_flag_roundtrip() {
         "p=? should produce 'q' flag, got: {:?}",
         namespaced
     );
-    let response = format!("i=p3q.qid;p=title,body");
+    let response = "i=p3q.qid;p=title,body".to_string();
     let (pane_id, wants_report, is_query, _bytes) =
         denormalize_notification_response(response.as_bytes()).unwrap();
     assert_eq!(pane_id, 3);
@@ -14780,7 +14828,7 @@ fn osc99_query_flag_roundtrip() {
         "Both flags should be present, got: {:?}",
         namespaced
     );
-    let response = format!("i=p3rq.both;p=title,body");
+    let response = "i=p3rq.both;p=title,body".to_string();
     let (pane_id, wants_report, is_query, _bytes) =
         denormalize_notification_response(response.as_bytes()).unwrap();
     assert_eq!(pane_id, 3);
@@ -14794,7 +14842,7 @@ fn osc99_query_flag_roundtrip() {
         "No flags expected, got: {:?}",
         namespaced
     );
-    let response = format!("i=p3.plain;activated");
+    let response = "i=p3.plain;activated".to_string();
     let (pane_id, wants_report, is_query, _bytes) =
         denormalize_notification_response(response.as_bytes()).unwrap();
     assert_eq!(pane_id, 3);

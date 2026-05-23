@@ -223,7 +223,7 @@ impl Text {
     }
 }
 
-pub fn parse_text(stringified: &mut String) -> Result<String> {
+pub fn parse_text(stringified: &str) -> Result<String> {
     let mut utf8 = vec![];
     for stringified_character in stringified.split(',') {
         utf8.push(

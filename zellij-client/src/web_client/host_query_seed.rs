@@ -186,12 +186,13 @@ mod tests {
     use zellij_utils::input::web_client::{WebClientConfig, WebClientTheme};
 
     fn config_with_web_theme(theme: WebClientTheme) -> Config {
-        let mut config = Config::default();
-        config.web_client = WebClientConfig {
-            theme: Some(theme),
-            ..WebClientConfig::default()
-        };
-        config
+        Config {
+            web_client: WebClientConfig {
+                theme: Some(theme),
+                ..WebClientConfig::default()
+            },
+            ..Config::default()
+        }
     }
 
     /// Locate the single `ColorRegister` matching `index` in the
@@ -286,9 +287,11 @@ mod tests {
         // User has set web_client.theme.foreground and .background
         // explicitly — the seed builder must propagate them as
         // ForegroundColor / BackgroundColor messages in xparse format.
-        let mut theme = WebClientTheme::default();
-        theme.foreground = Some("rgb(200, 200, 200)".to_string());
-        theme.background = Some("rgb(20, 20, 20)".to_string());
+        let theme = WebClientTheme {
+            foreground: Some("rgb(200, 200, 200)".to_string()),
+            background: Some("rgb(20, 20, 20)".to_string()),
+            ..Default::default()
+        };
         let config = config_with_web_theme(theme);
         let opts = Options::default();
 
@@ -302,9 +305,11 @@ mod tests {
     fn seed_with_indexed_overrides_populates_those_registers() {
         // Per-index overrides in WebClientTheme must show up in the
         // ColorRegisters payload at the correct ANSI index.
-        let mut theme = WebClientTheme::default();
-        theme.red = Some("rgb(204, 0, 0)".to_string()); // index 1
-        theme.bright_blue = Some("rgb(50, 100, 200)".to_string()); // index 12
+        let theme = WebClientTheme {
+            red: Some("rgb(204, 0, 0)".to_string()),            // index 1
+            bright_blue: Some("rgb(50, 100, 200)".to_string()), // index 12
+            ..Default::default()
+        };
         let config = config_with_web_theme(theme);
         let opts = Options::default();
 
@@ -325,8 +330,10 @@ mod tests {
         // Indices 0-15 without explicit overrides should be absent from
         // the ColorRegisters payload — apps will fall back to their own
         // defaults rather than reading a wrong value we made up.
-        let mut theme = WebClientTheme::default();
-        theme.red = Some("rgb(255, 0, 0)".to_string());
+        let theme = WebClientTheme {
+            red: Some("rgb(255, 0, 0)".to_string()),
+            ..Default::default()
+        };
         let config = config_with_web_theme(theme);
         let opts = Options::default();
 
@@ -374,10 +381,12 @@ mod tests {
         // Adding per-index overrides should grow the ColorRegisters
         // payload — 240 for the extended range plus one entry per
         // override in 0..=15.
-        let mut theme = WebClientTheme::default();
-        theme.red = Some("rgb(255, 0, 0)".to_string());
-        theme.green = Some("rgb(0, 255, 0)".to_string());
-        theme.blue = Some("rgb(0, 0, 255)".to_string());
+        let theme = WebClientTheme {
+            red: Some("rgb(255, 0, 0)".to_string()),
+            green: Some("rgb(0, 255, 0)".to_string()),
+            blue: Some("rgb(0, 0, 255)".to_string()),
+            ..Default::default()
+        };
         let config = config_with_web_theme(theme);
         let opts = Options::default();
 
@@ -392,12 +401,14 @@ mod tests {
         // web_client.theme, no main theme matching) should produce no
         // ForegroundColor / BackgroundColor messages — the server's
         // cache keeps its defaults instead of being clobbered.
-        let mut config = Config::default();
         // Force theme resolution to fail by clearing the theme name as
         // well. The exact internals depend on Config::theme_config(),
         // so this test just asserts: whatever the resolver decides,
         // the seed builder must not emit "Some(empty string)" garbage.
-        config.web_client = WebClientConfig::default();
+        let config = Config {
+            web_client: WebClientConfig::default(),
+            ..Default::default()
+        };
         let opts = Options::default();
 
         let msgs = build_host_query_seed_msgs(&config, &opts);
@@ -425,9 +436,11 @@ mod tests {
         // `rgb:RRRR/GGGG/BBBB` shape that synthesize_cached_reply
         // re-emits verbatim — no `rgb(R, G, B)` CSS strings leaking
         // through.
-        let mut theme = WebClientTheme::default();
-        theme.black = Some("rgb(0, 0, 0)".to_string());
-        theme.bright_white = Some("rgb(255, 255, 255)".to_string());
+        let theme = WebClientTheme {
+            black: Some("rgb(0, 0, 0)".to_string()),
+            bright_white: Some("rgb(255, 255, 255)".to_string()),
+            ..Default::default()
+        };
         let config = config_with_web_theme(theme);
         let opts = Options::default();
 

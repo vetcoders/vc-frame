@@ -308,7 +308,6 @@ mod tests {
     #[test]
     fn test_1_1_active_sessions_sorted_by_recency() {
         let mut state = SingleScreenState::default();
-        state.search_term = String::new();
         let active = vec![
             make_active_session("sess-300", 1, 1, 1, false, 300),
             make_active_session("sess-100", 1, 1, 1, false, 100),
@@ -328,7 +327,6 @@ mod tests {
     #[test]
     fn test_1_2_resurrectable_sessions_sorted_by_recency() {
         let mut state = SingleScreenState::default();
-        state.search_term = String::new();
         let resurrectable = vec![
             make_resurrectable("res-300", 300),
             make_resurrectable("res-100", 100),
@@ -350,7 +348,6 @@ mod tests {
     #[test]
     fn test_1_3_mixed_active_and_resurrectable_active_first() {
         let mut state = SingleScreenState::default();
-        state.search_term = String::new();
         let active = vec![
             make_active_session("active-200", 1, 1, 1, false, 200),
             make_active_session("active-100", 1, 1, 1, false, 100),
@@ -370,7 +367,6 @@ mod tests {
     #[test]
     fn test_1_4_current_session_included_in_results() {
         let mut state = SingleScreenState::default();
-        state.search_term = String::new();
         let active = vec![
             make_active_session("current-sess", 1, 1, 1, true, 100),
             make_active_session("other-sess", 1, 1, 1, false, 200),
@@ -390,7 +386,6 @@ mod tests {
     #[test]
     fn test_1_5_pane_counts_reflect_tab_structure() {
         let mut state = SingleScreenState::default();
-        state.search_term = String::new();
         let active = vec![make_active_session("sess", 3, 2, 1, false, 100)];
         state.update_search_term(&active, &[]);
         assert_eq!(state.unified_results.len(), 1);
@@ -410,7 +405,6 @@ mod tests {
     #[test]
     fn test_1_6_empty_sessions_list() {
         let mut state = SingleScreenState::default();
-        state.search_term = String::new();
         state.update_search_term(&[], &[]);
         assert!(state.unified_results.is_empty());
     }
@@ -422,7 +416,6 @@ mod tests {
     #[test]
     fn test_2_1_empty_search_term_shows_all() {
         let mut state = SingleScreenState::default();
-        state.search_term = String::new();
         let active = vec![
             make_active_session("a", 1, 1, 1, false, 100),
             make_active_session("b", 1, 1, 1, false, 200),
@@ -697,8 +690,6 @@ mod tests {
     #[test]
     fn test_3_6_navigation_with_empty_results() {
         let mut state = SingleScreenState::default();
-        state.unified_results = vec![];
-        state.selected_index = None;
         state.move_selection_down();
         assert_eq!(state.selected_index, None);
         state.move_selection_up();
@@ -853,9 +844,11 @@ mod tests {
 
     #[test]
     fn test_5_1_transition_to_layout_selection() {
-        let mut state = SingleScreenState::default();
-        state.mode = SingleScreenMode::SearchAndSelect;
-        state.search_term = "my-session".to_string();
+        let mut state = SingleScreenState {
+            mode: SingleScreenMode::SearchAndSelect,
+            search_term: "my-session".to_string(),
+            ..Default::default()
+        };
         state.transition_to_layout_selection();
         assert_eq!(state.mode, SingleScreenMode::SelectingLayout);
         assert_eq!(state.search_term, "my-session"); // preserved
@@ -863,8 +856,10 @@ mod tests {
 
     #[test]
     fn test_5_2_transition_back_to_search() {
-        let mut state = SingleScreenState::default();
-        state.mode = SingleScreenMode::SelectingLayout;
+        let mut state = SingleScreenState {
+            mode: SingleScreenMode::SelectingLayout,
+            ..Default::default()
+        };
         state.layout_list.layout_search_term = "some-layout".to_string();
         state.layout_list.selected_layout_index = 3;
         state.transition_to_search();
@@ -875,9 +870,11 @@ mod tests {
 
     #[test]
     fn test_5_3_round_trip_transition_preserves_search_term() {
-        let mut state = SingleScreenState::default();
-        state.search_term = "my-new-session".to_string();
-        state.mode = SingleScreenMode::SearchAndSelect;
+        let mut state = SingleScreenState {
+            search_term: "my-new-session".to_string(),
+            mode: SingleScreenMode::SearchAndSelect,
+            ..Default::default()
+        };
         state.transition_to_layout_selection();
         assert_eq!(state.mode, SingleScreenMode::SelectingLayout);
         state.transition_to_search();

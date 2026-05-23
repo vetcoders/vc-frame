@@ -67,11 +67,11 @@ impl SessionManager for RealSessionManager {
         session_name: &str,
         os_input: Box<dyn ClientOsApi>,
         session_exists: bool,
-        zellij_ipc_pipe: &PathBuf,
+        zellij_ipc_pipe: &Path,
         first_message: ClientToServerMsg,
     ) {
         if !session_exists {
-            spawn_new_session(session_name, os_input.clone(), zellij_ipc_pipe);
+            spawn_new_session(session_name, os_input.box_clone(), zellij_ipc_pipe);
         }
         os_input.connect_to_server(zellij_ipc_pipe);
         os_input.send_to_server(first_message);

@@ -16,8 +16,8 @@ impl std::fmt::Debug for ActivePanes {
 }
 
 impl ActivePanes {
-    pub fn new(os_api: &Box<dyn ServerOsApi>) -> Self {
-        let os_api = os_api.clone();
+    pub fn new(os_api: &dyn ServerOsApi) -> Self {
+        let os_api = os_api.box_clone();
         ActivePanes {
             active_panes: HashMap::new(),
             os_api,
