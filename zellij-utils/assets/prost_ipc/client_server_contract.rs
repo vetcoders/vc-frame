@@ -210,7 +210,7 @@ pub mod action {
         #[prost(message, tag="41")]
         UndoRenamePane(super::UndoRenamePaneAction),
         #[prost(message, tag="42")]
-        NewTab(super::NewTabAction),
+        NewTab(::prost::alloc::boxed::Box<super::NewTabAction>),
         #[prost(message, tag="43")]
         NoOp(super::NoOpAction),
         #[prost(message, tag="44")]

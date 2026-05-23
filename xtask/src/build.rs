@@ -167,7 +167,65 @@ fn run_proto_codegen(sh: &Shell) {
             let mut prost = prost_build::Config::new();
             prost.out_dir(&out_dir);
             prost.include_file(include_file);
+            configure_clippy_clean_prost(&mut prost);
             prost.compile_protos(&proto_files, &[src_dir]).unwrap();
+        }
+        postprocess_prost_for_clippy(&out_dir, include_file);
+    }
+}
+
+fn configure_clippy_clean_prost(prost: &mut prost_build::Config) {
+    for path in [
+        ".client_server_contract.Action.action_type.new_tab",
+        ".api.action.Action.optional_payload.new_tab_payload",
+        ".api.event.Event.payload.mode_update_payload",
+        ".api.event.Event.payload.action_complete_payload",
+        ".api.plugin_command.PluginCommand.payload.run_action_payload",
+    ] {
+        prost.boxed(path);
+    }
+}
+
+fn postprocess_prost_for_clippy(out_dir: &Path, include_file: &str) {
+    let include_path = out_dir.join(include_file);
+    if let Ok(mut include_contents) = std::fs::read_to_string(&include_path) {
+        include_contents = include_contents
+            .replace(
+                "pub mod action {\n    include!(\"api.action.rs\");\n}",
+                "pub mod action_api {\n    include!(\"api.action.rs\");\n}\npub use action_api as action;",
+            )
+            .replace(
+                "pub mod event {\n    include!(\"api.event.rs\");\n}",
+                "pub mod event_api {\n    include!(\"api.event.rs\");\n}\npub use event_api as event;",
+            )
+            .replace(
+                "pub mod key {\n    include!(\"api.key.rs\");\n}",
+                "pub mod key_api {\n    include!(\"api.key.rs\");\n}\npub use key_api as key;",
+            )
+            .replace(
+                "pub mod plugin_command {\n    include!(\"api.plugin_command.rs\");\n}",
+                "pub mod plugin_command_api {\n    include!(\"api.plugin_command.rs\");\n}\npub use plugin_command_api as plugin_command;",
+            )
+            .replace(
+                "pub mod client_server_contract {\n    include!(\"client_server_contract.rs\");\n}",
+                "pub mod client_server_contract_api {\n    include!(\"client_server_contract.rs\");\n}\npub use client_server_contract_api as client_server_contract;",
+            )
+            .replace(
+                "pub mod web_server_contract {\n    include!(\"web_server_contract.rs\");\n}",
+                "pub mod web_server_contract_api {\n    include!(\"web_server_contract.rs\");\n}\npub use web_server_contract_api as web_server_contract;",
+            );
+        std::fs::write(include_path, include_contents).unwrap();
+    }
+
+    let event_path = out_dir.join("api.event.rs");
+    if let Ok(mut event_contents) = std::fs::read_to_string(&event_path) {
+        let kdl_error_tail = "    #[prost(string, optional, tag=\"4\")]\n    pub help_message: ::core::option::Option<::prost::alloc::string::String>,\n}\n";
+        let kdl_error_tail_with_is_empty = "    #[prost(string, optional, tag=\"4\")]\n    pub help_message: ::core::option::Option<::prost::alloc::string::String>,\n}\nimpl KdlError {\n    pub fn is_empty(&self) -> bool {\n        self.len == Some(0)\n    }\n}\n";
+        if event_contents.contains(kdl_error_tail)
+            && !event_contents.contains("impl KdlError {\n    pub fn is_empty")
+        {
+            event_contents = event_contents.replace(kdl_error_tail, kdl_error_tail_with_is_empty);
+            std::fs::write(event_path, event_contents).unwrap();
         }
     }
 }

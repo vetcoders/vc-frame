@@ -1884,7 +1884,6 @@ fn test_client_messages() {
                     configuration: Some(PluginUserConfiguration::new(demo_context.clone())),
                     initial_cwd: Some(PathBuf::from("initial_cwd")),
                     run_plugin: Some(RunPlugin::default()),
-                    ..Default::default()
                 }))),
                 ..Default::default()
             }),

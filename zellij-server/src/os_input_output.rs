@@ -46,7 +46,7 @@ fn separate_command_arguments(command: &mut PathBuf, args: &mut Vec<String>) {
             let _ = current_part.pop();
             current_part.push(' ');
         } else {
-            let current_part = std::mem::replace(&mut current_part, String::new());
+            let current_part = std::mem::take(&mut current_part);
             parts.push(current_part);
         }
     }
@@ -191,14 +191,14 @@ impl ClientSender {
 
         self.client_buffer_sender
             .try_send(msg)
-            .or_else(|err| {
+            .map_err(|err| {
                 if let TrySendError::Full(_) = err {
                     log::warn!(
                         "client {} is processing server messages too slow",
                         self.client_id
                     );
                 }
-                Err(err)
+                err
             })
             .with_context(err_context)
     }
@@ -474,11 +474,7 @@ impl ServerOsApi for ServerOsInputOutput {
     fn get_all_cmds_by_ppid(&self, post_hook: &Option<String>) -> HashMap<String, Vec<String>> {
         // the key is the stringified ppid
         let mut cmds = HashMap::new();
-        if let Some(output) = Command::new("ps")
-            .args(vec!["-ao", "ppid,args"])
-            .output()
-            .ok()
-        {
+        if let Ok(output) = Command::new("ps").args(vec!["-ao", "ppid,args"]).output() {
             let output = String::from_utf8(output.stdout.clone())
                 .unwrap_or_else(|_| String::from_utf8_lossy(&output.stdout).to_string());
             for line in output.lines() {
@@ -506,10 +502,10 @@ impl ServerOsApi for ServerOsInputOutput {
                                 .split_ascii_whitespace()
                                 .map(|p| p.to_owned())
                                 .collect();
-                            cmds.insert(ppid.into(), line_parts);
+                            cmds.insert(ppid, line_parts);
                         },
                         None => {
-                            cmds.insert(ppid.into(), line_parts.collect());
+                            cmds.insert(ppid, line_parts.collect());
                         },
                     }
                 }
@@ -601,8 +597,8 @@ impl ServerOsApi for ServerOsInputOutput {
                     *terminal_id,
                     *cols,
                     *rows,
-                    width_in_pixels.clone(),
-                    height_in_pixels.clone(),
+                    *width_in_pixels,
+                    *height_in_pixels,
                 );
             }
         }

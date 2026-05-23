@@ -9,7 +9,7 @@ pub struct NestedListItem {
 }
 
 impl NestedListItem {
-    pub fn new<S: AsRef<str>>(text: S) -> Self
+    pub fn new<S>(text: S) -> Self
     where
         S: ToString,
     {

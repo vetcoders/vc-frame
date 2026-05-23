@@ -105,36 +105,34 @@ pub fn render_welcome_boundaries(rows: usize, cols: usize) {
                     right_boundary_x + 1
                 );
             }
+        } else if i == y_starting_point {
+            print!("\u{1b}[{};{}H┌", i + 1, left_boundary_x + 1);
+            print!(
+                "\u{1b}[m\u{1b}[{};{}H┐\u{1b}[K",
+                i + 1,
+                right_boundary_x + 1
+            );
+        } else if i == rows.saturating_sub(1) {
+            print!("\u{1b}[{};{}H└", i + 1, left_boundary_x + 1);
+            print!(
+                "\u{1b}[m\u{1b}[{};{}H┘\u{1b}[K",
+                i + 1,
+                right_boundary_x + 1
+            );
         } else {
-            if i == y_starting_point {
-                print!("\u{1b}[{};{}H┌", i + 1, left_boundary_x + 1);
-                print!(
-                    "\u{1b}[m\u{1b}[{};{}H┐\u{1b}[K",
-                    i + 1,
-                    right_boundary_x + 1
-                );
-            } else if i == rows.saturating_sub(1) {
-                print!("\u{1b}[{};{}H└", i + 1, left_boundary_x + 1);
-                print!(
-                    "\u{1b}[m\u{1b}[{};{}H┘\u{1b}[K",
-                    i + 1,
-                    right_boundary_x + 1
-                );
-            } else {
-                print!("\u{1b}[{};{}H│", i + 1, left_boundary_x + 1);
-                print!(
-                    "\u{1b}[m\u{1b}[{};{}H│\u{1b}[K",
-                    i + 1,
-                    right_boundary_x + 1
-                ); // this includes some
-                   // ANSI magic to delete
-                   // everything after this
-                   // boundary in order to
-                   // fix some rendering
-                   // bugs in the legacy
-                   // components of this
-                   // plugin
-            }
+            print!("\u{1b}[{};{}H│", i + 1, left_boundary_x + 1);
+            print!(
+                "\u{1b}[m\u{1b}[{};{}H│\u{1b}[K",
+                i + 1,
+                right_boundary_x + 1
+            ); // this includes some
+               // ANSI magic to delete
+               // everything after this
+               // boundary in order to
+               // fix some rendering
+               // bugs in the legacy
+               // components of this
+               // plugin
         }
     }
     if rows.saturating_sub(y_starting_point) > 25 && has_room_for_logos {

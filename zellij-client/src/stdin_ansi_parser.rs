@@ -19,26 +19,26 @@ use zellij_utils::{
 /// Describe the terminal implementation of synchronised output
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum SyncOutput {
-    DCS,
-    CSI,
+    Dcs,
+    Csi,
 }
 
 impl SyncOutput {
     pub fn start_seq(&self) -> &'static [u8] {
-        static CSI_BSU_SEQ: &'static [u8] = "\u{1b}[?2026h".as_bytes();
-        static DCS_BSU_SEQ: &'static [u8] = "\u{1b}P=1s\u{1b}".as_bytes();
+        static CSI_BSU_SEQ: &[u8] = "\u{1b}[?2026h".as_bytes();
+        static DCS_BSU_SEQ: &[u8] = "\u{1b}P=1s\u{1b}".as_bytes();
         match self {
-            SyncOutput::DCS => DCS_BSU_SEQ,
-            SyncOutput::CSI => CSI_BSU_SEQ,
+            SyncOutput::Dcs => DCS_BSU_SEQ,
+            SyncOutput::Csi => CSI_BSU_SEQ,
         }
     }
 
     pub fn end_seq(&self) -> &'static [u8] {
-        static CSI_ESU_SEQ: &'static [u8] = "\u{1b}[?2026l".as_bytes();
-        static DCS_ESU_SEQ: &'static [u8] = "\u{1b}P=2s\u{1b}".as_bytes();
+        static CSI_ESU_SEQ: &[u8] = "\u{1b}[?2026l".as_bytes();
+        static DCS_ESU_SEQ: &[u8] = "\u{1b}P=2s\u{1b}".as_bytes();
         match self {
-            SyncOutput::DCS => DCS_ESU_SEQ,
-            SyncOutput::CSI => CSI_ESU_SEQ,
+            SyncOutput::Dcs => DCS_ESU_SEQ,
+            SyncOutput::Csi => CSI_ESU_SEQ,
         }
     }
 }
@@ -140,7 +140,7 @@ impl HostReply {
         if let Some(caps) = SYNC_RE.captures(s) {
             let code: usize = caps[1].parse().ok()?;
             return match code {
-                1 | 2 | 3 => Some(HostReply::SynchronizedOutput(Some(SyncOutput::CSI))),
+                1..=3 => Some(HostReply::SynchronizedOutput(Some(SyncOutput::Csi))),
                 _ => Some(HostReply::SynchronizedOutput(None)),
             };
         }
@@ -504,7 +504,7 @@ impl StdinAnsiParser {
 /// Walk an OSC sequence starting at the head of `buf`. Returns whether
 /// the sequence is complete, needs more bytes, or is malformed.
 fn osc_status(buf: &[u8]) -> SeqStatus {
-    if buf.get(0) != Some(&0x1b) || buf.get(1) != Some(&b']') {
+    if buf.first() != Some(&0x1b) || buf.get(1) != Some(&b']') {
         return SeqStatus::Malformed;
     }
     let mut i = 2;
@@ -528,7 +528,7 @@ fn osc_status(buf: &[u8]) -> SeqStatus {
 
 /// Walk a whitelisted CSI report starting at the head of `buf`.
 fn csi_status(buf: &[u8]) -> SeqStatus {
-    if buf.get(0) != Some(&0x1b) || buf.get(1) != Some(&b'[') {
+    if buf.first() != Some(&0x1b) || buf.get(1) != Some(&b'[') {
         return SeqStatus::Malformed;
     }
     let mut i = 2;
@@ -536,7 +536,7 @@ fn csi_status(buf: &[u8]) -> SeqStatus {
     while i < buf.len() && i < max {
         let b = buf[i];
         match b {
-            0x30..=0x3F | 0x20..=0x2F => i += 1,
+            0x20..=0x3F => i += 1,
             b't' | b'y' | b'c' | b'n' => return SeqStatus::Complete(i + 1),
             0x40..=0x7E => return SeqStatus::Malformed, // non-whitelisted final
             _ => return SeqStatus::Malformed,

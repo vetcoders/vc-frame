@@ -403,7 +403,7 @@ pub mod action {
         #[prost(message, tag="50")]
         NewBlockingPanePayload(super::NewBlockingPanePayload),
         #[prost(message, tag="51")]
-        NewTabPayload(super::NewTabPayload),
+        NewTabPayload(::prost::alloc::boxed::Box<super::NewTabPayload>),
         #[prost(message, tag="52")]
         NewInPlacePanePayload(super::NewInPlacePanePayload),
         #[prost(message, tag="53")]

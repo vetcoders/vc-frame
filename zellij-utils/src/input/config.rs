@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use std::convert::TryFrom;
@@ -98,7 +98,7 @@ impl Diagnostic for KdlError {
     fn help<'a>(&'a self) -> Option<Box<dyn Display + 'a>> {
         match &self.help_message {
             Some(help_message) => Some(Box::new(help_message)),
-            None => Some(Box::new(format!("For more information, please see our configuration guide: https://zellij.dev/documentation/configuration.html")))
+            None => Some(Box::new("For more information, please see our configuration guide: https://zellij.dev/documentation/configuration.html".to_string()))
         }
     }
     fn labels(&self) -> Option<Box<dyn Iterator<Item = LabeledSpan> + '_>> {
@@ -153,7 +153,7 @@ impl ConfigError {
             src: None,
             offset: Some(offset),
             len: Some(len),
-            help_message: Some(format!("For more information, please see our layout guide: https://zellij.dev/documentation/creating-a-layout.html")),
+            help_message: Some("For more information, please see our layout guide: https://zellij.dev/documentation/creating-a-layout.html".to_string()),
         })
     }
 }
@@ -286,10 +286,10 @@ impl Config {
     }
     pub fn write_config_to_disk(
         config: String,
-        config_file_path: &PathBuf,
+        config_file_path: &Path,
     ) -> Result<Config, Option<PathBuf>> {
         // if we fail, try to return the PathBuf of the file we were not able to write to
-        let config_file_path = config_file_path.clone();
+        let config_file_path = config_file_path.to_path_buf();
         Config::from_kdl(&config, None)
             .map_err(|e| {
                 log::error!("Failed to parse config: {}", e);
@@ -353,19 +353,19 @@ impl Config {
             }
         }
     }
-    fn find_free_backup_file_name(config_file_path: &PathBuf) -> Option<PathBuf> {
+    fn find_free_backup_file_name(config_file_path: &Path) -> Option<PathBuf> {
         let mut backup_config_path = None;
         let config_file_name = config_file_path
             .file_name()
             .and_then(|f| f.to_str())
-            .unwrap_or_else(|| DEFAULT_CONFIG_FILE_NAME);
+            .unwrap_or(DEFAULT_CONFIG_FILE_NAME);
         for i in 0..100 {
             let new_file_name = if i == 0 {
                 format!("{}.bak", config_file_name)
             } else {
                 format!("{}.bak.{}", config_file_name, i)
             };
-            let mut potential_config_path = config_file_path.clone();
+            let mut potential_config_path = config_file_path.to_path_buf();
             potential_config_path.set_file_name(new_file_name);
             if !potential_config_path.exists() {
                 backup_config_path = Some(potential_config_path);
@@ -379,9 +379,9 @@ impl Config {
         current_config_file_path: &PathBuf,
         backup_config_path: &PathBuf,
     ) -> bool {
-        let _ = std::fs::copy(current_config_file_path, &backup_config_path);
-        match std::fs::read_to_string(&backup_config_path) {
-            Ok(backed_up_config) => current_config == &backed_up_config,
+        let _ = std::fs::copy(current_config_file_path, backup_config_path);
+        match std::fs::read_to_string(backup_config_path) {
+            Ok(backed_up_config) => current_config == backed_up_config,
             Err(e) => {
                 log::error!(
                     "Failed to back up config file {}: {:?}",
@@ -397,17 +397,16 @@ impl Config {
     ) -> Result<Option<PathBuf>, Option<PathBuf>> {
         // if we fail, try to return the PathBuf of the file we were not able to write to
         // if let Some(config_file_path) = Config::config_file_path(&opts) {
-        match std::fs::read_to_string(&config_file_path) {
+        match std::fs::read_to_string(config_file_path) {
             Ok(current_config) => {
-                let Some(backup_config_path) =
-                    Config::find_free_backup_file_name(&config_file_path)
+                let Some(backup_config_path) = Config::find_free_backup_file_name(config_file_path)
                 else {
                     log::error!("Failed to find a file name to back up the configuration to, ran out of files.");
                     return Err(None);
                 };
                 if Config::backup_config_with_written_content_confirmation(
                     &current_config,
-                    &config_file_path,
+                    config_file_path,
                     &backup_config_path,
                 ) {
                     Ok(Some(backup_config_path))
@@ -492,8 +491,10 @@ where
                                     continue;
                                 }
 
-                                let mut cli_args_for_config = CliArgs::default();
-                                cli_args_for_config.config = Some(PathBuf::from(&config_file_path));
+                                let cli_args_for_config = CliArgs {
+                                    config: Some(PathBuf::from(&config_file_path)),
+                                    ..Default::default()
+                                };
                                 if let Ok(new_config) = Setup::from_cli_args(&cli_args_for_config)
                                     .map_err(|e| e.to_string())
                                 {

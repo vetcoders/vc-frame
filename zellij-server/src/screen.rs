@@ -137,7 +137,7 @@ pub(crate) fn denormalize_notification_response(
             if let Some(dot_pos) = namespaced_value.find('.') {
                 let flags_part = namespaced_value.get(..dot_pos).unwrap_or_default();
                 let original_id = namespaced_value.get(dot_pos + 1..).unwrap_or_default();
-                let pane_id_str = flags_part.trim_end_matches(|c| c == 'r' || c == 'q');
+                let pane_id_str = flags_part.trim_end_matches(['r', 'q']);
                 let flag_chars = flags_part.get(pane_id_str.len()..).unwrap_or_default();
                 if let Ok(pid) = pane_id_str.parse::<u32>() {
                     terminal_id = Some(pid);
@@ -1692,7 +1692,7 @@ impl Screen {
             .context("screen contained no tabs")
             .with_context(err_context)?;
         for (client_id, client_mode_info) in client_ids_and_mode_infos {
-            let client_tab_history = self.tab_history.entry(client_id).or_insert_with(Vec::new);
+            let client_tab_history = self.tab_history.entry(client_id).or_default();
             if let Some(client_previous_tab) = client_tab_history.pop() {
                 if let Some(client_active_tab) = self.tabs.get_mut(&client_previous_tab) {
                     self.active_tab_ids.insert(client_id, client_previous_tab);
@@ -1774,7 +1774,7 @@ impl Screen {
         match self.active_tab_ids.remove(&client_id) {
             Some(old_active_index) => {
                 self.active_tab_ids.insert(client_id, new_tab_index);
-                let client_tab_history = self.tab_history.entry(client_id).or_insert_with(Vec::new);
+                let client_tab_history = self.tab_history.entry(client_id).or_default();
                 client_tab_history.retain(|&e| e != new_tab_index);
                 client_tab_history.push(old_active_index);
             },
@@ -1817,22 +1817,15 @@ impl Screen {
                             None,
                         )
                         .with_context(err_context)?;
-                        let all_connected_clients: Vec<ClientId> = self
-                            .connected_clients
-                            .borrow()
-                            .iter()
-                            .map(|(c, _i)| *c)
-                            .collect();
+                        let all_connected_clients: Vec<ClientId> =
+                            self.connected_clients.borrow().keys().copied().collect();
                         for client_id in all_connected_clients {
                             self.update_client_tab_focus(client_id, new_tab_index);
-                            match (
+                            if let (Some(direction), Some(new_tab)) = (
                                 should_change_pane_focus,
                                 self.get_indexed_tab_mut(new_tab_index),
                             ) {
-                                (Some(direction), Some(new_tab)) => {
-                                    new_tab.focus_pane_on_edge(direction, client_id);
-                                },
-                                _ => {},
+                                new_tab.focus_pane_on_edge(direction, client_id);
                             }
                         }
                     } else {
@@ -1843,14 +1836,11 @@ impl Screen {
                             Some(vec![client_id]),
                         )
                         .with_context(err_context)?;
-                        match (
+                        if let (Some(direction), Some(new_tab)) = (
                             should_change_pane_focus,
                             self.get_indexed_tab_mut(new_tab_index),
                         ) {
-                            (Some(direction), Some(new_tab)) => {
-                                new_tab.focus_pane_on_edge(direction, client_id);
-                            },
-                            _ => {},
+                            new_tab.focus_pane_on_edge(direction, client_id);
                         }
                         self.update_client_tab_focus(client_id, new_tab_index);
                     }
@@ -2907,10 +2897,8 @@ impl Screen {
                     if let Some(c) = completion.as_mut() {
                         c.set_stdout_message("true".to_string());
                     }
-                } else {
-                    if let Some(c) = completion.as_mut() {
-                        c.set_error_message("false".to_string());
-                    }
+                } else if let Some(c) = completion.as_mut() {
+                    c.set_error_message("false".to_string());
                 }
             },
         }
@@ -2938,7 +2926,7 @@ impl Screen {
             }
         });
 
-        let tab_name = tab_name.unwrap_or_else(|| String::new());
+        let tab_name = tab_name.unwrap_or_default();
 
         let position = self.tabs.len();
         let mut tab = Tab::new(
@@ -3046,12 +3034,8 @@ impl Screen {
                 } else {
                     None
                 };
-                let all_connected_clients: Vec<ClientId> = self
-                    .connected_clients
-                    .borrow()
-                    .iter()
-                    .map(|(c, _i)| *c)
-                    .collect();
+                let all_connected_clients: Vec<ClientId> =
+                    self.connected_clients.borrow().keys().copied().collect();
                 for client_id in all_connected_clients {
                     self.update_client_tab_focus(client_id, tab_id);
                 }
@@ -3432,7 +3416,7 @@ impl Screen {
     }
 
     fn log_and_report_session_state(&mut self) -> Result<()> {
-        let err_context = || format!("Failed to log and report session state");
+        let err_context = || "Failed to log and report session state".to_string();
 
         self.update_active_pane_ids();
         // generate own session info
@@ -3526,7 +3510,7 @@ impl Screen {
         Ok(())
     }
     fn dump_layout_to_hd(&mut self) -> Result<()> {
-        let err_context = || format!("Failed to log and report session state");
+        let err_context = || "Failed to log and report session state".to_string();
         let session_layout_metadata =
             self.get_layout_metadata(Some(self.default_shell.clone()), None);
         self.bus
@@ -3552,7 +3536,7 @@ impl Screen {
                     self.peer_sessions_cache.values().cloned().collect(),
                     self.resurrectable_sessions_cache
                         .iter()
-                        .map(|(n, c)| (n.clone(), c.clone()))
+                        .map(|(n, c)| (n.clone(), *c))
                         .collect(),
                 ),
             )]))
@@ -3896,10 +3880,8 @@ impl Screen {
         }
         // Background plugins subscribed to this event type
         for ((bg_pid, bg_cid), subs) in &self.background_plugin_subscriptions {
-            if subs.contains(&event_type) && *bg_cid == client_id {
-                if !plugin_ids.contains(bg_pid) {
-                    plugin_ids.push(*bg_pid);
-                }
+            if subs.contains(&event_type) && *bg_cid == client_id && !plugin_ids.contains(bg_pid) {
+                plugin_ids.push(*bg_pid);
             }
         }
         plugin_ids
@@ -4030,13 +4012,13 @@ impl Screen {
         completion_tx: &mut Option<NotificationEnd>,
     ) -> Result<bool> {
         // true => found and focused, false => not
-        let err_context = || format!("failed to focus_plugin_pane");
+        let err_context = || "failed to focus_plugin_pane".to_string();
         let mut tab_index_and_plugin_pane_id = None;
         let mut plugin_pane_to_move_to_active_tab = None;
         let focused_tab_index = *self.active_tab_ids.get(&client_id).unwrap_or(&0);
         let all_tabs = self.get_tabs_mut();
         for (tab_index, tab) in all_tabs.iter_mut() {
-            if let Some(plugin_pane_id) = tab.find_plugin(&run_plugin) {
+            if let Some(plugin_pane_id) = tab.find_plugin(run_plugin) {
                 tab_index_and_plugin_pane_id = Some((*tab_index, plugin_pane_id));
                 if move_to_focused_tab && focused_tab_index != *tab_index {
                     plugin_pane_to_move_to_active_tab = tab.extract_pane(plugin_pane_id, true);
@@ -4100,7 +4082,7 @@ impl Screen {
         should_open_in_place: bool,
         client_id: ClientId,
     ) -> Result<()> {
-        let err_context = || format!("failed to focus_plugin_pane");
+        let err_context = || "failed to focus_plugin_pane".to_string();
         let tab_index = self
             .tabs
             .iter()
@@ -4245,7 +4227,7 @@ impl Screen {
             for tab in all_tabs.values_mut() {
                 // here we pass None instead of the client_id we have because we do not need to
                 // necessarily trigger a relayout for this tab
-                if let Some(pane) = tab.extract_pane(pane_id, true).take() {
+                if let Some(pane) = tab.extract_pane(pane_id, true) {
                     extracted_panes.push(pane);
                     break;
                 }
@@ -4373,10 +4355,7 @@ impl Screen {
         client_id: ClientId,
     ) -> Result<()> {
         let all_tabs = self.get_tabs_mut();
-        let has_tab_with_index = all_tabs
-            .values()
-            .find(|t| t.position == tab_index)
-            .is_some();
+        let has_tab_with_index = all_tabs.values().any(|t| t.position == tab_index);
         if !has_tab_with_index {
             log::error!("Cannot find tab with index: {tab_index}");
             return Ok(());
@@ -4390,7 +4369,7 @@ impl Screen {
                 // here we pass None instead of the client_id we have because we do not need to
                 // necessarily trigger a relayout for this tab
                 let pane_was_floating = tab.pane_id_is_floating(&pane_id);
-                if let Some(pane) = tab.extract_pane(pane_id, true).take() {
+                if let Some(pane) = tab.extract_pane(pane_id, true) {
                     extracted_panes.push((pane_was_floating, pane));
                     break;
                 }
@@ -4605,8 +4584,8 @@ impl Screen {
         // keybinds and base mode must be kept in sync with reconfigures.
         self.default_mode_info.update_keybinds(new_keybinds.clone());
         self.default_mode_info.update_default_mode(new_default_mode);
-        self.default_shell = default_shell.clone().unwrap_or_else(|| get_default_shell());
-        self.default_editor = default_editor.clone().or_else(|| get_default_editor());
+        self.default_shell = default_shell.clone().unwrap_or_else(get_default_shell);
+        self.default_editor = default_editor.clone().or_else(get_default_editor);
         self.auto_layout = auto_layout;
         self.copy_options.command = copy_command.clone();
         self.copy_options.copy_on_select = copy_on_select;
@@ -4858,9 +4837,9 @@ impl Screen {
             .unwrap_or(false);
 
         if root_pane_id_is_floating {
-            self.tabs.get_mut(&root_tab_id).map(|tab| {
+            if let Some(tab) = self.tabs.get_mut(&root_tab_id) {
                 let _ = tab.toggle_pane_embed_or_floating_for_pane_id(root_pane_id, None);
-            });
+            }
         }
 
         let mut panes_to_stack = vec![];
@@ -4881,7 +4860,7 @@ impl Screen {
                 tab.set_tiled_panes_damaged();
             }
             for pane_id in &pane_ids_to_stack {
-                if tab.has_pane_with_pid(&pane_id) {
+                if tab.has_pane_with_pid(pane_id) {
                     match tab.extract_pane(*pane_id, false) {
                         Some(pane) => {
                             panes_to_stack.push(pane);
@@ -4893,10 +4872,10 @@ impl Screen {
                 }
             }
         }
-        self.tabs
-            .get_mut(&root_tab_id)
-            .map(|t| t.stack_panes(root_pane_id, panes_to_stack));
-        return last_pane_id.copied();
+        if let Some(t) = self.tabs.get_mut(&root_tab_id) {
+            t.stack_panes(root_pane_id, panes_to_stack)
+        }
+        last_pane_id.copied()
     }
     pub fn change_floating_panes_coordinates(
         &mut self,
@@ -4957,11 +4936,9 @@ impl Screen {
                         should_render = true;
                     }
                 }
-                if mouse_effect.ungroup {
-                    if self.advanced_mouse_actions {
-                        self.clear_pane_group(&client_id);
-                        should_render = true;
-                    }
+                if mouse_effect.ungroup && self.advanced_mouse_actions {
+                    self.clear_pane_group(&client_id);
+                    should_render = true;
                 }
                 if mouse_effect.state_changed {
                     if !is_bare_motion {
@@ -5058,11 +5035,11 @@ impl Screen {
         let tabs_to_process: Vec<_> = self
             .tabs
             .iter()
-            .filter(|(idx, _)| tab_index.map_or(true, |target| **idx == target))
+            .filter(|(idx, _)| tab_index.is_none_or(|target| **idx == target))
             .collect();
 
         for (tab_index, tab) in tabs_to_process {
-            let tab_is_focused = active_tab_index == Some(&tab_index);
+            let tab_is_focused = active_tab_index == Some(tab_index);
             let hide_floating_panes = !tab.are_floating_panes_visible();
             let mut suppressed_panes = HashMap::new();
             for (triggering_pane_id, p) in tab.get_suppressed_panes() {
@@ -5072,9 +5049,9 @@ impl Screen {
             let all_connected_clients: Vec<ClientId> = self
                 .connected_clients
                 .borrow()
-                .iter()
-                .map(|(c, _i)| *c)
-                .filter(|c| self.active_tab_ids.get(&c) == Some(&tab_index))
+                .keys()
+                .copied()
+                .filter(|c| self.active_tab_ids.get(c) == Some(tab_index))
                 .collect();
 
             let mut active_pane_ids: HashMap<ClientId, Option<PaneId>> = HashMap::new();
@@ -5232,9 +5209,9 @@ impl Screen {
                 .copied()
                 .unwrap_or(false)
             {
-                let active_pane_id = self.get_active_pane_id(&client_id);
+                let active_pane_id = self.get_active_pane_id(client_id);
                 if let Some(active_pane_id) = active_pane_id {
-                    self.add_pane_id_to_group(active_pane_id, &client_id);
+                    self.add_pane_id_to_group(active_pane_id, client_id);
                 }
             }
         }
@@ -5336,7 +5313,7 @@ impl Screen {
                 panes_in_group.retain(|p_id| {
                     let mut found = false;
                     for tab in all_tabs.values() {
-                        if tab.has_pane_with_pid(&p_id) {
+                        if tab.has_pane_with_pid(p_id) {
                             found = true;
                             break;
                         }
@@ -5369,10 +5346,10 @@ impl Screen {
             self.connected_clients.borrow().keys().copied().collect();
         for client_id in connected_clients {
             if let Some(active_pane_id) = self.get_active_pane_id(&client_id) {
-                let active_pane_id: PaneId = active_pane_id.into();
-                let history = self.pane_history.entry(client_id).or_insert_with(|| vec![]);
+                let active_pane_id: PaneId = active_pane_id;
+                let history = self.pane_history.entry(client_id).or_default();
                 history.retain(|e| e != &active_pane_id);
-                history.push(active_pane_id.into());
+                history.push(active_pane_id);
             }
         }
     }
@@ -5611,7 +5588,7 @@ impl Screen {
 fn get_default_editor() -> Option<PathBuf> {
     std::env::var("EDITOR")
         .or_else(|_| std::env::var("VISUAL"))
-        .map(|e| PathBuf::from(e))
+        .map(PathBuf::from)
         .ok()
 }
 
@@ -5718,11 +5695,11 @@ pub(crate) fn screen_thread_main(
     let default_shell = config_options
         .default_shell
         .clone()
-        .unwrap_or_else(|| get_default_shell());
+        .unwrap_or_else(get_default_shell);
     let default_editor = config_options
         .scrollback_editor
         .clone()
-        .or_else(|| get_default_editor());
+        .or_else(get_default_editor);
     let default_layout_name = config_options
         .default_layout
         .map(|l| format!("{}", l.display()));
@@ -5749,7 +5726,7 @@ pub(crate) fn screen_thread_main(
         .web_sharing
         .map(|s| s.web_clients_allowed())
         .unwrap_or(false);
-    let web_sharing = config_options.web_sharing.unwrap_or_else(Default::default);
+    let web_sharing = config_options.web_sharing.unwrap_or_default();
     let advanced_mouse_actions = config_options.advanced_mouse_actions.unwrap_or(true);
     let mouse_hover_effects = config_options.mouse_hover_effects.unwrap_or(true);
     let visual_bell = config_options.visual_bell.unwrap_or(true);
@@ -5890,7 +5867,9 @@ pub(crate) fn screen_thread_main(
                 mut completion_tx,
                 set_blocking,
             ) => {
-                completion_tx.as_mut().map(|c| c.set_affected_pane_id(pid));
+                if let Some(c) = completion_tx.as_mut() {
+                    c.set_affected_pane_id(pid)
+                }
 
                 let blocking_notification = if set_blocking { completion_tx } else { None };
 
@@ -6431,12 +6410,10 @@ pub(crate) fn screen_thread_main(
                                             {
                                                 result = dump;
                                             }
-                                        } else {
-                                            if let Some(dump) =
-                                                tab.get_dump_terminal_screen(pane_id, full)
-                                            {
-                                                result = dump;
-                                            }
+                                        } else if let Some(dump) =
+                                            tab.get_dump_terminal_screen(pane_id, full)
+                                        {
+                                            result = dump;
                                         }
                                         break;
                                     }
@@ -6478,7 +6455,7 @@ pub(crate) fn screen_thread_main(
                 }
             },
             ScreenInstruction::DumpLayout(default_shell, client_id, completion_tx) => {
-                let err_context = || format!("Failed to dump layout");
+                let err_context = || "Failed to dump layout".to_string();
                 let session_layout_metadata = screen.get_layout_metadata(default_shell, None);
                 screen
                     .bus
@@ -6491,7 +6468,7 @@ pub(crate) fn screen_thread_main(
                     .with_context(err_context)?;
             },
             ScreenInstruction::ListClientsMetadata(default_shell, client_id, completion_tx) => {
-                let err_context = || format!("Failed to dump layout");
+                let err_context = || "Failed to dump layout".to_string();
                 let session_layout_metadata = screen.get_layout_metadata(default_shell, None);
                 screen
                     .bus
@@ -6538,7 +6515,7 @@ pub(crate) fn screen_thread_main(
                 tab_index,
                 response_channel,
             } => {
-                let err_context = || format!("Failed to dump layout");
+                let err_context = || "Failed to dump layout".to_string();
                 let session_layout_metadata =
                     screen.get_layout_metadata(Some(screen.default_shell.clone()), tab_index);
                 screen
@@ -6589,7 +6566,7 @@ pub(crate) fn screen_thread_main(
                 let _ = response_channel.send(tab_info);
             },
             ScreenInstruction::ListClientsToPlugin(plugin_id, client_id) => {
-                let err_context = || format!("Failed to dump layout");
+                let err_context = || "Failed to dump layout".to_string();
                 let session_layout_metadata =
                     screen.get_layout_metadata(Some(screen.default_shell.clone()), None);
                 screen
@@ -6644,7 +6621,7 @@ pub(crate) fn screen_thread_main(
                         PaneScrollbackResponse::Err(format!("Pane {:?} not found", pane_id))
                     },
                 };
-                if let Err(_) = response_channel.send(response) {
+                if response_channel.send(response).is_err() {
                     // the plugin likely timed out and dropped the receiver
                     log::debug!(
                         "Plugin timed out before pane scrollback response was sent for pane {:?}",
@@ -7137,21 +7114,21 @@ pub(crate) fn screen_thread_main(
                     tab_id
                 );
                 // tab_id is a stable identifier from NewTab instruction
-                if let Some(first_terminal_pane) = new_pane_pids.iter().next() {
-                    completion_tx
-                        .as_mut()
-                        .map(|c| c.set_affected_pane_id(PaneId::Terminal(first_terminal_pane.0)));
+                if let Some(first_terminal_pane) = new_pane_pids.first() {
+                    if let Some(c) = completion_tx.as_mut() {
+                        c.set_affected_pane_id(PaneId::Terminal(first_terminal_pane.0))
+                    }
                 } else if let Some(plugin_id) =
                     new_plugin_ids.values().next().and_then(|v| v.first())
                 {
-                    completion_tx
-                        .as_mut()
-                        .map(|c| c.set_affected_pane_id(PaneId::Plugin(*plugin_id)));
+                    if let Some(c) = completion_tx.as_mut() {
+                        c.set_affected_pane_id(PaneId::Plugin(*plugin_id))
+                    }
                 }
                 // Set the affected tab ID for plugin API return value
-                completion_tx
-                    .as_mut()
-                    .map(|c| c.set_affected_tab_id(tab_id));
+                if let Some(c) = completion_tx.as_mut() {
+                    c.set_affected_tab_id(tab_id)
+                }
                 screen.apply_layout(
                     layout,
                     floating_panes_layout,
@@ -7166,7 +7143,7 @@ pub(crate) fn screen_thread_main(
                 pending_tab_ids.remove(&tab_id);
                 if pending_tab_ids.is_empty() {
                     for (tab_index, client_id) in pending_tab_switches.drain() {
-                        screen.go_to_tab(tab_index as usize + 1, client_id)?;
+                        screen.go_to_tab(tab_index + 1, client_id)?;
                     }
                     if should_change_focus_to_new_tab {
                         // Convert ID → position for go_to_tab (which expects 1-based position)
@@ -7294,9 +7271,9 @@ pub(crate) fn screen_thread_main(
                             if let Some(existing_tab) =
                                 screen.tabs.values().find(|t| t.name == tab_name)
                             {
-                                completion_tx
-                                    .as_mut()
-                                    .map(|c| c.set_affected_tab_id(existing_tab.id));
+                                if let Some(c) = completion_tx.as_mut() {
+                                    c.set_affected_tab_id(existing_tab.id)
+                                }
                             }
                         }
                         if create && !tab_exists {
@@ -8555,7 +8532,7 @@ pub(crate) fn screen_thread_main(
                         screen
                             .tab_history
                             .entry(client_id)
-                            .or_insert_with(Vec::new)
+                            .or_default()
                             .push(tab_id);
                     } else {
                         log::error!("Tab with ID {} not found", tab_id);
@@ -8598,9 +8575,9 @@ pub(crate) fn screen_thread_main(
                         client_id,
                     )?;
                     // Set affected tab ID (tab_id is the ID here)
-                    completion_tx
-                        .as_mut()
-                        .map(|c| c.set_affected_tab_id(tab_id));
+                    if let Some(c) = completion_tx.as_mut() {
+                        c.set_affected_tab_id(tab_id)
+                    }
                     let pane_group = screen.get_client_pane_group(&client_id);
                     if !pane_group.is_empty() {
                         let _ = screen.bus.senders.send_to_background_jobs(
@@ -8669,9 +8646,9 @@ pub(crate) fn screen_thread_main(
                 client_id_tab_index_or_pane_id,
                 mut completion_tx,
             ) => {
-                completion_tx
-                    .as_mut()
-                    .map(|c| c.set_affected_pane_id(new_pane_id));
+                if let Some(c) = completion_tx.as_mut() {
+                    c.set_affected_pane_id(new_pane_id)
+                }
                 screen.replace_pane(
                     new_pane_id,
                     hold_for_command,
@@ -8784,7 +8761,7 @@ pub(crate) fn screen_thread_main(
                         );
                     }
                 } else {
-                    let err_context = || format!("Failed to rename session");
+                    let err_context = || "Failed to rename session".to_string();
                     let old_session_name = screen.session_name.clone();
 
                     // update state
@@ -9179,9 +9156,9 @@ pub(crate) fn screen_thread_main(
                     client_id,
                 )?;
                 // Set affected tab ID for plugin API return value
-                completion_tx
-                    .as_mut()
-                    .map(|c| c.set_affected_tab_id(tab_id));
+                if let Some(c) = completion_tx.as_mut() {
+                    c.set_affected_tab_id(tab_id)
+                }
                 // TODO: is this a race?
                 let pane_group = screen.get_client_pane_group(&client_id);
                 if !pane_group.is_empty() {
@@ -9209,9 +9186,9 @@ pub(crate) fn screen_thread_main(
                     client_id,
                 )?;
                 // Set affected tab ID (tab_index is the ID here)
-                completion_tx
-                    .as_mut()
-                    .map(|c| c.set_affected_tab_id(tab_index));
+                if let Some(c) = completion_tx.as_mut() {
+                    c.set_affected_tab_id(tab_index)
+                }
                 let pane_group = screen.get_client_pane_group(&client_id);
                 if !pane_group.is_empty() {
                     let _ = screen.bus.senders.send_to_background_jobs(
@@ -9449,7 +9426,7 @@ pub(crate) fn screen_thread_main(
                 plugin_id,
                 highlights,
             } => {
-                let style = screen.style.clone();
+                let style = screen.style;
                 let all_tabs = screen.get_tabs_mut();
                 for tab in all_tabs.values_mut() {
                     if tab.has_pane_with_pid(&pane_id) {

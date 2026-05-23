@@ -88,7 +88,7 @@ impl TabLinePopulator {
 
             let tab_sizes = TabSizes {
                 left: tabs_before_active.last().map_or(usize::MAX, |tab| tab.len),
-                right: tabs_after_active.get(0).map_or(usize::MAX, |tab| tab.len),
+                right: tabs_after_active.first().map_or(usize::MAX, |tab| tab.len),
             };
 
             let fit_analysis = self.analyze_tab_fit(
@@ -293,7 +293,7 @@ impl TabLinePrefixBuilder {
         brand_text_short: Option<&str>,
     ) -> Vec<LinePart> {
         let mut parts = vec![self.create_brand_part(brand_text, brand_text_short)];
-        let mut used_len = parts.get(0).map_or(0, |p| p.len);
+        let mut used_len = parts.first().map_or(0, |p| p.len);
 
         if let Some(name) = session_name {
             if let Some(name_part) = self.create_session_name_part(name, used_len) {

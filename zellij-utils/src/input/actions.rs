@@ -53,8 +53,9 @@ impl FromStr for ResizeDirection {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub enum SearchDirection {
+    #[default]
     Down,
     Up,
 }
@@ -73,8 +74,9 @@ impl FromStr for SearchDirection {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub enum SearchOption {
+    #[default]
     CaseSensitivity,
     WholeWord,
     Wrap,
@@ -114,6 +116,7 @@ impl FromStr for SearchOption {
     strum_macros::EnumIter,
 )]
 #[strum(ascii_case_insensitive)]
+#[derive(Default)]
 pub enum Action {
     /// Quit Zellij.
     Quit,
@@ -318,6 +321,7 @@ pub enum Action {
         first_pane_unblock_condition: Option<UnblockCondition>,
     },
     /// Do nothing.
+    #[default]
     NoOp,
     /// Go to the next tab.
     GoToNextTab,
@@ -647,24 +651,6 @@ pub enum Action {
         id: u64,
         direction: Direction,
     },
-}
-
-impl Default for Action {
-    fn default() -> Self {
-        Action::NoOp
-    }
-}
-
-impl Default for SearchDirection {
-    fn default() -> Self {
-        SearchDirection::Down
-    }
-}
-
-impl Default for SearchOption {
-    fn default() -> Self {
-        SearchOption::CaseSensitivity
-    }
 }
 
 impl Action {
@@ -1042,7 +1028,7 @@ impl Action {
                 let cwd = cwd
                     .map(|cwd| current_dir.join(cwd))
                     .or_else(|| Some(current_dir.clone()));
-                let unblock_condition = unblock_condition.or_else(|| {
+                let unblock_condition = unblock_condition.or({
                     if block_until_exit_success {
                         Some(UnblockCondition::OnExitSuccess)
                     } else if block_until_exit_failure {
@@ -1214,43 +1200,41 @@ impl Action {
                             tab_id,
                         }])
                     }
+                } else if floating {
+                    Ok(vec![Action::NewFloatingPane {
+                        command: None,
+                        pane_name: name,
+                        coordinates: FloatingPaneCoordinates::new(
+                            x, y, width, height, pinned, borderless,
+                        ),
+                        near_current_pane,
+                        tab_id,
+                    }])
+                } else if in_place {
+                    Ok(vec![Action::NewInPlacePane {
+                        command: None,
+                        pane_name: name,
+                        near_current_pane,
+                        pane_id_to_replace: None, // TODO: support this
+                        close_replaced_pane,
+                        tab_id,
+                    }])
+                } else if stacked {
+                    Ok(vec![Action::NewStackedPane {
+                        command: None,
+                        pane_name: name,
+                        near_current_pane,
+                        tab_id,
+                    }])
                 } else {
-                    if floating {
-                        Ok(vec![Action::NewFloatingPane {
-                            command: None,
-                            pane_name: name,
-                            coordinates: FloatingPaneCoordinates::new(
-                                x, y, width, height, pinned, borderless,
-                            ),
-                            near_current_pane,
-                            tab_id,
-                        }])
-                    } else if in_place {
-                        Ok(vec![Action::NewInPlacePane {
-                            command: None,
-                            pane_name: name,
-                            near_current_pane,
-                            pane_id_to_replace: None, // TODO: support this
-                            close_replaced_pane,
-                            tab_id,
-                        }])
-                    } else if stacked {
-                        Ok(vec![Action::NewStackedPane {
-                            command: None,
-                            pane_name: name,
-                            near_current_pane,
-                            tab_id,
-                        }])
-                    } else {
-                        Ok(vec![Action::NewTiledPane {
-                            direction,
-                            command: None,
-                            pane_name: name,
-                            near_current_pane,
-                            borderless,
-                            tab_id,
-                        }])
-                    }
+                    Ok(vec![Action::NewTiledPane {
+                        direction,
+                        command: None,
+                        pane_name: name,
+                        near_current_pane,
+                        borderless,
+                        tab_id,
+                    }])
                 }
             },
             CliAction::Edit {
@@ -1272,9 +1256,7 @@ impl Action {
             } => {
                 let mut file = file;
                 let current_dir = get_current_dir();
-                let cwd = cwd
-                    .map(|cwd| current_dir.join(cwd))
-                    .or_else(|| Some(current_dir));
+                let cwd = cwd.map(|cwd| current_dir.join(cwd)).or(Some(current_dir));
                 if file.is_relative() {
                     if let Some(cwd) = cwd.as_ref() {
                         file = cwd.join(file);
@@ -1575,7 +1557,7 @@ impl Action {
                     let mut layout = Layout::from_str(&raw_layout, path_to_raw_layout, swap_layouts.as_ref().map(|(f, p)| (f.as_str(), p.as_str())), cwd).map_err(|e| {
                         let stringified_error = match e {
                             ConfigError::KdlError(kdl_error) => {
-                                let error = kdl_error.add_src(layout_source_name.clone(), String::from(raw_layout));
+                                let error = kdl_error.add_src(layout_source_name.clone(), raw_layout);
                                 let report: Report = error.into();
                                 format!("{:?}", report)
                             }
@@ -1592,7 +1574,7 @@ impl Action {
                                 };
                                 let kdl_error = KdlError {
                                     error_message,
-                                    src: Some(NamedSource::new(layout_source_name.clone(), String::from(raw_layout))),
+                                    src: Some(NamedSource::new(layout_source_name.clone(), raw_layout)),
                                     offset: Some(kdl_error.span.offset()),
                                     len: Some(kdl_error.span.len()),
                                     help_message: None,
@@ -1737,8 +1719,7 @@ impl Action {
                 .map_err(|e| {
                     let stringified_error = match e {
                         ConfigError::KdlError(kdl_error) => {
-                            let error = kdl_error
-                                .add_src(layout_source_name.clone(), String::from(raw_layout));
+                            let error = kdl_error.add_src(layout_source_name.clone(), raw_layout);
                             let report: Report = error.into();
                             format!("{:?}", report)
                         },
@@ -1839,7 +1820,7 @@ impl Action {
             } => {
                 let current_dir = get_current_dir();
                 let run_plugin_or_alias = RunPluginOrAlias::from_url(
-                    &url.as_str(),
+                    url.as_str(),
                     &configuration.map(|c| c.inner().clone()),
                     None,
                     Some(current_dir.clone()),
@@ -1871,7 +1852,7 @@ impl Action {
                 let current_dir = get_current_dir();
                 let cwd = plugin_cwd
                     .map(|cwd| current_dir.join(cwd))
-                    .or_else(|| Some(current_dir));
+                    .or(Some(current_dir));
                 let skip_cache = skip_plugin_cache;
                 let pipe_id = Uuid::new_v4().to_string();
                 Ok(vec![Action::CliPipe {
@@ -1971,7 +1952,7 @@ impl Action {
                 let Some(coordinates) =
                     FloatingPaneCoordinates::new(x, y, width, height, pinned, borderless)
                 else {
-                    return Err(format!("Failed to parse floating pane coordinates"));
+                    return Err("Failed to parse floating pane coordinates".to_string());
                 };
                 let parsed_pane_id = PaneId::from_str(&pane_id);
                 match parsed_pane_id {
@@ -2178,7 +2159,7 @@ impl Action {
 
                 Ok(vec![Action::SwitchSession {
                     name: name.clone(),
-                    tab_position: tab_position.clone(),
+                    tab_position,
                     pane_id,
                     layout: layout_info,
                     cwd,
@@ -2193,9 +2174,9 @@ impl Action {
             | Action::NewTiledPane { command, .. }
             | Action::NewInPlacePane { command, .. }
             | Action::NewStackedPane { command, .. } => {
-                command
-                    .as_mut()
-                    .map(|c| c.populate_originating_plugin(originating_plugin));
+                if let Some(c) = command.as_mut() {
+                    c.populate_originating_plugin(originating_plugin)
+                }
             },
             Action::Run { command, .. } => {
                 command.populate_originating_plugin(originating_plugin);
@@ -2206,11 +2187,8 @@ impl Action {
             Action::NewTab { initial_panes, .. } => {
                 if let Some(initial_panes) = initial_panes.as_mut() {
                     for pane in initial_panes.iter_mut() {
-                        match pane {
-                            CommandOrPlugin::Command(run_command) => {
-                                run_command.populate_originating_plugin(originating_plugin.clone());
-                            },
-                            _ => {},
+                        if let CommandOrPlugin::Command(run_command) = pane {
+                            run_command.populate_originating_plugin(originating_plugin.clone());
                         }
                     }
                 }
@@ -2220,8 +2198,8 @@ impl Action {
     }
     pub fn launches_plugin(&self, plugin_url: &str) -> bool {
         match self {
-            Action::LaunchPlugin { plugin, .. } => &plugin.location_string() == plugin_url,
-            Action::LaunchOrFocusPlugin { plugin, .. } => &plugin.location_string() == plugin_url,
+            Action::LaunchPlugin { plugin, .. } => plugin.location_string() == plugin_url,
+            Action::LaunchOrFocusPlugin { plugin, .. } => plugin.location_string() == plugin_url,
             _ => false,
         }
     }
@@ -2296,7 +2274,7 @@ mod tests {
                 assert_eq!(key.bare_key, BareKey::Enter);
                 assert!(key.key_modifiers.is_empty());
                 assert!(!bytes.is_empty());
-                assert_eq!(*is_kitty_keyboard_protocol, true);
+                assert!(*is_kitty_keyboard_protocol);
             },
             _ => panic!("Expected Write action"),
         }
@@ -2322,7 +2300,7 @@ mod tests {
                 let key = key_with_modifier.as_ref().unwrap();
                 assert_eq!(key.bare_key, BareKey::Char('a'));
                 assert!(key.key_modifiers.contains(&KeyModifier::Ctrl));
-                assert_eq!(*is_kitty_keyboard_protocol, true);
+                assert!(*is_kitty_keyboard_protocol);
             },
             _ => panic!("Expected Write action"),
         }
@@ -2344,7 +2322,7 @@ mod tests {
                     is_kitty_keyboard_protocol,
                     ..
                 } => {
-                    assert_eq!(*is_kitty_keyboard_protocol, true);
+                    assert!(*is_kitty_keyboard_protocol);
                 },
                 _ => panic!("Expected Write action"),
             }

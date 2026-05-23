@@ -22,7 +22,7 @@ impl RunningWorker {
         }
     }
     pub fn send_message(&mut self, message: String, payload: String) -> Result<()> {
-        let err_context = || format!("Failed to send message to worker");
+        let err_context = || "Failed to send message to worker".to_string();
         let protobuf_message = ProtobufMessage {
             name: message,
             payload,

@@ -9,7 +9,7 @@ use zellij_utils::position::Position;
 
 // If char is neither alphanumeric nor an underscore do we consider it a word-boundary
 fn is_word_boundary(x: &Option<char>) -> bool {
-    x.map_or(true, |c| !c.is_ascii_alphanumeric() && c != '_')
+    x.is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_')
 }
 
 #[derive(Debug)]
@@ -155,7 +155,7 @@ impl SearchResult {
         let mut chars_match = if self.case_insensitive {
             // Case insensitive search
             // Currently only ascii, as this whole search-function is very sub-optimal anyways
-            haystack_char.to_ascii_lowercase() == needle_char.to_ascii_lowercase()
+            haystack_char.eq_ignore_ascii_case(&needle_char)
         } else {
             // Case sensitive search
             haystack_char == needle_char
@@ -608,7 +608,7 @@ impl Grid {
         // If not, scroll back again, until we find something
         let mut found_something = match dir {
             SearchDirection::Up => self.search_results.selections.last().is_some(),
-            SearchDirection::Down => self.search_results.selections.first().is_some(),
+            SearchDirection::Down => !self.search_results.selections.is_empty(),
         };
 
         // We didn't find anything at the opposing end of the scrollbuffer, so we scroll back until we find something

@@ -247,14 +247,13 @@ impl LayoutListScreen {
     }
 
     fn start_rename_layout(&self, display_layouts: &[DisplayLayout]) -> Option<Screen> {
-        if let Some(layout_file_name) = self.get_selected_file_name(display_layouts) {
-            Some(Screen::RenameLayout(super::RenameLayoutScreen::new(
-                layout_file_name,
-                self.selected_layout_index,
-            )))
-        } else {
-            None
-        }
+        self.get_selected_file_name(display_layouts)
+            .map(|layout_file_name| {
+                Screen::RenameLayout(super::RenameLayoutScreen::new(
+                    layout_file_name,
+                    self.selected_layout_index,
+                ))
+            })
     }
 
     fn navigate_up(&mut self, display_layouts: &[DisplayLayout]) {
@@ -428,7 +427,7 @@ impl LayoutListScreen {
         };
 
         let layouts_to_render = self.effective_layouts(display_layouts);
-        let (content_height, controls_y) = self.calculate_layout(rows, &display_layouts);
+        let (content_height, controls_y) = self.calculate_layout(rows, display_layouts);
 
         let controls = Controls::new(
             self.retain_terminal_panes,

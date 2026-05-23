@@ -24,7 +24,7 @@ pub fn get_sessions() -> Result<Vec<(String, Duration)>, io::ErrorKind> {
                     // try to get creation time, fall back to modification time on platforms where it's not supported (e.g., musl)
                     // for session creation time these are almost always identical (notable
                     // exceptions are session name changes)
-                    let ctime = std::fs::metadata(&file.path())
+                    let ctime = std::fs::metadata(file.path())
                         .ok()
                         .and_then(|f| f.created().ok().or_else(|| f.modified().ok()))
                         .and_then(|d| d.elapsed().ok())
@@ -234,9 +234,9 @@ pub fn print_sessions(
             }
             if no_formatting {
                 let suffix = if curr_session == *session_name {
-                    format!("(current)")
+                    "(current)".to_string()
                 } else if *is_dead {
-                    format!("(EXITED - attach to resurrect)")
+                    "(EXITED - attach to resurrect)".to_string()
                 } else {
                     String::new()
                 };
@@ -245,9 +245,9 @@ pub fn print_sessions(
             } else {
                 let formatted_session_name = format!("\u{1b}[32;1m{}\u{1b}[m", session_name);
                 let suffix = if curr_session == *session_name {
-                    format!("(current)")
+                    "(current)".to_string()
                 } else if *is_dead {
-                    format!("(\u{1b}[31;1mEXITED\u{1b}[m - attach to resurrect)")
+                    "(\u{1b}[31;1mEXITED\u{1b}[m - attach to resurrect)".to_string()
                 } else {
                     String::new()
                 };
@@ -368,7 +368,7 @@ pub fn list_sessions(no_formatting: bool, short: bool, reverse: bool) {
             let resurrectable_sessions = get_resurrectable_sessions();
             let mut all_sessions: HashMap<String, (Duration, bool)> = resurrectable_sessions
                 .iter()
-                .map(|(name, timestamp)| (name.clone(), (timestamp.clone(), true)))
+                .map(|(name, timestamp)| (name.clone(), (*timestamp, true)))
                 .collect();
             for (session_name, duration) in running_sessions {
                 all_sessions.insert(session_name.clone(), (duration, false));
@@ -380,9 +380,7 @@ pub fn list_sessions(no_formatting: bool, short: bool, reverse: bool) {
                 print_sessions(
                     all_sessions
                         .iter()
-                        .map(|(name, (timestamp, is_dead))| {
-                            (name.clone(), timestamp.clone(), *is_dead)
-                        })
+                        .map(|(name, (timestamp, is_dead))| (name.clone(), *timestamp, *is_dead))
                         .collect(),
                     no_formatting,
                     short,
@@ -440,7 +438,7 @@ pub fn session_exists(name: &str) -> Result<bool, io::ErrorKind> {
 
 // if the session is resurrecable, the returned layout is the one to be used to resurrect it
 pub fn resurrection_layout(session_name_to_resurrect: &str) -> Result<Option<Layout>, String> {
-    let layout_file_name = session_layout_cache_file_name(&session_name_to_resurrect);
+    let layout_file_name = session_layout_cache_file_name(session_name_to_resurrect);
     let raw_layout = match std::fs::read_to_string(&layout_file_name) {
         Ok(raw_layout) => raw_layout,
         Err(_e) => {
@@ -460,11 +458,11 @@ pub fn resurrection_layout(session_name_to_resurrect: &str) -> Result<Option<Lay
                 layout_file_name.display(),
                 e
             );
-            return Err(format!(
+            Err(format!(
                 "Failed to parse resurrection layout file {}: {}.",
                 layout_file_name.display(),
                 e
-            ));
+            ))
         },
     }
 }
@@ -540,7 +538,7 @@ pub fn assert_session_ne(name: &str) {
     match session_exists(name) {
         Ok(result) if !result => {
             let resurrectable_sessions = get_resurrectable_session_names();
-            if resurrectable_sessions.iter().find(|s| s == &name).is_some() {
+            if resurrectable_sessions.iter().any(|s| s == name) {
                 println!("Session with name {:?} already exists, but is dead. Use the attach command to resurrect it or, the delete-session command to kill it or specify a different name.", name);
             } else {
                 return
@@ -565,15 +563,9 @@ pub fn generate_unique_session_name() -> Option<String> {
         return None;
     };
 
-    let name = get_name_generator()
+    get_name_generator()
         .take(1000)
-        .find(|name| !sessions.contains(name) && !dead_sessions.contains(name));
-
-    if let Some(name) = name {
-        return Some(name);
-    } else {
-        return None;
-    }
+        .find(|name| !sessions.contains(name) && !dead_sessions.contains(name))
 }
 
 /// Create a new random name generator
@@ -585,7 +577,7 @@ pub fn generate_unique_session_name() -> Option<String> {
 /// and offensive combinations. Care should be taken when adding or removing to either list due to the birthday paradox/
 /// hash collisions, e.g. with 4096 unique names, the likelihood of a collision in 10 session names is 1%.
 pub fn get_name_generator() -> impl Iterator<Item = String> {
-    names::Generator::new(&ADJECTIVES, &NOUNS, names::Name::Plain)
+    names::Generator::new(ADJECTIVES, NOUNS, names::Name::Plain)
 }
 
 /// Generates a random human-readable name using curated adjectives and nouns.

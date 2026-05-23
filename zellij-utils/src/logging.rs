@@ -23,9 +23,9 @@ use crate::shared::set_permissions;
 const LOG_MAX_BYTES: u64 = 1024 * 1024 * 16; // 16 MiB per log
 
 pub fn configure_logger() {
-    atomic_create_dir(&*ZELLIJ_TMP_DIR).unwrap();
-    atomic_create_dir(&*ZELLIJ_TMP_LOG_DIR).unwrap();
-    atomic_create_file(&*ZELLIJ_TMP_LOG_FILE).unwrap();
+    atomic_create_dir(&ZELLIJ_TMP_DIR).unwrap();
+    atomic_create_dir(&ZELLIJ_TMP_LOG_DIR).unwrap();
+    atomic_create_file(&ZELLIJ_TMP_LOG_FILE).unwrap();
 
     let trigger = SizeTrigger::new(LOG_MAX_BYTES);
     let roller = FixedWindowRoller::builder()

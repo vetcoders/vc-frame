@@ -171,8 +171,9 @@ impl UiSpan {
 }
 
 #[allow(dead_code)] // in the future this will be moved to be its own component
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub enum SpanStyle {
+    #[default]
     None,
     Bold,
     Foreground(PaletteColor),
@@ -201,12 +202,6 @@ impl SpanStyle {
                 },
             },
         }
-    }
-}
-
-impl Default for SpanStyle {
-    fn default() -> Self {
-        SpanStyle::None
     }
 }
 
@@ -393,7 +388,7 @@ pub fn build_session_ui_line(session_ui_info: &SessionUiInfo, colors: Colors) ->
     let connected_users_styled = colors.connected_users(&connected_users);
     let session_bullet_span =
         UiSpan::UiSpanTelescope(UiSpanTelescope::new(vec![StringAndLength::new(
-            format!(" > "),
+            " > ".to_string(),
             3,
         )]));
     let session_name_span = UiSpan::TruncatableUiSpan(TruncatableUiSpan::new(
@@ -426,12 +421,9 @@ pub fn build_session_ui_line(session_ui_info: &SessionUiInfo, colors: Colors) ->
     ui_spans.push(connected_users_count);
     if session_ui_info.is_current_session {
         let current_session_indication = UiSpan::UiSpanTelescope(UiSpanTelescope::new(vec![
-            StringAndLength::new(
-                colors.current_session_marker(&format!(" <CURRENT SESSION>")),
-                18,
-            ),
-            StringAndLength::new(colors.current_session_marker(&format!(" <CURRENT>")), 10),
-            StringAndLength::new(colors.current_session_marker(&format!(" <C>")), 4),
+            StringAndLength::new(colors.current_session_marker(" <CURRENT SESSION>"), 18),
+            StringAndLength::new(colors.current_session_marker(" <CURRENT>"), 10),
+            StringAndLength::new(colors.current_session_marker(" <C>"), 4),
         ]));
         ui_spans.push(current_session_indication);
     }
@@ -446,7 +438,7 @@ pub fn build_tab_ui_line(tab_ui_info: &TabUiInfo, colors: Colors) -> Vec<UiSpan>
     let pane_count_styled = colors.pane_count(&pane_count);
     let tab_bullet_span =
         UiSpan::UiSpanTelescope(UiSpanTelescope::new(vec![StringAndLength::new(
-            format!("  - "),
+            "  - ".to_string(),
             4,
         )]));
     let tab_name_span = UiSpan::TruncatableUiSpan(TruncatableUiSpan::new(
@@ -474,16 +466,16 @@ pub fn build_pane_ui_line(pane_ui_info: &PaneUiInfo, colors: Colors) -> Vec<UiSp
     let pane_name = pane_ui_info.name.clone();
     let exit_code = pane_ui_info.exit_code.map(|exit_code_number| {
         let exit_code = format!("{}", exit_code_number);
-        let exit_code = if exit_code_number == 0 {
+
+        if exit_code_number == 0 {
             colors.session_and_folder_entry(&exit_code)
         } else {
             colors.exit_code_error(&exit_code)
-        };
-        exit_code
+        }
     });
     let pane_bullet_span =
         UiSpan::UiSpanTelescope(UiSpanTelescope::new(vec![StringAndLength::new(
-            format!("    > "),
+            "    > ".to_string(),
             6,
         )]));
     ui_spans.push(pane_bullet_span);
@@ -525,7 +517,7 @@ pub fn minimize_lines(
 }
 
 pub fn render_prompt(search_term: &str, colors: Colors, x: usize, y: usize) {
-    let prompt = colors.session_and_folder_entry(&format!("Search:"));
+    let prompt = colors.session_and_folder_entry("Search:");
     let search_term = colors.bold(&format!("{}_", search_term));
     println!(
         "\u{1b}[{};{}H\u{1b}[0m{} {}\n",
@@ -631,7 +623,7 @@ fn render_new_session_folder_prompt(
             let new_session_path = new_session_folder.clone();
             let new_session_folder = new_session_folder.display().to_string();
             let change_folder_shortcut_text = "<Ctrl f>";
-            let change_folder_shortcut = colors.shortcuts(&change_folder_shortcut_text);
+            let change_folder_shortcut = colors.shortcuts(change_folder_shortcut_text);
             let to_change = "to change";
             let reset_folder_shortcut_text = "<Ctrl c>";
             let reset_folder_shortcut = colors.shortcuts(reset_folder_shortcut_text);
@@ -771,7 +763,7 @@ pub fn render_new_session_block(
                 "\u{1b}[m{}{} {}_ ({} {})",
                 format!("\u{1b}[{};{}H", y + 1, x + 1),
                 colors.session_name_prompt(prompt),
-                colors.session_and_folder_entry(&new_session_name),
+                colors.session_and_folder_entry(new_session_name),
                 enter,
                 long_instruction,
             );
@@ -900,9 +892,9 @@ pub fn render_layout_selection_list(
                 layout_cell = layout_cell.selected();
             }
             let arrow_cell = if is_selected {
-                Text::new(format!("<↓↑>")).selected().color_range(3, ..)
+                Text::new("<↓↑>".to_string()).selected().color_range(3, ..)
             } else {
-                Text::new(format!("    ")).color_range(3, ..)
+                Text::new("    ".to_string()).color_range(3, ..)
             };
             table = table.add_styled_row(vec![arrow_cell, layout_cell]);
         }
@@ -1073,7 +1065,7 @@ fn format_elapsed_time(elapsed_millis: u64) -> String {
         }
     }
     if formatted_duration.is_empty() {
-        format!("just now")
+        "just now".to_string()
     } else {
         format!("{} ago", formatted_duration)
     }

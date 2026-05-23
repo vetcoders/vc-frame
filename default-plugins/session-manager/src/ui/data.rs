@@ -114,7 +114,7 @@ impl TabUiInfo {
                         if pane_info.is_selectable && !pane_info.is_suppressed {
                             Some(PaneUiInfo {
                                 name: pane_info.title.clone(),
-                                exit_code: pane_info.exit_status.clone(),
+                                exit_code: pane_info.exit_status,
                                 pane_id: pane_info.id,
                                 is_plugin: pane_info.is_plugin,
                             })

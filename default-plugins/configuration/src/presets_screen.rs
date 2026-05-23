@@ -277,7 +277,7 @@ impl PresetsScreen {
             rows + 8,
             cols,
             ui_size,
-            &notification,
+            notification,
             &self.warning_text(cols),
             Some(self.main_screen_widths(&primary_modifier_key_text)),
         );

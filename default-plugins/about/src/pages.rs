@@ -765,14 +765,11 @@ impl Page {
     }
     pub fn handle_selection(&mut self) -> Option<Page> {
         for rendered_component in &mut self.components_to_render {
-            match rendered_component {
-                RenderedComponent::BulletinList(bulletin_list) => {
-                    let page_to_render = bulletin_list.handle_selection();
-                    if page_to_render.is_some() {
-                        return page_to_render;
-                    }
-                },
-                _ => {},
+            if let RenderedComponent::BulletinList(bulletin_list) = rendered_component {
+                let page_to_render = bulletin_list.handle_selection();
+                if page_to_render.is_some() {
+                    return page_to_render;
+                }
             }
         }
         None
@@ -843,7 +840,8 @@ impl Page {
         self.components_to_render.iter_mut().for_each(|c| {
             match c {
                 RenderedComponent::BulletinList(bulletin_list) => {
-                    Some(bulletin_list.clear_active_bulletins())
+                    let _: () = bulletin_list.clear_active_bulletins();
+                    Some(())
                 },
                 _ => None,
             };
@@ -851,21 +849,15 @@ impl Page {
     }
     fn set_active_bulletin(&mut self, active_bulletin_position: usize) {
         self.components_to_render.iter_mut().for_each(|c| {
-            match c {
-                RenderedComponent::BulletinList(bulletin_list) => {
-                    bulletin_list.set_active_bulletin(active_bulletin_position)
-                },
-                _ => {},
+            if let RenderedComponent::BulletinList(bulletin_list) = c {
+                bulletin_list.set_active_bulletin(active_bulletin_position)
             };
         });
     }
     fn set_last_active_bulletin(&mut self) {
         self.components_to_render.iter_mut().for_each(|c| {
-            match c {
-                RenderedComponent::BulletinList(bulletin_list) => {
-                    bulletin_list.set_last_active_bulletin()
-                },
-                _ => {},
+            if let RenderedComponent::BulletinList(bulletin_list) = c {
+                bulletin_list.set_last_active_bulletin()
             };
         });
     }
@@ -1066,18 +1058,18 @@ fn main_screen_title(version: String, is_release_notes: bool) -> Text {
 
 fn main_screen_help_text(hovering_over_link: bool, menu_item_is_selected: bool) -> Text {
     if hovering_over_link {
-        let help_text = format!("Help: Click or Shift-Click to open in browser");
+        let help_text = "Help: Click or Shift-Click to open in browser".to_string();
         Text::new(help_text)
             .color_range(3, 6..=10)
             .color_range(3, 15..=25)
     } else if menu_item_is_selected {
-        let help_text = format!("Help: <↓↑> - Navigate, <ENTER> - Learn More, <ESC> - Dismiss");
+        let help_text = "Help: <↓↑> - Navigate, <ENTER> - Learn More, <ESC> - Dismiss".to_string();
         Text::new(help_text)
             .color_range(1, 6..=9)
             .color_range(1, 23..=29)
             .color_range(1, 45..=49)
     } else {
-        let help_text = format!("Help: <↓↑> - Navigate, <ESC> - Dismiss, <?> - Usage Tips");
+        let help_text = "Help: <↓↑> - Navigate, <ESC> - Dismiss, <?> - Usage Tips".to_string();
         Text::new(help_text)
             .color_range(1, 6..=9)
             .color_range(1, 23..=27)
@@ -1087,18 +1079,18 @@ fn main_screen_help_text(hovering_over_link: bool, menu_item_is_selected: bool) 
 
 fn release_notes_main_help(hovering_over_link: bool, menu_item_is_selected: bool) -> Text {
     if hovering_over_link {
-        let help_text = format!("Help: Click or Shift-Click to open in browser");
+        let help_text = "Help: Click or Shift-Click to open in browser".to_string();
         Text::new(help_text)
             .color_range(3, 6..=10)
             .color_range(3, 15..=25)
     } else if menu_item_is_selected {
-        let help_text = format!("Help: <↓↑> - Navigate, <ENTER> - Learn More, <ESC> - Dismiss");
+        let help_text = "Help: <↓↑> - Navigate, <ENTER> - Learn More, <ESC> - Dismiss".to_string();
         Text::new(help_text)
             .color_range(1, 6..=9)
             .color_range(1, 23..=29)
             .color_range(1, 45..=49)
     } else {
-        let help_text = format!("Help: <↓↑> - Navigate, <ESC> - Dismiss");
+        let help_text = "Help: <↓↑> - Navigate, <ESC> - Dismiss".to_string();
         Text::new(help_text)
             .color_range(1, 6..=9)
             .color_range(1, 23..=27)
@@ -1107,18 +1099,18 @@ fn release_notes_main_help(hovering_over_link: bool, menu_item_is_selected: bool
 
 fn esc_go_back_plus_link_hover(hovering_over_link: bool, _menu_item_is_selected: bool) -> Text {
     if hovering_over_link {
-        let help_text = format!("Help: Click or Shift-Click to open in browser");
+        let help_text = "Help: Click or Shift-Click to open in browser".to_string();
         Text::new(help_text)
             .color_range(3, 6..=10)
             .color_range(3, 15..=25)
     } else {
-        let help_text = format!("Help: <ESC> - Go back");
+        let help_text = "Help: <ESC> - Go back".to_string();
         Text::new(help_text).color_range(1, 6..=10)
     }
 }
 
 fn esc_to_go_back_help() -> Text {
-    let help_text = format!("Help: <ESC> - Go back");
+    let help_text = "Help: <ESC> - Go back".to_string();
     Text::new(help_text).color_range(1, 6..=10)
 }
 
@@ -1127,7 +1119,7 @@ fn main_menu_item(item_name: &str) -> Text {
 }
 
 fn support_the_developer_text() -> Text {
-    let support_text = format!("Please support the VibeCrafted / Zellij craft <3: ");
+    let support_text = "Please support the VibeCrafted / Zellij craft <3: ".to_string();
     Text::new(support_text).color_range(3, ..)
 }
 
@@ -1294,14 +1286,14 @@ impl BulletinList {
         });
     }
     pub fn set_active_bulletin(&mut self, new_index: usize) {
-        self.items.get_mut(new_index).map(|i| {
+        if let Some(i) = self.items.get_mut(new_index) {
             i.is_active = true;
-        });
+        }
     }
     pub fn set_last_active_bulletin(&mut self) {
-        self.items.last_mut().map(|i| {
+        if let Some(i) = self.items.last_mut() {
             i.is_active = true;
-        });
+        }
     }
     pub fn render(&mut self, x: usize, y: usize, rows: usize, columns: usize) {
         print_text_with_coordinates(self.title.clone(), x, y, Some(columns), Some(rows));

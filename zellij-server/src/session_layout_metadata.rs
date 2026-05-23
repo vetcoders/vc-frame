@@ -74,7 +74,7 @@ impl SessionLayoutMetadata {
                     clients_metadata.insert(
                         *focused_client,
                         ClientMetadata {
-                            pane_id: pane.id.clone(),
+                            pane_id: pane.id,
                             command: pane.run.clone(),
                         },
                     );
@@ -97,7 +97,7 @@ impl SessionLayoutMetadata {
                     clients_metadata.insert(
                         *focused_client,
                         ClientMetadata {
-                            pane_id: pane.id.clone(),
+                            pane_id: pane.id,
                             command: pane.run.clone(),
                         },
                     );
@@ -282,7 +282,7 @@ impl SessionLayoutMetadata {
                     let mut command_line = command.iter();
                     if let Some(command_name) = command_line.next() {
                         let args: Vec<String> = command_line.map(|c| c.to_owned()).collect();
-                        if Self::is_default_shell(self.default_shell.as_ref(), &command_name, &args)
+                        if Self::is_default_shell(self.default_shell.as_ref(), command_name, &args)
                         {
                             pane_layout_metadata.run = None;
                         } else {
@@ -312,7 +312,7 @@ impl SessionLayoutMetadata {
                     *p = PathBuf::from(stripped)
                 }
             });
-            self.global_cwd = Some(PathBuf::from(common_path_between_cwds));
+            self.global_cwd = Some(common_path_between_cwds);
         }
         let mut update_cwd_in_pane_metadata = |pane_layout_metadata: &mut PaneLayoutMetadata| {
             if let PaneId::Terminal(id) = pane_layout_metadata.id {
@@ -414,29 +414,27 @@ impl SessionLayoutMetadata {
                     }
                 } else if is_helix(binary) {
                     if args.len() == 1 {
-                        args.first().and_then(|arg| {
+                        args.first().map(|arg| {
                             if let Some(colon_pos) = arg.rfind(':') {
                                 let file_part = &arg[..colon_pos];
                                 if let Some(line) = arg
                                     .get(colon_pos + 1..)
                                     .and_then(|s| s.parse::<usize>().ok())
                                 {
-                                    return Some((PathBuf::from(file_part), Some(line)));
+                                    return (PathBuf::from(file_part), Some(line));
                                 }
                             }
-                            Some((PathBuf::from(arg.as_str()), None))
+                            (PathBuf::from(arg.as_str()), None)
                         })
                     } else {
                         None
                     }
+                } else if args.len() == 1 {
+                    args.first()
+                        .filter(|f| !f.starts_with('-'))
+                        .map(|f| (PathBuf::from(f), None))
                 } else {
-                    if args.len() == 1 {
-                        args.first()
-                            .filter(|f| !f.starts_with('-'))
-                            .map(|f| (PathBuf::from(f), None))
-                    } else {
-                        None
-                    }
+                    None
                 };
 
                 if let Some((file_path, line_number)) = edit_file {
@@ -456,7 +454,7 @@ impl SessionLayoutMetadata {
     }
     pub fn update_plugin_aliases_in_default_layout(&mut self, plugin_aliases: &PluginAliases) {
         self.default_layout
-            .populate_plugin_aliases_in_layout(&plugin_aliases);
+            .populate_plugin_aliases_in_layout(plugin_aliases);
     }
     pub fn to_layout_metadata(&self) -> LayoutMetadata {
         // Get current timestamp for both creation and update time
@@ -476,13 +474,13 @@ impl SessionLayoutMetadata {
     }
 }
 
-impl Into<GlobalLayoutManifest> for SessionLayoutMetadata {
-    fn into(self) -> GlobalLayoutManifest {
+impl From<SessionLayoutMetadata> for GlobalLayoutManifest {
+    fn from(val: SessionLayoutMetadata) -> Self {
         GlobalLayoutManifest {
-            default_layout: self.default_layout,
-            default_shell: self.default_shell,
-            global_cwd: self.global_cwd,
-            tabs: self
+            default_layout: val.default_layout,
+            default_shell: val.default_shell,
+            global_cwd: val.global_cwd,
+            tabs: val
                 .tabs
                 .into_iter()
                 .map(|t| (t.name.clone().unwrap_or_default(), t.into()))
@@ -491,13 +489,13 @@ impl Into<GlobalLayoutManifest> for SessionLayoutMetadata {
     }
 }
 
-impl Into<TabLayoutManifest> for TabLayoutMetadata {
-    fn into(self) -> TabLayoutManifest {
+impl From<TabLayoutMetadata> for TabLayoutManifest {
+    fn from(val: TabLayoutMetadata) -> Self {
         TabLayoutManifest {
-            tiled_panes: self.tiled_panes.into_iter().map(|t| t.into()).collect(),
-            floating_panes: self.floating_panes.into_iter().map(|t| t.into()).collect(),
-            is_focused: self.is_focused,
-            hide_floating_panes: self.hide_floating_panes,
+            tiled_panes: val.tiled_panes.into_iter().map(|t| t.into()).collect(),
+            floating_panes: val.floating_panes.into_iter().map(|t| t.into()).collect(),
+            is_focused: val.is_focused,
+            hide_floating_panes: val.hide_floating_panes,
         }
     }
 }
@@ -523,18 +521,18 @@ impl TabLayoutMetadata {
     }
 }
 
-impl Into<PaneLayoutManifest> for PaneLayoutMetadata {
-    fn into(self) -> PaneLayoutManifest {
+impl From<PaneLayoutMetadata> for PaneLayoutManifest {
+    fn from(val: PaneLayoutMetadata) -> Self {
         PaneLayoutManifest {
-            geom: self.geom,
-            run: self.run,
-            cwd: self.cwd,
-            is_borderless: self.is_borderless,
-            title: self.title,
-            is_focused: self.is_focused,
-            pane_contents: self.pane_contents,
-            default_fg: self.default_fg,
-            default_bg: self.default_bg,
+            geom: val.geom,
+            run: val.run,
+            cwd: val.cwd,
+            is_borderless: val.is_borderless,
+            title: val.title,
+            is_focused: val.is_focused,
+            pane_contents: val.pane_contents,
+            default_fg: val.default_fg,
+            default_bg: val.default_bg,
         }
     }
 }
@@ -650,7 +648,7 @@ impl ClientMetadata {
             },
             Some(Run::Plugin(..)) => {
                 let (plugin, _plugin_config) = extract_plugin_and_config(&self.command);
-                plugin.map(|p| format!("{}", p))
+                plugin.map(|p| p.to_string())
             },
             _ => None,
         };

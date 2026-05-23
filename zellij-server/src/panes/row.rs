@@ -22,6 +22,12 @@ impl Debug for Row {
     }
 }
 
+impl Default for Row {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Row {
     pub fn new() -> Self {
         Row {
@@ -396,7 +402,7 @@ impl Row {
                     None
                 }
             })
-            .unwrap_or_else(|| self.columns.len())
+            .unwrap_or(self.columns.len())
     }
 }
 

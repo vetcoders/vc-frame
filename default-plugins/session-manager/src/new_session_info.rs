@@ -14,16 +14,11 @@ pub struct NewSessionInfo {
     pub new_session_folder: Option<PathBuf>,
 }
 
-#[derive(Eq, PartialEq)]
+#[derive(Eq, PartialEq, Default)]
 enum EnteringState {
+    #[default]
     EnteringName,
     EnteringLayoutSearch,
-}
-
-impl Default for EnteringState {
-    fn default() -> Self {
-        EnteringState::EnteringName
-    }
 }
 
 impl NewSessionInfo {
@@ -108,7 +103,7 @@ impl NewSessionInfo {
                 if new_session_name != current_session_name.as_ref().map(|s| s.as_str()) {
                     match new_session_layout {
                         Some(new_session_layout) => {
-                            let cwd = self.new_session_folder.as_ref().map(|c| PathBuf::from(c));
+                            let cwd = self.new_session_folder.as_ref().map(PathBuf::from);
                             switch_session_with_layout(new_session_name, new_session_layout, cwd);
                             if self.is_welcome_screen {
                                 // the welcome screen has done its job and now we need to quit this temporary
@@ -230,7 +225,7 @@ impl LayoutList {
     pub fn update_layout_list(&mut self, layout_list: Vec<LayoutInfo>) {
         let old_layout_length = self.layout_list.len();
         let mut layout_list = layout_list;
-        layout_list.sort_by(|a, b| layout_sort_key(a).cmp(&layout_sort_key(b)));
+        layout_list.sort_by_key(layout_sort_key);
         self.layout_list = layout_list;
         if old_layout_length != self.layout_list.len() {
             // honestly, this is just the UX choice that sucks the least...
@@ -517,12 +512,10 @@ mod tests {
     fn test_7_3_viewport_clamps_at_bottom() {
         // table_rows=6, results_len=20, selected=19
         // row_count_to_render = 5, half = 2
-        // first = 19-2 = 17, last = 17+5 = 22 > 20
-        // Note: range_to_render does NOT clamp — it returns (17, 22)
-        // The actual clamping happens in the caller via .take().skip()
+        // Since we clamp at bottom, end = 20, start = 20 - 5 = 15
         let (start, end) = crate::list_navigation::range_to_render(6, 20, Some(19));
-        assert_eq!(start, 17);
-        assert_eq!(end, 22);
+        assert_eq!(start, 15);
+        assert_eq!(end, 20);
     }
 
     #[test]

@@ -54,13 +54,15 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
+type ModeKeybinds = Vec<(InputMode, Vec<(KeyWithModifier, Vec<Action>)>)>;
+
 impl TryFrom<ProtobufEvent> for Event {
     type Error = &'static str;
     fn try_from(protobuf_event: ProtobufEvent) -> Result<Self, &'static str> {
         match ProtobufEventType::from_i32(protobuf_event.name) {
             Some(ProtobufEventType::ModeUpdate) => match protobuf_event.payload {
                 Some(ProtobufEventPayload::ModeUpdatePayload(protobuf_mode_update_payload)) => {
-                    let mode_info: ModeInfo = protobuf_mode_update_payload.try_into()?;
+                    let mode_info: ModeInfo = (*protobuf_mode_update_payload).try_into()?;
                     Ok(Event::ModeUpdate(mode_info))
                 },
                 _ => Err("Malformed payload for the ModeUpdate Event"),
@@ -219,10 +221,7 @@ impl TryFrom<ProtobufEvent> for Event {
                     {
                         resurrectable_sessions.push(protobuf_resurrectable_session.into());
                     }
-                    Ok(Event::SessionUpdate(
-                        session_infos,
-                        resurrectable_sessions.into(),
-                    ))
+                    Ok(Event::SessionUpdate(session_infos, resurrectable_sessions))
                 },
                 _ => Err("Malformed payload for the SessionUpdate Event"),
             },
@@ -441,6 +440,7 @@ impl TryFrom<ProtobufEvent> for Event {
             },
             Some(ProtobufEventType::ActionComplete) => match protobuf_event.payload {
                 Some(ProtobufEventPayload::ActionCompletePayload(protobuf_payload)) => {
+                    let protobuf_payload = *protobuf_payload;
                     let action: Action = protobuf_payload
                         .action
                         .ok_or("Missing action in ActionComplete payload")?
@@ -628,9 +628,9 @@ impl TryFrom<Event> for ProtobufEvent {
                 let protobuf_mode_update_payload = mode_info.try_into()?;
                 Ok(ProtobufEvent {
                     name: ProtobufEventType::ModeUpdate as i32,
-                    payload: Some(event::Payload::ModeUpdatePayload(
+                    payload: Some(event::Payload::ModeUpdatePayload(Box::new(
                         protobuf_mode_update_payload,
-                    )),
+                    ))),
                 })
             },
             Event::TabUpdate(tab_infos) => {
@@ -1023,9 +1023,9 @@ impl TryFrom<Event> for ProtobufEvent {
                 };
                 Ok(ProtobufEvent {
                     name: ProtobufEventType::ActionComplete as i32,
-                    payload: Some(event::Payload::ActionCompletePayload(
+                    payload: Some(event::Payload::ActionCompletePayload(Box::new(
                         action_complete_payload,
-                    )),
+                    ))),
                 })
             },
             Event::CwdChanged(pane_id, new_cwd, focused_client_ids) => {
@@ -1197,19 +1197,19 @@ impl TryFrom<SessionInfo> for ProtobufSessionManifest {
             plugins: session_info
                 .plugins
                 .into_iter()
-                .map(|p| ProtobufPluginInfo::from(p))
+                .map(ProtobufPluginInfo::from)
                 .collect(),
             web_clients_allowed: session_info.web_clients_allowed,
             web_client_count: session_info.web_client_count as u32,
             tab_history: session_info
                 .tab_history
                 .into_iter()
-                .map(|t| ProtobufClientTabHistory::from(t))
+                .map(ProtobufClientTabHistory::from)
                 .collect(),
             pane_history: session_info
                 .pane_history
                 .into_iter()
-                .map(|p| ProtobufClientPaneHistory::from(p))
+                .map(ProtobufClientPaneHistory::from)
                 .collect(),
             creation_time: session_info.creation_time.as_secs(),
         })
@@ -1858,43 +1858,40 @@ impl TryFrom<ProtobufModeUpdatePayload> for ModeInfo {
         let base_mode: Option<InputMode> = protobuf_mode_update_payload
             .base_mode
             .and_then(|b_m| ProtobufInputMode::from_i32(b_m)?.try_into().ok());
-        let keybinds: Vec<(InputMode, Vec<(KeyWithModifier, Vec<Action>)>)> =
-            protobuf_mode_update_payload
-                .keybinds
-                .iter_mut()
-                .filter_map(|k| {
-                    let input_mode: InputMode = ProtobufInputMode::from_i32(k.mode)
-                        .ok_or("Malformed InputMode in the ModeUpdate Event")
-                        .ok()?
-                        .try_into()
-                        .ok()?;
-                    let mut keybinds: Vec<(KeyWithModifier, Vec<Action>)> = vec![];
-                    for mut protobuf_keybind in k.key_bind.drain(..) {
-                        let key: KeyWithModifier = protobuf_keybind.key.unwrap().try_into().ok()?;
-                        let mut actions: Vec<Action> = vec![];
-                        for action in protobuf_keybind.action.drain(..) {
-                            if let Ok(action) = action.try_into() {
-                                actions.push(action);
-                            }
+        let keybinds: ModeKeybinds = protobuf_mode_update_payload
+            .keybinds
+            .iter_mut()
+            .filter_map(|k| {
+                let input_mode: InputMode = ProtobufInputMode::from_i32(k.mode)
+                    .ok_or("Malformed InputMode in the ModeUpdate Event")
+                    .ok()?
+                    .try_into()
+                    .ok()?;
+                let mut keybinds: Vec<(KeyWithModifier, Vec<Action>)> = vec![];
+                for mut protobuf_keybind in k.key_bind.drain(..) {
+                    let key: KeyWithModifier = protobuf_keybind.key.unwrap().try_into().ok()?;
+                    let mut actions: Vec<Action> = vec![];
+                    for action in protobuf_keybind.action.drain(..) {
+                        if let Ok(action) = action.try_into() {
+                            actions.push(action);
                         }
-                        keybinds.push((key, actions));
                     }
-                    Some((input_mode, keybinds))
-                })
-                .collect();
+                    keybinds.push((key, actions));
+                }
+                Some((input_mode, keybinds))
+            })
+            .collect();
         let style: Style = protobuf_mode_update_payload
             .style
             .and_then(|m| m.try_into().ok())
             .ok_or("malformed payload for mode_info")?;
         let session_name = protobuf_mode_update_payload.session_name;
-        let editor = protobuf_mode_update_payload
-            .editor
-            .map(|e| PathBuf::from(e));
-        let shell = protobuf_mode_update_payload.shell.map(|s| PathBuf::from(s));
+        let editor = protobuf_mode_update_payload.editor.map(PathBuf::from);
+        let shell = protobuf_mode_update_payload.shell.map(PathBuf::from);
         let web_clients_allowed = protobuf_mode_update_payload.web_clients_allowed;
         let web_sharing = protobuf_mode_update_payload
             .web_sharing
-            .and_then(|w| ProtobufWebSharing::from_i32(w))
+            .and_then(ProtobufWebSharing::from_i32)
             .map(|w| w.into());
         let capabilities = PluginCapabilities {
             arrow_fonts: protobuf_mode_update_payload.arrow_fonts_support,
@@ -2874,9 +2871,9 @@ impl TryFrom<PaneId> for ProtobufPaneId {
     }
 }
 
-impl Into<ProtobufWebSharing> for WebSharing {
-    fn into(self) -> ProtobufWebSharing {
-        match self {
+impl From<WebSharing> for ProtobufWebSharing {
+    fn from(val: WebSharing) -> Self {
+        match val {
             WebSharing::On => ProtobufWebSharing::On,
             WebSharing::Off => ProtobufWebSharing::Off,
             WebSharing::Disabled => ProtobufWebSharing::Disabled,
@@ -2884,9 +2881,9 @@ impl Into<ProtobufWebSharing> for WebSharing {
     }
 }
 
-impl Into<WebSharing> for ProtobufWebSharing {
-    fn into(self) -> WebSharing {
-        match self {
+impl From<ProtobufWebSharing> for WebSharing {
+    fn from(val: ProtobufWebSharing) -> Self {
+        match val {
             ProtobufWebSharing::On => WebSharing::On,
             ProtobufWebSharing::Off => WebSharing::Off,
             ProtobufWebSharing::Disabled => WebSharing::Disabled,
@@ -2904,7 +2901,7 @@ impl TryFrom<WebServerStatus> for ProtobufWebServerStatusPayload {
             }),
             WebServerStatus::DifferentVersion(version) => Ok(ProtobufWebServerStatusPayload {
                 web_server_status_indication: WebServerStatusIndication::DifferentVersion as i32,
-                payload: Some(format!("{}", version)),
+                payload: Some(version.to_string()),
             }),
             WebServerStatus::Offline => Ok(ProtobufWebServerStatusPayload {
                 web_server_status_indication: WebServerStatusIndication::Offline as i32,

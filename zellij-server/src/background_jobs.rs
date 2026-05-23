@@ -290,8 +290,8 @@ pub(crate) fn background_jobs_main(
                             }
                             let mut session_infos_on_machine = read_other_live_session_states(
                                 &current_session_name,
-                                &*ZELLIJ_SOCK_DIR,
-                                &*ZELLIJ_SESSION_INFO_CACHE_DIR,
+                                &ZELLIJ_SOCK_DIR,
+                                &ZELLIJ_SESSION_INFO_CACHE_DIR,
                             );
                             for (session_name, session_info) in session_infos_on_machine.iter_mut()
                             {
@@ -305,7 +305,7 @@ pub(crate) fn background_jobs_main(
                             }
                             let resurrectable_sessions = find_resurrectable_sessions(
                                 &session_infos_on_machine,
-                                &*ZELLIJ_SESSION_INFO_CACHE_DIR,
+                                &ZELLIJ_SESSION_INFO_CACHE_DIR,
                             );
                             let _ = senders.send_to_screen(ScreenInstruction::UpdateSessionInfos(
                                 session_infos_on_machine,
@@ -777,8 +777,8 @@ pub fn scan_session_list_default_dirs(
         current_session_name,
         available_layouts,
         current_session_plugin_list,
-        &*ZELLIJ_SOCK_DIR,
-        &*ZELLIJ_SESSION_INFO_CACHE_DIR,
+        &ZELLIJ_SOCK_DIR,
+        &ZELLIJ_SESSION_INFO_CACHE_DIR,
     )
 }
 
@@ -796,7 +796,7 @@ fn read_other_live_session_states(
             if let Ok(file) = file {
                 if let Ok(file_name) = file.file_name().into_string() {
                     if is_ipc_socket(&file.file_type().unwrap()) {
-                        let creation_time = std::fs::metadata(&file.path())
+                        let creation_time = std::fs::metadata(file.path())
                             .ok()
                             .and_then(|f| f.created().ok().or_else(|| f.modified().ok()))
                             .and_then(|d| d.elapsed().ok())
@@ -814,7 +814,7 @@ fn read_other_live_session_states(
             .join("session-metadata.kdl");
         if let Ok(raw_session_info) = fs::read_to_string(&session_cache_file_name) {
             if let Ok(mut session_info) =
-                SessionInfo::from_string(&raw_session_info, &current_session_name)
+                SessionInfo::from_string(&raw_session_info, current_session_name)
             {
                 session_info.creation_time = creation_time;
                 session_infos_on_machine.insert(session_name, session_info);

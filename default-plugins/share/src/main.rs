@@ -654,17 +654,12 @@ struct AppState {
     info: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 enum Screen {
+    #[default]
     Main,
     Token(String),
     ManageTokens,
-}
-
-impl Default for Screen {
-    fn default() -> Self {
-        Screen::Main
-    }
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]

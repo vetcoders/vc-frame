@@ -37,8 +37,9 @@ use std::{
 use std::{fs::File, io::prelude::*};
 use url::Url;
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Copy, Default)]
 pub enum SplitDirection {
+    #[default]
     Horizontal,
     Vertical,
 }
@@ -162,7 +163,7 @@ impl RunPluginOrAlias {
         alias_dict: Option<&PluginAliases>,
         cwd: Option<PathBuf>,
     ) -> Result<Self, String> {
-        match RunPluginLocation::parse(&url, cwd) {
+        match RunPluginLocation::parse(url, cwd) {
             Ok(location) => Ok(RunPluginOrAlias::RunPlugin(RunPlugin {
                 _allow_exec_host_cmd: false,
                 location,
@@ -174,7 +175,7 @@ impl RunPluginOrAlias {
             })),
             Err(PluginsConfigError::InvalidUrlScheme(_))
             | Err(PluginsConfigError::InvalidUrl(..)) => {
-                let mut plugin_alias = PluginAlias::new(&url, configuration, None);
+                let mut plugin_alias = PluginAlias::new(url, configuration, None);
                 if let Some(alias_dict) = alias_dict {
                     plugin_alias.run_plugin = alias_dict
                         .aliases
@@ -183,9 +184,7 @@ impl RunPluginOrAlias {
                 }
                 Ok(RunPluginOrAlias::Alias(plugin_alias))
             },
-            Err(e) => {
-                return Err(format!("Failed to parse plugin location {url}: {}", e));
-            },
+            Err(e) => Err(format!("Failed to parse plugin location {url}: {}", e)),
         }
     }
     pub fn is_equivalent_to_run(&self, run: &Option<Run>) -> bool {
@@ -235,13 +234,13 @@ impl RunPluginOrAlias {
         }
         self
     }
-    pub fn add_initial_cwd(&mut self, initial_cwd: &PathBuf) {
+    pub fn add_initial_cwd(&mut self, initial_cwd: &Path) {
         match self {
             RunPluginOrAlias::RunPlugin(ref mut run_plugin) => {
-                run_plugin.initial_cwd = Some(initial_cwd.clone());
+                run_plugin.initial_cwd = Some(initial_cwd.to_path_buf());
             },
             RunPluginOrAlias::Alias(ref mut alias) => {
-                alias.initial_cwd = Some(initial_cwd.clone());
+                alias.initial_cwd = Some(initial_cwd.to_path_buf());
             },
         }
     }
@@ -296,7 +295,7 @@ impl Run {
                 Some(Run::EditFile(file_to_edit, line_number, edit_cwd)),
             ) => match &base_run_command.cwd {
                 Some(cwd) => Some(Run::EditFile(
-                    cwd.join(&file_to_edit),
+                    cwd.join(file_to_edit),
                     *line_number,
                     Some(cwd.join(edit_cwd.clone().unwrap_or_default())),
                 )),
@@ -309,7 +308,7 @@ impl Run {
             (Some(Run::Cwd(cwd)), Some(Run::EditFile(file_to_edit, line_number, edit_cwd))) => {
                 let cwd = edit_cwd.clone().unwrap_or(cwd.clone());
                 Some(Run::EditFile(
-                    cwd.join(&file_to_edit),
+                    cwd.join(file_to_edit),
                     *line_number,
                     Some(cwd),
                 ))
@@ -320,14 +319,14 @@ impl Run {
             (None, None) => None,
         }
     }
-    pub fn add_cwd(&mut self, cwd: &PathBuf) {
+    pub fn add_cwd(&mut self, cwd: &Path) {
         match self {
             Run::Command(run_command) => match run_command.cwd.as_mut() {
                 Some(run_cwd) => {
                     *run_cwd = cwd.join(&run_cwd);
                 },
                 None => {
-                    run_command.cwd = Some(cwd.clone());
+                    run_command.cwd = Some(cwd.to_path_buf());
                 },
             },
             Run::EditFile(path_to_file, _line_number, edit_cwd) => {
@@ -336,7 +335,7 @@ impl Run {
                         *edit_cwd = cwd.join(&edit_cwd);
                     },
                     None => {
-                        let _ = edit_cwd.insert(cwd.clone());
+                        let _ = edit_cwd.insert(cwd.to_path_buf());
                     },
                 };
                 *path_to_file = cwd.join(&path_to_file);
@@ -345,7 +344,7 @@ impl Run {
                 *path = cwd.join(&path);
             },
             Run::Plugin(run_plugin_or_alias) => {
-                run_plugin_or_alias.add_initial_cwd(&cwd);
+                run_plugin_or_alias.add_initial_cwd(cwd);
             },
         }
     }
@@ -379,19 +378,19 @@ impl Run {
         }
     }
     pub fn is_same_category(first: &Option<Run>, second: &Option<Run>) -> bool {
-        match (first, second) {
-            (Some(Run::Plugin(..)), Some(Run::Plugin(..))) => true,
-            (Some(Run::Command(..)), Some(Run::Command(..))) => true,
-            (Some(Run::EditFile(..)), Some(Run::EditFile(..))) => true,
-            (Some(Run::Cwd(..)), Some(Run::Cwd(..))) => true,
-            _ => false,
-        }
+        matches!(
+            (first, second),
+            (Some(Run::Plugin(..)), Some(Run::Plugin(..)))
+                | (Some(Run::Command(..)), Some(Run::Command(..)))
+                | (Some(Run::EditFile(..)), Some(Run::EditFile(..)))
+                | (Some(Run::Cwd(..)), Some(Run::Cwd(..)))
+        )
     }
     pub fn is_terminal(run: &Option<Run>) -> bool {
-        match run {
-            Some(Run::Command(..)) | Some(Run::EditFile(..)) | Some(Run::Cwd(..)) | None => true,
-            _ => false,
-        }
+        matches!(
+            run,
+            Some(Run::Command(..)) | Some(Run::EditFile(..)) | Some(Run::Cwd(..)) | None
+        )
     }
     pub fn get_cwd(&self) -> Option<PathBuf> {
         match self {
@@ -404,18 +403,13 @@ impl Run {
     pub fn get_run_plugin(&self) -> Option<RunPlugin> {
         match self {
             Run::Plugin(RunPluginOrAlias::RunPlugin(run_plugin)) => Some(run_plugin.clone()),
-            Run::Plugin(RunPluginOrAlias::Alias(plugin_alias)) => {
-                plugin_alias.run_plugin.as_ref().map(|r| r.clone())
-            },
+            Run::Plugin(RunPluginOrAlias::Alias(plugin_alias)) => plugin_alias.run_plugin.clone(),
             _ => None,
         }
     }
     pub fn populate_run_plugin_if_needed(&mut self, alias_dict: &PluginAliases) {
-        match self {
-            Run::Plugin(run_plugin_alias) => {
-                run_plugin_alias.populate_run_plugin_if_needed(alias_dict)
-            },
-            _ => {},
+        if let Run::Plugin(run_plugin_alias) = self {
+            run_plugin_alias.populate_run_plugin_if_needed(alias_dict)
         }
     }
 }
@@ -697,6 +691,7 @@ pub type SwapFloatingLayout = (
     BTreeMap<LayoutConstraint, Vec<FloatingPaneLayout>>,
     Option<String>,
 ); // Option<String> is the swap layout name
+type StringifiedLayout = (String, String, Option<(String, String)>);
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
 pub struct Layout {
@@ -771,16 +766,16 @@ impl PercentOrFixed {
 impl FromStr for PercentOrFixed {
     type Err = Box<dyn std::error::Error>;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.chars().last() == Some('%') {
+        if s.ends_with('%') {
             let char_count = s.chars().count();
-            let percent_size = usize::from_str_radix(&s[..char_count.saturating_sub(1)], 10)?;
+            let percent_size = s[..char_count.saturating_sub(1)].parse::<usize>()?;
             if percent_size <= 100 {
                 Ok(PercentOrFixed::Percent(percent_size))
             } else {
                 Err("Percent must be between 0 and 100".into())
             }
         } else {
-            let fixed_size = usize::from_str_radix(s, 10)?;
+            let fixed_size = s.parse::<usize>()?;
             Ok(PercentOrFixed::Fixed(fixed_size))
         }
     }
@@ -823,11 +818,11 @@ impl FloatingPaneLayout {
             default_bg: None,
         }
     }
-    pub fn add_cwd_to_layout(&mut self, cwd: &PathBuf) {
+    pub fn add_cwd_to_layout(&mut self, cwd: &Path) {
         match self.run.as_mut() {
             Some(run) => run.add_cwd(cwd),
             None => {
-                self.run = Some(Run::Cwd(cwd.clone()));
+                self.run = Some(Run::Cwd(cwd.to_path_buf()));
             },
         }
     }
@@ -1091,9 +1086,10 @@ impl TiledPaneLayout {
         self.run_instructions_to_ignore.push(run_instruction);
     }
     pub fn with_one_pane() -> Self {
-        let mut default_layout = TiledPaneLayout::default();
-        default_layout.children = vec![TiledPaneLayout::default()];
-        default_layout
+        TiledPaneLayout {
+            children: vec![TiledPaneLayout::default()],
+            ..Default::default()
+        }
     }
     pub fn add_cwd_to_layout(&mut self, cwd: &PathBuf) {
         match self.run.as_mut() {
@@ -1107,9 +1103,8 @@ impl TiledPaneLayout {
         }
     }
     pub fn populate_plugin_aliases_in_layout(&mut self, plugin_aliases: &PluginAliases) {
-        match self.run.as_mut() {
-            Some(run) => run.populate_run_plugin_if_needed(plugin_aliases),
-            _ => {},
+        if let Some(run) = self.run.as_mut() {
+            run.populate_run_plugin_if_needed(plugin_aliases)
         }
         for child in self.children.iter_mut() {
             child.populate_plugin_aliases_in_layout(plugin_aliases);
@@ -1170,7 +1165,7 @@ impl TiledPaneLayout {
                     .filter(|c| c.children.is_empty())
                     .count();
             for child in self.children.iter_mut() {
-                if remaining_panes > 1 && child.children.len() > 0 {
+                if remaining_panes > 1 && !child.children.is_empty() {
                     remaining_panes =
                         remaining_panes.saturating_sub(child.truncate(remaining_panes));
                 } else {
@@ -1178,14 +1173,14 @@ impl TiledPaneLayout {
                 }
             }
         }
-        if self.children.len() > 0 {
+        if !self.children.is_empty() {
             self.children.len()
         } else {
             1 // just me
         }
     }
     pub fn has_focused_node(&self) -> bool {
-        if self.focus.map(|f| f).unwrap_or(false) {
+        if self.focus.unwrap_or(false) {
             return true;
         };
         for child in &self.children {
@@ -1259,7 +1254,7 @@ impl Layout {
     ) -> (Vec<LayoutInfo>, Vec<LayoutWithError>) {
         let (mut available_layouts, layouts_with_errors) = layout_dir
             .clone()
-            .or_else(|| default_layout_dir())
+            .or_else(default_layout_dir)
             .and_then(|layout_dir| match std::fs::read_dir(&layout_dir) {
                 Ok(layout_files) => Some((layout_files, layout_dir)),
                 Err(_) => None,
@@ -1267,53 +1262,49 @@ impl Layout {
             .map(|(layout_files, layout_dir)| {
                 let mut available_layouts = vec![];
                 let mut layouts_with_errors = vec![];
-                for file in layout_files {
-                    if let Ok(file) = file {
-                        if file.path().extension().map(|e| e.to_ascii_lowercase())
-                            == Some(std::ffi::OsString::from("kdl"))
-                        {
-                            let layout_name = file
-                                .path()
-                                .file_stem()
-                                .and_then(|f| f.to_str())
-                                .map(|f| f.to_string())
-                                .unwrap_or_default();
+                for file in layout_files.flatten() {
+                    if file.path().extension().map(|e| e.to_ascii_lowercase())
+                        == Some(std::ffi::OsString::from("kdl"))
+                    {
+                        let layout_name = file
+                            .path()
+                            .file_stem()
+                            .and_then(|f| f.to_str())
+                            .map(|f| f.to_string())
+                            .unwrap_or_default();
 
-                            match Layout::from_path_or_default_without_config(
-                                Some(&file.path()),
-                                Some(layout_dir.clone()),
-                            ) {
-                                Ok(_layout) => {
-                                    let file_path = layout_dir.join(file.path()); // TODO: do we
-                                                                                  // need
-                                                                                  // file_stem()
-                                                                                  // here too?
-                                    available_layouts.push(LayoutInfo::File(
-                                        layout_name,
-                                        LayoutMetadata::from(&file_path),
-                                    ))
-                                },
-                                Err(config_error) => {
-                                    let file_path = file.path();
-                                    let file_name =
-                                        file_path.to_str().unwrap_or("unknown").to_string();
-                                    let source_code =
-                                        std::fs::read_to_string(&file_path).unwrap_or_default();
+                        match Layout::from_path_or_default_without_config(
+                            Some(&file.path()),
+                            Some(layout_dir.clone()),
+                        ) {
+                            Ok(_layout) => {
+                                let file_path = layout_dir.join(file.path()); // TODO: do we
+                                                                              // need
+                                                                              // file_stem()
+                                                                              // here too?
+                                available_layouts.push(LayoutInfo::File(
+                                    layout_name,
+                                    LayoutMetadata::from(&file_path),
+                                ))
+                            },
+                            Err(config_error) => {
+                                let file_path = file.path();
+                                let file_name = file_path.to_str().unwrap_or("unknown").to_string();
+                                let source_code =
+                                    std::fs::read_to_string(&file_path).unwrap_or_default();
 
-                                    let error = match config_error {
-                                        ConfigError::KdlError(kdl_err) => {
-                                            LayoutParsingError::KdlError {
-                                                kdl_error: kdl_err,
-                                                file_name,
-                                                source_code,
-                                            }
-                                        },
-                                        _ => LayoutParsingError::SyntaxError,
-                                    };
-                                    layouts_with_errors
-                                        .push(LayoutWithError { layout_name, error });
-                                },
-                            }
+                                let error = match config_error {
+                                    ConfigError::KdlError(kdl_err) => {
+                                        LayoutParsingError::KdlError {
+                                            kdl_error: kdl_err,
+                                            file_name,
+                                            source_code,
+                                        }
+                                    },
+                                    _ => LayoutParsingError::SyntaxError,
+                                };
+                                layouts_with_errors.push(LayoutWithError { layout_name, error });
+                            },
                         }
                     }
                 }
@@ -1333,11 +1324,11 @@ impl Layout {
             let a_name = a.name();
             let b_name = b.name();
             if a_name == default_layout_name {
-                return Ordering::Less;
+                Ordering::Less
             } else if b_name == default_layout_name {
-                return Ordering::Greater;
+                Ordering::Greater
             } else {
-                a_name.cmp(&b_name)
+                a_name.cmp(b_name)
             }
         });
         (available_layouts, layouts_with_errors)
@@ -1349,7 +1340,7 @@ impl Layout {
         let mut should_start_layout_commands_suspended = false;
         let (path_to_raw_layout, raw_layout, raw_swap_layouts) = match layout_info {
             LayoutInfo::File(layout_name_without_extension, _layout_metadata) => {
-                let layout_dir = layout_dir.clone().or_else(|| default_layout_dir());
+                let layout_dir = layout_dir.clone().or_else(default_layout_dir);
                 let (path_to_layout, stringified_layout, swap_layouts) =
                     Self::stringified_from_dir(
                         &PathBuf::from(layout_name_without_extension),
@@ -1377,10 +1368,9 @@ impl Layout {
             None,
         );
         if should_start_layout_commands_suspended {
-            layout
-                .iter_mut()
-                .next()
-                .map(|l| l.recursively_add_start_suspended_including_template(Some(true)));
+            if let Some(l) = layout.iter_mut().next() {
+                l.recursively_add_start_suspended_including_template(Some(true))
+            }
         }
         layout
     }
@@ -1392,7 +1382,7 @@ impl Layout {
         let mut should_start_layout_commands_suspended = false;
         let (path_to_raw_layout, raw_layout, raw_swap_layouts) = match layout_info {
             LayoutInfo::File(layout_name_without_extension, _layout_metadata) => {
-                let layout_dir = layout_dir.clone().or_else(|| default_layout_dir());
+                let layout_dir = layout_dir.clone().or_else(default_layout_dir);
                 let (path_to_layout, stringified_layout, swap_layouts) =
                     Self::stringified_from_dir(
                         &PathBuf::from(layout_name_without_extension),
@@ -1407,7 +1397,7 @@ impl Layout {
             },
             LayoutInfo::Url(url) => {
                 should_start_layout_commands_suspended = true;
-                (Some(url.clone()), Self::stringified_from_url(&url)?, None)
+                (Some(url.clone()), Self::stringified_from_url(url)?, None)
             },
             LayoutInfo::Stringified(stringified_layout) => (None, stringified_layout.clone(), None),
         };
@@ -1420,10 +1410,9 @@ impl Layout {
             None,
         );
         if should_start_layout_commands_suspended {
-            layout
-                .iter_mut()
-                .next()
-                .map(|l| l.recursively_add_start_suspended_including_template(Some(true)));
+            if let Some(l) = layout.iter_mut().next() {
+                l.recursively_add_start_suspended_including_template(Some(true))
+            }
         }
         let config = Config::from_kdl(&raw_layout, config)?; // this merges the two config, with
         layout.map(|l| (l, config))
@@ -1431,7 +1420,7 @@ impl Layout {
     pub fn stringified_from_path_or_default(
         layout_path: Option<&PathBuf>,
         layout_dir: Option<PathBuf>,
-    ) -> Result<(String, String, Option<(String, String)>), ConfigError> {
+    ) -> Result<StringifiedLayout, ConfigError> {
         // (path_to_layout as String, stringified_layout, Option<path_to_swap_layout as String, stringified_swap_layout>)
         match layout_path {
             Some(layout_path) => {
@@ -1463,7 +1452,7 @@ impl Layout {
         let raw_layout = String::new();
         Ok(raw_layout)
     }
-    pub fn from_path_without_config(layout_path: &PathBuf) -> Result<Layout, ConfigError> {
+    pub fn from_path_without_config(layout_path: &Path) -> Result<Layout, ConfigError> {
         // (path_to_layout as String, stringified_layout, Option<path_to_swap_layout as String, stringified_swap_layout>)
         let (path_to_layout, raw_layout, raw_swap_layouts) =
             Layout::stringified_from_path(layout_path)?;
@@ -1507,8 +1496,8 @@ impl Layout {
         stringified_layout: &str,
         config: Config,
     ) -> Result<(Layout, Config), ConfigError> {
-        let layout = Layout::from_kdl(&stringified_layout, None, None, None)?;
-        let config = Config::from_kdl(&stringified_layout, Some(config))?; // this merges the two config, with
+        let layout = Layout::from_kdl(stringified_layout, None, None, None)?;
+        let config = Config::from_kdl(stringified_layout, Some(config))?; // this merges the two config, with
         Ok((layout, config))
     }
     #[cfg(target_family = "wasm")]
@@ -1574,9 +1563,9 @@ impl Layout {
         Layout::from_kdl(raw, Some(path_to_raw_layout), swap_layouts, cwd)
     }
     pub fn stringified_from_dir(
-        layout: &PathBuf,
+        layout: &Path,
         layout_dir: Option<&PathBuf>,
-    ) -> Result<(String, String, Option<(String, String)>), ConfigError> {
+    ) -> Result<StringifiedLayout, ConfigError> {
         // (path_to_layout as String, stringified_layout, Option<path_to_swap_layout as String, stringified_swap_layout>)
         match layout_dir {
             Some(dir) => {
@@ -1598,15 +1587,13 @@ impl Layout {
             },
         }
     }
-    pub fn stringified_from_path(
-        layout_path: &Path,
-    ) -> Result<(String, String, Option<(String, String)>), ConfigError> {
+    pub fn stringified_from_path(layout_path: &Path) -> Result<StringifiedLayout, ConfigError> {
         // (path_to_layout as String, stringified_layout, Option<path_to_swap_layout as String, stringified_swap_layout>)
-        let mut layout_file = File::open(&layout_path)
-            .or_else(|_| File::open(&layout_path.with_extension("kdl")))
+        let mut layout_file = File::open(layout_path)
+            .or_else(|_| File::open(layout_path.with_extension("kdl")))
             .map_err(|e| ConfigError::IoPath(e, layout_path.into()))?;
 
-        let swap_layout_and_path = Layout::swap_layout_and_path(&layout_path);
+        let swap_layout_and_path = Layout::swap_layout_and_path(layout_path);
 
         let mut kdl_layout = String::new();
         layout_file
@@ -1618,9 +1605,7 @@ impl Layout {
             swap_layout_and_path,
         ))
     }
-    pub fn stringified_from_default_assets(
-        path: &Path,
-    ) -> Result<(String, String, Option<(String, String)>), ConfigError> {
+    pub fn stringified_from_default_assets(path: &Path) -> Result<StringifiedLayout, ConfigError> {
         // (path_to_layout as String, stringified_layout, Option<path_to_swap_layout as String, stringified_swap_layout>)
         // TODO: ideally these should not be hard-coded
         // we should load layouts by name from the config
@@ -1694,7 +1679,7 @@ impl Layout {
                 None,
             )),
             None | Some(_) => Err(ConfigError::IoPath(
-                std::io::Error::new(std::io::ErrorKind::Other, "The layout was not found"),
+                std::io::Error::other("The layout was not found"),
                 path.into(),
             )),
         }
@@ -1819,48 +1804,45 @@ impl Layout {
         for tab in self.tabs.iter_mut() {
             tab.1.populate_plugin_aliases_in_layout(plugin_aliases);
             for floating_pane_layout in tab.2.iter_mut() {
-                floating_pane_layout
-                    .run
-                    .as_mut()
-                    .map(|f| f.populate_run_plugin_if_needed(&plugin_aliases));
+                if let Some(f) = floating_pane_layout.run.as_mut() {
+                    f.populate_run_plugin_if_needed(plugin_aliases)
+                }
             }
         }
         if let Some(template) = self.template.as_mut() {
             template.0.populate_plugin_aliases_in_layout(plugin_aliases);
             for floating_pane_layout in template.1.iter_mut() {
-                floating_pane_layout
-                    .run
-                    .as_mut()
-                    .map(|f| f.populate_run_plugin_if_needed(&plugin_aliases));
+                if let Some(f) = floating_pane_layout.run.as_mut() {
+                    f.populate_run_plugin_if_needed(plugin_aliases)
+                }
             }
         }
         for swap_tiled_layout in &mut self.swap_tiled_layouts {
-            for (_constraint, tiled_pane_layout) in &mut swap_tiled_layout.0 {
+            for tiled_pane_layout in swap_tiled_layout.0.values_mut() {
                 tiled_pane_layout.populate_plugin_aliases_in_layout(plugin_aliases);
             }
         }
         for swap_floating_layout in &mut self.swap_floating_layouts {
-            for (_constraint, floating_pane_layouts) in &mut swap_floating_layout.0 {
+            for floating_pane_layouts in swap_floating_layout.0.values_mut() {
                 for floating_pane_layout in floating_pane_layouts {
-                    floating_pane_layout
-                        .run
-                        .as_mut()
-                        .map(|f| f.populate_run_plugin_if_needed(plugin_aliases));
+                    if let Some(f) = floating_pane_layout.run.as_mut() {
+                        f.populate_run_plugin_if_needed(plugin_aliases)
+                    }
                 }
             }
         }
     }
     pub fn add_cwd_to_layout(&mut self, cwd: &PathBuf) {
         for (_, tiled_pane_layout, floating_panes) in self.tabs.iter_mut() {
-            tiled_pane_layout.add_cwd_to_layout(&cwd);
+            tiled_pane_layout.add_cwd_to_layout(cwd);
             for floating_pane in floating_panes {
-                floating_pane.add_cwd_to_layout(&cwd);
+                floating_pane.add_cwd_to_layout(cwd);
             }
         }
         if let Some((tiled_pane_layout, floating_panes)) = self.template.as_mut() {
-            tiled_pane_layout.add_cwd_to_layout(&cwd);
+            tiled_pane_layout.add_cwd_to_layout(cwd);
             for floating_pane in floating_panes {
-                floating_pane.add_cwd_to_layout(&cwd);
+                floating_pane.add_cwd_to_layout(cwd);
             }
         }
     }
@@ -2048,14 +2030,14 @@ fn split_space(
     pane_positions.append(&mut pane_positions_with_children);
     if pane_positions.is_empty() {
         let layout = layout.clone();
-        pane_positions.push((layout, space_to_split.clone()));
+        pane_positions.push((layout, *space_to_split));
     }
     Ok(pane_positions)
 }
 
 fn adjust_geoms_for_rounding_errors(
     total_pane_size: usize,
-    split_geoms: &mut Vec<PaneGeom>,
+    split_geoms: &mut [PaneGeom],
     split_dimension_space: Dimension,
     children_split_direction: SplitDirection,
 ) {
@@ -2068,62 +2050,50 @@ fn adjust_geoms_for_rounding_errors(
         let position_of_last_flexible_geom = split_geoms
             .iter()
             .rposition(|s_g| s_g.is_flexible_in_direction(children_split_direction));
-        position_of_last_flexible_geom
-            .map(|p| split_geoms.iter_mut().skip(p))
-            .map(|mut flexible_geom_and_following_geoms| {
-                if let Some(flexible_geom) = flexible_geom_and_following_geoms.next() {
-                    match children_split_direction {
-                        SplitDirection::Vertical => flexible_geom.cols.increase_inner(increase_by),
-                        SplitDirection::Horizontal => {
-                            flexible_geom.rows.increase_inner(increase_by)
-                        },
-                    }
+        if let Some(p) = position_of_last_flexible_geom {
+            let mut flexible_geom_and_following_geoms = split_geoms.iter_mut().skip(p);
+            if let Some(flexible_geom) = flexible_geom_and_following_geoms.next() {
+                match children_split_direction {
+                    SplitDirection::Vertical => flexible_geom.cols.increase_inner(increase_by),
+                    SplitDirection::Horizontal => flexible_geom.rows.increase_inner(increase_by),
                 }
-                for following_geom in flexible_geom_and_following_geoms {
-                    match children_split_direction {
-                        SplitDirection::Vertical => {
-                            following_geom.x += increase_by;
-                        },
-                        SplitDirection::Horizontal => {
-                            following_geom.y += increase_by;
-                        },
-                    }
+            }
+            for following_geom in flexible_geom_and_following_geoms {
+                match children_split_direction {
+                    SplitDirection::Vertical => {
+                        following_geom.x += increase_by;
+                    },
+                    SplitDirection::Horizontal => {
+                        following_geom.y += increase_by;
+                    },
                 }
-            });
+            }
+        }
     } else if total_pane_size > split_dimension_space.as_usize() {
         // remove extra space from rounding errors to the last pane
         let decrease_by = total_pane_size - split_dimension_space.as_usize();
         let position_of_last_flexible_geom = split_geoms
             .iter()
             .rposition(|s_g| s_g.is_flexible_in_direction(children_split_direction));
-        position_of_last_flexible_geom
-            .map(|p| split_geoms.iter_mut().skip(p))
-            .map(|mut flexible_geom_and_following_geoms| {
-                if let Some(flexible_geom) = flexible_geom_and_following_geoms.next() {
-                    match children_split_direction {
-                        SplitDirection::Vertical => flexible_geom.cols.decrease_inner(decrease_by),
-                        SplitDirection::Horizontal => {
-                            flexible_geom.rows.decrease_inner(decrease_by)
-                        },
-                    }
+        if let Some(p) = position_of_last_flexible_geom {
+            let mut flexible_geom_and_following_geoms = split_geoms.iter_mut().skip(p);
+            if let Some(flexible_geom) = flexible_geom_and_following_geoms.next() {
+                match children_split_direction {
+                    SplitDirection::Vertical => flexible_geom.cols.decrease_inner(decrease_by),
+                    SplitDirection::Horizontal => flexible_geom.rows.decrease_inner(decrease_by),
                 }
-                for following_geom in flexible_geom_and_following_geoms {
-                    match children_split_direction {
-                        SplitDirection::Vertical => {
-                            following_geom.x = following_geom.x.saturating_sub(decrease_by)
-                        },
-                        SplitDirection::Horizontal => {
-                            following_geom.y = following_geom.y.saturating_sub(decrease_by)
-                        },
-                    }
+            }
+            for following_geom in flexible_geom_and_following_geoms {
+                match children_split_direction {
+                    SplitDirection::Vertical => {
+                        following_geom.x = following_geom.x.saturating_sub(decrease_by)
+                    },
+                    SplitDirection::Horizontal => {
+                        following_geom.y = following_geom.y.saturating_sub(decrease_by)
+                    },
                 }
-            });
-    }
-}
-
-impl Default for SplitDirection {
-    fn default() -> Self {
-        SplitDirection::Horizontal
+            }
+        }
     }
 }
 
@@ -2141,16 +2111,16 @@ impl FromStr for SplitDirection {
 impl FromStr for SplitSize {
     type Err = Box<dyn std::error::Error>;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.chars().last() == Some('%') {
+        if s.ends_with('%') {
             let char_count = s.chars().count();
-            let percent_size = usize::from_str_radix(&s[..char_count.saturating_sub(1)], 10)?;
+            let percent_size = s[..char_count.saturating_sub(1)].parse::<usize>()?;
             if percent_size > 0 && percent_size <= 100 {
                 Ok(SplitSize::Percent(percent_size))
             } else {
                 Err("Percent must be between 0 and 100".into())
             }
         } else {
-            let fixed_size = usize::from_str_radix(s, 10)?;
+            let fixed_size = s.parse::<usize>()?;
             Ok(SplitSize::Fixed(fixed_size))
         }
     }

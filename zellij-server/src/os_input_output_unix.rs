@@ -13,7 +13,6 @@ use nix::{
 use tokio::io::unix::AsyncFd;
 
 use libc::{self, ioctl, TIOCSWINSZ};
-use signal_hook;
 use signal_hook::consts::*;
 
 use std::{
@@ -142,7 +141,7 @@ fn handle_command_exit(mut child: Child) -> Result<Option<i32>> {
     let mut should_exit = false;
     let mut attempts = 3;
     let mut signals =
-        signal_hook::iterator::Signals::new(&[SIGINT, SIGTERM]).with_context(err_context)?;
+        signal_hook::iterator::Signals::new([SIGINT, SIGTERM]).with_context(err_context)?;
     'handle_exit: loop {
         // test whether the child process has exited
         match child.try_wait() {
@@ -216,7 +215,7 @@ fn handle_openpty(
     let err_context = |cmd: &RunCommand| {
         format!(
             "failed to open PTY for command '{}'",
-            cmd.command.to_string_lossy().to_string()
+            cmd.command.to_string_lossy()
         )
     };
 

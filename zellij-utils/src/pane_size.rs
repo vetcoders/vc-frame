@@ -256,7 +256,7 @@ impl PartialEq for Constraint {
 
 impl PaneGeom {
     pub fn contains(&self, point: &Position) -> bool {
-        let col = point.column.0 as usize;
+        let col = point.column.0;
         let row = point.line.0 as usize;
         self.x <= col
             && col < self.x + self.cols.as_usize()
@@ -333,7 +333,7 @@ impl PaneGeom {
     pub fn combine_vertically_with(&self, geom_below: &PaneGeom) -> Option<Self> {
         match (self.rows.constraint, geom_below.rows.constraint) {
             (Constraint::Percent(self_percent), Constraint::Percent(geom_below_percent)) => {
-                let mut combined = self.clone();
+                let mut combined = *self;
                 combined.rows = Dimension::percent(self_percent + geom_below_percent);
                 combined.rows.inner = self.rows.inner + geom_below.rows.inner;
                 Some(combined)
@@ -347,7 +347,7 @@ impl PaneGeom {
     pub fn combine_horizontally_with(&self, geom_to_the_right: &PaneGeom) -> Option<Self> {
         match (self.cols.constraint, geom_to_the_right.cols.constraint) {
             (Constraint::Percent(self_percent), Constraint::Percent(geom_to_the_right_percent)) => {
-                let mut combined = self.clone();
+                let mut combined = *self;
                 combined.cols = Dimension::percent(self_percent + geom_to_the_right_percent);
                 combined.cols.inner = self.cols.inner + geom_to_the_right.cols.inner;
                 Some(combined)
@@ -361,7 +361,7 @@ impl PaneGeom {
     pub fn combine_vertically_with_many(&self, geoms_below: &Vec<PaneGeom>) -> Option<Self> {
         // here we expect the geoms to be sorted by their y and be contiguous (i.e. same x and
         // width, no overlaps) and be below self
-        let mut combined = self.clone();
+        let mut combined = *self;
         for geom_below in geoms_below {
             match (combined.rows.constraint, geom_below.rows.constraint) {
                 (
@@ -386,7 +386,7 @@ impl PaneGeom {
     ) -> Option<Self> {
         // here we expect the geoms to be sorted by their x and be contiguous (i.e. same x and
         // width, no overlaps) and be right of self
-        let mut combined = self.clone();
+        let mut combined = *self;
         for geom_to_the_right in geoms_to_the_right {
             match (combined.cols.constraint, geom_to_the_right.cols.constraint) {
                 (

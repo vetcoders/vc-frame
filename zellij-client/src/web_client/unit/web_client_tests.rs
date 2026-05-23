@@ -588,9 +588,7 @@ mod web_client_tests {
             }),
         };
         control_sink
-            .send(Message::Text(
-                serde_json::to_string(&resize_msg).unwrap().into(),
-            ))
+            .send(Message::Text(serde_json::to_string(&resize_msg).unwrap()))
             .await
             .expect("Failed to send TerminalResize");
 
@@ -610,7 +608,7 @@ mod web_client_tests {
             },
         });
         control_sink
-            .send(Message::Text(metrics_json.to_string().into()))
+            .send(Message::Text(metrics_json.to_string()))
             .await
             .expect("Failed to send TerminalMetrics");
 
@@ -1429,7 +1427,7 @@ mod web_client_tests {
             serde_json::from_str(&client_response.text().unwrap()).unwrap();
         let is_read_only = client_data["is_read_only"].as_bool().unwrap();
 
-        assert_eq!(is_read_only, true, "Client should be marked as read-only");
+        assert!(is_read_only, "Client should be marked as read-only");
 
         // Try to connect via control WebSocket
         // This will trigger the server_listener which should close the connection
@@ -1841,13 +1839,13 @@ mod web_client_tests {
         let readonly_is_read_only = readonly_client_data["is_read_only"].as_bool().unwrap();
 
         // Verify is_read_only flag in responses
-        assert_eq!(
-            regular_is_read_only, false,
+        assert!(
+            !regular_is_read_only,
             "Regular client should not be read-only"
         );
 
-        assert_eq!(
-            readonly_is_read_only, true,
+        assert!(
+            readonly_is_read_only,
             "Read-only client should be read-only"
         );
 

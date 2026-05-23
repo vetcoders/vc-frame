@@ -30,7 +30,7 @@ const ASSETS_DIR: include_dir::Dir<'_> = include_dir::include_dir!("$CARGO_MANIF
 
 pub async fn serve_html(State(state): State<AppState>, request: Request) -> Html<String> {
     let cookies = parse_cookies(&request);
-    let is_authenticated = cookies.get("session_token").is_some();
+    let is_authenticated = cookies.contains_key("session_token");
     let auth_value = if is_authenticated { "true" } else { "false" };
     let base_url = html_escape(
         &state
@@ -43,12 +43,11 @@ pub async fn serve_html(State(state): State<AppState>, request: Request) -> Html
             .unwrap_or("/".to_string()),
     );
 
-    let html = Html(
+    Html(
         WEB_CLIENT_PAGE
-            .replace("IS_AUTHENTICATED", &format!("{}", auth_value))
+            .replace("IS_AUTHENTICATED", auth_value)
             .replace("BASE_URL", &base_url),
-    );
-    html
+    )
 }
 
 pub async fn login_handler(

@@ -233,14 +233,14 @@ impl SessionConfiguration {
     pub fn get_client_default_input_mode(&self, client_id: &ClientId) -> InputMode {
         self.runtime_config
             .get(client_id)
-            .or_else(|| Some(&self.saved_config))
-            .and_then(|c| c.options.default_mode.clone())
+            .or(Some(&self.saved_config))
+            .and_then(|c| c.options.default_mode)
             .unwrap_or_default()
     }
     pub fn get_client_configuration(&self, client_id: &ClientId) -> Config {
         self.runtime_config
             .get(client_id)
-            .or_else(|| Some(&self.saved_config))
+            .or(Some(&self.saved_config))
             .cloned()
             .unwrap_or_default()
     }
@@ -632,7 +632,7 @@ impl SessionState {
     pub fn set_client_size(&mut self, client_id: ClientId, size: Size) {
         self.clients
             .entry(client_id)
-            .or_insert_with(Default::default)
+            .or_default()
             .as_mut()
             .map(|(s, _is_web_client)| *s = size);
     }
@@ -993,9 +993,7 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                         ..Default::default()
                     })
                 });
-                let cwd = cli_assets
-                    .cwd
-                    .or_else(|| runtime_config_options.default_cwd);
+                let cwd = cli_assets.cwd.or(runtime_config_options.default_cwd);
 
                 let spawn_tabs = |tab_layout,
                                   floating_panes_layout,
@@ -1542,7 +1540,7 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                         .get_client_configuration(&client_id)
                         .options
                         .layout_dir
-                        .or_else(|| default_layout_dir());
+                        .or_else(default_layout_dir);
                     if let Some(layout_dir) = layout_dir {
                         connect_to_session.apply_layout_dir(&layout_dir);
                     }
@@ -1720,13 +1718,8 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                         .unwrap_or(false);
                     if successfully_changed {
                         // disconnect existing web clients
-                        let web_client_ids: Vec<ClientId> = session_state
-                            .read()
-                            .unwrap()
-                            .web_client_ids()
-                            .iter()
-                            .copied()
-                            .collect();
+                        let web_client_ids: Vec<ClientId> =
+                            session_state.read().unwrap().web_client_ids().to_vec();
                         for client_id in web_client_ids {
                             let _ = os_input.send_to_client(
                                 client_id,
@@ -1740,9 +1733,7 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                             .read()
                             .unwrap()
                             .web_watcher_client_ids()
-                            .iter()
-                            .copied()
-                            .collect();
+                            .to_vec();
                         for client_id in web_watcher_client_ids {
                             let _ = os_input.send_to_client(
                                 client_id,
@@ -1898,7 +1889,7 @@ fn init_session(
     let web_server_ip = config_options
         .web_server_ip
         .unwrap_or_else(|| IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
-    let web_server_port = config_options.web_server_port.unwrap_or_else(|| 8082);
+    let web_server_port = config_options.web_server_port.unwrap_or(8082);
     let has_certificate =
         config_options.web_server_cert.is_some() && config_options.web_server_key.is_some();
     let enforce_https_for_localhost = config_options.enforce_https_for_localhost.unwrap_or(false);
@@ -1913,7 +1904,7 @@ fn init_session(
     let path_to_default_shell = config_options
         .default_shell
         .clone()
-        .unwrap_or_else(|| get_default_shell());
+        .unwrap_or_else(get_default_shell);
 
     let default_mode = config_options.default_mode.unwrap_or_default();
     let default_keybinds = config.keybinds.clone();
@@ -2005,7 +1996,7 @@ fn init_session(
             let layout_dir = config_options
                 .layout_dir
                 .clone()
-                .or_else(|| default_layout_dir());
+                .or_else(default_layout_dir);
             let background_plugins = config.background_plugins.clone();
             let session_env_vars = session_env_vars.clone();
             move || {
@@ -2085,7 +2076,7 @@ fn init_session(
         let layout_dir = config_options
             .layout_dir
             .clone()
-            .or_else(|| default_layout_dir());
+            .or_else(default_layout_dir);
         let default_layout_name = config_options
             .default_layout
             .map(|l| format!("{}", l.display()));
@@ -2177,19 +2168,19 @@ fn should_show_release_notes(
         }
     }
     if ZELLIJ_SEEN_RELEASE_NOTES_CACHE_FILE.exists() {
-        return false;
+        false
     } else {
         if let Some(parent) = ZELLIJ_SEEN_RELEASE_NOTES_CACHE_FILE.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if let Err(e) = std::fs::write(&*ZELLIJ_SEEN_RELEASE_NOTES_CACHE_FILE, &[]) {
+        if let Err(e) = std::fs::write(&*ZELLIJ_SEEN_RELEASE_NOTES_CACHE_FILE, []) {
             log::error!(
                 "Failed to write seen release notes indication to disk: {}",
                 e
             );
             return false;
         }
-        return true;
+        true
     }
 }
 
@@ -2285,7 +2276,7 @@ fn update_new_saved_config(
             };
             match Config::write_config_to_disk(
                 new_config.to_string(clear_defaults),
-                &config_file_path,
+                config_file_path,
             ) {
                 Ok(written_config) => {
                     let changes = session_data
@@ -2346,7 +2337,7 @@ fn get_available_layouts(config_options: &Options) -> (Vec<LayoutInfo>, Vec<Layo
     let layout_dir = config_options
         .layout_dir
         .clone()
-        .or_else(|| default_layout_dir());
+        .or_else(default_layout_dir);
     let default_layout_name = config_options
         .default_layout
         .as_ref()

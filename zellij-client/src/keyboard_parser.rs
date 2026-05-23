@@ -151,7 +151,7 @@ impl KittyKeyboardParser {
             },
             (KittyKeysParsingState::ParsingNumber, 59) => {
                 // semicolon
-                if &self.number_bytes == &[49] {
+                if self.number_bytes == [49] {
                     self.number_bytes.clear();
                 }
                 self.state = KittyKeysParsingState::ParsingModifiers;

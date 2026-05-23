@@ -24,8 +24,10 @@ impl DisplayLayout {
         match self {
             DisplayLayout::Valid(info) => match info {
                 LayoutInfo::BuiltIn(name) => name.clone(),
-                LayoutInfo::File(path, _) => path.split('/').last().unwrap_or(path).to_string(),
-                LayoutInfo::Url(url) => url.split('/').last().unwrap_or(url).to_string(),
+                LayoutInfo::File(path, _) => {
+                    path.split('/').next_back().unwrap_or(path).to_string()
+                },
+                LayoutInfo::Url(url) => url.split('/').next_back().unwrap_or(url).to_string(),
                 LayoutInfo::Stringified(_) => "raw".to_string(),
             },
             DisplayLayout::Error { name, .. } => name.clone(),
@@ -118,7 +120,7 @@ impl DisplayLayout {
         self.display_name().chars().count()
     }
     fn last_modified_width(&self) -> usize {
-        let display_info = get_layout_display_info(&self);
+        let display_info = get_layout_display_info(self);
         get_last_modified_string(display_info.1, self.is_builtin())
             .chars()
             .count()

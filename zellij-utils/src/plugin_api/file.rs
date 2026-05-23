@@ -9,7 +9,7 @@ impl TryFrom<ProtobufFile> for FileToOpen {
     fn try_from(protobuf_file: ProtobufFile) -> Result<Self, &'static str> {
         let path = PathBuf::from(protobuf_file.path);
         let line_number = protobuf_file.line_number.map(|l| l as usize);
-        let cwd = protobuf_file.cwd.map(|c| PathBuf::from(c));
+        let cwd = protobuf_file.cwd.map(PathBuf::from);
         Ok(FileToOpen {
             path,
             line_number,

@@ -9,7 +9,7 @@ impl TryFrom<ProtobufCommand> for CommandToRun {
     fn try_from(protobuf_command: ProtobufCommand) -> Result<Self, &'static str> {
         let path = PathBuf::from(protobuf_command.path);
         let args = protobuf_command.args;
-        let cwd = protobuf_command.cwd.map(|c| PathBuf::from(c));
+        let cwd = protobuf_command.cwd.map(PathBuf::from);
         Ok(CommandToRun { path, args, cwd })
     }
 }

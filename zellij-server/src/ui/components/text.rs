@@ -57,7 +57,7 @@ pub fn stringify_text(
         if is_too_wide(
             character_width,
             left_padding.unwrap_or(0) + text_width,
-            &coordinates,
+            coordinates,
         ) {
             break;
         }
@@ -71,30 +71,29 @@ pub fn stringify_text(
 
         if !text.indices.is_empty() || text.selected || text.opaque {
             let character_with_styling =
-                color_index_character(character, i, &text, style, styling, base_text_style);
+                color_index_character(character, i, text, style, styling, base_text_style);
             stringified.push_str(&character_with_styling);
         } else {
             stringified.push(character)
         }
     }
     let coordinates_width = coordinates.as_ref().and_then(|c| c.width);
-    match (coordinates_width, base_text_style.background) {
-        (Some(coordinates_width), Some(_background_style)) => {
-            let text_width_with_left_padding = text_width + left_padding.unwrap_or(0);
-            let background_padding_length =
-                coordinates_width.saturating_sub(text_width_with_left_padding);
-            if text_width_with_left_padding < coordinates_width {
-                // here we pad the string with whitespace until the end so that the background
-                // style will apply the whole length of the coordinates
-                stringified.push_str(&format!(
-                    "{:width$}",
-                    " ",
-                    width = background_padding_length
-                ));
-            }
-            text_width += background_padding_length;
-        },
-        _ => {},
+    if let (Some(coordinates_width), Some(_background_style)) =
+        (coordinates_width, base_text_style.background)
+    {
+        let text_width_with_left_padding = text_width + left_padding.unwrap_or(0);
+        let background_padding_length =
+            coordinates_width.saturating_sub(text_width_with_left_padding);
+        if text_width_with_left_padding < coordinates_width {
+            // here we pad the string with whitespace until the end so that the background
+            // style will apply the whole length of the coordinates
+            stringified.push_str(&format!(
+                "{:width$}",
+                " ",
+                width = background_padding_length
+            ));
+        }
+        text_width += background_padding_length;
     }
     (stringified, text_width)
 }
@@ -135,11 +134,11 @@ pub fn color_index_character(
 
 pub fn parse_text_params<'a>(params_iter: impl Iterator<Item = &'a mut String>) -> Vec<Text> {
     params_iter
-        .flat_map(|mut stringified| {
-            let selected = parse_selected(&mut stringified);
-            let opaque = parse_opaque(&mut stringified);
-            let indices = parse_indices(&mut stringified);
-            let text = parse_text(&mut stringified).map_err(|e| e.to_string())?;
+        .flat_map(|stringified| {
+            let selected = parse_selected(stringified);
+            let opaque = parse_opaque(stringified);
+            let indices = parse_indices(stringified);
+            let text = parse_text(stringified).map_err(|e| e.to_string())?;
             Ok::<Text, String>(Text {
                 text,
                 opaque,
@@ -231,7 +230,7 @@ pub fn parse_text(stringified: &mut String) -> Result<String> {
             stringified_character
                 .to_string()
                 .parse::<u8>()
-                .with_context(|| format!("Failed to parse utf8"))?,
+                .with_context(|| "Failed to parse utf8".to_string())?,
         );
     }
     Ok(String::from_utf8_lossy(&utf8).to_string())

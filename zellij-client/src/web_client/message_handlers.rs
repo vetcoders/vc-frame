@@ -240,7 +240,7 @@ pub fn parse_stdin(
     );
 
     let single_event = events.len() == 1;
-    for (_i, input_event) in events.into_iter().enumerate() {
+    for input_event in events.into_iter() {
         match input_event {
             InputEvent::Key(key_event) => {
                 // For multi-event buffers (e.g. IME composition), avoid

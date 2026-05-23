@@ -123,11 +123,7 @@ impl SearchState {
         results.sort_by(|a, b| b.score.cmp(&a.score));
         self.search_results = results;
 
-        if self.search_results.is_empty() {
-            self.filter_active = false;
-        } else {
-            self.filter_active = true;
-        }
+        self.filter_active = !self.search_results.is_empty();
 
         // Keep selection in bounds
         if self.selected_search_index >= self.search_results.len() {

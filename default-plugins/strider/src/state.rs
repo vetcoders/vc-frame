@@ -252,31 +252,27 @@ impl State {
             } else {
                 open_terminal(&self.file_list_view.path);
             }
-        } else {
-            if let Some(parent_folder) = self.file_list_view.path.parent() {
-                if self.close_on_selection {
-                    open_file_in_place_of_plugin(
-                        FileToOpen::new(&self.file_list_view.path).with_cwd(parent_folder.into()),
-                        true,
-                        BTreeMap::new(),
-                    );
-                } else {
-                    open_file(
-                        FileToOpen::new(&self.file_list_view.path).with_cwd(parent_folder.into()),
-                        BTreeMap::new(),
-                    );
-                }
+        } else if let Some(parent_folder) = self.file_list_view.path.parent() {
+            if self.close_on_selection {
+                open_file_in_place_of_plugin(
+                    FileToOpen::new(&self.file_list_view.path).with_cwd(parent_folder.into()),
+                    true,
+                    BTreeMap::new(),
+                );
             } else {
-                if self.close_on_selection {
-                    open_file_in_place_of_plugin(
-                        FileToOpen::new(&self.file_list_view.path),
-                        true,
-                        BTreeMap::new(),
-                    );
-                } else {
-                    open_file(FileToOpen::new(&self.file_list_view.path), BTreeMap::new());
-                }
+                open_file(
+                    FileToOpen::new(&self.file_list_view.path).with_cwd(parent_folder.into()),
+                    BTreeMap::new(),
+                );
             }
+        } else if self.close_on_selection {
+            open_file_in_place_of_plugin(
+                FileToOpen::new(&self.file_list_view.path),
+                true,
+                BTreeMap::new(),
+            );
+        } else {
+            open_file(FileToOpen::new(&self.file_list_view.path), BTreeMap::new());
         }
     }
     pub fn enter_virtual_root(&mut self) {

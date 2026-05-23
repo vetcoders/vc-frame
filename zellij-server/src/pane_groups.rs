@@ -33,10 +33,12 @@ impl PaneGroups {
         self.panes_in_group
             .get(client_id)
             .map(|p| p.iter().copied().collect())
-            .unwrap_or_else(|| HashSet::new())
+            .unwrap_or_default()
     }
     pub fn clear_pane_group(&mut self, client_id: &ClientId) {
-        self.panes_in_group.get_mut(client_id).map(|p| p.clear());
+        if let Some(p) = self.panes_in_group.get_mut(client_id) {
+            p.clear()
+        }
     }
     pub fn toggle_pane_id_in_group(
         &mut self,
@@ -45,10 +47,7 @@ impl PaneGroups {
         client_id: &ClientId,
     ) {
         let previous_groups = self.clone_inner();
-        let client_pane_group = self
-            .panes_in_group
-            .entry(*client_id)
-            .or_insert_with(|| vec![]);
+        let client_pane_group = self.panes_in_group.entry(*client_id).or_default();
         if client_pane_group.contains(&pane_id) {
             client_pane_group.retain(|p| p != &pane_id);
         } else {
@@ -65,10 +64,7 @@ impl PaneGroups {
         client_id: &ClientId,
     ) {
         let previous_groups = self.clone_inner();
-        let client_pane_group = self
-            .panes_in_group
-            .entry(*client_id)
-            .or_insert_with(|| vec![]);
+        let client_pane_group = self.panes_in_group.entry(*client_id).or_default();
         if !client_pane_group.contains(&pane_id) {
             client_pane_group.push(pane_id);
         }
@@ -84,10 +80,7 @@ impl PaneGroups {
         client_id: &ClientId,
     ) {
         let previous_groups = self.clone_inner();
-        let client_pane_group = self
-            .panes_in_group
-            .entry(*client_id)
-            .or_insert_with(|| vec![]);
+        let client_pane_group = self.panes_in_group.entry(*client_id).or_default();
         client_pane_group.append(&mut pane_ids_to_group);
         client_pane_group.retain(|p| !pane_ids_to_ungroup.contains(p));
         if self.should_launch_plugin(&previous_groups, client_id) {
@@ -105,14 +98,11 @@ impl PaneGroups {
         let all_connected_clients: Vec<ClientId> = self.panes_in_group.keys().copied().collect();
 
         for client_id in &all_connected_clients {
-            let client_pane_group = self
-                .panes_in_group
-                .entry(*client_id)
-                .or_insert_with(|| vec![]);
+            let client_pane_group = self.panes_in_group.entry(*client_id).or_default();
             client_pane_group.append(&mut pane_ids_to_group.clone());
             client_pane_group.retain(|p| !pane_ids_to_ungroup.contains(p));
 
-            if self.should_launch_plugin(&previous_groups, &client_id) {
+            if self.should_launch_plugin(&previous_groups, client_id) {
                 should_launch = true;
             }
         }
@@ -136,14 +126,14 @@ impl PaneGroups {
             let previous_panes_has_panes = !previous_panes.is_empty();
             let current_panes_has_panes = self
                 .panes_in_group
-                .get(&client_id)
+                .get(client_id)
                 .map(|g| !g.is_empty())
                 .unwrap_or(false);
             if !previous_panes_has_panes && current_panes_has_panes {
                 should_launch = true;
             }
         }
-        should_launch || previous_groups.get(&client_id).is_none()
+        should_launch || previous_groups.get(client_id).is_none()
     }
     fn launch_plugin(&self, screen_size: Size, client_id: &ClientId) {
         if let Ok(run_plugin) =

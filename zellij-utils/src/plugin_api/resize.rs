@@ -38,7 +38,7 @@ impl TryFrom<ProtobufResize> for ResizeStrategy {
     fn try_from(protobuf_resize: ProtobufResize) -> Result<Self, &'static str> {
         let direction = match protobuf_resize
             .direction
-            .and_then(|r| ResizeDirection::from_i32(r))
+            .and_then(ResizeDirection::from_i32)
         {
             Some(ResizeDirection::Left) => Some(Direction::Left),
             Some(ResizeDirection::Right) => Some(Direction::Right),
