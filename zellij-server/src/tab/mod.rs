@@ -924,10 +924,7 @@ impl Tab {
             client_id,
         ) {
             Ok(should_show_floating_panes) => {
-                if should_show_floating_panes && !self.floating_panes.panes_are_visible() {
-                    self.toggle_floating_panes(Some(client_id), None, None)
-                        .non_fatal();
-                } else if !should_show_floating_panes && self.floating_panes.panes_are_visible() {
+                if should_show_floating_panes != self.floating_panes.panes_are_visible() {
                     self.toggle_floating_panes(Some(client_id), None, None)
                         .non_fatal();
                 }
@@ -1004,10 +1001,7 @@ impl Tab {
             client_id,
         ) {
             Ok(should_show_floating_panes) => {
-                if should_show_floating_panes && !self.floating_panes.panes_are_visible() {
-                    self.toggle_floating_panes(Some(client_id), None, None)
-                        .non_fatal();
-                } else if !should_show_floating_panes && self.floating_panes.panes_are_visible() {
+                if should_show_floating_panes != self.floating_panes.panes_are_visible() {
                     self.toggle_floating_panes(Some(client_id), None, None)
                         .non_fatal();
                 }
@@ -6159,23 +6153,6 @@ pub fn pane_info_for_pane(
     pane: &Box<dyn Pane>,
     current_pane_group: &HashMap<ClientId, Vec<PaneId>>,
 ) -> PaneInfo {
-    let mut pane_info = PaneInfo::default();
-    pane_info.pane_x = pane.x();
-    pane_info.pane_content_x = pane.get_content_x();
-    pane_info.pane_y = pane.y();
-    pane_info.pane_content_y = pane.get_content_y();
-    pane_info.pane_rows = pane.rows();
-    pane_info.pane_content_rows = pane.get_content_rows();
-    pane_info.pane_columns = pane.cols();
-    pane_info.pane_content_columns = pane.get_content_columns();
-    pane_info.cursor_coordinates_in_pane = pane
-        .cursor_coordinates(None)
-        .and_then(|(x, y, is_visible)| if is_visible { Some((x, y)) } else { None });
-    pane_info.is_selectable = pane.selectable();
-    pane_info.title = pane.current_title();
-    pane_info.exited = pane.exited();
-    pane_info.exit_status = pane.exit_status();
-    pane_info.is_held = pane.is_held();
     let index_in_pane_group: BTreeMap<ClientId, usize> = current_pane_group
         .iter()
         .filter_map(|(client_id, pane_ids)| {
@@ -6185,11 +6162,30 @@ pub fn pane_info_for_pane(
                 .map(|position| (*client_id, position))
         })
         .collect();
-    pane_info.index_in_pane_group = index_in_pane_group;
-
     let (default_fg, default_bg) = pane.get_pane_default_colors();
-    pane_info.default_fg = default_fg;
-    pane_info.default_bg = default_bg;
+
+    let mut pane_info = PaneInfo {
+        pane_x: pane.x(),
+        pane_content_x: pane.get_content_x(),
+        pane_y: pane.y(),
+        pane_content_y: pane.get_content_y(),
+        pane_rows: pane.rows(),
+        pane_content_rows: pane.get_content_rows(),
+        pane_columns: pane.cols(),
+        pane_content_columns: pane.get_content_columns(),
+        cursor_coordinates_in_pane: pane
+            .cursor_coordinates(None)
+            .and_then(|(x, y, is_visible)| if is_visible { Some((x, y)) } else { None }),
+        is_selectable: pane.selectable(),
+        title: pane.current_title(),
+        exited: pane.exited(),
+        exit_status: pane.exit_status(),
+        is_held: pane.is_held(),
+        index_in_pane_group,
+        default_fg,
+        default_bg,
+        ..Default::default()
+    };
 
     match pane_id {
         PaneId::Terminal(terminal_id) => {

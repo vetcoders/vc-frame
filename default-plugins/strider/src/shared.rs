@@ -93,7 +93,7 @@ pub fn render_virtual_root_header(_cols: usize) {
 }
 
 pub fn render_current_path(
-    full_path: &PathBuf,
+    full_path: &Path,
     path_is_dir: bool,
     handling_filepick: bool,
     max_cols: usize,
@@ -130,7 +130,7 @@ pub fn render_current_path(
             current_path
         } else {
             truncate_path(
-                full_path.clone(),
+                full_path.to_path_buf(),
                 current_path_len.saturating_sub(max_path_len),
                 platform,
             )

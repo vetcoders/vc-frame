@@ -386,10 +386,10 @@ impl<'a> LayoutApplier<'a> {
                 )
             })
             .map_err(|e| anyhow!(e))?;
-        let mut logical_position = 0;
-        for (_layout, position_and_size) in positions_in_layout.iter_mut() {
+        for (logical_position, (_layout, position_and_size)) in
+            positions_in_layout.iter_mut().enumerate()
+        {
             position_and_size.logical_position = Some(logical_position);
-            logical_position += 1;
         }
         Ok(positions_in_layout)
     }
@@ -787,10 +787,9 @@ impl<'a> LayoutApplier<'a> {
     ) -> Result<bool> {
         let layout_has_floating_panes = !floating_panes_layout.is_empty();
 
-        let mut logical_position = 0;
-        for floating_pane_layout in floating_panes_layout.iter_mut() {
+        for (logical_position, floating_pane_layout) in floating_panes_layout.iter_mut().enumerate()
+        {
             floating_pane_layout.logical_position = Some(logical_position);
-            logical_position += 1;
         }
 
         let floating_panes_layout = floating_panes_layout.iter();

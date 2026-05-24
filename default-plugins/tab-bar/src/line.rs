@@ -212,19 +212,34 @@ pub fn tab_separator(capabilities: PluginCapabilities) -> &'static str {
     }
 }
 
-pub fn tab_line(
-    session_name: Option<&str>,
-    mut all_tabs: Vec<LinePart>,
-    active_tab_index: usize,
-    cols: usize,
-    palette: Styling,
-    capabilities: PluginCapabilities,
-    hide_session_name: bool,
-    tab_info: Option<&TabInfo>,
-    mode_info: &ModeInfo,
-    hide_swap_layout_indicator: bool,
-    background: &PaletteColor,
-) -> Vec<LinePart> {
+pub struct TabLineParams<'a> {
+    pub session_name: Option<&'a str>,
+    pub all_tabs: Vec<LinePart>,
+    pub active_tab_index: usize,
+    pub cols: usize,
+    pub palette: Styling,
+    pub capabilities: PluginCapabilities,
+    pub hide_session_name: bool,
+    pub tab_info: Option<&'a TabInfo>,
+    pub mode_info: &'a ModeInfo,
+    pub hide_swap_layout_indicator: bool,
+    pub background: &'a PaletteColor,
+}
+
+pub fn tab_line(params: TabLineParams) -> Vec<LinePart> {
+    let TabLineParams {
+        session_name,
+        mut all_tabs,
+        active_tab_index,
+        cols,
+        palette,
+        capabilities,
+        hide_session_name,
+        tab_info,
+        mode_info,
+        hide_swap_layout_indicator,
+        background,
+    } = params;
     let mut tabs_after_active = all_tabs.split_off(active_tab_index);
     let mut tabs_before_active = all_tabs;
     let active_tab = if !tabs_after_active.is_empty() {

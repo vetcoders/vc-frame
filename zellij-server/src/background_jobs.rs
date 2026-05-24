@@ -251,7 +251,7 @@ pub(crate) fn background_jobs_main(
                 // this job should only be run once and it keeps track of other sessions (as well
                 // as this one's) infos (metadata mostly) and sends it to the screen which in turn
                 // forwards it to plugins and other places it needs to be
-                if running_jobs.get(&job).is_some() {
+                if running_jobs.contains_key(&job) {
                     continue;
                 }
                 running_jobs.insert(job, Instant::now());

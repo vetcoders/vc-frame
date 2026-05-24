@@ -638,8 +638,9 @@ fn render_new_session_folder_prompt(
                     + 8
             {
                 print!(
-                    "\u{1b}[m{}{} {} ({} {}, {} {})",
-                    format!("\u{1b}[{};{}H", y + 1, x + 1),
+                    "\u{1b}[m\u{1b}[{};{}H{} {} ({} {}, {} {})",
+                    y + 1,
+                    x + 1,
                     colors.session_name_prompt(folder_prompt),
                     colors.session_and_folder_entry(&new_session_folder),
                     change_folder_shortcut,
@@ -657,8 +658,9 @@ fn render_new_session_folder_prompt(
                     + 8
             {
                 print!(
-                    "\u{1b}[m{}{} {} ({} {}, {} {})",
-                    format!("\u{1b}[{};{}H", y + 1, x + 1),
+                    "\u{1b}[m\u{1b}[{};{}H{} {} ({} {}, {} {})",
+                    y + 1,
+                    x + 1,
                     colors.session_name_prompt(short_folder_prompt),
                     colors.session_and_folder_entry(&new_session_folder),
                     change_folder_shortcut,
@@ -674,8 +676,9 @@ fn render_new_session_folder_prompt(
                     + 5
             {
                 print!(
-                    "\u{1b}[m{}{} {} ({}/{})",
-                    format!("\u{1b}[{};{}H", y + 1, x + 1),
+                    "\u{1b}[m\u{1b}[{};{}H{} {} ({}/{})",
+                    y + 1,
+                    x + 1,
                     colors.session_name_prompt(short_folder_prompt),
                     colors.session_and_folder_entry(&new_session_folder),
                     change_folder_shortcut,
@@ -692,8 +695,9 @@ fn render_new_session_folder_prompt(
                     new_session_folder.width().saturating_sub(max_path_len),
                 );
                 print!(
-                    "\u{1b}[m{}{} {} ({}/{})",
-                    format!("\u{1b}[{};{}H", y + 1, x + 1),
+                    "\u{1b}[m\u{1b}[{};{}H{} {} ({}/{})",
+                    y + 1,
+                    x + 1,
                     colors.session_name_prompt(short_folder_prompt),
                     colors.session_and_folder_entry(&truncated_path),
                     change_folder_shortcut,
@@ -712,8 +716,9 @@ fn render_new_session_folder_prompt(
                 >= folder_prompt.width() + change_folder_shortcut_text.width() + to_set.width() + 4
             {
                 print!(
-                    "\u{1b}[m{}{} ({} {})",
-                    format!("\u{1b}[{};{}H", y + 1, x + 1),
+                    "\u{1b}[m\u{1b}[{};{}H{} ({} {})",
+                    y + 1,
+                    x + 1,
                     colors.session_name_prompt(folder_prompt),
                     change_folder_shortcut,
                     to_set,
@@ -725,16 +730,18 @@ fn render_new_session_folder_prompt(
                     + 4
             {
                 print!(
-                    "\u{1b}[m{}{} ({} {})",
-                    format!("\u{1b}[{};{}H", y + 1, x + 1),
+                    "\u{1b}[m\u{1b}[{};{}H{} ({} {})",
+                    y + 1,
+                    x + 1,
                     colors.session_name_prompt(short_folder_prompt),
                     change_folder_shortcut,
                     to_set,
                 );
             } else {
                 print!(
-                    "\u{1b}[m{}{} {}",
-                    format!("\u{1b}[{};{}H", y + 1, x + 1),
+                    "\u{1b}[m\u{1b}[{};{}H{} {}",
+                    y + 1,
+                    x + 1,
                     colors.session_name_prompt(short_folder_prompt),
                     change_folder_shortcut,
                 );
@@ -760,8 +767,9 @@ pub fn render_new_session_block(
             > prompt.width() + long_instruction.width() + new_session_name.width() + 15
         {
             println!(
-                "\u{1b}[m{}{} {}_ ({} {})",
-                format!("\u{1b}[{};{}H", y + 1, x + 1),
+                "\u{1b}[m\u{1b}[{};{}H{} {}_ ({} {})",
+                y + 1,
+                x + 1,
                 colors.session_name_prompt(prompt),
                 colors.session_and_folder_entry(new_session_name),
                 enter,
@@ -786,8 +794,9 @@ pub fn render_new_session_block(
                 new_session_name.to_owned()
             };
             println!(
-                "\u{1b}[m{}{} {}_ {}",
-                format!("\u{1b}[{};{}H", y + 1, x + 1),
+                "\u{1b}[m\u{1b}[{};{}H{} {}_ {}",
+                y + 1,
+                x + 1,
                 colors.session_name_prompt(prompt),
                 colors.session_and_folder_entry(&new_session_name),
                 enter,
@@ -806,16 +815,18 @@ pub fn render_new_session_block(
             > prompt.width() + long_instruction.width() + new_session_name.width() + 15
         {
             println!(
-                "\u{1b}[m{}{}: {} ({} to correct)",
-                format!("\u{1b}[{};{}H", y + 1, x + 1),
+                "\u{1b}[m\u{1b}[{};{}H{}: {} ({} to correct)",
+                y + 1,
+                x + 1,
                 colors.session_name_prompt(prompt),
                 colors.session_and_folder_entry(new_session_name),
                 esc,
             );
         } else {
             println!(
-                "\u{1b}[m{}{}: {} {}",
-                format!("\u{1b}[{};{}H", y + 1, x + 1),
+                "\u{1b}[m\u{1b}[{};{}H{}: {} {}",
+                y + 1,
+                x + 1,
                 colors.session_name_prompt("New session name"),
                 colors.session_and_folder_entry(new_session_name),
                 esc,

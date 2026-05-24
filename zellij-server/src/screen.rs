@@ -317,6 +317,32 @@ pub struct TabOverrideResult {
     pub plugin_ids: HashMap<RunPluginOrAlias, Vec<u32>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ReconfigureParams {
+    pub client_id: ClientId,
+    pub keybinds: Keybinds,
+    pub default_mode: InputMode,
+    pub theme: Styling,
+    pub host_theme_dark: Option<Styling>,
+    pub host_theme_light: Option<Styling>,
+    pub simplified_ui: bool,
+    pub default_shell: Option<PathBuf>,
+    pub pane_frames: bool,
+    pub copy_command: Option<String>,
+    pub copy_to_clipboard: Option<Clipboard>,
+    pub copy_on_select: bool,
+    pub auto_layout: bool,
+    pub rounded_corners: bool,
+    pub hide_session_name: bool,
+    pub stacked_resize: bool,
+    pub default_editor: Option<PathBuf>,
+    pub advanced_mouse_actions: bool,
+    pub mouse_hover_effects: bool,
+    pub visual_bell: bool,
+    pub focus_follows_mouse: bool,
+    pub mouse_click_through: bool,
+}
+
 /// Instructions that can be sent to the [`Screen`].
 #[derive(Debug, Clone)]
 pub enum ScreenInstruction {
@@ -720,34 +746,7 @@ pub enum ScreenInstruction {
         client_id: ClientId,
         response_channel: crossbeam::channel::Sender<Option<TabInfo>>,
     },
-    Reconfigure {
-        client_id: ClientId,
-        keybinds: Keybinds,
-        default_mode: InputMode,
-        theme: Styling,
-        /// Resolved styling for `theme_dark`. When both this and
-        /// `host_theme_light` are `Some`, Screen auto-switches the active
-        /// palette in response to host CSI 2031 / DSR 997 notifications.
-        host_theme_dark: Option<Styling>,
-        /// Resolved styling for `theme_light`. See `host_theme_dark`.
-        host_theme_light: Option<Styling>,
-        simplified_ui: bool,
-        default_shell: Option<PathBuf>,
-        pane_frames: bool,
-        copy_command: Option<String>,
-        copy_to_clipboard: Option<Clipboard>,
-        copy_on_select: bool,
-        auto_layout: bool,
-        rounded_corners: bool,
-        hide_session_name: bool,
-        stacked_resize: bool,
-        default_editor: Option<PathBuf>,
-        advanced_mouse_actions: bool,
-        mouse_hover_effects: bool,
-        visual_bell: bool,
-        focus_follows_mouse: bool,
-        mouse_click_through: bool,
-    },
+    Reconfigure(Box<ReconfigureParams>),
     RerunCommandPane(u32, Option<NotificationEnd>), // u32 - terminal pane id
     ResizePaneWithId(ResizeStrategy, PaneId),
     EditScrollbackForPaneWithId(PaneId, Option<NotificationEnd>),
@@ -1084,7 +1083,7 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::ListPanes { .. } => ScreenContext::ListPanes,
             ScreenInstruction::ListTabs { .. } => ScreenContext::ListTabs,
             ScreenInstruction::GetCurrentTabInfo { .. } => ScreenContext::GetCurrentTabInfo,
-            ScreenInstruction::Reconfigure { .. } => ScreenContext::Reconfigure,
+            ScreenInstruction::Reconfigure(..) => ScreenContext::Reconfigure,
             ScreenInstruction::RerunCommandPane { .. } => ScreenContext::RerunCommandPane,
             ScreenInstruction::ResizePaneWithId(..) => ScreenContext::ResizePaneWithId,
             ScreenInstruction::EditScrollbackForPaneWithId(..) => {
@@ -2991,7 +2990,7 @@ impl Screen {
         client_id_and_is_web_client: (ClientId, bool),
         blocking_terminal: Option<(u32, NotificationEnd)>,
     ) -> Result<()> {
-        if self.tabs.get(&tab_id).is_none() {
+        if !self.tabs.contains_key(&tab_id) {
             // TODO: we should prevent this situation with a UI - eg. cannot close tabs with a
             // pending state
             log::error!("Tab with index {tab_id} not found. Cannot apply layout!");
@@ -7211,15 +7210,14 @@ pub(crate) fn screen_thread_main(
                 _completion_tx, // the action ends here, dropping this will release anything
                                 // waiting for it
             ) => {
-                let client_id_to_switch = if client_id.is_none() {
-                    None
-                } else if screen
-                    .active_tab_ids
-                    .contains_key(&client_id.expect("This is checked above"))
-                {
-                    client_id
+                let client_id_to_switch = if let Some(cid) = client_id {
+                    if screen.active_tab_ids.contains_key(&cid) {
+                        Some(cid)
+                    } else {
+                        screen.active_tab_ids.keys().next().copied()
+                    }
                 } else {
-                    screen.active_tab_ids.keys().next().copied()
+                    None
                 };
                 match client_id_to_switch {
                     // we must make sure pending_tab_ids is empty because otherwise we cannot be
@@ -7249,15 +7247,14 @@ pub(crate) fn screen_thread_main(
                     screen.default_layout.swap_tiled_layouts.clone(),
                     screen.default_layout.swap_floating_layouts.clone(),
                 );
-                let client_id = if client_id.is_none() {
-                    None
-                } else if screen
-                    .active_tab_ids
-                    .contains_key(&client_id.expect("This is checked above"))
-                {
-                    client_id
+                let client_id = if let Some(cid) = client_id {
+                    if screen.active_tab_ids.contains_key(&cid) {
+                        Some(cid)
+                    } else {
+                        screen.active_tab_ids.keys().next().copied()
+                    }
                 } else {
-                    screen.active_tab_ids.keys().next().copied()
+                    None
                 };
                 if let Some(client_id) = client_id {
                     let is_web_client = screen
@@ -7725,10 +7722,9 @@ pub(crate) fn screen_thread_main(
                             }
 
                             for idx in floating_indices {
-                                tab_layout_info
-                                    .floating_layouts
-                                    .get_mut(idx)
-                                    .map(|f| f.already_running = true);
+                                if let Some(f) = tab_layout_info.floating_layouts.get_mut(idx) {
+                                    f.already_running = true;
+                                }
                             }
 
                             processed_tab_layouts.push(tab_layout_info);
@@ -8813,30 +8809,31 @@ pub(crate) fn screen_thread_main(
                     }
                 }
             },
-            ScreenInstruction::Reconfigure {
-                client_id,
-                keybinds,
-                default_mode,
-                theme,
-                host_theme_dark,
-                host_theme_light,
-                simplified_ui,
-                default_shell,
-                pane_frames,
-                copy_to_clipboard,
-                copy_command,
-                copy_on_select,
-                auto_layout,
-                rounded_corners,
-                hide_session_name,
-                stacked_resize,
-                default_editor,
-                advanced_mouse_actions,
-                mouse_hover_effects,
-                visual_bell,
-                focus_follows_mouse,
-                mouse_click_through,
-            } => {
+            ScreenInstruction::Reconfigure(params) => {
+                let ReconfigureParams {
+                    client_id,
+                    keybinds,
+                    default_mode,
+                    theme,
+                    host_theme_dark,
+                    host_theme_light,
+                    simplified_ui,
+                    default_shell,
+                    pane_frames,
+                    copy_to_clipboard,
+                    copy_command,
+                    copy_on_select,
+                    auto_layout,
+                    rounded_corners,
+                    hide_session_name,
+                    stacked_resize,
+                    default_editor,
+                    advanced_mouse_actions,
+                    mouse_hover_effects,
+                    visual_bell,
+                    focus_follows_mouse,
+                    mouse_click_through,
+                } = *params;
                 screen.host_theme_dark_styling = host_theme_dark;
                 screen.host_theme_light_styling = host_theme_light;
                 screen

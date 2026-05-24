@@ -203,11 +203,9 @@ impl RebindLeadersScreen {
     }
     pub fn move_selection_for_default_preset(&mut self, key: &KeyWithModifier) {
         if self.browsing_primary_modifier {
-            if key.bare_key == BareKey::Left && key.has_no_modifiers() {
-                self.browsing_primary_modifier = false;
-                self.browsing_secondary_modifier = true;
-                self.selected_secondary_key_index = self.selected_primary_key_index;
-            } else if key.bare_key == BareKey::Right && key.has_no_modifiers() {
+            if (key.bare_key == BareKey::Left || key.bare_key == BareKey::Right)
+                && key.has_no_modifiers()
+            {
                 self.browsing_primary_modifier = false;
                 self.browsing_secondary_modifier = true;
                 self.selected_secondary_key_index = self.selected_primary_key_index;
@@ -222,11 +220,9 @@ impl RebindLeadersScreen {
                 self.selected_primary_key_index -= 1;
             }
         } else if self.browsing_secondary_modifier {
-            if key.bare_key == BareKey::Left && key.has_no_modifiers() {
-                self.browsing_secondary_modifier = false;
-                self.browsing_primary_modifier = true;
-                self.selected_primary_key_index = self.selected_secondary_key_index;
-            } else if key.bare_key == BareKey::Right && key.has_no_modifiers() {
+            if (key.bare_key == BareKey::Left || key.bare_key == BareKey::Right)
+                && key.has_no_modifiers()
+            {
                 self.browsing_secondary_modifier = false;
                 self.browsing_primary_modifier = true;
                 self.selected_primary_key_index = self.selected_secondary_key_index;

@@ -9,7 +9,7 @@ use prost::Message;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 use wasmi::{Engine, Instance, Linker, Module, Store, StoreLimits};
@@ -418,30 +418,33 @@ impl<'a> PluginLoader<'a> {
         Ok((store, instance))
     }
     pub fn create_wasi_ctx(
-        host_dir: &PathBuf,
-        data_dir: &PathBuf,
-        cache_dir: &PathBuf,
-        tmp_dir: &PathBuf,
-        plugin_url: &String,
+        host_dir: &Path,
+        data_dir: &Path,
+        cache_dir: &Path,
+        tmp_dir: &Path,
+        plugin_url: &str,
         plugin_id: PluginId,
         stdin_pipe: Arc<Mutex<VecDeque<u8>>>,
         stdout_pipe: Arc<Mutex<VecDeque<u8>>>,
     ) -> Result<WasiCtx> {
         let _err_context = || "Failed to create wasi_ctx".to_string();
         let dirs = vec![
-            ("/host".to_owned(), host_dir.clone()),
-            ("/data".to_owned(), data_dir.clone()),
-            ("/cache".to_owned(), cache_dir.clone()),
-            ("/tmp".to_owned(), tmp_dir.clone()),
+            ("/host".to_owned(), host_dir.to_path_buf()),
+            ("/data".to_owned(), data_dir.to_path_buf()),
+            ("/cache".to_owned(), cache_dir.to_path_buf()),
+            ("/tmp".to_owned(), tmp_dir.to_path_buf()),
         ];
-        let dirs = dirs.into_iter().filter(|(_dir_name, dir)| {
-            // note that this does not protect against TOCTOU errors
-            // eg. if one or more of these folders existed at the time of check but was deleted
-            // before we mounted in in the wasi environment, we'll crash
-            // when we move to a new wasi environment, we should address this with locking if
-            // there's no built-in solution
-            dir.try_exists().ok().unwrap_or(false)
-        });
+        let dirs: Vec<(String, PathBuf)> = dirs
+            .into_iter()
+            .filter(|(_dir_name, dir)| {
+                // note that this does not protect against TOCTOU errors
+                // eg. if one or more of these folders existed at the time of check but was deleted
+                // before we mounted in in the wasi environment, we'll crash
+                // when we move to a new wasi environment, we should address this with locking if
+                // there's no built-in solution
+                dir.try_exists().ok().unwrap_or(false)
+            })
+            .collect();
 
         let mut builder = WasiCtxBuilder::new();
         builder.inherit_env()?;

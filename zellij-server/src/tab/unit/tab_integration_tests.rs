@@ -73,7 +73,7 @@ impl ServerOsApi for FakeInputOutput {
             .lock()
             .unwrap()
             .entry(id)
-            .or_insert_with(std::vec::Vec::new)
+            .or_default()
             .extend_from_slice(buf);
         Ok(buf.len())
     }
@@ -378,17 +378,19 @@ fn create_new_tab_without_pane_frames(size: Size, default_mode: ModeInfo) -> Tab
     tab
 }
 
+type BaseLayoutAndIds = (
+    TiledPaneLayout,
+    Vec<FloatingPaneLayout>,
+    Vec<(u32, Option<RunCommand>)>,
+    Vec<(u32, Option<RunCommand>)>,
+    HashMap<RunPluginOrAlias, Vec<u32>>,
+);
+
 fn create_new_tab_with_swap_layouts(
     size: Size,
     default_mode: ModeInfo,
     swap_layouts: (Vec<SwapTiledLayout>, Vec<SwapFloatingLayout>),
-    base_layout_and_ids: Option<(
-        TiledPaneLayout,
-        Vec<FloatingPaneLayout>,
-        Vec<(u32, Option<RunCommand>)>,
-        Vec<(u32, Option<RunCommand>)>,
-        HashMap<RunPluginOrAlias, Vec<u32>>,
-    )>,
+    base_layout_and_ids: Option<BaseLayoutAndIds>,
     draw_pane_frames: bool,
     stacked_resize: bool,
 ) -> Tab {
@@ -492,16 +494,12 @@ fn create_new_tab_with_swap_layouts(
     tab
 }
 
-fn create_new_tab_with_os_api(
-    size: Size,
-    default_mode: ModeInfo,
-    os_api: &Box<FakeInputOutput>,
-) -> Tab {
+fn create_new_tab_with_os_api(size: Size, default_mode: ModeInfo, os_api: &FakeInputOutput) -> Tab {
     set_session_name("test".into());
     let index = 0;
     let position = 0;
     let name = String::new();
-    let os_api = os_api.clone();
+    let os_api = Box::new(os_api.clone());
     let senders = ThreadSenders::default().silently_fail_on_send();
     let max_panes = None;
     let mode_info = default_mode;
@@ -4683,7 +4681,7 @@ fn move_pane_focus_sends_tty_csi_event() {
         tty_stdin_bytes: tty_stdin_bytes.clone(),
         ..Default::default()
     });
-    let mut tab = create_new_tab_with_os_api(size, ModeInfo::default(), &os_api);
+    let mut tab = create_new_tab_with_os_api(size, ModeInfo::default(), os_api.as_ref());
     let new_pane_id_1 = PaneId::Terminal(2);
     tab.new_pane(
         new_pane_id_1,
@@ -4724,7 +4722,7 @@ fn move_floating_pane_focus_sends_tty_csi_event() {
         tty_stdin_bytes: tty_stdin_bytes.clone(),
         ..Default::default()
     });
-    let mut tab = create_new_tab_with_os_api(size, ModeInfo::default(), &os_api);
+    let mut tab = create_new_tab_with_os_api(size, ModeInfo::default(), os_api.as_ref());
     let new_pane_id_1 = PaneId::Terminal(2);
     let new_pane_id_2 = PaneId::Terminal(3);
 
@@ -4786,7 +4784,7 @@ fn toggle_floating_panes_on_sends_tty_csi_event() {
         tty_stdin_bytes: tty_stdin_bytes.clone(),
         ..Default::default()
     });
-    let mut tab = create_new_tab_with_os_api(size, ModeInfo::default(), &os_api);
+    let mut tab = create_new_tab_with_os_api(size, ModeInfo::default(), os_api.as_ref());
     let new_pane_id_1 = PaneId::Terminal(2);
     let new_pane_id_2 = PaneId::Terminal(3);
 
@@ -4851,7 +4849,7 @@ fn toggle_floating_panes_off_sends_tty_csi_event() {
         tty_stdin_bytes: tty_stdin_bytes.clone(),
         ..Default::default()
     });
-    let mut tab = create_new_tab_with_os_api(size, ModeInfo::default(), &os_api);
+    let mut tab = create_new_tab_with_os_api(size, ModeInfo::default(), os_api.as_ref());
     let new_pane_id_1 = PaneId::Terminal(2);
     let new_pane_id_2 = PaneId::Terminal(3);
 

@@ -579,16 +579,17 @@ impl MockScreen {
         // Build a layout where each child is a plugin pane
         let fake_plugin_url = "file:/path/to/fake/plugin";
         let run_plugin = RunPluginOrAlias::from_url(fake_plugin_url, &None, None, None).unwrap();
-        let mut tab_layout = TiledPaneLayout::default();
-        tab_layout.children_split_direction = SplitDirection::Vertical;
-        tab_layout.children = plugin_pane_ids
-            .iter()
-            .map(|_| {
-                let mut child = TiledPaneLayout::default();
-                child.run = Some(Run::Plugin(run_plugin.clone()));
-                child
-            })
-            .collect();
+        let tab_layout = TiledPaneLayout {
+            children_split_direction: SplitDirection::Vertical,
+            children: plugin_pane_ids
+                .iter()
+                .map(|_| TiledPaneLayout {
+                    run: Some(Run::Plugin(run_plugin.clone())),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
         let pane_ids = vec![]; // no terminal panes
         let mut plugin_ids = HashMap::new();
         plugin_ids.insert(run_plugin, plugin_pane_ids);
@@ -4080,11 +4081,7 @@ pub fn send_cli_rename_tab() {
         .find(|instruction| match instruction {
             PluginInstruction::Update(updates) => updates
                 .iter()
-                .find(|u| match u {
-                    (_, _, Event::TabUpdate(..)) => true,
-                    _ => false,
-                })
-                .is_some(),
+                .any(|u| matches!(u, (_, _, Event::TabUpdate(..)))),
             _ => false,
         })
         .cloned();
@@ -4137,11 +4134,7 @@ pub fn send_cli_undo_rename_tab() {
         .find(|instruction| match instruction {
             PluginInstruction::Update(updates) => updates
                 .iter()
-                .find(|u| match u {
-                    (_, _, Event::TabUpdate(..)) => true,
-                    _ => false,
-                })
-                .is_some(),
+                .any(|u| matches!(u, (_, _, Event::TabUpdate(..)))),
             _ => false,
         })
         .cloned();
@@ -4274,8 +4267,7 @@ pub fn send_cli_launch_or_focus_plugin_action_when_plugin_is_already_loaded() {
         .lock()
         .unwrap()
         .iter()
-        .find(|instruction| matches!(instruction, PluginInstruction::Load(..)))
-        .is_some();
+        .any(|instruction| matches!(&instruction, PluginInstruction::Load(..)));
     assert!(
         !plugin_load_instruction_sent,
         "Plugin Load instruction should not be sent for an already loaded plugin"
@@ -4359,8 +4351,7 @@ pub fn send_cli_launch_or_focus_plugin_action_when_plugin_is_already_loaded_for_
         .lock()
         .unwrap()
         .iter()
-        .find(|instruction| matches!(instruction, PluginInstruction::Load(..)))
-        .is_some();
+        .any(|instruction| matches!(&instruction, PluginInstruction::Load(..)));
     assert!(
         !plugin_load_instruction_sent,
         "Plugin Load instruction should not be sent for an already loaded plugin"
@@ -5486,12 +5477,12 @@ pub fn send_cli_launch_or_focus_plugin_in_place_with_close_replaced_pane() {
     assert_snapshot!(format!("{:#?}", fill_plugin_cwd_instruction));
 }
 
-fn create_new_screen_with_message_capture(
-    size: Size,
-) -> (
+type ScreenWithMessageCapture = (
     Screen,
     Arc<Mutex<HashMap<ClientId, Vec<ServerToClientMsg>>>>,
-) {
+);
+
+fn create_new_screen_with_message_capture(size: Size) -> ScreenWithMessageCapture {
     let mut bus: Bus<ScreenInstruction> = Bus::empty();
     let fake_os_input = FakeInputOutput::default();
     let messages = fake_os_input.server_to_client_messages.clone();

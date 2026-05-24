@@ -198,21 +198,19 @@ fn host_run_plugin_command(mut caller: Caller<'_, PluginEnv>) {
                         floating_pane_coordinates,
                         context,
                     ) => open_file_floating(env, file_to_open, floating_pane_coordinates, context),
-                    PluginCommand::OpenTerminal(cwd) => open_terminal(env, cwd.path.try_into()?),
+                    PluginCommand::OpenTerminal(cwd) => open_terminal(env, cwd.path),
                     PluginCommand::OpenTerminalNearPlugin(cwd) => {
-                        open_terminal_near_plugin(env, cwd.path.try_into()?)
+                        open_terminal_near_plugin(env, cwd.path)
                     },
                     PluginCommand::OpenTerminalFloating(cwd, floating_pane_coordinates) => {
-                        open_terminal_floating(env, cwd.path.try_into()?, floating_pane_coordinates)
+                        open_terminal_floating(env, cwd.path, floating_pane_coordinates)
                     },
                     PluginCommand::OpenTerminalFloatingNearPlugin(
                         cwd,
                         floating_pane_coordinates,
-                    ) => open_terminal_floating_near_plugin(
-                        env,
-                        cwd.path.try_into()?,
-                        floating_pane_coordinates,
-                    ),
+                    ) => {
+                        open_terminal_floating_near_plugin(env, cwd.path, floating_pane_coordinates)
+                    },
                     PluginCommand::OpenCommandPane(command_to_run, context) => {
                         open_command_pane(env, command_to_run, context)
                     },
@@ -258,9 +256,7 @@ fn host_run_plugin_command(mut caller: Caller<'_, PluginEnv>) {
                     PluginCommand::ShowSelf(should_float_if_hidden) => {
                         show_self(env, should_float_if_hidden)
                     },
-                    PluginCommand::SwitchToMode(input_mode) => {
-                        switch_to_mode(env, input_mode.try_into()?)
-                    },
+                    PluginCommand::SwitchToMode(input_mode) => switch_to_mode(env, input_mode),
                     PluginCommand::NewTabsWithLayout(raw_layout) => {
                         new_tabs_with_layout(env, &raw_layout)?
                     },
@@ -395,14 +391,10 @@ fn host_run_plugin_command(mut caller: Caller<'_, PluginEnv>) {
                         open_file_in_place(env, file_to_open, context)
                     },
                     PluginCommand::OpenTerminalInPlace(cwd) => {
-                        open_terminal_in_place(env, cwd.path.try_into()?)
+                        open_terminal_in_place(env, cwd.path)
                     },
                     PluginCommand::OpenTerminalInPlaceOfPlugin(cwd, close_plugin_after_replace) => {
-                        open_terminal_in_place_of_plugin(
-                            env,
-                            cwd.path.try_into()?,
-                            close_plugin_after_replace,
-                        )
+                        open_terminal_in_place_of_plugin(env, cwd.path, close_plugin_after_replace)
                     },
                     PluginCommand::OpenCommandPaneInPlace(command_to_run, context) => {
                         open_command_pane_in_place(env, command_to_run, context)

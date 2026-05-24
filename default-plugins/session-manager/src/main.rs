@@ -627,7 +627,7 @@ impl State {
                         let was_searching = self.sessions.is_searching;
                         let prev_search_idx = self.sessions.selected_search_index;
                         let prev_top_idx = self.sessions.selected_index.0;
-                        match kill_sessions(&[selected_session_name.clone()]) {
+                        match kill_sessions(std::slice::from_ref(&selected_session_name)) {
                             Ok(()) => {
                                 self.sessions
                                     .session_ui_infos
@@ -884,9 +884,10 @@ impl State {
                 if let Some(target) = selected {
                     let previous_index = self.single_screen_state.selected_index;
                     let outcome: Result<(), String> = match &target {
-                        DeleteTarget::Active(name) => kill_sessions(&[name.clone()]).map(|()| {
-                            self.sessions.session_ui_infos.retain(|s| s.name != *name);
-                        }),
+                        DeleteTarget::Active(name) => kill_sessions(std::slice::from_ref(name))
+                            .map(|()| {
+                                self.sessions.session_ui_infos.retain(|s| s.name != *name);
+                            }),
                         DeleteTarget::Resurrectable(name) => delete_dead_session(name).map(|()| {
                             self.resurrectable_sessions
                                 .all_resurrectable_sessions

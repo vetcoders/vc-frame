@@ -1383,9 +1383,7 @@ impl<'a> TiledPaneGrid<'a> {
             },
         );
         pane_id_to_split.and_then(|t_id_to_split| {
-            let Some(pane_to_split) = panes.get(t_id_to_split) else {
-                return None;
-            };
+            let pane_to_split = panes.get(t_id_to_split)?;
             let direction = if pane_to_split.rows()
                 * cursor_height_width_ratio.unwrap_or(DEFAULT_CURSOR_HEIGHT_WIDTH_RATIO)
                 > pane_to_split.cols()
@@ -1410,9 +1408,7 @@ impl<'a> TiledPaneGrid<'a> {
         // number, but we might want to change this to be a percentage of the current screen if it
         // feels better
         let panes = self.panes.borrow();
-        let Some(pane_to_split) = panes.get(active_pane_id) else {
-            return None;
-        };
+        let pane_to_split = panes.get(active_pane_id)?;
         let direction = if pane_to_split.rows()
             * cursor_height_width_ratio.unwrap_or(DEFAULT_CURSOR_HEIGHT_WIDTH_RATIO)
             > pane_to_split.cols()

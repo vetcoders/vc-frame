@@ -79,7 +79,7 @@ fn get_cwd() {
 #[cfg(not(windows))]
 #[test]
 fn kill_sends_sighup_to_process() {
-    let child = long_running_cmd()
+    let mut child = long_running_cmd()
         .spawn()
         .expect("failed to spawn long-running process");
     let pid = child.id();
@@ -90,12 +90,13 @@ fn kill_sends_sighup_to_process() {
 
     // Give the signal time to be delivered
     std::thread::sleep(std::time::Duration::from_millis(100));
+    let _ = child.wait();
 }
 
 #[cfg(not(windows))]
 #[test]
 fn force_kill_sends_sigkill_to_process() {
-    let child = long_running_cmd()
+    let mut child = long_running_cmd()
         .spawn()
         .expect("failed to spawn long-running process");
     let pid = child.id();
@@ -105,12 +106,13 @@ fn force_kill_sends_sigkill_to_process() {
     server.force_kill(pid).expect("force_kill should succeed");
 
     std::thread::sleep(std::time::Duration::from_millis(100));
+    let _ = child.wait();
 }
 
 #[cfg(not(windows))]
 #[test]
 fn send_sigint_to_process() {
-    let child = stdin_reader_cmd()
+    let mut child = stdin_reader_cmd()
         .spawn()
         .expect("failed to spawn stdin-reader process");
     let pid = child.id();
@@ -120,6 +122,7 @@ fn send_sigint_to_process() {
     server.send_sigint(pid).expect("send_sigint should succeed");
 
     std::thread::sleep(std::time::Duration::from_millis(100));
+    let _ = child.wait();
 }
 
 #[test]

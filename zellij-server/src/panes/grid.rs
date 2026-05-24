@@ -248,10 +248,7 @@ fn transfer_rows_from_lines_above_to_viewport(
         let excess_row = Row::from_rows(next_lines);
         bounded_push(lines_above, sixel_grid, excess_row);
     }
-    match usize::try_from(lines_added_to_viewport) {
-        Ok(n) => n,
-        _ => 0,
-    }
+    usize::try_from(lines_added_to_viewport).unwrap_or(0)
 }
 
 fn transfer_rows_from_viewport_to_lines_above(

@@ -344,7 +344,7 @@ impl<'a> StackedPanes<'a> {
     }
     fn position_of_current_pane(
         &self,
-        all_stacked_pane_positions: &Vec<(PaneId, PaneGeom)>,
+        all_stacked_pane_positions: &[(PaneId, PaneGeom)],
         pane_to_close: &dyn Pane,
     ) -> Result<usize> {
         let err_context = || "Failed to find position of current pane".to_string();
@@ -355,7 +355,7 @@ impl<'a> StackedPanes<'a> {
     }
     fn position_of_flexible_pane(
         &self,
-        all_stacked_pane_positions: &Vec<(PaneId, PaneGeom)>,
+        all_stacked_pane_positions: &[(PaneId, PaneGeom)],
     ) -> Result<usize> {
         let err_context = || "Failed to find position of flexible pane".to_string();
         all_stacked_pane_positions
@@ -852,7 +852,7 @@ impl<'a> StackedPanes<'a> {
     fn reset_stack_size(
         &self,
         new_position_and_size_of_stack: &PaneGeom,
-        all_stacked_pane_positions: &Vec<(PaneId, PaneGeom)>,
+        all_stacked_pane_positions: &[(PaneId, PaneGeom)],
         flexible_pane_id: PaneId,
         pane_ids_that_were_resized: &mut Vec<PaneId>,
     ) {

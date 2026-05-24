@@ -70,7 +70,7 @@ pub fn get_cached_tip_name() -> String {
         let diff = TIPS
             .keys()
             .cloned()
-            .filter(|k| !cached_set.contains(&k.to_string()))
+            .filter(|k| !cached_set.contains(*k))
             .collect::<Vec<&str>>();
 
         if !diff.is_empty() {

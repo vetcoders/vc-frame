@@ -27,12 +27,14 @@ enum WriteBehavior {
     Error,
 }
 
+type WriteLog = Arc<Mutex<Vec<(u32, Vec<u8>)>>>;
+
 #[derive(Clone)]
 struct MockServerOsApi {
     /// Controls how each terminal behaves on write.
     write_behavior: Arc<Mutex<HashMap<u32, WriteBehavior>>>,
     /// Log of (terminal_id, bytes) for each successful write.
-    write_log: Arc<Mutex<Vec<(u32, Vec<u8>)>>>,
+    write_log: WriteLog,
 }
 
 impl MockServerOsApi {

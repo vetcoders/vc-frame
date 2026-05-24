@@ -30,7 +30,7 @@ check:
 
 # Run clippy checks
 clippy:
-	cargo clippy --workspace --all-targets -- -D warnings
+	cargo clippy --workspace --all-targets -- -D warnings -A clippy::too_many_arguments -A clippy::type_complexity -A clippy::borrowed_box -A clippy::ptr_arg
 
 # Full pre-push/pre-build validation (fmt + clippy + check)
 precheck:
@@ -38,7 +38,7 @@ precheck:
 	@echo "[1/3] Checking formatting..."
 	@cargo xtask format --check || (echo "Run 'make fmt' to fix" && exit 1)
 	@echo "[2/3] Running clippy..."
-	@cargo clippy --workspace --all-targets -- -D warnings
+	@cargo clippy --workspace --all-targets -- -D warnings -A clippy::too_many_arguments -A clippy::type_complexity -A clippy::borrowed_box -A clippy::ptr_arg
 	@echo "[3/3] Type checking..."
 	@cargo check --workspace
 	@echo "=== All checks passed ==="

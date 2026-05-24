@@ -67,7 +67,7 @@ pub enum PtyInstruction {
     NewTab(
         Option<PathBuf>,
         Option<TerminalAction>,
-        Option<TiledPaneLayout>,
+        Box<Option<TiledPaneLayout>>,
         Vec<FloatingPaneLayout>,
         usize,                               // tab_index
         HashMap<RunPluginOrAlias, Vec<u32>>, // plugin_ids
@@ -509,7 +509,7 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
                 };
                 pty.spawn_terminals_for_layout(
                     cwd,
-                    tab_layout.unwrap_or_else(|| layout.new_tab().0),
+                    (*tab_layout).unwrap_or_else(|| layout.new_tab().0),
                     floating_panes_layout,
                     terminal_action.clone(),
                     plugin_ids,

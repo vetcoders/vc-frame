@@ -4652,10 +4652,10 @@ fn clear_plugin_highlights_removes_highlights() {
         HighlightLayer::Hint,
     )];
     grid.set_plugin_regex_highlights(1, highlights, &Style::default());
-    assert!(grid.plugin_highlights.get(&1).is_some());
+    assert!(grid.plugin_highlights.contains_key(&1));
 
     grid.clear_plugin_highlights(1);
-    assert!(grid.plugin_highlights.get(&1).is_none());
+    assert!(!grid.plugin_highlights.contains_key(&1));
 }
 
 #[test]
@@ -4680,12 +4680,12 @@ fn multiple_plugins_highlights_independent() {
     grid.set_plugin_regex_highlights(1, h1, &Style::default());
     grid.set_plugin_regex_highlights(2, h2, &Style::default());
 
-    assert!(grid.plugin_highlights.get(&1).is_some());
-    assert!(grid.plugin_highlights.get(&2).is_some());
+    assert!(grid.plugin_highlights.contains_key(&1));
+    assert!(grid.plugin_highlights.contains_key(&2));
 
     grid.clear_plugin_highlights(1);
-    assert!(grid.plugin_highlights.get(&1).is_none());
-    assert!(grid.plugin_highlights.get(&2).is_some());
+    assert!(!grid.plugin_highlights.contains_key(&1));
+    assert!(grid.plugin_highlights.contains_key(&2));
 }
 
 #[test]

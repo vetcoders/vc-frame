@@ -2,7 +2,7 @@ use crate::platform::Platform;
 use crate::shared::{calculate_list_bounds, refresh_directory, render_list_tip};
 use pretty_bytes::converter::convert as pretty_bytes;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use unicode_width::UnicodeWidthStr;
 use zellij_tile::prelude::*;
 
@@ -43,8 +43,8 @@ impl FileListView {
         refresh_directory(&self.path);
     }
 
-    pub fn descend_to_root_path(&mut self, initial_cwd: &PathBuf) {
-        self.path = initial_cwd.clone();
+    pub fn descend_to_root_path(&mut self, initial_cwd: &Path) {
+        self.path = initial_cwd.to_path_buf();
         self.path_is_dir = true;
         self.files.clear();
         self.clear_selected();

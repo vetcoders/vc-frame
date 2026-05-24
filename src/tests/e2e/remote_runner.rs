@@ -104,8 +104,8 @@ fn start_zellij_with_config_dir(channel: &mut ssh2::Channel, config_dir: &str) {
     channel
         .write_all(
             format!(
-                "{} {} --session {} --data-dir {} --config-dir {} options --show-release-notes false --show-startup-tips false\n",
-                SET_ENV_VARIABLES, ZELLIJ_EXECUTABLE_LOCATION, SESSION_NAME, ZELLIJ_DATA_DIR, format!("{}/{}", ZELLIJ_CONFIG_DIRS_PATH, config_dir)
+                "{} {} --session {} --data-dir {} --config-dir {}/{} options --show-release-notes false --show-startup-tips false\n",
+                SET_ENV_VARIABLES, ZELLIJ_EXECUTABLE_LOCATION, SESSION_NAME, ZELLIJ_DATA_DIR, ZELLIJ_CONFIG_DIRS_PATH, config_dir
             )
             .as_bytes(),
         )
@@ -132,12 +132,13 @@ fn start_zellij_mirrored_session_with_layout(channel: &mut ssh2::Channel, layout
     channel
         .write_all(
             format!(
-                "{} {} --session {} --data-dir {} --new-session-with-layout {} options --show-release-notes false --show-startup-tips false --mirror-session true --serialization-interval 1\n",
+                "{} {} --session {} --data-dir {} --new-session-with-layout {}/{} options --show-release-notes false --show-startup-tips false --mirror-session true --serialization-interval 1\n",
                 SET_ENV_VARIABLES,
                 ZELLIJ_EXECUTABLE_LOCATION,
                 SESSION_NAME,
                 ZELLIJ_DATA_DIR,
-                format!("{}/{}", ZELLIJ_FIXTURE_PATH, layout_file_name)
+                ZELLIJ_FIXTURE_PATH,
+                layout_file_name
             )
             .as_bytes(),
         )
@@ -153,12 +154,13 @@ fn start_zellij_mirrored_session_with_layout_and_viewport_serialization(
     channel
         .write_all(
             format!(
-                "{} {} --session {} --data-dir {} --new-session-with-layout {} options --show-release-notes false --show-startup-tips false --mirror-session true --serialize-pane-viewport true --serialization-interval 1\n",
+                "{} {} --session {} --data-dir {} --new-session-with-layout {}/{} options --show-release-notes false --show-startup-tips false --mirror-session true --serialize-pane-viewport true --serialization-interval 1\n",
                 SET_ENV_VARIABLES,
                 ZELLIJ_EXECUTABLE_LOCATION,
                 SESSION_NAME,
                 ZELLIJ_DATA_DIR,
-                format!("{}/{}", ZELLIJ_FIXTURE_PATH, layout_file_name)
+                ZELLIJ_FIXTURE_PATH,
+                layout_file_name
             )
             .as_bytes(),
         )

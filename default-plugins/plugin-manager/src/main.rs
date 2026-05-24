@@ -525,13 +525,13 @@ impl ZellijPlugin for State {
                     .and_then(|n| n.request_ids.iter().position(|p| p == request_id))
                 {
                     Some(request_id_position) => {
-                        self.new_plugin_screen
-                            .as_mut()
-                            .map(|n| n.request_ids.remove(request_id_position));
+                        if let Some(n) = self.new_plugin_screen.as_mut() {
+                            n.request_ids.remove(request_id_position);
+                        }
                         let chosen_plugin_location = std::path::PathBuf::from(payload);
-                        self.new_plugin_screen.as_mut().map(|n| {
-                            n.new_plugin_url = format!("file:{}", chosen_plugin_location.display())
-                        });
+                        if let Some(n) = self.new_plugin_screen.as_mut() {
+                            n.new_plugin_url = format!("file:{}", chosen_plugin_location.display());
+                        }
                     },
                     None => {
                         eprintln!("request id not found");
@@ -1082,7 +1082,7 @@ fn truncate_string_start(string_to_truncate: &str, max_len: usize) -> String {
 fn truncate_search_result(
     plugin_location: &str,
     max_location_len: usize,
-    indices: &Vec<usize>,
+    indices: &[usize],
 ) -> (String, Vec<usize>) {
     let truncated_location = truncate_string_start(plugin_location, max_location_len);
     let truncated_count = plugin_location

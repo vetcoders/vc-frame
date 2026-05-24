@@ -647,30 +647,23 @@ fn shortened_modes_shortcut_list(default_keys: &Vec<KeyShortcut>, help: &ModeInf
 fn common_modifiers_in_all_modes(
     key_shortcuts: &HashMap<InputMode, Vec<KeyShortcut>>,
 ) -> Option<Vec<KeyModifier>> {
-    let Some(mut common_modifiers) = key_shortcuts.iter().next().and_then(|k| {
+    let mut common_modifiers = key_shortcuts.iter().next().and_then(|k| {
         k.1.iter()
             .next()
             .and_then(|k| k.get_key().map(|k| k.key_modifiers.clone()))
-    }) else {
-        return None;
-    };
+    })?;
     for key_shortcuts in key_shortcuts.values() {
         if key_shortcuts.is_empty() {
             return None;
         }
-        let Some(mut common_modifiers_for_mode) = key_shortcuts
+        let mut common_modifiers_for_mode = key_shortcuts
             .iter()
             .next()
             .unwrap()
             .get_key()
-            .map(|k| k.key_modifiers.clone())
-        else {
-            return None;
-        };
+            .map(|k| k.key_modifiers.clone())?;
         for key in key_shortcuts {
-            let Some(key) = key.get_key() else {
-                return None;
-            };
+            let key = key.get_key()?;
             common_modifiers_for_mode = common_modifiers_for_mode
                 .intersection(&key.key_modifiers)
                 .cloned()

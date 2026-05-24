@@ -22,8 +22,8 @@ pub static POSSIBLE_MODIFIERS: [KeyModifier; 4] = [
 
 #[derive(Debug)]
 enum Screen {
-    RebindLeaders(RebindLeadersScreen),
-    Presets(PresetsScreen),
+    RebindLeaders(Box<RebindLeadersScreen>),
+    Presets(Box<PresetsScreen>),
 }
 
 impl Screen {
@@ -34,12 +34,12 @@ impl Screen {
             match self {
                 Screen::RebindLeaders(r) => {
                     let notification = r.drain_notification();
-                    *r = Default::default();
+                    **r = Default::default();
                     r.set_notification(notification);
                 },
                 Screen::Presets(r) => {
                     let notification = r.drain_notification();
-                    *r = Default::default();
+                    **r = Default::default();
                     r.set_notification(notification);
                 },
             }
@@ -55,13 +55,13 @@ impl Screen {
 
 impl Default for Screen {
     fn default() -> Self {
-        Screen::RebindLeaders(Default::default())
+        Screen::RebindLeaders(Box::default())
     }
 }
 
 impl Screen {
     pub fn new_reset_keybindings_screen(selected_index: Option<usize>) -> Self {
-        Screen::Presets(PresetsScreen::new(selected_index))
+        Screen::Presets(Box::new(PresetsScreen::new(selected_index)))
     }
 }
 
@@ -217,9 +217,9 @@ impl State {
                 self.current_screen = Screen::Presets(Default::default());
             },
             Screen::Presets(_) => {
-                self.current_screen = Screen::RebindLeaders(
+                self.current_screen = Screen::RebindLeaders(Box::new(
                     RebindLeadersScreen::default().with_mode_info(self.latest_mode_info.clone()),
-                );
+                ));
             },
         }
         if let Some(mode_info) = &self.latest_mode_info {

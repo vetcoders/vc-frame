@@ -146,8 +146,8 @@ impl ZellijPlugin for App {
                 }
             },
             Event::RunCommandResult(exit_code, _stdout, _stderr, context) => {
-                let is_xdg_open = context.get("xdg_open_cli").is_some();
-                let is_open = context.get("open_cli").is_some();
+                let is_xdg_open = context.contains_key("xdg_open_cli");
+                let is_open = context.contains_key("open_cli");
                 if is_xdg_open {
                     if exit_code == Some(0) {
                         self.update_link_executable("xdg-open".to_owned());

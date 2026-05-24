@@ -563,10 +563,13 @@ impl SessionList {
             .any(|s| s.name == session_name)
     }
     pub fn update_session_name(&mut self, old_name: &str, new_name: &str) {
-        self.session_ui_infos
+        if let Some(s) = self
+            .session_ui_infos
             .iter_mut()
             .find(|s| s.name == old_name)
-            .map(|s| s.name = new_name.to_owned());
+        {
+            s.name = new_name.to_owned();
+        }
     }
     pub fn all_other_sessions(&self) -> Vec<String> {
         self.session_ui_infos

@@ -612,7 +612,7 @@ pub(crate) fn plugin_thread_main(
                 drop(bus.senders.send_to_pty(PtyInstruction::NewTab(
                     cwd,
                     terminal_action,
-                    tab_layout,
+                    Box::new(tab_layout),
                     floating_panes_layout,
                     tab_id,
                     plugin_ids,
@@ -1180,11 +1180,10 @@ pub(crate) fn plugin_thread_main(
                 wasm_bridge.start_fs_watcher_if_not_started();
             },
             PluginInstruction::ChangePluginHostDir(new_host_folder, plugin_id, client_id) => {
-                if let Ok(_) = wasm_bridge.change_plugin_host_dir(
-                    new_host_folder.clone(),
-                    plugin_id,
-                    client_id,
-                ) {
+                if wasm_bridge
+                    .change_plugin_host_dir(new_host_folder.clone(), plugin_id, client_id)
+                    .is_ok()
+                {
                     drop(
                         bus.senders.send_to_pty(PtyInstruction::ReportPluginCwd(
                             plugin_id,

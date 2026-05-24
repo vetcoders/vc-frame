@@ -53,10 +53,7 @@ impl DisplayLayout {
         }
     }
     fn is_error(&self) -> bool {
-        match self {
-            DisplayLayout::Error { .. } => true,
-            _ => false,
-        }
+        matches!(self, DisplayLayout::Error { .. })
     }
     fn is_builtin(&self) -> bool {
         matches!(self, DisplayLayout::Valid(LayoutInfo::BuiltIn(..)))

@@ -403,38 +403,46 @@ impl SessionMetaData {
                 );
             }
             self.senders
-                .send_to_screen(ScreenInstruction::Reconfigure {
-                    client_id,
-                    keybinds: new_config.keybinds.clone(),
-                    default_mode: new_config
-                        .options
-                        .default_mode
-                        .unwrap_or_else(Default::default),
-                    theme: new_config
-                        .theme_config(new_config.options.theme.as_ref())
-                        .unwrap_or_else(|| default_palette().into()),
-                    host_theme_dark,
-                    host_theme_light,
-                    simplified_ui: new_config.options.simplified_ui.unwrap_or(false),
-                    default_shell: new_config.options.default_shell,
-                    pane_frames: new_config.options.pane_frames.unwrap_or(true),
-                    copy_command: new_config.options.copy_command,
-                    copy_to_clipboard: new_config.options.copy_clipboard,
-                    copy_on_select: new_config.options.copy_on_select.unwrap_or(true),
-                    auto_layout: new_config.options.auto_layout.unwrap_or(true),
-                    rounded_corners: new_config.ui.pane_frames.rounded_corners,
-                    hide_session_name: new_config.ui.pane_frames.hide_session_name,
-                    stacked_resize: new_config.options.stacked_resize.unwrap_or(true),
-                    default_editor: new_config.options.scrollback_editor.clone(),
-                    advanced_mouse_actions: new_config
-                        .options
-                        .advanced_mouse_actions
-                        .unwrap_or(true),
-                    mouse_hover_effects: new_config.options.mouse_hover_effects.unwrap_or(true),
-                    visual_bell: new_config.options.visual_bell.unwrap_or(true),
-                    focus_follows_mouse: new_config.options.focus_follows_mouse.unwrap_or(false),
-                    mouse_click_through: new_config.options.mouse_click_through.unwrap_or(false),
-                })
+                .send_to_screen(ScreenInstruction::Reconfigure(Box::new(
+                    screen::ReconfigureParams {
+                        client_id,
+                        keybinds: new_config.keybinds.clone(),
+                        default_mode: new_config
+                            .options
+                            .default_mode
+                            .unwrap_or_else(Default::default),
+                        theme: new_config
+                            .theme_config(new_config.options.theme.as_ref())
+                            .unwrap_or_else(|| default_palette().into()),
+                        host_theme_dark,
+                        host_theme_light,
+                        simplified_ui: new_config.options.simplified_ui.unwrap_or(false),
+                        default_shell: new_config.options.default_shell,
+                        pane_frames: new_config.options.pane_frames.unwrap_or(true),
+                        copy_command: new_config.options.copy_command,
+                        copy_to_clipboard: new_config.options.copy_clipboard,
+                        copy_on_select: new_config.options.copy_on_select.unwrap_or(true),
+                        auto_layout: new_config.options.auto_layout.unwrap_or(true),
+                        rounded_corners: new_config.ui.pane_frames.rounded_corners,
+                        hide_session_name: new_config.ui.pane_frames.hide_session_name,
+                        stacked_resize: new_config.options.stacked_resize.unwrap_or(true),
+                        default_editor: new_config.options.scrollback_editor.clone(),
+                        advanced_mouse_actions: new_config
+                            .options
+                            .advanced_mouse_actions
+                            .unwrap_or(true),
+                        mouse_hover_effects: new_config.options.mouse_hover_effects.unwrap_or(true),
+                        visual_bell: new_config.options.visual_bell.unwrap_or(true),
+                        focus_follows_mouse: new_config
+                            .options
+                            .focus_follows_mouse
+                            .unwrap_or(false),
+                        mouse_click_through: new_config
+                            .options
+                            .mouse_click_through
+                            .unwrap_or(false),
+                    },
+                )))
                 .unwrap();
             self.senders
                 .send_to_plugin(PluginInstruction::Reconfigure {

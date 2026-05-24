@@ -935,10 +935,7 @@ impl Page {
             current_y += 2;
         }
         for rendered_component in &mut self.components_to_render {
-            let is_help = match rendered_component {
-                RenderedComponent::HelpText(_) => true,
-                _ => false,
-            };
+            let is_help = matches!(rendered_component, RenderedComponent::HelpText(_));
             if is_help {
                 if let Some(error) = error {
                     render_error(error, rows);
@@ -1201,8 +1198,7 @@ impl RenderedComponent {
                 bulletin_list.render(x, y, rows, columns);
             },
             RenderedComponent::Paragraph(paragraph) => {
-                let mut paragraph_rendered_rows = 0;
-                for component_line in paragraph {
+                for (paragraph_rendered_rows, component_line) in paragraph.iter_mut().enumerate() {
                     component_line.render(
                         x,
                         y + paragraph_rendered_rows,
@@ -1210,7 +1206,6 @@ impl RenderedComponent {
                         columns,
                     );
                     rendered_rows += 1;
-                    paragraph_rendered_rows += 1;
                 }
             },
         }

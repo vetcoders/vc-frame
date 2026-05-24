@@ -1237,7 +1237,7 @@ impl FloatingPanes {
             .map(|(id, _)| *id)
     }
     pub fn focus_pane_if_exists(&mut self, pane_id: PaneId, client_id: ClientId) -> Result<()> {
-        if self.panes.get(&pane_id).is_some() {
+        if self.panes.contains_key(&pane_id) {
             self.focus_pane(pane_id, client_id);
             Ok(())
         } else {

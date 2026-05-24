@@ -252,7 +252,7 @@ impl PinnedExecutor {
 
         // Send work
         let job = Job::Work(Box::new(f));
-        if let Err(_) = thread.sender.send(job) {
+        if thread.sender.send(job).is_err() {
             // Thread died unexpectedly - this is a critical error
             thread.jobs_in_flight.fetch_sub(1, Ordering::SeqCst);
             log::error!("Plugin executor thread {} has died", thread_idx);
@@ -453,20 +453,22 @@ mod tests {
         ))
     }
 
+    type SignalingJob = Box<
+        dyn FnOnce(
+                ThreadSenders,
+                Arc<Mutex<PluginMap>>,
+                Arc<Mutex<Vec<ClientId>>>,
+                PluginCache,
+                Engine,
+            ) + Send
+            + 'static,
+    >;
+
     // Helper to create a job that signals completion via channel
-    fn make_signaling_job(
-        tx: Sender<()>,
-    ) -> impl FnOnce(
-        ThreadSenders,
-        Arc<Mutex<PluginMap>>,
-        Arc<Mutex<Vec<ClientId>>>,
-        PluginCache,
-        Engine,
-    ) + Send
-           + 'static {
-        move |_senders, _plugin_map, _clients, _cache, _engine| {
+    fn make_signaling_job(tx: Sender<()>) -> SignalingJob {
+        Box::new(move |_senders, _plugin_map, _clients, _cache, _engine| {
             tx.send(()).unwrap();
-        }
+        })
     }
 
     // Helper to verify thread assignment by capturing thread name in job

@@ -595,15 +595,17 @@ fn create_plugin_thread_with_pty_receiver(
     (to_plugin, pty_receiver, screen_receiver, Box::new(teardown))
 }
 
-fn create_plugin_thread_with_background_jobs_receiver(
-    zellij_cwd: Option<PathBuf>,
-    session_env_vars: Option<std::collections::BTreeMap<String, String>>,
-) -> (
+type PluginThreadBackgroundReceivers = (
     SenderWithContext<PluginInstruction>,
     Receiver<(BackgroundJob, ErrorContext)>,
     Receiver<(ScreenInstruction, ErrorContext)>,
     Box<dyn FnOnce()>,
-) {
+);
+
+fn create_plugin_thread_with_background_jobs_receiver(
+    zellij_cwd: Option<PathBuf>,
+    session_env_vars: Option<std::collections::BTreeMap<String, String>>,
+) -> PluginThreadBackgroundReceivers {
     let zellij_cwd = zellij_cwd.unwrap_or_else(|| PathBuf::from("."));
     let session_env_vars = session_env_vars.unwrap_or_else(|| std::env::vars().collect());
     let (to_server, _server_receiver): ChannelWithContext<ServerInstruction> =
@@ -1111,6 +1113,7 @@ pub fn can_subscribe_to_hd_events() {
     std::fs::OpenOptions::new()
         .create(true)
         .write(true)
+        .truncate(true)
         .open(PathBuf::from(temp_folder.path()).join("test1"))
         .unwrap();
     screen_thread.join().unwrap(); // this might take a while if the cache is cold
@@ -8954,13 +8957,7 @@ pub fn reload_plugin_plugin_command() {
         .lock()
         .unwrap()
         .iter()
-        .filter(|i| {
-            if let ScreenInstruction::RequestStateUpdateForPlugins = i {
-                true
-            } else {
-                false
-            }
-        })
+        .filter(|i| matches!(i, ScreenInstruction::RequestStateUpdateForPlugins))
         .count();
     assert_eq!(request_state_update_requests, 2);
 }
@@ -9030,13 +9027,7 @@ pub fn load_new_plugin_plugin_command() {
         .lock()
         .unwrap()
         .iter()
-        .filter(|i| {
-            if let ScreenInstruction::RequestStateUpdateForPlugins = i {
-                true
-            } else {
-                false
-            }
-        })
+        .filter(|i| matches!(i, ScreenInstruction::RequestStateUpdateForPlugins))
         .count();
     assert_eq!(request_state_update_requests, 2);
 }
