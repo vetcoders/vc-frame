@@ -139,16 +139,10 @@ pub enum Command {
     Subscribe(SubscribeCli),
 }
 
-#[derive(Debug, Parser, Clone, Serialize, Deserialize)]
+#[derive(Debug, Args, Clone, Serialize, Deserialize)]
 pub struct SubscribeCli {
     /// Pane ID(s) to subscribe to (e.g. terminal_1, plugin_2, or bare number like 1)
-    #[clap(
-        short,
-        long,
-        required = true,
-        multiple_values = true,
-        multiple_occurrences = true
-    )]
+    #[clap(short, long, required = true)]
     pub pane_id: Vec<String>,
 
     /// Include scrollback lines in initial delivery.

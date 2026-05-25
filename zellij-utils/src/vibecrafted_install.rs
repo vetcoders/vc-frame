@@ -191,7 +191,7 @@ fn validate_root(path: PathBuf) -> Result<PathBuf, InstallError> {
 }
 
 fn canonicalize_or(path: PathBuf) -> PathBuf {
-    path.canonicalize().unwrap_or(path)
+    dunce::canonicalize(&path).unwrap_or(path)
 }
 
 fn looks_like_framework_root(path: &Path) -> bool {
@@ -208,7 +208,7 @@ fn which_vibecrafted_walk_up() -> Option<PathBuf> {
     if bin_path.as_os_str().is_empty() {
         return None;
     }
-    let resolved = bin_path.canonicalize().ok()?;
+    let resolved = dunce::canonicalize(&bin_path).ok()?;
     let mut cursor = resolved.parent();
     while let Some(dir) = cursor {
         if looks_like_framework_root(dir) {
@@ -303,7 +303,7 @@ pub fn install(
         .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
 
-    let canonical_layouts_dir = layouts_dir.canonicalize().unwrap_or(layouts_dir.clone());
+    let canonical_layouts_dir = dunce::canonicalize(&layouts_dir).unwrap_or(layouts_dir.clone());
 
     clean_stale_symlinks(&target_dir, &canonical_layouts_dir, &mut summary)?;
 
@@ -327,7 +327,7 @@ pub fn install(
             if link.is_symlink() {
                 let current = fs::read_link(&link).ok();
                 if let Some(t) = current {
-                    let inside = match t.canonicalize() {
+                    let inside = match dunce::canonicalize(&t) {
                         Ok(c) => c.starts_with(&canonical_layouts_dir),
                         Err(_) => t.starts_with(&canonical_layouts_dir) || !t.exists(),
                     };
@@ -363,7 +363,9 @@ fn link_or_relink(
     match metadata {
         Some(meta) if meta.file_type().is_symlink() => {
             let current = fs::read_link(link).unwrap_or_default();
-            if current == source {
+            let current_canon = dunce::canonicalize(&current).unwrap_or_else(|_| current.clone());
+            let source_canon = dunce::canonicalize(source).unwrap_or_else(|_| source.to_path_buf());
+            if current_canon == source_canon {
                 if !is_alias {
                     summary.already_correct.push(display_name.to_string());
                 }
@@ -429,13 +431,13 @@ fn clean_stale_symlinks(
         //   - it is broken AND its raw target path string contains the segment
         //     `/config/zellij/layouts/` (heuristic: it was once one of ours,
         //     pointing at a stale repo location).
-        let resolves_inside = absolute
-            .canonicalize()
+        let resolves_inside = dunce::canonicalize(&absolute)
             .map(|c| c.starts_with(canonical_layouts_dir))
             .unwrap_or(false);
 
         let broken = !absolute.exists();
-        let path_looks_vibecrafted = target.to_string_lossy().contains("/config/zellij/layouts/");
+        let target_str = target.to_string_lossy().replace('\\', "/");
+        let path_looks_vibecrafted = target_str.contains("/config/zellij/layouts/");
 
         let belongs_to_us = resolves_inside || (broken && path_looks_vibecrafted);
         if !belongs_to_us {
@@ -580,8 +582,12 @@ mod tests {
         .unwrap();
 
         let resolved = fs::read_link(target_dir.path().join("dashboard.kdl")).unwrap();
-        let root_b_canon = root_b.path().canonicalize().unwrap();
-        assert!(resolved.starts_with(&root_b_canon), "{resolved:?}");
+        let resolved_canon = dunce::canonicalize(&resolved).unwrap_or(resolved);
+        let root_b_canon = dunce::canonicalize(root_b.path()).unwrap();
+        assert!(
+            resolved_canon.starts_with(&root_b_canon),
+            "{resolved_canon:?}"
+        );
         assert_eq!(s2.updated.len(), 2);
         assert!(s2.created.is_empty());
     }
@@ -832,8 +838,9 @@ vibecraft.kdl=operator.kdl
         let vc_old = target_dir.path().join("vc-dashboard.kdl");
         assert!(vc_old.is_symlink());
         let resolved = fs::read_link(&vc_old).unwrap();
-        let canonical_layouts_dir = layouts_dir.canonicalize().unwrap();
-        assert_eq!(resolved, canonical_layouts_dir.join("dashboard.kdl"));
+        let resolved_canon = dunce::canonicalize(&resolved).unwrap_or(resolved);
+        let canonical_layouts_dir = dunce::canonicalize(&layouts_dir).unwrap();
+        assert_eq!(resolved_canon, canonical_layouts_dir.join("dashboard.kdl"));
         assert!(s2
             .aliases_installed
             .iter()

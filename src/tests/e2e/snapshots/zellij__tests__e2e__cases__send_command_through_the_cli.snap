@@ -2,7 +2,7 @@
 source: src/tests/e2e/cases.rs
 expression: last_snapshot
 ---
- Zellij (e2e-test)  Tab #1                                                                                                    Alt <[]>  VERTICAL 
+ 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. (e2e-test)  Tab #1                                                                                                    Alt <[]>  VERTICAL 
 ┌ Pane #1 ────────────────────────────────────────────────────────────────┐┌ /usr/src/zellij/fixtures/append-echo-script.sh ─────────────────────────┐
 │$ /usr/src/zellij/zellij run -s -- "/usr/src/zellij/fixtures/append-echo-││foo                                                                      │
 │script.sh"                                                               ││foo                                                                      │
