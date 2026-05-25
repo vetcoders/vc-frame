@@ -2901,7 +2901,12 @@ pub fn clear_pane_highlights(pane_id: PaneId) {
     unsafe { host_run_plugin_command() };
 }
 
+#[cfg(target_family = "wasm")]
 #[link(wasm_import_module = "zellij")]
 extern "C" {
     fn host_run_plugin_command();
 }
+
+#[cfg(not(target_family = "wasm"))]
+#[no_mangle]
+unsafe extern "C" fn host_run_plugin_command() {}

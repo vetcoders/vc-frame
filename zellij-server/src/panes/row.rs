@@ -70,8 +70,8 @@ impl Row {
         self
     }
     pub fn width_cached(&mut self) -> usize {
-        if self.width.is_some() {
-            self.width.unwrap()
+        if let Some(width) = self.width {
+            width
         } else {
             let mut width = 0;
             for terminal_character in &self.columns {

@@ -3707,8 +3707,8 @@ impl Perform for Grid {
                 // Reset color indexes given as parameters.
                 for param in &params[1..] {
                     if let Some(index) = parse_number(param) {
-                        if self.changed_colors.is_some() {
-                            self.changed_colors.as_mut().unwrap()[index as usize] = None
+                        if let Some(changed_colors) = self.changed_colors.as_mut() {
+                            changed_colors[index as usize] = None;
                         }
                     }
                 }

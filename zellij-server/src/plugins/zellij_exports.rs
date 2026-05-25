@@ -3397,11 +3397,9 @@ fn delete_all_dead_sessions_and_reply(env: &PluginEnv) {
 }
 
 fn watch_filesystem(env: &PluginEnv) {
-    let _ = env
-        .senders
-        .to_plugin
-        .as_ref()
-        .map(|sender| sender.send(PluginInstruction::WatchFilesystem));
+    if let Some(sender) = env.senders.to_plugin.as_ref() {
+        let _ = sender.send(PluginInstruction::WatchFilesystem);
+    }
 }
 
 // note this removes the requesting plugin
@@ -3756,31 +3754,31 @@ fn get_tab_info(env: &PluginEnv, tab_id: usize) {
 }
 
 fn list_clients(env: &PluginEnv) {
-    let _ = env.senders.to_screen.as_ref().map(|sender| {
-        sender.send(ScreenInstruction::ListClientsToPlugin(
+    if let Some(sender) = env.senders.to_screen.as_ref() {
+        let _ = sender.send(ScreenInstruction::ListClientsToPlugin(
             env.plugin_id,
             env.client_id,
-        ))
-    });
+        ));
+    }
 }
 
 fn change_host_folder(env: &PluginEnv, new_host_folder: PathBuf) {
-    let _ = env.senders.to_plugin.as_ref().map(|sender| {
-        sender.send(PluginInstruction::ChangePluginHostDir(
+    if let Some(sender) = env.senders.to_plugin.as_ref() {
+        let _ = sender.send(PluginInstruction::ChangePluginHostDir(
             new_host_folder,
             env.plugin_id,
             env.client_id,
-        ))
-    });
+        ));
+    }
 }
 
 fn set_floating_pane_pinned(env: &PluginEnv, pane_id: PaneId, should_be_pinned: bool) {
-    let _ = env.senders.to_screen.as_ref().map(|sender| {
-        sender.send(ScreenInstruction::SetFloatingPanePinned(
+    if let Some(sender) = env.senders.to_screen.as_ref() {
+        let _ = sender.send(ScreenInstruction::SetFloatingPanePinned(
             pane_id,
             should_be_pinned,
-        ))
-    });
+        ));
+    }
 }
 
 fn stack_panes(env: &PluginEnv, pane_ids: Vec<PaneId>) {
