@@ -192,7 +192,11 @@ impl App {
                     .unwrap_or_else(|| "VibeCrafted Shell Guide".to_owned());
                 rename_plugin_pane(own_plugin_id, &pane_title);
             } else {
-                rename_plugin_pane(own_plugin_id, "About VibeCrafted Shell");
+                let pane_title = self
+                    .pane_title
+                    .clone()
+                    .unwrap_or_else(|| "About VibeCrafted Shell".to_owned());
+                rename_plugin_pane(own_plugin_id, &pane_title);
             }
         }
     }
