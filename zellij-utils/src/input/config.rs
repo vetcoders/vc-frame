@@ -650,7 +650,10 @@ mod config_test {
             }
         }
 
-        assert!(found, "Expected to find 'smoke-layout' in watcher output within 15 s");
+        assert!(
+            found,
+            "Expected to find 'smoke-layout' in watcher output within 15 s"
+        );
         watcher.abort();
     }
 
