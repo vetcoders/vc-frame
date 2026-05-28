@@ -9,7 +9,7 @@
 #   make help         — show all targets
 #
 # Requirements:
-#   - rustup-managed toolchain (NOT homebrew cargo)
+#   - rustup-managed toolchain (recommended over distro/homebrew)
 #   - wasm32-wasip1 target installed
 #   - protobuf compiler (protoc)
 
@@ -17,15 +17,36 @@
         test-client test-no-web check clippy precheck fmt clean doctor help
 
 # ──────────────────────────────────────────────────────────
-# Ensure rustup cargo AND rustc are used, not homebrew.
-# On macOS, /opt/homebrew/bin/{cargo,rustc} ignore
-# rust-toolchain.toml and lack wasm32-wasip1 sysroot.
-# We prepend ~/.cargo/bin to PATH so that ALL sub-processes
-# (including rustc invoked by cargo internally) use rustup.
+# Toolchain resolution.
+#
+# Priority order:
+#   1. ~/.cargo/bin/{cargo,rustc}  (rustup proxy — reads rust-toolchain.toml)
+#   2. Whatever is on PATH         (distro/homebrew/nix/CI)
+#
+# On macOS with Homebrew Rust installed alongside rustup,
+# /opt/homebrew/bin/{cargo,rustc} ignores rust-toolchain.toml
+# and lacks the wasm32-wasip1 sysroot. Prepending ~/.cargo/bin
+# to PATH fixes both cargo AND the rustc it spawns internally.
+#
+# On Linux without homebrew, ~/.cargo/bin is typically already
+# first in PATH (rustup installer sets it up). If rustup is
+# not installed at all, we fall back to whatever cargo is on PATH.
+#
+# On Windows: use `cargo xtask` directly, not make.
 # ──────────────────────────────────────────────────────────
-CARGO_HOME  := $(HOME)/.cargo
-export PATH := $(CARGO_HOME)/bin:$(PATH)
-CARGO       := $(CARGO_HOME)/bin/cargo
+CARGO_BIN_DIR := $(HOME)/.cargo/bin
+
+# Prepend rustup bin dir to PATH if cargo there is actually executable.
+# We use `test -x` instead of Make's `wildcard` because wildcard
+# sees broken symlinks (cargo -> rustup when rustup is uninstalled)
+# as existing files.
+RUSTUP_CARGO_OK := $(shell test -x $(CARGO_BIN_DIR)/cargo && echo yes)
+ifeq ($(RUSTUP_CARGO_OK),yes)
+  export PATH := $(CARGO_BIN_DIR):$(PATH)
+  CARGO := $(CARGO_BIN_DIR)/cargo
+else
+  CARGO := $(shell command -v cargo 2>/dev/null || echo cargo)
+endif
 
 # Stack size for tests that build deep plugin trees
 export RUST_MIN_STACK := 8388608
@@ -158,14 +179,18 @@ clean:
 ## Environment doctor — loud version, shows what's configured
 doctor:
 	@echo "── vc-frame doctor ──"
-	@echo "cargo:    $$($(CARGO) --version)"
-	@echo "rustc:    $$(rustc --version)"
+	@echo "cargo:    $$($(CARGO) --version) ($$(command -v $(CARGO)))"
+	@echo "rustc:    $$(rustc --version) ($$(command -v rustc))"
 	@echo "toolchain: $$(rustup show active-toolchain 2>/dev/null || echo 'rustup not available')"
 	@echo ""
 	@echo "WASM target:"
-	@rustup target list --installed 2>/dev/null | grep -q wasm32-wasip1 \
-		&& echo "  ✓ wasm32-wasip1 installed" \
-		|| { echo "  ✗ wasm32-wasip1 MISSING — run: rustup target add wasm32-wasip1"; exit 1; }
+	@if command -v rustup >/dev/null 2>&1; then \
+		rustup target list --installed 2>/dev/null | grep -q wasm32-wasip1 \
+			&& echo "  ✓ wasm32-wasip1 installed" \
+			|| echo "  ✗ wasm32-wasip1 MISSING — run: rustup target add wasm32-wasip1"; \
+	else \
+		echo "  ? rustup not found — cannot verify wasm target"; \
+	fi
 	@echo ""
 	@command -v protoc >/dev/null 2>&1 \
 		&& echo "protoc:   $$(protoc --version)" \
@@ -175,8 +200,12 @@ doctor:
 
 ## Silent doctor — prerequisite for build targets, fails fast on missing deps
 doctor-quiet:
-	@rustup target list --installed 2>/dev/null | grep -q wasm32-wasip1 \
-		|| { echo "ERROR: wasm32-wasip1 target missing. Run: rustup target add wasm32-wasip1"; exit 1; }
+	@command -v $(CARGO) >/dev/null 2>&1 \
+		|| { echo "ERROR: cargo not found at '$(CARGO)'. Install rustup: https://rustup.rs"; exit 1; }
+	@if command -v rustup >/dev/null 2>&1; then \
+		rustup target list --installed 2>/dev/null | grep -q wasm32-wasip1 \
+			|| { echo "ERROR: wasm32-wasip1 target missing. Run: rustup target add wasm32-wasip1"; exit 1; }; \
+	fi
 
 # ──────────────────────────────────────────────────────────
 # Help
