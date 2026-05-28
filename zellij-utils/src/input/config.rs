@@ -625,18 +625,32 @@ mod config_test {
             },
         ));
 
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Give the watcher time to complete its initial scan before we
+        // create the file.  FSEvents on macOS can take up to ~1 s to
+        // register a new watcher, so 500 ms is sometimes not enough.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
         std::fs::write(layout_dir.join("smoke-layout.kdl"), "layout { pane; }").unwrap();
 
-        let (layouts, _layout_errors) = tokio::time::timeout(Duration::from_secs(10), rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
+        // The watcher may fire multiple callbacks (initial scan, then the
+        // real change).  Drain messages until we see the expected layout
+        // or until we time out.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        let mut found = false;
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout_at(deadline, rx.recv()).await {
+                Ok(Some((layouts, _layout_errors))) => {
+                    if layouts.iter().any(|layout| {
+                        matches!(layout, LayoutInfo::File(layout_name, _) if layout_name == "smoke-layout")
+                    }) {
+                        found = true;
+                        break;
+                    }
+                },
+                _ => break,
+            }
+        }
 
-        assert!(layouts.iter().any(|layout| {
-            matches!(layout, LayoutInfo::File(layout_name, _) if layout_name == "smoke-layout")
-        }));
-
+        assert!(found, "Expected to find 'smoke-layout' in watcher output within 15 s");
         watcher.abort();
     }
 
