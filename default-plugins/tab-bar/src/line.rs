@@ -177,7 +177,11 @@ fn right_more_message(
 }
 
 fn tab_line_prefix(session_name: Option<&str>, palette: Styling, cols: usize) -> Vec<LinePart> {
-    let prefix_text = " 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. ".to_string();
+    // Rebranded user-facing top bar for Vibecrafted frame runtime (vc-runtime).
+    // Leads with 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. brand + (session) + mode + sep + Operator persona.
+    // This replaces prior "Zellij (vc-runtime) ..." leading chrome in the tab line UI.
+    let name = session_name.unwrap_or("vc-runtime");
+    let prefix_text = format!("𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. ({}) NORMAL  Operator ", name);
 
     let running_text_len = prefix_text.width();
     let text_color = palette.text_unselected.base;
@@ -188,19 +192,9 @@ fn tab_line_prefix(session_name: Option<&str>, palette: Styling, cols: usize) ->
         len: running_text_len,
         tab_index: None,
     }];
-    if let Some(name) = session_name {
-        let name_part = format!("({}) ", name);
-        let name_part_len = name_part.width();
-        let text_color = palette.text_unselected.base;
-        let name_part_styled_text = style!(text_color, bg_color).bold().paint(name_part);
-        if cols.saturating_sub(running_text_len) >= name_part_len {
-            parts.push(LinePart {
-                part: name_part_styled_text.to_string(),
-                len: name_part_len,
-                tab_index: None,
-            })
-        }
-    }
+    // Note: session name + persona now embedded in the single branded prefix for clean leading UI.
+    // Tabs follow after this leader. Mode is representative (NORMAL default for frame); full dynamic
+    // mode sync can be added in follow-up if status-bar and tab-bar need tighter coupling.
     parts
 }
 
