@@ -61,8 +61,6 @@ jobs:
     - name: Restart ssh container
       # we need to do this because otherwise the volume will not be mounted
       # on the docker container, since it was created before the folder existed
-      uses: docker://docker
-      with:
-        args: docker restart ssh
+      run: docker restart ssh
     - name: Test
       run: cargo xtask ci e2e --test
