@@ -23,50 +23,75 @@ pub struct PaneContentsAndUi<'a> {
 }
 
 impl<'a> PaneContentsAndUi<'a> {
-    pub fn new(
-        pane: &'a mut Box<dyn Pane>,
-        output: &'a mut Output,
-        style: Style,
-        active_panes: &HashMap<ClientId, PaneId>,
-        multiple_users_exist_in_session: bool,
-        z_index: Option<usize>,
-        pane_is_stacked_under: bool,
-        pane_is_stacked_over: bool,
-        should_draw_pane_frames: bool,
-        mouse_hover_pane_id: &HashMap<ClientId, PaneId>,
-        current_pane_group: HashMap<ClientId, Vec<PaneId>>,
-        show_help_text: bool,
-    ) -> Self {
+    pub fn new(pane: &'a mut Box<dyn Pane>, output: &'a mut Output, style: Style) -> Self {
+        PaneContentsAndUi {
+            pane,
+            output,
+            style,
+            focused_clients: vec![],
+            multiple_users_exist_in_session: false,
+            z_index: None,
+            pane_is_stacked_under: false,
+            pane_is_stacked_over: false,
+            should_draw_pane_frames: false,
+            mouse_is_hovering_over_pane_for_clients: HashSet::new(),
+            current_pane_group: HashMap::new(),
+            show_help_text: false,
+        }
+    }
+    pub fn with_active_panes(mut self, active_panes: &HashMap<ClientId, PaneId>) -> Self {
         let mut focused_clients: Vec<ClientId> = active_panes
             .iter()
-            .filter(|(_c_id, p_id)| **p_id == pane.pid())
+            .filter(|(_c_id, p_id)| **p_id == self.pane.pid())
             .map(|(c_id, _p_id)| *c_id)
             .collect();
         focused_clients.sort_unstable();
-        let mouse_is_hovering_over_pane_for_clients = mouse_hover_pane_id
+        self.focused_clients = focused_clients;
+        self
+    }
+    pub fn with_multiple_users_exist_in_session(mut self, val: bool) -> Self {
+        self.multiple_users_exist_in_session = val;
+        self
+    }
+    pub fn with_z_index(mut self, val: Option<usize>) -> Self {
+        self.z_index = val;
+        self
+    }
+    pub fn with_pane_is_stacked_under(mut self, val: bool) -> Self {
+        self.pane_is_stacked_under = val;
+        self
+    }
+    pub fn with_pane_is_stacked_over(mut self, val: bool) -> Self {
+        self.pane_is_stacked_over = val;
+        self
+    }
+    pub fn with_should_draw_pane_frames(mut self, val: bool) -> Self {
+        self.should_draw_pane_frames = val;
+        self
+    }
+    pub fn with_mouse_hover_pane_id(
+        mut self,
+        mouse_hover_pane_id: &HashMap<ClientId, PaneId>,
+    ) -> Self {
+        self.mouse_is_hovering_over_pane_for_clients = mouse_hover_pane_id
             .iter()
             .filter_map(|(client_id, pane_id)| {
-                if pane_id == &pane.pid() {
+                if pane_id == &self.pane.pid() {
                     Some(*client_id)
                 } else {
                     None
                 }
             })
             .collect();
-        PaneContentsAndUi {
-            pane,
-            output,
-            style,
-            focused_clients,
-            multiple_users_exist_in_session,
-            z_index,
-            pane_is_stacked_under,
-            pane_is_stacked_over,
-            should_draw_pane_frames,
-            mouse_is_hovering_over_pane_for_clients,
-            current_pane_group,
-            show_help_text,
-        }
+        self
+    }
+    pub fn with_current_pane_group(mut self, val: HashMap<ClientId, Vec<PaneId>>) -> Self {
+        self.current_pane_group = val;
+        self
+    }
+    pub fn with_show_help_text(mut self, val: bool) -> Self {
+        self.show_help_text = val;
+        self
     }
     pub fn render_pane_contents_to_multiple_clients(
         &mut self,

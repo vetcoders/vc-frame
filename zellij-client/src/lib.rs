@@ -1,4 +1,5 @@
 pub mod os_input_output;
+mod os_input_output_common;
 
 #[cfg(not(windows))]
 #[path = "os_input_output_unix.rs"]
@@ -43,7 +44,9 @@ use crate::web_client::control_message::{
     WebServerToWebClientControlMessage,
 };
 
+#[cfg(feature = "web_server_capability")]
 static ASYNC_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+#[cfg(feature = "web_server_capability")]
 use std::sync::OnceLock;
 
 const ENTER_ALTERNATE_SCREEN: &str = "\u{1b}[?1049h";
@@ -70,6 +73,7 @@ const QUERY_HOST_THEME: &str = "\u{1b}[?996n";
 ///
 /// The number of workers can be configured to any nonzero value. Passing zero or `None` will spawn
 /// one worker per physical CPU on the current machine.
+#[cfg(feature = "web_server_capability")]
 pub(crate) fn async_runtime(maybe_number_of_workers: Option<usize>) -> tokio::runtime::Handle {
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => handle.clone(),
@@ -365,7 +369,7 @@ pub fn spawn_server(socket_path: &Path, debug: bool) -> io::Result<()> {
             Some(c) => format!("{}: {}", msg, c),
             None => msg.to_string(),
         };
-        Err(io::Error::new(io::ErrorKind::Other, err_msg))
+        Err(io::Error::other(err_msg))
     }
 }
 
@@ -409,9 +413,8 @@ impl ClientInfo {
         }
     }
     pub fn set_layout_info(&mut self, new_layout_info: LayoutInfo) {
-        match self {
-            ClientInfo::New(_, layout_info, _) => *layout_info = Some(new_layout_info),
-            _ => {},
+        if let ClientInfo::New(_, layout_info, _) = self {
+            *layout_info = Some(new_layout_info)
         }
     }
     pub fn set_cwd(&mut self, new_cwd: PathBuf) {
@@ -449,14 +452,14 @@ pub async fn run_remote_client_terminal_loop(
     use crate::os_input_output::{AsyncSignals, AsyncStdin};
 
     let synchronised_output = match os_input.env_variable("TERM").as_deref() {
-        Some("alacritty") => Some(SyncOutput::DCS),
+        Some("alacritty") => Some(SyncOutput::Dcs),
         _ => None,
     };
 
     let mut async_stdin: Box<dyn AsyncStdin> = os_input.get_async_stdin_reader();
     let mut async_signals: Box<dyn AsyncSignals> = os_input
         .get_async_signal_listener()
-        .map_err(|e| RemoteClientError::IoError(e))?;
+        .map_err(RemoteClientError::IoError)?;
 
     let create_resize_message = |size: Size| {
         Message::Text(
@@ -717,17 +720,27 @@ pub fn start_remote_client(
     Ok(reconnect_to_session)
 }
 
+pub struct StartClientOptions {
+    pub tab_position_to_focus: Option<usize>,
+    pub pane_id_to_focus: Option<(u32, bool)>, // (pane_id, is_plugin)
+    pub is_a_reconnect: bool,
+    pub start_detached_and_exit: bool,
+}
+
 pub fn start_client(
     mut os_input: Box<dyn ClientOsApi>,
     cli_args: CliArgs,
     config: Config,          // saved to disk (or default?)
     config_options: Options, // CLI options merged into (getting priority over) saved config options
     info: ClientInfo,
-    tab_position_to_focus: Option<usize>,
-    pane_id_to_focus: Option<(u32, bool)>, // (pane_id, is_plugin)
-    is_a_reconnect: bool,
-    start_detached_and_exit: bool,
+    options: StartClientOptions,
 ) -> Option<ConnectToSession> {
+    let StartClientOptions {
+        tab_position_to_focus,
+        pane_id_to_focus,
+        is_a_reconnect,
+        start_detached_and_exit,
+    } = options;
     if start_detached_and_exit {
         start_server_detached(os_input, cli_args, config, config_options, info);
         return None;
@@ -738,7 +751,7 @@ pub fn start_client(
         .support_kitty_keyboard_protocol
         .map(|e| !e)
         .unwrap_or(false);
-    let should_start_web_server = config_options.web_server.map(|w| w).unwrap_or(false);
+    let should_start_web_server = config_options.web_server.unwrap_or(false);
     let mut reconnect_to_session = None;
     os_input.unset_raw_mode().unwrap();
 
@@ -773,7 +786,7 @@ pub fn start_client(
     let web_server_ip = config_options
         .web_server_ip
         .unwrap_or_else(|| IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
-    let web_server_port = config_options.web_server_port.unwrap_or_else(|| 8082);
+    let web_server_port = config_options.web_server_port.unwrap_or(8082);
     let has_certificate =
         config_options.web_server_cert.is_some() && config_options.web_server_key.is_some();
     let enforce_https_for_localhost = config_options.enforce_https_for_localhost.unwrap_or(false);
@@ -875,7 +888,7 @@ pub fn start_client(
             os_input.update_session_name(name);
             let ipc_pipe = create_ipc_pipe();
 
-            spawn_server(&*ipc_pipe, cli_args.debug).unwrap();
+            spawn_server(&ipc_pipe, cli_args.debug).unwrap();
             if should_start_web_server {
                 if let Err(e) = spawn_web_server(&cli_args) {
                     log::error!("Failed to start web server: {}", e);
@@ -929,7 +942,7 @@ pub fn start_client(
             os_input.update_session_name(name);
             let ipc_pipe = create_ipc_pipe();
 
-            spawn_server(&*ipc_pipe, cli_args.debug).unwrap();
+            spawn_server(&ipc_pipe, cli_args.debug).unwrap();
             if should_start_web_server {
                 if let Err(e) = spawn_web_server(&cli_args) {
                     log::error!("Failed to start web server: {}", e);
@@ -948,7 +961,7 @@ pub fn start_client(
         },
     };
 
-    os_input.connect_to_server(&*ipc_pipe);
+    os_input.connect_to_server(&ipc_pipe);
     os_input.send_to_server(first_msg);
 
     let mut command_is_executing = CommandIsExecuting::new();
@@ -1127,7 +1140,7 @@ pub fn start_client(
 
     let mut exit_msg = String::new();
     let mut synchronised_output = match os_input.env_variable("TERM").as_deref() {
-        Some("alacritty") => Some(SyncOutput::DCS),
+        Some("alacritty") => Some(SyncOutput::Dcs),
         _ => None,
     };
 
@@ -1203,13 +1216,13 @@ pub fn start_client(
                 );
                 match spawn_web_server(&cli_args) {
                     Ok(_) => {
-                        let _ = os_input.send_to_server(ClientToServerMsg::WebServerStarted {
+                        os_input.send_to_server(ClientToServerMsg::WebServerStarted {
                             base_url: web_server_base_url,
                         });
                     },
                     Err(e) => {
                         log::error!("Failed to start web_server: {}", e);
-                        let _ = os_input
+                        os_input
                             .send_to_server(ClientToServerMsg::FailedToStartWebServer { error: e });
                     },
                 }
@@ -1291,7 +1304,7 @@ pub fn start_server_detached(
     envs::set_zellij("0".to_string());
     config.env.set_vars();
 
-    let should_start_web_server = config_options.web_server.map(|w| w).unwrap_or(false);
+    let should_start_web_server = config_options.web_server.unwrap_or(false);
 
     let create_ipc_pipe = || -> std::path::PathBuf {
         let mut sock_dir = ZELLIJ_SOCK_DIR.clone();
@@ -1327,7 +1340,7 @@ pub fn start_server_detached(
             os_input.update_session_name(name);
             let ipc_pipe = create_ipc_pipe();
 
-            spawn_server(&*ipc_pipe, cli_args.debug).unwrap();
+            spawn_server(&ipc_pipe, cli_args.debug).unwrap();
             if should_start_web_server {
                 if let Err(e) = spawn_web_server(&cli_args) {
                     log::error!("Failed to start web server: {}", e);
@@ -1382,7 +1395,7 @@ pub fn start_server_detached(
             os_input.update_session_name(name);
             let ipc_pipe = create_ipc_pipe();
 
-            spawn_server(&*ipc_pipe, cli_args.debug).unwrap();
+            spawn_server(&ipc_pipe, cli_args.debug).unwrap();
             if should_start_web_server {
                 if let Err(e) = spawn_web_server(&cli_args) {
                     log::error!("Failed to start web server: {}", e);
@@ -1404,7 +1417,7 @@ pub fn start_server_detached(
         },
     };
 
-    os_input.connect_to_server(&*ipc_pipe);
+    os_input.connect_to_server(&ipc_pipe);
     os_input.send_to_server(first_msg);
 }
 

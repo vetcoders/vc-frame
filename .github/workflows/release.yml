@@ -7,7 +7,7 @@ on:
 
 jobs:
   create-release:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ops-linux]
     outputs:
       upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
@@ -25,7 +25,7 @@ jobs:
   build-release-normal:
     needs: create-release
     name: build-release-normal
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     env:
       RUST_BACKTRACE: 1
     strategy:
@@ -40,22 +40,22 @@ jobs:
           - windows x64
         include:
           - build: linux musl x64
-            os: ubuntu-latest
+            runner: [self-hosted, ops-linux]
             target: x86_64-unknown-linux-musl
           - build: linux musl aarch64
-            os: ubuntu-latest
+            runner: [self-hosted, ops-linux]
             target: aarch64-unknown-linux-musl
 #          - build: linux musl riscv64
-#            os: ubuntu-latest
+#            runner: [self-hosted, ops-linux]
 #            target: riscv64gc-unknown-linux-musl
           - build: macos x64
-            os: macos-latest
+            runner: [self-hosted, dragon-macos]
             target: x86_64-apple-darwin
           - build: macos aarch64
-            os: macos-latest
+            runner: [self-hosted, dragon-macos]
             target: aarch64-apple-darwin
           - build: windows x64
-            os: windows-latest
+            runner: [self-hosted, windows]
             target: x86_64-pc-windows-msvc
     steps:
       - name: Set release tag (Unix)
@@ -78,15 +78,20 @@ jobs:
           }
 
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
 
       - name: Install Protoc
-        uses: arduino/setup-protoc@v2
+        uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install musl-tools
-        if: matrix.os == 'ubuntu-latest'
+        if: contains(matrix.runner, 'ops-linux')
         run: sudo apt-get install -y --no-install-recommends musl-tools
 
       - name: Install Rust
@@ -221,7 +226,7 @@ jobs:
   build-release-noweb:
     needs: create-release
     name: build-release-noweb
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     env:
       RUST_BACKTRACE: 1
     strategy:
@@ -236,22 +241,22 @@ jobs:
           - windows x64
         include:
           - build: linux musl x64
-            os: ubuntu-latest
+            runner: [self-hosted, ops-linux]
             target: x86_64-unknown-linux-musl
           - build: linux musl aarch64
-            os: ubuntu-latest
+            runner: [self-hosted, ops-linux]
             target: aarch64-unknown-linux-musl
 #          - build: linux musl riscv64
-#            os: ubuntu-latest
+#            runner: [self-hosted, ops-linux]
 #            target: riscv64gc-unknown-linux-musl
           - build: macos x64
-            os: macos-latest
+            runner: [self-hosted, dragon-macos]
             target: x86_64-apple-darwin
           - build: macos aarch64
-            os: macos-latest
+            runner: [self-hosted, dragon-macos]
             target: aarch64-apple-darwin
           - build: windows x64
-            os: windows-latest
+            runner: [self-hosted, windows]
             target: x86_64-pc-windows-msvc
     steps:
       - name: Set release tag (Unix)
@@ -274,15 +279,20 @@ jobs:
           }
 
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
 
       - name: Install Protoc
-        uses: arduino/setup-protoc@v2
+        uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install musl-tools
-        if: matrix.os == 'ubuntu-latest'
+        if: contains(matrix.runner, 'ops-linux')
         run: sudo apt-get install -y --no-install-recommends musl-tools
 
       - name: Install Rust
@@ -413,4 +423,3 @@ jobs:
           asset_path: ${{ steps.make-checksum-msi.outputs.checksum_name }}
           asset_name: zellij-no-web-${{ matrix.target }}-installer.sha256sum
           asset_content_type: text/plain
-

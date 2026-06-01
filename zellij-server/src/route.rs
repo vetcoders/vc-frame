@@ -660,8 +660,11 @@ pub(crate) fn route_action(
 
             let client_tab_index_or_paneid = if let Some(tab_id) = tab_id {
                 ClientTabIndexOrPaneId::TabIndex(tab_id)
-            } else if near_current_pane && pane_id.is_some() {
-                ClientTabIndexOrPaneId::PaneId(pane_id.unwrap())
+            } else if near_current_pane {
+                match pane_id {
+                    Some(pid) => ClientTabIndexOrPaneId::PaneId(pid),
+                    None => ClientTabIndexOrPaneId::ClientId(client_id),
+                }
             } else {
                 ClientTabIndexOrPaneId::ClientId(client_id)
             };
@@ -694,8 +697,11 @@ pub(crate) fn route_action(
             let pty_instr = if should_open_in_place {
                 let client_tab_index_or_paneid = if let Some(tab_id) = tab_id {
                     ClientTabIndexOrPaneId::TabIndex(tab_id)
-                } else if near_current_pane && pane_id.is_some() {
-                    ClientTabIndexOrPaneId::PaneId(pane_id.unwrap())
+                } else if near_current_pane {
+                    match pane_id {
+                        Some(pid) => ClientTabIndexOrPaneId::PaneId(pid),
+                        None => ClientTabIndexOrPaneId::ClientId(client_id),
+                    }
                 } else {
                     ClientTabIndexOrPaneId::ClientId(client_id)
                 };
@@ -758,8 +764,11 @@ pub(crate) fn route_action(
                 .or_else(|| default_shell.clone());
             let client_tab_index_or_paneid = if let Some(tab_id) = tab_id {
                 ClientTabIndexOrPaneId::TabIndex(tab_id)
-            } else if near_current_pane && pane_id.is_some() {
-                ClientTabIndexOrPaneId::PaneId(pane_id.unwrap())
+            } else if near_current_pane {
+                match pane_id {
+                    Some(pid) => ClientTabIndexOrPaneId::PaneId(pid),
+                    None => ClientTabIndexOrPaneId::ClientId(client_id),
+                }
             } else {
                 ClientTabIndexOrPaneId::ClientId(client_id)
             };
@@ -786,14 +795,14 @@ pub(crate) fn route_action(
             let run_cmd = run_command
                 .map(|cmd| TerminalAction::RunCommand(cmd.into()))
                 .or_else(|| default_shell.clone());
-            let pane_id = match pane_id_to_replace {
-                Some(pane_id_to_replace) => pane_id_to_replace.try_into().ok(),
-                None => pane_id,
-            };
+            let pane_id = pane_id_to_replace.map(|p| p.into()).or(pane_id);
             let client_tab_index_or_paneid = if let Some(tab_id) = tab_id {
                 ClientTabIndexOrPaneId::TabIndex(tab_id)
-            } else if near_current_pane && pane_id.is_some() {
-                ClientTabIndexOrPaneId::PaneId(pane_id.unwrap())
+            } else if near_current_pane {
+                match pane_id {
+                    Some(pid) => ClientTabIndexOrPaneId::PaneId(pid),
+                    None => ClientTabIndexOrPaneId::ClientId(client_id),
+                }
             } else {
                 ClientTabIndexOrPaneId::ClientId(client_id)
             };
@@ -825,15 +834,23 @@ pub(crate) fn route_action(
                     },
                     ClientTabIndexOrPaneId::TabIndex(tab_id),
                 )
-            } else if near_current_pane && pane_id.is_some() {
-                let pane_id = pane_id.unwrap();
-                (
-                    NewPanePlacement::Stacked {
-                        pane_id_to_stack_under: Some(pane_id.into()),
-                        borderless: None,
-                    },
-                    ClientTabIndexOrPaneId::PaneId(pane_id),
-                )
+            } else if near_current_pane {
+                match pane_id {
+                    Some(pid) => (
+                        NewPanePlacement::Stacked {
+                            pane_id_to_stack_under: Some(pid.into()),
+                            borderless: None,
+                        },
+                        ClientTabIndexOrPaneId::PaneId(pid),
+                    ),
+                    None => (
+                        NewPanePlacement::Stacked {
+                            pane_id_to_stack_under: None,
+                            borderless: None,
+                        },
+                        ClientTabIndexOrPaneId::ClientId(client_id),
+                    ),
+                }
             } else {
                 (
                     NewPanePlacement::Stacked {
@@ -868,8 +885,11 @@ pub(crate) fn route_action(
                 .or_else(|| default_shell.clone());
             let client_tab_index_or_paneid = if let Some(tab_id) = tab_id {
                 ClientTabIndexOrPaneId::TabIndex(tab_id)
-            } else if near_current_pane && pane_id.is_some() {
-                ClientTabIndexOrPaneId::PaneId(pane_id.unwrap())
+            } else if near_current_pane {
+                match pane_id {
+                    Some(pid) => ClientTabIndexOrPaneId::PaneId(pid),
+                    None => ClientTabIndexOrPaneId::ClientId(client_id),
+                }
             } else {
                 ClientTabIndexOrPaneId::ClientId(client_id)
             };
@@ -927,8 +947,11 @@ pub(crate) fn route_action(
             near_current_pane,
         } => {
             let run_cmd = Some(TerminalAction::RunCommand(command.clone().into()));
-            let client_tab_index_or_paneid = if near_current_pane && pane_id.is_some() {
-                ClientTabIndexOrPaneId::PaneId(pane_id.unwrap())
+            let client_tab_index_or_paneid = if near_current_pane {
+                match pane_id {
+                    Some(pid) => ClientTabIndexOrPaneId::PaneId(pid),
+                    None => ClientTabIndexOrPaneId::ClientId(client_id),
+                }
             } else {
                 ClientTabIndexOrPaneId::ClientId(client_id)
             };
@@ -1157,8 +1180,8 @@ pub(crate) fn route_action(
             if name != current_session_name {
                 let connect_to_session = ConnectToSession {
                     name: Some(name.clone()),
-                    tab_position: tab_position.clone(),
-                    pane_id: pane_id.clone(),
+                    tab_position,
+                    pane_id,
                     layout: layout.clone(),
                     cwd: cwd.clone(),
                 };
@@ -1687,9 +1710,9 @@ pub(crate) fn route_action(
                     )
                 };
 
-                send_output_to_client(cli_client_id, os_input.as_ref(), output_lines);
+                send_output_to_client(cli_client_id, os_input.as_deref(), output_lines);
             } else {
-                send_error_to_client(cli_client_id, os_input.as_ref(), "Timeout listing panes");
+                send_error_to_client(cli_client_id, os_input.as_deref(), "Timeout listing panes");
             }
             drop(NotificationEnd::new(completion_tx));
         },
@@ -1717,9 +1740,9 @@ pub(crate) fn route_action(
                     )
                 };
 
-                send_output_to_client(cli_client_id, os_input.as_ref(), output_lines);
+                send_output_to_client(cli_client_id, os_input.as_deref(), output_lines);
             } else {
-                send_error_to_client(cli_client_id, os_input.as_ref(), "Timeout listing tabs");
+                send_error_to_client(cli_client_id, os_input.as_deref(), "Timeout listing tabs");
             }
             drop(NotificationEnd::new(completion_tx));
         },
@@ -1734,12 +1757,12 @@ pub(crate) fn route_action(
                     } else {
                         format_current_tab_info_plain(&tab_info)
                     };
-                    send_output_to_client(cli_client_id, os_input.as_ref(), output_lines);
+                    send_output_to_client(cli_client_id, os_input.as_deref(), output_lines);
                 },
                 None => {
                     send_error_to_client(
                         cli_client_id,
-                        os_input.as_ref(),
+                        os_input.as_deref(),
                         "No active tab found for current client",
                     );
                 },
@@ -2341,7 +2364,7 @@ pub(crate) fn route_thread_main(
                                     action,
                                     client_id,
                                     Some(cli_client_id),
-                                    maybe_pane_id.map(|p| PaneId::Terminal(p)),
+                                    maybe_pane_id.map(PaneId::Terminal),
                                     senders,
                                     default_shell,
                                     Some(&mut seen_cli_pipes),
@@ -2932,12 +2955,7 @@ fn extract_command(entry: &PaneListEntry) -> String {
 }
 
 fn extract_cwd(entry: &PaneListEntry) -> String {
-    entry
-        .pane_cwd
-        .as_ref()
-        .map(|s| s.as_str())
-        .unwrap_or("-")
-        .to_string()
+    entry.pane_cwd.as_deref().unwrap_or("-").to_string()
 }
 
 fn format_tabs_as_json(tab_infos: &[TabInfo]) -> Vec<String> {
@@ -3075,7 +3093,7 @@ fn format_current_tab_info_plain(tab_info: &TabInfo) -> Vec<String> {
 
 fn send_error_to_client(
     cli_client_id: Option<ClientId>,
-    os_input: Option<&Box<dyn ServerOsApi>>,
+    os_input: Option<&dyn ServerOsApi>,
     error_message: &str,
 ) {
     if let Some(cli_client_id) = cli_client_id {
@@ -3092,7 +3110,7 @@ fn send_error_to_client(
 
 fn send_output_to_client(
     cli_client_id: Option<ClientId>,
-    os_input: Option<&Box<dyn ServerOsApi>>,
+    os_input: Option<&dyn ServerOsApi>,
     output_lines: Vec<String>,
 ) {
     if let Some(cli_client_id) = cli_client_id {

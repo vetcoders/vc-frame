@@ -1,3 +1,4 @@
+mod os_input_output_api;
 #[cfg(not(windows))]
 #[path = "os_input_output_unix.rs"]
 mod os_input_output_unix;
@@ -32,7 +33,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::{
     net::{IpAddr, Ipv4Addr},
     path::PathBuf,
-    sync::{Arc, RwLock},
+    sync::{atomic::AtomicBool, Arc, RwLock},
     thread,
 };
 use zellij_utils::envs;
@@ -117,7 +118,7 @@ pub enum ServerInstruction {
         config: String,
         write_config_to_disk: bool,
     },
-    ConfigWrittenToDisk(Config),
+    ConfigWrittenToDisk(Box<Config>),
     FailedToWriteConfigToDisk(ClientId, Option<PathBuf>), // Pathbuf - file we failed to write
     RebindKeys {
         client_id: ClientId,
@@ -232,14 +233,14 @@ impl SessionConfiguration {
     pub fn get_client_default_input_mode(&self, client_id: &ClientId) -> InputMode {
         self.runtime_config
             .get(client_id)
-            .or_else(|| Some(&self.saved_config))
-            .and_then(|c| c.options.default_mode.clone())
+            .or(Some(&self.saved_config))
+            .and_then(|c| c.options.default_mode)
             .unwrap_or_default()
     }
     pub fn get_client_configuration(&self, client_id: &ClientId) -> Config {
         self.runtime_config
             .get(client_id)
-            .or_else(|| Some(&self.saved_config))
+            .or(Some(&self.saved_config))
             .cloned()
             .unwrap_or_default()
     }
@@ -276,7 +277,7 @@ impl SessionConfiguration {
         let mut full_reconfigured_config = None;
         let mut config_changed = false;
 
-        if self.runtime_config.get(client_id).is_none() {
+        if !self.runtime_config.contains_key(client_id) {
             self.runtime_config
                 .insert(*client_id, self.saved_config.clone());
         }
@@ -402,38 +403,46 @@ impl SessionMetaData {
                 );
             }
             self.senders
-                .send_to_screen(ScreenInstruction::Reconfigure {
-                    client_id,
-                    keybinds: new_config.keybinds.clone(),
-                    default_mode: new_config
-                        .options
-                        .default_mode
-                        .unwrap_or_else(Default::default),
-                    theme: new_config
-                        .theme_config(new_config.options.theme.as_ref())
-                        .unwrap_or_else(|| default_palette().into()),
-                    host_theme_dark,
-                    host_theme_light,
-                    simplified_ui: new_config.options.simplified_ui.unwrap_or(false),
-                    default_shell: new_config.options.default_shell,
-                    pane_frames: new_config.options.pane_frames.unwrap_or(true),
-                    copy_command: new_config.options.copy_command,
-                    copy_to_clipboard: new_config.options.copy_clipboard,
-                    copy_on_select: new_config.options.copy_on_select.unwrap_or(true),
-                    auto_layout: new_config.options.auto_layout.unwrap_or(true),
-                    rounded_corners: new_config.ui.pane_frames.rounded_corners,
-                    hide_session_name: new_config.ui.pane_frames.hide_session_name,
-                    stacked_resize: new_config.options.stacked_resize.unwrap_or(true),
-                    default_editor: new_config.options.scrollback_editor.clone(),
-                    advanced_mouse_actions: new_config
-                        .options
-                        .advanced_mouse_actions
-                        .unwrap_or(true),
-                    mouse_hover_effects: new_config.options.mouse_hover_effects.unwrap_or(true),
-                    visual_bell: new_config.options.visual_bell.unwrap_or(true),
-                    focus_follows_mouse: new_config.options.focus_follows_mouse.unwrap_or(false),
-                    mouse_click_through: new_config.options.mouse_click_through.unwrap_or(false),
-                })
+                .send_to_screen(ScreenInstruction::Reconfigure(Box::new(
+                    screen::ReconfigureParams {
+                        client_id,
+                        keybinds: new_config.keybinds.clone(),
+                        default_mode: new_config
+                            .options
+                            .default_mode
+                            .unwrap_or_else(Default::default),
+                        theme: new_config
+                            .theme_config(new_config.options.theme.as_ref())
+                            .unwrap_or_else(|| default_palette().into()),
+                        host_theme_dark,
+                        host_theme_light,
+                        simplified_ui: new_config.options.simplified_ui.unwrap_or(false),
+                        default_shell: new_config.options.default_shell,
+                        pane_frames: new_config.options.pane_frames.unwrap_or(true),
+                        copy_command: new_config.options.copy_command,
+                        copy_to_clipboard: new_config.options.copy_clipboard,
+                        copy_on_select: new_config.options.copy_on_select.unwrap_or(true),
+                        auto_layout: new_config.options.auto_layout.unwrap_or(true),
+                        rounded_corners: new_config.ui.pane_frames.rounded_corners,
+                        hide_session_name: new_config.ui.pane_frames.hide_session_name,
+                        stacked_resize: new_config.options.stacked_resize.unwrap_or(true),
+                        default_editor: new_config.options.scrollback_editor.clone(),
+                        advanced_mouse_actions: new_config
+                            .options
+                            .advanced_mouse_actions
+                            .unwrap_or(true),
+                        mouse_hover_effects: new_config.options.mouse_hover_effects.unwrap_or(true),
+                        visual_bell: new_config.options.visual_bell.unwrap_or(true),
+                        focus_follows_mouse: new_config
+                            .options
+                            .focus_follows_mouse
+                            .unwrap_or(false),
+                        mouse_click_through: new_config
+                            .options
+                            .mouse_click_through
+                            .unwrap_or(false),
+                    },
+                )))
                 .unwrap();
             self.senders
                 .send_to_plugin(PluginInstruction::Reconfigure {
@@ -629,11 +638,9 @@ impl SessionState {
         stuck
     }
     pub fn set_client_size(&mut self, client_id: ClientId, size: Size) {
-        self.clients
-            .entry(client_id)
-            .or_insert_with(Default::default)
-            .as_mut()
-            .map(|(s, _is_web_client)| *s = size);
+        if let Some((s, _is_web_client)) = self.clients.entry(client_id).or_default().as_mut() {
+            *s = size;
+        }
     }
     pub fn set_client_data(&mut self, client_id: ClientId, size: Size, is_web_client: bool) {
         self.clients.insert(client_id, Some((size, is_web_client)));
@@ -686,7 +693,7 @@ impl SessionState {
         self.watchers.insert(client_id, is_web_client);
     }
     pub fn is_watcher(&self, client_id: &ClientId) -> bool {
-        self.watchers.get(client_id).is_some()
+        self.watchers.contains_key(client_id)
     }
     pub fn remove_watcher(&mut self, client_id: ClientId) {
         self.watchers.remove(&client_id);
@@ -719,78 +726,6 @@ impl SessionState {
             }
         }
         self.clients.keys().copied().next()
-    }
-}
-
-#[cfg(test)]
-mod session_state_tests {
-    use super::*;
-
-    fn with_client(id: ClientId) -> SessionState {
-        let mut s = SessionState::new();
-        s.clients.insert(id, None);
-        s
-    }
-
-    #[test]
-    fn pick_forward_target_prefers_last_active_when_still_connected() {
-        let mut s = SessionState::new();
-        s.clients.insert(1, None);
-        s.clients.insert(2, None);
-        s.set_last_active_client(2);
-        assert_eq!(s.pick_forward_target(), Some(2));
-    }
-
-    #[test]
-    fn pick_forward_target_falls_back_when_last_active_disconnected() {
-        let mut s = SessionState::new();
-        s.clients.insert(1, None);
-        s.clients.insert(2, None);
-        // Client 3 was last active but has since disconnected — not in
-        // `clients` map anymore. Must fall through to any connected
-        // client rather than returning None.
-        s.last_active_client = Some(3);
-        let picked = s
-            .pick_forward_target()
-            .expect("some client still connected");
-        assert!(picked == 1 || picked == 2);
-    }
-
-    #[test]
-    fn pick_forward_target_none_when_no_clients() {
-        let s = SessionState::new();
-        assert_eq!(s.pick_forward_target(), None);
-    }
-
-    #[test]
-    fn remove_client_returns_stuck_forward_tokens() {
-        let mut s = with_client(1);
-        s.mark_forward_in_flight(10, 1);
-        s.mark_forward_in_flight(11, 1);
-        // A forward dispatched to a *different* client — must not be
-        // returned when we remove client 1.
-        s.clients.insert(2, None);
-        s.mark_forward_in_flight(12, 2);
-
-        let mut stuck = s.remove_client(1);
-        stuck.sort_unstable();
-        assert_eq!(stuck, vec![10, 11]);
-        assert_eq!(s.forwards_in_flight.get(&12), Some(&2));
-    }
-
-    #[test]
-    fn remove_client_returns_empty_when_no_forwards_in_flight() {
-        let mut s = with_client(1);
-        assert!(s.remove_client(1).is_empty());
-    }
-
-    #[test]
-    fn clear_forward_in_flight_removes_entry() {
-        let mut s = with_client(1);
-        s.mark_forward_in_flight(42, 1);
-        s.clear_forward_in_flight(42);
-        // After clear, removing the client yields no stuck tokens.
-        assert!(s.remove_client(1).is_empty());
     }
 }
 
@@ -952,17 +887,17 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                 };
 
                 info!("FirstClientConnected: initializing session");
-                let mut session = init_session(
-                    os_input.clone(),
-                    to_server.clone(),
-                    client_attributes.clone(),
-                    Box::new(runtime_config_options.clone()), // TODO: no box
-                    Box::new(layout.clone()),                 // TODO: no box
-                    cli_assets.clone(),
-                    config.clone(),
-                    config.plugins.clone(),
+                let mut session = init_session(SessionInitParams {
+                    os_input: os_input.clone(),
+                    to_server: to_server.clone(),
+                    client_attributes: client_attributes.clone(),
+                    config_options: Box::new(runtime_config_options.clone()), // TODO: no box
+                    layout: Box::new(layout.clone()),                         // TODO: no box
+                    cli_assets: cli_assets.clone(),
+                    config: config.clone(),
+                    plugin_aliases: config.plugins.clone(),
                     client_id,
-                );
+                });
                 info!("FirstClientConnected: session initialized, spawning tabs");
                 let mut runtime_configuration = config.clone();
                 runtime_configuration.options = runtime_config_options.clone();
@@ -992,9 +927,7 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                         ..Default::default()
                     })
                 });
-                let cwd = cli_assets
-                    .cwd
-                    .or_else(|| runtime_config_options.default_cwd);
+                let cwd = cli_assets.cwd.or(runtime_config_options.default_cwd);
 
                 let spawn_tabs = |tab_layout,
                                   floating_panes_layout,
@@ -1541,7 +1474,7 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                         .get_client_configuration(&client_id)
                         .options
                         .layout_dir
-                        .or_else(|| default_layout_dir());
+                        .or_else(default_layout_dir);
                     if let Some(layout_dir) = layout_dir {
                         connect_to_session.apply_layout_dir(&layout_dir);
                     }
@@ -1624,7 +1557,7 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                     .as_mut()
                     .unwrap()
                     .session_configuration
-                    .change_saved_config(new_config);
+                    .change_saved_config(*new_config);
                 let config_was_written_to_disk = true;
                 session_data
                     .write()
@@ -1719,13 +1652,8 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                         .unwrap_or(false);
                     if successfully_changed {
                         // disconnect existing web clients
-                        let web_client_ids: Vec<ClientId> = session_state
-                            .read()
-                            .unwrap()
-                            .web_client_ids()
-                            .iter()
-                            .copied()
-                            .collect();
+                        let web_client_ids: Vec<ClientId> =
+                            session_state.read().unwrap().web_client_ids().to_vec();
                         for client_id in web_client_ids {
                             let _ = os_input.send_to_client(
                                 client_id,
@@ -1739,9 +1667,7 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                             .read()
                             .unwrap()
                             .web_watcher_client_ids()
-                            .iter()
-                            .copied()
-                            .collect();
+                            .to_vec();
                         for client_id in web_watcher_client_ids {
                             let _ = os_input.send_to_client(
                                 client_id,
@@ -1850,17 +1776,30 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
     drop(std::fs::remove_file(&socket_path));
 }
 
-fn init_session(
+struct SessionInitParams {
     os_input: Box<dyn ServerOsApi>,
     to_server: SenderWithContext<ServerInstruction>,
     client_attributes: ClientAttributes,
     config_options: Box<Options>,
     layout: Box<Layout>,
     cli_assets: CliAssets,
-    mut config: Config,
+    config: Config,
     plugin_aliases: PluginAliases,
     client_id: ClientId,
-) -> SessionMetaData {
+}
+
+fn init_session(params: SessionInitParams) -> SessionMetaData {
+    let SessionInitParams {
+        os_input,
+        to_server,
+        client_attributes,
+        config_options,
+        layout,
+        cli_assets,
+        mut config,
+        plugin_aliases,
+        client_id,
+    } = params;
     config.options = config.options.merge(*config_options.clone());
 
     let _ = SCROLL_BUFFER_SIZE.set(
@@ -1897,7 +1836,7 @@ fn init_session(
     let web_server_ip = config_options
         .web_server_ip
         .unwrap_or_else(|| IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
-    let web_server_port = config_options.web_server_port.unwrap_or_else(|| 8082);
+    let web_server_port = config_options.web_server_port.unwrap_or(8082);
     let has_certificate =
         config_options.web_server_cert.is_some() && config_options.web_server_key.is_some();
     let enforce_https_for_localhost = config_options.enforce_https_for_localhost.unwrap_or(false);
@@ -1912,7 +1851,7 @@ fn init_session(
     let path_to_default_shell = config_options
         .default_shell
         .clone()
-        .unwrap_or_else(|| get_default_shell());
+        .unwrap_or_else(get_default_shell);
 
     let default_mode = config_options.default_mode.unwrap_or_default();
     let default_keybinds = config.keybinds.clone();
@@ -1924,12 +1863,14 @@ fn init_session(
             let pty = Pty::new(
                 Bus::new(
                     vec![pty_receiver],
-                    Some(&to_screen_bounded),
-                    None,
-                    Some(&to_plugin),
-                    Some(&to_server),
-                    Some(&to_pty_writer),
-                    Some(&to_background_jobs),
+                    ThreadSenders {
+                        to_screen: Some(to_screen_bounded.clone()),
+                        to_plugin: Some(to_plugin.clone()),
+                        to_server: Some(to_server.clone()),
+                        to_pty_writer: Some(to_pty_writer.clone()),
+                        to_background_jobs: Some(to_background_jobs.clone()),
+                        ..Default::default()
+                    },
                     Some(os_input.clone()),
                 ),
                 cli_assets.is_debug,
@@ -1941,18 +1882,22 @@ fn init_session(
         })
         .unwrap();
 
+    let has_clients_flag = Arc::new(AtomicBool::new(false));
+
     let screen_thread = thread::Builder::new()
         .name("screen".to_string())
         .spawn({
             let screen_bus = Bus::new(
                 vec![screen_receiver, bounded_screen_receiver],
-                Some(&to_screen), // there are certain occasions (eg. caching) where the screen
-                // needs to send messages to itself
-                Some(&to_pty),
-                Some(&to_plugin),
-                Some(&to_server),
-                Some(&to_pty_writer),
-                Some(&to_background_jobs),
+                ThreadSenders {
+                    to_screen: Some(to_screen.clone()),
+                    to_pty: Some(to_pty.clone()),
+                    to_plugin: Some(to_plugin.clone()),
+                    to_server: Some(to_server.clone()),
+                    to_pty_writer: Some(to_pty_writer.clone()),
+                    to_background_jobs: Some(to_background_jobs.clone()),
+                    ..Default::default()
+                },
                 Some(os_input.clone()),
             );
             let max_panes = cli_assets.max_panes;
@@ -1961,6 +1906,7 @@ fn init_session(
             let debug = cli_assets.is_debug;
             let layout = layout.clone();
             let config = config.clone();
+            let has_clients_flag = has_clients_flag.clone();
             move || {
                 screen_thread_main(
                     screen_bus,
@@ -1969,6 +1915,7 @@ fn init_session(
                     config,
                     debug,
                     layout,
+                    has_clients_flag,
                 )
                 .fatal();
             }
@@ -1985,12 +1932,15 @@ fn init_session(
         .spawn({
             let plugin_bus = Bus::new(
                 vec![plugin_receiver],
-                Some(&to_screen_bounded),
-                Some(&to_pty),
-                Some(&to_plugin),
-                Some(&to_server),
-                Some(&to_pty_writer),
-                Some(&to_background_jobs),
+                ThreadSenders {
+                    to_screen: Some(to_screen_bounded.clone()),
+                    to_pty: Some(to_pty.clone()),
+                    to_plugin: Some(to_plugin.clone()),
+                    to_server: Some(to_server.clone()),
+                    to_pty_writer: Some(to_pty_writer.clone()),
+                    to_background_jobs: Some(to_background_jobs.clone()),
+                    ..Default::default()
+                },
                 None,
             );
             let engine = get_engine();
@@ -2000,7 +1950,7 @@ fn init_session(
             let layout_dir = config_options
                 .layout_dir
                 .clone()
-                .or_else(|| default_layout_dir());
+                .or_else(default_layout_dir);
             let background_plugins = config.background_plugins.clone();
             let session_env_vars = session_env_vars.clone();
             move || {
@@ -2032,12 +1982,14 @@ fn init_session(
         .spawn({
             let pty_writer_bus = Bus::new(
                 vec![pty_writer_receiver],
-                Some(&to_screen),
-                Some(&to_pty),
-                Some(&to_plugin),
-                Some(&to_server),
-                None,
-                Some(&to_background_jobs),
+                ThreadSenders {
+                    to_screen: Some(to_screen.clone()),
+                    to_pty: Some(to_pty.clone()),
+                    to_plugin: Some(to_plugin.clone()),
+                    to_server: Some(to_server.clone()),
+                    to_background_jobs: Some(to_background_jobs.clone()),
+                    ..Default::default()
+                },
                 Some(os_input.clone()),
             );
             || pty_writer_main(pty_writer_bus).fatal()
@@ -2049,12 +2001,14 @@ fn init_session(
         .spawn({
             let background_jobs_bus = Bus::new(
                 vec![background_jobs_receiver],
-                Some(&to_screen),
-                Some(&to_pty),
-                Some(&to_plugin),
-                Some(&to_server),
-                Some(&to_pty_writer),
-                None,
+                ThreadSenders {
+                    to_screen: Some(to_screen.clone()),
+                    to_pty: Some(to_pty.clone()),
+                    to_plugin: Some(to_plugin.clone()),
+                    to_server: Some(to_server.clone()),
+                    to_pty_writer: Some(to_pty_writer.clone()),
+                    ..Default::default()
+                },
                 Some(os_input.clone()),
             );
             let web_server_base_url = web_server_base_url(
@@ -2063,12 +2017,14 @@ fn init_session(
                 has_certificate,
                 enforce_https_for_localhost,
             );
+            let has_clients_flag = has_clients_flag.clone();
             move || {
                 background_jobs_main(
                     background_jobs_bus,
                     serialization_interval,
                     disable_session_metadata,
                     web_server_base_url,
+                    has_clients_flag,
                 )
                 .fatal()
             }
@@ -2078,7 +2034,7 @@ fn init_session(
         let layout_dir = config_options
             .layout_dir
             .clone()
-            .or_else(|| default_layout_dir());
+            .or_else(default_layout_dir);
         let default_layout_name = config_options
             .default_layout
             .map(|l| format!("{}", l.display()));
@@ -2170,19 +2126,19 @@ fn should_show_release_notes(
         }
     }
     if ZELLIJ_SEEN_RELEASE_NOTES_CACHE_FILE.exists() {
-        return false;
+        false
     } else {
         if let Some(parent) = ZELLIJ_SEEN_RELEASE_NOTES_CACHE_FILE.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if let Err(e) = std::fs::write(&*ZELLIJ_SEEN_RELEASE_NOTES_CACHE_FILE, &[]) {
+        if let Err(e) = std::fs::write(&*ZELLIJ_SEEN_RELEASE_NOTES_CACHE_FILE, []) {
             log::error!(
                 "Failed to write seen release notes indication to disk: {}",
                 e
             );
             return false;
         }
-        return true;
+        true
     }
 }
 
@@ -2205,7 +2161,8 @@ fn report_changes_in_config_file(
         watch_config_file_changes(config_file_path, move |new_config| {
             let to_server = to_server.clone();
             async move {
-                let _ = to_server.send(ServerInstruction::ConfigWrittenToDisk(new_config));
+                let _ =
+                    to_server.send(ServerInstruction::ConfigWrittenToDisk(Box::new(new_config)));
             }
         })
         .await;
@@ -2278,7 +2235,7 @@ fn update_new_saved_config(
             };
             match Config::write_config_to_disk(
                 new_config.to_string(clear_defaults),
-                &config_file_path,
+                config_file_path,
             ) {
                 Ok(written_config) => {
                     let changes = session_data
@@ -2339,10 +2296,82 @@ fn get_available_layouts(config_options: &Options) -> (Vec<LayoutInfo>, Vec<Layo
     let layout_dir = config_options
         .layout_dir
         .clone()
-        .or_else(|| default_layout_dir());
+        .or_else(default_layout_dir);
     let default_layout_name = config_options
         .default_layout
         .as_ref()
         .map(|l| format!("{}", l.display()));
     Layout::list_available_layouts(layout_dir, &default_layout_name)
+}
+
+#[cfg(test)]
+mod session_state_tests {
+    use super::*;
+
+    fn with_client(id: ClientId) -> SessionState {
+        let mut s = SessionState::new();
+        s.clients.insert(id, None);
+        s
+    }
+
+    #[test]
+    fn pick_forward_target_prefers_last_active_when_still_connected() {
+        let mut s = SessionState::new();
+        s.clients.insert(1, None);
+        s.clients.insert(2, None);
+        s.set_last_active_client(2);
+        assert_eq!(s.pick_forward_target(), Some(2));
+    }
+
+    #[test]
+    fn pick_forward_target_falls_back_when_last_active_disconnected() {
+        let mut s = SessionState::new();
+        s.clients.insert(1, None);
+        s.clients.insert(2, None);
+        // Client 3 was last active but has since disconnected — not in
+        // `clients` map anymore. Must fall through to any connected
+        // client rather than returning None.
+        s.last_active_client = Some(3);
+        let picked = s
+            .pick_forward_target()
+            .expect("some client still connected");
+        assert!(picked == 1 || picked == 2);
+    }
+
+    #[test]
+    fn pick_forward_target_none_when_no_clients() {
+        let s = SessionState::new();
+        assert_eq!(s.pick_forward_target(), None);
+    }
+
+    #[test]
+    fn remove_client_returns_stuck_forward_tokens() {
+        let mut s = with_client(1);
+        s.mark_forward_in_flight(10, 1);
+        s.mark_forward_in_flight(11, 1);
+        // A forward dispatched to a *different* client — must not be
+        // returned when we remove client 1.
+        s.clients.insert(2, None);
+        s.mark_forward_in_flight(12, 2);
+
+        let mut stuck = s.remove_client(1);
+        stuck.sort_unstable();
+        assert_eq!(stuck, vec![10, 11]);
+        assert_eq!(s.forwards_in_flight.get(&12), Some(&2));
+    }
+
+    #[test]
+    fn remove_client_returns_empty_when_no_forwards_in_flight() {
+        let mut s = with_client(1);
+        assert!(s.remove_client(1).is_empty());
+    }
+
+    #[test]
+    fn clear_forward_in_flight_removes_entry() {
+        let mut s = with_client(1);
+        s.mark_forward_in_flight(42, 1);
+        s.clear_forward_in_flight(42);
+        // After clear, removing the client yields no stuck tokens.
+        assert!(s.remove_client(1).is_empty());
+    }
 }

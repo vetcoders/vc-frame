@@ -22,8 +22,8 @@ pub static POSSIBLE_MODIFIERS: [KeyModifier; 4] = [
 
 #[derive(Debug)]
 enum Screen {
-    RebindLeaders(RebindLeadersScreen),
-    Presets(PresetsScreen),
+    RebindLeaders(Box<RebindLeadersScreen>),
+    Presets(Box<PresetsScreen>),
 }
 
 impl Screen {
@@ -34,12 +34,12 @@ impl Screen {
             match self {
                 Screen::RebindLeaders(r) => {
                     let notification = r.drain_notification();
-                    *r = Default::default();
+                    **r = Default::default();
                     r.set_notification(notification);
                 },
                 Screen::Presets(r) => {
                     let notification = r.drain_notification();
-                    *r = Default::default();
+                    **r = Default::default();
                     r.set_notification(notification);
                 },
             }
@@ -55,13 +55,13 @@ impl Screen {
 
 impl Default for Screen {
     fn default() -> Self {
-        Screen::RebindLeaders(Default::default())
+        Screen::RebindLeaders(Box::default())
     }
 }
 
 impl Screen {
     pub fn new_reset_keybindings_screen(selected_index: Option<usize>) -> Self {
-        Screen::Presets(PresetsScreen::new(selected_index))
+        Screen::Presets(Box::new(PresetsScreen::new(selected_index)))
     }
 }
 
@@ -95,6 +95,10 @@ impl ZellijPlugin for State {
             .get("is_setup_wizard")
             .map(|v| v == "true")
             .unwrap_or(false);
+        let pane_title = configuration
+            .get("pane_title")
+            .cloned()
+            .unwrap_or_else(|| "Configuration".to_owned());
         subscribe(&[
             EventType::Key,
             EventType::FailedToWriteConfigToDisk,
@@ -109,7 +113,7 @@ impl ZellijPlugin for State {
             resize_focused_pane(Resize::Increase);
             resize_focused_pane(Resize::Increase);
         } else {
-            rename_plugin_pane(own_plugin_id, "Configuration");
+            rename_plugin_pane(own_plugin_id, pane_title);
         }
     }
     fn update(&mut self, event: Event) -> bool {
@@ -159,7 +163,7 @@ impl ZellijPlugin for State {
                         ));
                     },
                     None => {
-                        self.notification = Some(format!("Failed to write configuration file."));
+                        self.notification = Some("Failed to write configuration file.".to_string());
                     },
                 }
                 should_render = true;
@@ -203,11 +207,7 @@ impl State {
         match &self.current_screen {
             Screen::RebindLeaders(_) => true,
             Screen::Presets(presets_screen) => {
-                if self.is_setup_wizard || presets_screen.rebinding_leaders() {
-                    false
-                } else {
-                    true
-                }
+                !(self.is_setup_wizard || presets_screen.rebinding_leaders())
             },
         }
     }
@@ -217,9 +217,9 @@ impl State {
                 self.current_screen = Screen::Presets(Default::default());
             },
             Screen::Presets(_) => {
-                self.current_screen = Screen::RebindLeaders(
+                self.current_screen = Screen::RebindLeaders(Box::new(
                     RebindLeadersScreen::default().with_mode_info(self.latest_mode_info.clone()),
-                );
+                ));
             },
         }
         if let Some(mode_info) = &self.latest_mode_info {

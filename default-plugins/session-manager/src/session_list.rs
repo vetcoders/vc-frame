@@ -2,9 +2,65 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 
 use crate::ui::{
-    components::{Colors, LineToRender, ListItem},
-    SessionUiInfo,
+    components::{minimize_lines, Colors, LineToRender, ListItem},
+    SelectedIndex, SessionUiInfo,
 };
+
+type FlatSessionAssets = Vec<(ListItem, String, Option<usize>, Option<(u32, bool)>, bool)>;
+
+macro_rules! render_assets {
+    ($assets:expr, $line_count_to_remove:expr, $selected_index:expr, $to_render_until_selected: expr, $to_render_after_selected:expr, $has_deeper_selected_assets:expr, $max_cols:expr, $colors:expr) => {{
+        let (start_index, anchor_asset_index, end_index, line_count_to_remove) =
+            minimize_lines($assets.len(), $line_count_to_remove, $selected_index);
+        let mut truncated_result_count_above = start_index;
+        let mut truncated_result_count_below = $assets.len().saturating_sub(end_index);
+        let mut current_index = 1;
+        if let Some(assets_to_render_before_selected) = $assets.get(start_index..anchor_asset_index)
+        {
+            for asset in assets_to_render_before_selected {
+                let mut asset: LineToRender =
+                    asset.as_line_to_render(current_index, $max_cols, $colors);
+                asset.add_truncated_results(truncated_result_count_above);
+                truncated_result_count_above = 0;
+                current_index += 1;
+                $to_render_until_selected.push(asset);
+            }
+        }
+        if let Some(selected_asset) = $assets.get(anchor_asset_index) {
+            if $selected_index.is_some() && !$has_deeper_selected_assets {
+                let mut selected_asset: LineToRender =
+                    selected_asset.as_line_to_render(current_index, $max_cols, $colors);
+                selected_asset.make_selected(true);
+                selected_asset.add_truncated_results(truncated_result_count_above);
+                if anchor_asset_index + 1 >= end_index {
+                    selected_asset.add_truncated_results(truncated_result_count_below);
+                }
+                current_index += 1;
+                $to_render_until_selected.push(selected_asset);
+            } else {
+                $to_render_until_selected.push(selected_asset.as_line_to_render(
+                    current_index,
+                    $max_cols,
+                    $colors,
+                ));
+                current_index += 1;
+            }
+        }
+        if let Some(assets_to_render_after_selected) =
+            $assets.get(anchor_asset_index + 1..end_index)
+        {
+            for asset in assets_to_render_after_selected.iter().rev() {
+                let mut asset: LineToRender =
+                    asset.as_line_to_render(current_index, $max_cols, $colors);
+                asset.add_truncated_results(truncated_result_count_below);
+                truncated_result_count_below = 0;
+                current_index += 1;
+                $to_render_after_selected.insert(0, asset.into());
+            }
+        }
+        line_count_to_remove
+    }};
+}
 
 #[derive(Debug, Default)]
 pub struct SessionList {
@@ -35,6 +91,161 @@ impl SessionList {
         self.session_ui_infos = session_ui_infos;
         self.forbidden_sessions = forbidden_sessions;
     }
+    pub fn render(&self, max_rows: usize, max_cols: usize, colors: Colors) -> Vec<LineToRender> {
+        if self.is_searching {
+            self.render_search_results(max_rows, max_cols)
+        } else {
+            self.render_list(max_rows, max_cols, colors)
+        }
+    }
+    fn render_search_results(&self, max_rows: usize, max_cols: usize) -> Vec<LineToRender> {
+        let mut lines_to_render = vec![];
+        for (i, result) in self.search_results.iter().enumerate() {
+            if lines_to_render.len() + result.lines_to_render() <= max_rows {
+                let mut result_lines = result.render(max_cols);
+                if Some(i) == self.selected_search_index {
+                    let mut render_arrows = true;
+                    for line_to_render in result_lines.iter_mut() {
+                        line_to_render.make_selected_as_search(render_arrows);
+                        render_arrows = false;
+                    }
+                }
+                lines_to_render.append(&mut result_lines);
+            } else {
+                break;
+            }
+        }
+        lines_to_render
+    }
+    fn render_list(&self, max_rows: usize, max_cols: usize, colors: Colors) -> Vec<LineToRender> {
+        let mut lines_to_render_until_selected = vec![];
+        let mut lines_to_render_after_selected = vec![];
+        let total_lines_to_render = self.total_lines_to_render();
+        let line_count_to_remove = total_lines_to_render.saturating_sub(max_rows);
+        let line_count_to_remove = self.render_sessions(
+            &mut lines_to_render_until_selected,
+            &mut lines_to_render_after_selected,
+            line_count_to_remove,
+            max_cols,
+            colors,
+        );
+        let line_count_to_remove = self.render_tabs(
+            &mut lines_to_render_until_selected,
+            &mut lines_to_render_after_selected,
+            line_count_to_remove,
+            max_cols,
+            colors,
+        );
+        self.render_panes(
+            &mut lines_to_render_until_selected,
+            &mut lines_to_render_after_selected,
+            line_count_to_remove,
+            max_cols,
+            colors,
+        );
+        let mut lines_to_render = lines_to_render_until_selected;
+        lines_to_render.append(&mut lines_to_render_after_selected);
+        lines_to_render
+    }
+    fn render_sessions(
+        &self,
+        to_render_until_selected: &mut Vec<LineToRender>,
+        to_render_after_selected: &mut Vec<LineToRender>,
+        line_count_to_remove: usize,
+        max_cols: usize,
+        colors: Colors,
+    ) -> usize {
+        render_assets!(
+            self.session_ui_infos,
+            line_count_to_remove,
+            self.selected_index.0,
+            to_render_until_selected,
+            to_render_after_selected,
+            self.selected_index.1.is_some(),
+            max_cols,
+            colors
+        )
+    }
+    fn render_tabs(
+        &self,
+        to_render_until_selected: &mut Vec<LineToRender>,
+        to_render_after_selected: &mut Vec<LineToRender>,
+        line_count_to_remove: usize,
+        max_cols: usize,
+        colors: Colors,
+    ) -> usize {
+        if self.selected_index.1.is_none() {
+            return line_count_to_remove;
+        }
+        if let Some(tabs_in_session) = self
+            .selected_index
+            .0
+            .and_then(|i| self.session_ui_infos.get(i))
+            .map(|s| &s.tabs)
+        {
+            render_assets!(
+                tabs_in_session,
+                line_count_to_remove,
+                self.selected_index.1,
+                to_render_until_selected,
+                to_render_after_selected,
+                self.selected_index.2.is_some(),
+                max_cols,
+                colors
+            )
+        } else {
+            line_count_to_remove
+        }
+    }
+    fn render_panes(
+        &self,
+        to_render_until_selected: &mut Vec<LineToRender>,
+        to_render_after_selected: &mut Vec<LineToRender>,
+        line_count_to_remove: usize,
+        max_cols: usize,
+        colors: Colors,
+    ) -> usize {
+        if self.selected_index.2.is_none() {
+            return line_count_to_remove;
+        }
+        if let Some(panes_in_session) = self
+            .selected_index
+            .0
+            .and_then(|i| self.session_ui_infos.get(i))
+            .map(|s| &s.tabs)
+            .and_then(|tabs| {
+                self.selected_index
+                    .1
+                    .and_then(|i| tabs.get(i))
+                    .map(|t| &t.panes)
+            })
+        {
+            render_assets!(
+                panes_in_session,
+                line_count_to_remove,
+                self.selected_index.2,
+                to_render_until_selected,
+                to_render_after_selected,
+                false,
+                max_cols,
+                colors
+            )
+        } else {
+            line_count_to_remove
+        }
+    }
+    fn total_lines_to_render(&self) -> usize {
+        self.session_ui_infos
+            .iter()
+            .enumerate()
+            .fold(0, |acc, (index, s)| {
+                if self.selected_index.session_index_is_selected(index) {
+                    acc + s.line_count(&self.selected_index)
+                } else {
+                    acc + 1
+                }
+            })
+    }
     pub fn update_search_term(&mut self, search_term: &str, colors: &Colors) {
         let mut flattened_assets = self.flatten_assets(colors);
         let mut matches = vec![];
@@ -42,7 +253,7 @@ impl SessionList {
         for (list_item, session_name, tab_position, pane_id, is_current_session) in
             flattened_assets.drain(..)
         {
-            if let Some((score, indices)) = matcher.fuzzy_indices(&list_item.name, &search_term) {
+            if let Some((score, indices)) = matcher.fuzzy_indices(&list_item.name, search_term) {
                 matches.push(SearchResult::new(
                     score,
                     indices,
@@ -59,10 +270,7 @@ impl SessionList {
         self.is_searching = !search_term.is_empty();
         self.selected_search_index = Some(0);
     }
-    fn flatten_assets(
-        &self,
-        colors: &Colors,
-    ) -> Vec<(ListItem, String, Option<usize>, Option<(u32, bool)>, bool)> {
+    fn flatten_assets(&self, colors: &Colors) -> FlatSessionAssets {
         // list_item, session_name, tab_position, (pane_id, is_plugin), is_current_session
         let mut list_items = vec![];
         for session in &self.session_ui_infos {
@@ -355,10 +563,13 @@ impl SessionList {
             .any(|s| s.name == session_name)
     }
     pub fn update_session_name(&mut self, old_name: &str, new_name: &str) {
-        self.session_ui_infos
+        if let Some(s) = self
+            .session_ui_infos
             .iter_mut()
             .find(|s| s.name == old_name)
-            .map(|s| s.name = new_name.to_owned());
+        {
+            s.name = new_name.to_owned();
+        }
     }
     pub fn all_other_sessions(&self) -> Vec<String> {
         self.session_ui_infos
@@ -383,39 +594,6 @@ pub fn clamp_index_after_delete(prev_index: Option<usize>, new_len: usize) -> Op
         return None;
     }
     Some(prev_index.unwrap_or(0).min(new_len - 1))
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct SelectedIndex(pub Option<usize>, pub Option<usize>, pub Option<usize>);
-
-impl SelectedIndex {
-    pub fn tabs_are_visible(&self) -> bool {
-        self.1.is_some()
-    }
-    pub fn panes_are_visible(&self) -> bool {
-        self.2.is_some()
-    }
-    pub fn selected_tab_index(&self) -> Option<usize> {
-        self.1
-    }
-    pub fn session_index_is_selected(&self, index: usize) -> bool {
-        self.0 == Some(index)
-    }
-    pub fn result_shrink(&mut self) {
-        match self {
-            SelectedIndex(Some(_selected_session), None, None) => self.0 = None,
-            SelectedIndex(Some(_selected_session), Some(_selected_tab), None) => self.1 = None,
-            SelectedIndex(Some(_selected_session), Some(_selected_tab), Some(_selected_pane)) => {
-                self.2 = None
-            },
-            _ => {},
-        }
-    }
-    pub fn reset(&mut self) {
-        self.0 = None;
-        self.1 = None;
-        self.2 = None;
-    }
 }
 
 #[derive(Debug)]

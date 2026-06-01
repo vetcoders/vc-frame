@@ -16,8 +16,8 @@ impl std::fmt::Debug for ActivePanes {
 }
 
 impl ActivePanes {
-    pub fn new(os_api: &Box<dyn ServerOsApi>) -> Self {
-        let os_api = os_api.clone();
+    pub fn new(os_api: &dyn ServerOsApi) -> Self {
+        let os_api = os_api.box_clone();
         ActivePanes {
             active_panes: HashMap::new(),
             os_api,
@@ -56,18 +56,18 @@ impl ActivePanes {
         client_id: &ClientId,
         panes: &mut BTreeMap<PaneId, Box<dyn Pane>>,
     ) -> Option<PaneId> {
-        if let Some(pane_id_to_unfocus) = self.active_panes.get(&client_id) {
+        if let Some(pane_id_to_unfocus) = self.active_panes.get(client_id) {
             self.unfocus_pane(*pane_id_to_unfocus, panes);
         }
         self.active_panes.remove(client_id)
     }
     pub fn unfocus_all_panes(&self, panes: &mut BTreeMap<PaneId, Box<dyn Pane>>) {
-        for (_client_id, pane_id) in &self.active_panes {
+        for pane_id in self.active_panes.values() {
             self.unfocus_pane(*pane_id, panes);
         }
     }
     pub fn focus_all_panes(&self, panes: &mut BTreeMap<PaneId, Box<dyn Pane>>) {
-        for (_client_id, pane_id) in &self.active_panes {
+        for pane_id in self.active_panes.values() {
             self.focus_pane(*pane_id, panes);
         }
     }
@@ -105,9 +105,6 @@ impl ActivePanes {
         }
     }
     pub fn pane_id_is_focused(&self, pane_id: &PaneId) -> bool {
-        self.active_panes
-            .values()
-            .find(|p_id| **p_id == *pane_id)
-            .is_some()
+        self.active_panes.values().any(|p_id| *p_id == *pane_id)
     }
 }

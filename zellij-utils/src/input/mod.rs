@@ -74,7 +74,7 @@ mod not_wasm {
     fn key_is_bound(key: &KeyWithModifier, keybinds: &Keybinds, mode: &InputMode) -> bool {
         keybinds
             .get_actions_for_key_in_mode(mode, key)
-            .map_or(false, |actions| !actions.is_empty())
+            .is_some_and(|actions| !actions.is_empty())
     }
 
     // FIXME: This is an absolutely cursed function that should be destroyed as soon

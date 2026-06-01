@@ -65,12 +65,10 @@ pub fn info_line(
         } else {
             cols.saturating_sub(widths.2) / 2
         }
+    } else if cols >= WIDTH_BREAKPOINTS.0 {
+        cols.saturating_sub(WIDTH_BREAKPOINTS.0) / 2
     } else {
-        if cols >= WIDTH_BREAKPOINTS.0 {
-            cols.saturating_sub(WIDTH_BREAKPOINTS.0) / 2
-        } else {
-            cols.saturating_sub(WIDTH_BREAKPOINTS.1) / 2
-        }
+        cols.saturating_sub(WIDTH_BREAKPOINTS.1) / 2
     };
     if let Some(notification) = &notification {
         print_text_with_coordinates(

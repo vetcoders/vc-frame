@@ -258,9 +258,7 @@ impl ZellijPlugin for State {
                 self.display_system_clipboard_failure = true;
             },
             Event::InputReceived => {
-                if self.text_copy_destination.is_some()
-                    || self.display_system_clipboard_failure == true
-                {
+                if self.text_copy_destination.is_some() || self.display_system_clipboard_failure {
                     should_render = true;
                 }
                 self.text_copy_destination = None;
@@ -314,23 +312,19 @@ impl ZellijPlugin for State {
             PaletteColor::Rgb((r, g, b)) => {
                 if rows > 1 {
                     println!("{}\u{1b}[48;2;{};{};{}m\u{1b}[0K", first_line, r, g, b);
+                } else if self.mode_info.mode == InputMode::Normal {
+                    print!("{}\u{1b}[48;2;{};{};{}m\u{1b}[0K", first_line, r, g, b);
                 } else {
-                    if self.mode_info.mode == InputMode::Normal {
-                        print!("{}\u{1b}[48;2;{};{};{}m\u{1b}[0K", first_line, r, g, b);
-                    } else {
-                        print!("\u{1b}[m{}\u{1b}[0K", second_line);
-                    }
+                    print!("\u{1b}[m{}\u{1b}[0K", second_line);
                 }
             },
             PaletteColor::EightBit(color) => {
                 if rows > 1 {
                     println!("{}\u{1b}[48;5;{}m\u{1b}[0K", first_line, color);
+                } else if self.mode_info.mode == InputMode::Normal {
+                    print!("{}\u{1b}[48;5;{}m\u{1b}[0K", first_line, color);
                 } else {
-                    if self.mode_info.mode == InputMode::Normal {
-                        print!("{}\u{1b}[48;5;{}m\u{1b}[0K", first_line, color);
-                    } else {
-                        print!("\u{1b}[m{}\u{1b}[0K", second_line);
-                    }
+                    print!("\u{1b}[m{}\u{1b}[0K", second_line);
                 }
             },
         }
@@ -478,17 +472,15 @@ pub fn style_key_with_modifier(
         .join("-");
     let painted_modifier = if modifier_str.is_empty() {
         Style::new().paint("")
+    } else if let Some(background) = background {
+        let background = palette_match!(background);
+        Style::new()
+            .fg(orange_color)
+            .on(background)
+            .bold()
+            .paint(modifier_str)
     } else {
-        if let Some(background) = background {
-            let background = palette_match!(background);
-            Style::new()
-                .fg(orange_color)
-                .on(background)
-                .bold()
-                .paint(modifier_str)
-        } else {
-            Style::new().fg(orange_color).bold().paint(modifier_str)
-        }
+        Style::new().fg(orange_color).bold().paint(modifier_str)
     };
     ret.push(painted_modifier);
 
@@ -625,7 +617,7 @@ pub mod tests {
 
     #[test]
     fn common_modifier_with_ctrl_keys() {
-        let keyvec = vec![
+        let keyvec = [
             KeyWithModifier::new(BareKey::Char('a')).with_ctrl_modifier(),
             KeyWithModifier::new(BareKey::Char('b')).with_ctrl_modifier(),
             KeyWithModifier::new(BareKey::Char('c')).with_ctrl_modifier(),
@@ -636,7 +628,7 @@ pub mod tests {
 
     #[test]
     fn common_modifier_with_alt_keys_chars() {
-        let keyvec = vec![
+        let keyvec = [
             KeyWithModifier::new(BareKey::Char('1')).with_alt_modifier(),
             KeyWithModifier::new(BareKey::Char('t')).with_alt_modifier(),
             KeyWithModifier::new(BareKey::Char('z')).with_alt_modifier(),
@@ -647,7 +639,7 @@ pub mod tests {
 
     #[test]
     fn common_modifier_with_mixed_alt_ctrl_keys() {
-        let keyvec = vec![
+        let keyvec = [
             KeyWithModifier::new(BareKey::Char('1')).with_ctrl_modifier(),
             KeyWithModifier::new(BareKey::Char('t')).with_alt_modifier(),
             KeyWithModifier::new(BareKey::Char('z')).with_alt_modifier(),
@@ -658,7 +650,7 @@ pub mod tests {
 
     #[test]
     fn common_modifier_with_any_keys() {
-        let keyvec = vec![
+        let keyvec = [
             KeyWithModifier::new(BareKey::Char('1')),
             KeyWithModifier::new(BareKey::Char('t')).with_alt_modifier(),
             KeyWithModifier::new(BareKey::Char('z')).with_alt_modifier(),

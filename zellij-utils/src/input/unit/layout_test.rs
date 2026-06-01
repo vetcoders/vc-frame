@@ -1,5 +1,7 @@
 use super::super::layout::*;
+use crate::input::config::Config;
 use insta::assert_snapshot;
+use std::path::{Path, PathBuf};
 
 #[cfg(not(windows))]
 fn normalize_layout_debug(s: String) -> String {
@@ -250,6 +252,109 @@ fn layout_with_floating_panes_template() {
         ..Default::default()
     };
     assert_eq!(layout, expected_layout);
+}
+
+#[test]
+fn vibecrafted_layouts_are_available_as_builtins() {
+    let layout_dir = Some(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("test-fixtures")
+            .join("config-dirs")
+            .join("custom-default-layout")
+            .join("layouts"),
+    );
+    let (available_layouts, layout_errors) =
+        Layout::list_available_layouts(layout_dir, &Some("default".to_owned()));
+    assert!(
+        layout_errors.is_empty(),
+        "expected no layout parsing errors in test fixture, got: {layout_errors:#?}"
+    );
+
+    let available_builtin_layouts: Vec<_> = available_layouts
+        .into_iter()
+        .filter(|layout_info| layout_info.is_builtin())
+        .map(|layout_info| layout_info.name().to_owned())
+        .collect();
+
+    for layout_name in [
+        "vibecrafted",
+        "vc-dashboard",
+        "vc-workflow",
+        "vc-marbles",
+        "vc-research",
+    ] {
+        assert!(
+            available_builtin_layouts.contains(&layout_name.to_owned()),
+            "expected {layout_name} to be available as a built-in layout"
+        );
+    }
+}
+
+#[test]
+fn vibecrafted_layouts_can_be_loaded_from_builtin_assets() {
+    for layout_name in [
+        "vibecrafted",
+        "vc-dashboard",
+        "vc-workflow",
+        "vc-marbles",
+        "vc-research",
+    ] {
+        let (_path, raw_layout, _swap_layout) =
+            Layout::stringified_from_default_assets(Path::new(layout_name)).unwrap();
+        assert!(
+            raw_layout.contains("VibeCrafted with AI Agents")
+                || raw_layout.contains("𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍."),
+            "expected {layout_name} to resolve from built-in assets"
+        );
+    }
+}
+
+#[test]
+fn vibecrafted_layouts_include_companion_repo_fallbacks() {
+    let expected_companion_root =
+        "${VIBECRAFTED_COMPANION_ROOT:-$HOME/Libraxis/vibecrafted}/skills/vc-agents";
+
+    for layout_name in ["vibecrafted", "vc-dashboard", "vc-marbles"] {
+        let (_path, raw_layout, _swap_layout) =
+            Layout::stringified_from_default_assets(Path::new(layout_name)).unwrap();
+        assert!(
+            raw_layout.contains(expected_companion_root),
+            "expected {layout_name} to resolve mission-control helpers from the companion repo"
+        );
+    }
+}
+
+#[test]
+fn vc_dashboard_guide_tab_uses_branded_mission_control_mode() {
+    let (_path, raw_layout, _swap_layout) =
+        Layout::stringified_from_default_assets(Path::new("vc-dashboard")).unwrap();
+    assert!(
+        raw_layout.contains("guide_mode \"mission-control\""),
+        "expected vc-dashboard to configure the about plugin for the mission-control guide"
+    );
+    assert!(
+        raw_layout.contains("pane_title \"VibeCrafted Shell Guide\""),
+        "expected vc-dashboard guide tab to set a branded pane title"
+    );
+}
+
+#[test]
+fn vibecrafted_layouts_parse_from_builtin_assets() {
+    for layout_name in [
+        "vibecrafted",
+        "vc-dashboard",
+        "vc-workflow",
+        "vc-marbles",
+        "vc-research",
+    ] {
+        let (layout, _config) =
+            Layout::from_default_assets(Path::new(layout_name), None, Config::default()).unwrap();
+        assert!(
+            layout.has_tabs() || !layout.is_empty(),
+            "expected {layout_name} to parse into a non-empty layout"
+        );
+    }
 }
 
 #[test]
@@ -1237,12 +1342,11 @@ fn cannot_define_pane_template_names_as_keywords() {
 
 #[test]
 fn error_on_multiple_layout_nodes_in_file() {
-    let kdl_layout = format!(
-        "
+    let kdl_layout = "
         layout
         layout
     "
-    );
+    .to_string();
     let layout_error =
         Layout::from_kdl(&kdl_layout, Some("layout_file_name".into()), None, None).unwrap_err();
     assert_snapshot!(normalize_layout_debug(format!("{:?}", layout_error)));
@@ -1250,15 +1354,14 @@ fn error_on_multiple_layout_nodes_in_file() {
 
 #[test]
 fn error_on_unknown_layout_node() {
-    let kdl_layout = format!(
-        "
-        layout {{
+    let kdl_layout = "
+        layout {
             pane
             i_am_not_a_proper_node
             pane
-        }}
+        }
     "
-    );
+    .to_string();
     let layout_error =
         Layout::from_kdl(&kdl_layout, Some("layout_file_name".into()), None, None).unwrap_err();
     assert_snapshot!(normalize_layout_debug(format!("{:?}", layout_error)));
@@ -1266,13 +1369,12 @@ fn error_on_unknown_layout_node() {
 
 #[test]
 fn error_on_unknown_layout_pane_property() {
-    let kdl_layout = format!(
-        "
-        layout {{
+    let kdl_layout = "
+        layout {
             pane spit_size=1
-        }}
+        }
     "
-    );
+    .to_string();
     let layout_error =
         Layout::from_kdl(&kdl_layout, Some("layout_file_name".into()), None, None).unwrap_err();
     assert_snapshot!(normalize_layout_debug(format!("{:?}", layout_error)));
@@ -1280,13 +1382,12 @@ fn error_on_unknown_layout_pane_property() {
 
 #[test]
 fn error_on_unknown_layout_pane_template_property() {
-    let kdl_layout = format!(
-        "
-        layout {{
+    let kdl_layout = "
+        layout {
             pane_template name=\"my_cool_template\" spit_size=1
-        }}
+        }
     "
-    );
+    .to_string();
     let layout_error =
         Layout::from_kdl(&kdl_layout, Some("layout_file_name".into()), None, None).unwrap_err();
     assert_snapshot!(normalize_layout_debug(format!("{:?}", layout_error)));
@@ -1294,13 +1395,12 @@ fn error_on_unknown_layout_pane_template_property() {
 
 #[test]
 fn error_on_unknown_layout_tab_property() {
-    let kdl_layout = format!(
-        "
-        layout {{
+    let kdl_layout = "
+        layout {
             tab spit_size=1
-        }}
+        }
     "
-    );
+    .to_string();
     let layout_error =
         Layout::from_kdl(&kdl_layout, Some("layout_file_name".into()), None, None).unwrap_err();
     assert_snapshot!(normalize_layout_debug(format!("{:?}", layout_error)));
@@ -1308,13 +1408,12 @@ fn error_on_unknown_layout_tab_property() {
 
 #[test]
 fn error_on_unknown_layout_tab_template_property() {
-    let kdl_layout = format!(
-        "
-        layout {{
+    let kdl_layout = "
+        layout {
             tab_template name=\"my_cool_template\" spit_size=1
-        }}
+        }
     "
-    );
+    .to_string();
     let layout_error =
         Layout::from_kdl(&kdl_layout, Some("layout_file_name".into()), None, None).unwrap_err();
     assert_snapshot!(normalize_layout_debug(format!("{:?}", layout_error)));
@@ -1322,17 +1421,16 @@ fn error_on_unknown_layout_tab_template_property() {
 
 #[test]
 fn error_on_pane_templates_without_a_name() {
-    let kdl_layout = format!(
-        "
-        layout {{
-            pane_template {{
+    let kdl_layout = "
+        layout {
+            pane_template {
                 pane
                 children
                 pane
-            }}
-        }}
+            }
+        }
     "
-    );
+    .to_string();
     let layout_error =
         Layout::from_kdl(&kdl_layout, Some("layout_file_name".into()), None, None).unwrap_err();
     assert_snapshot!(normalize_layout_debug(format!("{:?}", layout_error)));
@@ -1340,17 +1438,16 @@ fn error_on_pane_templates_without_a_name() {
 
 #[test]
 fn error_on_tab_templates_without_a_name() {
-    let kdl_layout = format!(
-        "
-        layout {{
-            tab_template {{
+    let kdl_layout = "
+        layout {
+            tab_template {
                 pane
                 children
                 pane
-            }}
-        }}
+            }
+        }
     "
-    );
+    .to_string();
     let layout_error =
         Layout::from_kdl(&kdl_layout, Some("layout_file_name".into()), None, None).unwrap_err();
     assert_snapshot!(normalize_layout_debug(format!("{:?}", layout_error)));
@@ -1944,7 +2041,7 @@ fn can_load_swap_layouts_from_a_different_file() {
     let layout = Layout::from_kdl(
         kdl_layout,
         Some("layout_file_name".into()),
-        Some(("swap_layout_file_name".into(), kdl_swap_layout)),
+        Some(("swap_layout_file_name", kdl_swap_layout)),
         None,
     )
     .unwrap();
@@ -2298,7 +2395,7 @@ fn layout_node_with_hide_floating_panes() {
 
     let layout = Layout::from_kdl(kdl_layout, Some("layout_file_name".into()), None, None).unwrap();
 
-    assert_eq!(layout.tabs[0].1.hide_floating_panes, true);
+    assert!(layout.tabs[0].1.hide_floating_panes);
 }
 
 #[test]
@@ -2312,7 +2409,7 @@ fn layout_node_with_cwd() {
     let layout = Layout::from_kdl(kdl_layout, Some("layout_file_name".into()), None, None).unwrap();
 
     // Verify cwd was applied - check the first pane's run property
-    assert!(layout.tabs.len() > 0);
+    assert!(!layout.tabs.is_empty());
     // The cwd should be propagated to children
     if let Some(Run::Cwd(path)) = &layout.tabs[0].1.children[0].run {
         assert_eq!(path.to_str(), Some("/tmp"));
@@ -2337,7 +2434,7 @@ fn layout_node_with_multiple_tab_properties() {
         layout.tabs[0].1.children_split_direction,
         SplitDirection::Vertical
     );
-    assert_eq!(layout.tabs[0].1.hide_floating_panes, true);
+    assert!(layout.tabs[0].1.hide_floating_panes);
 }
 
 #[test]

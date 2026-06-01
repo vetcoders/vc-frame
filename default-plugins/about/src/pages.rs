@@ -3,8 +3,6 @@ use zellij_tile::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::active_component::{ActiveComponent, ClickAction};
-
 #[derive(Debug)]
 pub struct Page {
     title: Option<Text>,
@@ -13,6 +11,160 @@ pub struct Page {
     hovering_over_link: bool,
     menu_item_is_selected: bool,
     pub is_main_screen: bool,
+}
+
+#[derive(Debug)]
+pub struct ActiveComponent {
+    text_no_hover: TextOrCustomRender,
+    text_hover: Option<TextOrCustomRender>,
+    left_click_action: Option<ClickAction>,
+    last_rendered_coordinates: Option<ComponentCoordinates>,
+    pub is_active: bool,
+}
+
+impl ActiveComponent {
+    pub fn new(text_no_hover: TextOrCustomRender) -> Self {
+        ActiveComponent {
+            text_no_hover,
+            text_hover: None,
+            left_click_action: None,
+            is_active: false,
+            last_rendered_coordinates: None,
+        }
+    }
+    pub fn with_hover(mut self, text_hover: TextOrCustomRender) -> Self {
+        self.text_hover = Some(text_hover);
+        self
+    }
+    pub fn with_left_click_action(mut self, left_click_action: ClickAction) -> Self {
+        self.left_click_action = Some(left_click_action);
+        self
+    }
+    pub fn render(&mut self, x: usize, y: usize, rows: usize, columns: usize) -> usize {
+        let component_width = match self.text_hover.as_mut() {
+            Some(text) if self.is_active => text.render(x, y, rows, columns),
+            _ => self.text_no_hover.render(x, y, rows, columns),
+        };
+        self.last_rendered_coordinates = Some(ComponentCoordinates::new(x, y, 1, columns));
+        component_width
+    }
+    pub fn left_click_action(&mut self) -> Option<Page> {
+        match self.left_click_action.take() {
+            Some(ClickAction::ChangePage(go_to_page)) => Some(go_to_page()),
+            Some(ClickAction::OpenLink(link, executable)) => {
+                self.left_click_action =
+                    Some(ClickAction::OpenLink(link.clone(), executable.clone()));
+                run_command(&[&executable.borrow(), &link], Default::default());
+                None
+            },
+            Some(ClickAction::LaunchPlugin(plugin_url)) => {
+                open_plugin_pane_floating(
+                    &plugin_url,
+                    Default::default(),
+                    None,
+                    Default::default(),
+                );
+                self.left_click_action = Some(ClickAction::LaunchPlugin(plugin_url));
+                None
+            },
+            None => None,
+        }
+    }
+    pub fn handle_left_click_at_position(&mut self, x: usize, y: usize) -> Option<Page> {
+        let Some(last_rendered_coordinates) = &self.last_rendered_coordinates else {
+            return None;
+        };
+        if last_rendered_coordinates.contains(x, y) {
+            self.left_click_action()
+        } else {
+            None
+        }
+    }
+    pub fn handle_hover_at_position(&mut self, x: usize, y: usize) -> bool {
+        let Some(last_rendered_coordinates) = &self.last_rendered_coordinates else {
+            return false;
+        };
+        if last_rendered_coordinates.contains(x, y) && self.text_hover.is_some() {
+            self.is_active = true;
+            true
+        } else {
+            false
+        }
+    }
+    pub fn handle_selection(&mut self) -> Option<Page> {
+        if self.is_active {
+            self.left_click_action()
+        } else {
+            None
+        }
+    }
+    pub fn column_count(&self) -> usize {
+        match self.text_hover.as_ref() {
+            Some(text) if self.is_active => text.len(),
+            _ => self.text_no_hover.len(),
+        }
+    }
+    pub fn clear_hover(&mut self) {
+        self.is_active = false;
+    }
+}
+
+#[derive(Debug)]
+struct ComponentCoordinates {
+    x: usize,
+    y: usize,
+    rows: usize,
+    columns: usize,
+}
+
+impl ComponentCoordinates {
+    fn new(x: usize, y: usize, rows: usize, columns: usize) -> Self {
+        ComponentCoordinates {
+            x,
+            y,
+            rows,
+            columns,
+        }
+    }
+
+    fn contains(&self, x: usize, y: usize) -> bool {
+        x >= self.x && x < self.x + self.columns && y >= self.y && y < self.y + self.rows
+    }
+}
+
+pub enum ClickAction {
+    ChangePage(Box<dyn FnOnce() -> Page>),
+    OpenLink(String, Rc<RefCell<String>>),
+    LaunchPlugin(String),
+}
+
+impl std::fmt::Debug for ClickAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClickAction::ChangePage(_) => write!(f, "ChangePage"),
+            ClickAction::OpenLink(destination, executable) => {
+                write!(f, "OpenLink: {}, {:?}", destination, executable)
+            },
+            ClickAction::LaunchPlugin(url) => {
+                write!(f, "LaunchPlugin: {}", url)
+            },
+        }
+    }
+}
+
+impl ClickAction {
+    pub fn new_change_page<F>(go_to_page: F) -> Self
+    where
+        F: FnOnce() -> Page + 'static,
+    {
+        ClickAction::ChangePage(Box::new(go_to_page))
+    }
+    pub fn new_open_link(destination: String, executable: Rc<RefCell<String>>) -> Self {
+        ClickAction::OpenLink(destination, executable)
+    }
+    pub fn new_launch_plugin(plugin_url: String) -> Self {
+        ClickAction::LaunchPlugin(plugin_url)
+    }
 }
 
 impl Page {
@@ -131,6 +283,125 @@ impl Page {
                     main_screen_help_text(hovering_over_link, menu_item_is_selected)
                 })
             })
+    }
+    pub fn new_vibecrafted_mission_control(
+        link_executable: Rc<RefCell<String>>,
+        zellij_version: String,
+        _base_mode: Rc<RefCell<InputMode>>,
+    ) -> Self {
+        Page::new()
+            .main_screen()
+            .with_title(Text::new("VibeCrafted Mission Control").color_range(0, ..))
+            .with_paragraph(vec![
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("A branded shell-provider surface built on top of native Zellij control decks."),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(format!(
+                        "This guide is wired into Zellij {} so operators can jump from telemetry into action without leaving the dashboard.",
+                        zellij_version
+                    ))
+                    .color_substring(2, "operators")
+                    .color_substring(3, "dashboard"),
+                ))]),
+            ])
+            .with_bulletin_list(
+                BulletinList::new(Text::new("Open a deck:").color_range(2, ..)).with_items(vec![
+                    ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
+                        "Session Atlas",
+                    )))
+                    .with_hover(TextOrCustomRender::Text(
+                        main_menu_item("Session Atlas").selected(),
+                    ))
+                    .with_left_click_action(ClickAction::new_launch_plugin(
+                        "zellij:session-manager".to_owned(),
+                    )),
+                    ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
+                        "Layout Forge",
+                    )))
+                    .with_hover(TextOrCustomRender::Text(
+                        main_menu_item("Layout Forge").selected(),
+                    ))
+                    .with_left_click_action(ClickAction::new_launch_plugin(
+                        "zellij:layout-manager".to_owned(),
+                    )),
+                    ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
+                        "Control Deck",
+                    )))
+                    .with_hover(TextOrCustomRender::Text(
+                        main_menu_item("Control Deck").selected(),
+                    ))
+                    .with_left_click_action(ClickAction::new_launch_plugin(
+                        "zellij:configuration".to_owned(),
+                    )),
+                    ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
+                        "Plugin Forge",
+                    )))
+                    .with_hover(TextOrCustomRender::Text(
+                        main_menu_item("Plugin Forge").selected(),
+                    ))
+                    .with_left_click_action(ClickAction::new_launch_plugin(
+                        "zellij:plugin-manager".to_owned(),
+                    )),
+                    ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
+                        "Workspace Atlas",
+                    )))
+                    .with_hover(TextOrCustomRender::Text(
+                        main_menu_item("Workspace Atlas").selected(),
+                    ))
+                    .with_left_click_action(ClickAction::new_launch_plugin(
+                        "zellij:strider".to_owned(),
+                    )),
+                    ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
+                        "Share Relay",
+                    )))
+                    .with_hover(TextOrCustomRender::Text(
+                        main_menu_item("Share Relay").selected(),
+                    ))
+                    .with_left_click_action(ClickAction::new_launch_plugin(
+                        "zellij:share".to_owned(),
+                    )),
+                ]),
+            )
+            .with_paragraph(vec![
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("Operator shell: vibecrafted start").color_substring(
+                        3,
+                        "vibecrafted start",
+                    ),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("Implementation surface: vibecrafted dashboard vc-workflow")
+                        .color_substring(3, "vibecrafted dashboard vc-workflow"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("Convergence surface: vibecrafted dashboard vc-marbles")
+                        .color_substring(3, "vibecrafted dashboard vc-marbles"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("Research surface: vibecrafted dashboard vc-research")
+                        .color_substring(3, "vibecrafted dashboard vc-research"),
+                ))]),
+            ])
+            .with_paragraph(vec![ComponentLine::new(vec![
+                ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("Learn more about the native Zellij surfaces behind this shell: ")
+                        .color_range(2, ..),
+                )),
+                ActiveComponent::new(TextOrCustomRender::Text(Text::new(
+                    "https://zellij.dev/documentation/",
+                )))
+                .with_hover(TextOrCustomRender::Text(
+                    Text::new("https://zellij.dev/documentation/").selected(),
+                ))
+                .with_left_click_action(ClickAction::new_open_link(
+                    "https://zellij.dev/documentation/".to_owned(),
+                    link_executable.clone(),
+                )),
+            ])])
+            .with_help(Box::new(|hovering_over_link, menu_item_is_selected| {
+                main_screen_help_text(hovering_over_link, menu_item_is_selected)
+            }))
     }
     fn new_windows_support() -> Page {
         Page::new()
@@ -494,14 +765,11 @@ impl Page {
     }
     pub fn handle_selection(&mut self) -> Option<Page> {
         for rendered_component in &mut self.components_to_render {
-            match rendered_component {
-                RenderedComponent::BulletinList(bulletin_list) => {
-                    let page_to_render = bulletin_list.handle_selection();
-                    if page_to_render.is_some() {
-                        return page_to_render;
-                    }
-                },
-                _ => {},
+            if let RenderedComponent::BulletinList(bulletin_list) = rendered_component {
+                let page_to_render = bulletin_list.handle_selection();
+                if page_to_render.is_some() {
+                    return page_to_render;
+                }
             }
         }
         None
@@ -572,7 +840,8 @@ impl Page {
         self.components_to_render.iter_mut().for_each(|c| {
             match c {
                 RenderedComponent::BulletinList(bulletin_list) => {
-                    Some(bulletin_list.clear_active_bulletins())
+                    let _: () = bulletin_list.clear_active_bulletins();
+                    Some(())
                 },
                 _ => None,
             };
@@ -580,21 +849,15 @@ impl Page {
     }
     fn set_active_bulletin(&mut self, active_bulletin_position: usize) {
         self.components_to_render.iter_mut().for_each(|c| {
-            match c {
-                RenderedComponent::BulletinList(bulletin_list) => {
-                    bulletin_list.set_active_bulletin(active_bulletin_position)
-                },
-                _ => {},
+            if let RenderedComponent::BulletinList(bulletin_list) = c {
+                bulletin_list.set_active_bulletin(active_bulletin_position)
             };
         });
     }
     fn set_last_active_bulletin(&mut self) {
         self.components_to_render.iter_mut().for_each(|c| {
-            match c {
-                RenderedComponent::BulletinList(bulletin_list) => {
-                    bulletin_list.set_last_active_bulletin()
-                },
-                _ => {},
+            if let RenderedComponent::BulletinList(bulletin_list) = c {
+                bulletin_list.set_last_active_bulletin()
             };
         });
     }
@@ -672,10 +935,7 @@ impl Page {
             current_y += 2;
         }
         for rendered_component in &mut self.components_to_render {
-            let is_help = match rendered_component {
-                RenderedComponent::HelpText(_) => true,
-                _ => false,
-            };
+            let is_help = matches!(rendered_component, RenderedComponent::HelpText(_));
             if is_help {
                 if let Some(error) = error {
                     render_error(error, rows);
@@ -785,28 +1045,28 @@ fn whats_new_title() -> Text {
 
 fn main_screen_title(version: String, is_release_notes: bool) -> Text {
     if is_release_notes {
-        let title_text = format!("Hi there, welcome to Zellij {}!", &version);
-        Text::new(title_text).color_range(2, 21..=27 + version.chars().count())
+        let title_text = format!("Hi there, welcome to VibeCrafted Shell {}!", &version);
+        Text::new(title_text).color_range(2, 21..=38 + version.chars().count())
     } else {
-        let title_text = format!("Zellij {}", &version);
+        let title_text = format!("VibeCrafted Shell {}", &version);
         Text::new(title_text).color_range(2, ..)
     }
 }
 
 fn main_screen_help_text(hovering_over_link: bool, menu_item_is_selected: bool) -> Text {
     if hovering_over_link {
-        let help_text = format!("Help: Click or Shift-Click to open in browser");
+        let help_text = "Help: Click or Shift-Click to open in browser".to_string();
         Text::new(help_text)
             .color_range(3, 6..=10)
             .color_range(3, 15..=25)
     } else if menu_item_is_selected {
-        let help_text = format!("Help: <↓↑> - Navigate, <ENTER> - Learn More, <ESC> - Dismiss");
+        let help_text = "Help: <↓↑> - Navigate, <ENTER> - Learn More, <ESC> - Dismiss".to_string();
         Text::new(help_text)
             .color_range(1, 6..=9)
             .color_range(1, 23..=29)
             .color_range(1, 45..=49)
     } else {
-        let help_text = format!("Help: <↓↑> - Navigate, <ESC> - Dismiss, <?> - Usage Tips");
+        let help_text = "Help: <↓↑> - Navigate, <ESC> - Dismiss, <?> - Usage Tips".to_string();
         Text::new(help_text)
             .color_range(1, 6..=9)
             .color_range(1, 23..=27)
@@ -816,18 +1076,18 @@ fn main_screen_help_text(hovering_over_link: bool, menu_item_is_selected: bool) 
 
 fn release_notes_main_help(hovering_over_link: bool, menu_item_is_selected: bool) -> Text {
     if hovering_over_link {
-        let help_text = format!("Help: Click or Shift-Click to open in browser");
+        let help_text = "Help: Click or Shift-Click to open in browser".to_string();
         Text::new(help_text)
             .color_range(3, 6..=10)
             .color_range(3, 15..=25)
     } else if menu_item_is_selected {
-        let help_text = format!("Help: <↓↑> - Navigate, <ENTER> - Learn More, <ESC> - Dismiss");
+        let help_text = "Help: <↓↑> - Navigate, <ENTER> - Learn More, <ESC> - Dismiss".to_string();
         Text::new(help_text)
             .color_range(1, 6..=9)
             .color_range(1, 23..=29)
             .color_range(1, 45..=49)
     } else {
-        let help_text = format!("Help: <↓↑> - Navigate, <ESC> - Dismiss");
+        let help_text = "Help: <↓↑> - Navigate, <ESC> - Dismiss".to_string();
         Text::new(help_text)
             .color_range(1, 6..=9)
             .color_range(1, 23..=27)
@@ -836,18 +1096,18 @@ fn release_notes_main_help(hovering_over_link: bool, menu_item_is_selected: bool
 
 fn esc_go_back_plus_link_hover(hovering_over_link: bool, _menu_item_is_selected: bool) -> Text {
     if hovering_over_link {
-        let help_text = format!("Help: Click or Shift-Click to open in browser");
+        let help_text = "Help: Click or Shift-Click to open in browser".to_string();
         Text::new(help_text)
             .color_range(3, 6..=10)
             .color_range(3, 15..=25)
     } else {
-        let help_text = format!("Help: <ESC> - Go back");
+        let help_text = "Help: <ESC> - Go back".to_string();
         Text::new(help_text).color_range(1, 6..=10)
     }
 }
 
 fn esc_to_go_back_help() -> Text {
-    let help_text = format!("Help: <ESC> - Go back");
+    let help_text = "Help: <ESC> - Go back".to_string();
     Text::new(help_text).color_range(1, 6..=10)
 }
 
@@ -856,7 +1116,7 @@ fn main_menu_item(item_name: &str) -> Text {
 }
 
 fn support_the_developer_text() -> Text {
-    let support_text = format!("Please support the Zellij developer <3: ");
+    let support_text = "Please support the VibeCrafted / Zellij craft <3: ".to_string();
     Text::new(support_text).color_range(3, ..)
 }
 
@@ -938,8 +1198,7 @@ impl RenderedComponent {
                 bulletin_list.render(x, y, rows, columns);
             },
             RenderedComponent::Paragraph(paragraph) => {
-                let mut paragraph_rendered_rows = 0;
-                for component_line in paragraph {
+                for (paragraph_rendered_rows, component_line) in paragraph.iter_mut().enumerate() {
                     component_line.render(
                         x,
                         y + paragraph_rendered_rows,
@@ -947,7 +1206,6 @@ impl RenderedComponent {
                         columns,
                     );
                     rendered_rows += 1;
-                    paragraph_rendered_rows += 1;
                 }
             },
         }
@@ -1023,14 +1281,14 @@ impl BulletinList {
         });
     }
     pub fn set_active_bulletin(&mut self, new_index: usize) {
-        self.items.get_mut(new_index).map(|i| {
+        if let Some(i) = self.items.get_mut(new_index) {
             i.is_active = true;
-        });
+        }
     }
     pub fn set_last_active_bulletin(&mut self) {
-        self.items.last_mut().map(|i| {
+        if let Some(i) = self.items.last_mut() {
             i.is_active = true;
-        });
+        }
     }
     pub fn render(&mut self, x: usize, y: usize, rows: usize, columns: usize) {
         print_text_with_coordinates(self.title.clone(), x, y, Some(columns), Some(rows));

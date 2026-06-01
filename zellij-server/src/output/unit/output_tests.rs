@@ -27,8 +27,7 @@ fn create_test_output() -> Output {
 
 /// Helper to create a simple CharacterChunk with text
 fn create_character_chunk_from_str(text: &str, x: usize, y: usize) -> CharacterChunk {
-    let terminal_chars: Vec<TerminalCharacter> =
-        text.chars().map(|c| TerminalCharacter::new(c)).collect();
+    let terminal_chars: Vec<TerminalCharacter> = text.chars().map(TerminalCharacter::new).collect();
     CharacterChunk::new(terminal_chars, x, y)
 }
 
@@ -737,7 +736,7 @@ fn test_visible_character_chunks_partially_covered_left() {
     let visible = stack.visible_character_chunks(chunks, Some(0)).unwrap();
 
     // Should retain the right part
-    assert!(visible.len() > 0, "Should have visible chunks");
+    assert!(!visible.is_empty(), "Should have visible chunks");
     if !visible.is_empty() {
         assert!(
             visible[0].x >= 10,
@@ -759,7 +758,7 @@ fn test_visible_character_chunks_partially_covered_right() {
     let visible = stack.visible_character_chunks(chunks, Some(0)).unwrap();
 
     // Should retain the left part
-    assert!(visible.len() > 0, "Should have visible chunks");
+    assert!(!visible.is_empty(), "Should have visible chunks");
     if !visible.is_empty() {
         assert_eq!(visible[0].x, 5, "Visible chunk should start at original x");
         assert!(
@@ -783,7 +782,7 @@ fn test_visible_character_chunks_middle_covered() {
 
     // Should return two chunks (left and right parts)
     assert!(
-        visible.len() >= 1,
+        !visible.is_empty(),
         "Should have at least one visible chunk when middle is covered"
     );
 }

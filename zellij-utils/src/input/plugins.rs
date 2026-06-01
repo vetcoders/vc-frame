@@ -150,13 +150,13 @@ impl PluginConfig {
             }
 
             // Try to read from disk
-            match fs::read(&path) {
+            match fs::read(path) {
                 Ok(val) => {
                     log::debug!("Loaded plugin '{}' from disk", path.display());
                     return Ok(val);
                 },
                 Err(err) => {
-                    last_err = last_err.with_context(|| err_context(err, &path));
+                    last_err = last_err.with_context(|| err_context(err, path));
                 },
             }
         }
@@ -185,7 +185,7 @@ impl PluginConfig {
             }
         }
 
-        return last_err;
+        last_err
     }
 
     pub fn is_builtin(&self) -> bool {

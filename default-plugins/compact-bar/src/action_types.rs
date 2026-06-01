@@ -138,7 +138,7 @@ impl ActionType {
             action if action.launches_plugin("configuration") => ActionType::Configuration,
             action if action.launches_plugin("plugin-manager") => ActionType::PluginManager,
             action if action.launches_plugin("zellij:about") => ActionType::About,
-            action if matches!(action, Action::NewTab { .. }) => ActionType::NewTab,
+            Action::NewTab { .. } => ActionType::NewTab,
             _ => ActionType::Other(format!("{:?}", action)),
         }
     }

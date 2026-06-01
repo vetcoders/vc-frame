@@ -433,10 +433,7 @@ impl Output {
         vte_instruction: &str,
     ) {
         for client_id in client_ids {
-            let entry = self
-                .post_vte_instructions
-                .entry(client_id)
-                .or_insert_with(Vec::new);
+            let entry = self.post_vte_instructions.entry(client_id).or_default();
             entry.push(String::from(vte_instruction));
         }
     }
@@ -446,10 +443,7 @@ impl Output {
         vte_instruction: &str,
     ) {
         for client_id in client_ids {
-            let entry = self
-                .pre_vte_instructions
-                .entry(client_id)
-                .or_insert_with(Vec::new);
+            let entry = self.pre_vte_instructions.entry(client_id).or_default();
             entry.push(String::from(vte_instruction));
         }
     }
@@ -458,10 +452,7 @@ impl Output {
         client_id: ClientId,
         vte_instruction: &str,
     ) {
-        let entry = self
-            .post_vte_instructions
-            .entry(client_id)
-            .or_insert_with(Vec::new);
+        let entry = self.post_vte_instructions.entry(client_id).or_default();
         entry.push(String::from(vte_instruction));
     }
     pub fn add_pre_vte_instruction_to_client(
@@ -469,10 +460,7 @@ impl Output {
         client_id: ClientId,
         vte_instruction: &str,
     ) {
-        let entry = self
-            .pre_vte_instructions
-            .entry(client_id)
-            .or_insert_with(Vec::new);
+        let entry = self.pre_vte_instructions.entry(client_id).or_default();
         entry.push(String::from(vte_instruction));
     }
     pub fn add_sixel_image_chunks_to_client(
@@ -491,7 +479,7 @@ impl Output {
             } else {
                 sixel_image_chunks
             };
-            let entry = self.sixel_chunks.entry(client_id).or_insert_with(Vec::new);
+            let entry = self.sixel_chunks.entry(client_id).or_default();
             entry.append(&mut sixel_chunks);
         }
     }
@@ -512,7 +500,7 @@ impl Output {
                 sixel_image_chunks
             };
             for client_id in client_ids {
-                let entry = self.sixel_chunks.entry(client_id).or_insert_with(Vec::new);
+                let entry = self.sixel_chunks.entry(client_id).or_default();
                 entry.append(&mut sixel_chunks.clone());
             }
         }
@@ -713,7 +701,7 @@ impl FloatingPanesStack {
         };
 
         let z_index = z_index.unwrap_or(0);
-        let mut chunks_to_check: Vec<CharacterChunk> = character_chunks.drain(..).collect();
+        let mut chunks_to_check: Vec<CharacterChunk> = std::mem::take(&mut character_chunks);
         let mut visible_chunks = vec![];
         'chunk_loop: loop {
             match chunks_to_check.pop() {
@@ -749,11 +737,11 @@ impl FloatingPanesStack {
         character_cell_size: &SizeInPixels,
     ) -> Vec<SixelImageChunk> {
         let z_index = z_index.unwrap_or(0);
-        let mut chunks_to_check: Vec<SixelImageChunk> = sixel_image_chunks.drain(..).collect();
+        let mut chunks_to_check: Vec<SixelImageChunk> = std::mem::take(&mut sixel_image_chunks);
         let panes_to_check = self.layers.iter().skip(z_index);
         for pane_geom in panes_to_check {
             let chunks_to_check_against_this_pane: Vec<SixelImageChunk> =
-                chunks_to_check.drain(..).collect();
+                std::mem::take(&mut chunks_to_check);
             for s_chunk in chunks_to_check_against_this_pane {
                 let mut uncovered_chunks =
                     self.remove_covered_sixel_parts(pane_geom, &s_chunk, character_cell_size);
@@ -795,7 +783,7 @@ impl FloatingPanesStack {
                 c_chunk.x = pane_right_edge + 1;
                 return Ok(None);
             } else if pane_left_edge >= c_chunk_left_side
-                && pane_left_edge >= c_chunk_left_side
+                && pane_left_edge < c_chunk_right_side
                 && pane_right_edge >= c_chunk_right_side
             {
                 // pane covers chunk partially to the right
@@ -834,20 +822,24 @@ impl FloatingPanesStack {
         character_cell_size: &SizeInPixels,
     ) -> Vec<SixelImageChunk> {
         // round these up to the nearest cell edge
-        let rounded_sixel_image_pixel_height =
-            if s_chunk.sixel_image_pixel_height % character_cell_size.height > 0 {
-                let modulus = s_chunk.sixel_image_pixel_height % character_cell_size.height;
-                s_chunk.sixel_image_pixel_height + (character_cell_size.height - modulus)
-            } else {
-                s_chunk.sixel_image_pixel_height
-            };
-        let rounded_sixel_image_pixel_width =
-            if s_chunk.sixel_image_pixel_width % character_cell_size.width > 0 {
-                let modulus = s_chunk.sixel_image_pixel_width % character_cell_size.width;
-                s_chunk.sixel_image_pixel_width + (character_cell_size.width - modulus)
-            } else {
-                s_chunk.sixel_image_pixel_width
-            };
+        let rounded_sixel_image_pixel_height = if !s_chunk
+            .sixel_image_pixel_height
+            .is_multiple_of(character_cell_size.height)
+        {
+            let modulus = s_chunk.sixel_image_pixel_height % character_cell_size.height;
+            s_chunk.sixel_image_pixel_height + (character_cell_size.height - modulus)
+        } else {
+            s_chunk.sixel_image_pixel_height
+        };
+        let rounded_sixel_image_pixel_width = if !s_chunk
+            .sixel_image_pixel_width
+            .is_multiple_of(character_cell_size.width)
+        {
+            let modulus = s_chunk.sixel_image_pixel_width % character_cell_size.width;
+            s_chunk.sixel_image_pixel_width + (character_cell_size.width - modulus)
+        } else {
+            s_chunk.sixel_image_pixel_width
+        };
 
         let pane_top_edge = pane_geom.y * character_cell_size.height;
         let pane_left_edge = pane_geom.x * character_cell_size.width;

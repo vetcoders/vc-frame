@@ -330,7 +330,7 @@ impl<'a> FloatingPaneGrid<'a> {
         let panes = self.panes.borrow();
         let pane = panes
             .get(pane_id)
-            .with_context(|| no_pane_id(&pane_id))
+            .with_context(|| no_pane_id(pane_id))
             .with_context(err_context)?;
         let space_until_left_screen_edge = pane.x().saturating_sub(self.viewport.x);
 
@@ -353,7 +353,7 @@ impl<'a> FloatingPaneGrid<'a> {
         let panes = self.panes.borrow();
         let pane = panes
             .get(pane_id)
-            .with_context(|| no_pane_id(&pane_id))
+            .with_context(|| no_pane_id(pane_id))
             .with_context(err_context)?;
         let space_until_right_screen_edge =
             (self.viewport.x + self.viewport.cols).saturating_sub(pane.x() + pane.cols());
@@ -374,7 +374,7 @@ impl<'a> FloatingPaneGrid<'a> {
         let panes = self.panes.borrow();
         let pane = panes
             .get(pane_id)
-            .with_context(|| no_pane_id(&pane_id))
+            .with_context(|| no_pane_id(pane_id))
             .with_context(err_context)?;
         let space_until_top_screen_edge = pane.y().saturating_sub(self.viewport.y);
 
@@ -395,7 +395,7 @@ impl<'a> FloatingPaneGrid<'a> {
         let panes = self.panes.borrow();
         let pane = panes
             .get(pane_id)
-            .with_context(|| no_pane_id(&pane_id))
+            .with_context(|| no_pane_id(pane_id))
             .with_context(err_context)?;
         let space_until_bottom_screen_edge =
             (self.viewport.y + self.viewport.rows).saturating_sub(pane.y() + pane.rows());
@@ -416,7 +416,7 @@ impl<'a> FloatingPaneGrid<'a> {
             let mut panes = self.panes.borrow_mut();
             let pane = panes
                 .get_mut(pane_id)
-                .with_context(|| no_pane_id(&pane_id))
+                .with_context(|| no_pane_id(pane_id))
                 .with_context(err_context)?;
             let mut current_geom = pane.position_and_size();
             current_geom.x -= move_by;
@@ -433,7 +433,7 @@ impl<'a> FloatingPaneGrid<'a> {
             let mut panes = self.panes.borrow_mut();
             let pane = panes
                 .get_mut(pane_id)
-                .with_context(|| no_pane_id(&pane_id))
+                .with_context(|| no_pane_id(pane_id))
                 .with_context(err_context)?;
             let mut current_geom = pane.position_and_size();
             current_geom.x += move_by;
@@ -450,7 +450,7 @@ impl<'a> FloatingPaneGrid<'a> {
             let mut panes = self.panes.borrow_mut();
             let pane = panes
                 .get_mut(pane_id)
-                .with_context(|| no_pane_id(&pane_id))
+                .with_context(|| no_pane_id(pane_id))
                 .with_context(err_context)?;
             let mut current_geom = pane.position_and_size();
             current_geom.y += move_by;
@@ -467,7 +467,7 @@ impl<'a> FloatingPaneGrid<'a> {
             let mut panes = self.panes.borrow_mut();
             let pane = panes
                 .get_mut(pane_id)
-                .with_context(|| no_pane_id(&pane_id))
+                .with_context(|| no_pane_id(pane_id))
                 .with_context(err_context)?;
             let mut current_geom = pane.position_and_size();
             current_geom.y -= move_by;
@@ -489,7 +489,7 @@ impl<'a> FloatingPaneGrid<'a> {
             .panes
             .borrow()
             .get(pane_id)
-            .with_context(|| no_pane_id(&pane_id))
+            .with_context(|| no_pane_id(pane_id))
             .with_context(err_context)?
             .position_and_size();
 
@@ -765,7 +765,7 @@ impl<'a> FloatingPaneGrid<'a> {
 
         let next_active_pane_id = panes
             .get(active_pane_position + 1)
-            .or_else(|| panes.get(0))
+            .or_else(|| panes.first())
             .map(|p| p.0)?;
         Some(next_active_pane_id)
     }
@@ -846,7 +846,7 @@ impl<'a> FloatingPaneGrid<'a> {
             &self.viewport,
             &pane_geoms
         );
-        return None;
+        None
     }
 }
 

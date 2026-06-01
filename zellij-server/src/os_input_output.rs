@@ -1,3 +1,5 @@
+pub use crate::os_input_output_api::AsyncReader;
+pub(crate) use crate::os_input_output_api::NullAsyncReader;
 use crate::{panes::PaneId, ClientId};
 
 use interprocess::local_socket::Stream as LocalSocketStream;
@@ -27,71 +29,11 @@ use std::{
     collections::{BTreeMap, HashMap},
     env,
     fs::File,
-    io::{self, Write},
+    io::Write,
     path::PathBuf,
     process::Command,
     sync::{Arc, Mutex},
 };
-
-pub use async_trait::async_trait;
-
-/// Check whether a candidate path refers to an executable file, considering
-/// PATHEXT extensions on Windows (e.g. `.exe`, `.cmd`).
-fn find_executable(candidate: &std::path::Path) -> Option<PathBuf> {
-    if candidate.exists() && candidate.is_file() {
-        return Some(candidate.to_path_buf());
-    }
-    #[cfg(windows)]
-    {
-        if let Some(pathext) = env::var_os("PATHEXT") {
-            let pathext = pathext.to_string_lossy();
-            for ext in pathext.split(';') {
-                let ext = ext.trim();
-                if ext.is_empty() {
-                    continue;
-                }
-                let mut with_ext = candidate.as_os_str().to_os_string();
-                with_ext.push(ext);
-                let with_ext_path = PathBuf::from(with_ext);
-                if with_ext_path.exists() && with_ext_path.is_file() {
-                    return Some(with_ext_path);
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Resolve a command to its absolute path, searching the working directory,
-/// then PATH (and PATHEXT on Windows).
-pub(crate) fn resolve_command(cmd: &RunCommand) -> Option<PathBuf> {
-    let command = &cmd.command;
-    match cmd.cwd.as_ref() {
-        Some(cwd) => {
-            if let Some(resolved) = find_executable(&cwd.join(command)) {
-                return Some(resolved);
-            }
-        },
-        None => {
-            if let Some(resolved) = find_executable(command) {
-                return Some(resolved);
-            }
-        },
-    }
-    if let Some(paths) = env::var_os("PATH") {
-        for path in env::split_paths(&paths) {
-            if let Some(resolved) = find_executable(&path.join(command)) {
-                return Some(resolved);
-            }
-        }
-    }
-    None
-}
-
-#[cfg(not(windows))]
-pub(crate) fn command_exists(cmd: &RunCommand) -> bool {
-    resolve_command(cmd).is_some()
-}
 
 // this is a utility method to separate the arguments from a pathbuf before we turn it into a
 // Command. eg. "/usr/bin/vim -e" ==> "/usr/bin/vim" + "-e" (the latter will be pushed to args)
@@ -104,7 +46,7 @@ fn separate_command_arguments(command: &mut PathBuf, args: &mut Vec<String>) {
             let _ = current_part.pop();
             current_part.push(' ');
         } else {
-            let current_part = std::mem::replace(&mut current_part, String::new());
+            let current_part = std::mem::take(&mut current_part);
             parts.push(current_part);
         }
     }
@@ -249,41 +191,26 @@ impl ClientSender {
 
         self.client_buffer_sender
             .try_send(msg)
-            .or_else(|err| {
+            .map_err(|err| {
                 if let TrySendError::Full(_) = err {
                     log::warn!(
                         "client {} is processing server messages too slow",
                         self.client_id
                     );
                 }
-                Err(err)
+                err
             })
             .with_context(err_context)
     }
 }
 
+type CachedResizes = Arc<Mutex<Option<BTreeMap<u32, (u16, u16, Option<u16>, Option<u16>)>>>>;
+
 #[derive(Clone)]
 pub struct ServerOsInputOutput {
     pty_backend: PtyBackendImpl,
     client_senders: Arc<Mutex<HashMap<ClientId, ClientSender>>>,
-    cached_resizes: Arc<Mutex<Option<BTreeMap<u32, (u16, u16, Option<u16>, Option<u16>)>>>>,
-}
-
-/// A null `AsyncReader` for held panes (produces EOF immediately).
-pub(crate) struct NullAsyncReader;
-
-// async fn in traits is not supported by rust, so dtolnay's excellent async_trait macro is being
-// used. See https://smallcultfollowing.com/babysteps/blog/2019/10/26/async-fn-in-traits-are-hard/
-#[async_trait]
-pub trait AsyncReader: Send + Sync {
-    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, io::Error>;
-}
-
-#[async_trait]
-impl AsyncReader for NullAsyncReader {
-    async fn read(&mut self, _buf: &mut [u8]) -> Result<usize, io::Error> {
-        Ok(0) // EOF
-    }
+    cached_resizes: CachedResizes,
 }
 
 /// The `ServerOsApi` trait represents an abstract interface to the features of an operating system that
@@ -549,11 +476,7 @@ impl ServerOsApi for ServerOsInputOutput {
     fn get_all_cmds_by_ppid(&self, post_hook: &Option<String>) -> HashMap<String, Vec<String>> {
         // the key is the stringified ppid
         let mut cmds = HashMap::new();
-        if let Some(output) = Command::new("ps")
-            .args(vec!["-ao", "ppid,args"])
-            .output()
-            .ok()
-        {
+        if let Ok(output) = Command::new("ps").args(vec!["-ao", "ppid,args"]).output() {
             let output = String::from_utf8(output.stdout.clone())
                 .unwrap_or_else(|_| String::from_utf8_lossy(&output.stdout).to_string());
             for line in output.lines() {
@@ -581,10 +504,10 @@ impl ServerOsApi for ServerOsInputOutput {
                                 .split_ascii_whitespace()
                                 .map(|p| p.to_owned())
                                 .collect();
-                            cmds.insert(ppid.into(), line_parts);
+                            cmds.insert(ppid, line_parts);
                         },
                         None => {
-                            cmds.insert(ppid.into(), line_parts.collect());
+                            cmds.insert(ppid, line_parts.collect());
                         },
                     }
                 }
@@ -676,8 +599,8 @@ impl ServerOsApi for ServerOsInputOutput {
                     *terminal_id,
                     *cols,
                     *rows,
-                    width_in_pixels.clone(),
-                    height_in_pixels.clone(),
+                    *width_in_pixels,
+                    *height_in_pixels,
                 );
             }
         }

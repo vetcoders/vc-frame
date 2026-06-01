@@ -1,4 +1,6 @@
-use crate::os_input_output::SignalEvent;
+use crate::os_input_output_common::{
+    AsyncSignals, SignalEvent, DISABLE_MOUSE_SUPPORT, ENABLE_MOUSE_SUPPORT,
+};
 
 use async_trait::async_trait;
 use signal_hook::consts::signal::*;
@@ -33,7 +35,7 @@ impl AsyncSignalListener {
 }
 
 #[async_trait]
-impl crate::os_input_output::AsyncSignals for AsyncSignalListener {
+impl AsyncSignals for AsyncSignalListener {
     async fn recv(&mut self) -> Option<SignalEvent> {
         tokio::select! {
             result = self.sigwinch.recv() => result.map(|_| SignalEvent::Resize),
@@ -91,7 +93,7 @@ pub(crate) fn setup_ipc(
 pub(crate) fn enable_mouse_support(stdout: &mut dyn Write) -> Result<()> {
     let err_context = "failed to enable mouse mode";
     stdout
-        .write_all(super::os_input_output::ENABLE_MOUSE_SUPPORT.as_bytes())
+        .write_all(ENABLE_MOUSE_SUPPORT.as_bytes())
         .context(err_context)?;
     stdout.flush().context(err_context)?;
     Ok(())
@@ -100,7 +102,7 @@ pub(crate) fn enable_mouse_support(stdout: &mut dyn Write) -> Result<()> {
 pub(crate) fn disable_mouse_support(stdout: &mut dyn Write) -> Result<()> {
     let err_context = "failed to disable mouse mode";
     stdout
-        .write_all(super::os_input_output::DISABLE_MOUSE_SUPPORT.as_bytes())
+        .write_all(DISABLE_MOUSE_SUPPORT.as_bytes())
         .context(err_context)?;
     stdout.flush().context(err_context)?;
     Ok(())

@@ -8,7 +8,6 @@ import { getBaseUrl } from "./utils.js";
 let reconnectionAttempt = 0;
 let isReconnecting = false;
 let isDisconnected = false;
-let reconnectionTimeout = null;
 let hasConnectedBefore = false;
 let isPageUnloading = false;
 
@@ -62,7 +61,6 @@ export async function handleReconnection() {
     }
 
     isReconnecting = true;
-    let currentModal = null;
 
     while (isReconnecting) {
         reconnectionAttempt++;
@@ -81,7 +79,6 @@ export async function handleReconnection() {
         }
 
         if (result.action === "reconnect") {
-            currentModal = result.modal;
             const connectionOk = await checkConnection();
 
             if (connectionOk) {
@@ -116,16 +113,4 @@ export function initConnectionHandlers() {
  */
 export function markConnectionEstablished() {
     hasConnectedBefore = true;
-}
-
-/**
- * Reset connection state
- */
-export function resetConnectionState() {
-    reconnectionAttempt = 0;
-    isReconnecting = false;
-    isDisconnected = false;
-    reconnectionTimeout = null;
-    hasConnectedBefore = false;
-    isPageUnloading = false;
 }

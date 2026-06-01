@@ -7,6 +7,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 ## [Unreleased]
 * feat: allow tabs to have different sizes if clients aren't focused on the same one (https://github.com/zellij-org/zellij/pull/5133)
 
+## [0.45.1] - 2026-05-13
+* fix: skip render pipeline work and reduce polling when all clients are detached
+* fix: use macOS FSEvents for file watching instead of the kqueue backend
+* feat: add VibeCrafted shell layouts, dashboard surfaces, and mission-control guidance
+* refactor: split session-manager rendering/navigation state and pane row rendering utilities
+* refactor: split server background jobs and OS input/output APIs
+* chore: bump Zellij workspace packages to 0.45.1
+
 ## [0.44.3] - 2026-05-13
 * fix(windows): bump windows-sys to 0.59 to align manifest with code, fixing source builds via `cargo install`/`cargo binstall` (https://github.com/zellij-org/zellij/pull/5139)
 * fix: deadlock with --blocking panes (https://github.com/zellij-org/zellij/pull/5152)

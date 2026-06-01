@@ -32,8 +32,7 @@ impl CliAssets {
             } else if let Some(ref path) = self.config_file_path {
                 let default_config =
                     Config::from_default_assets().unwrap_or_else(|_| Default::default());
-                Config::from_path(path, Some(default_config.clone()))
-                    .unwrap_or_else(|_| default_config)
+                Config::from_path(path, Some(default_config.clone())).unwrap_or(default_config)
             } else {
                 Config::from_default_assets().unwrap_or_else(|_| Default::default())
             }
@@ -56,7 +55,6 @@ impl CliAssets {
                     .ok()
             })
         }
-        .map(|(layout, config)| (layout, config))
         .unwrap_or_else(|| (Layout::default_layout_asset(), config));
 
         if self.force_run_layout_commands {

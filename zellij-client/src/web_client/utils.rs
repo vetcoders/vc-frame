@@ -32,7 +32,7 @@ pub fn should_use_https(
     if is_loopback && !enforce_https_for_localhost {
         Ok(has_certificate)
     } else if is_loopback {
-        Err(format!("Cannot bind without an SSL certificate."))
+        Err("Cannot bind without an SSL certificate.".to_string())
     } else if has_certificate {
         Ok(true)
     } else {

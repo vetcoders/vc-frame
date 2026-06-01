@@ -1,7 +1,7 @@
 use super::*;
 use crate::os_input_output::{AsyncReader, ServerOsApi};
 use crate::panes::PaneId;
-use crate::thread_bus::Bus;
+use crate::thread_bus::{Bus, ThreadSenders};
 use interprocess::local_socket::Stream as LocalSocketStream;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -27,12 +27,14 @@ enum WriteBehavior {
     Error,
 }
 
+type WriteLog = Arc<Mutex<Vec<(u32, Vec<u8>)>>>;
+
 #[derive(Clone)]
 struct MockServerOsApi {
     /// Controls how each terminal behaves on write.
     write_behavior: Arc<Mutex<HashMap<u32, WriteBehavior>>>,
     /// Log of (terminal_id, bytes) for each successful write.
-    write_log: Arc<Mutex<Vec<(u32, Vec<u8>)>>>,
+    write_log: WriteLog,
 }
 
 impl MockServerOsApi {
@@ -180,12 +182,7 @@ fn make_test_bus(
     let sender_with_ctx = SenderWithContext::new(sender);
     let bus = Bus::new(
         vec![receiver],
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        ThreadSenders::default(),
         Some(Box::new(mock)),
     );
     (bus, sender_with_ctx)

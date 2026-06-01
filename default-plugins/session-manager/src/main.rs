@@ -1,19 +1,24 @@
+mod list_navigation;
 mod new_session_info;
 mod resurrectable_sessions;
 mod session_list;
 mod single_screen;
+mod single_screen_data;
+mod single_screen_render;
 mod ui;
 use std::collections::BTreeMap;
 use uuid::Uuid;
 use zellij_tile::prelude::*;
 
 use new_session_info::NewSessionInfo;
-use single_screen::{DeleteTarget, SingleScreenMode, SingleScreenState, UnifiedSearchResult};
+use single_screen::{SingleScreenMode, SingleScreenState};
+use single_screen_data::{DeleteTarget, UnifiedSearchResult};
+use single_screen_render::render_unified_results;
 use ui::{
     components::{
         render_controls_line, render_error, render_new_session_block, render_prompt,
         render_renaming_session_screen, render_screen_toggle, render_single_screen_prompt,
-        render_unified_results, render_unsaved_changes_line, Colors,
+        render_unsaved_changes_line, Colors,
     },
     welcome_screen::{render_banner, render_welcome_boundaries},
     SessionUiInfo,
@@ -22,18 +27,13 @@ use ui::{
 use resurrectable_sessions::ResurrectableSessions;
 use session_list::SessionList;
 
-#[derive(Clone, Debug, Copy, PartialEq)]
+#[derive(Clone, Debug, Copy, PartialEq, Default)]
 enum ActiveScreen {
     NewSession,
+    #[default]
     AttachToSession,
     ResurrectSession,
     SingleScreen,
-}
-
-impl Default for ActiveScreen {
-    fn default() -> Self {
-        ActiveScreen::AttachToSession
-    }
 }
 
 #[derive(Default)]
@@ -87,7 +87,18 @@ impl ZellijPlugin for State {
             EventType::Timer,
             EventType::Visible,
         ]);
-        rename_plugin_pane(get_plugin_ids().plugin_id, "Session Manager");
+        let pane_title = if self.is_welcome_screen {
+            configuration
+                .get("pane_title")
+                .cloned()
+                .unwrap_or_else(|| "𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Shell".to_owned())
+        } else {
+            configuration
+                .get("pane_title")
+                .cloned()
+                .unwrap_or_else(|| "Session Manager".to_owned())
+        };
+        rename_plugin_pane(get_plugin_ids().plugin_id, pane_title);
         self.refresh_session_list();
         if !self.is_welcome_screen {
             self.arm_refresh_timer();
@@ -96,24 +107,23 @@ impl ZellijPlugin for State {
 
     fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
         if pipe_message.name == "filepicker_result" {
-            match (pipe_message.payload, pipe_message.args.get("request_id")) {
-                (Some(payload), Some(request_id)) => {
-                    match self.request_ids.iter().position(|p| p == request_id) {
-                        Some(request_id_position) => {
-                            self.request_ids.remove(request_id_position);
-                            let new_session_folder = std::path::PathBuf::from(payload);
-                            if !self.is_multi_screen {
-                                self.single_screen_state.new_session_folder =
-                                    Some(new_session_folder.clone());
-                            }
-                            self.new_session_info.new_session_folder = Some(new_session_folder);
-                        },
-                        None => {
-                            eprintln!("request id not found");
-                        },
-                    }
-                },
-                _ => {},
+            if let (Some(payload), Some(request_id)) =
+                (pipe_message.payload, pipe_message.args.get("request_id"))
+            {
+                match self.request_ids.iter().position(|p| p == request_id) {
+                    Some(request_id_position) => {
+                        self.request_ids.remove(request_id_position);
+                        let new_session_folder = std::path::PathBuf::from(payload);
+                        if !self.is_multi_screen {
+                            self.single_screen_state.new_session_folder =
+                                Some(new_session_folder.clone());
+                        }
+                        self.new_session_info.new_session_folder = Some(new_session_folder);
+                    },
+                    None => {
+                        eprintln!("request id not found");
+                    },
+                }
             }
             true
         } else {
@@ -227,7 +237,7 @@ impl ZellijPlugin for State {
             },
             ActiveScreen::AttachToSession => {
                 if let Some(new_session_name) = self.renaming_session_name.as_ref() {
-                    render_renaming_session_screen(&new_session_name, height, width, x, y + 2);
+                    render_renaming_session_screen(new_session_name, height, width, x, y + 2);
                 } else if self.show_kill_all_sessions_warning {
                     self.render_kill_all_sessions_warning(height, width, x, y);
                 } else {
@@ -356,7 +366,7 @@ impl ZellijPlugin for State {
                             .into_iter()
                             .enumerate()
                         {
-                            let layout_name = layout_info.name();
+                            let layout_name = layout_info.display_name();
                             let layout_name_len = layout_name.len();
                             let is_builtin = layout_info.is_builtin();
                             if i > max_layout_rows.saturating_sub(1) {
@@ -368,7 +378,7 @@ impl ZellijPlugin for State {
                                     .color_range(0, layout_name_len + 1..)
                                     .color_indices(3, indices)
                             } else {
-                                Text::new(format!("{}", layout_name))
+                                Text::new(layout_name)
                                     .color_range(1, ..)
                                     .color_indices(3, indices)
                             };
@@ -376,9 +386,9 @@ impl ZellijPlugin for State {
                                 layout_cell = layout_cell.selected();
                             }
                             let arrow_cell = if is_selected {
-                                Text::new(format!("<↓↑>")).selected().color_range(3, ..)
+                                Text::new("<↓↑>".to_string()).selected().color_range(3, ..)
                             } else {
-                                Text::new(format!("    ")).color_range(3, ..)
+                                Text::new("    ".to_string()).color_range(3, ..)
                             };
                             table = table.add_styled_row(vec![arrow_cell, layout_cell]);
                         }
@@ -395,7 +405,7 @@ impl ZellijPlugin for State {
             },
         }
         if let Some(error) = self.error.as_ref() {
-            render_error(&error, height, width, x, y);
+            render_error(error, height, width, x, y);
         } else if (self.active_screen == ActiveScreen::AttachToSession
             || self.active_screen == ActiveScreen::SingleScreen)
             && !self.is_welcome_screen
@@ -617,7 +627,7 @@ impl State {
                         let was_searching = self.sessions.is_searching;
                         let prev_search_idx = self.sessions.selected_search_index;
                         let prev_top_idx = self.sessions.selected_index.0;
-                        match kill_sessions(&[selected_session_name.clone()]) {
+                        match kill_sessions(std::slice::from_ref(&selected_session_name)) {
                             Ok(()) => {
                                 self.sessions
                                     .session_ui_infos
@@ -874,9 +884,10 @@ impl State {
                 if let Some(target) = selected {
                     let previous_index = self.single_screen_state.selected_index;
                     let outcome: Result<(), String> = match &target {
-                        DeleteTarget::Active(name) => kill_sessions(&[name.clone()]).map(|()| {
-                            self.sessions.session_ui_infos.retain(|s| s.name != *name);
-                        }),
+                        DeleteTarget::Active(name) => kill_sessions(std::slice::from_ref(name))
+                            .map(|()| {
+                                self.sessions.session_ui_infos.retain(|s| s.name != *name);
+                            }),
                         DeleteTarget::Resurrectable(name) => delete_dead_session(name).map(|()| {
                             self.resurrectable_sessions
                                 .all_resurrectable_sessions
@@ -1038,12 +1049,12 @@ impl State {
                     } else if self.session_name.as_ref() == Some(renaming_session_name) {
                         // noop - we're already called that!
                         return; // so that we don't hide self
-                    } else if self.sessions.has_session(&renaming_session_name) {
+                    } else if self.sessions.has_session(renaming_session_name) {
                         self.show_error("A session by this name already exists.");
                         return; // so that we don't hide self
                     } else if self
                         .resurrectable_sessions
-                        .has_session(&renaming_session_name)
+                        .has_session(renaming_session_name)
                     {
                         self.show_error("A resurrectable session by this name already exists.");
                         return; // s that we don't hide self
@@ -1052,8 +1063,8 @@ impl State {
                             self.show_error("Session names cannot contain '/'");
                             return;
                         }
-                        self.update_current_session_name_in_ui(&renaming_session_name);
-                        rename_session(&renaming_session_name);
+                        self.update_current_session_name_in_ui(renaming_session_name);
+                        rename_session(renaming_session_name);
                         return; // s that we don't hide self
                     }
                 }
@@ -1115,12 +1126,12 @@ impl State {
                         return;
                     } else if self.session_name.as_ref() == Some(renaming_session_name) {
                         return;
-                    } else if self.sessions.has_session(&renaming_session_name) {
+                    } else if self.sessions.has_session(renaming_session_name) {
                         self.show_error("A session by this name already exists.");
                         return;
                     } else if self
                         .resurrectable_sessions
-                        .has_session(&renaming_session_name)
+                        .has_session(renaming_session_name)
                     {
                         self.show_error("A resurrectable session by this name already exists.");
                         return;
@@ -1129,8 +1140,8 @@ impl State {
                             self.show_error("Session names cannot contain '/'");
                             return;
                         }
-                        self.update_current_session_name_in_ui(&renaming_session_name);
-                        rename_session(&renaming_session_name);
+                        self.update_current_session_name_in_ui(renaming_session_name);
+                        rename_session(renaming_session_name);
                         return;
                     }
                 }
@@ -1218,7 +1229,7 @@ impl State {
                         let layout = self.single_screen_state.layout_list.selected_layout_info();
                         let cwd = self.single_screen_state.new_session_folder.clone();
 
-                        if new_session_name != self.session_name.as_ref().map(|s| s.as_str()) {
+                        if new_session_name != self.session_name.as_deref() {
                             match layout {
                                 Some(layout_info) => {
                                     switch_session_with_layout(new_session_name, layout_info, cwd);
@@ -1254,7 +1265,7 @@ impl State {
     fn update_current_session_name_in_ui(&mut self, new_name: &str) {
         if let Some(old_session_name) = self.session_name.as_ref() {
             self.sessions
-                .update_session_name(&old_session_name, new_name);
+                .update_session_name(old_session_name, new_name);
         }
         self.session_name = Some(new_name.to_owned());
     }

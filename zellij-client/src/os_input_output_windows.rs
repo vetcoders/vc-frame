@@ -1,4 +1,6 @@
-use crate::os_input_output::SignalEvent;
+use crate::os_input_output_common::{
+    AsyncSignals, SignalEvent, DISABLE_MOUSE_SUPPORT, ENABLE_MOUSE_SUPPORT,
+};
 use crate::stdin_handler_windows::restore_vt_input;
 
 use anyhow::{Context, Result};
@@ -35,7 +37,7 @@ impl AsyncSignalListener {
 }
 
 #[async_trait]
-impl crate::os_input_output::AsyncSignals for AsyncSignalListener {
+impl AsyncSignals for AsyncSignalListener {
     async fn recv(&mut self) -> Option<SignalEvent> {
         loop {
             tokio::select! {
@@ -209,7 +211,7 @@ pub(crate) fn enable_mouse_support(stdout: &mut dyn Write) -> Result<()> {
     if std::env::var("TERM").is_ok() {
         enable_vt_processing_on_stdout();
         stdout
-            .write_all(super::os_input_output::ENABLE_MOUSE_SUPPORT.as_bytes())
+            .write_all(ENABLE_MOUSE_SUPPORT.as_bytes())
             .context(err_context)?;
         stdout.flush().context(err_context)?;
     } else {
@@ -238,7 +240,7 @@ pub(crate) fn disable_mouse_support(stdout: &mut dyn Write) -> Result<()> {
     let err_context = "failed to disable mouse mode";
     if std::env::var("TERM").is_ok() {
         stdout
-            .write_all(super::os_input_output::DISABLE_MOUSE_SUPPORT.as_bytes())
+            .write_all(DISABLE_MOUSE_SUPPORT.as_bytes())
             .context(err_context)?;
         stdout.flush().context(err_context)?;
     } else {

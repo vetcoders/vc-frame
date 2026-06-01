@@ -10,7 +10,7 @@ pub struct Text {
 }
 
 impl Text {
-    pub fn new<S: AsRef<str>>(content: S) -> Self
+    pub fn new<S>(content: S) -> Self
     where
         S: ToString,
     {
@@ -32,9 +32,9 @@ impl Text {
     pub fn dim_indices(mut self, mut indices: Vec<usize>) -> Self {
         const DIM_LEVEL: usize = 4;
         self.pad_indices(DIM_LEVEL);
-        self.indices
-            .get_mut(DIM_LEVEL)
-            .map(|i| i.append(&mut indices));
+        if let Some(i) = self.indices.get_mut(DIM_LEVEL) {
+            i.append(&mut indices)
+        }
         self
     }
     pub fn dim_range<R: RangeBounds<usize>>(mut self, indices: R) -> Self {
@@ -50,10 +50,10 @@ impl Text {
             Bound::Included(s) => *s + 1,
             Bound::Excluded(s) => *s,
         };
-        let indices = (start..end).into_iter();
-        self.indices
-            .get_mut(DIM_LEVEL)
-            .map(|i| i.append(&mut indices.into_iter().collect()));
+        let indices = start..end;
+        if let Some(i) = self.indices.get_mut(DIM_LEVEL) {
+            i.append(&mut indices.into_iter().collect())
+        }
         self
     }
     pub fn dim_substring<S: AsRef<str>>(mut self, substr: S) -> Self {
@@ -75,9 +75,9 @@ impl Text {
     pub fn unbold_indices(mut self, mut indices: Vec<usize>) -> Self {
         const UNBOLD_LEVEL: usize = 5;
         self.pad_indices(UNBOLD_LEVEL);
-        self.indices
-            .get_mut(UNBOLD_LEVEL)
-            .map(|i| i.append(&mut indices));
+        if let Some(i) = self.indices.get_mut(UNBOLD_LEVEL) {
+            i.append(&mut indices)
+        }
         self
     }
     pub fn unbold_range<R: RangeBounds<usize>>(mut self, indices: R) -> Self {
@@ -93,10 +93,10 @@ impl Text {
             Bound::Included(s) => *s + 1,
             Bound::Excluded(s) => *s,
         };
-        let indices = (start..end).into_iter();
-        self.indices
-            .get_mut(UNBOLD_LEVEL)
-            .map(|i| i.append(&mut indices.into_iter().collect()));
+        let indices = start..end;
+        if let Some(i) = self.indices.get_mut(UNBOLD_LEVEL) {
+            i.append(&mut indices.into_iter().collect())
+        }
         self
     }
     pub fn unbold_substring<S: AsRef<str>>(mut self, substr: S) -> Self {
@@ -118,9 +118,9 @@ impl Text {
     pub fn error_color_indices(mut self, mut indices: Vec<usize>) -> Self {
         const ERROR_COLOR_LEVEL: usize = 6;
         self.pad_indices(ERROR_COLOR_LEVEL);
-        self.indices
-            .get_mut(ERROR_COLOR_LEVEL)
-            .map(|i| i.append(&mut indices));
+        if let Some(i) = self.indices.get_mut(ERROR_COLOR_LEVEL) {
+            i.append(&mut indices)
+        }
         self
     }
     pub fn error_color_range<R: RangeBounds<usize>>(mut self, indices: R) -> Self {
@@ -136,10 +136,10 @@ impl Text {
             Bound::Included(s) => *s + 1,
             Bound::Excluded(s) => *s,
         };
-        let indices = (start..end).into_iter();
-        self.indices
-            .get_mut(ERROR_COLOR_LEVEL)
-            .map(|i| i.append(&mut indices.into_iter().collect()));
+        let indices = start..end;
+        if let Some(i) = self.indices.get_mut(ERROR_COLOR_LEVEL) {
+            i.append(&mut indices.into_iter().collect())
+        }
         self
     }
     pub fn error_color_substring<S: AsRef<str>>(mut self, substr: S) -> Self {
@@ -200,9 +200,9 @@ impl Text {
     pub fn success_color_indices(mut self, mut indices: Vec<usize>) -> Self {
         const SUCCESS_COLOR_LEVEL: usize = 7;
         self.pad_indices(SUCCESS_COLOR_LEVEL);
-        self.indices
-            .get_mut(SUCCESS_COLOR_LEVEL)
-            .map(|i| i.append(&mut indices));
+        if let Some(i) = self.indices.get_mut(SUCCESS_COLOR_LEVEL) {
+            i.append(&mut indices)
+        }
         self
     }
     pub fn success_color_range<R: RangeBounds<usize>>(mut self, indices: R) -> Self {
@@ -218,10 +218,10 @@ impl Text {
             Bound::Included(s) => *s + 1,
             Bound::Excluded(s) => *s,
         };
-        let indices = (start..end).into_iter();
-        self.indices
-            .get_mut(SUCCESS_COLOR_LEVEL)
-            .map(|i| i.append(&mut indices.into_iter().collect()));
+        let indices = start..end;
+        if let Some(i) = self.indices.get_mut(SUCCESS_COLOR_LEVEL) {
+            i.append(&mut indices.into_iter().collect())
+        }
         self
     }
     pub fn success_color_substring<S: AsRef<str>>(mut self, substr: S) -> Self {
@@ -281,9 +281,9 @@ impl Text {
     }
     pub fn color_indices(mut self, index_level: usize, mut indices: Vec<usize>) -> Self {
         self.pad_indices(index_level);
-        self.indices
-            .get_mut(index_level)
-            .map(|i| i.append(&mut indices));
+        if let Some(i) = self.indices.get_mut(index_level) {
+            i.append(&mut indices)
+        }
         self
     }
     pub fn color_range<R: RangeBounds<usize>>(mut self, index_level: usize, indices: R) -> Self {
@@ -298,10 +298,10 @@ impl Text {
             Bound::Included(s) => *s + 1,
             Bound::Excluded(s) => *s,
         };
-        let indices = (start..end).into_iter();
-        self.indices
-            .get_mut(index_level)
-            .map(|i| i.append(&mut indices.into_iter().collect()));
+        let indices = start..end;
+        if let Some(i) = self.indices.get_mut(index_level) {
+            i.append(&mut indices.into_iter().collect())
+        }
         self
     }
 
@@ -405,6 +405,9 @@ impl Text {
     }
     pub fn len(&self) -> usize {
         self.text.chars().count()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
     }
 }
 

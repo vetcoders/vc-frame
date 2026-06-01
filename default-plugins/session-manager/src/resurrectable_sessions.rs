@@ -6,6 +6,10 @@ use std::time::Duration;
 
 use zellij_tile::shim::*;
 
+use crate::list_navigation::{
+    move_wrapping_selection_down, move_wrapping_selection_up, range_to_render,
+};
+
 #[derive(Debug, Default)]
 pub struct ResurrectableSessions {
     pub all_resurrectable_sessions: Vec<(String, Duration)>,
@@ -33,18 +37,17 @@ impl ResurrectableSessions {
         let search_indication =
             Text::new(format!("Search: {}_", self.search_term)).color_range(2, ..7);
         let table_rows = rows.saturating_sub(5); // search row, toggle row and some padding
-        let table_columns = columns;
         let table = if self.is_searching {
             self.render_search_results(table_rows, columns)
         } else {
             self.render_all_entries(table_rows, columns)
         };
         print_text_with_coordinates(search_indication, x.saturating_sub(1), y + 2, None, None);
-        print_table_with_coordinates(table, x, y + 3, Some(table_columns), Some(table_rows));
+        print_table_with_coordinates(table, x, y + 3, Some(columns), Some(table_rows));
     }
     fn render_search_results(&self, table_rows: usize, _table_columns: usize) -> Table {
         let mut table = Table::new().add_row(vec![" ", " ", " "]); // skip the title row
-        let (first_row_index_to_render, last_row_index_to_render) = self.range_to_render(
+        let (first_row_index_to_render, last_row_index_to_render) = range_to_render(
             table_rows,
             self.search_results.len(),
             self.selected_search_index,
@@ -76,7 +79,7 @@ impl ResurrectableSessions {
     }
     fn render_all_entries(&self, table_rows: usize, _table_columns: usize) -> Table {
         let mut table = Table::new().add_row(vec![" ", " ", " "]); // skip the title row
-        let (first_row_index_to_render, last_row_index_to_render) = self.range_to_render(
+        let (first_row_index_to_render, last_row_index_to_render) = range_to_render(
             table_rows,
             self.all_resurrectable_sessions.len(),
             self.selected_index,
@@ -133,34 +136,15 @@ impl ResurrectableSessions {
             None,
         );
     }
-    fn range_to_render(
-        &self,
-        table_rows: usize,
-        results_len: usize,
-        selected_index: Option<usize>,
-    ) -> (usize, usize) {
-        if table_rows <= results_len {
-            let row_count_to_render = table_rows.saturating_sub(1); // 1 for the title
-            let first_row_index_to_render = selected_index
-                .unwrap_or(0)
-                .saturating_sub(row_count_to_render / 2);
-            let last_row_index_to_render = first_row_index_to_render + row_count_to_render;
-            (first_row_index_to_render, last_row_index_to_render)
-        } else {
-            let first_row_index_to_render = 0;
-            let last_row_index_to_render = results_len;
-            (first_row_index_to_render, last_row_index_to_render)
-        }
-    }
     fn render_session_name(&self, session_name: &str, indices: Option<Vec<usize>>) -> Text {
-        let text = Text::new(&session_name).color_range(0, ..);
+        let text = Text::new(session_name).color_range(0, ..);
         match indices {
             Some(indices) => text.color_indices(1, indices),
             None => text,
         }
     }
     fn render_ctime(&self, ctime: &Duration) -> Text {
-        let duration = format_duration(ctime.clone()).to_string();
+        let duration = format_duration(*ctime).to_string();
         let duration_parts = duration.split_whitespace();
         let mut formatted_duration = String::new();
         for part in duration_parts {
@@ -186,7 +170,7 @@ impl ResurrectableSessions {
         is_selected: bool,
     ) -> Text {
         if is_selected {
-            Text::new(format!("<ENTER> - Resurrect Session")).color_range(3, 0..7)
+            Text::new("<ENTER> - Resurrect Session".to_string()).color_range(3, 0..7)
         } else if i == first_row_index_to_render && i > 0 {
             Text::new(format!("+ {} more", first_row_index_to_render)).color_range(1, ..)
         } else if i == last_row_index_to_render.saturating_sub(1)
@@ -203,48 +187,25 @@ impl ResurrectableSessions {
     }
     pub fn move_selection_down(&mut self) {
         if self.is_searching {
-            if let Some(selected_index) = self.selected_search_index.as_mut() {
-                if *selected_index == self.search_results.len().saturating_sub(1) {
-                    *selected_index = 0;
-                } else {
-                    *selected_index = *selected_index + 1;
-                }
-            } else {
-                self.selected_search_index = Some(0);
-            }
+            move_wrapping_selection_down(
+                &mut self.selected_search_index,
+                self.search_results.len(),
+            );
         } else {
-            if let Some(selected_index) = self.selected_index.as_mut() {
-                if *selected_index == self.all_resurrectable_sessions.len().saturating_sub(1) {
-                    *selected_index = 0;
-                } else {
-                    *selected_index = *selected_index + 1;
-                }
-            } else {
-                self.selected_index = Some(0);
-            }
+            move_wrapping_selection_down(
+                &mut self.selected_index,
+                self.all_resurrectable_sessions.len(),
+            );
         }
     }
     pub fn move_selection_up(&mut self) {
         if self.is_searching {
-            if let Some(selected_index) = self.selected_search_index.as_mut() {
-                if *selected_index == 0 {
-                    *selected_index = self.search_results.len().saturating_sub(1);
-                } else {
-                    *selected_index = selected_index.saturating_sub(1);
-                }
-            } else {
-                self.selected_search_index = Some(self.search_results.len().saturating_sub(1));
-            }
+            move_wrapping_selection_up(&mut self.selected_search_index, self.search_results.len());
         } else {
-            if let Some(selected_index) = self.selected_index.as_mut() {
-                if *selected_index == 0 {
-                    *selected_index = self.all_resurrectable_sessions.len().saturating_sub(1);
-                } else {
-                    *selected_index = selected_index.saturating_sub(1);
-                }
-            } else {
-                self.selected_index = Some(self.all_resurrectable_sessions.len().saturating_sub(1));
-            }
+            move_wrapping_selection_up(
+                &mut self.selected_index,
+                self.all_resurrectable_sessions.len(),
+            );
         }
     }
     pub fn get_selected_session_name(&self) -> Option<String> {
@@ -314,11 +275,10 @@ impl ResurrectableSessions {
         let mut matches = vec![];
         let matcher = SkimMatcherV2::default().use_cache(true);
         for (session_name, ctime) in &self.all_resurrectable_sessions {
-            if let Some((score, indices)) = matcher.fuzzy_indices(&session_name, &self.search_term)
-            {
+            if let Some((score, indices)) = matcher.fuzzy_indices(session_name, &self.search_term) {
                 matches.push(SearchResult {
                     session_name: session_name.to_owned(),
-                    ctime: ctime.clone(),
+                    ctime: *ctime,
                     score,
                     indices,
                 });

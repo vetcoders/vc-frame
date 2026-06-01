@@ -154,7 +154,7 @@ impl CursorInactiveStyle {
             Some("outline") => Ok(CursorInactiveStyle::Outline),
             Some("no_style") => Ok(CursorInactiveStyle::NoStyle),
             _ => Err(ConfigError::new_kdl_error(
-                format!("Must be 'block', 'bar', 'underline', 'outline' or 'no_style'"),
+                "Must be 'block', 'bar', 'underline', 'outline' or 'no_style'".to_string(),
                 kdl.span().offset(),
                 kdl.span().len(),
             )),
@@ -207,7 +207,7 @@ impl CursorStyle {
             Some("bar") => Ok(CursorStyle::Bar),
             Some("underline") => Ok(CursorStyle::Underline),
             _ => Err(ConfigError::new_kdl_error(
-                format!("Must be 'block', 'bar' or 'underline'"),
+                "Must be 'block', 'bar' or 'underline'".to_string(),
                 kdl.span().offset(),
                 kdl.span().len(),
             )),

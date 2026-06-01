@@ -64,7 +64,7 @@ impl State {
     fn handle_pane_update(&mut self, pane_manifest: PaneManifest) {
         let mut current_panes: HashSet<PaneId> = HashSet::new();
 
-        for (_tab_index, panes) in &pane_manifest.panes {
+        for panes in pane_manifest.panes.values() {
             for pane_info in panes {
                 if !pane_info.is_plugin {
                     let pane_id = PaneId::Terminal(pane_info.id);
@@ -145,7 +145,7 @@ impl State {
             pipe_message_to_plugin(
                 MessageToPlugin::new("filepicker")
                     .with_plugin_url("filepicker")
-                    .new_plugin_instance_should_have_pane_title(&format!(
+                    .new_plugin_instance_should_have_pane_title(format!(
                         "Browse: {}",
                         absolute_path.display()
                     ))
@@ -236,13 +236,11 @@ fn scan_directory(path: &Path) -> Vec<String> {
         Ok(rd) => rd,
         Err(_) => return entries,
     };
-    for entry in read_dir {
-        if let Ok(entry) = entry {
-            if let Some(name) = entry.file_name().to_str() {
-                entries.push(name.to_owned());
-                if entries.len() > MAX_DIR_ENTRIES {
-                    return Vec::new();
-                }
+    for entry in read_dir.flatten() {
+        if let Some(name) = entry.file_name().to_str() {
+            entries.push(name.to_owned());
+            if entries.len() > MAX_DIR_ENTRIES {
+                return Vec::new();
             }
         }
     }

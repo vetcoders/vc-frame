@@ -99,12 +99,12 @@ impl Downloader {
                     .write(true)
                     .open(&file_part_path)
                     .await
-                    .map_err(|e| DownloaderError::Io(e))?;
+                    .map_err(DownloaderError::Io)?;
 
                 let file_part_size = file_part
                     .metadata()
                     .await
-                    .map_err(|e| DownloaderError::Io(e))?
+                    .map_err(DownloaderError::Io)?
                     .len();
 
                 log::debug!("Resuming download from {} bytes", file_part_size);
@@ -113,7 +113,7 @@ impl Downloader {
             } else {
                 let file_part = tokio::fs::File::create(&file_part_path)
                     .await
-                    .map_err(|e| DownloaderError::Io(e))?;
+                    .map_err(DownloaderError::Io)?;
 
                 (file_part, 0)
             }
@@ -137,7 +137,7 @@ impl Downloader {
 
         tokio::fs::rename(file_part_path, file_path)
             .await
-            .map_err(|e| DownloaderError::Io(e))?;
+            .map_err(DownloaderError::Io)?;
 
         Ok(())
     }
@@ -157,7 +157,7 @@ impl Downloader {
         let mut stream = ReaderStream::with_capacity(body.compat(), STREAM_BUFFER_SIZE_BYTES);
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(DownloaderError::Io)?;
-            downloaded_bytes.extend_from_slice(&*chunk);
+            downloaded_bytes.extend_from_slice(&chunk);
         }
 
         log::debug!("Download complete");
@@ -196,8 +196,7 @@ impl Downloader {
                 runtime.handle().clone()
             },
             _ => {
-                return Err(DownloaderError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                return Err(DownloaderError::Io(std::io::Error::other(
                     "failed to spawn runtime for download task",
                 )))
             },
@@ -210,15 +209,15 @@ impl Downloader {
             .map_err(|_| DownloaderError::NotFoundFileName(url.to_string()))?
             .path_segments()
             .ok_or_else(|| DownloaderError::NotFoundFileName(url.to_string()))?
-            .last()
+            .next_back()
             .ok_or_else(|| DownloaderError::NotFoundFileName(url.to_string()))
             .map(|s| s.to_string())
     }
-    async fn acquire_download_lock(&self, file_name: &String) -> Arc<Mutex<()>> {
+    async fn acquire_download_lock(&self, file_name: &str) -> Arc<Mutex<()>> {
         let mut lock_dict = self.download_locks.lock().await;
         let download_lock = lock_dict
-            .entry(file_name.clone())
-            .or_insert_with(|| Default::default());
+            .entry(file_name.to_owned())
+            .or_insert_with(Default::default);
         download_lock.clone()
     }
 }

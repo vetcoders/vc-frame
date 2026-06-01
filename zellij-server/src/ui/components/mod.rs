@@ -64,14 +64,13 @@ impl<'a> UiComponentParser<'a> {
         // 6. Finally, we take this string, encode it back into bytes and pass it back through the ANSI
         //    parser (our `Grid`) in order to create a representation of it on screen
         let mut params: Vec<String> = String::from_utf8_lossy(&bytes)
-            .to_string()
             .split(';')
             .map(|c| c.to_owned())
             .collect();
         let mut params_iter = params.iter_mut().peekable();
         let component_name = params_iter
             .next()
-            .with_context(|| format!("ui component must have a name"))?;
+            .with_context(|| "ui component must have a name".to_string())?;
 
         // parse coordinates
         let mut component_coordinates = None;
@@ -82,7 +81,7 @@ impl<'a> UiComponentParser<'a> {
             }
         }
 
-        if component_name == &"table" {
+        if component_name == "table" {
             let columns = parse_next_param!(params_iter.next(), usize, "table", "columns");
             let rows = parse_next_param!(params_iter.next(), usize, "table", "rows");
             let stringified_params = parse_text_params(params_iter);
@@ -95,11 +94,11 @@ impl<'a> UiComponentParser<'a> {
             );
             parse_vte_bytes!(self, encoded_table);
             Ok(())
-        } else if component_name == &"ribbon" {
+        } else if component_name == "ribbon" {
             let stringified_params = parse_text_params(params_iter)
                 .into_iter()
                 .next()
-                .with_context(|| format!("a ribbon must have text"))?;
+                .with_context(|| "a ribbon must have text".to_string())?;
             let encoded_text = ribbon(
                 stringified_params,
                 &self.style,
@@ -108,17 +107,17 @@ impl<'a> UiComponentParser<'a> {
             );
             parse_vte_bytes!(self, encoded_text);
             Ok(())
-        } else if component_name == &"nested_list" {
+        } else if component_name == "nested_list" {
             let nested_list_items = parse_nested_list_items(params_iter);
             let encoded_nested_list =
                 nested_list(nested_list_items, &self.style, component_coordinates);
             parse_vte_bytes!(self, encoded_nested_list);
             Ok(())
-        } else if component_name == &"text" {
+        } else if component_name == "text" {
             let stringified_params = parse_text_params(params_iter)
                 .into_iter()
                 .next()
-                .with_context(|| format!("text must have, well, text..."))?;
+                .with_context(|| "text must have, well, text...".to_string())?;
             let encoded_text = text(stringified_params, &self.style, component_coordinates);
             parse_vte_bytes!(self, encoded_text);
             Ok(())
@@ -130,7 +129,7 @@ impl<'a> UiComponentParser<'a> {
         lazy_static! {
             static ref RE: Regex = Regex::new(r"(\d*)/(\d*)/(\d*)/(\d*)").unwrap();
         }
-        if let Some(captures) = RE.captures_iter(&coordinates).next() {
+        if let Some(captures) = RE.captures_iter(coordinates).next() {
             let x = captures[1].parse::<usize>().with_context(|| {
                 format!(
                     "Failed to parse x coordinates for string: {:?}",
@@ -159,7 +158,7 @@ impl<'a> UiComponentParser<'a> {
 
 fn parse_selected(stringified: &mut String) -> bool {
     let mut selected = false;
-    if stringified.chars().next() == Some('x') {
+    if stringified.starts_with('x') {
         selected = true;
         stringified.remove(0);
     }
@@ -168,7 +167,7 @@ fn parse_selected(stringified: &mut String) -> bool {
 
 fn parse_opaque(stringified: &mut String) -> bool {
     let mut opaque = false;
-    if stringified.chars().next() == Some('z') {
+    if stringified.starts_with('z') {
         opaque = true;
         stringified.remove(0);
     }

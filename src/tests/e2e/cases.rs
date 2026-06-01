@@ -2620,7 +2620,7 @@ pub fn pin_floating_panes() {
                     let mut step_is_complete = false;
                     if remote_terminal.snapshot_contains("line") {
                         remote_terminal
-                            .send_key(&format!("                     hide_me").as_bytes().to_vec());
+                            .send_key("                     hide_me".to_string().as_bytes());
                         step_is_complete = true;
                     }
                     step_is_complete
@@ -2701,8 +2701,7 @@ pub fn watcher_client_functionality() {
         main_client = main_client.add_step(Step {
             name: "Wait for first output",
             instruction: |remote_terminal: RemoteTerminal| -> bool {
-                let found = remote_terminal.snapshot_contains("WATCHER_OUTPUT_1");
-                found
+                remote_terminal.snapshot_contains("WATCHER_OUTPUT_1")
             },
         });
         main_client.run_all_steps();

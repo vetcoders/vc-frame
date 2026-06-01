@@ -9,7 +9,7 @@ use prost::Message;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 use wasmi::{Engine, Instance, Linker, Module, Store, StoreLimits};
@@ -48,10 +48,10 @@ fn open_dir(path: &std::path::Path) -> std::io::Result<std::fs::File> {
 fn create_plugin_fs_entries(plugin_own_data_dir: &PathBuf, plugin_own_cache_dir: &PathBuf) {
     // Create filesystem entries mounted into WASM.
     // We create them here to get expressive error messages in case they fail.
-    if let Err(e) = fs::create_dir_all(&plugin_own_data_dir) {
+    if let Err(e) = fs::create_dir_all(plugin_own_data_dir) {
         log::error!("Failed to create plugin data dir: {}", e);
     };
-    if let Err(e) = fs::create_dir_all(&plugin_own_cache_dir) {
+    if let Err(e) = fs::create_dir_all(plugin_own_cache_dir) {
         log::error!("Failed to create plugin cache dir: {}", e);
     }
     if let Err(e) = fs::create_dir_all(ZELLIJ_TMP_DIR.as_path()) {
@@ -171,7 +171,7 @@ impl<'a> PluginLoader<'a> {
         instance: &Instance,
     ) -> Result<()> {
         let err_context = || format!("failed to load plugin from instance {instance:#?}");
-        let main_user_instance = instance.clone();
+        let main_user_instance = *instance;
         let start_function = instance
             .get_typed_func::<(), ()>(&mut store, "_start")
             .with_context(err_context)?;
@@ -193,7 +193,7 @@ impl<'a> PluginLoader<'a> {
                     .call(&mut store, ())
                     .with_context(err_context)?;
 
-                let worker = RunningWorker::new(store, instance, &function_name);
+                let worker = RunningWorker::new(store, instance, function_name);
                 let worker_sender = plugin_worker(worker);
                 workers.insert(function_name.into(), worker_sender);
             }
@@ -274,7 +274,7 @@ impl<'a> PluginLoader<'a> {
             input_pipes_to_unblock: Arc::new(Mutex::new(HashSet::new())),
             input_pipes_to_block: Arc::new(Mutex::new(HashSet::new())),
             layout_dir: self.layout_dir.clone(),
-            default_mode: self.default_mode.clone(),
+            default_mode: self.default_mode,
             subscriptions: Arc::new(Mutex::new(HashSet::new())),
             keybinds: self.keybinds.clone(),
             intercepting_key_presses: false,
@@ -386,7 +386,7 @@ impl<'a> PluginLoader<'a> {
             input_pipes_to_unblock: Arc::new(Mutex::new(HashSet::new())),
             input_pipes_to_block: Arc::new(Mutex::new(HashSet::new())),
             layout_dir: self.layout_dir.clone(),
-            default_mode: self.default_mode.clone(),
+            default_mode: self.default_mode,
             subscriptions: Arc::new(Mutex::new(HashSet::new())),
             keybinds: self.keybinds.clone(),
             intercepting_key_presses: false,
@@ -418,30 +418,33 @@ impl<'a> PluginLoader<'a> {
         Ok((store, instance))
     }
     pub fn create_wasi_ctx(
-        host_dir: &PathBuf,
-        data_dir: &PathBuf,
-        cache_dir: &PathBuf,
-        tmp_dir: &PathBuf,
-        plugin_url: &String,
+        host_dir: &Path,
+        data_dir: &Path,
+        cache_dir: &Path,
+        tmp_dir: &Path,
+        plugin_url: &str,
         plugin_id: PluginId,
         stdin_pipe: Arc<Mutex<VecDeque<u8>>>,
         stdout_pipe: Arc<Mutex<VecDeque<u8>>>,
     ) -> Result<WasiCtx> {
-        let _err_context = || format!("Failed to create wasi_ctx");
+        let _err_context = || "Failed to create wasi_ctx".to_string();
         let dirs = vec![
-            ("/host".to_owned(), host_dir.clone()),
-            ("/data".to_owned(), data_dir.clone()),
-            ("/cache".to_owned(), cache_dir.clone()),
-            ("/tmp".to_owned(), tmp_dir.clone()),
+            ("/host".to_owned(), host_dir.to_path_buf()),
+            ("/data".to_owned(), data_dir.to_path_buf()),
+            ("/cache".to_owned(), cache_dir.to_path_buf()),
+            ("/tmp".to_owned(), tmp_dir.to_path_buf()),
         ];
-        let dirs = dirs.into_iter().filter(|(_dir_name, dir)| {
-            // note that this does not protect against TOCTOU errors
-            // eg. if one or more of these folders existed at the time of check but was deleted
-            // before we mounted in in the wasi environment, we'll crash
-            // when we move to a new wasi environment, we should address this with locking if
-            // there's no built-in solution
-            dir.try_exists().ok().unwrap_or(false)
-        });
+        let dirs: Vec<(String, PathBuf)> = dirs
+            .into_iter()
+            .filter(|(_dir_name, dir)| {
+                // note that this does not protect against TOCTOU errors
+                // eg. if one or more of these folders existed at the time of check but was deleted
+                // before we mounted in in the wasi environment, we'll crash
+                // when we move to a new wasi environment, we should address this with locking if
+                // there's no built-in solution
+                dir.try_exists().ok().unwrap_or(false)
+            })
+            .collect();
 
         let mut builder = WasiCtxBuilder::new();
         builder.inherit_env()?;

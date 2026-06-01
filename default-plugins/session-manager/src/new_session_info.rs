@@ -3,6 +3,8 @@ use fuzzy_matcher::FuzzyMatcher;
 use std::path::PathBuf;
 use zellij_tile::prelude::*;
 
+use crate::list_navigation::{move_wrapping_index_down, move_wrapping_index_up, range_to_render};
+
 #[derive(Default)]
 pub struct NewSessionInfo {
     name: String,
@@ -12,16 +14,11 @@ pub struct NewSessionInfo {
     pub new_session_folder: Option<PathBuf>,
 }
 
-#[derive(Eq, PartialEq)]
+#[derive(Eq, PartialEq, Default)]
 enum EnteringState {
+    #[default]
     EnteringName,
     EnteringLayoutSearch,
-}
-
-impl Default for EnteringState {
-    fn default() -> Self {
-        EnteringState::EnteringName
-    }
 }
 
 impl NewSessionInfo {
@@ -44,7 +41,7 @@ impl NewSessionInfo {
             },
             EnteringState::EnteringLayoutSearch => {
                 self.layout_list.layout_search_term.push(character);
-                self.update_layout_search_term();
+                self.layout_list.update_search_term();
             },
         }
     }
@@ -55,7 +52,7 @@ impl NewSessionInfo {
             },
             EnteringState::EnteringLayoutSearch => {
                 self.layout_list.layout_search_term.pop();
-                self.update_layout_search_term();
+                self.layout_list.update_search_term();
             },
         }
     }
@@ -67,7 +64,7 @@ impl NewSessionInfo {
             EnteringState::EnteringLayoutSearch => {
                 self.layout_list.layout_search_term.clear();
                 self.entering_new_session_info = EnteringState::EnteringName;
-                self.update_layout_search_term();
+                self.layout_list.update_search_term();
             },
         }
     }
@@ -86,10 +83,10 @@ impl NewSessionInfo {
                 self.add_char(character);
             },
             BareKey::Up if key.has_no_modifiers() => {
-                self.move_selection_up();
+                self.layout_list.move_selection_up();
             },
             BareKey::Down if key.has_no_modifiers() => {
-                self.move_selection_down();
+                self.layout_list.move_selection_down();
             },
             _ => {},
         }
@@ -106,7 +103,7 @@ impl NewSessionInfo {
                 if new_session_name != current_session_name.as_ref().map(|s| s.as_str()) {
                     match new_session_layout {
                         Some(new_session_layout) => {
-                            let cwd = self.new_session_folder.as_ref().map(|c| PathBuf::from(c));
+                            let cwd = self.new_session_folder.as_ref().map(PathBuf::from);
                             switch_session_with_layout(new_session_name, new_session_layout, cwd);
                             if self.is_welcome_screen {
                                 // the welcome screen has done its job and now we need to quit this temporary
@@ -203,15 +200,6 @@ impl NewSessionInfo {
     pub fn selected_layout_info(&self) -> Option<LayoutInfo> {
         self.layout_list.selected_layout_info()
     }
-    fn update_layout_search_term(&mut self) {
-        self.layout_list.update_search_term();
-    }
-    fn move_selection_up(&mut self) {
-        self.layout_list.move_selection_up();
-    }
-    fn move_selection_down(&mut self) {
-        self.layout_list.move_selection_down();
-    }
     pub fn get_layout_list_clone(&self) -> LayoutList {
         self.layout_list.clone()
     }
@@ -225,9 +213,19 @@ pub struct LayoutList {
     pub layout_search_term: String,
 }
 
+fn layout_sort_key(layout_info: &LayoutInfo) -> (usize, usize, String) {
+    match layout_info.builtin_sort_priority() {
+        Some(priority @ 0..=5) => (0, priority, layout_info.display_name().to_lowercase()),
+        None => (1, 0, layout_info.name().to_lowercase()),
+        Some(priority) => (2, priority, layout_info.display_name().to_lowercase()),
+    }
+}
+
 impl LayoutList {
     pub fn update_layout_list(&mut self, layout_list: Vec<LayoutInfo>) {
         let old_layout_length = self.layout_list.len();
+        let mut layout_list = layout_list;
+        layout_list.sort_by_key(layout_sort_key);
         self.layout_list = layout_list;
         if old_layout_length != self.layout_list.len() {
             // honestly, this is just the UX choice that sucks the least...
@@ -247,27 +245,15 @@ impl LayoutList {
         self.selected_layout_index = 0;
     }
     pub fn max_index(&self) -> usize {
-        if self.layout_search_term.is_empty() {
-            self.layout_list.len().saturating_sub(1)
-        } else {
-            self.layout_search_results.len().saturating_sub(1)
-        }
+        self.current_results_len().saturating_sub(1)
     }
     pub fn move_selection_up(&mut self) {
-        let max_index = self.max_index();
-        if self.selected_layout_index > 0 {
-            self.selected_layout_index -= 1;
-        } else {
-            self.selected_layout_index = max_index;
-        }
+        let current_results_len = self.current_results_len();
+        move_wrapping_index_up(&mut self.selected_layout_index, current_results_len);
     }
     pub fn move_selection_down(&mut self) {
-        let max_index = self.max_index();
-        if self.selected_layout_index < max_index {
-            self.selected_layout_index += 1;
-        } else {
-            self.selected_layout_index = 0;
-        }
+        let current_results_len = self.current_results_len();
+        move_wrapping_index_down(&mut self.selected_layout_index, current_results_len);
     }
     pub fn update_search_term(&mut self) {
         if self.layout_search_term.is_empty() {
@@ -278,7 +264,7 @@ impl LayoutList {
             let matcher = SkimMatcherV2::default().use_cache(true);
             for layout_info in &self.layout_list {
                 if let Some((score, indices)) =
-                    matcher.fuzzy_indices(&layout_info.name(), &self.layout_search_term)
+                    matcher.fuzzy_indices(&layout_info.searchable_name(), &self.layout_search_term)
                 {
                     matches.push(LayoutSearchResult {
                         layout_info: layout_info.clone(),
@@ -290,6 +276,13 @@ impl LayoutList {
             matches.sort_by(|a, b| b.score.cmp(&a.score));
             self.layout_search_results = matches;
             self.clear_selection();
+        }
+    }
+    fn current_results_len(&self) -> usize {
+        if self.layout_search_term.is_empty() {
+            self.layout_list.len()
+        } else {
+            self.layout_search_results.len()
         }
     }
     pub fn layouts_to_render(&self, max_rows: usize) -> Vec<(LayoutInfo, Vec<usize>, bool)> {
@@ -338,25 +331,6 @@ impl LayoutList {
     }
 }
 
-pub fn range_to_render(
-    table_rows: usize,
-    results_len: usize,
-    selected_index: Option<usize>,
-) -> (usize, usize) {
-    if table_rows <= results_len {
-        let row_count_to_render = table_rows.saturating_sub(1); // 1 for the title
-        let first_row_index_to_render = selected_index
-            .unwrap_or(0)
-            .saturating_sub(row_count_to_render / 2);
-        let last_row_index_to_render = first_row_index_to_render + row_count_to_render;
-        (first_row_index_to_render, last_row_index_to_render)
-    } else {
-        let first_row_index_to_render = 0;
-        let last_row_index_to_render = results_len;
-        (first_row_index_to_render, last_row_index_to_render)
-    }
-}
-
 #[derive(Clone)]
 pub struct LayoutSearchResult {
     pub layout_info: LayoutInfo,
@@ -373,9 +347,10 @@ mod tests {
     }
 
     fn make_layout_list(names: &[&str]) -> LayoutList {
-        let mut ll = LayoutList::default();
-        ll.layout_list = names.iter().map(|n| make_layout(n)).collect();
-        ll
+        LayoutList {
+            layout_list: names.iter().map(|n| make_layout(n)).collect(),
+            ..Default::default()
+        }
     }
 
     // ---------------------------------------------------------------
@@ -447,6 +422,71 @@ mod tests {
         assert!(selected_visible);
     }
 
+    #[test]
+    fn test_6_6_vibecrafted_layouts_rank_ahead_of_stock_builtins() {
+        let mut ll = make_layout_list(&[
+            "compact",
+            "vc-dashboard",
+            "classic",
+            "vibecrafted",
+            "default",
+            "vc-workflow",
+        ]);
+        ll.update_layout_list(ll.layout_list.clone());
+
+        let ordered_names: Vec<&str> = ll.layout_list.iter().map(|layout| layout.name()).collect();
+        assert_eq!(
+            ordered_names,
+            vec![
+                "default",
+                "vibecrafted",
+                "vc-dashboard",
+                "vc-workflow",
+                "compact",
+                "classic",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_6_7_layout_search_matches_vibecrafted_labels() {
+        let mut ll = make_layout_list(&["compact", "vc-dashboard", "vibecrafted"]);
+        ll.update_layout_list(ll.layout_list.clone());
+        ll.layout_search_term = "mission control".to_owned();
+        ll.update_search_term();
+
+        assert_eq!(
+            ll.layout_search_results
+                .first()
+                .map(|result| result.layout_info.name()),
+            Some("vc-dashboard")
+        );
+    }
+
+    #[test]
+    fn test_6_8_layout_search_matches_dashboard_surface_aliases() {
+        let mut ll = make_layout_list(&["compact", "vc-dashboard", "vibecrafted"]);
+        ll.update_layout_list(ll.layout_list.clone());
+
+        ll.layout_search_term = "session atlas".to_owned();
+        ll.update_search_term();
+        assert_eq!(
+            ll.layout_search_results
+                .first()
+                .map(|result| result.layout_info.name()),
+            Some("vc-dashboard")
+        );
+
+        ll.layout_search_term = "operator shell".to_owned();
+        ll.update_search_term();
+        assert_eq!(
+            ll.layout_search_results
+                .first()
+                .map(|result| result.layout_info.name()),
+            Some("vibecrafted")
+        );
+    }
+
     // ---------------------------------------------------------------
     // Section 7: Viewport Scrolling (range_to_render tests)
     // ---------------------------------------------------------------
@@ -454,7 +494,7 @@ mod tests {
     #[test]
     fn test_7_1_all_results_fit_in_viewport() {
         // When table_rows > results_len, all results are shown
-        let (start, end) = range_to_render(10, 5, None);
+        let (start, end) = crate::list_navigation::range_to_render(10, 5, None);
         assert_eq!(start, 0);
         assert_eq!(end, 5);
     }
@@ -464,7 +504,7 @@ mod tests {
         // table_rows=6, results_len=20, selected=10
         // row_count_to_render = 6-1 = 5, half = 2
         // first = 10-2 = 8, last = 8+5 = 13
-        let (start, end) = range_to_render(6, 20, Some(10));
+        let (start, end) = crate::list_navigation::range_to_render(6, 20, Some(10));
         assert_eq!(start, 8);
         assert_eq!(end, 13);
     }
@@ -473,12 +513,10 @@ mod tests {
     fn test_7_3_viewport_clamps_at_bottom() {
         // table_rows=6, results_len=20, selected=19
         // row_count_to_render = 5, half = 2
-        // first = 19-2 = 17, last = 17+5 = 22 > 20
-        // Note: range_to_render does NOT clamp — it returns (17, 22)
-        // The actual clamping happens in the caller via .take().skip()
-        let (start, end) = range_to_render(6, 20, Some(19));
-        assert_eq!(start, 17);
-        assert_eq!(end, 22);
+        // Since we clamp at bottom, end = 20, start = 20 - 5 = 15
+        let (start, end) = crate::list_navigation::range_to_render(6, 20, Some(19));
+        assert_eq!(start, 15);
+        assert_eq!(end, 20);
     }
 
     #[test]
@@ -486,7 +524,7 @@ mod tests {
         // table_rows=6, results_len=20, selected=0
         // row_count_to_render = 5, half = 2
         // first = 0.saturating_sub(2) = 0, last = 0+5 = 5
-        let (start, end) = range_to_render(6, 20, Some(0));
+        let (start, end) = crate::list_navigation::range_to_render(6, 20, Some(0));
         assert_eq!(start, 0);
         assert_eq!(end, 5);
     }

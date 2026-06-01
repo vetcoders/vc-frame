@@ -27,30 +27,31 @@ use zellij_utils::{data::PermissionType, errors::prelude::*};
 // so when adding/removing from the map - everything is halted, that's life
 // but when cloning the internal RunningPlugin and Subscriptions atomics, we can call methods on
 // them without blocking other instances
+pub type PluginAssetTuple = (
+    Arc<Mutex<RunningPlugin>>,
+    Arc<Mutex<Subscriptions>>,
+    HashMap<String, UnboundedSender<MessageToWorker>>,
+);
+
+pub type RunningPluginAndSubscriptions = (
+    PluginId,
+    ClientId,
+    Arc<Mutex<RunningPlugin>>,
+    Arc<Mutex<Subscriptions>>,
+);
+
+pub type RunningPluginAndSubscriptionsRef = (Arc<Mutex<RunningPlugin>>, Arc<Mutex<Subscriptions>>);
+
 #[derive(Default)]
 pub struct PluginMap {
-    plugin_assets: HashMap<
-        (PluginId, ClientId),
-        (
-            Arc<Mutex<RunningPlugin>>,
-            Arc<Mutex<Subscriptions>>,
-            HashMap<String, UnboundedSender<MessageToWorker>>,
-        ),
-    >,
+    plugin_assets: HashMap<(PluginId, ClientId), PluginAssetTuple>,
 }
 
 impl PluginMap {
     pub fn remove_plugins(
         &mut self,
         pid: PluginId,
-    ) -> HashMap<
-        (PluginId, ClientId),
-        (
-            Arc<Mutex<RunningPlugin>>,
-            Arc<Mutex<Subscriptions>>,
-            HashMap<String, UnboundedSender<MessageToWorker>>,
-        ),
-    > {
+    ) -> HashMap<(PluginId, ClientId), PluginAssetTuple> {
         let mut removed = HashMap::new();
         let ids_in_plugin_map: Vec<(PluginId, ClientId)> =
             self.plugin_assets.keys().copied().collect();
@@ -69,7 +70,7 @@ impl PluginMap {
             .keys()
             .map(|(plugin_id, _client_id)| *plugin_id)
             .collect();
-        unique_plugins.drain().into_iter().collect()
+        unique_plugins.drain().collect()
     }
     pub fn running_plugins(&mut self) -> Vec<(PluginId, ClientId, Arc<Mutex<RunningPlugin>>)> {
         self.plugin_assets
@@ -79,14 +80,7 @@ impl PluginMap {
             })
             .collect()
     }
-    pub fn running_plugins_and_subscriptions(
-        &mut self,
-    ) -> Vec<(
-        PluginId,
-        ClientId,
-        Arc<Mutex<RunningPlugin>>,
-        Arc<Mutex<Subscriptions>>,
-    )> {
+    pub fn running_plugins_and_subscriptions(&mut self) -> Vec<RunningPluginAndSubscriptions> {
         self.plugin_assets
             .iter()
             .map(
@@ -105,12 +99,12 @@ impl PluginMap {
         &self,
         plugin_id: PluginId,
         client_id: ClientId,
-    ) -> Option<(Arc<Mutex<RunningPlugin>>, Arc<Mutex<Subscriptions>>)> {
-        self.plugin_assets.get(&(plugin_id, client_id)).and_then(
-            |(running_plugin, subscriptions, _)| {
-                Some((running_plugin.clone(), subscriptions.clone()))
-            },
-        )
+    ) -> Option<RunningPluginAndSubscriptionsRef> {
+        self.plugin_assets
+            .get(&(plugin_id, client_id))
+            .map(|(running_plugin, subscriptions, _)| {
+                (running_plugin.clone(), subscriptions.clone())
+            })
     }
     pub fn get_running_plugin(
         &self,
@@ -121,12 +115,12 @@ impl PluginMap {
             Some(client_id) => self
                 .plugin_assets
                 .get(&(plugin_id, client_id))
-                .and_then(|(running_plugin, _, _)| Some(running_plugin.clone())),
+                .map(|(running_plugin, _, _)| running_plugin.clone()),
             None => self
                 .plugin_assets
                 .iter()
                 .find(|((p_id, _), _)| *p_id == plugin_id)
-                .and_then(|(_, (running_plugin, _, _))| Some(running_plugin.clone())),
+                .map(|(_, (running_plugin, _, _))| running_plugin.clone()),
         }
     }
     pub fn worker_sender(
@@ -139,11 +133,7 @@ impl PluginMap {
             .iter()
             .find(|((p_id, c_id), _)| p_id == &plugin_id && c_id == &client_id)
             .and_then(|(_, (_running_plugin, _subscriptions, workers))| {
-                if let Some(worker) = workers.get(&format!("{}_worker", worker_name)) {
-                    Some(worker.clone())
-                } else {
-                    None
-                }
+                workers.get(&format!("{}_worker", worker_name)).cloned()
             })
             .clone()
     }
@@ -335,11 +325,7 @@ impl<T: Write + Send + 'static> std::io::Write for WriteOutputStream<T> {
 impl PluginEnv {
     // Get the name (path) of the containing plugin
     pub fn name(&self) -> String {
-        format!(
-            "{} (ID {})",
-            self.plugin.path.display().to_string(),
-            self.plugin_id
-        )
+        format!("{} (ID {})", self.plugin.path.display(), self.plugin_id)
     }
 
     pub fn set_permissions(&mut self, permissions: HashSet<PermissionType>) {

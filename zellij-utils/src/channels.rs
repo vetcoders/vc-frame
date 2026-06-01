@@ -1,7 +1,5 @@
 //! Definitions and helpers for sending and receiving messages between threads.
 
-use std::cell::RefCell;
-
 use crate::errors::{get_current_ctx, ErrorContext};
 pub use crossbeam::channel::{
     bounded, unbounded, Receiver, RecvError, RecvTimeoutError, Select, SendError, Sender,
@@ -29,16 +27,4 @@ impl<T: Clone> SenderWithContext<T> {
         let err_ctx = get_current_ctx();
         self.sender.send((event, err_ctx))
     }
-}
-
-thread_local!(
-    /// A key to some thread local storage (TLS) that holds a representation of the thread's call
-    /// stack in the form of an [`ErrorContext`].
-    pub static OPENCALLS: RefCell<ErrorContext> = RefCell::default()
-);
-
-tokio::task_local! {
-    /// A key to some task local storage that holds a representation of the task's call
-    /// stack in the form of an [`ErrorContext`].
-    pub static ASYNCOPENCALLS: RefCell<ErrorContext>;
 }

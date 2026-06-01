@@ -95,10 +95,7 @@ impl KeyShortcut {
         self.action
     }
     pub fn is_selected(&self) -> bool {
-        match self.mode {
-            KeyMode::Selected => true,
-            _ => false,
-        }
+        matches!(self.mode, KeyMode::Selected)
     }
     pub fn short_text(&self) -> String {
         match self.action {
@@ -408,7 +405,7 @@ fn swap_layout_status(
             );
             let (part, full_len) = if mode_info.mode == InputMode::Locked {
                 (
-                    format!("{}", swap_layout_indicator),
+                    swap_layout_indicator.to_string(),
                     swap_layout_name_len, // 1 is the space between
                 )
             } else {
@@ -598,12 +595,9 @@ fn get_key_shortcut_for_mode<'a>(
         InputMode::Scroll | InputMode::Search | InputMode::EnterSearch => KeyAction::Search,
         InputMode::Session => KeyAction::Session,
     };
-    for shortcut in shortcuts.iter_mut() {
-        if shortcut.action == key_action {
-            return Some(shortcut);
-        }
-    }
-    None
+    shortcuts
+        .iter_mut()
+        .find(|shortcut| shortcut.action == key_action)
 }
 
 pub fn first_line(

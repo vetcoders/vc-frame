@@ -185,8 +185,8 @@ mod mock_ws_server {
     pub struct MockWsServer {
         pub terminal_to_client_tx: mpsc::UnboundedSender<Message>,
         pub control_to_client_tx: mpsc::UnboundedSender<Message>,
-        pub client_to_terminal_rx: Arc<Mutex<mpsc::UnboundedReceiver<Message>>>,
-        pub client_to_control_rx: Arc<Mutex<mpsc::UnboundedReceiver<Message>>>,
+        pub client_to_terminal_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<Message>>>,
+        pub client_to_control_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<Message>>>,
     }
 
     impl MockWsServer {
@@ -229,8 +229,8 @@ mod mock_ws_server {
             let server = MockWsServer {
                 terminal_to_client_tx,
                 control_to_client_tx,
-                client_to_terminal_rx: Arc::new(Mutex::new(client_to_terminal_rx)),
-                client_to_control_rx: Arc::new(Mutex::new(client_to_control_rx)),
+                client_to_terminal_rx: Arc::new(tokio::sync::Mutex::new(client_to_terminal_rx)),
+                client_to_control_rx: Arc::new(tokio::sync::Mutex::new(client_to_control_rx)),
             };
 
             (port, server, server_handle)
@@ -369,10 +369,9 @@ async fn test_stdin_forwarded_to_terminal_websocket() {
 
     // Verify terminal WebSocket received the data
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let received = tokio::time::timeout(
-        Duration::from_secs(1),
-        server.client_to_terminal_rx.lock().unwrap().recv(),
-    )
+    let received = tokio::time::timeout(Duration::from_secs(1), async {
+        server.client_to_terminal_rx.lock().await.recv().await
+    })
     .await
     .expect("Timeout")
     .expect("No message");
@@ -512,10 +511,9 @@ async fn test_resize_signal_sends_control_message() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Consume the initial resize message
-    let _ = tokio::time::timeout(
-        Duration::from_millis(500),
-        server.client_to_control_rx.lock().unwrap().recv(),
-    )
+    let _ = tokio::time::timeout(Duration::from_millis(500), async {
+        server.client_to_control_rx.lock().await.recv().await
+    })
     .await;
 
     // Send resize signal
@@ -524,10 +522,9 @@ async fn test_resize_signal_sends_control_message() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Verify control WebSocket received resize message
-    let received = tokio::time::timeout(
-        Duration::from_secs(1),
-        server.client_to_control_rx.lock().unwrap().recv(),
-    )
+    let received = tokio::time::timeout(Duration::from_secs(1), async {
+        server.client_to_control_rx.lock().await.recv().await
+    })
     .await
     .expect("Timeout")
     .expect("No message");
@@ -718,10 +715,9 @@ async fn test_control_message_handling() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Consume the initial resize message
-    let _ = tokio::time::timeout(
-        Duration::from_millis(500),
-        server.client_to_control_rx.lock().unwrap().recv(),
-    )
+    let _ = tokio::time::timeout(Duration::from_millis(500), async {
+        server.client_to_control_rx.lock().await.recv().await
+    })
     .await;
 
     // Send QueryTerminalSize control message
@@ -734,10 +730,9 @@ async fn test_control_message_handling() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Verify we receive a resize response
-    let received = tokio::time::timeout(
-        Duration::from_secs(1),
-        server.client_to_control_rx.lock().unwrap().recv(),
-    )
+    let received = tokio::time::timeout(Duration::from_secs(1), async {
+        server.client_to_control_rx.lock().await.recv().await
+    })
     .await
     .expect("Timeout")
     .expect("No message");

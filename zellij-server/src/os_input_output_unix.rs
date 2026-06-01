@@ -1,4 +1,4 @@
-use crate::os_input_output::{command_exists, AsyncReader};
+use crate::os_input_output_api::{command_exists, AsyncReader};
 use crate::panes::PaneId;
 
 use nix::{
@@ -13,7 +13,6 @@ use nix::{
 use tokio::io::unix::AsyncFd;
 
 use libc::{self, ioctl, TIOCSWINSZ};
-use signal_hook;
 use signal_hook::consts::*;
 
 use std::{
@@ -142,7 +141,7 @@ fn handle_command_exit(mut child: Child) -> Result<Option<i32>> {
     let mut should_exit = false;
     let mut attempts = 3;
     let mut signals =
-        signal_hook::iterator::Signals::new(&[SIGINT, SIGTERM]).with_context(err_context)?;
+        signal_hook::iterator::Signals::new([SIGINT, SIGTERM]).with_context(err_context)?;
     'handle_exit: loop {
         // test whether the child process has exited
         match child.try_wait() {
@@ -181,6 +180,32 @@ fn handle_command_exit(mut child: Child) -> Result<Option<i32>> {
     }
 }
 
+unsafe fn spawn_command_in_pty<F>(
+    cmd: &RunCommand,
+    terminal_id: u32,
+    pre_exec: F,
+) -> io::Result<Child>
+where
+    F: FnMut() -> io::Result<()> + Send + Sync + 'static,
+{
+    let mut command = Command::new(&cmd.command);
+    if let Some(current_dir) = &cmd.cwd {
+        if current_dir.exists() && current_dir.is_dir() {
+            command.current_dir(current_dir);
+        } else {
+            log::error!(
+                "Failed to set CWD for new pane. '{}' does not exist or is not a folder",
+                current_dir.display()
+            );
+        }
+    }
+    command
+        .args(&cmd.args)
+        .env("ZELLIJ_PANE_ID", format!("{}", terminal_id))
+        .pre_exec(pre_exec)
+        .spawn()
+}
+
 fn handle_openpty(
     open_pty_res: OpenptyResult,
     cmd: RunCommand,
@@ -190,7 +215,7 @@ fn handle_openpty(
     let err_context = |cmd: &RunCommand| {
         format!(
             "failed to open PTY for command '{}'",
-            cmd.command.to_string_lossy().to_string()
+            cmd.command.to_string_lossy()
         )
     };
 
@@ -206,31 +231,21 @@ fn handle_openpty(
         .with_context(|| err_context(&cmd));
     }
 
-    let mut child = unsafe {
-        let cmd = cmd.clone();
-        let command = &mut Command::new(cmd.command);
-        if let Some(current_dir) = cmd.cwd {
-            if current_dir.exists() && current_dir.is_dir() {
-                command.current_dir(current_dir);
-            } else {
-                log::error!(
-                    "Failed to set CWD for new pane. '{}' does not exist or is not a folder",
-                    current_dir.display()
-                );
+    let mut child = match unsafe {
+        spawn_command_in_pty(&cmd, terminal_id, move || -> io::Result<()> {
+            if libc::login_tty(pid_secondary) != 0 {
+                return Err(io::Error::last_os_error());
             }
-        }
-        command
-            .args(&cmd.args)
-            .env("ZELLIJ_PANE_ID", &format!("{}", terminal_id))
-            .pre_exec(move || -> io::Result<()> {
-                if libc::login_tty(pid_secondary) != 0 {
-                    panic!("failed to set controlling terminal");
-                }
-                close_fds::close_open_fds(3, &[]);
-                Ok(())
-            })
-            .spawn()
-            .expect("failed to spawn")
+            close_fds::close_open_fds(3, &[]);
+            Ok(())
+        })
+    } {
+        Ok(child) => child,
+        Err(e) => {
+            let _ = unistd::close(pid_primary);
+            let _ = unistd::close(pid_secondary);
+            return Err(e).with_context(|| err_context(&cmd));
+        },
     };
 
     let child_id = child.id();
@@ -555,5 +570,21 @@ mod tests {
             libc::close(pty.master);
             libc::close(pty.slave);
         }
+    }
+
+    #[test]
+    fn spawn_command_in_pty_returns_spawn_errors() {
+        let cmd = RunCommand {
+            command: "/bin/sh".into(),
+            args: vec!["-c".into(), "exit 0".into()],
+            ..Default::default()
+        };
+
+        let err = unsafe {
+            spawn_command_in_pty(&cmd, 0, || Err(io::Error::from_raw_os_error(libc::EMFILE)))
+        }
+        .expect_err("spawn errors should be returned, not panic");
+
+        assert_eq!(err.raw_os_error(), Some(libc::EMFILE));
     }
 }

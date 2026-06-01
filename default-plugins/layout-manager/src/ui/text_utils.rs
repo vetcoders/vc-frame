@@ -145,13 +145,13 @@ pub fn wrap_text_to_width(text: &str, max_width: usize) -> Vec<String> {
 pub fn get_layout_display_info(layout: &DisplayLayout) -> (String, Option<&LayoutMetadata>) {
     match layout {
         DisplayLayout::Valid(info) => match info {
-            LayoutInfo::BuiltIn(name) => (name.clone(), None),
+            LayoutInfo::BuiltIn(_name) => (info.display_name(), None),
             LayoutInfo::File(path, metadata) => {
-                let name = path.split('/').last().unwrap_or(path).to_string();
+                let name = path.split('/').next_back().unwrap_or(path).to_string();
                 (name, Some(metadata))
             },
             LayoutInfo::Url(url) => {
-                let name = url.split('/').last().unwrap_or(url).to_string();
+                let name = url.split('/').next_back().unwrap_or(url).to_string();
                 (name, None)
             },
             LayoutInfo::Stringified(_) => ("raw".to_string(), None),

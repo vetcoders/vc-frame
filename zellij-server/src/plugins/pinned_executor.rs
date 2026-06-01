@@ -9,6 +9,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use wasmi::Engine;
 
+pub type WorkFn = Box<
+    dyn FnOnce(ThreadSenders, Arc<Mutex<PluginMap>>, Arc<Mutex<Vec<ClientId>>>, PluginCache, Engine)
+        + Send
+        + 'static,
+>;
+
 /// A dynamic thread pool that pins jobs to specific threads based on plugin_id
 /// Starts with 1 thread and expands when threads are busy, shrinks when plugins unload
 pub struct PinnedExecutor {
@@ -41,18 +47,7 @@ struct ExecutionThread {
 }
 
 enum Job {
-    Work(
-        Box<
-            dyn FnOnce(
-                    ThreadSenders,
-                    Arc<Mutex<PluginMap>>,
-                    Arc<Mutex<Vec<ClientId>>>,
-                    PluginCache,
-                    Engine,
-                ) + Send
-                + 'static,
-        >,
-    ),
+    Work(WorkFn),
     Shutdown, // Signal to exit the worker loop
 }
 
@@ -198,7 +193,7 @@ impl PinnedExecutor {
         assignments.insert(plugin_id, thread_idx);
         thread_plugins
             .entry(thread_idx)
-            .or_insert_with(HashSet::new)
+            .or_default()
             .insert(plugin_id);
 
         thread_idx
@@ -257,7 +252,7 @@ impl PinnedExecutor {
 
         // Send work
         let job = Job::Work(Box::new(f));
-        if let Err(_) = thread.sender.send(job) {
+        if thread.sender.send(job).is_err() {
             // Thread died unexpectedly - this is a critical error
             thread.jobs_in_flight.fetch_sub(1, Ordering::SeqCst);
             log::error!("Plugin executor thread {} has died", thread_idx);
@@ -381,10 +376,8 @@ impl Drop for PinnedExecutor {
         let mut threads = self.execution_threads.lock().unwrap();
 
         // Send shutdown to all threads
-        for thread_opt in threads.iter_mut() {
-            if let Some(thread) = thread_opt {
-                let _ = thread.sender.send(Job::Shutdown);
-            }
+        for thread in threads.iter_mut().flatten() {
+            let _ = thread.sender.send(Job::Shutdown);
         }
     }
 }
@@ -398,14 +391,16 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    // Test fixtures
-    fn create_test_dependencies() -> (
+    type TestDependencies = (
         ThreadSenders,
         Arc<Mutex<PluginMap>>,
         Arc<Mutex<Vec<ClientId>>>,
         PluginCache,
         Engine,
-    ) {
+    );
+
+    // Test fixtures
+    fn create_test_dependencies() -> TestDependencies {
         use std::path::PathBuf;
         use wasmi::Module;
         use zellij_utils::channels::{self, SenderWithContext};
@@ -458,20 +453,22 @@ mod tests {
         ))
     }
 
+    type SignalingJob = Box<
+        dyn FnOnce(
+                ThreadSenders,
+                Arc<Mutex<PluginMap>>,
+                Arc<Mutex<Vec<ClientId>>>,
+                PluginCache,
+                Engine,
+            ) + Send
+            + 'static,
+    >;
+
     // Helper to create a job that signals completion via channel
-    fn make_signaling_job(
-        tx: Sender<()>,
-    ) -> impl FnOnce(
-        ThreadSenders,
-        Arc<Mutex<PluginMap>>,
-        Arc<Mutex<Vec<ClientId>>>,
-        PluginCache,
-        Engine,
-    ) + Send
-           + 'static {
-        move |_senders, _plugin_map, _clients, _cache, _engine| {
+    fn make_signaling_job(tx: Sender<()>) -> SignalingJob {
+        Box::new(move |_senders, _plugin_map, _clients, _cache, _engine| {
             tx.send(()).unwrap();
-        }
+        })
     }
 
     // Helper to verify thread assignment by capturing thread name in job

@@ -9,6 +9,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_MIN_STACK: 8388608
 
 jobs:
   build:
@@ -17,12 +18,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ops-linux, dragon-macos]
 
-    runs-on: ${{ matrix.os }}
+    runs-on: [self-hosted, '${{ matrix.os }}']
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
 
       - name: Install Protoc
         uses: arduino/setup-protoc@v3
@@ -39,10 +45,15 @@ jobs:
 
   build-windows:
     name: Build (Windows)
-    runs-on: windows-latest
+    runs-on: [self-hosted, windows]
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
 
       - name: Install Protoc
         uses: arduino/setup-protoc@v3
@@ -67,12 +78,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ops-linux, dragon-macos]
 
-    runs-on: ${{ matrix.os }}
+    runs-on: [self-hosted, '${{ matrix.os }}']
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
 
       - name: Install Protoc
         uses: arduino/setup-protoc@v3
@@ -89,10 +105,15 @@ jobs:
 
   test-windows:
     name: Test (Windows)
-    runs-on: windows-latest
+    runs-on: [self-hosted, windows]
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
 
       - name: Install Protoc
         uses: arduino/setup-protoc@v3
@@ -115,10 +136,15 @@ jobs:
 
   test-no-web:
     name: Test (No Web)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ops-linux]
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
 
       - name: Install Protoc
         uses: arduino/setup-protoc@v3
@@ -135,10 +161,10 @@ jobs:
 
   format:
     name: Check Formatting
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ops-linux]
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Setup toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1

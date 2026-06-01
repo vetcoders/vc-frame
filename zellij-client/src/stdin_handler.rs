@@ -33,8 +33,8 @@ pub(crate) fn stdin_loop(
     let use_vt_reader = std::env::var("TERM").is_ok() && enable_vt_input();
 
     // Send the startup host query string so the host terminal replies
-    // with its live pixel dimensions, fg/bg, sync-output support, and
-    // palette registers. These replies will be classified by the
+    // with its live pixel dimensions, fg/bg, and sync-output support.
+    // These replies will be classified by the
     // continuous parser as they arrive and routed via `InputInstruction::
     // AnsiStdinInstructions` — no deadline, no cache, no loading gate.
     {
@@ -164,7 +164,7 @@ pub(crate) fn stdin_loop(
                                     send_input_instructions
                                         .send(InputInstruction::KeyWithModifierEvent(
                                             key_with_modifier,
-                                            current_buffer.drain(..).collect(),
+                                            std::mem::take(&mut current_buffer),
                                             true,
                                         ))
                                         .unwrap();
@@ -196,7 +196,7 @@ pub(crate) fn stdin_loop(
                             send_input_instructions
                                 .send(InputInstruction::KeyEvent(
                                     input_event,
-                                    current_buffer.drain(..).collect(),
+                                    std::mem::take(&mut current_buffer),
                                 ))
                                 .unwrap();
                         }
@@ -262,7 +262,7 @@ fn finalize_events(
         send_input_instructions
             .send(InputInstruction::KeyEvent(
                 input_event,
-                current_buffer.drain(..).collect(),
+                std::mem::take(current_buffer),
             ))
             .unwrap();
     }
@@ -277,13 +277,20 @@ fn build_startup_query_string() -> String {
     // <ESC>]11;?<ESC>\ => get background color
     // <ESC>]10;?<ESC>\ => get foreground color
     // <ESC>[?2026$p => get synchronised output mode
-    let mut query_string = String::from(
-        "\u{1b}[14t\u{1b}[16t\u{1b}]11;?\u{1b}\u{5c}\u{1b}]10;?\u{1b}\u{5c}\u{1b}[?2026$p",
-    );
-    // query colors
-    // eg. <ESC>]4;5;?<ESC>\ => query color register number 5
-    for i in 0..256 {
-        query_string.push_str(&format!("\u{1b}]4;{};?\u{1b}\u{5c}", i));
+    String::from("\u{1b}[14t\u{1b}[16t\u{1b}]11;?\u{1b}\u{5c}\u{1b}]10;?\u{1b}\u{5c}\u{1b}[?2026$p")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_startup_query_string;
+
+    #[test]
+    fn startup_host_query_does_not_sweep_palette_registers() {
+        let query = build_startup_query_string();
+
+        assert!(
+            !query.contains("\u{1b}]4;"),
+            "startup query must not ask the host for all OSC 4 palette registers"
+        );
     }
-    query_string
 }

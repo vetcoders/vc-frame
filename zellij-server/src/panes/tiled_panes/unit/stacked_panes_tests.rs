@@ -1090,10 +1090,10 @@ impl Pane for MockPane {
     }
 
     fn position_and_size(&self) -> PaneGeom {
-        self.pane_geom.clone()
+        self.pane_geom
     }
     fn current_geom(&self) -> PaneGeom {
-        self.pane_geom.clone()
+        self.pane_geom
     }
 
     fn geom_override(&self) -> Option<PaneGeom> {

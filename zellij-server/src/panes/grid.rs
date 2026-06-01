@@ -1,3 +1,4 @@
+use super::row::Row;
 use super::sixel::{PixelRect, SixelGrid, SixelImageStore};
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -122,6 +123,16 @@ use crate::panes::terminal_character::{
 };
 use crate::panes::Selection;
 use crate::ui::components::UiComponentParser;
+
+pub type LogicalLineMatch = (usize, usize, String, Vec<(usize, usize)>);
+pub type RenderOutput = (Vec<CharacterChunk>, Option<String>, Vec<SixelImageChunk>);
+pub type BestHighlight = (
+    HighlightLayer,
+    u32,
+    String,
+    String,
+    BTreeMap<String, String>,
+);
 use zellij_utils::data::PaneContents;
 
 fn get_top_non_canonical_rows(rows: &mut VecDeque<Row>) -> Vec<Row> {
@@ -237,10 +248,7 @@ fn transfer_rows_from_lines_above_to_viewport(
         let excess_row = Row::from_rows(next_lines);
         bounded_push(lines_above, sixel_grid, excess_row);
     }
-    match usize::try_from(lines_added_to_viewport) {
-        Ok(n) => n,
-        _ => 0,
-    }
+    usize::try_from(lines_added_to_viewport).unwrap_or(0)
 }
 
 fn transfer_rows_from_viewport_to_lines_above(
@@ -346,7 +354,7 @@ fn calculate_row_display_height(row_width: usize, viewport_width: usize) -> usiz
 
 fn subtract_isize_from_usize(u: usize, i: isize) -> usize {
     if i.is_negative() {
-        u - i.abs() as usize
+        u - i.unsigned_abs()
     } else {
         u + i as usize
     }
@@ -469,7 +477,7 @@ fn utf8_mouse_coordinates(column: usize, line: isize) -> Vec<u8> {
 fn collect_and_build_logical_line(
     viewport: &VecDeque<Row>,
     row_idx: usize,
-) -> Option<(usize, usize, String, Vec<(usize, usize)>)> {
+) -> Option<LogicalLineMatch> {
     if row_idx >= viewport.len() {
         return None;
     }
@@ -786,31 +794,21 @@ impl Click {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum MouseMode {
+    #[default]
     NoEncoding,
     Utf8,
     Sgr,
 }
 
-impl Default for MouseMode {
-    fn default() -> Self {
-        MouseMode::NoEncoding
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub enum MouseTracking {
+    #[default]
     Off,
     Normal,
     ButtonEventTracking,
     AnyEventTracking,
-}
-
-impl Default for MouseTracking {
-    fn default() -> Self {
-        MouseTracking::Off
-    }
 }
 
 impl Debug for Grid {
@@ -1558,7 +1556,7 @@ impl Grid {
         content_x: usize,
         content_y: usize,
         style: &Style,
-    ) -> Result<Option<(Vec<CharacterChunk>, Option<String>, Vec<SixelImageChunk>)>> {
+    ) -> Result<Option<RenderOutput>> {
         if self.lock_renders {
             return Ok(None);
         }
@@ -1654,11 +1652,11 @@ impl Grid {
                 }
             }
         }
-        return Ok(Some((
+        Ok(Some((
             character_chunks,
             Some(raw_vte_output),
             sixel_image_chunks,
-        )));
+        )))
     }
     /// Returns the cursor position and whether it is visible.
     /// The position is returned unconditionally (as long as the cursor is within
@@ -2072,11 +2070,7 @@ impl Grid {
             self.cursor.y = std::cmp::max(self.cursor.y.saturating_sub(count), scroll_region_top);
             return;
         }
-        self.cursor.y = if self.cursor.y < count {
-            0
-        } else {
-            self.cursor.y - count
-        };
+        self.cursor.y = self.cursor.y.saturating_sub(count);
     }
     pub fn move_cursor_up_with_scrolling(&mut self, count: usize) {
         let (scroll_region_top, scroll_region_bottom) = self.scroll_region;
@@ -2295,10 +2289,7 @@ impl Grid {
         highlights: Vec<RegexHighlight>,
         style: &Style,
     ) {
-        let slot = self
-            .plugin_highlights
-            .entry(plugin_id)
-            .or_insert_with(Vec::new);
+        let slot = self.plugin_highlights.entry(plugin_id).or_default();
         for h in highlights {
             let (fg, bg) = resolve_highlight_colors(&h.style, style);
             if let Ok(regex) = regex::Regex::new(&h.pattern) {
@@ -2365,18 +2356,12 @@ impl Grid {
         position: &Position,
     ) -> Option<(u32, String, String, BTreeMap<String, String>)> {
         let click_row = position.line.0 as usize;
-        let click_col = position.column.0 as usize;
+        let click_col = position.column.0;
 
         let (_canonical, _group_len, logical_text, boundaries) =
             collect_and_build_logical_line(&self.viewport, click_row)?;
 
-        let mut best: Option<(
-            HighlightLayer,
-            u32,
-            String,
-            String,
-            BTreeMap<String, String>,
-        )> = None;
+        let mut best: Option<BestHighlight> = None;
         for (plugin_id, pattern_map) in &self.plugin_highlights {
             for (pattern, compiled) in pattern_map {
                 for captures in compiled.regex.captures_iter(&logical_text) {
@@ -2467,7 +2452,7 @@ impl Grid {
             return;
         }
         let hover_row = hover_pos.line.0 as usize;
-        let hover_col = hover_pos.column.0 as usize;
+        let hover_col = hover_pos.column.0;
         let (_canonical, _group_len, logical_text, boundaries) =
             match collect_and_build_logical_line(&self.viewport, hover_row) {
                 Some(v) => v,
@@ -2475,7 +2460,7 @@ impl Grid {
             };
         let mut best_layer: Option<HighlightLayer> = None;
         let mut best_tooltip: Option<String> = None;
-        for (_plugin_id, pattern_map) in &self.plugin_highlights {
+        for pattern_map in self.plugin_highlights.values() {
             for (_pattern, compiled) in pattern_map {
                 if !compiled.on_hover || compiled.tooltip_text.is_none() {
                     continue;
@@ -2534,7 +2519,7 @@ impl Grid {
                     let group_end_row = ridx + group_len - 1;
                     if hover_row >= ridx && hover_row <= group_end_row {
                         let hover_col = hover_pos.column.0;
-                        for (_plugin_id, pattern_map) in &self.plugin_highlights {
+                        for pattern_map in self.plugin_highlights.values() {
                             for (_pattern, compiled) in pattern_map {
                                 if !compiled.on_hover || !compiled.has_visual_effect() {
                                     continue;
@@ -2571,7 +2556,7 @@ impl Grid {
 
             // Non-hover highlights are pushed after hover so that hover
             // takes precedence for overlapping regions.
-            for (_plugin_id, pattern_map) in &self.plugin_highlights {
+            for pattern_map in self.plugin_highlights.values() {
                 for (_pattern, compiled) in pattern_map {
                     if compiled.on_hover || !compiled.has_visual_effect() {
                         continue;
@@ -2614,7 +2599,7 @@ impl Grid {
         self.click.record_click(*start);
 
         if self.click.is_double_click() {
-            let Some((start_position, end_position)) = self.word_around_position(&start) else {
+            let Some((start_position, end_position)) = self.word_around_position(start) else {
                 // no-op
                 return;
             };
@@ -2628,7 +2613,7 @@ impl Grid {
             self.mark_for_rerender();
             return;
         } else if self.click.is_triple_click() {
-            let Some((start_position, end_position)) = self.canonical_line_around_position(&start)
+            let Some((start_position, end_position)) = self.canonical_line_around_position(start)
             else {
                 // no-op
                 return;
@@ -2652,7 +2637,7 @@ impl Grid {
         let old_selection = self.selection;
         if &old_selection.end != to {
             if self.click.is_double_click() {
-                let Some((word_start_position, word_end_position)) = self.word_around_position(&to)
+                let Some((word_start_position, word_end_position)) = self.word_around_position(to)
                 else {
                     // no-op
                     return;
@@ -2663,7 +2648,7 @@ impl Grid {
                 self.update_selected_lines(&old_selection, &current_selection);
                 self.mark_for_rerender();
             } else if self.click.is_triple_click() {
-                let Some(last_index_in_line) = self.last_index_in_line(&to) else {
+                let Some(last_index_in_line) = self.last_index_in_line(to) else {
                     return;
                 };
                 self.selection
@@ -2731,7 +2716,7 @@ impl Grid {
                 Row::from_columns(VecDeque::from(vec![EMPTY_TERMINAL_CHARACTER; self.width]));
 
             // get the row from lines_above, viewport, or lines below depending on index
-            let row = if l < 0 && self.lines_above.len() > l.abs() as usize {
+            let row = if l < 0 && self.lines_above.len() > l.unsigned_abs() {
                 let offset_from_end = l.abs();
                 &self.lines_above[self
                     .lines_above
@@ -3307,7 +3292,7 @@ impl Grid {
         self.lock_renders = false;
     }
     pub fn update_theme(&mut self, theme: Styling) {
-        self.style.colors = theme.clone();
+        self.style.colors = theme;
     }
     pub fn update_arrow_fonts(&mut self, should_support_arrow_fonts: bool) {
         self.arrow_fonts = should_support_arrow_fonts;
@@ -3322,13 +3307,13 @@ impl Grid {
     ) -> PaneContents {
         let mut viewport: Vec<String> = Vec::with_capacity(self.viewport.len());
         for row in &self.viewport {
-            let s: String = (&row.columns).into_iter().map(|x| x.character).collect();
+            let s: String = row.columns.iter().map(|x| x.character).collect();
             viewport.push(s);
         }
         if get_full_scrollback {
             let mut lines_above_viewport: Vec<String> = Vec::with_capacity(self.lines_above.len());
             for row in &self.lines_above {
-                let s: String = (&row.columns).into_iter().map(|x| x.character).collect();
+                let s: String = row.columns.iter().map(|x| x.character).collect();
                 lines_above_viewport.push(s);
             }
             // Truncate to last N lines if max specified (Some(0) means "all" — no truncation)
@@ -3340,7 +3325,7 @@ impl Grid {
             }
             let mut lines_below_viewport: Vec<String> = Vec::with_capacity(self.lines_below.len());
             for row in &self.lines_below {
-                let s: String = (&row.columns).into_iter().map(|x| x.character).collect();
+                let s: String = row.columns.iter().map(|x| x.character).collect();
                 lines_below_viewport.push(s);
             }
             PaneContents::new_with_scrollback(
@@ -3445,7 +3430,7 @@ impl Perform for Grid {
                 // tab
                 self.advance_to_next_tabstop(self.cursor.pending_styles.clone());
             },
-            10 | 11 | 12 => {
+            10..=12 => {
                 // 0a, newline
                 // 0b, vertical tabulation
                 // 0c, form feed
@@ -3508,7 +3493,7 @@ impl Perform for Grid {
             self.create_sixel_image();
         } else if let Some(mut ui_component_bytes) = self.ui_component_bytes.take() {
             let component_bytes = ui_component_bytes.drain(..);
-            let style = self.style.clone();
+            let style = self.style;
             let arrow_fonts = self.arrow_fonts;
             UiComponentParser::new(self, style, arrow_fonts)
                 .parse(component_bytes.collect())
@@ -3550,7 +3535,7 @@ impl Perform for Grid {
             // Set color index.
             b"4" => {
                 for chunk in params[1..].chunks(2) {
-                    let index = chunk.get(0).and_then(|index| parse_number(index));
+                    let index = chunk.first().and_then(|index| parse_number(index));
                     let color = chunk.get(1).and_then(|color| xparse_color(color));
                     if let (Some(i), Some(c)) = (index, color) {
                         if self.changed_colors.is_none() {
@@ -3558,7 +3543,7 @@ impl Perform for Grid {
                         }
                         self.changed_colors.as_mut().unwrap()[i as usize] = Some(c);
                         return;
-                    } else if chunk.get(1).as_ref().and_then(|c| c.get(0)) == Some(&b'?') {
+                    } else if chunk.get(1).as_ref().and_then(|c| c.first()) == Some(&b'?') {
                         if let Some(index) = index {
                             // Forward palette-register queries to the
                             // host — apps want the actual host palette,
@@ -3696,7 +3681,7 @@ impl Perform for Grid {
                     return;
                 }
 
-                let _clipboard = params[1].get(0).unwrap_or(&b'c');
+                let _clipboard = params[1].first().unwrap_or(&b'c');
                 match params[2] {
                     b"?" => {
                         // TBD: paste from own clipboard - currently unsupported
@@ -3722,8 +3707,8 @@ impl Perform for Grid {
                 // Reset color indexes given as parameters.
                 for param in &params[1..] {
                     if let Some(index) = parse_number(param) {
-                        if self.changed_colors.is_some() {
-                            self.changed_colors.as_mut().unwrap()[index as usize] = None
+                        if let Some(changed_colors) = self.changed_colors.as_mut() {
+                            changed_colors[index as usize] = None;
                         }
                     }
                 }
@@ -3855,17 +3840,17 @@ impl Perform for Grid {
         } else if c == 'A' {
             // move cursor up until edge of screen
             let move_up_count = next_param_or(1);
-            self.move_cursor_up(move_up_count as usize);
+            self.move_cursor_up(move_up_count);
         } else if c == 'B' || c == 'e' {
             // move cursor down until edge of screen
             let move_down_count = next_param_or(1);
             let pad_character = EMPTY_TERMINAL_CHARACTER;
-            self.move_cursor_down_until_edge_of_screen(move_down_count as usize, pad_character);
+            self.move_cursor_down_until_edge_of_screen(move_down_count, pad_character);
         } else if c == 'D' {
             let move_back_count = next_param_or(1);
             self.move_cursor_back(move_back_count);
         } else if c == 'l' {
-            let first_intermediate_is_questionmark = match intermediates.get(0) {
+            let first_intermediate_is_questionmark = match intermediates.first() {
                 Some(b'?') => true,
                 None => false,
                 _ => false,
@@ -3963,7 +3948,7 @@ impl Perform for Grid {
                 }
             }
         } else if c == 'h' {
-            let first_intermediate_is_questionmark = match intermediates.get(0) {
+            let first_intermediate_is_questionmark = match intermediates.first() {
                 Some(b'?') => true,
                 None => false,
                 _ => false,
@@ -3983,8 +3968,7 @@ impl Perform for Grid {
                         },
                         1049 => {
                             // enter alternate buffer
-                            let current_lines_above =
-                                std::mem::replace(&mut self.lines_above, VecDeque::new());
+                            let current_lines_above = std::mem::take(&mut self.lines_above);
                             let current_viewport = std::mem::replace(
                                 &mut self.viewport,
                                 VecDeque::from(vec![Row::new().canonical()]),
@@ -4071,7 +4055,7 @@ impl Perform for Grid {
                 }
             }
         } else if c == 'p' {
-            let first_intermediate_is_questionmark = match intermediates.get(0) {
+            let first_intermediate_is_questionmark = match intermediates.first() {
                 Some(b'?') => true,
                 None => false,
                 _ => false,
@@ -4099,7 +4083,7 @@ impl Perform for Grid {
             }
         } else if c == 'r' {
             if params.len() > 1 {
-                let top = (next_param_or(1) as usize).saturating_sub(1);
+                let top = next_param_or(1).saturating_sub(1);
                 let bottom = params_iter
                     .next()
                     .map(|param| param[0] as usize)
@@ -4160,9 +4144,9 @@ impl Perform for Grid {
              * [4T = Scroll down 4, bring previous lines back into view
              */
             let line_count = next_param_or(1);
-            self.rotate_scroll_region_up(line_count as usize);
+            self.rotate_scroll_region_up(line_count);
         } else if c == 'S' {
-            let first_intermediate_is_questionmark = match intermediates.get(0) {
+            let first_intermediate_is_questionmark = match intermediates.first() {
                 Some(b'?') => true,
                 None => false,
                 _ => false,
@@ -4203,25 +4187,21 @@ impl Perform for Grid {
             }
         } else if c == 's' {
             self.save_cursor_position();
-        } else if c == 'u' && intermediates == &[b'>'] {
+        } else if c == 'u' && intermediates == [b'>'] {
             // Zellij only supports the first "progressive enhancement" layer of the kitty keyboard
             // protocol
             // 0 disables, everything else enables.
             let count = next_param_or(0);
             if !self.explicitly_disable_kitty_keyboard_protocol {
-                if count > 0 {
-                    self.supports_kitty_keyboard_protocol = true;
-                } else {
-                    self.supports_kitty_keyboard_protocol = false;
-                }
+                self.supports_kitty_keyboard_protocol = count > 0;
             }
-        } else if c == 'u' && intermediates == &[b'<'] {
+        } else if c == 'u' && intermediates == [b'<'] {
             // Zellij only supports the first "progressive enhancement" layer of the kitty keyboard
             // protocol
             if !self.explicitly_disable_kitty_keyboard_protocol {
                 self.supports_kitty_keyboard_protocol = false;
             }
-        } else if c == 'u' && intermediates == &[b'?'] {
+        } else if c == 'u' && intermediates == [b'?'] {
             // Zellij only supports the first "progressive enhancement" layer of the kitty keyboard
             // protocol
             let reply = if self.supports_kitty_keyboard_protocol {
@@ -4230,16 +4210,12 @@ impl Perform for Grid {
                 "\u{1b}[?0u"
             };
             self.pending_messages_to_pty.push(reply.as_bytes().to_vec());
-        } else if c == 'u' && intermediates == &[b'='] {
+        } else if c == 'u' && intermediates == [b'='] {
             // kitty keyboard protocol without the stack, just setting.
             // 0 disables, everything else enables.
             let count = next_param_or(0);
             if !self.explicitly_disable_kitty_keyboard_protocol {
-                if count > 0 {
-                    self.supports_kitty_keyboard_protocol = true;
-                } else {
-                    self.supports_kitty_keyboard_protocol = false;
-                }
+                self.supports_kitty_keyboard_protocol = count > 0;
             }
         } else if c == 'u' {
             self.restore_cursor_position();
@@ -4272,7 +4248,7 @@ impl Perform for Grid {
                 self.advance_to_next_tabstop(self.cursor.pending_styles.clone());
             }
         } else if c == 'q' {
-            let first_intermediate_is_space = matches!(intermediates.get(0), Some(b' '));
+            let first_intermediate_is_space = matches!(intermediates.first(), Some(b' '));
             if first_intermediate_is_space {
                 // DECSCUSR (CSI Ps SP q) -- Set Cursor Style.
                 let cursor_style_id = next_param_or(0);
@@ -4289,7 +4265,7 @@ impl Perform for Grid {
                 if let Some(cursor_shape) = shape {
                     self.cursor.change_shape(cursor_shape);
                 }
-            } else if matches!(intermediates.get(0), Some(b'>')) {
+            } else if matches!(intermediates.first(), Some(b'>')) {
                 let version = version_number(VERSION);
                 let xtversion = format!("\u{1b}P>|Zellij({})\u{1b}\\", version);
                 self.pending_messages_to_pty
@@ -4302,7 +4278,7 @@ impl Perform for Grid {
         } else if c == 'c' {
             // identify terminal
             // https://vt100.net/docs/vt510-rm/DA1.html
-            match intermediates.get(0) {
+            match intermediates.first() {
                 None | Some(0) => {
                     // primary device attributes - VT220 with sixel and OSC 52 clipboard
                     let terminal_capabilities = "\u{1b}[?62;4;52c";
@@ -4320,7 +4296,7 @@ impl Perform for Grid {
         } else if c == 'n' {
             // DSR - device status report
             // https://vt100.net/docs/vt510-rm/DSR.html
-            let first_intermediate_is_questionmark = match intermediates.get(0) {
+            let first_intermediate_is_questionmark = match intermediates.first() {
                 Some(b'?') => true,
                 None => false,
                 _ => false,
@@ -4386,7 +4362,7 @@ impl Perform for Grid {
                 _ => {},
             }
         } else if c == 't' {
-            match next_param_or(1) as usize {
+            match next_param_or(1) {
                 14 => {
                     // Forward to host: apps asking for text-area pixels
                     // want the real window size, not Zellij's synthesised
@@ -4415,15 +4391,13 @@ impl Perform for Grid {
                 },
                 _ => {},
             }
-        } else {
-            if self.debug {
-                log::warn!("Unhandled csi: {}->{:?}", c, params);
-            }
+        } else if self.debug {
+            log::warn!("Unhandled csi: {}->{:?}", c, params);
         }
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
-        match (byte, intermediates.get(0)) {
+        match (byte, intermediates.first()) {
             (b'A', charset_index_symbol) => {
                 let charset_index: CharsetIndex = match charset_index_symbol {
                     Some(b'(') => CharsetIndex::G0,
@@ -4549,436 +4523,6 @@ impl AlternateScreenState {
             supports_kitty_keyboard_protocol,
         );
     }
-}
-
-#[derive(Clone)]
-pub struct Row {
-    pub columns: VecDeque<TerminalCharacter>,
-    pub is_canonical: bool,
-    width: Option<usize>,
-    pub bg_color: Option<AnsiCode>,
-}
-
-impl Debug for Row {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        for character in &self.columns {
-            write!(f, "{:?}", character)?;
-        }
-        Ok(())
-    }
-}
-
-impl Row {
-    pub fn new() -> Self {
-        Row {
-            columns: VecDeque::new(),
-            is_canonical: false,
-            width: None,
-            bg_color: None,
-        }
-    }
-    pub fn from_columns(columns: VecDeque<TerminalCharacter>) -> Self {
-        Row {
-            columns,
-            is_canonical: false,
-            width: None,
-            bg_color: None,
-        }
-    }
-    pub fn from_rows(mut rows: Vec<Row>) -> Self {
-        if rows.is_empty() {
-            Row::new()
-        } else {
-            let mut first_row = rows.remove(0);
-            for row in &mut rows {
-                first_row.append(&mut row.columns);
-            }
-            first_row
-        }
-    }
-    pub fn with_character(mut self, terminal_character: TerminalCharacter) -> Self {
-        self.columns.push_back(terminal_character);
-        self.width = None;
-        self
-    }
-    pub fn canonical(mut self) -> Self {
-        self.is_canonical = true;
-        self
-    }
-    pub fn with_bg_color(mut self, bg_color: Option<AnsiCode>) -> Self {
-        self.bg_color = bg_color;
-        self
-    }
-    pub fn width_cached(&mut self) -> usize {
-        if self.width.is_some() {
-            self.width.unwrap()
-        } else {
-            let mut width = 0;
-            for terminal_character in &self.columns {
-                width += terminal_character.width();
-            }
-            self.width = Some(width);
-            width
-        }
-    }
-    pub fn width(&self) -> usize {
-        let mut width = 0;
-        for terminal_character in &self.columns {
-            width += terminal_character.width();
-        }
-        width
-    }
-    pub fn excess_width(&self) -> usize {
-        let mut acc = 0;
-        for terminal_character in &self.columns {
-            if terminal_character.width() > 1 {
-                acc += terminal_character.width() - 1;
-            }
-        }
-        acc
-    }
-    pub fn excess_width_until(&self, x: usize) -> usize {
-        let mut acc = 0;
-        for terminal_character in self.columns.iter().take(x) {
-            if terminal_character.width() > 1 {
-                acc += terminal_character.width() - 1;
-            }
-        }
-        acc
-    }
-    pub fn absolute_character_index(&self, x: usize) -> usize {
-        // return x's width aware index
-        let mut absolute_index = x;
-        for (i, terminal_character) in self.columns.iter().enumerate().take(x) {
-            if i == absolute_index {
-                break;
-            }
-            if terminal_character.width() > 1 {
-                absolute_index = absolute_index.saturating_sub(1);
-            }
-        }
-        absolute_index
-    }
-    pub fn absolute_character_index_and_position_in_char(&self, x: usize) -> (usize, usize) {
-        // returns x's width aware index as well as its position inside the wide char (eg. 1 if
-        // it's in the middle of a 2-char wide character)
-        let mut accumulated_width = 0;
-        let mut absolute_index = x;
-        let mut position_inside_character = 0;
-        for (i, terminal_character) in self.columns.iter().enumerate() {
-            accumulated_width += terminal_character.width();
-            absolute_index = i;
-            if accumulated_width > x {
-                let character_start_position = accumulated_width - terminal_character.width();
-                position_inside_character = x - character_start_position;
-                break;
-            }
-        }
-        (absolute_index, position_inside_character)
-    }
-    pub fn add_character_at(&mut self, terminal_character: TerminalCharacter, x: usize) {
-        match self.width_cached().cmp(&x) {
-            Ordering::Equal => {
-                // this is unwrapped because this always happens after self.width_cached()
-                *self.width.as_mut().unwrap() += terminal_character.width();
-                // adding the character at the end of the current line
-                self.columns.push_back(terminal_character);
-            },
-            Ordering::Less => {
-                // adding the character after the end of the current line
-                // we pad the line up to the character and then add it
-                let width_offset = self.excess_width_until(x);
-                let mut gap_fill = EMPTY_TERMINAL_CHARACTER;
-                if let Some(bg_color) = self.bg_color {
-                    gap_fill
-                        .styles
-                        .update(|styles| styles.background = Some(bg_color));
-                }
-                self.columns
-                    .resize(x.saturating_sub(width_offset), gap_fill);
-                self.columns.push_back(terminal_character);
-                self.width = None;
-            },
-            Ordering::Greater => {
-                // adding the character in the middle of the line
-                // we replace the character at its position
-                let (absolute_x_index, position_inside_character) =
-                    self.absolute_character_index_and_position_in_char(x);
-                let character_width = terminal_character.width();
-                let replaced_character =
-                    std::mem::replace(&mut self.columns[absolute_x_index], terminal_character);
-                match character_width.cmp(&replaced_character.width()) {
-                    Ordering::Greater => {
-                        // the replaced character is narrower than the current character
-                        // (eg. we added a wide emoji in place of an English character)
-                        // we remove the character after it to make room
-                        let position_to_remove = absolute_x_index + 1;
-                        if let Some(removed) = self.columns.remove(position_to_remove) {
-                            if removed.width() > 1 {
-                                // the character we removed is a wide character itself, so we add
-                                // padding
-                                self.columns
-                                    .insert(position_to_remove, EMPTY_TERMINAL_CHARACTER);
-                            }
-                        }
-                    },
-                    Ordering::Less => {
-                        // the replaced character is wider than the current character
-                        // (eg. we added an English character in place of a wide emoji)
-                        // we must make sure to add padding either before the character we added
-                        // or after it, depending on our position inside said removed wide character
-                        // TODO: support characters wider than 2
-                        if position_inside_character > 0 {
-                            self.columns
-                                .insert(absolute_x_index, EMPTY_TERMINAL_CHARACTER);
-                        } else {
-                            self.columns
-                                .insert(absolute_x_index + 1, EMPTY_TERMINAL_CHARACTER);
-                        }
-                    },
-                    _ => {},
-                }
-                self.width = None;
-            },
-        }
-    }
-    pub fn insert_character_at(&mut self, terminal_character: TerminalCharacter, x: usize) {
-        let insert_position = self.absolute_character_index(x);
-        match self.columns.len().cmp(&insert_position) {
-            Ordering::Equal => self.columns.push_back(terminal_character),
-            Ordering::Less => {
-                self.columns
-                    .resize(insert_position, EMPTY_TERMINAL_CHARACTER);
-                self.columns.push_back(terminal_character);
-            },
-            Ordering::Greater => {
-                self.columns.insert(insert_position, terminal_character);
-            },
-        }
-        self.width = None;
-    }
-    pub fn replace_character_at(&mut self, terminal_character: TerminalCharacter, x: usize) {
-        let absolute_x_index = self.absolute_character_index(x);
-        if let Some(character) = self.columns.get_mut(absolute_x_index) {
-            let terminal_character_width = terminal_character.width();
-            let character = std::mem::replace(character, terminal_character);
-            let excess_width = character.width().saturating_sub(terminal_character_width);
-            for _ in 0..excess_width {
-                self.columns
-                    .insert(absolute_x_index, EMPTY_TERMINAL_CHARACTER);
-            }
-        }
-        self.width = None;
-    }
-    pub fn replace_columns(&mut self, columns: VecDeque<TerminalCharacter>) {
-        self.columns = columns;
-        self.width = None;
-    }
-    pub fn push(&mut self, terminal_character: TerminalCharacter) {
-        self.columns.push_back(terminal_character);
-        self.width = None;
-    }
-    pub fn truncate(&mut self, x: usize) {
-        let width_offset = self.excess_width_until(x);
-        let truncate_position = x.saturating_sub(width_offset);
-        if truncate_position < self.columns.len() {
-            self.columns.truncate(truncate_position);
-        }
-        self.width = None;
-    }
-    pub fn position_accounting_for_widechars(&self, x: usize) -> usize {
-        let mut position = x;
-        for (index, terminal_character) in self.columns.iter().enumerate() {
-            if index == position {
-                break;
-            }
-            if terminal_character.width() > 1 {
-                position = position.saturating_sub(terminal_character.width().saturating_sub(1));
-            }
-        }
-        position
-    }
-    pub fn replace_and_pad_end(
-        &mut self,
-        from: usize,
-        to: usize,
-        terminal_character: TerminalCharacter,
-    ) {
-        let from_position_accounting_for_widechars = self.position_accounting_for_widechars(from);
-        let to_position_accounting_for_widechars = self.position_accounting_for_widechars(to);
-        let replacement_length = to_position_accounting_for_widechars
-            .saturating_sub(from_position_accounting_for_widechars);
-        let mut replace_with = VecDeque::from(vec![terminal_character; replacement_length]);
-        self.columns
-            .truncate(from_position_accounting_for_widechars);
-        self.columns.append(&mut replace_with);
-        self.width = None;
-    }
-    pub fn append(&mut self, to_append: &mut VecDeque<TerminalCharacter>) {
-        self.columns.append(to_append);
-        self.width = None;
-    }
-    pub fn drain_until(&mut self, x: usize) -> VecDeque<TerminalCharacter> {
-        let mut drained_part_len = 0;
-        let mut split_pos = 0;
-        for next_character in self.columns.iter() {
-            // drained_part_len == 0 here is so that if the grid is resized
-            // to a size of 1, we won't drop wide characters
-            if drained_part_len + next_character.width() <= x || drained_part_len == 0 {
-                drained_part_len += next_character.width();
-                split_pos += 1
-            } else {
-                break;
-            }
-        }
-        // Can't use split_off because it doesn't reduce capacity, causing OOM with long lines
-        let drained_part = self.columns.drain(..split_pos).collect();
-        self.width = None;
-        drained_part
-    }
-    pub fn replace_and_pad_beginning(&mut self, to: usize, terminal_character: TerminalCharacter) {
-        let to_position_accounting_for_widechars = self.position_accounting_for_widechars(to);
-        let width_of_current_character = self
-            .columns
-            .get(to_position_accounting_for_widechars)
-            .map(|character| character.width())
-            .unwrap_or(1);
-        let mut replace_with =
-            VecDeque::from(vec![terminal_character; to + width_of_current_character]);
-        if to_position_accounting_for_widechars > self.columns.len() {
-            self.columns.clear();
-        } else if to_position_accounting_for_widechars >= self.columns.len() {
-            drop(self.columns.drain(0..to_position_accounting_for_widechars));
-        } else {
-            drop(self.columns.drain(0..=to_position_accounting_for_widechars));
-        }
-        replace_with.append(&mut self.columns);
-        self.width = None;
-        self.columns = replace_with;
-    }
-    pub fn len(&self) -> usize {
-        self.columns.len()
-    }
-    pub fn is_empty(&self) -> bool {
-        self.columns.is_empty()
-    }
-    pub fn delete_and_return_character(&mut self, x: usize) -> Option<TerminalCharacter> {
-        let erase_position = self.absolute_character_index(x);
-        if erase_position < self.columns.len() {
-            self.width = None;
-            self.columns.remove(erase_position)
-        } else {
-            None
-        }
-    }
-    pub fn split_to_rows_of_length(&mut self, max_row_length: usize) -> Vec<Row> {
-        let mut parts: Vec<Row> = vec![];
-        let mut current_part: VecDeque<TerminalCharacter> = VecDeque::new();
-        let mut current_part_len = 0;
-        for character in self.columns.drain(..) {
-            if current_part_len + character.width() > max_row_length {
-                parts.push(Row::from_columns(current_part).with_bg_color(self.bg_color));
-                current_part = VecDeque::new();
-                current_part_len = 0;
-            }
-            current_part_len += character.width();
-            current_part.push_back(character);
-        }
-        if !current_part.is_empty() {
-            parts.push(Row::from_columns(current_part).with_bg_color(self.bg_color))
-        };
-        if !parts.is_empty() && self.is_canonical {
-            if let Some(part) = parts.get_mut(0) {
-                part.is_canonical = true;
-            }
-        }
-        if parts.is_empty() {
-            parts.push(self.clone());
-        }
-        self.width = None;
-        parts
-    }
-    pub fn last_index_in_line(&self) -> usize {
-        self.columns.len()
-    }
-    pub fn word_indices_around_character_index(&self, index: usize) -> Option<(usize, usize)> {
-        let absolute_character_index = self.absolute_character_index(index);
-        let character_at_index = self.columns.get(absolute_character_index)?;
-        if is_selection_boundary_character(character_at_index.character) {
-            return Some((index, index + 1));
-        }
-        let mut end_position = self
-            .columns
-            .iter()
-            .enumerate()
-            .skip(absolute_character_index)
-            .find_map(|(i, t_c)| {
-                if is_selection_boundary_character(t_c.character) {
-                    Some(i + self.excess_width_until(i))
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| self.columns.len() + self.excess_width());
-        let start_position = self
-            .columns
-            .iter()
-            .enumerate()
-            .take(absolute_character_index)
-            .rev()
-            .find_map(|(i, t_c)| {
-                if is_selection_boundary_character(t_c.character) {
-                    Some(i + 1 + self.excess_width_until(i))
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(0);
-        if start_position == end_position {
-            // so that if this is only one character, it'll still be marked
-            end_position += 1;
-        }
-        Some((start_position, end_position))
-    }
-    pub fn word_start_index_of_last_character(&self) -> usize {
-        self.columns
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(i, t_c)| {
-                if is_selection_boundary_character(t_c.character) {
-                    Some(self.absolute_character_index(i + 1))
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(0)
-    }
-    pub fn word_end_index_of_first_character(&self) -> usize {
-        self.columns
-            .iter()
-            .enumerate()
-            .find_map(|(i, t_c)| {
-                if is_selection_boundary_character(t_c.character) {
-                    Some(self.absolute_character_index(i))
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| self.columns.len())
-    }
-}
-
-fn is_selection_boundary_character(character: char) -> bool {
-    character.is_ascii_whitespace()
-        || character == '['
-        || character == ']'
-        || character == '{'
-        || character == '}'
-        || character == '<'
-        || character == '>'
-        || character == '('
-        || character == ')'
 }
 
 #[cfg(test)]

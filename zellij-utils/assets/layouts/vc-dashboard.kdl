@@ -1,0 +1,132 @@
+// vc-dashboard — mission control overview
+// Launch: vibecrafted dashboard
+//
+// Design: pure monitoring surface — no work pane. Four quadrants showing
+// live system state. Agent tabs spawned during monitoring sessions get
+// branded chrome via default_tab_template.
+// Dashboard tabs expose the native Zellij control surfaces we rely on for
+// operators: sessions, layouts, configuration, plugin curation, workspace
+// navigation, sharing, and shell guidance.
+//
+// Swap layouts:
+//   "default"  — 2x2 grid (balanced monitoring)
+//   "stacked"  — vertical stack (narrow terminals)
+//   "focused"  — single large pane + compact sidebar
+//
+// VibeCrafted with AI Agents (c)2026 VetCoders
+layout {
+    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="compact-bar" {
+                brand_text " 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. "
+                brand_text_short " VC. "
+            }
+        }
+        children
+        pane size=1 borderless=true {
+            plugin location="status-bar"
+        }
+    }
+
+    tab name="MC" {
+        pane split_direction="horizontal" {
+            pane split_direction="vertical" size="50%" {
+                pane name="agents" focus=true command="bash" {
+                    args "-lc" "for root in \"${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/skills/vc-agents\" \"${VIBECRAFTED_COMPANION_ROOT:-$HOME/Libraxis/vibecrafted}/skills/vc-agents\" \"${VIBECRAFTED_ROOT:+$VIBECRAFTED_ROOT/.vibecrafted/skills/vc-agents}\" \"${VIBECRAFTED_ROOT:+$VIBECRAFTED_ROOT/skills/vc-agents}\" \"./skills/vc-agents\"; do if [[ -n \"$root\" && -x \"$root/scripts/mission-control/active-agents.sh\" ]]; then exec \"$root/scripts/mission-control/active-agents.sh\"; fi; done; printf 'Mission control helper not found: active-agents.sh\\n'; exec \"${SHELL:-bash}\" -l"
+                }
+                pane name="transcript" command="bash" {
+                    args "-lc" "for root in \"${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/skills/vc-agents\" \"${VIBECRAFTED_COMPANION_ROOT:-$HOME/Libraxis/vibecrafted}/skills/vc-agents\" \"${VIBECRAFTED_ROOT:+$VIBECRAFTED_ROOT/.vibecrafted/skills/vc-agents}\" \"${VIBECRAFTED_ROOT:+$VIBECRAFTED_ROOT/skills/vc-agents}\" \"./skills/vc-agents\"; do if [[ -n \"$root\" && -x \"$root/scripts/mission-control/live-transcript.sh\" ]]; then exec \"$root/scripts/mission-control/live-transcript.sh\"; fi; done; printf 'Mission control helper not found: live-transcript.sh\\n'; exec \"${SHELL:-bash}\" -l"
+                }
+            }
+            pane split_direction="vertical" size="50%" {
+                pane name="convergence" command="bash" {
+                    args "-lc" "for root in \"${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/skills/vc-agents\" \"${VIBECRAFTED_COMPANION_ROOT:-$HOME/Libraxis/vibecrafted}/skills/vc-agents\" \"${VIBECRAFTED_ROOT:+$VIBECRAFTED_ROOT/.vibecrafted/skills/vc-agents}\" \"${VIBECRAFTED_ROOT:+$VIBECRAFTED_ROOT/skills/vc-agents}\" \"./skills/vc-agents\"; do if [[ -n \"$root\" && -x \"$root/scripts/mission-control/convergence-trend.sh\" ]]; then exec \"$root/scripts/mission-control/convergence-trend.sh\"; fi; done; printf 'Mission control helper not found: convergence-trend.sh\\n'; exec \"${SHELL:-bash}\" -l"
+                }
+                pane name="sessions" command="bash" {
+                    args "-lc" "for root in \"${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/skills/vc-agents\" \"${VIBECRAFTED_COMPANION_ROOT:-$HOME/Libraxis/vibecrafted}/skills/vc-agents\" \"${VIBECRAFTED_ROOT:+$VIBECRAFTED_ROOT/.vibecrafted/skills/vc-agents}\" \"${VIBECRAFTED_ROOT:+$VIBECRAFTED_ROOT/skills/vc-agents}\" \"./skills/vc-agents\"; do if [[ -n \"$root\" && -x \"$root/scripts/mission-control/recent-sessions.sh\" ]]; then exec \"$root/scripts/mission-control/recent-sessions.sh\"; fi; done; printf 'Mission control helper not found: recent-sessions.sh\\n'; exec \"${SHELL:-bash}\" -l"
+                }
+            }
+        }
+    }
+
+    tab name="Sessions" {
+        pane name="session atlas" focus=true {
+            plugin location="session-manager" {
+                pane_title "VibeCrafted Session Atlas"
+            }
+        }
+    }
+
+    tab name="Layouts" {
+        pane name="layout forge" focus=true {
+            plugin location="zellij:layout-manager" {
+                pane_title "VibeCrafted Layout Forge"
+            }
+        }
+    }
+
+    tab name="Control" {
+        pane name="control deck" focus=true {
+            plugin location="zellij:configuration" {
+                pane_title "VibeCrafted Control Deck"
+            }
+        }
+    }
+
+    tab name="Plugins" {
+        pane name="plugin forge" focus=true {
+            plugin location="zellij:plugin-manager" {
+                pane_title "VibeCrafted Plugin Forge"
+            }
+        }
+    }
+
+    tab name="Workspace" {
+        pane name="workspace atlas" focus=true {
+            plugin location="strider" {
+                pane_title "VibeCrafted Workspace Atlas"
+            }
+        }
+    }
+
+    tab name="Share" {
+        pane name="share relay" focus=true {
+            plugin location="zellij:share" {
+                pane_title "VibeCrafted Share Relay"
+            }
+        }
+    }
+
+    tab name="Guide" {
+        pane name="shell guide" focus=true {
+            plugin location="about" {
+                pane_title "VibeCrafted Shell Guide"
+                guide_mode "mission-control"
+            }
+        }
+    }
+
+    swap_tiled_layout name="stacked" {
+        tab {
+            pane split_direction="horizontal" {
+                pane name="agents" size="25%" focus=true
+                pane name="transcript" size="25%"
+                pane name="convergence" size="25%"
+                pane name="sessions" size="25%"
+            }
+        }
+    }
+
+    swap_tiled_layout name="focused" {
+        tab {
+            pane split_direction="vertical" {
+                pane name="agents" size="60%" focus=true
+                pane split_direction="horizontal" size="40%" {
+                    pane name="transcript"
+                    pane name="convergence"
+                    pane name="sessions"
+                }
+            }
+        }
+    }
+}

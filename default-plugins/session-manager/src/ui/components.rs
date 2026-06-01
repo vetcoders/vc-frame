@@ -5,240 +5,8 @@ use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 use zellij_tile::prelude::*;
 
-use crate::single_screen::UnifiedSearchResult;
 use crate::ui::{PaneUiInfo, SessionUiInfo, TabUiInfo};
 use crate::{ActiveScreen, NewSessionInfo};
-
-// ---------------------------------------------------------------
-// Render cache for unified results
-// ---------------------------------------------------------------
-
-/// Pre-computed data for a single visible row, independent of selection state.
-#[derive(Clone)]
-pub struct CachedRowData {
-    pub session_name: String,
-    pub indices: Vec<usize>,
-    pub original_index: usize,
-    pub kind: CachedRowKind,
-    // Pre-formatted strings (computed once, reused across renders)
-    pub full_details: String,
-    pub abbr_details: String,
-    pub full_tag: &'static str,
-    pub abbr_tag: &'static str,
-    // Pre-computed widths
-    pub name_width: usize,
-    pub full_details_width: usize,
-    pub abbr_details_width: usize,
-    pub full_tag_width: usize,
-    // Color range data for details cell
-    pub details_color_ranges: DetailsColorRanges,
-    pub abbr_details_color_ranges: DetailsColorRanges,
-}
-
-#[derive(Clone)]
-pub enum CachedRowKind {
-    Active,
-    Resurrectable,
-}
-
-/// Byte-offset ranges for coloring details cells.
-#[derive(Clone, Default)]
-pub struct DetailsColorRanges {
-    pub ranges: Vec<(usize, std::ops::Range<usize>)>, // (color_index, range)
-}
-
-/// Cached intermediate representation of the unified results table.
-///
-/// Stored on `SingleScreenState` and rebuilt only when `unified_results`
-/// changes (via `update_search_term` / `SessionUpdate`). Selection changes
-/// and timer re-renders reuse the cached data.
-#[derive(Default)]
-pub struct UnifiedResultsRenderCache {
-    /// Filtered rows (current session excluded), with pre-formatted strings.
-    pub rows: Vec<CachedRowData>,
-    /// Max column widths across all cached rows.
-    pub full_name_width: usize,
-    pub full_details_width: usize,
-    pub abbr_details_width: usize,
-    pub full_tag_width: usize,
-}
-
-impl UnifiedResultsRenderCache {
-    /// Rebuild the cache from the current `unified_results`.
-    pub fn rebuild(&mut self, results: &[UnifiedSearchResult]) {
-        self.rows.clear();
-        self.full_name_width = 0;
-        self.full_details_width = 0;
-        self.abbr_details_width = 0;
-        self.full_tag_width = 0;
-
-        for (orig_i, result) in results.iter().enumerate() {
-            let is_current = matches!(
-                result,
-                UnifiedSearchResult::ActiveSession {
-                    is_current_session: true,
-                    ..
-                }
-            );
-            if is_current {
-                continue;
-            }
-
-            let row = match result {
-                UnifiedSearchResult::ActiveSession {
-                    indices,
-                    session_name,
-                    connected_users,
-                    tab_count,
-                    pane_count,
-                    ..
-                } => {
-                    let client_word = if *connected_users == 1 {
-                        "client"
-                    } else {
-                        "clients"
-                    };
-
-                    let tab_str = format!("{}", tab_count);
-                    let pane_str = format!("{}", pane_count);
-                    let conn_str = format!("{}", connected_users);
-
-                    // Full details
-                    let full_details = format!(
-                        "{} tabs, {} panes, {} {}",
-                        tab_str, pane_str, conn_str, client_word
-                    );
-                    let full_details_ranges = {
-                        let tab_end = tab_str.len();
-                        let pane_offset = tab_str.len() + " tabs, ".len();
-                        let pane_end = pane_offset + pane_str.len();
-                        let conn_offset = pane_end + " panes, ".len();
-                        let conn_end = conn_offset + conn_str.len();
-                        DetailsColorRanges {
-                            ranges: vec![
-                                (1, 0..tab_end),
-                                (2, pane_offset..pane_end),
-                                (2, conn_offset..conn_end),
-                            ],
-                        }
-                    };
-
-                    // Abbreviated details
-                    let abbr_details = format!("{}t, {}p, {}c", tab_str, pane_str, conn_str);
-                    let abbr_details_ranges = {
-                        let tab_end = tab_str.len();
-                        let pane_offset = tab_str.len() + "t, ".len();
-                        let pane_end = pane_offset + pane_str.len();
-                        let conn_offset = pane_end + "p, ".len();
-                        let conn_end = conn_offset + conn_str.len();
-                        DetailsColorRanges {
-                            ranges: vec![
-                                (1, 0..tab_end),
-                                (2, pane_offset..pane_end),
-                                (2, conn_offset..conn_end),
-                            ],
-                        }
-                    };
-
-                    let name_width = session_name.width();
-                    let full_details_width = full_details.width();
-                    let abbr_details_width = abbr_details.width();
-
-                    CachedRowData {
-                        session_name: session_name.clone(),
-                        indices: indices.clone(),
-                        original_index: orig_i,
-                        kind: CachedRowKind::Active,
-                        full_details,
-                        abbr_details,
-                        full_tag: "[ATTACH]",
-                        abbr_tag: "[A]",
-                        name_width,
-                        full_details_width,
-                        abbr_details_width,
-                        full_tag_width: "[ATTACH]".len(),
-                        details_color_ranges: full_details_ranges,
-                        abbr_details_color_ranges: abbr_details_ranges,
-                    }
-                },
-                UnifiedSearchResult::ResurrectableSession {
-                    indices,
-                    session_name,
-                    ctime,
-                    ..
-                } => {
-                    let duration = humantime::format_duration(*ctime).to_string();
-                    let mut formatted_duration = String::new();
-                    for part in duration.split_whitespace() {
-                        if !part.ends_with('s') {
-                            if !formatted_duration.is_empty() {
-                                formatted_duration.push(' ');
-                            }
-                            formatted_duration.push_str(part);
-                        }
-                    }
-                    if formatted_duration.is_empty() {
-                        formatted_duration.push_str("<1m");
-                    }
-
-                    let full_details = format!("Created {} ago", formatted_duration);
-                    let full_details_ranges = {
-                        let created_len = "Created ".len();
-                        let duration_end = created_len + formatted_duration.len();
-                        DetailsColorRanges {
-                            ranges: vec![(2, created_len..duration_end)],
-                        }
-                    };
-
-                    let abbr_details = format!("{} ago", formatted_duration);
-                    let abbr_details_ranges = {
-                        let duration_end = formatted_duration.len();
-                        DetailsColorRanges {
-                            ranges: vec![(2, 0..duration_end)],
-                        }
-                    };
-
-                    let name_width = session_name.width();
-                    let full_details_width = full_details.width();
-                    let abbr_details_width = abbr_details.width();
-
-                    CachedRowData {
-                        session_name: session_name.clone(),
-                        indices: indices.clone(),
-                        original_index: orig_i,
-                        kind: CachedRowKind::Resurrectable,
-                        full_details,
-                        abbr_details,
-                        full_tag: "[RESURRECT]",
-                        abbr_tag: "[R]",
-                        name_width,
-                        full_details_width,
-                        abbr_details_width,
-                        full_tag_width: "[RESURRECT]".len(),
-                        details_color_ranges: full_details_ranges,
-                        abbr_details_color_ranges: abbr_details_ranges,
-                    }
-                },
-            };
-
-            // Update max widths
-            if row.name_width > self.full_name_width {
-                self.full_name_width = row.name_width;
-            }
-            if row.full_details_width > self.full_details_width {
-                self.full_details_width = row.full_details_width;
-            }
-            if row.abbr_details_width > self.abbr_details_width {
-                self.abbr_details_width = row.abbr_details_width;
-            }
-            if row.full_tag_width > self.full_tag_width {
-                self.full_tag_width = row.full_tag_width;
-            }
-
-            self.rows.push(row);
-        }
-    }
-}
 
 #[derive(Debug)]
 pub struct ListItem {
@@ -403,8 +171,9 @@ impl UiSpan {
 }
 
 #[allow(dead_code)] // in the future this will be moved to be its own component
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub enum SpanStyle {
+    #[default]
     None,
     Bold,
     Foreground(PaletteColor),
@@ -434,27 +203,6 @@ impl SpanStyle {
             },
         }
     }
-}
-
-impl Default for SpanStyle {
-    fn default() -> Self {
-        SpanStyle::None
-    }
-}
-
-fn truncate_to_width(text: &str, max_width: usize) -> String {
-    use unicode_width::UnicodeWidthChar;
-    let mut result = String::new();
-    let mut current_width = 0;
-    for ch in text.chars() {
-        let ch_width = ch.width().unwrap_or(0);
-        if current_width + ch_width > max_width {
-            break;
-        }
-        result.push(ch);
-        current_width += ch_width;
-    }
-    result
 }
 
 #[derive(Debug, Default)]
@@ -640,7 +388,7 @@ pub fn build_session_ui_line(session_ui_info: &SessionUiInfo, colors: Colors) ->
     let connected_users_styled = colors.connected_users(&connected_users);
     let session_bullet_span =
         UiSpan::UiSpanTelescope(UiSpanTelescope::new(vec![StringAndLength::new(
-            format!(" > "),
+            " > ".to_string(),
             3,
         )]));
     let session_name_span = UiSpan::TruncatableUiSpan(TruncatableUiSpan::new(
@@ -673,12 +421,9 @@ pub fn build_session_ui_line(session_ui_info: &SessionUiInfo, colors: Colors) ->
     ui_spans.push(connected_users_count);
     if session_ui_info.is_current_session {
         let current_session_indication = UiSpan::UiSpanTelescope(UiSpanTelescope::new(vec![
-            StringAndLength::new(
-                colors.current_session_marker(&format!(" <CURRENT SESSION>")),
-                18,
-            ),
-            StringAndLength::new(colors.current_session_marker(&format!(" <CURRENT>")), 10),
-            StringAndLength::new(colors.current_session_marker(&format!(" <C>")), 4),
+            StringAndLength::new(colors.current_session_marker(" <CURRENT SESSION>"), 18),
+            StringAndLength::new(colors.current_session_marker(" <CURRENT>"), 10),
+            StringAndLength::new(colors.current_session_marker(" <C>"), 4),
         ]));
         ui_spans.push(current_session_indication);
     }
@@ -693,7 +438,7 @@ pub fn build_tab_ui_line(tab_ui_info: &TabUiInfo, colors: Colors) -> Vec<UiSpan>
     let pane_count_styled = colors.pane_count(&pane_count);
     let tab_bullet_span =
         UiSpan::UiSpanTelescope(UiSpanTelescope::new(vec![StringAndLength::new(
-            format!("  - "),
+            "  - ".to_string(),
             4,
         )]));
     let tab_name_span = UiSpan::TruncatableUiSpan(TruncatableUiSpan::new(
@@ -721,16 +466,16 @@ pub fn build_pane_ui_line(pane_ui_info: &PaneUiInfo, colors: Colors) -> Vec<UiSp
     let pane_name = pane_ui_info.name.clone();
     let exit_code = pane_ui_info.exit_code.map(|exit_code_number| {
         let exit_code = format!("{}", exit_code_number);
-        let exit_code = if exit_code_number == 0 {
+
+        if exit_code_number == 0 {
             colors.session_and_folder_entry(&exit_code)
         } else {
             colors.exit_code_error(&exit_code)
-        };
-        exit_code
+        }
     });
     let pane_bullet_span =
         UiSpan::UiSpanTelescope(UiSpanTelescope::new(vec![StringAndLength::new(
-            format!("    > "),
+            "    > ".to_string(),
             6,
         )]));
     ui_spans.push(pane_bullet_span);
@@ -772,7 +517,7 @@ pub fn minimize_lines(
 }
 
 pub fn render_prompt(search_term: &str, colors: Colors, x: usize, y: usize) {
-    let prompt = colors.session_and_folder_entry(&format!("Search:"));
+    let prompt = colors.session_and_folder_entry("Search:");
     let search_term = colors.bold(&format!("{}_", search_term));
     println!(
         "\u{1b}[{};{}H\u{1b}[0m{} {}\n",
@@ -807,246 +552,6 @@ pub fn render_single_screen_prompt(
         search_term_display,
         enter_hint,
     );
-}
-
-pub fn render_unified_results(
-    cache: &UnifiedResultsRenderCache,
-    selected_index: Option<usize>,
-    max_rows: usize,
-    max_cols: usize,
-    _colors: Colors,
-    x: usize,
-    y: usize,
-) {
-    if cache.rows.is_empty() {
-        return;
-    }
-
-    // Map selected_index (from original results) to filtered/cached position
-    let filtered_selected =
-        selected_index.and_then(|sel| cache.rows.iter().position(|r| r.original_index == sel));
-
-    // Calculate viewport range over the cached (already filtered) list
-    let total = cache.rows.len();
-    let data_rows = max_rows.saturating_sub(1); // 1 for the empty header
-    let (start, end) = if data_rows >= total {
-        (0, total)
-    } else {
-        let anchor = filtered_selected.unwrap_or(0);
-        let half = data_rows / 2;
-        let mut s = anchor.saturating_sub(half);
-        let mut e = s + data_rows;
-        if e > total {
-            e = total;
-            s = total.saturating_sub(data_rows);
-        }
-        (s, e)
-    };
-
-    // Hidden-item counts (single pass over two slices)
-    let (above_active, above_resurrectable) = count_by_kind(&cache.rows[..start]);
-    let (below_active, below_resurrectable) = count_by_kind(&cache.rows[end..]);
-
-    let has_hidden_above = above_active > 0 || above_resurrectable > 0;
-    let has_hidden_below = below_active > 0 || below_resurrectable > 0;
-    let has_hidden = has_hidden_above || has_hidden_below;
-
-    // 4th column content strings
-    let tab_header_full = "<TAB> Complete";
-    let tab_header_short = "<TAB>";
-
-    let above_summary_full = if has_hidden_above {
-        format!(
-            "[+{} Active] [+{} Exited]",
-            above_active, above_resurrectable
-        )
-    } else {
-        String::new()
-    };
-    let above_summary_short = if has_hidden_above {
-        format!("[+{}] [+{}]", above_active, above_resurrectable)
-    } else {
-        String::new()
-    };
-    let below_summary_full = if has_hidden_below {
-        format!(
-            "[+{} Active] [+{} Exited]",
-            below_active, below_resurrectable
-        )
-    } else {
-        String::new()
-    };
-    let below_summary_short = if has_hidden_below {
-        format!("[+{}] [+{}]", below_active, below_resurrectable)
-    } else {
-        String::new()
-    };
-
-    let max_summary_full_width = std::cmp::max(
-        if has_hidden_above {
-            above_summary_full.width()
-        } else {
-            0
-        },
-        if has_hidden_below {
-            below_summary_full.width()
-        } else {
-            0
-        },
-    );
-    let max_summary_short_width = std::cmp::max(
-        if has_hidden_above {
-            above_summary_short.width()
-        } else {
-            0
-        },
-        if has_hidden_below {
-            below_summary_short.width()
-        } else {
-            0
-        },
-    );
-
-    let full_fourth_col_width = std::cmp::max(
-        tab_header_full.width(),
-        if has_hidden {
-            max_summary_full_width
-        } else {
-            1
-        },
-    );
-    let short_fourth_col_width = std::cmp::max(
-        tab_header_short.width(),
-        if has_hidden {
-            max_summary_short_width
-        } else {
-            1
-        },
-    );
-
-    // Use pre-computed widths from cache — no format!() allocations needed
-    let (abbreviate_details, abbreviate_tags, abbreviate_fourth_col, name_max_width) =
-        compute_reduction_tier(
-            cache.full_name_width,
-            cache.full_details_width,
-            cache.full_tag_width,
-            full_fourth_col_width,
-            cache.abbr_details_width,
-            short_fourth_col_width,
-            max_cols,
-        );
-
-    // Build table from cached data
-    let mut table = Table::new();
-
-    // Empty header row
-    table = table.add_styled_row(vec![
-        Text::new(" "),
-        Text::new(" "),
-        Text::new(" "),
-        Text::new(" "),
-    ]);
-
-    let visible_count = end - start;
-    for (row_index, row) in cache.rows[start..end].iter().enumerate() {
-        let is_selected = filtered_selected == Some(start + row_index);
-
-        // Name cell — use cached string, only truncate if needed
-        let display_name = match name_max_width {
-            Some(max_w) => truncate_to_width(&row.session_name, max_w),
-            None => row.session_name.clone(),
-        };
-
-        let display_indices: Vec<usize> = row
-            .indices
-            .iter()
-            .filter(|&&i| i < display_name.chars().count())
-            .cloned()
-            .collect();
-
-        let mut name_cell = Text::new(display_name).color_range(1, ..);
-        if !display_indices.is_empty() {
-            name_cell = name_cell.color_indices(3, display_indices);
-        }
-
-        // Details and tag cells — use cached pre-formatted strings
-        let color_ranges = if abbreviate_details {
-            &row.abbr_details_color_ranges
-        } else {
-            &row.details_color_ranges
-        };
-        let details_text = if abbreviate_details {
-            &row.abbr_details
-        } else {
-            &row.full_details
-        };
-        let mut details_cell = Text::new(details_text);
-        for (color_idx, range) in &color_ranges.ranges {
-            details_cell = details_cell.color_range(*color_idx, range.clone());
-        }
-
-        let tag_text = if abbreviate_tags {
-            row.abbr_tag
-        } else {
-            row.full_tag
-        };
-        let tag_cell = Text::new(tag_text).color_range(0, ..);
-
-        // 4th column
-        let fourth_cell = if row_index == 0 && has_hidden_above {
-            let (summary_text, active_count, resurrectable_count) = if abbreviate_fourth_col {
-                (&above_summary_short, above_active, above_resurrectable)
-            } else {
-                (&above_summary_full, above_active, above_resurrectable)
-            };
-            Text::new(summary_text)
-                .color_substring(2, &format!("+{}", active_count))
-                .color_substring(2, &format!("+{}", resurrectable_count))
-        } else if row_index == 0 && selected_index.is_none() {
-            let tab_hint_text = if abbreviate_fourth_col {
-                tab_header_short
-            } else {
-                tab_header_full
-            };
-            Text::new(tab_hint_text).color_substring(3, "<TAB>")
-        } else if row_index == visible_count - 1 && has_hidden_below {
-            let (summary_text, active_count, resurrectable_count) = if abbreviate_fourth_col {
-                (&below_summary_short, below_active, below_resurrectable)
-            } else {
-                (&below_summary_full, below_active, below_resurrectable)
-            };
-            Text::new(summary_text)
-                .color_substring(2, &format!("+{}", active_count))
-                .color_substring(2, &format!("+{}", resurrectable_count))
-        } else {
-            Text::new(" ")
-        };
-
-        if is_selected {
-            table = table.add_styled_row(vec![
-                name_cell.selected(),
-                details_cell.selected(),
-                tag_cell.selected(),
-                fourth_cell,
-            ]);
-        } else {
-            table = table.add_styled_row(vec![name_cell, details_cell, tag_cell, fourth_cell]);
-        }
-    }
-
-    print_table_with_coordinates(table, x, y, Some(max_cols), Some(max_rows));
-}
-
-fn count_by_kind(rows: &[CachedRowData]) -> (usize, usize) {
-    let mut active = 0;
-    let mut resurrectable = 0;
-    for row in rows {
-        match row.kind {
-            CachedRowKind::Active => active += 1,
-            CachedRowKind::Resurrectable => resurrectable += 1,
-        }
-    }
-    (active, resurrectable)
 }
 
 pub fn render_screen_toggle(
@@ -1118,7 +623,7 @@ fn render_new_session_folder_prompt(
             let new_session_path = new_session_folder.clone();
             let new_session_folder = new_session_folder.display().to_string();
             let change_folder_shortcut_text = "<Ctrl f>";
-            let change_folder_shortcut = colors.shortcuts(&change_folder_shortcut_text);
+            let change_folder_shortcut = colors.shortcuts(change_folder_shortcut_text);
             let to_change = "to change";
             let reset_folder_shortcut_text = "<Ctrl c>";
             let reset_folder_shortcut = colors.shortcuts(reset_folder_shortcut_text);
@@ -1133,8 +638,9 @@ fn render_new_session_folder_prompt(
                     + 8
             {
                 print!(
-                    "\u{1b}[m{}{} {} ({} {}, {} {})",
-                    format!("\u{1b}[{};{}H", y + 1, x + 1),
+                    "\u{1b}[m\u{1b}[{};{}H{} {} ({} {}, {} {})",
+                    y + 1,
+                    x + 1,
                     colors.session_name_prompt(folder_prompt),
                     colors.session_and_folder_entry(&new_session_folder),
                     change_folder_shortcut,
@@ -1152,8 +658,9 @@ fn render_new_session_folder_prompt(
                     + 8
             {
                 print!(
-                    "\u{1b}[m{}{} {} ({} {}, {} {})",
-                    format!("\u{1b}[{};{}H", y + 1, x + 1),
+                    "\u{1b}[m\u{1b}[{};{}H{} {} ({} {}, {} {})",
+                    y + 1,
+                    x + 1,
                     colors.session_name_prompt(short_folder_prompt),
                     colors.session_and_folder_entry(&new_session_folder),
                     change_folder_shortcut,
@@ -1169,8 +676,9 @@ fn render_new_session_folder_prompt(
                     + 5
             {
                 print!(
-                    "\u{1b}[m{}{} {} ({}/{})",
-                    format!("\u{1b}[{};{}H", y + 1, x + 1),
+                    "\u{1b}[m\u{1b}[{};{}H{} {} ({}/{})",
+                    y + 1,
+                    x + 1,
                     colors.session_name_prompt(short_folder_prompt),
                     colors.session_and_folder_entry(&new_session_folder),
                     change_folder_shortcut,
@@ -1187,8 +695,9 @@ fn render_new_session_folder_prompt(
                     new_session_folder.width().saturating_sub(max_path_len),
                 );
                 print!(
-                    "\u{1b}[m{}{} {} ({}/{})",
-                    format!("\u{1b}[{};{}H", y + 1, x + 1),
+                    "\u{1b}[m\u{1b}[{};{}H{} {} ({}/{})",
+                    y + 1,
+                    x + 1,
                     colors.session_name_prompt(short_folder_prompt),
                     colors.session_and_folder_entry(&truncated_path),
                     change_folder_shortcut,
@@ -1207,8 +716,9 @@ fn render_new_session_folder_prompt(
                 >= folder_prompt.width() + change_folder_shortcut_text.width() + to_set.width() + 4
             {
                 print!(
-                    "\u{1b}[m{}{} ({} {})",
-                    format!("\u{1b}[{};{}H", y + 1, x + 1),
+                    "\u{1b}[m\u{1b}[{};{}H{} ({} {})",
+                    y + 1,
+                    x + 1,
                     colors.session_name_prompt(folder_prompt),
                     change_folder_shortcut,
                     to_set,
@@ -1220,16 +730,18 @@ fn render_new_session_folder_prompt(
                     + 4
             {
                 print!(
-                    "\u{1b}[m{}{} ({} {})",
-                    format!("\u{1b}[{};{}H", y + 1, x + 1),
+                    "\u{1b}[m\u{1b}[{};{}H{} ({} {})",
+                    y + 1,
+                    x + 1,
                     colors.session_name_prompt(short_folder_prompt),
                     change_folder_shortcut,
                     to_set,
                 );
             } else {
                 print!(
-                    "\u{1b}[m{}{} {}",
-                    format!("\u{1b}[{};{}H", y + 1, x + 1),
+                    "\u{1b}[m\u{1b}[{};{}H{} {}",
+                    y + 1,
+                    x + 1,
                     colors.session_name_prompt(short_folder_prompt),
                     change_folder_shortcut,
                 );
@@ -1255,10 +767,11 @@ pub fn render_new_session_block(
             > prompt.width() + long_instruction.width() + new_session_name.width() + 15
         {
             println!(
-                "\u{1b}[m{}{} {}_ ({} {})",
-                format!("\u{1b}[{};{}H", y + 1, x + 1),
+                "\u{1b}[m\u{1b}[{};{}H{} {}_ ({} {})",
+                y + 1,
+                x + 1,
                 colors.session_name_prompt(prompt),
-                colors.session_and_folder_entry(&new_session_name),
+                colors.session_and_folder_entry(new_session_name),
                 enter,
                 long_instruction,
             );
@@ -1281,8 +794,9 @@ pub fn render_new_session_block(
                 new_session_name.to_owned()
             };
             println!(
-                "\u{1b}[m{}{} {}_ {}",
-                format!("\u{1b}[{};{}H", y + 1, x + 1),
+                "\u{1b}[m\u{1b}[{};{}H{} {}_ {}",
+                y + 1,
+                x + 1,
                 colors.session_name_prompt(prompt),
                 colors.session_and_folder_entry(&new_session_name),
                 enter,
@@ -1301,16 +815,18 @@ pub fn render_new_session_block(
             > prompt.width() + long_instruction.width() + new_session_name.width() + 15
         {
             println!(
-                "\u{1b}[m{}{}: {} ({} to correct)",
-                format!("\u{1b}[{};{}H", y + 1, x + 1),
+                "\u{1b}[m\u{1b}[{};{}H{}: {} ({} to correct)",
+                y + 1,
+                x + 1,
                 colors.session_name_prompt(prompt),
                 colors.session_and_folder_entry(new_session_name),
                 esc,
             );
         } else {
             println!(
-                "\u{1b}[m{}{}: {} {}",
-                format!("\u{1b}[{};{}H", y + 1, x + 1),
+                "\u{1b}[m\u{1b}[{};{}H{}: {} {}",
+                y + 1,
+                x + 1,
                 colors.session_name_prompt("New session name"),
                 colors.session_and_folder_entry(new_session_name),
                 esc,
@@ -1367,7 +883,7 @@ pub fn render_layout_selection_list(
         .into_iter()
         .enumerate()
     {
-        let layout_name = layout_info.name();
+        let layout_name = layout_info.display_name();
         let layout_name_len = layout_name.width();
         let is_builtin = layout_info.is_builtin();
         if i > max_rows_of_new_session_block.saturating_sub(1) {
@@ -1379,7 +895,7 @@ pub fn render_layout_selection_list(
                     .color_range(0, layout_name_len + 1..)
                     .color_indices(3, indices)
             } else {
-                Text::new(format!("{}", layout_name))
+                Text::new(layout_name)
                     .color_range(1, ..)
                     .color_indices(3, indices)
             };
@@ -1387,9 +903,9 @@ pub fn render_layout_selection_list(
                 layout_cell = layout_cell.selected();
             }
             let arrow_cell = if is_selected {
-                Text::new(format!("<↓↑>")).selected().color_range(3, ..)
+                Text::new("<↓↑>".to_string()).selected().color_range(3, ..)
             } else {
-                Text::new(format!("    ")).color_range(3, ..)
+                Text::new("    ".to_string()).color_range(3, ..)
             };
             table = table.add_styled_row(vec![arrow_cell, layout_cell]);
         }
@@ -1560,7 +1076,7 @@ fn format_elapsed_time(elapsed_millis: u64) -> String {
         }
     }
     if formatted_duration.is_empty() {
-        format!("just now")
+        "just now".to_string()
     } else {
         format!("{} ago", formatted_duration)
     }

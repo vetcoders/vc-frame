@@ -1,5 +1,5 @@
 use crate::platform::Platform;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use unicode_width::UnicodeWidthStr;
 use zellij_tile::prelude::*;
 
@@ -26,7 +26,7 @@ pub fn render_instruction_line(y: usize, max_cols: usize) {
 }
 
 pub fn render_list_tip(y: usize, max_cols: usize) {
-    let tip = Text::new(format!("(<↓↑> - Navigate, <TAB> - Select)"))
+    let tip = Text::new("(<↓↑> - Navigate, <TAB> - Select)".to_string())
         .color_range(3, 1..5)
         .color_range(3, 18..23);
     print_text_with_coordinates(tip, 0, y, Some(max_cols), None);
@@ -76,7 +76,7 @@ pub fn render_search_term(search_term: &str) {
         .color_range(2, 0..prompt.len())
         .color_range(3, prompt.len()..);
     print_text(text);
-    println!("")
+    println!()
 }
 
 pub fn render_virtual_root_header(_cols: usize) {
@@ -93,7 +93,7 @@ pub fn render_virtual_root_header(_cols: usize) {
 }
 
 pub fn render_current_path(
-    full_path: &PathBuf,
+    full_path: &Path,
     path_is_dir: bool,
     handling_filepick: bool,
     max_cols: usize,
@@ -130,7 +130,7 @@ pub fn render_current_path(
             current_path
         } else {
             truncate_path(
-                full_path.clone(),
+                full_path.to_path_buf(),
                 current_path_len.saturating_sub(max_path_len),
                 platform,
             )
@@ -167,4 +167,8 @@ fn truncate_path(path: PathBuf, mut char_count_to_remove: usize, platform: Platf
         }
     }
     truncated
+}
+
+pub fn refresh_directory(full_path: &Path) {
+    change_host_folder(PathBuf::from(full_path));
 }

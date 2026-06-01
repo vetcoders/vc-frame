@@ -25,8 +25,9 @@ struct App {
 register_plugin!(App);
 
 impl ZellijPlugin for App {
-    fn load(&mut self, _configuration: BTreeMap<String, String>) {
-        self.initialize();
+    fn load(&mut self, configuration: BTreeMap<String, String>) {
+        let pane_title = configuration.get("pane_title").cloned();
+        self.initialize(pane_title.as_deref());
     }
 
     fn update(&mut self, event: Event) -> bool {
@@ -64,12 +65,12 @@ impl ZellijPlugin for App {
 }
 
 impl App {
-    fn initialize(&mut self) {
+    fn initialize(&mut self, pane_title: Option<&str>) {
         self.subscribe_to_events();
         self.state.own_plugin_id = Some(get_plugin_ids().plugin_id);
         self.retrieve_token_list();
         self.query_link_executable();
-        self.set_plugin_title();
+        self.set_plugin_title(pane_title);
     }
 
     fn subscribe_to_events(&self) {
@@ -84,9 +85,9 @@ impl App {
         ]);
     }
 
-    fn set_plugin_title(&self) {
+    fn set_plugin_title(&self, pane_title: Option<&str>) {
         if let Some(plugin_id) = self.state.own_plugin_id {
-            rename_plugin_pane(plugin_id, "Share Session");
+            rename_plugin_pane(plugin_id, pane_title.unwrap_or("Share Session").to_owned());
         }
     }
 
@@ -653,17 +654,12 @@ struct AppState {
     info: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 enum Screen {
+    #[default]
     Main,
     Token(String),
     ManageTokens,
-}
-
-impl Default for Screen {
-    fn default() -> Self {
-        Screen::Main
-    }
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]

@@ -1,15 +1,10 @@
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Platform {
+    #[default]
     Unix,
     Windows,
-}
-
-impl Default for Platform {
-    fn default() -> Self {
-        Platform::Unix
-    }
 }
 
 impl Platform {
@@ -19,14 +14,14 @@ impl Platform {
         let bytes = initial_cwd.as_bytes();
         // Drive letter: X:\ or X:/
         let is_drive_letter = matches!(
-            (bytes.get(0), bytes.get(1), bytes.get(2)),
+            (bytes.first(), bytes.get(1), bytes.get(2)),
             (Some(c), Some(b':'), Some(b'\\' | b'/')) if c.is_ascii_alphabetic()
         );
         if is_drive_letter {
             return Platform::Windows;
         }
         // UNC path: \\server\share
-        let is_unc_path = matches!((bytes.get(0), bytes.get(1)), (Some(b'\\'), Some(b'\\')));
+        let is_unc_path = matches!((bytes.first(), bytes.get(1)), (Some(b'\\'), Some(b'\\')));
         if is_unc_path {
             return Platform::Windows;
         }
@@ -70,7 +65,7 @@ impl Platform {
             let s = path.to_string_lossy();
             let bytes = s.as_bytes();
             let is_bare_drive = s.len() == 2
-                && matches!(bytes.get(0), Some(c) if c.is_ascii_alphabetic())
+                && matches!(bytes.first(), Some(c) if c.is_ascii_alphabetic())
                 && matches!(bytes.get(1), Some(b':'));
             if is_bare_drive {
                 return PathBuf::from(format!("{}/", s));
@@ -85,8 +80,7 @@ impl Platform {
         let s = path.to_string_lossy();
         match platform {
             Platform::Windows => {
-                if s.starts_with("//wsl.localhost/") {
-                    let rest = &s["//wsl.localhost/".len()..];
+                if let Some(rest) = s.strip_prefix("//wsl.localhost/") {
                     let distro = rest.trim_end_matches('/');
                     return format!("{} (WSL)", distro);
                 }
@@ -107,21 +101,20 @@ impl Platform {
                 let bytes = s.as_bytes();
                 // Drive root: "C:/" or "C:"
                 let is_drive_root_slash = s.len() == 3
-                    && matches!(bytes.get(0), Some(c) if c.is_ascii_alphabetic())
+                    && matches!(bytes.first(), Some(c) if c.is_ascii_alphabetic())
                     && matches!(bytes.get(1), Some(b':'))
                     && matches!(bytes.get(2), Some(b'/'));
                 if is_drive_root_slash {
                     return true;
                 }
                 let is_bare_drive = s.len() == 2
-                    && matches!(bytes.get(0), Some(c) if c.is_ascii_alphabetic())
+                    && matches!(bytes.first(), Some(c) if c.is_ascii_alphabetic())
                     && matches!(bytes.get(1), Some(b':'));
                 if is_bare_drive {
                     return true;
                 }
                 // UNC root: //server/share (at most 4 path components)
-                if s.starts_with("//") {
-                    let without_prefix = &s[2..];
+                if let Some(without_prefix) = s.strip_prefix("//") {
                     let parts: Vec<&str> = without_prefix
                         .split('/')
                         .filter(|p| !p.is_empty())

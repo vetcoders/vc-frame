@@ -87,7 +87,7 @@ impl RebindLeadersScreen {
                 })
                 .and_then(|k| {
                     k.into_iter().find_map(|(k, a)| {
-                        if a == &[actions::Action::SwitchToMode {
+                        if a == [actions::Action::SwitchToMode {
                             input_mode: InputMode::Normal,
                         }] {
                             Some(k)
@@ -112,7 +112,7 @@ impl RebindLeadersScreen {
                 })
                 .and_then(|k| {
                     k.into_iter().find_map(|(k, a)| {
-                        if a == &[actions::Action::SwitchToMode {
+                        if a == [actions::Action::SwitchToMode {
                             input_mode: InputMode::Normal,
                         }] {
                             Some(k.key_modifiers.clone())
@@ -136,7 +136,7 @@ impl RebindLeadersScreen {
                 })
                 .and_then(|k| {
                     k.into_iter().find_map(|(k, a)| {
-                        if a == &[actions::Action::NewPane {
+                        if a == [actions::Action::NewPane {
                             direction: None,
                             pane_name: None,
                             start_suppressed: false,
@@ -203,11 +203,9 @@ impl RebindLeadersScreen {
     }
     pub fn move_selection_for_default_preset(&mut self, key: &KeyWithModifier) {
         if self.browsing_primary_modifier {
-            if key.bare_key == BareKey::Left && key.has_no_modifiers() {
-                self.browsing_primary_modifier = false;
-                self.browsing_secondary_modifier = true;
-                self.selected_secondary_key_index = self.selected_primary_key_index;
-            } else if key.bare_key == BareKey::Right && key.has_no_modifiers() {
+            if (key.bare_key == BareKey::Left || key.bare_key == BareKey::Right)
+                && key.has_no_modifiers()
+            {
                 self.browsing_primary_modifier = false;
                 self.browsing_secondary_modifier = true;
                 self.selected_secondary_key_index = self.selected_primary_key_index;
@@ -215,17 +213,16 @@ impl RebindLeadersScreen {
                 if self.selected_primary_key_index < POSSIBLE_MODIFIERS.len().saturating_sub(1) {
                     self.selected_primary_key_index += 1;
                 }
-            } else if key.bare_key == BareKey::Up && key.has_no_modifiers() {
-                if self.selected_primary_key_index > 0 {
-                    self.selected_primary_key_index -= 1;
-                }
+            } else if key.bare_key == BareKey::Up
+                && key.has_no_modifiers()
+                && self.selected_primary_key_index > 0
+            {
+                self.selected_primary_key_index -= 1;
             }
         } else if self.browsing_secondary_modifier {
-            if key.bare_key == BareKey::Left && key.has_no_modifiers() {
-                self.browsing_secondary_modifier = false;
-                self.browsing_primary_modifier = true;
-                self.selected_primary_key_index = self.selected_secondary_key_index;
-            } else if key.bare_key == BareKey::Right && key.has_no_modifiers() {
+            if (key.bare_key == BareKey::Left || key.bare_key == BareKey::Right)
+                && key.has_no_modifiers()
+            {
                 self.browsing_secondary_modifier = false;
                 self.browsing_primary_modifier = true;
                 self.selected_primary_key_index = self.selected_secondary_key_index;
@@ -233,10 +230,11 @@ impl RebindLeadersScreen {
                 if self.selected_secondary_key_index < POSSIBLE_MODIFIERS.len().saturating_sub(1) {
                     self.selected_secondary_key_index += 1;
                 }
-            } else if key.bare_key == BareKey::Up && key.has_no_modifiers() {
-                if self.selected_secondary_key_index > 0 {
-                    self.selected_secondary_key_index -= 1;
-                }
+            } else if key.bare_key == BareKey::Up
+                && key.has_no_modifiers()
+                && self.selected_secondary_key_index > 0
+            {
+                self.selected_secondary_key_index -= 1;
             }
         } else {
             self.set_primary_modifier_selected();
@@ -310,7 +308,7 @@ impl RebindLeadersScreen {
             if cols >= WIDTH_BREAKPOINTS.0 {
                 (format!("Primary: {}", primary_modifier_key_text), 9)
             } else {
-                (format!("{}", primary_modifier_key_text), 0)
+                (primary_modifier_key_text.to_string(), 0)
             };
         let primary_modifier_menu_width = primary_modifier_text.chars().count();
         print_text_with_coordinates(
@@ -461,7 +459,7 @@ impl RebindLeadersScreen {
                 if cols >= WIDTH_BREAKPOINTS.0 {
                     (format!("Unlock Toggle: {}", main_leader_key_text), 15)
                 } else {
-                    (format!("{}", main_leader_key_text), 0)
+                    (main_leader_key_text.to_string(), 0)
                 };
             let mut primary_modifier =
                 Text::new(primary_modifier_text).color_range(3, primary_modifier_start_position..);
@@ -510,7 +508,7 @@ impl RebindLeadersScreen {
                     (format!("Secondary: {}", secondary_modifier_key_text), 11)
                 }
             } else {
-                (format!("{}", secondary_modifier_key_text), 0)
+                (secondary_modifier_key_text.to_string(), 0)
             };
         let secondary_modifier_menu_x_coords = base_x + (screen_width / 2);
         let secondary_modifier_menu_width = secondary_modifier_text.chars().count();
@@ -875,11 +873,11 @@ impl RebindLeadersScreen {
                     .find_map(|m| if m.0 == in_mode { Some(&m.1) } else { None })
             })
             .map(|k| {
-                k.into_iter()
+                k.iter()
                     .filter_map(|(k, a)| if a == actions { Some(k.clone()) } else { None })
                     .collect::<Vec<_>>()
             })
-            .unwrap_or_else(Default::default)
+            .unwrap_or_default()
     }
     fn bind_primary_switch_to_mode_action(
         &self,
@@ -1239,7 +1237,7 @@ impl RebindLeadersScreen {
                     .find_map(|m| if m.0 == in_mode { Some(&m.1) } else { None })
             })
             .and_then(|k| {
-                k.into_iter()
+                k.iter()
                     .find_map(|(k, a)| if a == actions { Some(k) } else { None })
             })
             .cloned()

@@ -4,6 +4,7 @@ use futures_util::{SinkExt, StreamExt};
 use isahc::prelude::*;
 use serde_json;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::http::Request;
@@ -27,7 +28,7 @@ use zellij_utils::{
 
 use serial_test::serial;
 
-mod web_client_tests {
+mod tests {
     use super::*;
 
     use std::time::{Duration, Instant};
@@ -420,30 +421,33 @@ mod web_client_tests {
 
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        let mock_apis = factory_for_verification.mock_apis.lock().unwrap();
-        let mut found_resize = false;
-        let mut found_terminal_input = false;
+        let (found_resize, found_terminal_input) = {
+            let mock_apis = factory_for_verification.mock_apis.lock().unwrap();
+            let mut found_resize = false;
+            let mut found_terminal_input = false;
 
-        for (_, mock_api) in mock_apis.iter() {
-            let messages = mock_api.get_sent_messages();
-            for msg in messages {
-                match msg {
-                    ClientToServerMsg::TerminalResize { new_size: _ } => {
-                        found_resize = true;
-                    },
-                    ClientToServerMsg::Key { .. }
-                    | ClientToServerMsg::Action {
-                        action: _,
-                        terminal_id: _,
-                        client_id: _,
-                        is_cli_client: _,
-                    } => {
-                        found_terminal_input = true;
-                    },
-                    _ => {},
+            for (_, mock_api) in mock_apis.iter() {
+                let messages = mock_api.get_sent_messages();
+                for msg in messages {
+                    match msg {
+                        ClientToServerMsg::TerminalResize { new_size: _ } => {
+                            found_resize = true;
+                        },
+                        ClientToServerMsg::Key { .. }
+                        | ClientToServerMsg::Action {
+                            action: _,
+                            terminal_id: _,
+                            client_id: _,
+                            is_cli_client: _,
+                        } => {
+                            found_terminal_input = true;
+                        },
+                        _ => {},
+                    }
                 }
             }
-        }
+            (found_resize, found_terminal_input)
+        };
 
         assert!(
             found_resize,
@@ -588,9 +592,7 @@ mod web_client_tests {
             }),
         };
         control_sink
-            .send(Message::Text(
-                serde_json::to_string(&resize_msg).unwrap().into(),
-            ))
+            .send(Message::Text(serde_json::to_string(&resize_msg).unwrap()))
             .await
             .expect("Failed to send TerminalResize");
 
@@ -610,7 +612,7 @@ mod web_client_tests {
             },
         });
         control_sink
-            .send(Message::Text(metrics_json.to_string().into()))
+            .send(Message::Text(metrics_json.to_string()))
             .await
             .expect("Failed to send TerminalMetrics");
 
@@ -619,35 +621,35 @@ mod web_client_tests {
 
         // Inspect the captured ClientToServerMsg traffic on the mock OS
         // API for this web client.
-        let mock_apis = factory_for_verification.mock_apis.lock().unwrap();
-        let mut found_pixel_dims: Option<ClientToServerMsg> = None;
-        for (_, mock_api) in mock_apis.iter() {
-            for msg in mock_api.get_sent_messages() {
-                if matches!(msg, ClientToServerMsg::TerminalPixelDimensions { .. }) {
-                    found_pixel_dims = Some(msg);
-                    break;
+        {
+            let mock_apis = factory_for_verification.mock_apis.lock().unwrap();
+            let mut found_pixel_dims: Option<ClientToServerMsg> = None;
+            for (_, mock_api) in mock_apis.iter() {
+                for msg in mock_api.get_sent_messages() {
+                    if matches!(msg, ClientToServerMsg::TerminalPixelDimensions { .. }) {
+                        found_pixel_dims = Some(msg);
+                        break;
+                    }
                 }
             }
+            let pixel_dims = found_pixel_dims
+                .expect("TerminalMetrics did not reach the server as TerminalPixelDimensions");
+            match pixel_dims {
+                ClientToServerMsg::TerminalPixelDimensions { pixel_dimensions } => {
+                    let cell = pixel_dimensions
+                        .character_cell_size
+                        .expect("character_cell_size missing");
+                    let area = pixel_dimensions
+                        .text_area_size
+                        .expect("text_area_size missing");
+                    assert_eq!(cell.width, 9);
+                    assert_eq!(cell.height, 18);
+                    assert_eq!(area.width, 720);
+                    assert_eq!(area.height, 432);
+                },
+                other => panic!("unexpected msg variant: {:?}", other),
+            }
         }
-        let pixel_dims = found_pixel_dims
-            .expect("TerminalMetrics did not reach the server as TerminalPixelDimensions");
-        match pixel_dims {
-            ClientToServerMsg::TerminalPixelDimensions { pixel_dimensions } => {
-                let cell = pixel_dimensions
-                    .character_cell_size
-                    .expect("character_cell_size missing");
-                let area = pixel_dimensions
-                    .text_area_size
-                    .expect("text_area_size missing");
-                assert_eq!(cell.width, 9);
-                assert_eq!(cell.height, 18);
-                assert_eq!(area.width, 720);
-                assert_eq!(area.height, 432);
-            },
-            other => panic!("unexpected msg variant: {:?}", other),
-        }
-
-        drop(mock_apis);
         let _ = control_sink.close().await;
         server_handle.abort();
 
@@ -1060,17 +1062,20 @@ mod web_client_tests {
         }
 
         // Verify messages were received by checking mock APIs
-        let mock_apis = factory_for_verification.mock_apis.lock().unwrap();
-        let mut total_resize_messages: usize = 0;
+        let total_resize_messages = {
+            let mock_apis = factory_for_verification.mock_apis.lock().unwrap();
+            let mut total_resize_messages: usize = 0;
 
-        for (_, mock_api) in mock_apis.iter() {
-            let messages = mock_api.get_sent_messages();
-            for msg in messages {
-                if matches!(msg, ClientToServerMsg::TerminalResize { .. }) {
-                    total_resize_messages = total_resize_messages.saturating_add(1);
+            for (_, mock_api) in mock_apis.iter() {
+                let messages = mock_api.get_sent_messages();
+                for msg in messages {
+                    if matches!(msg, ClientToServerMsg::TerminalResize { .. }) {
+                        total_resize_messages = total_resize_messages.saturating_add(1);
+                    }
                 }
             }
-        }
+            total_resize_messages
+        };
 
         assert!(
             total_resize_messages >= 2,
@@ -1298,16 +1303,17 @@ mod web_client_tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // Create a mock API and simulate different exit scenarios by sending exit message
-        let mock_apis = factory_for_verification.mock_apis.lock().unwrap();
-        if let Some((_, mock_api)) = mock_apis.iter().next() {
-            // Simulate ClientExited message being sent
-            mock_api
-                .messages_to_server
-                .lock()
-                .unwrap()
-                .push(ClientToServerMsg::ClientExited);
+        {
+            let mock_apis = factory_for_verification.mock_apis.lock().unwrap();
+            if let Some((_, mock_api)) = mock_apis.iter().next() {
+                // Simulate ClientExited message being sent
+                mock_api
+                    .messages_to_server
+                    .lock()
+                    .unwrap()
+                    .push(ClientToServerMsg::ClientExited);
+            }
         }
-        drop(mock_apis);
 
         // Close the WebSocket connection to trigger cleanup
         let _ = terminal_sink.close().await;
@@ -1333,18 +1339,21 @@ mod web_client_tests {
         }
 
         // Verify that ClientExited message was processed
-        let mock_apis = factory_for_verification.mock_apis.lock().unwrap();
-        let mut found_client_exited = false;
+        let found_client_exited = {
+            let mock_apis = factory_for_verification.mock_apis.lock().unwrap();
+            let mut found_client_exited = false;
 
-        for (_, mock_api) in mock_apis.iter() {
-            let messages = mock_api.get_sent_messages();
-            for msg in messages {
-                if matches!(msg, ClientToServerMsg::ClientExited) {
-                    found_client_exited = true;
-                    break;
+            for (_, mock_api) in mock_apis.iter() {
+                let messages = mock_api.get_sent_messages();
+                for msg in messages {
+                    if matches!(msg, ClientToServerMsg::ClientExited) {
+                        found_client_exited = true;
+                        break;
+                    }
                 }
             }
-        }
+            found_client_exited
+        };
 
         assert!(
             found_client_exited,
@@ -1429,7 +1438,7 @@ mod web_client_tests {
             serde_json::from_str(&client_response.text().unwrap()).unwrap();
         let is_read_only = client_data["is_read_only"].as_bool().unwrap();
 
-        assert_eq!(is_read_only, true, "Client should be marked as read-only");
+        assert!(is_read_only, "Client should be marked as read-only");
 
         // Try to connect via control WebSocket
         // This will trigger the server_listener which should close the connection
@@ -1712,32 +1721,36 @@ mod web_client_tests {
 
         // VERIFY: Regular client creating new session should use FirstClientConnected
         // The session name will be "default" or a generated name
-        let all_messages = session_manager_for_verification
-            .first_messages_sent
-            .lock()
-            .unwrap();
+        {
+            let all_messages = session_manager_for_verification
+                .first_messages_sent
+                .lock()
+                .unwrap();
 
-        // Find the first message (should be FirstClientConnected)
-        let msg = all_messages
-            .first()
-            .map(|(_, msg)| msg)
-            .expect("Should have at least one message");
+            // Find the first message (should be FirstClientConnected)
+            let msg = all_messages
+                .first()
+                .map(|(_, msg)| msg)
+                .expect("Should have at least one message");
 
-        assert!(
-            matches!(msg, ClientToServerMsg::FirstClientConnected { .. }),
-            "Regular client creating new session should use FirstClientConnected, got {:?}",
-            msg
-        );
+            assert!(
+                matches!(msg, ClientToServerMsg::FirstClientConnected { .. }),
+                "Regular client creating new session should use FirstClientConnected, got {:?}",
+                msg
+            );
+        }
 
         // Verify session was marked as created
-        let sessions_created = session_manager_for_verification
-            .sessions_created
-            .lock()
-            .unwrap();
-        assert!(
-            !sessions_created.is_empty(),
-            "Session should be created by regular client"
-        );
+        {
+            let sessions_created = session_manager_for_verification
+                .sessions_created
+                .lock()
+                .unwrap();
+            assert!(
+                !sessions_created.is_empty(),
+                "Session should be created by regular client"
+            );
+        }
 
         let _ = control_sink.close().await;
         let _ = terminal_sink.close().await;
@@ -1841,13 +1854,13 @@ mod web_client_tests {
         let readonly_is_read_only = readonly_client_data["is_read_only"].as_bool().unwrap();
 
         // Verify is_read_only flag in responses
-        assert_eq!(
-            regular_is_read_only, false,
+        assert!(
+            !regular_is_read_only,
             "Regular client should not be read-only"
         );
 
-        assert_eq!(
-            readonly_is_read_only, true,
+        assert!(
+            readonly_is_read_only,
             "Read-only client should be read-only"
         );
 
@@ -2563,14 +2576,16 @@ mod web_client_tests {
 
         // Verify that NO TerminalResize message was forwarded on behalf of the rw client
         tokio::time::sleep(Duration::from_millis(200)).await;
-        let mock_apis = factory_for_verification.mock_apis.lock().unwrap();
-        for (_, mock_api) in mock_apis.iter() {
-            let messages = mock_api.get_sent_messages();
-            for msg in &messages {
-                if matches!(msg, ClientToServerMsg::TerminalResize { .. }) {
-                    panic!(
-                        "TerminalResize should NOT have been forwarded for a foreign web_client_id"
-                    );
+        {
+            let mock_apis = factory_for_verification.mock_apis.lock().unwrap();
+            for (_, mock_api) in mock_apis.iter() {
+                let messages = mock_api.get_sent_messages();
+                for msg in &messages {
+                    if matches!(msg, ClientToServerMsg::TerminalResize { .. }) {
+                        panic!(
+                            "TerminalResize should NOT have been forwarded for a foreign web_client_id"
+                        );
+                    }
                 }
             }
         }
@@ -2655,16 +2670,19 @@ mod web_client_tests {
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         // Verify the resize was forwarded
-        let mock_apis = factory_for_verification.mock_apis.lock().unwrap();
-        let mut found_resize = false;
-        for (_, mock_api) in mock_apis.iter() {
-            let messages = mock_api.get_sent_messages();
-            for msg in messages {
-                if matches!(msg, ClientToServerMsg::TerminalResize { .. }) {
-                    found_resize = true;
+        let found_resize = {
+            let mock_apis = factory_for_verification.mock_apis.lock().unwrap();
+            let mut found_resize = false;
+            for (_, mock_api) in mock_apis.iter() {
+                let messages = mock_api.get_sent_messages();
+                for msg in messages {
+                    if matches!(msg, ClientToServerMsg::TerminalResize { .. }) {
+                        found_resize = true;
+                    }
                 }
             }
-        }
+            found_resize
+        };
         assert!(
             found_resize,
             "TerminalResize should be forwarded when using own web_client_id"
@@ -2892,7 +2910,7 @@ impl SessionManager for MockSessionManager {
         session_name: &str,
         _os_input: Box<dyn ClientOsApi>,
         session_exists: bool,
-        _zellij_ipc_pipe: &PathBuf,
+        _zellij_ipc_pipe: &Path,
         first_message: ClientToServerMsg,
     ) {
         // Track the message that was sent

@@ -54,7 +54,9 @@ impl LocalCache {
     pub fn new(path: PathBuf) -> LocalCacheResult {
         match OpenOptions::new()
             .read(true)
+            .write(true)
             .create(true)
+            .truncate(false)
             .open(path.as_path())
         {
             Ok(mut file) => {

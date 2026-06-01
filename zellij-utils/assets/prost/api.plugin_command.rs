@@ -218,7 +218,7 @@ pub mod plugin_command {
         #[prost(message, tag="113")]
         GetPaneScrollbackPayload(super::GetPaneScrollbackPayload),
         #[prost(message, tag="114")]
-        RunActionPayload(super::RunActionPayload),
+        RunActionPayload(::prost::alloc::boxed::Box<super::RunActionPayload>),
         #[prost(message, tag="119")]
         ShowCursorPayload(super::ShowCursorPayload),
         #[prost(message, tag="120")]

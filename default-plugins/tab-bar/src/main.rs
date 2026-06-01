@@ -146,19 +146,19 @@ impl ZellijPlugin for State {
 
         let background = self.mode_info.style.colors.text_unselected.background;
 
-        self.tab_line = tab_line(
-            self.mode_info.session_name.as_deref(),
+        self.tab_line = tab_line(crate::line::TabLineParams {
+            session_name: self.mode_info.session_name.as_deref(),
             all_tabs,
             active_tab_index,
-            cols.saturating_sub(1),
-            self.mode_info.style.colors,
-            self.mode_info.capabilities,
-            self.mode_info.style.hide_session_name,
-            self.tabs.iter().find(|t| t.active),
-            &self.mode_info,
-            self.hide_swap_layout_indication,
-            &background,
-        );
+            cols: cols.saturating_sub(1),
+            palette: self.mode_info.style.colors,
+            capabilities: self.mode_info.capabilities,
+            hide_session_name: self.mode_info.style.hide_session_name,
+            tab_info: self.tabs.iter().find(|t| t.active),
+            mode_info: &self.mode_info,
+            hide_swap_layout_indicator: self.hide_swap_layout_indication,
+            background: &background,
+        });
 
         let output = self
             .tab_line

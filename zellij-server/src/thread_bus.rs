@@ -25,11 +25,9 @@ pub struct ThreadSenders {
 impl ThreadSenders {
     pub fn send_to_screen(&self, instruction: ScreenInstruction) -> Result<()> {
         if self.should_silently_fail {
-            let _ = self
-                .to_screen
-                .as_ref()
-                .map(|sender| sender.send(instruction))
-                .unwrap_or_else(|| Ok(()));
+            if let Some(sender) = &self.to_screen {
+                let _ = sender.send(instruction);
+            }
             Ok(())
         } else {
             self.to_screen
@@ -43,11 +41,9 @@ impl ThreadSenders {
 
     pub fn send_to_pty(&self, instruction: PtyInstruction) -> Result<()> {
         if self.should_silently_fail {
-            let _ = self
-                .to_pty
-                .as_ref()
-                .map(|sender| sender.send(instruction))
-                .unwrap_or_else(|| Ok(()));
+            if let Some(sender) = &self.to_pty {
+                let _ = sender.send(instruction);
+            }
             Ok(())
         } else {
             self.to_pty
@@ -61,11 +57,9 @@ impl ThreadSenders {
 
     pub fn send_to_plugin(&self, instruction: PluginInstruction) -> Result<()> {
         if self.should_silently_fail {
-            let _ = self
-                .to_plugin
-                .as_ref()
-                .map(|sender| sender.send(instruction))
-                .unwrap_or_else(|| Ok(()));
+            if let Some(sender) = &self.to_plugin {
+                let _ = sender.send(instruction);
+            }
             Ok(())
         } else {
             self.to_plugin
@@ -79,11 +73,9 @@ impl ThreadSenders {
 
     pub fn send_to_server(&self, instruction: ServerInstruction) -> Result<()> {
         if self.should_silently_fail {
-            let _ = self
-                .to_server
-                .as_ref()
-                .map(|sender| sender.send(instruction))
-                .unwrap_or_else(|| Ok(()));
+            if let Some(sender) = &self.to_server {
+                let _ = sender.send(instruction);
+            }
             Ok(())
         } else {
             self.to_server
@@ -96,11 +88,9 @@ impl ThreadSenders {
     }
     pub fn send_to_pty_writer(&self, instruction: PtyWriteInstruction) -> Result<()> {
         if self.should_silently_fail {
-            let _ = self
-                .to_pty_writer
-                .as_ref()
-                .map(|sender| sender.send(instruction))
-                .unwrap_or_else(|| Ok(()));
+            if let Some(sender) = &self.to_pty_writer {
+                let _ = sender.send(instruction);
+            }
             Ok(())
         } else {
             self.to_pty_writer
@@ -113,11 +103,9 @@ impl ThreadSenders {
     }
     pub fn send_to_background_jobs(&self, background_job: BackgroundJob) -> Result<()> {
         if self.should_silently_fail {
-            let _ = self
-                .to_background_jobs
-                .as_ref()
-                .map(|sender| sender.send(background_job))
-                .unwrap_or_else(|| Ok(()));
+            if let Some(sender) = &self.to_background_jobs {
+                let _ = sender.send(background_job);
+            }
             Ok(())
         } else {
             self.to_background_jobs
@@ -167,26 +155,13 @@ pub(crate) struct Bus<T> {
 impl<T> Bus<T> {
     pub fn new(
         receivers: Vec<channels::Receiver<(T, ErrorContext)>>,
-        to_screen: Option<&SenderWithContext<ScreenInstruction>>,
-        to_pty: Option<&SenderWithContext<PtyInstruction>>,
-        to_plugin: Option<&SenderWithContext<PluginInstruction>>,
-        to_server: Option<&SenderWithContext<ServerInstruction>>,
-        to_pty_writer: Option<&SenderWithContext<PtyWriteInstruction>>,
-        to_background_jobs: Option<&SenderWithContext<BackgroundJob>>,
+        senders: ThreadSenders,
         os_input: Option<Box<dyn ServerOsApi>>,
     ) -> Self {
         Bus {
             receivers,
-            senders: ThreadSenders {
-                to_screen: to_screen.cloned(),
-                to_pty: to_pty.cloned(),
-                to_plugin: to_plugin.cloned(),
-                to_server: to_server.cloned(),
-                to_pty_writer: to_pty_writer.cloned(),
-                to_background_jobs: to_background_jobs.cloned(),
-                should_silently_fail: false,
-            },
-            os_input: os_input.clone(),
+            senders,
+            os_input,
         }
     }
     #[allow(unused)]

@@ -177,9 +177,14 @@ fn right_more_message(
 }
 
 fn tab_line_prefix(session_name: Option<&str>, palette: Styling, cols: usize) -> Vec<LinePart> {
-    let prefix_text = " Zellij ".to_string();
+    // User-facing top bar for the Vibecrafted frame runtime.
+    // Leads with the 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. brand, then the dynamic (session) name. The input
+    // mode is owned by the status-bar and the operator persona surfaces as the focused
+    // tab name (see vibecrafted.kdl), so the prefix stays brand + session only. A prior
+    // hardcoded "NORMAL"/"Operator" prefix froze the mode and duplicated the tab persona.
+    let prefix_text = " 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. ".to_string();
 
-    let running_text_len = prefix_text.chars().count();
+    let running_text_len = prefix_text.width();
     let text_color = palette.text_unselected.base;
     let bg_color = palette.text_unselected.background;
     let prefix_styled_text = style!(text_color, bg_color).bold().paint(prefix_text);
@@ -212,19 +217,34 @@ pub fn tab_separator(capabilities: PluginCapabilities) -> &'static str {
     }
 }
 
-pub fn tab_line(
-    session_name: Option<&str>,
-    mut all_tabs: Vec<LinePart>,
-    active_tab_index: usize,
-    cols: usize,
-    palette: Styling,
-    capabilities: PluginCapabilities,
-    hide_session_name: bool,
-    tab_info: Option<&TabInfo>,
-    mode_info: &ModeInfo,
-    hide_swap_layout_indicator: bool,
-    background: &PaletteColor,
-) -> Vec<LinePart> {
+pub struct TabLineParams<'a> {
+    pub session_name: Option<&'a str>,
+    pub all_tabs: Vec<LinePart>,
+    pub active_tab_index: usize,
+    pub cols: usize,
+    pub palette: Styling,
+    pub capabilities: PluginCapabilities,
+    pub hide_session_name: bool,
+    pub tab_info: Option<&'a TabInfo>,
+    pub mode_info: &'a ModeInfo,
+    pub hide_swap_layout_indicator: bool,
+    pub background: &'a PaletteColor,
+}
+
+pub fn tab_line(params: TabLineParams) -> Vec<LinePart> {
+    let TabLineParams {
+        session_name,
+        mut all_tabs,
+        active_tab_index,
+        cols,
+        palette,
+        capabilities,
+        hide_session_name,
+        tab_info,
+        mode_info,
+        hide_swap_layout_indicator,
+        background,
+    } = params;
     let mut tabs_after_active = all_tabs.split_off(active_tab_index);
     let mut tabs_before_active = all_tabs;
     let active_tab = if !tabs_after_active.is_empty() {
@@ -400,7 +420,7 @@ pub fn style_key_with_modifier(keyvec: &[KeyWithModifier], color_index: Option<u
             ..Default::default()
         }
     } else {
-        let key_string_without_modifier = format!("{}", key.join(key_separator));
+        let key_string_without_modifier = key.join(key_separator).to_string();
         let key_string_text = format!(" {} <{}> ", modifier_str, key_string_without_modifier);
         let text = if let Some(color_index) = color_index {
             Text::new(&key_string_text)

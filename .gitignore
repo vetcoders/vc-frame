@@ -5,3 +5,8 @@ target/
 .idea
 .DS_Store
 /assets/man/zellij.1
+/.vibecrafted
+/.loctree
+/.claude
+/.antigravitycli
+*.log

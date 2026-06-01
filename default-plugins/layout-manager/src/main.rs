@@ -24,10 +24,24 @@ impl DisplayLayout {
         match self {
             DisplayLayout::Valid(info) => match info {
                 LayoutInfo::BuiltIn(name) => name.clone(),
-                LayoutInfo::File(path, _) => path.split('/').last().unwrap_or(path).to_string(),
-                LayoutInfo::Url(url) => url.split('/').last().unwrap_or(url).to_string(),
+                LayoutInfo::File(path, _) => {
+                    path.split('/').next_back().unwrap_or(path).to_string()
+                },
+                LayoutInfo::Url(url) => url.split('/').next_back().unwrap_or(url).to_string(),
                 LayoutInfo::Stringified(_) => "raw".to_string(),
             },
+            DisplayLayout::Error { name, .. } => name.clone(),
+        }
+    }
+    fn display_name(&self) -> String {
+        match self {
+            DisplayLayout::Valid(info) => info.display_name(),
+            DisplayLayout::Error { name, .. } => name.clone(),
+        }
+    }
+    fn searchable_name(&self) -> String {
+        match self {
+            DisplayLayout::Valid(info) => info.searchable_name(),
             DisplayLayout::Error { name, .. } => name.clone(),
         }
     }
@@ -39,21 +53,16 @@ impl DisplayLayout {
         }
     }
     fn is_error(&self) -> bool {
-        match self {
-            DisplayLayout::Error { .. } => true,
-            _ => false,
-        }
+        matches!(self, DisplayLayout::Error { .. })
     }
     fn is_builtin(&self) -> bool {
         matches!(self, DisplayLayout::Valid(LayoutInfo::BuiltIn(..)))
     }
 
     fn builtin_sort_priority(&self) -> usize {
-        let name = self.name().to_lowercase();
-        match name.as_str() {
-            "default" => 0,
-            "compact" => 1,
-            _ => 2,
+        match self {
+            DisplayLayout::Valid(info) => info.builtin_sort_priority().unwrap_or(20),
+            DisplayLayout::Error { .. } => 20,
         }
     }
 
@@ -71,9 +80,10 @@ impl DisplayLayout {
             .builtin_sort_priority()
             .cmp(&other.builtin_sort_priority())
         {
-            std::cmp::Ordering::Equal => {
-                self.name().to_lowercase().cmp(&other.name().to_lowercase())
-            },
+            std::cmp::Ordering::Equal => self
+                .display_name()
+                .to_lowercase()
+                .cmp(&other.display_name().to_lowercase()),
             priority_order => priority_order,
         }
     }
@@ -91,7 +101,9 @@ impl DisplayLayout {
                     (None, Some(_)) => std::cmp::Ordering::Greater,
                     (None, None) => {
                         // Fallback to alphabetical
-                        self.name().to_lowercase().cmp(&other.name().to_lowercase())
+                        self.display_name()
+                            .to_lowercase()
+                            .cmp(&other.display_name().to_lowercase())
                     },
                 }
             },
@@ -102,10 +114,10 @@ impl DisplayLayout {
     }
 
     fn name_width(&self) -> usize {
-        self.name().chars().count()
+        self.display_name().chars().count()
     }
     fn last_modified_width(&self) -> usize {
-        let display_info = get_layout_display_info(&self);
+        let display_info = get_layout_display_info(self);
         get_last_modified_string(display_info.1, self.is_builtin())
             .chars()
             .count()
@@ -216,6 +228,10 @@ register_plugin!(State);
 
 impl ZellijPlugin for State {
     fn load(&mut self, _configuration: BTreeMap<String, String>) {
+        let pane_title = _configuration
+            .get("pane_title")
+            .cloned()
+            .unwrap_or_else(|| "Layout Manager".to_owned());
         subscribe(&[
             EventType::PastedText,
             EventType::SessionUpdate,
@@ -223,7 +239,7 @@ impl ZellijPlugin for State {
             EventType::AvailableLayoutInfo,
             EventType::PermissionRequestResult,
         ]);
-        rename_plugin_pane(get_plugin_ids().plugin_id, "Layout Manager");
+        rename_plugin_pane(get_plugin_ids().plugin_id, pane_title);
     }
 
     fn update(&mut self, event: Event) -> bool {

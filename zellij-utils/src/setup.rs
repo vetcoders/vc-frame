@@ -3,7 +3,7 @@ use crate::consts::ASSET_MAP;
 use crate::input::theme::Themes;
 #[allow(unused_imports)]
 use crate::{
-    cli::{CliArgs, Command, SessionCommand, Sessions},
+    cli::{CliArgs, CliOptions, Command, SessionCommand, Sessions},
     consts::{FEATURES, VERSION, ZELLIJ_CACHE_DIR, ZELLIJ_DEFAULT_THEMES},
     data::LayoutInfo,
     errors::prelude::*,
@@ -18,7 +18,14 @@ use clap::{Args, IntoApp};
 use clap_complete::Shell;
 use log::info;
 use serde::{Deserialize, Serialize};
-use std::{convert::TryFrom, fmt::Write as FmtWrite, fs, io::Write, path::PathBuf, process};
+use std::{
+    convert::TryFrom,
+    fmt::Write as FmtWrite,
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+    process,
+};
 
 const CONFIG_NAME: &str = "config.kdl";
 static ARROW_SEPARATOR: &str = "";
@@ -29,9 +36,8 @@ pub fn get_default_themes() -> Themes {
     for file in ZELLIJ_DEFAULT_THEMES.files() {
         if let Some(content) = file.contents_utf8() {
             let sourced_from_external_file = true;
-            match Themes::from_string(&content.to_string(), sourced_from_external_file) {
-                Ok(theme) => themes = themes.merge(theme),
-                Err(_) => {},
+            if let Ok(theme) = Themes::from_string(content, sourced_from_external_file) {
+                themes = themes.merge(theme)
             }
         }
     }
@@ -114,6 +120,36 @@ pub const WELCOME_LAYOUT: &[u8] = include_bytes!(concat!(
     "assets/layouts/welcome.kdl"
 ));
 
+pub const VC_DASHBOARD_LAYOUT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/",
+    "assets/layouts/vc-dashboard.kdl"
+));
+
+pub const VIBECRAFTED_LAYOUT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/",
+    "assets/layouts/vibecrafted.kdl"
+));
+
+pub const VC_WORKFLOW_LAYOUT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/",
+    "assets/layouts/vc-workflow.kdl"
+));
+
+pub const VC_MARBLES_LAYOUT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/",
+    "assets/layouts/vc-marbles.kdl"
+));
+
+pub const VC_RESEARCH_LAYOUT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/",
+    "assets/layouts/vc-research.kdl"
+));
+
 pub const FISH_EXTRA_COMPLETION: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/",
@@ -166,29 +202,31 @@ pub fn dump_default_config() -> std::io::Result<()> {
 }
 
 pub fn dump_specified_layout(layout: &str) -> std::io::Result<()> {
-    match layout {
-        "strider" => dump_asset(STRIDER_LAYOUT),
-        "default" => dump_asset(DEFAULT_LAYOUT),
-        "compact" => dump_asset(COMPACT_BAR_LAYOUT),
-        "disable-status" => dump_asset(NO_STATUS_LAYOUT),
-        "classic" => dump_asset(CLASSIC_LAYOUT),
-        custom => {
-            info!("Dump {custom} layout");
-            let custom = add_layout_ext(custom);
-            let home = default_layout_dir();
-            let path = home.map(|h| h.join(&custom));
-            let layout_exists = path.as_ref().map(|p| p.exists()).unwrap_or_default();
+    let layout = if layout == "disable-status" {
+        "disable-status-bar"
+    } else {
+        layout
+    };
+    if let Ok((_layout_name, stringified_layout, _swap_layouts)) =
+        Layout::stringified_from_default_assets(Path::new(layout))
+    {
+        return std::io::stdout().write_all(stringified_layout.as_bytes());
+    }
 
-            match (path, layout_exists) {
-                (Some(path), true) => {
-                    let content = fs::read_to_string(path)?;
-                    std::io::stdout().write_all(content.as_bytes())
-                },
-                _ => {
-                    log::error!("No layout named {custom} found");
-                    return Ok(());
-                },
-            }
+    info!("Dump {layout} layout");
+    let custom = add_layout_ext(layout);
+    let home = default_layout_dir();
+    let path = home.map(|h| h.join(&custom));
+    let layout_exists = path.as_ref().map(|p| p.exists()).unwrap_or_default();
+
+    match (path, layout_exists) {
+        (Some(path), true) => {
+            let content = fs::read_to_string(path)?;
+            std::io::stdout().write_all(content.as_bytes())
+        },
+        _ => {
+            log::error!("No layout named {custom} found");
+            Ok(())
         },
     }
 }
@@ -199,15 +237,15 @@ pub fn dump_specified_swap_layout(swap_layout: &str) -> std::io::Result<()> {
         "default" => dump_asset(DEFAULT_SWAP_LAYOUT),
         "compact" => dump_asset(COMPACT_BAR_SWAP_LAYOUT),
         "classic" => dump_asset(CLASSIC_SWAP_LAYOUT),
-        not_found => Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Swap Layout not found for: {}", not_found),
-        )),
+        not_found => Err(std::io::Error::other(format!(
+            "Swap Layout not found for: {}",
+            not_found
+        ))),
     }
 }
 
 #[cfg(not(target_family = "wasm"))]
-pub fn dump_builtin_plugins(path: &PathBuf) -> Result<()> {
+pub fn dump_builtin_plugins(path: &Path) -> Result<()> {
     for (asset_path, bytes) in ASSET_MAP.iter() {
         let plugin_path = path.join(asset_path);
         plugin_path
@@ -283,6 +321,19 @@ pub struct Setup {
     /// Generates auto-start script for the specified shell
     #[clap(long, value_name = "SHELL", value_parser)]
     pub generate_auto_start: Option<String>,
+
+    /// Install / refresh the Vibecrafted zellij layouts into the user's
+    /// `~/.config/zellij/layouts/` directory. Resolution order for the
+    /// framework root: `--vibecrafted-root` flag → `$VIBECRAFTED_HOME` env →
+    /// `which vibecrafted` walk-up. Idempotent.
+    #[clap(long, value_parser)]
+    pub install_vibecrafted_layouts: bool,
+
+    /// Explicit path to the Vibecrafted framework root (the directory
+    /// containing `config/zellij/layouts/`). Used by
+    /// `--install-vibecrafted-layouts`; overrides env / PATH lookup.
+    #[clap(long, value_name = "PATH", value_parser)]
+    pub vibecrafted_root: Option<PathBuf>,
 }
 
 impl Setup {
@@ -301,15 +352,15 @@ impl Setup {
         Setup::handle_setup_commands(cli_args);
         let config = Config::try_from(cli_args)?;
         let cli_config_options: Option<Options> =
-            if let Some(Command::Options(options)) = cli_args.command.clone() {
-                Some(options.into())
+            if let Some(Command::Options(cli_options)) = cli_args.command.clone() {
+                Some(*cli_options.options)
             } else {
                 None
             };
 
         // the attach CLI command can also have its own Options, we need to merge them if they
         // exist
-        let cli_config_options = merge_attach_command_options(cli_config_options, &cli_args);
+        let cli_config_options = merge_attach_command_options(cli_config_options, cli_args);
 
         let mut config_without_layout = config.clone();
         let (layout_info, mut config) =
@@ -383,13 +434,29 @@ impl Setup {
         }
 
         if let Some(layout) = &self.dump_layout {
-            dump_specified_layout(&layout)?;
+            dump_specified_layout(layout)?;
             std::process::exit(0);
         }
 
         if let Some(swap_layout) = &self.dump_swap_layout {
             dump_specified_swap_layout(swap_layout)?;
             std::process::exit(0);
+        }
+
+        if self.install_vibecrafted_layouts {
+            #[cfg(not(target_family = "wasm"))]
+            {
+                match crate::vibecrafted_install::install(self.vibecrafted_root.clone(), None) {
+                    Ok(summary) => {
+                        print!("{}", summary.render());
+                        std::process::exit(0);
+                    },
+                    Err(err) => {
+                        eprintln!("vibecrafted layout install failed: {err}");
+                        std::process::exit(1);
+                    },
+                }
+            }
         }
 
         Ok(())
@@ -410,7 +477,7 @@ impl Setup {
             };
 
             println!("Dumping plugins to '{}'", dir.display());
-            dump_builtin_plugins(&dir)?;
+            dump_builtin_plugins(dir)?;
             std::process::exit(0);
         }
 
@@ -664,9 +731,9 @@ fn merge_attach_command_options(
         match options.clone().as_deref() {
             Some(SessionCommand::Options(options)) => match cli_config_options {
                 Some(cli_config_options) => {
-                    Some(cli_config_options.merge_from_cli(options.to_owned().into()))
+                    Some(cli_config_options.merge_from_cli(options.to_owned()))
                 },
-                None => Some(options.to_owned().into()),
+                None => Some(options.to_owned()),
             },
             _ => cli_config_options,
         }
@@ -679,7 +746,7 @@ fn merge_attach_command_options(
 #[cfg(test)]
 mod setup_test {
     use super::Setup;
-    use crate::cli::{CliArgs, Command};
+    use crate::cli::{CliArgs, CliOptions, Command};
     use crate::data::LayoutInfo;
     use crate::input::options::Options;
     use insta::assert_snapshot;
@@ -695,21 +762,27 @@ mod setup_test {
     }
     #[test]
     fn cli_arguments_override_config_options() {
-        let mut cli_args = CliArgs::default();
-        cli_args.command = Some(Command::Options(Options {
-            simplified_ui: Some(true),
+        let cli_args = CliArgs {
+            command: Some(Command::Options(CliOptions {
+                options: Box::new(Options {
+                    simplified_ui: Some(true),
+                    ..Default::default()
+                }),
+            })),
             ..Default::default()
-        }));
+        };
         let (_config, _layout_info, options, _, _) = Setup::from_cli_args(&cli_args).unwrap();
         assert_snapshot!(format!("{:#?}", options));
     }
     #[test]
     fn layout_options_override_config_options() {
-        let mut cli_args = CliArgs::default();
-        cli_args.layout = Some(PathBuf::from(format!(
-            "{}/src/test-fixtures/layout-with-options.kdl",
-            env!("CARGO_MANIFEST_DIR")
-        )));
+        let cli_args = CliArgs {
+            layout: Some(PathBuf::from(format!(
+                "{}/src/test-fixtures/layout-with-options.kdl",
+                env!("CARGO_MANIFEST_DIR")
+            ))),
+            ..Default::default()
+        };
         let (_config, layout_info, options, _, _) = Setup::from_cli_args(&cli_args).unwrap();
         assert_snapshot!(format!("{:#?}", options));
         let Some(LayoutInfo::File(layout_path, _)) = layout_info else {
@@ -725,15 +798,19 @@ mod setup_test {
     }
     #[test]
     fn cli_arguments_override_layout_options() {
-        let mut cli_args = CliArgs::default();
-        cli_args.layout = Some(PathBuf::from(format!(
-            "{}/src/test-fixtures/layout-with-options.kdl",
-            env!("CARGO_MANIFEST_DIR")
-        )));
-        cli_args.command = Some(Command::Options(Options {
-            pane_frames: Some(true),
+        let cli_args = CliArgs {
+            layout: Some(PathBuf::from(format!(
+                "{}/src/test-fixtures/layout-with-options.kdl",
+                env!("CARGO_MANIFEST_DIR")
+            ))),
+            command: Some(Command::Options(CliOptions {
+                options: Box::new(Options {
+                    pane_frames: Some(true),
+                    ..Default::default()
+                }),
+            })),
             ..Default::default()
-        }));
+        };
         let (_config, layout_info, options, _, _) = Setup::from_cli_args(&cli_args).unwrap();
         assert_snapshot!(format!("{:#?}", options));
         let Some(LayoutInfo::File(layout_path, _)) = layout_info else {
@@ -749,57 +826,65 @@ mod setup_test {
     }
     #[test]
     fn layout_env_vars_override_config_env_vars() {
-        let mut cli_args = CliArgs::default();
-        cli_args.config = Some(PathBuf::from(format!(
-            "{}/src/test-fixtures/config-with-env-vars.kdl",
-            env!("CARGO_MANIFEST_DIR")
-        )));
-        cli_args.layout = Some(PathBuf::from(format!(
-            "{}/src/test-fixtures/layout-with-env-vars.kdl",
-            env!("CARGO_MANIFEST_DIR")
-        )));
+        let cli_args = CliArgs {
+            config: Some(PathBuf::from(format!(
+                "{}/src/test-fixtures/config-with-env-vars.kdl",
+                env!("CARGO_MANIFEST_DIR")
+            ))),
+            layout: Some(PathBuf::from(format!(
+                "{}/src/test-fixtures/layout-with-env-vars.kdl",
+                env!("CARGO_MANIFEST_DIR")
+            ))),
+            ..Default::default()
+        };
         let (config, _layout_info, _options, _, _) = Setup::from_cli_args(&cli_args).unwrap();
         assert_snapshot!(format!("{:#?}", config));
     }
     #[test]
     fn layout_ui_config_overrides_config_ui_config() {
-        let mut cli_args = CliArgs::default();
-        cli_args.config = Some(PathBuf::from(format!(
-            "{}/src/test-fixtures/config-with-ui-config.kdl",
-            env!("CARGO_MANIFEST_DIR")
-        )));
-        cli_args.layout = Some(PathBuf::from(format!(
-            "{}/src/test-fixtures/layout-with-ui-config.kdl",
-            env!("CARGO_MANIFEST_DIR")
-        )));
+        let cli_args = CliArgs {
+            config: Some(PathBuf::from(format!(
+                "{}/src/test-fixtures/config-with-ui-config.kdl",
+                env!("CARGO_MANIFEST_DIR")
+            ))),
+            layout: Some(PathBuf::from(format!(
+                "{}/src/test-fixtures/layout-with-ui-config.kdl",
+                env!("CARGO_MANIFEST_DIR")
+            ))),
+            ..Default::default()
+        };
         let (config, _layout_info, _options, _, _) = Setup::from_cli_args(&cli_args).unwrap();
         assert_snapshot!(format!("{:#?}", config));
     }
     #[test]
     fn layout_themes_override_config_themes() {
-        let mut cli_args = CliArgs::default();
-        cli_args.config = Some(PathBuf::from(format!(
-            "{}/src/test-fixtures/config-with-themes-config.kdl",
-            env!("CARGO_MANIFEST_DIR")
-        )));
-        cli_args.layout = Some(PathBuf::from(format!(
-            "{}/src/test-fixtures/layout-with-themes-config.kdl",
-            env!("CARGO_MANIFEST_DIR")
-        )));
+        let cli_args = CliArgs {
+            config: Some(PathBuf::from(format!(
+                "{}/src/test-fixtures/config-with-themes-config.kdl",
+                env!("CARGO_MANIFEST_DIR")
+            ))),
+            layout: Some(PathBuf::from(format!(
+                "{}/src/test-fixtures/layout-with-themes-config.kdl",
+                env!("CARGO_MANIFEST_DIR")
+            ))),
+            ..Default::default()
+        };
         let (config, _layout_info, _options, _, _) = Setup::from_cli_args(&cli_args).unwrap();
         assert_snapshot!(format!("{:#?}", config));
     }
     #[test]
     fn layout_keybinds_override_config_keybinds() {
-        let mut cli_args = CliArgs::default();
-        cli_args.config = Some(PathBuf::from(format!(
-            "{}/src/test-fixtures/config-with-keybindings-config.kdl",
-            env!("CARGO_MANIFEST_DIR")
-        )));
-        cli_args.layout = Some(PathBuf::from(format!(
-            "{}/src/test-fixtures/layout-with-keybindings-config.kdl",
-            env!("CARGO_MANIFEST_DIR")
-        )));
+        let cli_args = CliArgs {
+            config: Some(PathBuf::from(format!(
+                "{}/src/test-fixtures/config-with-keybindings-config.kdl",
+                env!("CARGO_MANIFEST_DIR")
+            ))),
+            layout: Some(PathBuf::from(format!(
+                "{}/src/test-fixtures/layout-with-keybindings-config.kdl",
+                env!("CARGO_MANIFEST_DIR")
+            ))),
+            ..Default::default()
+        };
         let (config, _layout_info, _options, _, _) = Setup::from_cli_args(&cli_args).unwrap();
         assert_snapshot!(format!("{:#?}", config));
     }

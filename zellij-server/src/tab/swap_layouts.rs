@@ -85,8 +85,7 @@ impl SwapLayouts {
         // (swap_layout_name, is_swap_layout_dirty)
         match self
             .swap_tiled_layouts
-            .iter()
-            .nth(self.current_tiled_layout_position)
+            .get(self.current_tiled_layout_position)
         {
             Some(current_tiled_layout) => (
                 current_tiled_layout.1.clone().or_else(|| {
@@ -104,8 +103,7 @@ impl SwapLayouts {
         // (swap_layout_name, is_swap_layout_dirty)
         match self
             .swap_floating_layouts
-            .iter()
-            .nth(self.current_floating_layout_position)
+            .get(self.current_floating_layout_position)
         {
             Some(current_floating_layout) => (
                 current_floating_layout.1.clone().or_else(|| {
@@ -147,8 +145,7 @@ impl SwapLayouts {
         if !self.is_floating_damaged
             && self
                 .swap_floating_layouts
-                .iter()
-                .nth(self.current_floating_layout_position)
+                .get(self.current_floating_layout_position)
                 .is_some()
         {
             progress_layout!();
@@ -157,8 +154,7 @@ impl SwapLayouts {
         loop {
             match self
                 .swap_floating_layouts
-                .iter()
-                .nth(self.current_floating_layout_position)
+                .get(self.current_floating_layout_position)
             {
                 Some(swap_layout) => {
                     for (constraint, layout) in swap_layout.0.iter() {
@@ -242,8 +238,7 @@ impl SwapLayouts {
         if !self.is_tiled_damaged
             && self
                 .swap_tiled_layouts
-                .iter()
-                .nth(self.current_tiled_layout_position)
+                .get(self.current_tiled_layout_position)
                 .is_some()
         {
             progress_layout!();
@@ -252,8 +247,7 @@ impl SwapLayouts {
         loop {
             match self
                 .swap_tiled_layouts
-                .iter()
-                .nth(self.current_tiled_layout_position)
+                .get(self.current_tiled_layout_position)
             {
                 Some(swap_layout) => {
                     for (constraint, layout) in swap_layout.0.iter() {

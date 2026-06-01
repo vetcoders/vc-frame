@@ -1,9 +1,8 @@
-mod active_component;
 mod pages;
 mod tips;
 use zellij_tile::prelude::*;
 
-use pages::Page;
+use pages::{ActiveComponent, Page};
 use rand::prelude::*;
 use rand::rng;
 use std::cell::RefCell;
@@ -11,7 +10,6 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 use tips::MAX_TIP_INDEX;
 
-use crate::active_component::ActiveComponent;
 use crate::pages::{ComponentLine, TextOrCustomRender};
 
 const UI_ROWS: usize = 20;
@@ -28,6 +26,8 @@ struct App {
     own_plugin_id: Option<u32>,
     is_release_notes: bool,
     is_startup_tip: bool,
+    guide_mode: Option<String>,
+    pane_title: Option<String>,
     tip_index: usize,
     waiting_for_config_to_be_written: bool,
     error: Option<String>,
@@ -53,6 +53,8 @@ impl Default for App {
             own_plugin_id: None,
             is_release_notes: false,
             is_startup_tip: false,
+            guide_mode: None,
+            pane_title: None,
             tip_index: 0,
             waiting_for_config_to_be_written: false,
             error: None,
@@ -72,6 +74,8 @@ impl ZellijPlugin for App {
             .get("is_startup_tip")
             .map(|v| v == "true")
             .unwrap_or(false);
+        self.guide_mode = configuration.get("guide_mode").cloned();
+        self.pane_title = configuration.get("pane_title").cloned();
         subscribe(&[
             EventType::Key,
             EventType::Mouse,
@@ -94,6 +98,12 @@ impl ZellijPlugin for App {
                 self.base_mode.clone(),
                 self.tip_index,
             )
+        } else if self.guide_mode.as_deref() == Some("mission-control") {
+            Page::new_vibecrafted_mission_control(
+                self.link_executable.clone(),
+                self.zellij_version.borrow().clone(),
+                self.base_mode.clone(),
+            )
         } else {
             Page::new_main_screen(
                 self.link_executable.clone(),
@@ -112,7 +122,7 @@ impl ZellijPlugin for App {
                         Some(file_path) => {
                             format!("Failed to write config to disk at: {}", file_path)
                         },
-                        None => format!("Failed to write config to disk."),
+                        None => "Failed to write config to disk.".to_string(),
                     };
                     eprintln!("{}", error);
                     self.error = Some(error);
@@ -136,16 +146,14 @@ impl ZellijPlugin for App {
                 }
             },
             Event::RunCommandResult(exit_code, _stdout, _stderr, context) => {
-                let is_xdg_open = context.get("xdg_open_cli").is_some();
-                let is_open = context.get("open_cli").is_some();
+                let is_xdg_open = context.contains_key("xdg_open_cli");
+                let is_open = context.contains_key("open_cli");
                 if is_xdg_open {
                     if exit_code == Some(0) {
                         self.update_link_executable("xdg-open".to_owned());
                     }
-                } else if is_open {
-                    if exit_code == Some(0) {
-                        self.update_link_executable("open".to_owned());
-                    }
+                } else if is_open && exit_code == Some(0) {
+                    self.update_link_executable("open".to_owned());
                 }
             },
             Event::Key(key) => {
@@ -177,11 +185,22 @@ impl App {
                     own_plugin_id,
                     format!("Release Notes {}", self.zellij_version.borrow()),
                 );
+            } else if self.guide_mode.as_deref() == Some("mission-control") {
+                let pane_title = self
+                    .pane_title
+                    .clone()
+                    .unwrap_or_else(|| "VibeCrafted Shell Guide".to_owned());
+                rename_plugin_pane(own_plugin_id, &pane_title);
             } else {
-                rename_plugin_pane(own_plugin_id, "About Zellij");
+                let pane_title = self
+                    .pane_title
+                    .clone()
+                    .unwrap_or_else(|| "About VibeCrafted Shell".to_owned());
+                rename_plugin_pane(own_plugin_id, &pane_title);
             }
         }
     }
+
     pub fn query_link_executable(&self) {
         let mut xdg_open_context = BTreeMap::new();
         xdg_open_context.insert("xdg_open_cli".to_owned(), String::new());
@@ -271,7 +290,7 @@ impl App {
     fn render_error(&self, rows: usize, cols: usize, error: String) {
         let mut error_page = Page::new()
             .main_screen()
-            .with_title(Text::new(format!("{}", error)).color_range(3, ..))
+            .with_title(Text::new(error.to_string()).color_range(3, ..))
             .with_paragraph(vec![
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new("Unable to permanently dismiss tips."),
@@ -291,7 +310,7 @@ impl App {
     fn center_own_pane(&mut self, tab_info: Vec<TabInfo>) {
         // we only take the size of the first tab because at the time of writing this is
         // identical to all tabs, but this might not always be the case...
-        if let Some(first_tab) = tab_info.get(0) {
+        if let Some(first_tab) = tab_info.first() {
             let prev_tab_columns = self.tab_columns;
             let prev_tab_rows = self.tab_rows;
             self.tab_columns = first_tab.display_area_columns;

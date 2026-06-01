@@ -1,11 +1,8 @@
 use crate::file_list_view::{FileListView, FsEntry};
 use crate::platform::Platform;
 use crate::search_view::SearchView;
-use crate::shared::{calculate_list_bounds, render_list_tip};
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-};
+use crate::shared::{calculate_list_bounds, refresh_directory, render_list_tip};
+use std::{collections::BTreeMap, path::PathBuf};
 use unicode_width::UnicodeWidthStr;
 use zellij_tile::prelude::*;
 
@@ -255,31 +252,27 @@ impl State {
             } else {
                 open_terminal(&self.file_list_view.path);
             }
-        } else {
-            if let Some(parent_folder) = self.file_list_view.path.parent() {
-                if self.close_on_selection {
-                    open_file_in_place_of_plugin(
-                        FileToOpen::new(&self.file_list_view.path).with_cwd(parent_folder.into()),
-                        true,
-                        BTreeMap::new(),
-                    );
-                } else {
-                    open_file(
-                        FileToOpen::new(&self.file_list_view.path).with_cwd(parent_folder.into()),
-                        BTreeMap::new(),
-                    );
-                }
+        } else if let Some(parent_folder) = self.file_list_view.path.parent() {
+            if self.close_on_selection {
+                open_file_in_place_of_plugin(
+                    FileToOpen::new(&self.file_list_view.path).with_cwd(parent_folder.into()),
+                    true,
+                    BTreeMap::new(),
+                );
             } else {
-                if self.close_on_selection {
-                    open_file_in_place_of_plugin(
-                        FileToOpen::new(&self.file_list_view.path),
-                        true,
-                        BTreeMap::new(),
-                    );
-                } else {
-                    open_file(FileToOpen::new(&self.file_list_view.path), BTreeMap::new());
-                }
+                open_file(
+                    FileToOpen::new(&self.file_list_view.path).with_cwd(parent_folder.into()),
+                    BTreeMap::new(),
+                );
             }
+        } else if self.close_on_selection {
+            open_file_in_place_of_plugin(
+                FileToOpen::new(&self.file_list_view.path),
+                true,
+                BTreeMap::new(),
+            );
+        } else {
+            open_file(FileToOpen::new(&self.file_list_view.path), BTreeMap::new());
         }
     }
     pub fn enter_virtual_root(&mut self) {
@@ -373,8 +366,4 @@ impl State {
             _ => {},
         }
     }
-}
-
-pub(crate) fn refresh_directory(full_path: &Path) {
-    change_host_folder(PathBuf::from(full_path));
 }

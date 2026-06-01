@@ -46,6 +46,7 @@ pub enum BackgroundJob {
     ReportSessionInfo(String, SessionInfo),               // String - session name
     ReportPluginList(BTreeMap<PluginId, RunPlugin>),      // String - session name
     ReportLayoutInfo((String, BTreeMap<String, String>)), // BTreeMap<file_name, pane_contents>
+    ReadAllSessionInfosOnMachine,
     RunCommand(
         PluginId,
         ClientId,
@@ -87,6 +88,7 @@ impl From<&BackgroundJob> for BackgroundJobContext {
             },
             BackgroundJob::ReportSessionInfo(..) => BackgroundJobContext::ReportSessionInfo,
             BackgroundJob::ReportLayoutInfo(..) => BackgroundJobContext::ReportLayoutInfo,
+            BackgroundJob::ReadAllSessionInfosOnMachine => BackgroundJobContext::ListWebSessions,
             BackgroundJob::RunCommand(..) => BackgroundJobContext::RunCommand,
             BackgroundJob::WebRequest(..) => BackgroundJobContext::WebRequest,
             BackgroundJob::ReportPluginList(..) => BackgroundJobContext::ReportPluginList,
@@ -111,7 +113,6 @@ static LONG_FLASH_DURATION_MS: u64 = 1000;
 static FLASH_DURATION_MS: u64 = 400; // Doherty threshold
 static PLUGIN_ANIMATION_OFFSET_DURATION_MD: u64 = 500;
 static SESSION_METADATA_WRITE_INTERVAL_MS: u64 = 1000;
-static UPDATE_AND_REPORT_CWDS_INTERVAL_MS: u64 = 1000;
 static DEFAULT_SERIALIZATION_INTERVAL: u64 = 60000;
 static REPAINT_DELAY_MS: u64 = 10;
 static HELP_TEXT_DEBOUNCE_DURATION: u64 = 5000;
@@ -135,6 +136,7 @@ pub(crate) fn background_jobs_main(
     serialization_interval: Option<u64>,
     disable_session_metadata: bool,
     web_server_base_url: String,
+    has_clients: Arc<AtomicBool>,
 ) -> Result<()> {
     let err_context = || "failed to write to pty".to_string();
     let mut running_jobs: HashMap<BackgroundJob, Instant> = HashMap::new();
@@ -167,55 +169,9 @@ pub(crate) fn background_jobs_main(
     // We needn't do anything with the runtime, but it should exist at this point.
     let runtime = crate::global_async_runtime::get_tokio_runtime();
 
-    {
-        let senders = bus.senders.clone();
-        let serialization_ms = serialization_interval.unwrap_or(DEFAULT_SERIALIZATION_INTERVAL);
-        runtime.spawn(async move {
-            let mut ticker =
-                tokio::time::interval(std::time::Duration::from_millis(serialization_ms));
-            ticker.tick().await;
-            loop {
-                ticker.tick().await;
-                let _ = senders.send_to_screen(ScreenInstruction::SerializeLayoutForResurrection);
-            }
-        });
-    }
-
-    {
-        let senders = bus.senders.clone();
-        runtime.spawn(async move {
-            let mut ticker = tokio::time::interval(std::time::Duration::from_millis(
-                UPDATE_AND_REPORT_CWDS_INTERVAL_MS,
-            ));
-            ticker.tick().await;
-            loop {
-                ticker.tick().await;
-                let _ = senders.send_to_pty(PtyInstruction::UpdateAndReportCwds);
-            }
-        });
-    }
-
-    if !disable_session_metadata {
-        let current_session_name = current_session_name.clone();
-        let current_session_info = current_session_info.clone();
-        let current_session_layout = current_session_layout.clone();
-        runtime.spawn(async move {
-            let mut ticker = tokio::time::interval(std::time::Duration::from_millis(
-                SESSION_METADATA_WRITE_INTERVAL_MS,
-            ));
-            ticker.tick().await;
-            loop {
-                ticker.tick().await;
-                let name = current_session_name.lock().unwrap().clone();
-                if name.is_empty() {
-                    continue;
-                }
-                let info = current_session_info.lock().unwrap().clone();
-                let layout = current_session_layout.lock().unwrap().clone();
-                write_session_state_to_disk(name, info, layout);
-            }
-        });
-    }
+    let _ = bus
+        .senders
+        .send_to_background_jobs(BackgroundJob::ReadAllSessionInfosOnMachine);
 
     loop {
         let (event, mut err_ctx) = bus.recv().with_context(err_context)?;
@@ -290,6 +246,95 @@ pub(crate) fn background_jobs_main(
                 let _ = bus
                     .senders
                     .send_to_plugin(PluginInstruction::UpdateSessionSaveTime(timestamp_millis));
+            },
+            BackgroundJob::ReadAllSessionInfosOnMachine => {
+                // this job should only be run once and it keeps track of other sessions (as well
+                // as this one's) infos (metadata mostly) and sends it to the screen which in turn
+                // forwards it to plugins and other places it needs to be
+                if running_jobs.contains_key(&job) {
+                    continue;
+                }
+                running_jobs.insert(job, Instant::now());
+                runtime.spawn({
+                    let senders = bus.senders.clone();
+                    let current_session_info = current_session_info.clone();
+                    let current_session_name = current_session_name.clone();
+                    let current_session_layout = current_session_layout.clone();
+                    let current_session_plugin_list = current_session_plugin_list.clone();
+                    let last_serialization_time = last_serialization_time.clone();
+                    let has_clients = has_clients.clone();
+                    async move {
+                        loop {
+                            let current_session_name =
+                                current_session_name.lock().unwrap().to_string();
+                            let current_session_info = current_session_info.lock().unwrap().clone();
+                            let available_layouts = current_session_info.available_layouts.clone();
+                            let current_session_layout =
+                                current_session_layout.lock().unwrap().clone();
+                            if !disable_session_metadata {
+                                write_session_state_to_disk(
+                                    current_session_name.clone(),
+                                    current_session_info,
+                                    current_session_layout,
+                                );
+
+                                // Send SavedCurrentSession instruction to plugin thread
+                                let timestamp_millis = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis()
+                                    as u64;
+                                let _ = senders.send_to_plugin(
+                                    PluginInstruction::UpdateSessionSaveTime(timestamp_millis),
+                                );
+                            }
+                            let mut session_infos_on_machine = read_other_live_session_states(
+                                &current_session_name,
+                                &ZELLIJ_SOCK_DIR,
+                                &ZELLIJ_SESSION_INFO_CACHE_DIR,
+                            );
+                            for (session_name, session_info) in session_infos_on_machine.iter_mut()
+                            {
+                                if session_name == &current_session_name {
+                                    let current_session_plugin_list =
+                                        current_session_plugin_list.lock().unwrap().clone();
+                                    session_info.populate_plugin_list(current_session_plugin_list);
+                                    // these are not serialized, so must be explicitly added
+                                    session_info.available_layouts = available_layouts.clone();
+                                }
+                            }
+                            let resurrectable_sessions = find_resurrectable_sessions(
+                                &session_infos_on_machine,
+                                &ZELLIJ_SESSION_INFO_CACHE_DIR,
+                            );
+                            let _ = senders.send_to_screen(ScreenInstruction::UpdateSessionInfos(
+                                session_infos_on_machine,
+                                resurrectable_sessions,
+                            ));
+                            let _ = senders.send_to_pty(PtyInstruction::UpdateAndReportCwds);
+                            if last_serialization_time
+                                .lock()
+                                .unwrap()
+                                .elapsed()
+                                .as_millis()
+                                >= serialization_interval
+                                    .unwrap_or(DEFAULT_SERIALIZATION_INTERVAL)
+                                    .into()
+                            {
+                                let _ = senders.send_to_screen(
+                                    ScreenInstruction::SerializeLayoutForResurrection,
+                                );
+                                *last_serialization_time.lock().unwrap() = Instant::now();
+                            }
+                            let sleep_ms = if has_clients.load(Ordering::Relaxed) {
+                                SESSION_METADATA_WRITE_INTERVAL_MS
+                            } else {
+                                SESSION_METADATA_WRITE_INTERVAL_MS * 5 // 5s when detached
+                            };
+                            tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
+                        }
+                    }
+                });
             },
             BackgroundJob::RunCommand(
                 plugin_id,
@@ -732,8 +777,8 @@ pub fn scan_session_list_default_dirs(
         current_session_name,
         available_layouts,
         current_session_plugin_list,
-        &*ZELLIJ_SOCK_DIR,
-        &*ZELLIJ_SESSION_INFO_CACHE_DIR,
+        &ZELLIJ_SOCK_DIR,
+        &ZELLIJ_SESSION_INFO_CACHE_DIR,
     )
 }
 
@@ -751,7 +796,7 @@ fn read_other_live_session_states(
             if let Ok(file) = file {
                 if let Ok(file_name) = file.file_name().into_string() {
                     if is_ipc_socket(&file.file_type().unwrap()) {
-                        let creation_time = std::fs::metadata(&file.path())
+                        let creation_time = std::fs::metadata(file.path())
                             .ok()
                             .and_then(|f| f.created().ok().or_else(|| f.modified().ok()))
                             .and_then(|d| d.elapsed().ok())
@@ -769,7 +814,7 @@ fn read_other_live_session_states(
             .join("session-metadata.kdl");
         if let Ok(raw_session_info) = fs::read_to_string(&session_cache_file_name) {
             if let Ok(mut session_info) =
-                SessionInfo::from_string(&raw_session_info, &current_session_name)
+                SessionInfo::from_string(&raw_session_info, current_session_name)
             {
                 session_info.creation_time = creation_time;
                 session_infos_on_machine.insert(session_name, session_info);

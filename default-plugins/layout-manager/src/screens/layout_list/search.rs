@@ -43,7 +43,7 @@ impl SearchState {
 
     pub fn fill_input_with_selected_match(&mut self) -> bool {
         if let Some(result) = self.search_results.get(self.selected_search_index) {
-            let name = result.layout.name();
+            let name = result.layout.searchable_name();
             if self.filter_input.get_text() != name {
                 self.filter_input.set_text(name);
                 return true;
@@ -107,7 +107,7 @@ impl SearchState {
             .iter()
             .enumerate()
             .filter_map(|(index, layout)| {
-                let name = layout.name();
+                let name = layout.searchable_name();
                 matcher
                     .fuzzy_indices(&name, filter_text)
                     .map(|(score, indices)| SearchResult {
@@ -123,11 +123,7 @@ impl SearchState {
         results.sort_by(|a, b| b.score.cmp(&a.score));
         self.search_results = results;
 
-        if self.search_results.is_empty() {
-            self.filter_active = false;
-        } else {
-            self.filter_active = true;
-        }
+        self.filter_active = !self.search_results.is_empty();
 
         // Keep selection in bounds
         if self.selected_search_index >= self.search_results.len() {

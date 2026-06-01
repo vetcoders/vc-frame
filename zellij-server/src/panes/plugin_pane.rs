@@ -241,10 +241,7 @@ impl Pane for PluginPane {
         grid.reset_cursor_position();
         grid.render_full_viewport();
 
-        let vte_parser = self
-            .vte_parsers
-            .entry(client_id)
-            .or_insert_with(|| vte::Parser::new());
+        let vte_parser = self.vte_parsers.entry(client_id).or_default();
 
         for &byte in &vte_bytes {
             vte_parser.advance(grid, byte);
@@ -457,7 +454,7 @@ impl Pane for PluginPane {
             pane_title,
             frame_params,
         )
-        .is_pinned(is_pinned);
+        .with_pinned(is_pinned);
         if let Some((frame_color_override, _text)) = self.pane_frame_color_override.as_ref() {
             frame.override_color(*frame_color_override);
         }
@@ -794,9 +791,9 @@ impl Pane for PluginPane {
         self.set_should_render(true);
     }
     fn update_theme(&mut self, theme: Styling) {
-        self.style.colors = theme.clone();
+        self.style.colors = theme;
         for grid in self.grids.values_mut() {
-            grid.update_theme(theme.clone());
+            grid.update_theme(theme);
         }
     }
     fn update_arrow_fonts(&mut self, should_support_arrow_fonts: bool) {
@@ -890,7 +887,7 @@ impl Pane for PluginPane {
         client_id
             .and_then(|c| self.grids.get(&c))
             .map(|g| g.pane_contents(get_full_scrollback, max_scrollback_lines))
-            .unwrap_or_else(Default::default)
+            .unwrap_or_default()
     }
     fn pane_contents_with_ansi(
         &self,
@@ -901,7 +898,7 @@ impl Pane for PluginPane {
         client_id
             .and_then(|c| self.grids.get(&c))
             .map(|g| g.pane_contents_with_ansi(get_full_scrollback, max_scrollback_lines))
-            .unwrap_or_else(Default::default)
+            .unwrap_or_default()
     }
 }
 
@@ -945,7 +942,7 @@ impl PluginPane {
             permissions.iter().enumerate().for_each(|(i, p)| {
                 messages.push_str(&format!(
                     "\n\r{}. {}",
-                    bold_white.paint(&format!("{}", i + 1)),
+                    bold_white.paint(format!("{}", i + 1)),
                     orange.paint(p.display_name())
                 ));
             });

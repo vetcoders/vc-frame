@@ -1,4 +1,4 @@
-use crate::os_input_output::{resolve_command, AsyncReader};
+use crate::os_input_output_api::{resolve_command, AsyncReader};
 use crate::panes::PaneId;
 
 use std::{

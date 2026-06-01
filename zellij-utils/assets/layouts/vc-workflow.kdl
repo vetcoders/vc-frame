@@ -1,0 +1,40 @@
+// vc-workflow — ERi implementation workspace
+// Launch: vibecrafted dashboard vc-workflow
+//
+// VibeCrafted with AI Agents (c)2026 VetCoders
+layout {
+    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="compact-bar" {
+                brand_text " 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. "
+                brand_text_short " VC. "
+            }
+        }
+        children
+        pane size=1 borderless=true {
+            plugin location="status-bar"
+        }
+    }
+
+    tab name="Workflow" {
+        pane split_direction="vertical" {
+            pane name="main" size="75%" focus=true
+            pane name="agent" size="25%"
+        }
+    }
+
+    swap_tiled_layout name="solo" {
+        tab {
+            pane name="main" focus=true
+        }
+    }
+
+    swap_tiled_layout name="dual" {
+        tab {
+            pane split_direction="vertical" {
+                pane name="main" size="50%" focus=true
+                pane name="agent" size="50%"
+            }
+        }
+    }
+}

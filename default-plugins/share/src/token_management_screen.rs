@@ -362,13 +362,7 @@ impl<'a> TokenManagementScreen<'a> {
         // The "create new token" line is always visible and handled separately
 
         // Find the selected index within the token list only
-        let selected_index = if let Some(idx) = self.selected_list_index {
-            idx
-        } else {
-            // If "create new token" is selected or no selection,
-            // we don't need to center anything in the token list
-            0
-        };
+        let selected_index = self.selected_list_index.unwrap_or(0);
 
         // Calculate how many items to show above and below the selected item
         let items_above = max_height / 2;
@@ -599,10 +593,10 @@ impl<'a> TokenManagementScreen<'a> {
     fn create_status_message(&self) -> Option<(String, Text)> {
         if let Some(error) = &self.error {
             Some((error.clone(), Text::new(error).color_range(3, ..)))
-        } else if let Some(info) = &self.info {
-            Some((info.clone(), Text::new(info).color_range(1, ..)))
         } else {
-            None
+            self.info
+                .as_ref()
+                .map(|info| (info.clone(), Text::new(info).color_range(1, ..)))
         }
     }
 

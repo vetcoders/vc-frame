@@ -1,0 +1,66 @@
+// vc-marbles — convergence workspace
+// Launch: vibecrafted marbles dashboard | vibecrafted dashboard vc-marbles
+//
+// VibeCrafted with AI Agents (c)2026 VetCoders
+layout {
+    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="compact-bar" {
+                brand_text " 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. "
+                brand_text_short " VC. "
+            }
+        }
+        children
+        pane size=1 borderless=true {
+            plugin location="status-bar"
+        }
+    }
+
+    tab name="Marbles" focus=true {
+        pane split_direction="horizontal" {
+            pane name="operator" size="75%" focus=true
+            pane split_direction="vertical" size="25%" {
+                pane name="convergence" command="bash" {
+                    args "-lc" "for root in \"${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/skills/vc-agents\" \"${VIBECRAFTED_COMPANION_ROOT:-$HOME/Libraxis/vibecrafted}/skills/vc-agents\" \"${VIBECRAFTED_ROOT:+$VIBECRAFTED_ROOT/.vibecrafted/skills/vc-agents}\" \"${VIBECRAFTED_ROOT:+$VIBECRAFTED_ROOT/skills/vc-agents}\" \"./skills/vc-agents\"; do if [[ -n \"$root\" && -x \"$root/scripts/mission-control/convergence-trend.sh\" ]]; then exec \"$root/scripts/mission-control/convergence-trend.sh\"; fi; done; printf 'Convergence monitor not found.\\n'; exec \"${SHELL:-bash}\" -l"
+                }
+                pane name="sessions" command="bash" {
+                    args "-lc" "for root in \"${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/skills/vc-agents\" \"${VIBECRAFTED_COMPANION_ROOT:-$HOME/Libraxis/vibecrafted}/skills/vc-agents\" \"${VIBECRAFTED_ROOT:+$VIBECRAFTED_ROOT/.vibecrafted/skills/vc-agents}\" \"${VIBECRAFTED_ROOT:+$VIBECRAFTED_ROOT/skills/vc-agents}\" \"./skills/vc-agents\"; do if [[ -n \"$root\" && -x \"$root/scripts/mission-control/recent-sessions.sh\" ]]; then exec \"$root/scripts/mission-control/recent-sessions.sh\"; fi; done; printf 'Sessions monitor not found.\\n'; exec \"${SHELL:-bash}\" -l"
+                }
+            }
+        }
+    }
+
+    swap_tiled_layout name="expanded" {
+        tab {
+            pane split_direction="vertical" {
+                pane name="operator" size="65%" focus=true
+                pane split_direction="horizontal" size="35%" {
+                    pane name="convergence" command="bash" {
+                        args "-lc" "for root in \"${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/skills/vc-agents\" \"${VIBECRAFTED_COMPANION_ROOT:-$HOME/Libraxis/vibecrafted}/skills/vc-agents\" \"${VIBECRAFTED_ROOT:+$VIBECRAFTED_ROOT/.vibecrafted/skills/vc-agents}\" \"${VIBECRAFTED_ROOT:+$VIBECRAFTED_ROOT/skills/vc-agents}\" \"./skills/vc-agents\"; do if [[ -n \"$root\" && -x \"$root/scripts/mission-control/convergence-trend.sh\" ]]; then exec \"$root/scripts/mission-control/convergence-trend.sh\"; fi; done; printf 'Convergence monitor not found.\\n'; exec \"${SHELL:-bash}\" -l"
+                    }
+                    pane name="agents" command="bash" {
+                        args "-lc" "for root in \"${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/skills/vc-agents\" \"${VIBECRAFTED_COMPANION_ROOT:-$HOME/Libraxis/vibecrafted}/skills/vc-agents\" \"${VIBECRAFTED_ROOT:+$VIBECRAFTED_ROOT/.vibecrafted/skills/vc-agents}\" \"${VIBECRAFTED_ROOT:+$VIBECRAFTED_ROOT/skills/vc-agents}\" \"./skills/vc-agents\"; do if [[ -n \"$root\" && -x \"$root/scripts/mission-control/active-agents.sh\" ]]; then exec \"$root/scripts/mission-control/active-agents.sh\"; fi; done; printf 'Agent monitor not found.\\n'; exec \"${SHELL:-bash}\" -l"
+                    }
+                    pane name="sessions" command="bash" {
+                        args "-lc" "for root in \"${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/skills/vc-agents\" \"${VIBECRAFTED_COMPANION_ROOT:-$HOME/Libraxis/vibecrafted}/skills/vc-agents\" \"${VIBECRAFTED_ROOT:+$VIBECRAFTED_ROOT/.vibecrafted/skills/vc-agents}\" \"${VIBECRAFTED_ROOT:+$VIBECRAFTED_ROOT/skills/vc-agents}\" \"./skills/vc-agents\"; do if [[ -n \"$root\" && -x \"$root/scripts/mission-control/recent-sessions.sh\" ]]; then exec \"$root/scripts/mission-control/recent-sessions.sh\"; fi; done; printf 'Sessions monitor not found.\\n'; exec \"${SHELL:-bash}\" -l"
+                    }
+                }
+            }
+        }
+    }
+
+    swap_tiled_layout name="grid" {
+        tab {
+            pane split_direction="horizontal" {
+                pane split_direction="vertical" size="50%" {
+                    pane name="operator" focus=true
+                    pane name="convergence"
+                }
+                pane split_direction="vertical" size="50%" {
+                    pane name="agents"
+                    pane name="sessions"
+                }
+            }
+        }
+    }
+}

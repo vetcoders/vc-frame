@@ -284,7 +284,7 @@ impl<'a> MainScreen<'a> {
         print_text_with_coordinates(help_text, x, y, None, None);
     }
     pub fn connection_is_unencrypted(&self) -> bool {
-        Url::parse(&self.web_server_base_url)
+        Url::parse(self.web_server_base_url)
             .ok()
             .map(|b| b.scheme() == "http")
             .unwrap_or(false)

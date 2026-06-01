@@ -2,6 +2,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use zellij_utils::pane_size::Size;
 
+pub use crate::os_input_output_common::{AsyncSignals, SignalEvent};
+
 #[cfg(not(windows))]
 use crate::os_input_output_unix::{
     disable_mouse_support, enable_mouse_support, setup_ipc, AsyncSignalListener,
@@ -27,11 +29,6 @@ use zellij_utils::{
 
 const SIGWINCH_CB_THROTTLE_DURATION: time::Duration = time::Duration::from_millis(50);
 
-pub(crate) const ENABLE_MOUSE_SUPPORT: &str =
-    "\u{1b}[?1000h\u{1b}[?1002h\u{1b}[?1003h\u{1b}[?1015h\u{1b}[?1006h";
-pub(crate) const DISABLE_MOUSE_SUPPORT: &str =
-    "\u{1b}[?1006l\u{1b}[?1015l\u{1b}[?1003l\u{1b}[?1002l\u{1b}[?1000l";
-
 /// Trait for async stdin reading, allowing for testable implementations
 #[async_trait]
 pub trait AsyncStdin: Send {
@@ -41,6 +38,12 @@ pub trait AsyncStdin: Send {
 pub struct AsyncStdinReader {
     stdin: tokio::io::Stdin,
     buffer: Vec<u8>,
+}
+
+impl Default for AsyncStdinReader {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AsyncStdinReader {
@@ -59,17 +62,6 @@ impl AsyncStdin for AsyncStdinReader {
         let n = self.stdin.read(&mut self.buffer).await?;
         Ok(self.buffer[..n].to_vec())
     }
-}
-
-pub enum SignalEvent {
-    Resize,
-    Quit,
-}
-
-/// Trait for async signal listening, allowing for testable implementations
-#[async_trait]
-pub trait AsyncSignals: Send {
-    async fn recv(&mut self) -> Option<SignalEvent>;
 }
 
 pub(crate) fn get_terminal_size() -> Size {

@@ -96,18 +96,24 @@ impl CliArgs {
         false
     }
     pub fn options(&self) -> Option<Options> {
-        if let Some(Command::Options(options)) = &self.command {
-            return Some(options.clone());
+        if let Some(Command::Options(cli_options)) = &self.command {
+            return Some(*cli_options.options.clone());
         }
         None
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Args)]
+pub struct CliOptions {
+    #[clap(flatten)]
+    pub options: Box<Options>,
 }
 
 #[derive(Debug, Subcommand, Clone, Serialize, Deserialize)]
 pub enum Command {
     /// Change the behaviour of zellij
     #[clap(name = "options", value_parser)]
-    Options(Options),
+    Options(CliOptions),
 
     /// Setup zellij and check its configuration
     #[clap(name = "setup", value_parser)]
@@ -133,16 +139,10 @@ pub enum Command {
     Subscribe(SubscribeCli),
 }
 
-#[derive(Debug, Parser, Clone, Serialize, Deserialize)]
+#[derive(Debug, Args, Clone, Serialize, Deserialize)]
 pub struct SubscribeCli {
     /// Pane ID(s) to subscribe to (e.g. terminal_1, plugin_2, or bare number like 1)
-    #[clap(
-        short,
-        long,
-        required = true,
-        multiple_values = true,
-        multiple_occurrences = true
-    )]
+    #[clap(short, long, required = true)]
     pub pane_id: Vec<String>,
 
     /// Include scrollback lines in initial delivery.
