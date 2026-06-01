@@ -161,12 +161,11 @@ impl Row {
                 match character_width.cmp(&replaced_character.width()) {
                     Ordering::Greater => {
                         let position_to_remove = absolute_x_index + 1;
-                        if let Some(removed) = self.columns.remove(position_to_remove) {
-                            if removed.width() > 1 {
+                        if let Some(removed) = self.columns.remove(position_to_remove)
+                            && removed.width() > 1 {
                                 self.columns
                                     .insert(position_to_remove, EMPTY_TERMINAL_CHARACTER);
                             }
-                        }
                     },
                     Ordering::Less => {
                         if position_inside_character > 0 {
@@ -325,11 +324,10 @@ impl Row {
         if !current_part.is_empty() {
             parts.push(Row::from_columns(current_part).with_bg_color(self.bg_color))
         };
-        if !parts.is_empty() && self.is_canonical {
-            if let Some(part) = parts.get_mut(0) {
+        if !parts.is_empty() && self.is_canonical
+            && let Some(part) = parts.get_mut(0) {
                 part.is_canonical = true;
             }
-        }
         if parts.is_empty() {
             parts.push(self.clone());
         }

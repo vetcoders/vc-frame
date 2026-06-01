@@ -826,19 +826,17 @@ impl Pane for TerminalPane {
     fn hold(&mut self, exit_status: Option<i32>, is_first_run: bool, run_command: RunCommand) {
         self.invoked_with = Some(Run::Command(run_command.clone()));
         self.is_held = Some((exit_status, is_first_run, run_command));
-        if let Some(notification_end) = self.notification_end.as_mut() {
-            if let Some(exit_status) = exit_status {
+        if let Some(notification_end) = self.notification_end.as_mut()
+            && let Some(exit_status) = exit_status {
                 notification_end.set_exit_status(exit_status);
 
                 // Check if unblock condition is met
-                if let Some(condition) = notification_end.unblock_condition() {
-                    if condition.is_met(exit_status) {
+                if let Some(condition) = notification_end.unblock_condition()
+                    && condition.is_met(exit_status) {
                         // Condition met - drop the NotificationEnd now to unblock
                         drop(self.notification_end.take());
                     }
-                }
             }
-        }
         if is_first_run {
             self.render_first_run_banner();
         }
@@ -972,26 +970,23 @@ impl Pane for TerminalPane {
     fn intercept_left_mouse_click(&mut self, position: &Position, client_id: ClientId) -> bool {
         if self.position_is_on_frame(position) {
             let relative_position = self.relative_position(position);
-            if let Some(client_frame) = self.frame.get_mut(&client_id) {
-                if client_frame.clicked_on_pinned(relative_position) {
+            if let Some(client_frame) = self.frame.get_mut(&client_id)
+                && client_frame.clicked_on_pinned(relative_position) {
                     self.toggle_pinned();
                     return true;
                 }
-            }
         }
         false
     }
     fn intercept_mouse_event_on_frame(&mut self, event: &MouseEvent, client_id: ClientId) -> bool {
         if self.position_is_on_frame(&event.position) {
             let relative_position = self.relative_position(&event.position);
-            if let MouseEventType::Press = event.event_type {
-                if let Some(client_frame) = self.frame.get_mut(&client_id) {
-                    if client_frame.clicked_on_pinned(relative_position) {
+            if let MouseEventType::Press = event.event_type
+                && let Some(client_frame) = self.frame.get_mut(&client_id)
+                    && client_frame.clicked_on_pinned(relative_position) {
                         self.toggle_pinned();
                         return true;
                     }
-                }
-            }
         }
         false
     }
@@ -1020,12 +1015,11 @@ impl Pane for TerminalPane {
         if let Some(notification_end) = self.notification_end.as_mut() {
             notification_end.set_exit_status(exit_status);
             // Check if unblock condition is met
-            if let Some(condition) = notification_end.unblock_condition() {
-                if condition.is_met(exit_status) {
+            if let Some(condition) = notification_end.unblock_condition()
+                && condition.is_met(exit_status) {
                     // Condition met - drop the NotificationEnd now to unblock
                     drop(self.notification_end.take());
                 }
-            }
         }
     }
     fn set_plugin_regex_highlights(

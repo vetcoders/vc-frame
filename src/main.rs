@@ -170,11 +170,10 @@ fn main() {
         {
             let mut file = file;
             let cwd = cwd.or_else(|| std::env::current_dir().ok());
-            if file.is_relative() {
-                if let Some(cwd) = cwd.as_ref() {
+            if file.is_relative()
+                && let Some(cwd) = cwd.as_ref() {
                     file = cwd.join(file);
                 }
-            }
             let command_cli_action = CliAction::Edit {
                 file,
                 direction,

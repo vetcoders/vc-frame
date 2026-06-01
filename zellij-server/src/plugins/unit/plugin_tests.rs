@@ -379,7 +379,9 @@ fn create_plugin_thread(
     let plugin_thread = std::thread::Builder::new()
         .name("plugin_thread".to_string())
         .spawn(move || {
-            set_var("ZELLIJ_SESSION_NAME", "zellij-test");
+            // SAFETY: test threads set this process-wide env var before reading it; no
+            // concurrent unsynchronized env access in these single-purpose test harnesses.
+            unsafe { set_var("ZELLIJ_SESSION_NAME", "zellij-test") };
             plugin_thread_main(
                 plugin_bus,
                 engine,
@@ -465,7 +467,9 @@ fn create_plugin_thread_with_server_receiver(
     let plugin_thread = std::thread::Builder::new()
         .name("plugin_thread".to_string())
         .spawn(move || {
-            set_var("ZELLIJ_SESSION_NAME", "zellij-test");
+            // SAFETY: test threads set this process-wide env var before reading it; no
+            // concurrent unsynchronized env access in these single-purpose test harnesses.
+            unsafe { set_var("ZELLIJ_SESSION_NAME", "zellij-test") };
             plugin_thread_main(
                 plugin_bus,
                 engine,
@@ -559,7 +563,9 @@ fn create_plugin_thread_with_pty_receiver(
     let plugin_thread = std::thread::Builder::new()
         .name("plugin_thread".to_string())
         .spawn(move || {
-            set_var("ZELLIJ_SESSION_NAME", "zellij-test");
+            // SAFETY: test threads set this process-wide env var before reading it; no
+            // concurrent unsynchronized env access in these single-purpose test harnesses.
+            unsafe { set_var("ZELLIJ_SESSION_NAME", "zellij-test") };
             plugin_thread_main(
                 plugin_bus,
                 engine,
@@ -653,7 +659,9 @@ fn create_plugin_thread_with_background_jobs_receiver(
     let plugin_thread = std::thread::Builder::new()
         .name("plugin_thread".to_string())
         .spawn(move || {
-            set_var("ZELLIJ_SESSION_NAME", "zellij-test");
+            // SAFETY: test threads set this process-wide env var before reading it; no
+            // concurrent unsynchronized env access in these single-purpose test harnesses.
+            unsafe { set_var("ZELLIJ_SESSION_NAME", "zellij-test") };
             plugin_thread_main(
                 plugin_bus,
                 engine,
@@ -12072,14 +12080,13 @@ pub fn plugin_receives_config_change_event() {
         .unwrap()
         .iter()
         .filter_map(|i| {
-            if let ScreenInstruction::PluginBytes(plugin_render_assets) = i {
-                if let Some(plugin_render_asset) = plugin_render_assets.first() {
+            if let ScreenInstruction::PluginBytes(plugin_render_assets) = i
+                && let Some(plugin_render_asset) = plugin_render_assets.first() {
                     let plugin_bytes = plugin_render_asset.bytes.clone();
                     let plugin_output =
                         String::from_utf8_lossy(plugin_bytes.as_slice()).to_string();
                     return Some(plugin_output);
                 }
-            }
             None
         })
         .collect::<Vec<_>>();
@@ -12199,14 +12206,13 @@ pub fn plugin_does_not_receive_event_when_config_unchanged() {
         .unwrap()
         .iter()
         .filter_map(|i| {
-            if let ScreenInstruction::PluginBytes(plugin_render_assets) = i {
-                if let Some(plugin_render_asset) = plugin_render_assets.first() {
+            if let ScreenInstruction::PluginBytes(plugin_render_assets) = i
+                && let Some(plugin_render_asset) = plugin_render_assets.first() {
                     let plugin_bytes = plugin_render_asset.bytes.clone();
                     let plugin_output =
                         String::from_utf8_lossy(plugin_bytes.as_slice()).to_string();
                     return Some(plugin_output);
                 }
-            }
             None
         })
         .collect::<Vec<_>>();

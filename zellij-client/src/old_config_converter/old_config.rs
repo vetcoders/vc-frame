@@ -134,7 +134,7 @@ fn options_yaml_to_options_kdl(options_yaml: &OldOptions, no_comments: bool) -> 
     let mut options_kdl = String::new();
 
     macro_rules! push_option {
-        ($attribute_name:ident, $description_text:ident, $present_pattern:expr) => {
+        ($attribute_name:ident, $description_text:ident, $present_pattern:expr_2021) => {
             if !no_comments {
                 options_kdl.push_str($description_text);
             }
@@ -143,7 +143,7 @@ fn options_yaml_to_options_kdl(options_yaml: &OldOptions, no_comments: bool) -> 
                 options_kdl.push('\n');
             };
         };
-        ($attribute_name:ident, $description_text:ident, $present_pattern:expr, $absent_pattern:expr) => {
+        ($attribute_name:ident, $description_text:ident, $present_pattern:expr_2021, $absent_pattern:expr_2021) => {
             if !no_comments {
                 options_kdl.push_str($description_text);
             }
@@ -324,7 +324,7 @@ fn theme_config_yaml_to_theme_config_kdl(
     theme_config_yaml: &OldThemesFromYamlIntermediate,
 ) -> String {
     macro_rules! theme_color {
-        ($theme:ident, $color:ident, $color_name:expr, $kdl_theme_config:expr) => {
+        ($theme:ident, $color:ident, $color_name:expr_2021, $kdl_theme_config:expr_2021) => {
             match $theme.palette.$color {
                 OldPaletteColorFromYaml::Rgb((r, g, b)) => {
                     $kdl_theme_config

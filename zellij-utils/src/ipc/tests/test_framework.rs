@@ -1,6 +1,6 @@
 /// Macro for testing round-trip conversion for ClientToServerMsg variants
 macro_rules! test_client_roundtrip {
-    ($msg:expr) => {{
+    ($msg:expr_2021) => {{
         let original: crate::ipc::ClientToServerMsg = $msg;
         let proto: crate::client_server_contract::client_server_contract::ClientToServerMsg =
             original.clone().into();
@@ -13,7 +13,7 @@ macro_rules! test_client_roundtrip {
 
 /// Macro for testing round-trip conversion for ServerToClientMsg variants
 macro_rules! test_server_roundtrip {
-    ($msg:expr) => {{
+    ($msg:expr_2021) => {{
         let original: crate::ipc::ServerToClientMsg = $msg;
         let proto: crate::client_server_contract::client_server_contract::ServerToClientMsg =
             original.clone().into();

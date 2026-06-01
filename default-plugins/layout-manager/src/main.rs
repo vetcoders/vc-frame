@@ -141,8 +141,8 @@ impl State {
             },
             Screen::ImportLayout(import_layout_screen) => import_layout_screen.handle_key(key),
             Screen::RenameLayout(rename_layout_screen) => rename_layout_screen.handle_key(key),
-            Screen::Error(ref mut error_screen) => error_screen.handle_key(key),
-            Screen::ErrorDetail(ref mut error_detail_screen) => error_detail_screen.handle_key(key),
+            Screen::Error(error_screen) => error_screen.handle_key(key),
+            Screen::ErrorDetail(error_detail_screen) => error_detail_screen.handle_key(key),
         }
     }
 
@@ -199,18 +199,16 @@ impl State {
     fn optimistic_rename_layout(&mut self, old_name: &str, new_name: &str) {
         for layout in &mut self.display_layouts {
             match layout {
-                DisplayLayout::Valid(LayoutInfo::File(file_name, _)) => {
-                    if file_name == old_name {
+                DisplayLayout::Valid(LayoutInfo::File(file_name, _))
+                    if file_name == old_name => {
                         let _ = std::mem::replace(file_name, new_name.to_string());
                         break;
-                    }
-                },
-                DisplayLayout::Error { ref mut name, .. } => {
-                    if name == old_name {
+                    },
+                DisplayLayout::Error { name, .. }
+                    if name == old_name => {
                         let _ = std::mem::replace(name, new_name.to_string());
                         break;
-                    }
-                },
+                    },
                 _ => {},
             }
         }
@@ -304,8 +302,8 @@ impl ZellijPlugin for State {
             },
             Screen::ImportLayout(import_layout_screen) => import_layout_screen.render(rows, cols),
             Screen::RenameLayout(rename_layout_screen) => rename_layout_screen.render(rows, cols),
-            Screen::Error(ref error_screen) => error_screen.render(rows, cols),
-            Screen::ErrorDetail(ref error_detail_screen) => error_detail_screen.render(rows, cols),
+            Screen::Error(error_screen) => error_screen.render(rows, cols),
+            Screen::ErrorDetail(error_detail_screen) => error_detail_screen.render(rows, cols),
         }
     }
 }

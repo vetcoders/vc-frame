@@ -513,8 +513,8 @@ pub(crate) fn background_jobs_main(
                             let _ = senders.send_to_screen(ScreenInstruction::RenderToClients);
                             {
                                 let mut last_render_request = last_render_request.lock().unwrap();
-                                if let Some(last_render_request) = *last_render_request {
-                                    if last_render_request > task_start_time {
+                                if let Some(last_render_request) = *last_render_request
+                                    && last_render_request > task_start_time {
                                         // another render request was received while we were
                                         // sleeping, schedule this job again so that we can also
                                         // render that request
@@ -522,7 +522,6 @@ pub(crate) fn background_jobs_main(
                                             BackgroundJob::RenderToClients,
                                         );
                                     }
-                                }
                                 // reset the last_render_request so that the task will be spawned
                                 // again once a new request is received
                                 *last_render_request = None;
@@ -793,9 +792,9 @@ fn read_other_live_session_states(
     // reasonably sure their session is running
     if let Ok(files) = fs::read_dir(sock_dir) {
         files.for_each(|file| {
-            if let Ok(file) = file {
-                if let Ok(file_name) = file.file_name().into_string() {
-                    if is_ipc_socket(&file.file_type().unwrap()) {
+            if let Ok(file) = file
+                && let Ok(file_name) = file.file_name().into_string()
+                    && is_ipc_socket(&file.file_type().unwrap()) {
                         let creation_time = std::fs::metadata(file.path())
                             .ok()
                             .and_then(|f| f.created().ok().or_else(|| f.modified().ok()))
@@ -803,8 +802,6 @@ fn read_other_live_session_states(
                             .unwrap_or_default();
                         other_session_names.push((file_name, creation_time));
                     }
-                }
-            }
         });
     }
 
@@ -812,14 +809,13 @@ fn read_other_live_session_states(
         let session_cache_file_name = session_info_cache_dir
             .join(&session_name)
             .join("session-metadata.kdl");
-        if let Ok(raw_session_info) = fs::read_to_string(&session_cache_file_name) {
-            if let Ok(mut session_info) =
+        if let Ok(raw_session_info) = fs::read_to_string(&session_cache_file_name)
+            && let Ok(mut session_info) =
                 SessionInfo::from_string(&raw_session_info, current_session_name)
             {
                 session_info.creation_time = creation_time;
                 session_infos_on_machine.insert(session_name, session_info);
             }
-        }
     }
     session_infos_on_machine
 }

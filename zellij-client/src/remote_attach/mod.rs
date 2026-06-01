@@ -54,8 +54,8 @@ pub fn attach_to_remote_session(
         let _ = remote_session_tokens::delete_session_token(&server_url);
     }
 
-    if token.is_none() {
-        if let Some(connections) = try_to_connect_with_saved_session_token(
+    if token.is_none()
+        && let Some(connections) = try_to_connect_with_saved_session_token(
             runtime.clone(),
             remote_session_url,
             &server_url,
@@ -64,7 +64,6 @@ pub fn attach_to_remote_session(
         )? {
             return Ok(connections);
         }
-    }
 
     // Normal auth flow with retry logic
     authenticate_with_retry(

@@ -394,8 +394,8 @@ impl Pane for PluginPane {
         if client_id.is_none() {
             return Ok(None);
         }
-        if let Some(client_id) = client_id {
-            if self.should_render.get(&client_id).copied().unwrap_or(false) {
+        if let Some(client_id) = client_id
+            && self.should_render.get(&client_id).copied().unwrap_or(false) {
                 let content_x = self.get_content_x();
                 let content_y = self.get_content_y();
                 let rows = self.get_content_rows();
@@ -413,7 +413,6 @@ impl Pane for PluginPane {
                     }
                 }
             }
-        }
         Ok(None)
     }
     fn render_frame(
@@ -822,26 +821,23 @@ impl Pane for PluginPane {
     fn intercept_left_mouse_click(&mut self, position: &Position, client_id: ClientId) -> bool {
         if self.position_is_on_frame(position) {
             let relative_position = self.relative_position(position);
-            if let Some(client_frame) = self.frame.get_mut(&client_id) {
-                if client_frame.clicked_on_pinned(relative_position) {
+            if let Some(client_frame) = self.frame.get_mut(&client_id)
+                && client_frame.clicked_on_pinned(relative_position) {
                     self.toggle_pinned();
                     return true;
                 }
-            }
         }
         false
     }
     fn intercept_mouse_event_on_frame(&mut self, event: &MouseEvent, client_id: ClientId) -> bool {
         if self.position_is_on_frame(&event.position) {
             let relative_position = self.relative_position(&event.position);
-            if let MouseEventType::Press = event.event_type {
-                if let Some(client_frame) = self.frame.get_mut(&client_id) {
-                    if client_frame.clicked_on_pinned(relative_position) {
+            if let MouseEventType::Press = event.event_type
+                && let Some(client_frame) = self.frame.get_mut(&client_id)
+                    && client_frame.clicked_on_pinned(relative_position) {
                         self.toggle_pinned();
                         return true;
                     }
-                }
-            }
         }
         false
     }

@@ -80,15 +80,14 @@ impl RenameLayoutScreen {
         let mut text = format!("{}{}", prompt, input_text);
         let mut cursor_position_in_line = prompt_len + cursor_pos;
 
-        if let Some(max_width) = max_width {
-            if text.chars().count() > max_width {
+        if let Some(max_width) = max_width
+            && text.chars().count() > max_width {
                 let truncated_name =
                     truncate_with_ellipsis_start(input_text, max_width.saturating_sub(prompt_len));
                 text = format!("{}{}", prompt, truncated_name);
                 let truncated_len = truncated_name.chars().count();
                 cursor_position_in_line = prompt_len + cursor_pos.min(truncated_len);
             }
-        }
 
         (text, cursor_position_in_line)
     }

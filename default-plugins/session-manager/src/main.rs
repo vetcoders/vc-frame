@@ -685,14 +685,13 @@ impl State {
                         close_self();
                     }
                 },
-                BareKey::Char('a') if key.has_modifiers(&[KeyModifier::Ctrl]) => {
-                    if !self.is_welcome_screen {
+                BareKey::Char('a') if key.has_modifiers(&[KeyModifier::Ctrl])
+                    && !self.is_welcome_screen => {
                         // we don't want to save welcome screen sessions
                         if let Err(e) = save_session() {
                             self.show_error(&format!("Couldn't save session: {}", e));
                         }
-                    }
-                },
+                    },
                 _ => {},
             }
         }
@@ -742,11 +741,10 @@ impl State {
                     .show_delete_all_sessions_warning();
                 should_render = true;
             },
-            BareKey::Esc if key.has_no_modifiers() => {
-                if !self.is_welcome_screen {
+            BareKey::Esc if key.has_no_modifiers()
+                && !self.is_welcome_screen => {
                     close_self();
-                }
-            },
+                },
             _ => {},
         }
         should_render
@@ -923,11 +921,10 @@ impl State {
                 disconnect_other_clients();
             },
             BareKey::Char('a') if key.has_modifiers(&[KeyModifier::Ctrl]) => {
-                if !self.is_welcome_screen {
-                    if let Err(e) = save_session() {
+                if !self.is_welcome_screen
+                    && let Err(e) = save_session() {
                         self.show_error(&format!("Couldn't save session: {}", e));
                     }
-                }
             },
             BareKey::Char('c') if key.has_modifiers(&[KeyModifier::Ctrl]) => {
                 if !self.single_screen_state.search_term.is_empty() {

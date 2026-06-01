@@ -994,7 +994,7 @@ impl FloatingPanes {
         Ok(panes
             .iter()
             .find(|(_, p)| p.contains(point))
-            .map(|(&id, _)| id))
+            .map(|&(&id, _)| id))
     }
     pub fn get_pinned_pane_id_at(
         &self,
@@ -1033,7 +1033,7 @@ impl FloatingPanes {
         Ok(panes
             .iter()
             .find(|(_, p)| p.contains(point))
-            .map(|(&id, _)| id))
+            .map(|&(&id, _)| id))
     }
     pub fn has_pinned_pane_at(&self, point: &Position) -> bool {
         let mut panes: Vec<_> = self
@@ -1071,13 +1071,11 @@ impl FloatingPanes {
         if let Some((last_pane_id, initial_position)) = self
             .pane_being_moved_with_mouse
             .map(|(pane_id, initial_position, _)| (pane_id, initial_position))
-        {
-            if last_pane_id == pane_id {
+            && last_pane_id == pane_id {
                 // preserve initial_position
                 self.pane_being_moved_with_mouse = Some((pane_id, initial_position, last_position));
                 return;
             }
-        }
         self.pane_being_moved_with_mouse = Some((pane_id, last_position, last_position));
     }
     pub fn pane_is_being_moved_with_mouse(&self) -> bool {

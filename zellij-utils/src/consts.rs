@@ -41,11 +41,10 @@ pub fn create_config_and_cache_folders() {
     if let Err(e) = std::fs::create_dir_all(ZELLIJ_CACHE_DIR.as_path()) {
         log::error!("Failed to create cache dir: {:?}", e);
     }
-    if let Some(config_dir) = find_default_config_dir() {
-        if let Err(e) = std::fs::create_dir_all(config_dir.as_path()) {
+    if let Some(config_dir) = find_default_config_dir()
+        && let Err(e) = std::fs::create_dir_all(config_dir.as_path()) {
             log::error!("Failed to create config dir: {:?}", e);
         }
-    }
     // while session_info is a child of cache currently, it won't necessarily always be this way,
     // and so it's explicitly created here
     if let Err(e) = std::fs::create_dir_all(ZELLIJ_SESSION_INFO_CACHE_DIR.as_path()) {
@@ -66,13 +65,11 @@ fn prune_empty_session_info_folders() {
         let is_empty = std::fs::read_dir(&path)
             .ok()
             .is_some_and(|mut iter| iter.next().is_none());
-        if is_empty {
-            if let Err(e) = std::fs::remove_dir(&path) {
-                if e.kind() != std::io::ErrorKind::NotFound {
+        if is_empty
+            && let Err(e) = std::fs::remove_dir(&path)
+                && e.kind() != std::io::ErrorKind::NotFound {
                     log::debug!("Failed to prune empty session folder {:?}: {:?}", path, e);
                 }
-            }
-        }
     }
 }
 
@@ -134,7 +131,7 @@ mod not_wasm {
     // - `zellij-utils/../target/wasm32-wasip1/debug`: When building in debug mode AND the
     //   `plugins_from_target` feature IS set
     macro_rules! add_plugin {
-        ($assets:expr, $plugin:literal) => {
+        ($assets:expr_2021, $plugin:literal) => {
             $assets.insert(
                 PathBuf::from("plugins").join($plugin),
                 #[cfg(any(not(feature = "plugins_from_target"), not(debug_assertions)))]

@@ -468,13 +468,12 @@ fn record_preserved(target_dir: &Path, summary: &mut InstallSummary) -> Result<(
         if meta.file_type().is_symlink() {
             continue;
         }
-        if meta.file_type().is_file() {
-            if let Some(name) = path.file_name() {
+        if meta.file_type().is_file()
+            && let Some(name) = path.file_name() {
                 summary
                     .preserved_files
                     .push(name.to_string_lossy().into_owned());
             }
-        }
     }
     summary.preserved_files.sort();
     summary.preserved_files.dedup();

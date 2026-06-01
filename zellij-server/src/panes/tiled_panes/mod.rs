@@ -237,8 +237,7 @@ impl TiledPanes {
                 }
             })
             .copied()
-        {
-            if let Some(mut pane) = self.panes.remove(&pane_id) {
+            && let Some(mut pane) = self.panes.remove(&pane_id) {
                 // we must strip the logical position here because it's likely a straggler from
                 // this pane's previous tab and would cause chaos if considered in the new one
                 let mut pane_geom = pane.position_and_size();
@@ -246,7 +245,6 @@ impl TiledPanes {
                 pane.set_geom(pane_geom);
                 self.add_pane_with_existing_geom(pane.pid(), pane);
             }
-        }
     }
     pub fn add_pane_to_stack(&mut self, pane_id_in_stack: &PaneId, mut pane: Box<dyn Pane>) {
         let mut pane_grid = TiledPaneGrid::new(
@@ -280,12 +278,11 @@ impl TiledPanes {
         }
         let stacked_resize = { *self.stacked_resize.borrow() };
 
-        if let Some(client_id) = client_id {
-            if stacked_resize && self.is_connected(&client_id) {
+        if let Some(client_id) = client_id
+            && stacked_resize && self.is_connected(&client_id) {
                 self.add_pane_with_stacked_resize(pane_id, pane, should_relayout, client_id);
                 return;
             }
-        }
         self.add_pane_without_stacked_resize(pane_id, pane, should_relayout)
     }
     fn add_pane_without_stacked_resize(
@@ -452,11 +449,10 @@ impl TiledPanes {
             .get_pane_geom(&root_pane_id)
             .map(|p| p.is_stacked())
             .unwrap_or(false);
-        if !pane_id_is_stacked {
-            if let Err(e) = pane_grid.make_pane_stacked(&root_pane_id) {
+        if !pane_id_is_stacked
+            && let Err(e) = pane_grid.make_pane_stacked(&root_pane_id) {
                 log::error!("Failed to make pane stacked: {:?}", e);
             }
-        }
         match pane_grid.make_room_in_stack_of_pane_id_for_pane(&root_pane_id) {
             Ok(new_pane_geom) => {
                 pane.set_geom(new_pane_geom);
@@ -602,8 +598,8 @@ impl TiledPanes {
         self.reset_boundaries();
     }
     pub fn can_split_pane_horizontally(&mut self, client_id: ClientId) -> bool {
-        if let Some(active_pane_id) = &self.active_panes.get(&client_id) {
-            if let Some(active_pane) = self.panes.get_mut(active_pane_id) {
+        if let Some(active_pane_id) = &self.active_panes.get(&client_id)
+            && let Some(active_pane) = self.panes.get_mut(active_pane_id) {
                 let mut full_pane_size = active_pane.position_and_size();
 
                 if full_pane_size.is_stacked() {
@@ -623,12 +619,11 @@ impl TiledPanes {
                     return split(SplitDirection::Horizontal, &full_pane_size).is_some();
                 }
             }
-        }
         false
     }
     pub fn can_split_pane_vertically(&mut self, client_id: ClientId) -> bool {
-        if let Some(active_pane_id) = &self.active_panes.get(&client_id) {
-            if let Some(active_pane) = self.panes.get_mut(active_pane_id) {
+        if let Some(active_pane_id) = &self.active_panes.get(&client_id)
+            && let Some(active_pane) = self.panes.get_mut(active_pane_id) {
                 let mut full_pane_size = active_pane.position_and_size();
 
                 if full_pane_size.is_stacked() {
@@ -647,7 +642,6 @@ impl TiledPanes {
                 }
                 return split(SplitDirection::Vertical, &full_pane_size).is_some();
             }
-        }
         false
     }
     pub fn split_pane_horizontally(
@@ -855,13 +849,12 @@ impl TiledPanes {
                 let connected_clients: Vec<ClientId> =
                     self.connected_clients.borrow().iter().copied().collect();
                 for client_id in connected_clients {
-                    if let Some(focused_pane_id_for_client) = self.active_panes.get(&client_id) {
-                        if all_panes_in_stack.contains(focused_pane_id_for_client) {
+                    if let Some(focused_pane_id_for_client) = self.active_panes.get(&client_id)
+                        && all_panes_in_stack.contains(focused_pane_id_for_client) {
                             self.active_panes
                                 .insert(client_id, pane_id, &mut self.panes);
                             self.set_pane_active_at(pane_id);
                         }
-                    }
                 }
                 self.set_force_render();
                 self.reapply_pane_frames();
@@ -925,8 +918,7 @@ impl TiledPanes {
             .iter()
             .find(|(_pid, pane)| pane.position_and_size() == position_and_size)
             .map(|(pid, _p)| *pid)
-        {
-            if let Some(currently_active_pane_id) = self.active_panes.get(&client_id) {
+            && let Some(currently_active_pane_id) = self.active_panes.get(&client_id) {
                 let prev_geom = {
                     if let Some(currently_focused_pane) =
                         self.panes.get_mut(currently_active_pane_id)
@@ -938,14 +930,12 @@ impl TiledPanes {
                         None
                     }
                 };
-                if let Some(prev_geom) = prev_geom {
-                    if let Some(previous_pane) = self.panes.get_mut(&pane_id) {
+                if let Some(prev_geom) = prev_geom
+                    && let Some(previous_pane) = self.panes.get_mut(&pane_id) {
                         previous_pane.set_geom(prev_geom);
                         self.reset_boundaries();
                     }
-                }
             }
-        }
     }
     pub fn focus_pane_if_client_not_focused(&mut self, pane_id: PaneId, client_id: ClientId) {
         match self.active_panes.get(&client_id) {
@@ -1107,13 +1097,12 @@ impl TiledPanes {
                         .mode;
                     let err_context =
                         || format!("failed to render tiled panes for client {client_id}");
-                    if let PaneId::Plugin(..) = kind {
-                        if !pane_is_one_liner_in_stack {
+                    if let PaneId::Plugin(..) = kind
+                        && !pane_is_one_liner_in_stack {
                             pane_contents_and_ui
                                 .render_pane_contents_for_client(*client_id)
                                 .with_context(err_context)?;
                         }
-                    }
                     let is_floating = false;
                     if self.draw_pane_frames {
                         pane_contents_and_ui
@@ -1173,15 +1162,14 @@ impl TiledPanes {
                         .render_fake_cursor_if_needed(*client_id)
                         .with_context(err_context)?;
                 }
-                if let PaneId::Terminal(..) = kind {
-                    if !pane_is_one_liner_in_stack {
+                if let PaneId::Terminal(..) = kind
+                    && !pane_is_one_liner_in_stack {
                         pane_contents_and_ui
                             .render_pane_contents_to_multiple_clients(
                                 connected_clients.iter().copied(),
                             )
                             .with_context(err_context)?;
                     }
-                }
             }
         }
         // render boundaries if needed

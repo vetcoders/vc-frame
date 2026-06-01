@@ -323,8 +323,8 @@ fn serialize_pane_title_and_attributes(
             .entries_mut()
             .push(KdlEntry::new_prop("focus", KdlValue::Bool(true)));
     }
-    if let Some(initial_pane_contents) = initial_pane_contents.as_ref() {
-        if command.is_none() && edit.is_none() {
+    if let Some(initial_pane_contents) = initial_pane_contents.as_ref()
+        && command.is_none() && edit.is_none() {
             let file_name = format!("initial_contents_{}", pane_contents.keys().len() + 1);
             kdl_node
                 .entries_mut()
@@ -332,7 +332,6 @@ fn serialize_pane_title_and_attributes(
 
             pane_contents.insert(file_name, initial_pane_contents.clone());
         }
-    }
 }
 
 fn serialize_args(args: Vec<String>, pane_node_children: &mut KdlDocument) {
@@ -873,11 +872,10 @@ fn get_floating_panes_layout_from_panegeoms(
         .iter()
         .map(|m| {
             let mut run = m.run.clone();
-            if let Some(cwd) = &m.cwd {
-                if let Some(r) = run.as_mut() {
+            if let Some(cwd) = &m.cwd
+                && let Some(r) = run.as_mut() {
                     r.add_cwd(cwd)
                 }
-            }
             FloatingPaneLayout {
                 name: m.title.clone(),
                 height: Some(m.geom.rows.into()),
@@ -2234,7 +2232,8 @@ mod tests {
 
     fn get_dim(dim_hm: &Value) -> Dimension {
         let constr_str = dim_hm["constraint"].to_string();
-        let dim = if constr_str.contains("Fixed") {
+        
+        if constr_str.contains("Fixed") {
             let value = &constr_str[7..constr_str.len() - 2];
             Dimension::fixed(value.parse().unwrap())
         } else if constr_str.contains("Percent") {
@@ -2244,7 +2243,6 @@ mod tests {
             dim
         } else {
             panic!("Constraint is nor a percent nor fixed");
-        };
-        dim
+        }
     }
 }

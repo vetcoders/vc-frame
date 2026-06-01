@@ -56,11 +56,10 @@ impl PluginMap {
         let ids_in_plugin_map: Vec<(PluginId, ClientId)> =
             self.plugin_assets.keys().copied().collect();
         for (plugin_id, client_id) in ids_in_plugin_map {
-            if pid == plugin_id {
-                if let Some(plugin_asset) = self.plugin_assets.remove(&(plugin_id, client_id)) {
+            if pid == plugin_id
+                && let Some(plugin_asset) = self.plugin_assets.remove(&(plugin_id, client_id)) {
                     removed.insert((plugin_id, client_id), plugin_asset);
                 }
-            }
         }
         removed
     }

@@ -24,8 +24,8 @@ impl KeybindProcessor {
             // Find the first matching action for this predicate
             let mut found_match = false;
             for (_key, actions) in &keybinds {
-                if let Some(first_action) = actions.first() {
-                    if predicate(first_action) {
+                if let Some(first_action) = actions.first()
+                    && predicate(first_action) {
                         let action_type = ActionType::from_action(first_action);
 
                         // Skip if we've already processed this action type
@@ -38,11 +38,10 @@ impl KeybindProcessor {
 
                         // Find all keys that match this action type (including different directions)
                         for (inner_key, inner_actions) in &keybinds {
-                            if let Some(inner_first_action) = inner_actions.first() {
-                                if ActionType::from_action(inner_first_action) == action_type {
+                            if let Some(inner_first_action) = inner_actions.first()
+                                && ActionType::from_action(inner_first_action) == action_type {
                                     matching_keys.push(format!("{}", inner_key));
                                 }
-                            }
                         }
 
                         if !matching_keys.is_empty() {
@@ -69,7 +68,6 @@ impl KeybindProcessor {
                         found_match = true;
                         break;
                     }
-                }
             }
 
             // If we found a match for this predicate, we've processed it

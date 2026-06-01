@@ -386,13 +386,13 @@ pub fn publish(sh: &Shell, flags: flags::Publish) -> anyhow::Result<()> {
                     _ => None,
                 };
 
-                if let Err(err) = cmd!(
+                match cmd!(
                     sh,
                     "{cargo} publish --locked {registry...} {more_args...} {dry_run...}"
                 )
                 .run()
                 .context(err_context)
-                {
+                { Err(err) => {
                     println!();
                     println!("Publishing crate '{crate_name}' failed with error:");
                     println!("{:?}", err);
@@ -434,10 +434,10 @@ pub fn publish(sh: &Shell, flags: flags::Publish) -> anyhow::Result<()> {
                             return Err::<(), _>(err);
                         },
                     }
-                } else {
+                } _ => {
                     // publish successful, continue to next crate
                     break;
-                }
+                }}
             }
         }
 

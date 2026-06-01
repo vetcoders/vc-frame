@@ -536,11 +536,11 @@ pub(crate) fn plugin_thread_main(
                 tab_layout = tab_layout.or_else(|| Some(layout.new_tab().0));
 
                 // Match initial_panes plugins to empty slots in the layout
-                if let Some(ref initial_panes_vec) = initial_panes {
-                    if let Some(ref mut tiled_layout) = tab_layout {
+                if let Some(ref initial_panes_vec) = initial_panes
+                    && let Some(ref mut tiled_layout) = tab_layout {
                         for initial_pane in initial_panes_vec.iter() {
-                            if let CommandOrPlugin::Plugin(run_plugin_or_alias) = initial_pane {
-                                if !tiled_layout.replace_next_empty_slot_with_run(Run::Plugin(
+                            if let CommandOrPlugin::Plugin(run_plugin_or_alias) = initial_pane
+                                && !tiled_layout.replace_next_empty_slot_with_run(Run::Plugin(
                                     run_plugin_or_alias.clone(),
                                 )) {
                                     log::warn!(
@@ -548,11 +548,9 @@ pub(crate) fn plugin_thread_main(
                                     );
                                     break;
                                 }
-                            }
                             // Skip CommandOrPlugin::Command entries (handled by pty thread)
                         }
                     }
-                }
                 if let Some(t) = tab_layout.as_mut() {
                     t.populate_plugin_aliases_in_layout(&plugin_aliases);
                     if let Some(cwd) = cwd.as_ref() {

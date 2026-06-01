@@ -1584,8 +1584,8 @@ pub(crate) fn route_action(
         } => {
             drop(completion_tx); // releasing pipes is handled by the plugins, so we don't want
                                  // this to block additionallu
-            if let Some(seen_cli_pipes) = seen_cli_pipes.as_mut() {
-                if !seen_cli_pipes.contains(&pipe_id) {
+            if let Some(seen_cli_pipes) = seen_cli_pipes.as_mut()
+                && !seen_cli_pipes.contains(&pipe_id) {
                     seen_cli_pipes.insert(pipe_id.clone());
                     senders
                         .send_to_server(ServerInstruction::AssociatePipeWithClient {
@@ -1594,7 +1594,6 @@ pub(crate) fn route_action(
                         })
                         .with_context(err_context)?;
                 }
-            }
             if let Some(name) = name.take() {
                 let should_open_in_place = in_place.unwrap_or(false);
                 if should_open_in_place && pane_id.is_none() {
@@ -2086,8 +2085,8 @@ pub(crate) fn route_action(
     }
     let result = wait_for_action_completion(completion_rx, &action_name, wait_forever);
     if let Some(error_message) = &result.error_message {
-        if let Some(cli_client_id) = cli_client_id {
-            if let Some(ref os_input) = os_input {
+        if let Some(cli_client_id) = cli_client_id
+            && let Some(ref os_input) = os_input {
                 let _ = os_input.send_to_client(
                     cli_client_id,
                     ServerToClientMsg::LogError {
@@ -2095,10 +2094,9 @@ pub(crate) fn route_action(
                     },
                 );
             }
-        }
     } else if let Some(stdout_message) = &result.stdout_message {
-        if let Some(cli_client_id) = cli_client_id {
-            if let Some(ref os_input) = os_input {
+        if let Some(cli_client_id) = cli_client_id
+            && let Some(ref os_input) = os_input {
                 let _ = os_input.send_to_client(
                     cli_client_id,
                     ServerToClientMsg::Log {
@@ -2106,10 +2104,9 @@ pub(crate) fn route_action(
                     },
                 );
             }
-        }
-    } else if let Some(exit_status) = result.exit_status {
-        if let Some(cli_client_id) = cli_client_id {
-            if let Some(ref os_input) = os_input {
+    } else if let Some(exit_status) = result.exit_status
+        && let Some(cli_client_id) = cli_client_id
+            && let Some(ref os_input) = os_input {
                 let _ = os_input.send_to_client(
                     cli_client_id,
                     ServerToClientMsg::Exit {
@@ -2117,12 +2114,10 @@ pub(crate) fn route_action(
                     },
                 );
             }
-        }
-    }
     // Return tab ID to CLI clients as plain text
-    if let Some(tab_id) = result.affected_tab_id {
-        if let Some(cli_client_id) = cli_client_id {
-            if let Some(ref os_input) = os_input {
+    if let Some(tab_id) = result.affected_tab_id
+        && let Some(cli_client_id) = cli_client_id
+            && let Some(ref os_input) = os_input {
                 let _ = os_input.send_to_client(
                     cli_client_id,
                     ServerToClientMsg::Log {
@@ -2130,12 +2125,10 @@ pub(crate) fn route_action(
                     },
                 );
             }
-        }
-    }
     // Return pane ID to CLI clients as plain text
-    if let Some(pane_id) = result.affected_pane_id {
-        if let Some(cli_client_id) = cli_client_id {
-            if let Some(ref os_input) = os_input {
+    if let Some(pane_id) = result.affected_pane_id
+        && let Some(cli_client_id) = cli_client_id
+            && let Some(ref os_input) = os_input {
                 let _ = os_input.send_to_client(
                     cli_client_id,
                     ServerToClientMsg::Log {
@@ -2143,8 +2136,6 @@ pub(crate) fn route_action(
                     },
                 );
             }
-        }
-    }
     Ok((should_break, Some(result)))
 }
 
@@ -2197,13 +2188,13 @@ pub(crate) fn route_thread_main(
                     let is_watcher = session_state.read().unwrap().is_watcher(&client_id);
                     if is_watcher {
                         match &instruction {
-                            ClientToServerMsg::Key { key, .. } => {
-                                if (key.bare_key == BareKey::Char('q')
+                            ClientToServerMsg::Key { key, .. }
+                                if ((key.bare_key == BareKey::Char('q')
                                     && key.key_modifiers.contains(&KeyModifier::Ctrl))
                                     || key.bare_key == BareKey::Esc
                                     || (key.bare_key == BareKey::Char('c')
-                                        && key.key_modifiers.contains(&KeyModifier::Ctrl))
-                                {
+                                        && key.key_modifiers.contains(&KeyModifier::Ctrl)))
+                                => {
                                     let _ = os_input.send_to_client(
                                         client_id,
                                         ServerToClientMsg::Exit {
@@ -2216,8 +2207,7 @@ pub(crate) fn route_thread_main(
                                         ))
                                     });
                                     should_break = true;
-                                }
-                            },
+                                },
                             ClientToServerMsg::TerminalResize { new_size } => {
                                 // For watchers: send size to Screen for rendering adjustments, but
                                 // this does not affect the screen size
@@ -3096,8 +3086,8 @@ fn send_error_to_client(
     os_input: Option<&dyn ServerOsApi>,
     error_message: &str,
 ) {
-    if let Some(cli_client_id) = cli_client_id {
-        if let Some(os_input) = os_input {
+    if let Some(cli_client_id) = cli_client_id
+        && let Some(os_input) = os_input {
             let _ = os_input.send_to_client(
                 cli_client_id,
                 ServerToClientMsg::LogError {
@@ -3105,7 +3095,6 @@ fn send_error_to_client(
                 },
             );
         }
-    }
 }
 
 fn send_output_to_client(
@@ -3113,8 +3102,8 @@ fn send_output_to_client(
     os_input: Option<&dyn ServerOsApi>,
     output_lines: Vec<String>,
 ) {
-    if let Some(cli_client_id) = cli_client_id {
-        if let Some(os_input) = os_input {
+    if let Some(cli_client_id) = cli_client_id
+        && let Some(os_input) = os_input {
             let _ = os_input.send_to_client(
                 cli_client_id,
                 ServerToClientMsg::Log {
@@ -3122,7 +3111,6 @@ fn send_output_to_client(
                 },
             );
         }
-    }
 }
 
 #[cfg(test)]

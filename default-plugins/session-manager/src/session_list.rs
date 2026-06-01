@@ -265,7 +265,7 @@ impl SessionList {
                 ));
             }
         }
-        matches.sort_by(|a, b| b.score.cmp(&a.score));
+        matches.sort_by_key(|b| std::cmp::Reverse(b.score));
         self.search_results = matches;
         self.is_searching = !search_term.is_empty();
         self.selected_search_index = Some(0);
@@ -386,11 +386,10 @@ impl SessionList {
             }
         } else {
             match self.selected_index {
-                SelectedIndex(None, None, None) => {
-                    if !self.session_ui_infos.is_empty() {
+                SelectedIndex(None, None, None)
+                    if !self.session_ui_infos.is_empty() => {
                         self.selected_index.0 = Some(0);
-                    }
-                },
+                    },
                 SelectedIndex(Some(selected_session), None, None) => {
                     if self.session_ui_infos.len() > selected_session + 1 {
                         self.selected_index.0 = Some(selected_session + 1);
@@ -441,11 +440,10 @@ impl SessionList {
             }
         } else {
             match self.selected_index {
-                SelectedIndex(None, None, None) => {
-                    if !self.session_ui_infos.is_empty() {
+                SelectedIndex(None, None, None)
+                    if !self.session_ui_infos.is_empty() => {
                         self.selected_index.0 = Some(self.session_ui_infos.len().saturating_sub(1))
-                    }
-                },
+                    },
                 SelectedIndex(Some(selected_session), None, None) => {
                     if selected_session > 0 {
                         self.selected_index.0 = Some(selected_session - 1);
@@ -518,13 +516,12 @@ impl SessionList {
                 .enumerate()
                 .take(i + 1)
                 .fold(0, |acc, s| acc + s.1.lines_to_render())
-        }) {
-            if search_result_rows_until_selected > rows
-                || self.selected_search_index >= Some(self.search_results.len())
+        })
+            && (search_result_rows_until_selected > rows
+                || self.selected_search_index >= Some(self.search_results.len()))
             {
                 self.selected_search_index = None;
             }
-        }
     }
     pub fn reset_selected_index(&mut self) {
         self.selected_index.reset();

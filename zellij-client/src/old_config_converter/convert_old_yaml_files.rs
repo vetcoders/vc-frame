@@ -15,16 +15,15 @@ pub fn convert_old_yaml_files(opts: &CliArgs) {
 
     let mut layout_files_to_convert = vec![];
     let mut theme_files_to_convert = vec![];
-    if let Some(layout) = opts.layout.as_ref() {
-        if layout.extension().map(|s| s.to_string_lossy().to_string()) == Some("yaml".into())
+    if let Some(layout) = opts.layout.as_ref()
+        && layout.extension().map(|s| s.to_string_lossy().to_string()) == Some("yaml".into())
             && layout.exists()
         {
             layout_files_to_convert.push((layout.clone(), true));
         }
-    }
     layout_files_to_convert.dedup();
-    if let Some(layout_dir) = layout_dir {
-        if let Ok(files) = std::fs::read_dir(layout_dir) {
+    if let Some(layout_dir) = layout_dir
+        && let Ok(files) = std::fs::read_dir(layout_dir) {
             for file in files.flatten() {
                 if file
                     .path()
@@ -40,25 +39,21 @@ pub fn convert_old_yaml_files(opts: &CliArgs) {
                 }
             }
         }
-    }
 
-    if let Some(theme_dir) = theme_dir {
-        if theme_dir.is_dir() {
-            if let Ok(files) = std::fs::read_dir(theme_dir) {
+    if let Some(theme_dir) = theme_dir
+        && theme_dir.is_dir()
+            && let Ok(files) = std::fs::read_dir(theme_dir) {
                 for entry in files.flatten() {
-                    if let Some(extension) = entry.path().extension() {
-                        if extension == "yaml" {
+                    if let Some(extension) = entry.path().extension()
+                        && extension == "yaml" {
                             let mut new_file_path = entry.path().clone();
                             new_file_path.set_extension("kdl");
                             if !new_file_path.exists() {
                                 theme_files_to_convert.push(entry.path())
                             }
                         }
-                    }
                 }
             }
-        }
-    }
 
     if let Some(config_dir) = config_dir {
         let yaml_config_location = specified_config_location.cloned().filter(|c| {

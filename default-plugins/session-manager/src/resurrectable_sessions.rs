@@ -284,7 +284,7 @@ impl ResurrectableSessions {
                 });
             }
         }
-        matches.sort_by(|a, b| b.score.cmp(&a.score));
+        matches.sort_by_key(|b| std::cmp::Reverse(b.score));
         self.search_results = matches;
         self.is_searching = !self.search_term.is_empty();
         match self.selected_search_index {

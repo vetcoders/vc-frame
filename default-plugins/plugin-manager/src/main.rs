@@ -861,10 +861,10 @@ impl State {
                 tab_of_plugin_id
             };
 
-        let tab_line = NestedListItem::new(format!("Tab: {}", tab_of_plugin_id))
+        
+        NestedListItem::new(format!("Tab: {}", tab_of_plugin_id))
             .color_range(2, ..=3)
-            .indent(1);
-        tab_line
+            .indent(1)
     }
     pub fn render_help(&self, y: usize, cols: usize) {
         let full_text = "Help: <←↓↑→> - Navigate/Expand, <ENTER> - focus, <TAB> - Reload, <Del> - Close, <Ctrl a> - New, <ESC> - Exit";
@@ -956,7 +956,7 @@ impl State {
                     matches.push(SearchResult::new(*plugin_id, plugin_info, indices, score));
                 }
             }
-            matches.sort_by(|a, b| b.score.cmp(&a.score));
+            matches.sort_by_key(|b| std::cmp::Reverse(b.score));
             self.search_results = matches;
         }
     }

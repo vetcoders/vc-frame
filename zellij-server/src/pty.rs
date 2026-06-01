@@ -1186,8 +1186,8 @@ impl Pty {
                         log::warn!("More initial_panes provided than empty slots available");
                         break;
                     }
-                } else if let CommandOrPlugin::File(file_to_open) = initial_pane {
-                    if !layout.replace_next_empty_slot_with_run(Run::EditFile(
+                } else if let CommandOrPlugin::File(file_to_open) = initial_pane
+                    && !layout.replace_next_empty_slot_with_run(Run::EditFile(
                         file_to_open.path.clone(),
                         file_to_open.line_number,
                         file_to_open.cwd.clone(),
@@ -1195,7 +1195,6 @@ impl Pty {
                         log::warn!("More initial_panes provided than empty slots available");
                         break;
                     }
-                }
                 // Skip CommandOrPlugin::Plugin entries (already handled by plugin thread)
             }
         }
@@ -1356,19 +1355,15 @@ impl Pty {
                     self.pane_activity_flags.insert(terminal_id, activity_flag);
                 },
                 _ => match run_command {
-                    Some(run_command) => {
-                        if run_command.hold_on_close {
-                            send_command_not_found_to_screen(
-                                self.bus.senders.clone(),
-                                terminal_id,
-                                run_command.clone(),
-                            )
-                            .with_context(err_context)?;
-                        } else {
-                            self.close_pane(PaneId::Terminal(terminal_id))
-                                .with_context(err_context)?;
-                        }
+                    Some(run_command) if run_command.hold_on_close => {
+                        send_command_not_found_to_screen(
+                            self.bus.senders.clone(),
+                            terminal_id,
+                            run_command.clone(),
+                        )
+                        .with_context(err_context)?;
                     },
+                    Some(_) => {},
                     None => {
                         self.close_pane(PaneId::Terminal(terminal_id))
                             .with_context(err_context)?;
@@ -1534,19 +1529,15 @@ impl Pty {
                     self.pane_activity_flags.insert(terminal_id, activity_flag);
                 },
                 _ => match run_command {
-                    Some(run_command) => {
-                        if run_command.hold_on_close {
-                            send_command_not_found_to_screen(
-                                self.bus.senders.clone(),
-                                terminal_id,
-                                run_command.clone(),
-                            )
-                            .with_context(err_context)?;
-                        } else {
-                            self.close_pane(PaneId::Terminal(terminal_id))
-                                .with_context(err_context)?;
-                        }
+                    Some(run_command) if run_command.hold_on_close => {
+                        send_command_not_found_to_screen(
+                            self.bus.senders.clone(),
+                            terminal_id,
+                            run_command.clone(),
+                        )
+                        .with_context(err_context)?;
                     },
+                    Some(_) => {},
                     None => {
                         self.close_pane(PaneId::Terminal(terminal_id))
                             .with_context(err_context)?;
@@ -1614,8 +1605,8 @@ impl Pty {
                 let quit_cb = Box::new({
                     let senders = self.bus.senders.clone();
                     move |pane_id, exit_status, command| {
-                        if let PaneId::Terminal(terminal_pane_id) = pane_id {
-                            if let Some(originating_plugin) = originating_plugin.as_ref() {
+                        if let PaneId::Terminal(terminal_pane_id) = pane_id
+                            && let Some(originating_plugin) = originating_plugin.as_ref() {
                                 let update_event = Event::CommandPaneExited(
                                     terminal_pane_id,
                                     exit_status,
@@ -1627,7 +1618,6 @@ impl Pty {
                                     update_event,
                                 )]));
                             }
-                        }
 
                         if hold_on_close {
                             let _ = senders.send_to_screen(ScreenInstruction::HoldPane(
@@ -1645,11 +1635,10 @@ impl Pty {
                         }
                     }
                 });
-                if command.cwd.is_none() {
-                    if let TerminalAction::RunCommand(cmd) = default_shell {
+                if command.cwd.is_none()
+                    && let TerminalAction::RunCommand(cmd) = default_shell {
                         command.cwd = cmd.cwd;
                     }
-                }
                 let cmd = TerminalAction::RunCommand(command.clone());
                 if starts_held {
                     // we don't actually open a terminal in this case, just wait for the user to run it
@@ -1864,8 +1853,8 @@ impl Pty {
                 let quit_cb = Box::new({
                     let senders = self.bus.senders.clone();
                     move |pane_id, exit_status, command| {
-                        if let PaneId::Terminal(pane_id) = pane_id {
-                            if let Some(originating_plugin) = originating_plugin.as_ref() {
+                        if let PaneId::Terminal(pane_id) = pane_id
+                            && let Some(originating_plugin) = originating_plugin.as_ref() {
                                 let update_event = Event::CommandPaneExited(
                                     pane_id,
                                     exit_status,
@@ -1877,7 +1866,6 @@ impl Pty {
                                     update_event,
                                 )]));
                             }
-                        }
                         if hold_on_close {
                             let _ = senders.send_to_screen(ScreenInstruction::HoldPane(
                                 pane_id,
@@ -2056,11 +2044,10 @@ impl Pty {
         Ok(())
     }
     fn capture_initial_cwd(&mut self, terminal_id: u32, child_pid: u32) {
-        if let Some(os_input) = self.bus.os_input.as_ref() {
-            if let Some(cwd) = os_input.get_cwd(child_pid) {
+        if let Some(os_input) = self.bus.os_input.as_ref()
+            && let Some(cwd) = os_input.get_cwd(child_pid) {
                 self.terminal_cwds.insert(terminal_id, cwd);
             }
-        }
     }
 
     pub fn update_and_report_cwds(&mut self) {

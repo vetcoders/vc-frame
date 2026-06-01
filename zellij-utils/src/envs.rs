@@ -13,7 +13,7 @@ pub fn get_zellij() -> Result<String> {
     Ok(var(ZELLIJ_ENV_KEY)?)
 }
 pub fn set_zellij(v: String) {
-    set_var(ZELLIJ_ENV_KEY, v);
+    set_process_env(ZELLIJ_ENV_KEY, v);
 }
 
 pub const SESSION_NAME_ENV_KEY: &str = "ZELLIJ_SESSION_NAME";
@@ -23,7 +23,7 @@ pub fn get_session_name() -> Result<String> {
 }
 
 pub fn set_session_name(v: String) {
-    set_var(SESSION_NAME_ENV_KEY, v);
+    set_process_env(SESSION_NAME_ENV_KEY, v);
 }
 
 pub const SOCKET_DIR_ENV_KEY: &str = "ZELLIJ_SOCKET_DIR";
@@ -61,10 +61,18 @@ impl EnvironmentVariables {
     /// in the configuration and layout files
     pub fn set_vars(&self) {
         for (k, v) in &self.env {
-            set_var(k, v);
+            set_process_env(k, v);
         }
     }
     pub fn inner(&self) -> &HashMap<String, String> {
         &self.env
+    }
+}
+
+fn set_process_env<K: AsRef<std::ffi::OsStr>, V: AsRef<std::ffi::OsStr>>(key: K, value: V) {
+    // SAFETY: Zellij applies these process-wide variables during startup/configuration before
+    // handing control to worker threads that read them.
+    unsafe {
+        set_var(key, value);
     }
 }

@@ -114,9 +114,9 @@ fn account_for_races_in_snapshot(snapshot: String) -> String {
     let snapshot = base_replace_tmux_mode_2
         .replace_all(&snapshot, "\n")
         .to_string();
-    let snapshot = eol_arrow_replace.replace_all(&snapshot, "\n").to_string();
+    
 
-    snapshot
+    eol_arrow_replace.replace_all(&snapshot, "\n").to_string()
 }
 
 // All the E2E tests are marked as "ignored" so that they can be run separately from the normal

@@ -1257,11 +1257,10 @@ impl Action {
                 let mut file = file;
                 let current_dir = get_current_dir();
                 let cwd = cwd.map(|cwd| current_dir.join(cwd)).or(Some(current_dir));
-                if file.is_relative() {
-                    if let Some(cwd) = cwd.as_ref() {
+                if file.is_relative()
+                    && let Some(cwd) = cwd.as_ref() {
                         file = cwd.join(file);
                     }
-                }
                 let start_suppressed = false;
                 Ok(vec![Action::EditFile {
                     payload: OpenFilePayload::new(file, line_number, cwd),
@@ -1439,7 +1438,8 @@ impl Action {
                     let should_start_layout_commands_suspended = false;
                     let raw_layout_for_error = raw_layout.clone();
                     let mut layout = Layout::from_str(&raw_layout, path_to_raw_layout, swap_layouts.as_ref().map(|(f, p)| (f.as_str(), p.as_str())), cwd).map_err(|e| {
-                        let stringified_error = match e {
+                        
+                        match e {
                             ConfigError::KdlError(kdl_error) => {
                                 let error = kdl_error.add_src(layout_source_name.clone(), raw_layout_for_error);
                                 let report: Report = error.into();
@@ -1467,8 +1467,7 @@ impl Action {
                                 format!("{:?}", report)
                             },
                             e => format!("{}", e)
-                        };
-                        stringified_error
+                        }
                     })?;
                     if should_start_layout_commands_suspended {
                         layout.recursively_add_start_suspended_including_template(Some(true));
@@ -1555,7 +1554,8 @@ impl Action {
                             .map_err(|e| format!("Failed to load layout: {}", e))?
                     };
                     let mut layout = Layout::from_str(&raw_layout, path_to_raw_layout, swap_layouts.as_ref().map(|(f, p)| (f.as_str(), p.as_str())), cwd).map_err(|e| {
-                        let stringified_error = match e {
+                        
+                        match e {
                             ConfigError::KdlError(kdl_error) => {
                                 let error = kdl_error.add_src(layout_source_name.clone(), raw_layout);
                                 let report: Report = error.into();
@@ -1583,8 +1583,7 @@ impl Action {
                                 format!("{:?}", report)
                             },
                             e => format!("{}", e)
-                        };
-                        stringified_error
+                        }
                     })?;
                     if should_start_layout_commands_suspended {
                         layout.recursively_add_start_suspended_including_template(Some(true));
@@ -1717,7 +1716,8 @@ impl Action {
                     None, // cwd
                 )
                 .map_err(|e| {
-                    let stringified_error = match e {
+                    
+                    match e {
                         ConfigError::KdlError(kdl_error) => {
                             let error = kdl_error.add_src(layout_source_name.clone(), raw_layout);
                             let report: Report = error.into();
@@ -1728,8 +1728,7 @@ impl Action {
                             format!("Failed to deserialize KDL layout: {}", error_message)
                         },
                         e => format!("{}", e),
-                    };
-                    stringified_error
+                    }
                 })?;
 
                 // Convert all tabs to Vec<TabLayoutInfo>

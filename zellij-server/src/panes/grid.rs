@@ -2024,8 +2024,8 @@ impl Grid {
         }
         if let Some(current_row) = self.viewport.get_mut(self.cursor.y) {
             let mut effective_pad = pad_character;
-            if let Some(bg_color) = current_row.bg_color {
-                if matches!(
+            if let Some(bg_color) = current_row.bg_color
+                && matches!(
                     effective_pad.styles.background,
                     Some(AnsiCode::Reset) | None
                 ) {
@@ -2033,7 +2033,6 @@ impl Grid {
                         .styles
                         .update(|styles| styles.background = Some(bg_color));
                 }
-            }
             for _ in current_row.width()..position {
                 current_row.push(effective_pad.clone());
             }
@@ -2370,8 +2369,7 @@ impl Grid {
                     };
                     if let Some((_sel, start_row, start_col, end_row, end_col)) =
                         match_to_selection(&mat, &boundaries, &self.viewport)
-                    {
-                        if position_in_span(
+                        && position_in_span(
                             click_row, click_col, start_row, start_col, end_row, end_col,
                         ) {
                             let dominated = match &best {
@@ -2388,7 +2386,6 @@ impl Grid {
                                 ));
                             }
                         }
-                    }
                 }
             }
         }
@@ -2471,8 +2468,7 @@ impl Grid {
                     };
                     if let Some((_sel, start_row, start_col, end_row, end_col)) =
                         match_to_selection(&mat, &boundaries, &self.viewport)
-                    {
-                        if position_in_span(
+                        && position_in_span(
                             hover_row, hover_col, start_row, start_col, end_row, end_col,
                         ) {
                             let dominated = match best_layer {
@@ -2484,7 +2480,6 @@ impl Grid {
                                 best_tooltip = compiled.tooltip_text.clone();
                             }
                         }
-                    }
                 }
             }
         }
@@ -2513,8 +2508,8 @@ impl Grid {
             // style when the cursor overlaps the match.  They are suppressed
             // when mouse tracking is active (events pass through to the app)
             // and on unfocused panes (hover_position is not set for those).
-            if self.mouse_tracking == MouseTracking::Off {
-                if let Some(hover_pos) = self.hover_position {
+            if self.mouse_tracking == MouseTracking::Off
+                && let Some(hover_pos) = self.hover_position {
                     let hover_row = hover_pos.line.0 as usize;
                     let group_end_row = ridx + group_len - 1;
                     if hover_row >= ridx && hover_row <= group_end_row {
@@ -2530,8 +2525,7 @@ impl Grid {
                                     };
                                     if let Some((sel, start_row, start_col, end_row, end_col)) =
                                         match_to_selection(&mat, &boundaries, &self.viewport)
-                                    {
-                                        if position_in_span(
+                                        && position_in_span(
                                             hover_row, hover_col, start_row, start_col, end_row,
                                             end_col,
                                         ) {
@@ -2546,13 +2540,11 @@ impl Grid {
                                             });
                                             break; // only one match per pattern per hover
                                         }
-                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
 
             // Non-hover highlights are pushed after hover so that hover
             // takes precedence for overlapping regions.
@@ -2892,8 +2884,8 @@ impl Grid {
     }
     fn move_cursor_down_by_pixels(&mut self, pixel_count: usize) {
         if let Some(character_cell_size) = {
-            let c = *self.character_cell_size.borrow();
-            c
+            
+            *self.character_cell_size.borrow()
         } {
             // thanks borrow checker
             let pixel_height = character_cell_size.height;
@@ -3317,12 +3309,11 @@ impl Grid {
                 lines_above_viewport.push(s);
             }
             // Truncate to last N lines if max specified (Some(0) means "all" — no truncation)
-            if let Some(max) = max_scrollback_lines {
-                if max > 0 && lines_above_viewport.len() > max {
+            if let Some(max) = max_scrollback_lines
+                && max > 0 && lines_above_viewport.len() > max {
                     let start = lines_above_viewport.len() - max;
                     lines_above_viewport = lines_above_viewport.split_off(start);
                 }
-            }
             let mut lines_below_viewport: Vec<String> = Vec::with_capacity(self.lines_below.len());
             for row in &self.lines_below {
                 let s: String = row.columns.iter().map(|x| x.character).collect();
@@ -3384,12 +3375,11 @@ impl Grid {
             for row in &self.lines_above {
                 lines_above_viewport.push(extract_row_with_ansi(row));
             }
-            if let Some(max) = max_scrollback_lines {
-                if max > 0 && lines_above_viewport.len() > max {
+            if let Some(max) = max_scrollback_lines
+                && max > 0 && lines_above_viewport.len() > max {
                     let start = lines_above_viewport.len() - max;
                     lines_above_viewport = lines_above_viewport.split_off(start);
                 }
-            }
             let mut lines_below_viewport: Vec<String> = Vec::with_capacity(self.lines_below.len());
             for row in &self.lines_below {
                 lines_below_viewport.push(extract_row_with_ansi(row));
@@ -3525,11 +3515,10 @@ impl Perform for Grid {
             },
 
             b"7" => {
-                if let Some(raw) = params.get(1) {
-                    if let Some(path) = parse_osc7_path(raw) {
+                if let Some(raw) = params.get(1)
+                    && let Some(path) = parse_osc7_path(raw) {
                         self.pending_osc7_cwd = Some(path);
                     }
-                }
             },
 
             // Set color index.
@@ -3543,8 +3532,8 @@ impl Perform for Grid {
                         }
                         self.changed_colors.as_mut().unwrap()[i as usize] = Some(c);
                         return;
-                    } else if chunk.get(1).as_ref().and_then(|c| c.first()) == Some(&b'?') {
-                        if let Some(index) = index {
+                    } else if chunk.get(1).as_ref().and_then(|c| c.first()) == Some(&b'?')
+                        && let Some(index) = index {
                             // Forward palette-register queries to the
                             // host — apps want the actual host palette,
                             // not Zellij's cached copy. (Zellij's cache
@@ -3560,7 +3549,6 @@ impl Perform for Grid {
                                 },
                             );
                         }
-                    }
                 }
             },
 
@@ -3576,8 +3564,8 @@ impl Perform for Grid {
 
             // Get/set Foreground (b"10") or background (b"11") colors
             b"10" | b"11" => {
-                if params.len() >= 2 {
-                    if let Some(mut dynamic_code) = parse_number(params[0]) {
+                if params.len() >= 2
+                    && let Some(mut dynamic_code) = parse_number(params[0]) {
                         for param in &params[1..] {
                             if param == b"?" {
                                 // If this pane has a local override for
@@ -3650,7 +3638,6 @@ impl Perform for Grid {
                             dynamic_code += 1;
                         }
                     }
-                }
             },
 
             b"12" => {
@@ -3687,11 +3674,10 @@ impl Perform for Grid {
                         // TBD: paste from own clipboard - currently unsupported
                     },
                     base64 => {
-                        if let Ok(bytes) = base64::decode(base64) {
-                            if let Ok(string) = String::from_utf8(bytes) {
+                        if let Ok(bytes) = base64::decode(base64)
+                            && let Ok(string) = String::from_utf8(bytes) {
                                 self.pending_clipboard_update = Some(string);
-                            }
-                        };
+                            };
                     },
                 }
             },
@@ -3706,11 +3692,10 @@ impl Perform for Grid {
 
                 // Reset color indexes given as parameters.
                 for param in &params[1..] {
-                    if let Some(index) = parse_number(param) {
-                        if let Some(changed_colors) = self.changed_colors.as_mut() {
+                    if let Some(index) = parse_number(param)
+                        && let Some(changed_colors) = self.changed_colors.as_mut() {
                             changed_colors[index as usize] = None;
                         }
-                    }
                 }
 
                 // Reset all color indexes when no parameters are given.

@@ -768,11 +768,10 @@ mod not_wasm {
         // We still keep the second one around just in case the first backtrace isn't meaningful or
         // non-existent in the first place (Which really shouldn't happen, but you never know).
         fn show_backtrace(&self) -> String {
-            if let Ok(var) = std::env::var("RUST_BACKTRACE") {
-                if !var.is_empty() && var != "0" {
+            if let Ok(var) = std::env::var("RUST_BACKTRACE")
+                && !var.is_empty() && var != "0" {
                     return format!("\n\nPanic backtrace:\n{:?}", backtrace::Backtrace::new());
                 }
-            }
             "".into()
         }
 

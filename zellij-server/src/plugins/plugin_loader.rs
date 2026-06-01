@@ -297,11 +297,10 @@ impl<'a> PluginLoader<'a> {
             .instantiate_and_start(&mut store, &module)
             .with_context(err_context)?;
 
-        if let Some(func) = instance.get_func(&mut store, "_initialize") {
-            if let Ok(typed_func) = func.typed::<(), ()>(&store) {
+        if let Some(func) = instance.get_func(&mut store, "_initialize")
+            && let Ok(typed_func) = func.typed::<(), ()>(&store) {
                 let _ = typed_func.call(&mut store, ());
             }
-        }
 
         self.plugin_cache
             .lock()
@@ -409,11 +408,10 @@ impl<'a> PluginLoader<'a> {
             .instantiate_and_start(&mut store, module)
             .with_context(err_context)?;
 
-        if let Some(func) = instance.get_func(&mut store, "_initialize") {
-            if let Ok(typed_func) = func.typed::<(), ()>(&store) {
+        if let Some(func) = instance.get_func(&mut store, "_initialize")
+            && let Ok(typed_func) = func.typed::<(), ()>(&store) {
                 let _ = typed_func.call(&mut store, ());
             }
-        }
 
         Ok((store, instance))
     }

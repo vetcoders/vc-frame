@@ -191,8 +191,8 @@ impl ImportLayoutScreen {
         let mut text = format!("Save as: {}{}", display_name, text_suffix);
         let mut cursor_position_in_line = 9 + cursor_pos;
 
-        if let Some(max_width) = max_width {
-            if text.chars().count() > max_width {
+        if let Some(max_width) = max_width
+            && text.chars().count() > max_width {
                 let truncated_display_name = truncate_with_ellipsis_start(
                     display_name,
                     max_width.saturating_sub(9 + text_suffix.chars().count()),
@@ -201,7 +201,6 @@ impl ImportLayoutScreen {
                 let truncated_len = truncated_display_name.chars().count();
                 cursor_position_in_line = 9 + cursor_pos.min(truncated_len);
             }
-        }
 
         (text, cursor_position_in_line)
     }

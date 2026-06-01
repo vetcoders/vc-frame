@@ -36,7 +36,7 @@ use crate::input::command::RunCommandAction;
 
 #[macro_export]
 macro_rules! parse_kdl_action_arguments {
-    ( $action_name:expr, $action_arguments:expr, $action_node:expr ) => {{
+    ( $action_name:expr_2021, $action_arguments:expr_2021, $action_node:expr_2021 ) => {{
         if !$action_arguments.is_empty() {
             Err(ConfigError::new_kdl_error(
                 format!("Action '{}' must have arguments", $action_name),
@@ -96,7 +96,7 @@ macro_rules! parse_kdl_action_arguments {
 
 #[macro_export]
 macro_rules! parse_kdl_action_u8_arguments {
-    ( $action_name:expr, $action_arguments:expr, $action_node:expr ) => {{
+    ( $action_name:expr_2021, $action_arguments:expr_2021, $action_node:expr_2021 ) => {{
         let mut bytes = vec![];
         for kdl_entry in $action_arguments.iter() {
             match kdl_entry.value().as_i64() {
@@ -116,14 +116,14 @@ macro_rules! parse_kdl_action_u8_arguments {
 
 #[macro_export]
 macro_rules! kdl_parsing_error {
-    ( $message:expr, $entry:expr ) => {
+    ( $message:expr_2021, $entry:expr_2021 ) => {
         ConfigError::new_kdl_error($message, $entry.span().offset(), $entry.span().len())
     };
 }
 
 #[macro_export]
 macro_rules! kdl_entries_as_i64 {
-    ( $node:expr ) => {
+    ( $node:expr_2021 ) => {
         $node
             .entries()
             .iter()
@@ -133,7 +133,7 @@ macro_rules! kdl_entries_as_i64 {
 
 #[macro_export]
 macro_rules! kdl_first_entry_as_string {
-    ( $node:expr ) => {
+    ( $node:expr_2021 ) => {
         $node
             .entries()
             .iter()
@@ -144,7 +144,7 @@ macro_rules! kdl_first_entry_as_string {
 
 #[macro_export]
 macro_rules! kdl_first_entry_as_i64 {
-    ( $node:expr ) => {
+    ( $node:expr_2021 ) => {
         $node
             .entries()
             .iter()
@@ -155,7 +155,7 @@ macro_rules! kdl_first_entry_as_i64 {
 
 #[macro_export]
 macro_rules! kdl_first_entry_as_bool {
-    ( $node:expr ) => {
+    ( $node:expr_2021 ) => {
         $node
             .entries()
             .iter()
@@ -166,14 +166,14 @@ macro_rules! kdl_first_entry_as_bool {
 
 #[macro_export]
 macro_rules! entry_count {
-    ( $node:expr ) => {{
+    ( $node:expr_2021 ) => {{
         $node.entries().iter().len()
     }};
 }
 
 #[macro_export]
 macro_rules! parse_kdl_action_char_or_string_arguments {
-    ( $action_name:expr, $action_arguments:expr, $action_node:expr ) => {{
+    ( $action_name:expr_2021, $action_arguments:expr_2021, $action_node:expr_2021 ) => {{
         let mut chars_to_write = String::new();
         for kdl_entry in $action_arguments.iter() {
             match kdl_entry.value().as_string() {
@@ -193,7 +193,7 @@ macro_rules! parse_kdl_action_char_or_string_arguments {
 
 #[macro_export]
 macro_rules! kdl_arg_is_truthy {
-    ( $kdl_node:expr, $arg_name:expr ) => {
+    ( $kdl_node:expr_2021, $arg_name:expr_2021 ) => {
         match $kdl_node.get($arg_name) {
             Some(arg) => match arg.value().as_bool() {
                 Some(value) => value,
@@ -212,7 +212,7 @@ macro_rules! kdl_arg_is_truthy {
 
 #[macro_export]
 macro_rules! kdl_children_nodes_or_error {
-    ( $kdl_node:expr, $error:expr ) => {
+    ( $kdl_node:expr_2021, $error:expr_2021 ) => {
         $kdl_node
             .children()
             .ok_or(ConfigError::new_kdl_error(
@@ -226,14 +226,14 @@ macro_rules! kdl_children_nodes_or_error {
 
 #[macro_export]
 macro_rules! kdl_children_nodes {
-    ( $kdl_node:expr ) => {
+    ( $kdl_node:expr_2021 ) => {
         $kdl_node.children().map(|c| c.nodes())
     };
 }
 
 #[macro_export]
 macro_rules! kdl_property_nodes {
-    ( $kdl_node:expr ) => {{
+    ( $kdl_node:expr_2021 ) => {{
         $kdl_node
             .entries()
             .iter()
@@ -244,7 +244,7 @@ macro_rules! kdl_property_nodes {
 
 #[macro_export]
 macro_rules! kdl_children_or_error {
-    ( $kdl_node:expr, $error:expr ) => {
+    ( $kdl_node:expr_2021, $error:expr_2021 ) => {
         $kdl_node.children().ok_or(ConfigError::new_kdl_error(
             $error.into(),
             $kdl_node.span().offset(),
@@ -255,14 +255,14 @@ macro_rules! kdl_children_or_error {
 
 #[macro_export]
 macro_rules! kdl_children {
-    ( $kdl_node:expr ) => {
+    ( $kdl_node:expr_2021 ) => {
         $kdl_node.children().iter().copied().collect()
     };
 }
 
 #[macro_export]
 macro_rules! kdl_get_string_property_or_child_value {
-    ( $kdl_node:expr, $name:expr ) => {
+    ( $kdl_node:expr_2021, $name:expr_2021 ) => {
         $kdl_node
             .get($name)
             .and_then(|e| e.value().as_string())
@@ -278,7 +278,7 @@ macro_rules! kdl_get_string_property_or_child_value {
 
 #[macro_export]
 macro_rules! kdl_string_arguments {
-    ( $kdl_node:expr ) => {{
+    ( $kdl_node:expr_2021 ) => {{
         let res: Result<Vec<_>, _> = $kdl_node
             .entries()
             .iter()
@@ -296,7 +296,7 @@ macro_rules! kdl_string_arguments {
 
 #[macro_export]
 macro_rules! kdl_property_names {
-    ( $kdl_node:expr ) => {{
+    ( $kdl_node:expr_2021 ) => {{
         $kdl_node
             .entries()
             .iter()
@@ -307,28 +307,28 @@ macro_rules! kdl_property_names {
 
 #[macro_export]
 macro_rules! kdl_argument_values {
-    ( $kdl_node:expr ) => {
+    ( $kdl_node:expr_2021 ) => {
         $kdl_node.entries().iter().collect()
     };
 }
 
 #[macro_export]
 macro_rules! kdl_name {
-    ( $kdl_node:expr ) => {
+    ( $kdl_node:expr_2021 ) => {
         $kdl_node.name().value()
     };
 }
 
 #[macro_export]
 macro_rules! kdl_document_name {
-    ( $kdl_node:expr ) => {
+    ( $kdl_node:expr_2021 ) => {
         $kdl_node.node().name().value()
     };
 }
 
 #[macro_export]
 macro_rules! keys_from_kdl {
-    ( $kdl_node:expr ) => {
+    ( $kdl_node:expr_2021 ) => {
         kdl_string_arguments!($kdl_node)
             .iter()
             .map(|k| {
@@ -346,7 +346,7 @@ macro_rules! keys_from_kdl {
 
 #[macro_export]
 macro_rules! actions_from_kdl {
-    ( $kdl_node:expr, $config_options:expr ) => {
+    ( $kdl_node:expr_2021, $config_options:expr_2021 ) => {
         kdl_children_nodes_or_error!($kdl_node, "no actions found for key_block")
             .iter()
             .map(|kdl_action| Action::try_from((kdl_action, $config_options)))
@@ -2259,7 +2259,7 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
 
 #[macro_export]
 macro_rules! kdl_property_first_arg_as_string {
-    ( $kdl_node:expr, $property_name:expr ) => {
+    ( $kdl_node:expr_2021, $property_name:expr_2021 ) => {
         $kdl_node
             .get($property_name)
             .and_then(|p| p.entries().iter().next())
@@ -2269,7 +2269,7 @@ macro_rules! kdl_property_first_arg_as_string {
 
 #[macro_export]
 macro_rules! kdl_property_first_arg_as_string_or_error {
-    ( $kdl_node:expr, $property_name:expr ) => {{
+    ( $kdl_node:expr_2021, $property_name:expr_2021 ) => {{
         match $kdl_node.get($property_name) {
             Some(property) => match property.entries().iter().next() {
                 Some(first_entry) => match first_entry.value().as_string() {
@@ -2301,7 +2301,7 @@ macro_rules! kdl_property_first_arg_as_string_or_error {
 
 #[macro_export]
 macro_rules! kdl_property_first_arg_as_bool_or_error {
-    ( $kdl_node:expr, $property_name:expr ) => {{
+    ( $kdl_node:expr_2021, $property_name:expr_2021 ) => {{
         match $kdl_node.get($property_name) {
             Some(property) => match property.entries().iter().next() {
                 Some(first_entry) => match first_entry.value().as_bool() {
@@ -2333,7 +2333,7 @@ macro_rules! kdl_property_first_arg_as_bool_or_error {
 
 #[macro_export]
 macro_rules! kdl_property_first_arg_as_i64_or_error {
-    ( $kdl_node:expr, $property_name:expr ) => {{
+    ( $kdl_node:expr_2021, $property_name:expr_2021 ) => {{
         match $kdl_node.get($property_name) {
             Some(property) => match property.entries().iter().next() {
                 Some(first_entry) => match first_entry.value().as_i64() {
@@ -2365,7 +2365,7 @@ macro_rules! kdl_property_first_arg_as_i64_or_error {
 
 #[macro_export]
 macro_rules! kdl_has_string_argument {
-    ( $kdl_node:expr, $string_argument:expr ) => {
+    ( $kdl_node:expr_2021, $string_argument:expr_2021 ) => {
         $kdl_node
             .entries()
             .iter()
@@ -2376,7 +2376,7 @@ macro_rules! kdl_has_string_argument {
 
 #[macro_export]
 macro_rules! kdl_children_property_first_arg_as_string {
-    ( $kdl_node:expr, $property_name:expr ) => {
+    ( $kdl_node:expr_2021, $property_name:expr_2021 ) => {
         $kdl_node
             .children()
             .and_then(|c| c.get($property_name))
@@ -2387,7 +2387,7 @@ macro_rules! kdl_children_property_first_arg_as_string {
 
 #[macro_export]
 macro_rules! kdl_property_first_arg_as_bool {
-    ( $kdl_node:expr, $property_name:expr ) => {
+    ( $kdl_node:expr_2021, $property_name:expr_2021 ) => {
         $kdl_node
             .get($property_name)
             .and_then(|p| p.entries().iter().next())
@@ -2397,7 +2397,7 @@ macro_rules! kdl_property_first_arg_as_bool {
 
 #[macro_export]
 macro_rules! kdl_children_property_first_arg_as_bool {
-    ( $kdl_node:expr, $property_name:expr ) => {
+    ( $kdl_node:expr_2021, $property_name:expr_2021 ) => {
         $kdl_node
             .children()
             .and_then(|c| c.get($property_name))
@@ -2408,7 +2408,7 @@ macro_rules! kdl_children_property_first_arg_as_bool {
 
 #[macro_export]
 macro_rules! kdl_property_first_arg_as_i64 {
-    ( $kdl_node:expr, $property_name:expr ) => {
+    ( $kdl_node:expr_2021, $property_name:expr_2021 ) => {
         $kdl_node
             .get($property_name)
             .and_then(|p| p.entries().iter().next())
@@ -2418,14 +2418,14 @@ macro_rules! kdl_property_first_arg_as_i64 {
 
 #[macro_export]
 macro_rules! kdl_get_child {
-    ( $kdl_node:expr, $child_name:expr ) => {
+    ( $kdl_node:expr_2021, $child_name:expr_2021 ) => {
         $kdl_node.children().and_then(|c| c.get($child_name))
     };
 }
 
 #[macro_export]
 macro_rules! kdl_get_child_entry_bool_value {
-    ( $kdl_node:expr, $child_name:expr ) => {
+    ( $kdl_node:expr_2021, $child_name:expr_2021 ) => {
         $kdl_node
             .children()
             .and_then(|c| c.get($child_name))
@@ -2436,7 +2436,7 @@ macro_rules! kdl_get_child_entry_bool_value {
 
 #[macro_export]
 macro_rules! kdl_get_child_entry_string_value {
-    ( $kdl_node:expr, $child_name:expr ) => {
+    ( $kdl_node:expr_2021, $child_name:expr_2021 ) => {
         $kdl_node
             .children()
             .and_then(|c| c.get($child_name))
@@ -2447,7 +2447,7 @@ macro_rules! kdl_get_child_entry_string_value {
 
 #[macro_export]
 macro_rules! kdl_get_bool_property_or_child_value {
-    ( $kdl_node:expr, $name:expr ) => {
+    ( $kdl_node:expr_2021, $name:expr_2021 ) => {
         $kdl_node
             .get($name)
             .and_then(|e| e.value().as_bool())
@@ -2463,7 +2463,7 @@ macro_rules! kdl_get_bool_property_or_child_value {
 
 #[macro_export]
 macro_rules! kdl_get_bool_property_or_child_value_with_error {
-    ( $kdl_node:expr, $name:expr ) => {
+    ( $kdl_node:expr_2021, $name:expr_2021 ) => {
         match $kdl_node.get($name) {
             Some(e) => match e.value().as_bool() {
                 Some(bool_value) => Some(bool_value),
@@ -2518,7 +2518,7 @@ macro_rules! kdl_get_bool_property_or_child_value_with_error {
 
 #[macro_export]
 macro_rules! kdl_property_or_child_value_node {
-    ( $kdl_node:expr, $name:expr ) => {
+    ( $kdl_node:expr_2021, $name:expr_2021 ) => {
         $kdl_node.get($name).or_else(|| {
             $kdl_node
                 .children()
@@ -2530,7 +2530,7 @@ macro_rules! kdl_property_or_child_value_node {
 
 #[macro_export]
 macro_rules! kdl_child_with_name {
-    ( $kdl_node:expr, $name:expr ) => {{
+    ( $kdl_node:expr_2021, $name:expr_2021 ) => {{
         $kdl_node
             .children()
             .and_then(|children| children.nodes().iter().find(|c| c.name().value() == $name))
@@ -2539,7 +2539,7 @@ macro_rules! kdl_child_with_name {
 
 #[macro_export]
 macro_rules! kdl_child_with_name_or_error {
-    ( $kdl_node:expr, $name:expr) => {{
+    ( $kdl_node:expr_2021, $name:expr_2021) => {{
         $kdl_node
             .children()
             .and_then(|children| children.nodes().iter().find(|c| c.name().value() == $name))
@@ -2553,7 +2553,7 @@ macro_rules! kdl_child_with_name_or_error {
 
 #[macro_export]
 macro_rules! kdl_get_string_property_or_child_value_with_error {
-    ( $kdl_node:expr, $name:expr ) => {
+    ( $kdl_node:expr_2021, $name:expr_2021 ) => {
         match $kdl_node.get($name) {
             Some(e) => match e.value().as_string() {
                 Some(string_value) => Some(string_value),
@@ -2608,7 +2608,7 @@ macro_rules! kdl_get_string_property_or_child_value_with_error {
 
 #[macro_export]
 macro_rules! kdl_get_property_or_child {
-    ( $kdl_node:expr, $name:expr ) => {
+    ( $kdl_node:expr_2021, $name:expr_2021 ) => {
         $kdl_node.get($name).or_else(|| {
             $kdl_node
                 .children()
@@ -2620,7 +2620,7 @@ macro_rules! kdl_get_property_or_child {
 
 #[macro_export]
 macro_rules! kdl_get_int_property_or_child_value {
-    ( $kdl_node:expr, $name:expr ) => {
+    ( $kdl_node:expr_2021, $name:expr_2021 ) => {
         $kdl_node
             .get($name)
             .and_then(|e| e.value().as_i64())
@@ -2636,7 +2636,7 @@ macro_rules! kdl_get_int_property_or_child_value {
 
 #[macro_export]
 macro_rules! kdl_get_string_entry {
-    ( $kdl_node:expr, $entry_name:expr ) => {
+    ( $kdl_node:expr_2021, $entry_name:expr_2021 ) => {
         $kdl_node
             .get($entry_name)
             .and_then(|e| e.value().as_string())
@@ -2645,7 +2645,7 @@ macro_rules! kdl_get_string_entry {
 
 #[macro_export]
 macro_rules! kdl_get_int_entry {
-    ( $kdl_node:expr, $entry_name:expr ) => {
+    ( $kdl_node:expr_2021, $entry_name:expr_2021 ) => {
         $kdl_node.get($entry_name).and_then(|e| e.value().as_i64())
     };
 }
@@ -5025,8 +5025,8 @@ pub fn load_plugins_to_kdl(
                 .as_ref()
                 .map(|c| c.inner().clone()),
         };
-        if let Some(configuration) = configuration {
-            if !configuration.is_empty() {
+        if let Some(configuration) = configuration
+            && !configuration.is_empty() {
                 has_children = true;
                 for (config_key, config_value) in configuration {
                     let mut node = KdlNode::new(config_key.to_owned());
@@ -5040,7 +5040,6 @@ pub fn load_plugins_to_kdl(
                     background_plugin_children.nodes_mut().push(node);
                 }
             }
-        }
         if has_children {
             background_plugin_node.set_children(background_plugin_children);
         }
@@ -5357,11 +5356,10 @@ impl Themes {
         {
             let entry = entry.map_err(|e| ConfigError::IoPath(e, path_to_theme_dir.clone()))?;
             let path = entry.path();
-            if let Some(extension) = path.extension() {
-                if extension == "kdl" {
+            if let Some(extension) = path.extension()
+                && extension == "kdl" {
                     themes = themes.merge(Themes::from_path(path)?);
                 }
-            }
         }
         Ok(themes)
     }
@@ -5604,8 +5602,7 @@ impl SessionInfo {
                     let mut history = vec![];
                     if let Some(history_node) =
                         client_node.children().and_then(|c| c.get("history"))
-                    {
-                        if let Some(history_children) = history_node.children() {
+                        && let Some(history_children) = history_node.children() {
                             for pane_id_node in history_children.nodes() {
                                 if pane_id_node.name().value() == "pane_id" {
                                     let pane_type = pane_id_node
@@ -5632,7 +5629,6 @@ impl SessionInfo {
                                 }
                             }
                         }
-                    }
                     pane_history.insert(client_id as u16, history);
                 }
             }
@@ -5777,7 +5773,7 @@ impl std::fmt::Display for SessionInfo {
 impl TabInfo {
     pub fn decode_from_kdl(kdl_document: &KdlDocument) -> Result<Self, String> {
         macro_rules! int_node {
-            ($name:expr, $type:ident) => {{
+            ($name:expr_2021, $type:ident) => {{
                 kdl_document
                     .get($name)
                     .and_then(|n| n.entries().iter().next())
@@ -5787,7 +5783,7 @@ impl TabInfo {
             }};
         }
         macro_rules! string_node {
-            ($name:expr) => {{
+            ($name:expr_2021) => {{
                 kdl_document
                     .get($name)
                     .and_then(|n| n.entries().iter().next())
@@ -5797,7 +5793,7 @@ impl TabInfo {
             }};
         }
         macro_rules! optional_string_node {
-            ($name:expr) => {{
+            ($name:expr_2021) => {{
                 kdl_document
                     .get($name)
                     .and_then(|n| n.entries().iter().next())
@@ -5806,7 +5802,7 @@ impl TabInfo {
             }};
         }
         macro_rules! optional_int_node {
-            ($name:expr, $type:ident) => {{
+            ($name:expr_2021, $type:ident) => {{
                 kdl_document
                     .get($name)
                     .and_then(|n| n.entries().iter().next())
@@ -5815,7 +5811,7 @@ impl TabInfo {
             }};
         }
         macro_rules! bool_node {
-            ($name:expr) => {{
+            ($name:expr_2021) => {{
                 kdl_document
                     .get($name)
                     .and_then(|n| n.entries().iter().next())
@@ -5962,15 +5958,13 @@ impl PaneManifest {
     pub fn decode_from_kdl(kdl_doucment: &KdlDocument) -> Self {
         let mut panes: HashMap<usize, Vec<PaneInfo>> = HashMap::new();
         for node in kdl_doucment.nodes() {
-            if node.name().to_string() == "pane" {
-                if let Some(pane_document) = node.children() {
-                    if let Ok((tab_position, pane_info)) = PaneInfo::decode_from_kdl(pane_document)
+            if node.name().to_string() == "pane"
+                && let Some(pane_document) = node.children()
+                    && let Ok((tab_position, pane_info)) = PaneInfo::decode_from_kdl(pane_document)
                     {
                         let panes_in_tab_position = panes.entry(tab_position).or_default();
                         panes_in_tab_position.push(pane_info);
                     }
-                }
-            }
         }
         PaneManifest { panes }
     }
@@ -5997,7 +5991,7 @@ impl PaneInfo {
     pub fn decode_from_kdl(kdl_document: &KdlDocument) -> Result<(usize, Self), String> {
         // usize is the tab position
         macro_rules! int_node {
-            ($name:expr, $type:ident) => {{
+            ($name:expr_2021, $type:ident) => {{
                 kdl_document
                     .get($name)
                     .and_then(|n| n.entries().iter().next())
@@ -6007,7 +6001,7 @@ impl PaneInfo {
             }};
         }
         macro_rules! optional_int_node {
-            ($name:expr, $type:ident) => {{
+            ($name:expr_2021, $type:ident) => {{
                 kdl_document
                     .get($name)
                     .and_then(|n| n.entries().iter().next())
@@ -6016,7 +6010,7 @@ impl PaneInfo {
             }};
         }
         macro_rules! bool_node {
-            ($name:expr) => {{
+            ($name:expr_2021) => {{
                 kdl_document
                     .get($name)
                     .and_then(|n| n.entries().iter().next())
@@ -6025,7 +6019,7 @@ impl PaneInfo {
             }};
         }
         macro_rules! string_node {
-            ($name:expr) => {{
+            ($name:expr_2021) => {{
                 kdl_document
                     .get($name)
                     .and_then(|n| n.entries().iter().next())
@@ -6035,7 +6029,7 @@ impl PaneInfo {
             }};
         }
         macro_rules! optional_string_node {
-            ($name:expr) => {{
+            ($name:expr_2021) => {{
                 kdl_document
                     .get($name)
                     .and_then(|n| n.entries().iter().next())
@@ -6113,21 +6107,21 @@ impl PaneInfo {
     pub fn encode_to_kdl(&self) -> KdlDocument {
         let mut kdl_doucment = KdlDocument::new();
         macro_rules! int_node {
-            ($name:expr, $val:expr) => {{
+            ($name:expr_2021, $val:expr_2021) => {{
                 let mut att = KdlNode::new($name);
                 att.push($val as i64);
                 kdl_doucment.nodes_mut().push(att);
             }};
         }
         macro_rules! bool_node {
-            ($name:expr, $val:expr) => {{
+            ($name:expr_2021, $val:expr_2021) => {{
                 let mut att = KdlNode::new($name);
                 att.push($val);
                 kdl_doucment.nodes_mut().push(att);
             }};
         }
         macro_rules! string_node {
-            ($name:expr, $val:expr) => {{
+            ($name:expr_2021, $val:expr_2021) => {{
                 let mut att = KdlNode::new($name);
                 att.push($val);
                 kdl_doucment.nodes_mut().push(att);

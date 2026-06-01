@@ -77,7 +77,7 @@ fn to_multiplayer_colors(
 
 #[macro_export]
 macro_rules! color_definitions {
-    ($proto:expr, $declaration:ident, $size:expr) => {
+    ($proto:expr_2021, $declaration:ident, $size:expr_2021) => {
         to_style_declaration(to_array::<PaletteColor, $size>(
             $proto
                 .$declaration
@@ -90,7 +90,7 @@ macro_rules! color_definitions {
 
 #[macro_export]
 macro_rules! multiplayer_colors {
-    ($proto:expr, $size: expr) => {
+    ($proto:expr_2021, $size: expr_2021) => {
         to_multiplayer_colors(to_array::<PaletteColor, $size>(
             $proto
                 .multiplayer_user_colors

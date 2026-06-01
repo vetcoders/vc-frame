@@ -14,14 +14,16 @@
 #   - protobuf compiler (protoc)
 
 .PHONY: all build plugins binary install run test test-server test-utils \
-        test-client test-no-web check clippy precheck fmt clean doctor help
+        test-client test-no-web check clippy precheck fmt clean doctor \
+        doctor-quiet doctor-install-quiet help
 
 # ──────────────────────────────────────────────────────────
 # Toolchain resolution.
 #
 # Priority order:
 #   1. ~/.cargo/bin/{cargo,rustc}  (rustup proxy — reads rust-toolchain.toml)
-#   2. Whatever is on PATH         (distro/homebrew/nix/CI)
+#   2. Homebrew rustup keg proxies (when rustup is installed keg-only)
+#   3. Whatever is on PATH         (distro/homebrew/nix/CI)
 #
 # On macOS with Homebrew Rust installed alongside rustup,
 # /opt/homebrew/bin/{cargo,rustc} ignores rust-toolchain.toml
@@ -35,15 +37,20 @@
 # On Windows: use `cargo xtask` directly, not make.
 # ──────────────────────────────────────────────────────────
 CARGO_BIN_DIR := $(HOME)/.cargo/bin
+HOMEBREW_RUSTUP_BIN_DIR := /opt/homebrew/opt/rustup/bin
 
 # Prepend rustup bin dir to PATH if cargo there is actually executable.
 # We use `test -x` instead of Make's `wildcard` because wildcard
 # sees broken symlinks (cargo -> rustup when rustup is uninstalled)
 # as existing files.
 RUSTUP_CARGO_OK := $(shell test -x $(CARGO_BIN_DIR)/cargo && echo yes)
+HOMEBREW_RUSTUP_CARGO_OK := $(shell test -x $(HOMEBREW_RUSTUP_BIN_DIR)/cargo && echo yes)
 ifeq ($(RUSTUP_CARGO_OK),yes)
   export PATH := $(CARGO_BIN_DIR):$(PATH)
   CARGO := $(CARGO_BIN_DIR)/cargo
+else ifeq ($(HOMEBREW_RUSTUP_CARGO_OK),yes)
+  export PATH := $(HOMEBREW_RUSTUP_BIN_DIR):$(CARGO_BIN_DIR):$(PATH)
+  CARGO := $(HOMEBREW_RUSTUP_BIN_DIR)/cargo
 else
   CARGO := $(shell command -v cargo 2>/dev/null || echo cargo)
 endif
@@ -77,7 +84,7 @@ release: doctor-quiet
 ## Build + install the zellij binary (with bundled plugins) to $DEST
 ## Usage: make install  OR  make install DEST=/usr/local/bin
 DEST ?=
-install: doctor-quiet
+install: doctor-quiet doctor-install-quiet
 	$(CARGO) xtask install $(DEST)
 
 ## Run the locally built zellij
@@ -195,6 +202,9 @@ doctor:
 	@command -v protoc >/dev/null 2>&1 \
 		&& echo "protoc:   $$(protoc --version)" \
 		|| echo "protoc:   ✗ NOT FOUND (required for build)"
+	@command -v mandown >/dev/null 2>&1 \
+		&& echo "mandown:  $$(command -v mandown)" \
+		|| echo "mandown:  ✗ NOT FOUND (required for install; run: cargo install mandown)"
 	@echo ""
 	@echo "── OK ──"
 
@@ -206,6 +216,10 @@ doctor-quiet:
 		rustup target list --installed 2>/dev/null | grep -q wasm32-wasip1 \
 			|| { echo "ERROR: wasm32-wasip1 target missing. Run: rustup target add wasm32-wasip1"; exit 1; }; \
 	fi
+
+doctor-install-quiet:
+	@command -v mandown >/dev/null 2>&1 \
+		|| { echo "ERROR: mandown missing. Run: cargo install mandown"; exit 1; }
 
 # ──────────────────────────────────────────────────────────
 # Help

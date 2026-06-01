@@ -313,11 +313,10 @@ impl PinnedExecutor {
         let mut assignments = self.plugin_assignments.lock().unwrap();
         let mut thread_plugins = self.thread_plugins.lock().unwrap();
 
-        if let Some(thread_idx) = assignments.remove(&plugin_id) {
-            if let Some(plugins) = thread_plugins.get_mut(&thread_idx) {
+        if let Some(thread_idx) = assignments.remove(&plugin_id)
+            && let Some(plugins) = thread_plugins.get_mut(&thread_idx) {
                 plugins.remove(&plugin_id);
             }
-        }
 
         drop(assignments);
         drop(thread_plugins);

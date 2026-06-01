@@ -711,8 +711,8 @@ pub fn first_line(
 
     let mut key_indicators =
         key_indicators(max_len, &default_keys, colored_elements, separator, help);
-    if key_indicators.len < max_len {
-        if let Some(tab_info) = tab_info {
+    if key_indicators.len < max_len
+        && let Some(tab_info) = tab_info {
             let mut remaining_space = max_len - key_indicators.len;
             if let Some(swap_layout_status) = swap_layout_status(
                 remaining_space,
@@ -732,7 +732,6 @@ pub fn first_line(
                 key_indicators.append(&swap_layout_status);
             }
         }
-    }
     key_indicators
 }
 

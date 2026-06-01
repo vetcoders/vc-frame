@@ -329,11 +329,10 @@ impl App {
         false
     }
     fn handle_timer(&mut self) -> bool {
-        if let Some(own_plugin_id) = self.own_plugin_id {
-            if self.doherty_threshold_elapsed_since_highlight() {
+        if let Some(own_plugin_id) = self.own_plugin_id
+            && self.doherty_threshold_elapsed_since_highlight() {
                 highlight_and_unhighlight_panes(vec![], vec![PaneId::Plugin(own_plugin_id)]);
             }
-        }
         false
     }
 

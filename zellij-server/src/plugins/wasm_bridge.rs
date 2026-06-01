@@ -912,8 +912,8 @@ impl WasmBridge {
             for (plugin_id, client_id, running_plugin, subscriptions) in &plugins_to_update {
                 let subs = subscriptions.lock().unwrap().clone();
                 // FIXME: This is very janky... Maybe I should write my own macro for Event -> EventType?
-                if let Ok(event_type) = EventType::from_str(&event.to_string()) {
-                    if (subs.contains(&event_type)
+                if let Ok(event_type) = EventType::from_str(&event.to_string())
+                    && (subs.contains(&event_type)
                         || event_type == EventType::PermissionRequestResult)
                         && Self::message_is_directed_at_plugin(pid, cid, plugin_id, client_id)
                     {
@@ -964,7 +964,6 @@ impl WasmBridge {
                             }
                         });
                     }
-                }
             }
         }
 
@@ -2096,11 +2095,10 @@ fn check_event_permission(
         _ => return (PermissionStatus::Granted, None),
     };
 
-    if let Some(permissions) = plugin_env.permissions.lock().unwrap().as_ref() {
-        if permissions.contains(&permission) {
+    if let Some(permissions) = plugin_env.permissions.lock().unwrap().as_ref()
+        && permissions.contains(&permission) {
             return (PermissionStatus::Granted, None);
         }
-    }
 
     (PermissionStatus::Denied, Some(permission))
 }

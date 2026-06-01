@@ -295,12 +295,11 @@ impl TabLinePrefixBuilder {
         let mut parts = vec![self.create_brand_part(brand_text, brand_text_short)];
         let mut used_len = parts.first().map_or(0, |p| p.len);
 
-        if let Some(name) = session_name {
-            if let Some(name_part) = self.create_session_name_part(name, used_len) {
+        if let Some(name) = session_name
+            && let Some(name_part) = self.create_session_name_part(name, used_len) {
                 used_len += name_part.len;
                 parts.push(name_part);
             }
-        }
 
         if let Some(mode_part) = self.create_mode_part(mode, used_len) {
             parts.push(mode_part);

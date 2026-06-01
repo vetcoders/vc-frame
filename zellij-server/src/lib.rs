@@ -464,13 +464,12 @@ impl SessionMetaData {
         }
 
         // Detect and notify plugins of configuration changes
-        if config_was_written_to_disk {
-            if let Some(new_plugins) = new_plugin_config {
+        if config_was_written_to_disk
+            && let Some(new_plugins) = new_plugin_config {
                 self.senders
                     .send_to_plugin(PluginInstruction::DetectPluginConfigChanges(new_plugins))
                     .unwrap();
             }
-        }
     }
 }
 
@@ -720,11 +719,10 @@ impl SessionState {
     /// to any currently-connected non-watcher client. Returns `None`
     /// only when no regular client is connected.
     pub fn pick_forward_target(&self) -> Option<ClientId> {
-        if let Some(candidate) = self.last_active_client {
-            if self.clients.contains_key(&candidate) {
+        if let Some(candidate) = self.last_active_client
+            && self.clients.contains_key(&candidate) {
                 return Some(candidate);
             }
-        }
         self.clients.keys().copied().next()
     }
 }
@@ -2117,14 +2115,13 @@ fn should_show_release_notes(
     if layout_is_welcome_screen {
         return false;
     }
-    if let Some(should_show_release_notes_config) = should_show_release_notes_config {
-        if !should_show_release_notes_config {
+    if let Some(should_show_release_notes_config) = should_show_release_notes_config
+        && !should_show_release_notes_config {
             // if we were explicitly told not to show release notes, we don't show them,
             // otherwise we make sure we only show them if they were not seen AND we know
             // we are able to write to the cache
             return false;
         }
-    }
     if ZELLIJ_SEEN_RELEASE_NOTES_CACHE_FILE.exists() {
         false
     } else {

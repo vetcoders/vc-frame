@@ -392,12 +392,11 @@ pub fn take_snapshot(terminal_output: &mut TerminalPane) -> String {
     let mut snapshot = String::new();
     for (line_index, line) in output_lines.iter().enumerate() {
         for (character_index, terminal_character) in line.iter().enumerate() {
-            if let Some((cursor_x, cursor_y)) = cursor_coordinates {
-                if line_index == cursor_y && character_index == cursor_x {
+            if let Some((cursor_x, cursor_y)) = cursor_coordinates
+                && line_index == cursor_y && character_index == cursor_x {
                     snapshot.push('█');
                     continue;
                 }
-            }
             snapshot.push(terminal_character.character);
         }
         if line_index != output_lines.len() - 1 {

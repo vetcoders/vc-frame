@@ -138,7 +138,7 @@ fn combine_vertically_aligned_panes_to_stack() {
         .values()
         .map(|p| p.current_geom())
         .collect();
-    pane_geoms_after.sort_by(|a, b| a.logical_position.cmp(&b.logical_position));
+    pane_geoms_after.sort_by_key(|a| a.logical_position);
     assert_snapshot!(format!("{:#?}", pane_geoms_after));
 }
 
@@ -195,7 +195,7 @@ fn combine_vertically_aligned_panes_to_stack_when_lower_pane_is_stacked() {
         .values()
         .map(|p| p.current_geom())
         .collect();
-    pane_geoms_after.sort_by(|a, b| a.logical_position.cmp(&b.logical_position));
+    pane_geoms_after.sort_by_key(|a| a.logical_position);
     assert_snapshot!(format!("{:#?}", pane_geoms_after));
 }
 
@@ -253,7 +253,7 @@ fn combine_vertically_aligned_panes_to_stack_when_lower_pane_is_stacked_and_flex
         .values()
         .map(|p| p.current_geom())
         .collect();
-    pane_geoms_after.sort_by(|a, b| a.logical_position.cmp(&b.logical_position));
+    pane_geoms_after.sort_by_key(|a| a.logical_position);
     assert_snapshot!(format!("{:#?}", pane_geoms_after));
 }
 
@@ -320,7 +320,7 @@ fn combine_vertically_aligned_panes_to_stack_when_lower_pane_is_stacked_and_flex
         .values()
         .map(|p| p.current_geom())
         .collect();
-    pane_geoms_after.sort_by(|a, b| a.logical_position.cmp(&b.logical_position));
+    pane_geoms_after.sort_by_key(|a| a.logical_position);
     assert_snapshot!(format!("{:#?}", pane_geoms_after));
 }
 
@@ -391,7 +391,7 @@ fn combine_vertically_aligned_panes_to_stack_when_both_are_stacked() {
         .values()
         .map(|p| p.current_geom())
         .collect();
-    pane_geoms_after.sort_by(|a, b| a.logical_position.cmp(&b.logical_position));
+    pane_geoms_after.sort_by_key(|a| a.logical_position);
     assert_snapshot!(format!("{:#?}", pane_geoms_after));
 }
 
@@ -465,7 +465,7 @@ fn combine_vertically_aligned_panes_to_stack_with_multiple_non_stacked_neighbors
         .values()
         .map(|p| p.current_geom())
         .collect();
-    pane_geoms_after.sort_by(|a, b| a.logical_position.cmp(&b.logical_position));
+    pane_geoms_after.sort_by_key(|a| a.logical_position);
     assert_snapshot!(format!("{:#?}", pane_geoms_after));
 }
 
@@ -552,7 +552,7 @@ fn combine_vertically_aligned_panes_to_stack_with_multiple_stacked_neighbors() {
         .values()
         .map(|p| p.current_geom())
         .collect();
-    pane_geoms_after.sort_by(|a, b| a.logical_position.cmp(&b.logical_position));
+    pane_geoms_after.sort_by_key(|a| a.logical_position);
     assert_snapshot!(format!("{:#?}", pane_geoms_after));
 }
 
@@ -606,7 +606,7 @@ fn combine_horizontally_aligned_panes_to_stack() {
         .values()
         .map(|p| p.current_geom())
         .collect();
-    pane_geoms_after.sort_by(|a, b| a.logical_position.cmp(&b.logical_position));
+    pane_geoms_after.sort_by_key(|a| a.logical_position);
     assert_snapshot!(format!("{:#?}", pane_geoms_after));
 }
 
@@ -686,7 +686,7 @@ fn combine_horizontally_aligned_panes_to_stack_when_left_pane_is_stacked() {
         .values()
         .map(|p| p.current_geom())
         .collect();
-    pane_geoms_after.sort_by(|a, b| a.logical_position.cmp(&b.logical_position));
+    pane_geoms_after.sort_by_key(|a| a.logical_position);
     assert_snapshot!(format!("{:#?}", pane_geoms_after));
 }
 
@@ -766,7 +766,7 @@ fn combine_horizontally_aligned_panes_to_stack_when_right_pane_is_stacked() {
         .values()
         .map(|p| p.current_geom())
         .collect();
-    pane_geoms_after.sort_by(|a, b| a.logical_position.cmp(&b.logical_position));
+    pane_geoms_after.sort_by_key(|a| a.logical_position);
     assert_snapshot!(format!("{:#?}", pane_geoms_after));
 }
 
@@ -833,7 +833,7 @@ fn break_pane_out_of_stack_top() {
         .values()
         .map(|p| p.current_geom())
         .collect();
-    pane_geoms_after.sort_by(|a, b| a.logical_position.cmp(&b.logical_position));
+    pane_geoms_after.sort_by_key(|a| a.logical_position);
     assert_snapshot!(format!("{:#?}", pane_geoms_after));
 }
 
@@ -899,7 +899,7 @@ fn break_pane_out_of_stack_middle() {
         .values()
         .map(|p| p.current_geom())
         .collect();
-    pane_geoms_after.sort_by(|a, b| a.logical_position.cmp(&b.logical_position));
+    pane_geoms_after.sort_by_key(|a| a.logical_position);
     assert_snapshot!(format!("{:#?}", pane_geoms_after));
 }
 
@@ -966,7 +966,7 @@ fn break_pane_out_of_stack_bottom() {
         .values()
         .map(|p| p.current_geom())
         .collect();
-    pane_geoms_after.sort_by(|a, b| a.logical_position.cmp(&b.logical_position));
+    pane_geoms_after.sort_by_key(|a| a.logical_position);
     assert_snapshot!(format!("{:#?}", pane_geoms_after));
 }
 
@@ -1031,7 +1031,7 @@ fn break_next_to_last_pane_out_of_stack() {
         .values()
         .map(|p| p.current_geom())
         .collect();
-    pane_geoms_after.sort_by(|a, b| a.logical_position.cmp(&b.logical_position));
+    pane_geoms_after.sort_by_key(|a| a.logical_position);
     assert_snapshot!(format!("{:#?}", pane_geoms_after));
 }
 

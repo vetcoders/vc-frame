@@ -119,8 +119,8 @@ impl<'a> PaneContentsAndUi<'a> {
                 clients.iter().copied(),
                 self.z_index,
             );
-            if let Some(raw_vte_output) = raw_vte_output {
-                if !raw_vte_output.is_empty() {
+            if let Some(raw_vte_output) = raw_vte_output
+                && !raw_vte_output.is_empty() {
                     self.output.add_post_vte_instruction_to_multiple_clients(
                         clients.iter().copied(),
                         &format!(
@@ -131,7 +131,6 @@ impl<'a> PaneContentsAndUi<'a> {
                         ),
                     );
                 }
-            }
         }
         Ok(())
     }
@@ -200,8 +199,8 @@ impl<'a> PaneContentsAndUi<'a> {
                         }
                     })
                     .unwrap_or(false);
-                if cursor_is_visible {
-                    if let Some(vte_output) = self.pane.render_fake_cursor(colors.0, colors.1) {
+                if cursor_is_visible
+                    && let Some(vte_output) = self.pane.render_fake_cursor(colors.0, colors.1) {
                         self.output.add_post_vte_instruction_to_client(
                             client_id,
                             &format!(
@@ -212,7 +211,6 @@ impl<'a> PaneContentsAndUi<'a> {
                             ),
                         );
                     }
-                }
             }
         }
         Ok(())
@@ -227,11 +225,10 @@ impl<'a> PaneContentsAndUi<'a> {
             return;
         }
         let vte_output = self.pane.render_terminal_title(client_mode);
-        if let Some(previous_title) = previous_title {
-            if *previous_title == vte_output {
+        if let Some(previous_title) = previous_title
+            && *previous_title == vte_output {
                 return;
             }
-        }
         *previous_title = Some(vte_output.clone());
         self.output
             .add_post_vte_instruction_to_client(client_id, &vte_output);

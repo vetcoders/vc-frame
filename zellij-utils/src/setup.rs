@@ -392,7 +392,7 @@ impl Setup {
             Ok(config_options)
         }
 
-        if let Some(Command::Setup(ref setup)) = &cli_args.command {
+        if let Some(Command::Setup(setup)) = &cli_args.command {
             setup
                 .from_cli_with_options(cli_args, &config_options)
                 .map_or_else(
@@ -709,7 +709,7 @@ impl Setup {
         }
     }
     fn handle_setup_commands(cli_args: &CliArgs) {
-        if let Some(Command::Setup(ref setup)) = &cli_args.command {
+        if let Some(Command::Setup(setup)) = &cli_args.command {
             setup.from_cli().map_or_else(
                 |e| {
                     eprintln!("{:?}", e);
@@ -725,7 +725,8 @@ fn merge_attach_command_options(
     cli_config_options: Option<Options>,
     cli_args: &CliArgs,
 ) -> Option<Options> {
-    let cli_config_options = if let Some(Command::Sessions(Sessions::Attach { options, .. })) =
+    
+    if let Some(Command::Sessions(Sessions::Attach { options, .. })) =
         cli_args.command.clone()
     {
         match options.clone().as_deref() {
@@ -739,8 +740,7 @@ fn merge_attach_command_options(
         }
     } else {
         cli_config_options
-    };
-    cli_config_options
+    }
 }
 
 #[cfg(test)]

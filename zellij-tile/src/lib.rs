@@ -110,7 +110,7 @@ macro_rules! register_plugin {
             }));
         }
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         fn load() {
             STATE.with(|state| {
                 use std::collections::BTreeMap;
@@ -127,7 +127,7 @@ macro_rules! register_plugin {
             });
         }
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub fn update() -> bool {
             let err_context = "Failed to deserialize event";
             use std::convert::TryInto;
@@ -142,7 +142,7 @@ macro_rules! register_plugin {
             })
         }
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub fn pipe() -> bool {
             let err_context = "Failed to deserialize pipe message";
             use std::convert::TryInto;
@@ -157,14 +157,14 @@ macro_rules! register_plugin {
             })
         }
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub fn render(rows: i32, cols: i32) {
             STATE.with(|state| {
                 state.borrow_mut().render(rows as usize, cols as usize);
             });
         }
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub fn plugin_version() {
             println!("{}", $crate::prelude::VERSION);
         }
@@ -200,7 +200,7 @@ macro_rules! register_worker {
         thread_local! {
             static $worker_static_name: std::cell::RefCell<$worker> = std::cell::RefCell::new(Default::default());
         }
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub fn $worker_name() {
             use zellij_tile::shim::plugin_api::message::ProtobufMessage;
             use zellij_tile::shim::prost::Message;

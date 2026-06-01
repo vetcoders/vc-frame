@@ -120,7 +120,7 @@ impl SearchState {
             .collect();
 
         // Sort by score descending (best matches first)
-        results.sort_by(|a, b| b.score.cmp(&a.score));
+        results.sort_by_key(|b| std::cmp::Reverse(b.score));
         self.search_results = results;
 
         self.filter_active = !self.search_results.is_empty();

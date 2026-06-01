@@ -236,10 +236,10 @@ impl RunPluginOrAlias {
     }
     pub fn add_initial_cwd(&mut self, initial_cwd: &Path) {
         match self {
-            RunPluginOrAlias::RunPlugin(ref mut run_plugin) => {
+            RunPluginOrAlias::RunPlugin(run_plugin) => {
                 run_plugin.initial_cwd = Some(initial_cwd.to_path_buf());
             },
-            RunPluginOrAlias::Alias(ref mut alias) => {
+            RunPluginOrAlias::Alias(alias) => {
                 alias.initial_cwd = Some(initial_cwd.to_path_buf());
             },
         }
@@ -351,31 +351,27 @@ impl Run {
     pub fn add_args(&mut self, args: Option<Vec<String>>) {
         // overrides the args of a Run::Command if they are Some
         // and not empty
-        if let Some(args) = args {
-            if let Run::Command(run_command) = self {
-                if !args.is_empty() {
+        if let Some(args) = args
+            && let Run::Command(run_command) = self
+                && !args.is_empty() {
                     run_command.args = args.clone();
                 }
-            }
-        }
     }
     pub fn add_close_on_exit(&mut self, close_on_exit: Option<bool>) {
         // overrides the hold_on_close of a Run::Command if it is Some
         // and not empty
-        if let Some(close_on_exit) = close_on_exit {
-            if let Run::Command(run_command) = self {
+        if let Some(close_on_exit) = close_on_exit
+            && let Run::Command(run_command) = self {
                 run_command.hold_on_close = !close_on_exit;
             }
-        }
     }
     pub fn add_start_suspended(&mut self, start_suspended: Option<bool>) {
         // overrides the hold_on_start of a Run::Command if they are Some
         // and not empty
-        if let Some(start_suspended) = start_suspended {
-            if let Run::Command(run_command) = self {
+        if let Some(start_suspended) = start_suspended
+            && let Run::Command(run_command) = self {
                 run_command.hold_on_start = start_suspended;
             }
-        }
     }
     pub fn is_same_category(first: &Option<Run>, second: &Option<Run>) -> bool {
         matches!(
@@ -492,8 +488,8 @@ impl PluginAlias {
         // want to pass the "caller" cwd for the plugin the alias resolves into (eg. a
         // filepicker that has access to the whole filesystem but wants to start in a specific
         // folder)
-        if let Some(caller_cwd) = caller_cwd {
-            if self
+        if let Some(caller_cwd) = caller_cwd
+            && self
                 .configuration
                 .as_ref()
                 .map(|c| c.inner().get("caller_cwd").is_none())
@@ -504,7 +500,6 @@ impl PluginAlias {
                     .get_or_insert_with(|| PluginUserConfiguration::new(BTreeMap::new()));
                 configuration.insert("caller_cwd", caller_cwd.display().to_string());
             }
-        }
     }
 }
 
@@ -950,11 +945,10 @@ impl TiledPaneLayout {
                     // because we really should support that
                     let children_count = (max_panes - pane_count_in_layout) + 1;
                     let mut extra_children = vec![TiledPaneLayout::default(); children_count];
-                    if !layout_to_split.has_focused_node() && focus_layout_if_not_focused {
-                        if let Some(last_child) = extra_children.last_mut() {
+                    if !layout_to_split.has_focused_node() && focus_layout_if_not_focused
+                        && let Some(last_child) = extra_children.last_mut() {
                             last_child.focus = Some(true);
                         }
-                    }
                     let _ = layout_to_split.insert_children_nodes(&mut extra_children);
                 } else {
                     layout_to_split.truncate(max_panes);
@@ -1367,11 +1361,10 @@ impl Layout {
                 .map(|(r, f)| (r.as_str(), f.as_str())),
             None,
         );
-        if should_start_layout_commands_suspended {
-            if let Some(l) = layout.iter_mut().next() {
+        if should_start_layout_commands_suspended
+            && let Some(l) = layout.iter_mut().next() {
                 l.recursively_add_start_suspended_including_template(Some(true))
             }
-        }
         layout
     }
     pub fn from_layout_info_with_config(
@@ -1409,11 +1402,10 @@ impl Layout {
                 .map(|(r, f)| (r.as_str(), f.as_str())),
             None,
         );
-        if should_start_layout_commands_suspended {
-            if let Some(l) = layout.iter_mut().next() {
+        if should_start_layout_commands_suspended
+            && let Some(l) = layout.iter_mut().next() {
                 l.recursively_add_start_suspended_including_template(Some(true))
             }
-        }
         let config = Config::from_kdl(&raw_layout, config)?; // this merges the two config, with
         layout.map(|l| (l, config))
     }

@@ -173,11 +173,10 @@ impl TryFrom<&CliArgs> for Config {
             return Config::from_path(path, Some(default_config));
         }
 
-        if let Some(Command::Setup(ref setup)) = opts.command {
-            if setup.clean {
+        if let Some(Command::Setup(ref setup)) = opts.command
+            && setup.clean {
                 return Config::from_default_assets();
             }
-        }
 
         let config_dir = opts
             .config_dir

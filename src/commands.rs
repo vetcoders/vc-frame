@@ -415,8 +415,8 @@ pub(crate) fn send_action_to_session(
             std::process::exit(1);
         },
         ActiveSession::One(session_name) => {
-            if let Some(requested_session_name) = requested_session_name {
-                if requested_session_name != session_name {
+            if let Some(requested_session_name) = requested_session_name
+                && requested_session_name != session_name {
                     eprintln!(
                         "Session '{}' not found. The following sessions are active:",
                         requested_session_name
@@ -424,7 +424,6 @@ pub(crate) fn send_action_to_session(
                     eprintln!("{}", session_name);
                     std::process::exit(1);
                 }
-            }
             attach_with_cli_client(cli_action, &session_name, config);
         },
         ActiveSession::Many => {
@@ -465,8 +464,8 @@ pub(crate) fn subscribe_to_session(
             std::process::exit(1);
         },
         ActiveSession::One(session_name) => {
-            if let Some(ref requested) = requested_session_name {
-                if *requested != session_name {
+            if let Some(ref requested) = requested_session_name
+                && *requested != session_name {
                     eprintln!(
                         "Session '{}' not found. The following sessions are active:",
                         requested
@@ -474,7 +473,6 @@ pub(crate) fn subscribe_to_session(
                     eprintln!("{}", session_name);
                     std::process::exit(1);
                 }
-            }
             session_name
         },
         ActiveSession::Many => {
@@ -851,11 +849,10 @@ pub(crate) fn start_client(opts: CliArgs) {
                     }
                 };
 
-                if let Ok(val) = std::env::var(envs::SESSION_NAME_ENV_KEY) {
-                    if val == *client.get_session_name() {
+                if let Ok(val) = std::env::var(envs::SESSION_NAME_ENV_KEY)
+                    && val == *client.get_session_name() {
                         panic!("You are trying to attach to the current session (\"{}\"). This is not supported.", val);
                     }
-                }
 
                 if let Some(layout_info) = layout_info {
                     client.set_layout_info(layout_info);

@@ -14634,7 +14634,7 @@ fn osc99_grid_parses_and_stores_notification() {
         "Should have one pending notification"
     );
 
-    let (ref payload, ref _terminator) = grid.pending_desktop_notifications.first().unwrap();
+    let (payload, _terminator) = grid.pending_desktop_notifications.first().unwrap();
     assert!(
         payload.contains("i=gridtest"),
         "Payload should contain i=gridtest, got: {:?}",

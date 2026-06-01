@@ -745,14 +745,13 @@ impl MouseHandler {
                 }
             },
             MouseAction::UpdateSelection { position } => {
-                if let Some(pane_id_with_selection) = tab.selecting_with_mouse_in_pane {
-                    if let Some(pane_with_selection) =
+                if let Some(pane_id_with_selection) = tab.selecting_with_mouse_in_pane
+                    && let Some(pane_with_selection) =
                         tab.get_pane_with_id_mut(pane_id_with_selection)
                     {
                         let relative_position = pane_with_selection.relative_position(&position);
                         pane_with_selection.update_selection(&relative_position, client_id);
                     }
-                }
                 Ok(MouseEffect::default())
             },
             MouseAction::EndSelection { position } => {
@@ -813,11 +812,10 @@ impl MouseHandler {
             let active_pane_id = tab
                 .get_active_pane_id(client_id)
                 .ok_or_else(|| anyhow!("Failed to find active pane"))?;
-            if let Some(pane_id) = pane_id_at_position {
-                if pane_id != active_pane_id {
+            if let Some(pane_id) = pane_id_at_position
+                && pane_id != active_pane_id {
                     Self::focus_pane_at(tab, &position, client_id).with_context(err_context)?;
                 }
-            }
         }
         Ok(MouseEffect::state_changed())
     }
@@ -905,12 +903,11 @@ impl MouseHandler {
             let relative_position = pane.relative_position(&click_event.position);
             let mut event_for_pane = click_event;
             event_for_pane.position = relative_position;
-            if let Some(mouse_event) = pane.mouse_event(&event_for_pane, client_id) {
-                if !pane.position_is_on_frame(&click_event.position) {
+            if let Some(mouse_event) = pane.mouse_event(&event_for_pane, client_id)
+                && !pane.position_is_on_frame(&click_event.position) {
                     tab.write_to_active_terminal(&None, mouse_event.into_bytes(), false, client_id)
                         .with_context(err_context)?;
                 }
-            }
         } else {
             // Terminal does not want mouse — start text selection
             if let Some(pane) = tab.get_pane_with_id_mut(active_pane_id) {
@@ -941,9 +938,7 @@ impl MouseHandler {
             let mut relative_position = pane_with_selection.relative_position(&position);
 
             relative_position.change_column(
-                (relative_position.column())
-                    .max(0)
-                    .min(pane_with_selection.get_content_columns()),
+                (relative_position.column()).min(pane_with_selection.get_content_columns()),
             );
 
             relative_position.change_line(
@@ -1101,13 +1096,11 @@ impl MouseHandler {
         // pane has changed (or cursor left all panes).  Hover position is
         // intentionally not set on unfocused panes so that hover-only plugin
         // highlights only activate on the focused pane.
-        if let Some(prev_pane_id) = previous_hover_pane_id {
-            if Some(prev_pane_id) != pane_id {
-                if let Some(pane) = tab.get_pane_with_id_mut(prev_pane_id) {
+        if let Some(prev_pane_id) = previous_hover_pane_id
+            && Some(prev_pane_id) != pane_id
+                && let Some(pane) = tab.get_pane_with_id_mut(prev_pane_id) {
                     pane.set_hover_position(None);
                 }
-            }
-        }
 
         if tab.mouse_help_text_visible.remove(&client_id).is_some() {
             should_render = true;
@@ -1140,12 +1133,11 @@ impl MouseHandler {
             let relative_position = pane.relative_position(&event.position);
             let mut event_for_pane = event;
             event_for_pane.position = relative_position;
-            if let Some(mouse_event) = pane.mouse_event(&event_for_pane, client_id) {
-                if !pane.position_is_on_frame(&event.position) {
+            if let Some(mouse_event) = pane.mouse_event(&event_for_pane, client_id)
+                && !pane.position_is_on_frame(&event.position) {
                     tab.write_to_active_terminal(&None, mouse_event.into_bytes(), false, client_id)
                         .with_context(err_context)?;
                 }
-            }
             if clear_hover_for_client(tab, client_id) {
                 should_render = true;
             }
@@ -1154,16 +1146,14 @@ impl MouseHandler {
             // Skip when the terminal application has mouse tracking enabled,
             // because hover highlights are suppressed in that case and the
             // update would only trigger unnecessary re-renders.
-            if event.event_type == MouseEventType::Motion {
-                if let Some(pane) = tab.get_pane_with_id_mut(pane_id) {
-                    if !pane.terminal_emulator_wants_mouse() {
+            if event.event_type == MouseEventType::Motion
+                && let Some(pane) = tab.get_pane_with_id_mut(pane_id)
+                    && !pane.terminal_emulator_wants_mouse() {
                         let relative = pane.relative_position(&event.position);
                         if pane.set_hover_position(Some(relative)) {
                             should_render = true;
                         }
                     }
-                }
-            }
 
             if event.event_type == MouseEventType::Motion && tab.mouse_hover_effects {
                 tab.last_mouse_activity_time
@@ -1232,16 +1222,14 @@ impl MouseHandler {
             let is_left_press = event.left && event.event_type == MouseEventType::Press;
             let is_left_motion = event.left && event.event_type == MouseEventType::Motion;
 
-            if is_left_press {
-                if let Some(pane_id) = ctx.pane_id_at_position {
+            if is_left_press
+                && let Some(pane_id) = ctx.pane_id_at_position {
                     return Ok(MouseAction::GroupToggle(pane_id));
                 }
-            }
-            if is_left_motion {
-                if let Some(pane_id) = ctx.pane_id_at_position {
+            if is_left_motion
+                && let Some(pane_id) = ctx.pane_id_at_position {
                     return Ok(MouseAction::GroupAdd(pane_id));
                 }
-            }
             if event.right {
                 return Ok(MouseAction::Ungroup);
             }
@@ -1452,25 +1440,20 @@ impl MouseHandler {
         let floating_panes_are_visible = tab.floating_panes.panes_are_visible();
         if floating_panes_are_visible {
             if let Ok(Some(clicked_pane_id)) = tab.floating_panes.get_pane_id_at(point, true) {
-                if let Some(pane) = tab.floating_panes.get_pane_mut(clicked_pane_id) {
-                    if !pane.selectable() {
+                if let Some(pane) = tab.floating_panes.get_pane_mut(clicked_pane_id)
+                    && !pane.selectable() {
                         return Some(pane);
                     }
-                }
-            } else if let Ok(Some(clicked_pane_id)) = tab.get_pane_id_at(point, false) {
-                if let Some(pane) = tab.tiled_panes.get_pane_mut(clicked_pane_id) {
-                    if !pane.selectable() {
+            } else if let Ok(Some(clicked_pane_id)) = tab.get_pane_id_at(point, false)
+                && let Some(pane) = tab.tiled_panes.get_pane_mut(clicked_pane_id)
+                    && !pane.selectable() {
                         return Some(pane);
                     }
-                }
-            }
-        } else if let Ok(Some(clicked_pane_id)) = tab.get_pane_id_at(point, false) {
-            if let Some(pane) = tab.tiled_panes.get_pane_mut(clicked_pane_id) {
-                if !pane.selectable() {
+        } else if let Ok(Some(clicked_pane_id)) = tab.get_pane_id_at(point, false)
+            && let Some(pane) = tab.tiled_panes.get_pane_mut(clicked_pane_id)
+                && !pane.selectable() {
                     return Some(pane);
                 }
-            }
-        }
         None
     }
 
@@ -1478,8 +1461,8 @@ impl MouseHandler {
         let err_context =
             || format!("failed to focus pane at position {point:?} for client {client_id}");
 
-        if tab.floating_panes.panes_are_visible() {
-            if let Some(clicked_pane) = tab
+        if tab.floating_panes.panes_are_visible()
+            && let Some(clicked_pane) = tab
                 .floating_panes
                 .get_pane_id_at(point, true)
                 .with_context(err_context)?
@@ -1488,7 +1471,6 @@ impl MouseHandler {
                 tab.set_pane_active_at(clicked_pane);
                 return Ok(());
             }
-        }
         if tab.floating_panes.has_pinned_panes() {
             let search_selectable = false;
             if let Some(pane_id) = tab
@@ -1568,12 +1550,11 @@ impl MouseHandler {
                 }
             } else {
                 pane.scroll_down(lines, client_id);
-                if !pane.is_scrolled() {
-                    if let PaneId::Terminal(pid) = pane.pid() {
+                if !pane.is_scrolled()
+                    && let PaneId::Terminal(pid) = pane.pid() {
                         tab.process_pending_vte_events(pid)
                             .with_context(err_context)?;
                     }
-                }
             }
         }
         Ok(MouseEffect::default())
@@ -1662,15 +1643,14 @@ impl MouseHandler {
             {
                 return Ok(tab.floating_panes.get_pane_mut(pane_id));
             }
-        } else if tab.floating_panes.has_pinned_panes() {
-            if let Some(pane_id) = tab
+        } else if tab.floating_panes.has_pinned_panes()
+            && let Some(pane_id) = tab
                 .floating_panes
                 .get_pinned_pane_id_at(point, search_selectable)
                 .with_context(err_context)?
             {
                 return Ok(tab.floating_panes.get_pane_mut(pane_id));
             }
-        }
         if let Some(pane_id) = tab
             .get_pane_id_at(point, search_selectable)
             .with_context(err_context)?

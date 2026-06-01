@@ -310,13 +310,12 @@ impl TextInput {
         }
 
         // Check for Ctrl+Shift modifiers (alternative redo: Ctrl+Shift+Z)
-        if key.has_modifiers(&[KeyModifier::Ctrl, KeyModifier::Shift]) {
-            if let BareKey::Char('Z') = key.bare_key {
+        if key.has_modifiers(&[KeyModifier::Ctrl, KeyModifier::Shift])
+            && let BareKey::Char('Z') = key.bare_key {
                 // Ctrl-Shift-Z: Redo (alternative)
                 self.redo();
                 return InputAction::Continue;
             }
-        }
 
         // Check for Alt modifiers
         if key.has_modifiers(&[KeyModifier::Alt]) {

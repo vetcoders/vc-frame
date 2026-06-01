@@ -17,8 +17,8 @@ pub fn shutdown_all_webserver_instances() -> Result<()> {
         let entry = entry?;
         let path = entry.path();
 
-        if let Some(file_name) = path.file_name() {
-            if let Some(_file_name_str) = file_name.to_str() {
+        if let Some(file_name) = path.file_name()
+            && let Some(_file_name_str) = file_name.to_str() {
                 let metadata = entry.metadata()?;
                 let file_type = metadata.file_type();
 
@@ -36,7 +36,6 @@ pub fn shutdown_all_webserver_instances() -> Result<()> {
                     }
                 }
             }
-        }
     }
     Ok(())
 }

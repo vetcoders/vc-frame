@@ -936,12 +936,11 @@ impl Page {
         }
         for rendered_component in &mut self.components_to_render {
             let is_help = matches!(rendered_component, RenderedComponent::HelpText(_));
-            if is_help {
-                if let Some(error) = error {
+            if is_help
+                && let Some(error) = error {
                     render_error(error, rows);
                     continue;
                 }
-            }
             let y = if is_help { rows } else { current_y };
             let columns = if is_help {
                 columns
@@ -1292,9 +1291,9 @@ impl BulletinList {
     }
     pub fn render(&mut self, x: usize, y: usize, rows: usize, columns: usize) {
         print_text_with_coordinates(self.title.clone(), x, y, Some(columns), Some(rows));
-        let mut item_bulletin = 1;
-        let mut running_y = y + 1;
-        for item in &mut self.items {
+        for (idx, item) in self.items.iter_mut().enumerate() {
+            let item_bulletin = idx + 1;
+            let running_y = y + 1 + idx;
             let mut item_bulletin_text = Text::new(format!("{}. ", item_bulletin));
             if item.is_active {
                 item_bulletin_text = item_bulletin_text.selected();
@@ -1313,8 +1312,6 @@ impl BulletinList {
                 rows,
                 columns.saturating_sub(item_bulletin_text_len),
             );
-            running_y += 1;
-            item_bulletin += 1;
         }
     }
 }

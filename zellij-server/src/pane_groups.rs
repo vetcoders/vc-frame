@@ -107,11 +107,10 @@ impl PaneGroups {
             }
         }
 
-        if should_launch {
-            if let Some(first_client) = all_connected_clients.first() {
+        if should_launch
+            && let Some(first_client) = all_connected_clients.first() {
                 self.launch_plugin(screen_size, first_client);
             }
-        }
     }
     pub fn override_groups_with(&mut self, new_pane_groups: HashMap<ClientId, Vec<PaneId>>) {
         self.panes_in_group = new_pane_groups;

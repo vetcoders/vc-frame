@@ -252,19 +252,19 @@ async fn handle_ws_terminal(
                 // Idle timeout fired with `pending_finalize` set:
                 // drain any ambiguous-but-complete events termwiz held
                 // back on the previous frame.
-                if let Some(client_connection) = state
+                match state
                     .connection_table
                     .lock()
                     .unwrap()
                     .get_client_os_api(&web_client_id)
                     .map(|api| api.box_clone())
-                {
+                { Some(client_connection) => {
                     stdin_session.finalize(&*client_connection, &mut mouse_old_event);
-                } else {
+                } _ => {
                     // No client to send drained events to — clear the
                     // flag so we don't busy-loop the idle timer.
                     stdin_session.clear_pending_finalize();
-                }
+                }}
                 continue;
             },
         };

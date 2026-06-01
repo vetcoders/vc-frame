@@ -2923,13 +2923,11 @@ fn delete_all_dead_sessions() -> Result<()> {
     let mut live_sessions = vec![];
     if let Ok(files) = std::fs::read_dir(&*ZELLIJ_SOCK_DIR) {
         files.for_each(|file| {
-            if let Ok(file) = file {
-                if let Ok(file_name) = file.file_name().into_string() {
-                    if is_ipc_socket(&file.file_type().unwrap()) {
+            if let Ok(file) = file
+                && let Ok(file_name) = file.file_name().into_string()
+                    && is_ipc_socket(&file.file_type().unwrap()) {
                         live_sessions.push(file_name);
                     }
-                }
-            }
         });
     }
     let dead_sessions: Vec<String> = match std::fs::read_dir(&*ZELLIJ_SESSION_INFO_CACHE_DIR) {
@@ -5468,11 +5466,10 @@ fn check_command_permission(
         _ => return (PermissionStatus::Granted, None),
     };
 
-    if let Some(permissions) = plugin_env.permissions.lock().unwrap().as_ref() {
-        if permissions.contains(&permission) {
+    if let Some(permissions) = plugin_env.permissions.lock().unwrap().as_ref()
+        && permissions.contains(&permission) {
             return (PermissionStatus::Granted, None);
         }
-    }
 
     (PermissionStatus::Denied, Some(permission))
 }

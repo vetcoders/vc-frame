@@ -199,11 +199,15 @@ where
             );
         }
     }
-    command
-        .args(&cmd.args)
-        .env("ZELLIJ_PANE_ID", format!("{}", terminal_id))
-        .pre_exec(pre_exec)
-        .spawn()
+    // SAFETY: `pre_exec` runs in the forked child before exec; the caller upholds the
+    // contract of `spawn_command_in_pty` (an `unsafe fn`) that the closure is async-signal-safe.
+    unsafe {
+        command
+            .args(&cmd.args)
+            .env("ZELLIJ_PANE_ID", format!("{}", terminal_id))
+            .pre_exec(pre_exec)
+            .spawn()
+    }
 }
 
 fn handle_openpty(

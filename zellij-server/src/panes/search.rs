@@ -308,11 +308,10 @@ impl SearchResult {
     }
 
     pub(crate) fn unset_active_selection_if_nonexistent(&mut self) {
-        if let Some(active_idx) = self.active {
-            if !self.selections.contains(&active_idx) {
+        if let Some(active_idx) = self.active
+            && !self.selections.contains(&active_idx) {
                 self.active = None;
             }
-        }
     }
 
     pub(crate) fn move_down(
@@ -331,8 +330,8 @@ impl SearchResult {
         self.adjust_selections_to_moved_viewport(grid_height);
 
         // Search the new line for our needle
-        if !self.needle.is_empty() {
-            if let Some(row) = viewport.front() {
+        if !self.needle.is_empty()
+            && let Some(row) = viewport.front() {
                 let mut tail = Vec::new();
                 loop {
                     let tail_idx = 1 + tail.len();
@@ -348,7 +347,6 @@ impl SearchResult {
                     found_something = true;
                 }
             }
-        }
         found_something
     }
 
@@ -368,8 +366,8 @@ impl SearchResult {
         self.adjust_selections_to_moved_viewport(grid_height);
 
         // Search the new line for our needle
-        if !self.needle.is_empty() {
-            if let Some(row) = viewport.back() {
+        if !self.needle.is_empty()
+            && let Some(row) = viewport.back() {
                 let tail: Vec<&Row> = lines_below.iter().take_while(|r| !r.is_canonical).collect();
                 let selections = self.search_row(viewport.len() - 1, row, &tail);
                 for selection in selections {
@@ -380,7 +378,6 @@ impl SearchResult {
                     }
                 }
             }
-        }
         found_something
     }
 

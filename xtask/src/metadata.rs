@@ -37,10 +37,10 @@ pub fn get_no_web_features(sh: &Shell, crate_name: &str) -> anyhow::Result<Optio
 
             if let Some(default_features) = features.get("default").and_then(|v| v.as_array()) {
                 for feature_value in default_features {
-                    if let Some(feature_name) = feature_value.as_str() {
-                        if feature_name != "web_server_capability" {
-                            main_default_features.push(feature_name);
-                        }
+                    if let Some(feature_name) = feature_value.as_str()
+                        && feature_name != "web_server_capability"
+                    {
+                        main_default_features.push(feature_name);
                     }
                 }
             }

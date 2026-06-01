@@ -89,18 +89,14 @@ fn adjust_styles_for_custom_bg_fg(
     pane_default_bg: Option<AnsiCode>,
 ) -> CharacterStyles {
     let mut character_styles = character_styles;
-    if character_styles.foreground.is_none() || character_styles.foreground == Some(AnsiCode::Reset)
-    {
-        if let Some(fg) = pane_default_fg {
+    if (character_styles.foreground.is_none() || character_styles.foreground == Some(AnsiCode::Reset))
+        && let Some(fg) = pane_default_fg {
             character_styles.foreground = Some(fg);
         }
-    }
-    if character_styles.background.is_none() || character_styles.background == Some(AnsiCode::Reset)
-    {
-        if let Some(bg) = pane_default_bg {
+    if (character_styles.background.is_none() || character_styles.background == Some(AnsiCode::Reset))
+        && let Some(bg) = pane_default_bg {
             character_styles.background = Some(bg);
         }
-    }
     character_styles
 }
 
@@ -163,11 +159,10 @@ fn serialize_chunks_with_newlines(
         let mut chunk_width = character_chunk.x;
         for t_character in character_chunk.terminal_characters.iter() {
             // Stop rendering if the next character would exceed max_size.cols
-            if let Some(size) = max_size {
-                if chunk_width + t_character.width() > size.cols {
+            if let Some(size) = max_size
+                && chunk_width + t_character.width() > size.cols {
                     break; // Stop rendering this chunk
                 }
-            }
 
             let current_character_styles = adjust_styles_for_custom_bg_fg(
                 adjust_styles_for_possible_selection(
@@ -228,11 +223,10 @@ fn serialize_chunks(
         let mut chunk_width = character_chunk.x;
         for t_character in character_chunk.terminal_characters.iter() {
             // Stop rendering if the next character would exceed max_size.cols
-            if let Some(size) = max_size {
-                if chunk_width + t_character.width() > size.cols {
+            if let Some(size) = max_size
+                && chunk_width + t_character.width() > size.cols {
                     break; // Stop rendering this chunk
                 }
-            }
 
             let current_character_styles = adjust_styles_for_custom_bg_fg(
                 adjust_styles_for_possible_selection(
@@ -257,8 +251,8 @@ fn serialize_chunks(
             vte_output.push(t_character.character);
         }
     }
-    if let Some(sixel_image_store) = sixel_image_store {
-        if let Some(sixel_chunks) = sixel_chunks {
+    if let Some(sixel_image_store) = sixel_image_store
+        && let Some(sixel_chunks) = sixel_chunks {
             for sixel_chunk in sixel_chunks {
                 // Skip sixel chunks that are completely outside the size bounds
                 if let Some(size) = max_size {
@@ -285,7 +279,6 @@ fn serialize_chunks(
                 }
             }
         }
-    }
     if let Some(ref sixel_vte) = sixel_vte {
         // we do this at the end because of the implied z-index,
         // images should be above text unless the text was explicitly inserted after them (the
@@ -571,8 +564,8 @@ impl Output {
             }
 
             // Add padding instructions if max_size is larger than content_size
-            if let (Some(max_size), Some(content_size)) = (max_size, content_size) {
-                if max_size.rows > content_size.rows || max_size.cols > content_size.cols {
+            if let (Some(max_size), Some(content_size)) = (max_size, content_size)
+                && (max_size.rows > content_size.rows || max_size.cols > content_size.cols) {
                     // Clear each line from the end of rendered content to the end of the watcher's line
                     for y in 0..content_size.rows {
                         let padding_instruction = format!(
@@ -588,7 +581,6 @@ impl Output {
                         format!("\u{1b}[{};{}H\u{1b}[m\u{1b}[J", content_size.rows + 1, 1);
                     client_serialized_render_instructions.push_str(&clear_below_instruction);
                 }
-            }
 
             // append the actual vte with size constraints
             client_serialized_render_instructions.push_str(
