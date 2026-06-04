@@ -3,7 +3,7 @@
 #
 # Usage:
 #   make              — full build (plugins + binary)
-#   make install      — build + install to ~/.cargo/bin
+#   make install      — build + install to ~/.cargo/bin + ~/.local/bin alias
 #   make test         — run all tests
 #   make precheck     — fmt + clippy + typecheck  (gate before push)
 #   make help         — show all targets
@@ -59,6 +59,12 @@ endif
 export RUST_MIN_STACK := 8388608
 export CARGO_TERM_COLOR := always
 
+# Help colors
+C_CYAN   := \033[36m
+C_GREEN  := \033[32m
+C_YELLOW := \033[33m
+C_RESET  := \033[0m
+
 # ──────────────────────────────────────────────────────────
 # Top-level targets
 # ──────────────────────────────────────────────────────────
@@ -81,11 +87,19 @@ binary: doctor-quiet
 release: doctor-quiet
 	$(CARGO) xtask build --release
 
-## Build + install the zellij binary (with bundled plugins) to $DEST
-## Usage: make install  OR  make install DEST=/usr/local/bin
-DEST ?=
+## Build + install the zellij binary (with bundled plugins), then expose it on ~/.local/bin
+## Usage: make install  OR  make install DEST=/usr/local/bin/zellij
+DEST ?= $(CARGO_BIN_DIR)/zellij
+LOCAL_BIN_DIR ?= $(HOME)/.local/bin
+LOCAL_ZELLIJ_ALIAS ?= $(LOCAL_BIN_DIR)/zellij
 install: doctor-quiet doctor-install-quiet
 	$(CARGO) xtask install $(DEST)
+	@mkdir -p "$(LOCAL_BIN_DIR)"
+	@installed="$(DEST)"; \
+	if [ -d "$$installed" ]; then installed="$$installed/zellij"; fi; \
+	ln -sfn "$$installed" "$(LOCAL_ZELLIJ_ALIAS)"; \
+	echo "✓ Installed zellij: $$installed"; \
+	echo "✓ Linked $(LOCAL_ZELLIJ_ALIAS) -> $$installed"
 
 ## Run the locally built zellij
 run: doctor-quiet
@@ -226,32 +240,34 @@ doctor-install-quiet:
 # ──────────────────────────────────────────────────────────
 
 help:
-	@echo "vc-frame Build System"
-	@echo ""
-	@echo "Build:"
-	@echo "  make              Build plugins + binary (default)"
-	@echo "  make plugins      Build only WASM plugins"
-	@echo "  make binary       Build only host binary (plugins must exist)"
-	@echo "  make release      Build everything in release mode"
-	@echo "  make install      Build + install to ~/.cargo/bin (or DEST=path)"
-	@echo "  make run          Run the locally built binary"
-	@echo ""
-	@echo "Test:"
-	@echo "  make test         Full test suite"
-	@echo "  make test-server  Test zellij-server only"
-	@echo "  make test-utils   Test zellij-utils only"
-	@echo "  make test-client  Test zellij-client only"
-	@echo "  make test-no-web  Test without web support"
-	@echo ""
-	@echo "Quality:"
-	@echo "  make precheck     fmt + clippy + typecheck (pre-push gate)"
-	@echo "  make ci           precheck + full test suite"
-	@echo "  make clippy       Clippy only"
-	@echo "  make fmt          Format code"
-	@echo "  make fmt-check    Check formatting (dry-run)"
-	@echo "  make check        Quick typecheck"
-	@echo ""
-	@echo "Other:"
-	@echo "  make doctor       Show environment info"
-	@echo "  make clean        Clean build artifacts"
-	@echo "  make help         This message"
+	@printf "\n$(C_CYAN)vc-frame$(C_RESET) — Zellij fork canonical build system\n"
+	@printf "$(C_CYAN)────────────────────────────────────────────────────────────────────────$(C_RESET)\n\n"
+	@printf "  $(C_YELLOW)BUILD$(C_RESET)\n"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "build" "Build plugins + binary (default)"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "plugins" "Build only WASM plugins"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "binary" "Build only host binary (plugins must exist)"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "release" "Build everything in release mode"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "install" "Release build + install to ~/.cargo/bin + link ~/.local/bin/zellij"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "run" "Run the locally built zellij"
+	@printf "\n  $(C_YELLOW)QUALITY GATES$(C_RESET)\n"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "precheck" "Format check + clippy -D warnings + workspace typecheck"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "ci" "Precheck + full test suite"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "clippy" "Clippy only"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "fmt" "Format code"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "fmt-check" "Check formatting without modifying files"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "check" "Quick workspace typecheck"
+	@printf "\n  $(C_YELLOW)TEST$(C_RESET)\n"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "test" "Full test suite"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "test-server" "Test zellij-server only"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "test-utils" "Test zellij-utils only"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "test-client" "Test zellij-client only"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "test-no-web" "Test without web support"
+	@printf "\n  $(C_YELLOW)INSPECTION / HOUSEKEEPING$(C_RESET)\n"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "doctor" "Show environment info"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "clean" "Clean build artifacts"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "help" "Show this help"
+	@printf "\n  $(C_CYAN)Quick start:$(C_RESET)\n"
+	@printf "    make precheck       # format + clippy + typecheck\n"
+	@printf "    make plugins        # refresh WASM plugin artifacts for local gates\n"
+	@printf "    make install        # canonical release install + ~/.local/bin alias\n"
+	@printf "    make run            # run local debug zellij\n\n"
