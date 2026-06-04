@@ -636,6 +636,15 @@ pub fn start_remote_client(
 ) -> Result<Option<ConnectToSession>, RemoteClientError> {
     info!("Starting Zellij client!");
 
+    // See start_client(): an interactive (remote) client needs a real TTY for
+    // raw mode; fail fast instead of panicking in set_raw_mode() without one.
+    if !os_input.stdin_is_terminal() {
+        eprintln!(
+            "zellij: stdin is not a terminal (TTY); cannot start an interactive session. Run zellij from a real terminal."
+        );
+        std::process::exit(1);
+    }
+
     let runtime = crate::async_runtime(async_worker_tasks);
 
     let connections = remote_attach::attach_to_remote_session(
@@ -744,6 +753,17 @@ pub fn start_client(
     if start_detached_and_exit {
         start_server_detached(os_input, cli_args, config, config_options, info);
         return None;
+    }
+    // An interactive client needs a real terminal to enter raw mode. Without a
+    // TTY (e.g. spawned from a non-interactive shell or a headless agent),
+    // crossterm's enable_raw_mode() fails with ENXIO and would otherwise panic
+    // deep in set_raw_mode(). Fail fast with a clear message and a non-zero exit
+    // so launchers (vibecrafted operator session) can detect it cleanly.
+    if !os_input.stdin_is_terminal() {
+        eprintln!(
+            "zellij: stdin is not a terminal (TTY); cannot start an interactive session. Run zellij from a real terminal."
+        );
+        std::process::exit(1);
     }
     info!("Starting Zellij client!");
 
