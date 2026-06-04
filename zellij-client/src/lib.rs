@@ -155,7 +155,7 @@ use crate::{
 use zellij_utils::cli::CliArgs;
 use zellij_utils::{
     channels::{self, ChannelWithContext, SenderWithContext},
-    consts::{set_permissions, ZELLIJ_SOCK_DIR},
+    consts::{ZELLIJ_SOCK_DIR, set_permissions},
     data::{ClientId, ConnectToSession, KeyWithModifier, LayoutInfo, LayoutMetadata},
     envs,
     errors::{ClientContext, ContextType, ErrorInstruction},
@@ -909,10 +909,9 @@ pub fn start_client(
             let ipc_pipe = create_ipc_pipe();
 
             spawn_server(&ipc_pipe, cli_args.debug).unwrap();
-            if should_start_web_server
-                && let Err(e) = spawn_web_server(&cli_args) {
-                    log::error!("Failed to start web server: {}", e);
-                }
+            if should_start_web_server && let Err(e) = spawn_web_server(&cli_args) {
+                log::error!("Failed to start web server: {}", e);
+            }
 
             let is_web_client = false;
 
@@ -962,10 +961,9 @@ pub fn start_client(
             let ipc_pipe = create_ipc_pipe();
 
             spawn_server(&ipc_pipe, cli_args.debug).unwrap();
-            if should_start_web_server
-                && let Err(e) = spawn_web_server(&cli_args) {
-                    log::error!("Failed to start web server: {}", e);
-                }
+            if should_start_web_server && let Err(e) = spawn_web_server(&cli_args) {
+                log::error!("Failed to start web server: {}", e);
+            }
 
             let is_web_client = false;
 
@@ -1359,10 +1357,9 @@ pub fn start_server_detached(
             let ipc_pipe = create_ipc_pipe();
 
             spawn_server(&ipc_pipe, cli_args.debug).unwrap();
-            if should_start_web_server
-                && let Err(e) = spawn_web_server(&cli_args) {
-                    log::error!("Failed to start web server: {}", e);
-                }
+            if should_start_web_server && let Err(e) = spawn_web_server(&cli_args) {
+                log::error!("Failed to start web server: {}", e);
+            }
 
             let is_web_client = false;
 
@@ -1413,10 +1410,9 @@ pub fn start_server_detached(
             let ipc_pipe = create_ipc_pipe();
 
             spawn_server(&ipc_pipe, cli_args.debug).unwrap();
-            if should_start_web_server
-                && let Err(e) = spawn_web_server(&cli_args) {
-                    log::error!("Failed to start web server: {}", e);
-                }
+            if should_start_web_server && let Err(e) = spawn_web_server(&cli_args) {
+                log::error!("Failed to start web server: {}", e);
+            }
             let is_web_client = false;
 
             (
