@@ -1,10 +1,10 @@
 //! Composite pipelines for the build system.
 //!
 //! Defines multiple "pipelines" that run specific individual steps in sequence.
+use crate::{WorkspaceMember, flags};
 use crate::{build, clippy, format, metadata, test};
-use crate::{flags, WorkspaceMember};
 use anyhow::Context;
-use xshell::{cmd, Shell};
+use xshell::{Shell, cmd};
 
 /// Perform a default build.
 ///
@@ -97,7 +97,20 @@ pub fn install(sh: &Shell, flags: flags::Install) -> anyhow::Result<()> {
     };
     sh.change_dir(crate::project_root());
     sh.copy_file("target/release/zellij", &destination)
-        .with_context(err_context)
+        .with_context(err_context)?;
+
+    // On macOS (Apple Silicon especially), `cargo build --release` with
+    // `strip = true` produces a stripped, ad-hoc "linker-signed" Mach-O.
+    // Copying it to the destination leaves a code signature the kernel then
+    // rejects, so the installed binary is SIGKILLed at exec ("Killed: 9",
+    // exit 137) — even though target/release/zellij itself runs fine. Re-sign
+    // the installed copy ad-hoc in place so it is executable.
+    #[cfg(target_os = "macos")]
+    cmd!(sh, "codesign --force --sign - {destination}")
+        .run()
+        .with_context(err_context)?;
+
+    Ok(())
 }
 
 /// Run zellij debug build.
@@ -392,52 +405,55 @@ pub fn publish(sh: &Shell, flags: flags::Publish) -> anyhow::Result<()> {
                 )
                 .run()
                 .context(err_context)
-                { Err(err) => {
-                    println!();
-                    println!("Publishing crate '{crate_name}' failed with error:");
-                    println!("{:?}", err);
-                    println!();
-                    println!("Please choose what to do: [r]etry/[a]bort/[i]gnore");
+                {
+                    Err(err) => {
+                        println!();
+                        println!("Publishing crate '{crate_name}' failed with error:");
+                        println!("{:?}", err);
+                        println!();
+                        println!("Please choose what to do: [r]etry/[a]bort/[i]gnore");
 
-                    let stdin = std::io::stdin();
-                    let action;
+                        let stdin = std::io::stdin();
+                        let action;
 
-                    loop {
-                        let mut buffer = String::new();
-                        stdin.read_line(&mut buffer).context(err_context)?;
-                        match buffer.trim_end() {
-                            "r" | "R" => {
-                                action = UserAction::Retry;
-                                break;
-                            },
-                            "a" | "A" => {
-                                action = UserAction::Abort;
-                                break;
-                            },
-                            "i" | "I" => {
-                                action = UserAction::Ignore;
-                                break;
-                            },
-                            _ => {
-                                println!(" --> Unknown input '{buffer}', ignoring...");
-                                println!();
-                                println!("Please choose what to do: [r]etry/[a]bort/[i]gnore");
+                        loop {
+                            let mut buffer = String::new();
+                            stdin.read_line(&mut buffer).context(err_context)?;
+                            match buffer.trim_end() {
+                                "r" | "R" => {
+                                    action = UserAction::Retry;
+                                    break;
+                                },
+                                "a" | "A" => {
+                                    action = UserAction::Abort;
+                                    break;
+                                },
+                                "i" | "I" => {
+                                    action = UserAction::Ignore;
+                                    break;
+                                },
+                                _ => {
+                                    println!(" --> Unknown input '{buffer}', ignoring...");
+                                    println!();
+                                    println!("Please choose what to do: [r]etry/[a]bort/[i]gnore");
+                                },
+                            }
+                        }
+
+                        match action {
+                            UserAction::Retry => continue,
+                            UserAction::Ignore => break,
+                            UserAction::Abort => {
+                                eprintln!("Aborting publish for crate '{crate_name}'");
+                                return Err::<(), _>(err);
                             },
                         }
-                    }
-
-                    match action {
-                        UserAction::Retry => continue,
-                        UserAction::Ignore => break,
-                        UserAction::Abort => {
-                            eprintln!("Aborting publish for crate '{crate_name}'");
-                            return Err::<(), _>(err);
-                        },
-                    }
-                } _ => {
-                    // publish successful, continue to next crate
-                    break;
-                }}
+                    },
+                    _ => {
+                        // publish successful, continue to next crate
+                        break;
+                    },
+                }
             }
         }
 
