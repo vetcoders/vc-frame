@@ -1,11 +1,11 @@
 use super::PluginInstruction;
+use crate::ServerInstruction;
 use crate::background_jobs::BackgroundJob;
 use crate::global_async_runtime::get_tokio_runtime;
 use crate::plugins::plugin_map::PluginEnv;
 use crate::plugins::wasm_bridge::handle_plugin_crash;
 use crate::pty::{ClientTabIndexOrPaneId, PtyInstruction};
-use crate::route::{route_action, wait_for_action_completion, NotificationEnd};
-use crate::ServerInstruction;
+use crate::route::{NotificationEnd, route_action, wait_for_action_completion};
 use log::warn;
 use serde::Serialize;
 use std::{
@@ -70,12 +70,10 @@ use zellij_utils::{
     },
     plugin_api::{
         event::{
-            layout_parsing_error::ErrorType as ProtobufLayoutParsingErrorType,
             ProtobufLayoutParsingError, ProtobufPaneScrollbackResponse, ProtobufSyntaxError,
+            layout_parsing_error::ErrorType as ProtobufLayoutParsingErrorType,
         },
         plugin_command::{
-            dump_layout_response, dump_session_layout_response, hide_floating_panes_response,
-            parse_layout_response, save_session_response, show_floating_panes_response,
             ProtobufBreakPanesToNewTabResponse, ProtobufBreakPanesToTabWithIdResponse,
             ProtobufBreakPanesToTabWithIndexResponse, ProtobufDeleteAllDeadSessionsResponse,
             ProtobufDeleteDeadSessionResponse, ProtobufDeleteLayoutResponse,
@@ -104,7 +102,9 @@ use zellij_utils::{
             ProtobufOpenTerminalPaneInPlaceOfPaneIdResponse, ProtobufOpenTerminalResponse,
             ProtobufParseLayoutResponse, ProtobufPluginCommand, ProtobufRenameLayoutResponse,
             ProtobufSaveLayoutResponse, ProtobufSaveSessionResponse,
-            ProtobufShowFloatingPanesResponse,
+            ProtobufShowFloatingPanesResponse, dump_layout_response, dump_session_layout_response,
+            hide_floating_panes_response, parse_layout_response, save_session_response,
+            show_floating_panes_response,
         },
         plugin_ids::{ProtobufPluginIds, ProtobufZellijVersion},
     },
@@ -2489,7 +2489,9 @@ fn set_timeout(env: &PluginEnv, secs: f64) {
 }
 
 fn exec_cmd(env: &PluginEnv, mut command_line: Vec<String>) {
-    log::warn!("The ExecCmd plugin command is deprecated and will be removed in a future version. Please use RunCmd instead (it has all the things and can even show you STDOUT/STDERR and an exit code!)");
+    log::warn!(
+        "The ExecCmd plugin command is deprecated and will be removed in a future version. Please use RunCmd instead (it has all the things and can even show you STDOUT/STDERR and an exit code!)"
+    );
     let err_context = || {
         format!(
             "failed to execute command on host for plugin '{}'",
@@ -2500,8 +2502,11 @@ fn exec_cmd(env: &PluginEnv, mut command_line: Vec<String>) {
 
     // Bail out if we're forbidden to run command
     if !env.plugin._allow_exec_host_cmd {
-        warn!("This plugin isn't allow to run command in host side, skip running this command: '{cmd} {args}'.",
-        	cmd = command, args = command_line.join(" "));
+        warn!(
+            "This plugin isn't allow to run command in host side, skip running this command: '{cmd} {args}'.",
+            cmd = command,
+            args = command_line.join(" ")
+        );
         return;
     }
 
@@ -2925,9 +2930,10 @@ fn delete_all_dead_sessions() -> Result<()> {
         files.for_each(|file| {
             if let Ok(file) = file
                 && let Ok(file_name) = file.file_name().into_string()
-                    && is_ipc_socket(&file.file_type().unwrap()) {
-                        live_sessions.push(file_name);
-                    }
+                && is_ipc_socket(&file.file_type().unwrap())
+            {
+                live_sessions.push(file_name);
+            }
         });
     }
     let dead_sessions: Vec<String> = match std::fs::read_dir(&*ZELLIJ_SESSION_INFO_CACHE_DIR) {
@@ -4382,14 +4388,14 @@ fn try_save_layout(
 
     // Step 7: Write to disk
     let mut parsed_layout: KdlDocument = layout_kdl.parse().unwrap(); // unwrap
-                                                                      // should
-                                                                      // be
-                                                                      // safe,
-                                                                      // but
-                                                                      // let's
-                                                                      // do
-                                                                      // it
-                                                                      // nicer
+    // should
+    // be
+    // safe,
+    // but
+    // let's
+    // do
+    // it
+    // nicer
     parsed_layout.fmt();
     std::fs::write(&file_path, parsed_layout.to_string())
         .map_err(|io_error| format!("Failed to write layout file: {}", io_error))?;
@@ -5467,9 +5473,10 @@ fn check_command_permission(
     };
 
     if let Some(permissions) = plugin_env.permissions.lock().unwrap().as_ref()
-        && permissions.contains(&permission) {
-            return (PermissionStatus::Granted, None);
-        }
+        && permissions.contains(&permission)
+    {
+        return (PermissionStatus::Granted, None);
+    }
 
     (PermissionStatus::Denied, Some(permission))
 }

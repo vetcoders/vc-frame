@@ -1,15 +1,15 @@
-use super::{screen_thread_main, CopyOptions, Screen, ScreenInstruction};
+use super::{CopyOptions, Screen, ScreenInstruction, screen_thread_main};
 use crate::panes::PaneId;
 use crate::{
-    channels::SenderWithContext, os_input_output::ServerOsApi, route::route_action,
-    thread_bus::Bus, ClientId, ServerInstruction, SessionMetaData, ThreadSenders,
+    ClientId, ServerInstruction, SessionMetaData, ThreadSenders, channels::SenderWithContext,
+    os_input_output::ServerOsApi, route::route_action, thread_bus::Bus,
 };
 use insta::assert_snapshot;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use zellij_utils::cli::CliAction;
 use zellij_utils::data::{Event, EventType, Resize, Style, WebSharing};
-use zellij_utils::errors::{prelude::*, ErrorContext};
+use zellij_utils::errors::{ErrorContext, prelude::*};
 use zellij_utils::input::actions::Action;
 use zellij_utils::input::command::{RunCommand, TerminalAction};
 use zellij_utils::input::config::Config;
@@ -413,7 +413,7 @@ impl MockScreen {
         let tab_index = self.last_opened_tab_index.map(|l| l + 1).unwrap_or(0);
         let should_change_focus_to_new_tab = true;
         std::thread::sleep(std::time::Duration::from_millis(100)); // give time for the async
-                                                                   // render
+        // render
         let _ = self.to_screen.send(ScreenInstruction::NewTab(
             None,
             default_shell,
@@ -2145,7 +2145,15 @@ fn group_panes_following_focus() {
             .move_focus_up(client_id)
             .unwrap();
         screen.add_active_pane_to_group_if_marking(&client_id);
-        assert_eq!(screen.current_pane_group.borrow().clone_inner().get(&client_id), Some(&vec![PaneId::Terminal(4), PaneId::Terminal(3)]), "Pane Id of newly focused pane not added to group after the group marking was toggled off");
+        assert_eq!(
+            screen
+                .current_pane_group
+                .borrow()
+                .clone_inner()
+                .get(&client_id),
+            Some(&vec![PaneId::Terminal(4), PaneId::Terminal(3)]),
+            "Pane Id of newly focused pane not added to group after the group marking was toggled off"
+        );
     }
 }
 
@@ -3685,10 +3693,10 @@ pub fn send_cli_toggle_pane_embed_or_float() {
     );
     let _snapshot_count = snapshots.len();
     let last_three_snapshots = snapshots.clone().into_iter().rev().take(3).rev(); // we do this to
-                                                                                  // prevent extra
-                                                                                  // renders from
-                                                                                  // throwing us
-                                                                                  // off
+    // prevent extra
+    // renders from
+    // throwing us
+    // off
     for (_cursor_coordinates, snapshot) in last_three_snapshots.clone() {
         eprintln!("{}", snapshot);
     }
@@ -5746,12 +5754,14 @@ fn subscriber_state_registered_for_multiple_panes() {
 
     let sub = screen.pane_render_subscribers.get(&100).unwrap();
     assert_eq!(sub.pane_ids.len(), 2);
-    assert!(sub
-        .pane_ids
-        .contains(&zellij_utils::data::PaneId::Terminal(1)));
-    assert!(sub
-        .pane_ids
-        .contains(&zellij_utils::data::PaneId::Terminal(2)));
+    assert!(
+        sub.pane_ids
+            .contains(&zellij_utils::data::PaneId::Terminal(1))
+    );
+    assert!(
+        sub.pane_ids
+            .contains(&zellij_utils::data::PaneId::Terminal(2))
+    );
 }
 
 #[test]

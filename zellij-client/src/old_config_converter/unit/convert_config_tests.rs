@@ -53,7 +53,10 @@ fn convert_config_with_keybind_unbinds_in_mode() -> Result<(), String> {
 
 #[test]
 fn convert_config_with_global_keybind_unbinds() -> Result<(), String> {
-    let fixture = PathBuf::from(format!("{}/src/old_config_converter/unit/fixtures/old_yaml_config_with_global_keybind_unbinds.yaml", env!("CARGO_MANIFEST_DIR")));
+    let fixture = PathBuf::from(format!(
+        "{}/src/old_config_converter/unit/fixtures/old_yaml_config_with_global_keybind_unbinds.yaml",
+        env!("CARGO_MANIFEST_DIR")
+    ));
     let mut handle = File::open(&fixture).map_err(|e| format!("{}", e))?;
     let mut raw_config_file = String::new();
     handle
@@ -66,7 +69,10 @@ fn convert_config_with_global_keybind_unbinds() -> Result<(), String> {
 
 #[test]
 fn convert_config_with_unbind_all_keys_per_mode() -> Result<(), String> {
-    let fixture = PathBuf::from(format!("{}/src/old_config_converter/unit/fixtures/old_yaml_config_with_unbind_all_keys_per_mode.yaml", env!("CARGO_MANIFEST_DIR")));
+    let fixture = PathBuf::from(format!(
+        "{}/src/old_config_converter/unit/fixtures/old_yaml_config_with_unbind_all_keys_per_mode.yaml",
+        env!("CARGO_MANIFEST_DIR")
+    ));
     let mut handle = File::open(&fixture).map_err(|e| format!("{}", e))?;
     let mut raw_config_file = String::new();
     handle

@@ -1,18 +1,18 @@
-use crate::os_input_output_api::{command_exists, AsyncReader};
+use crate::os_input_output_api::{AsyncReader, command_exists};
 use crate::panes::PaneId;
 
 use nix::{
-    fcntl::{fcntl, FcntlArg, OFlag},
-    pty::{openpty, OpenptyResult, Winsize},
+    fcntl::{FcntlArg, OFlag, fcntl},
+    pty::{OpenptyResult, Winsize, openpty},
     sys::{
-        signal::{kill, Signal},
+        signal::{Signal, kill},
         termios,
     },
     unistd,
 };
 use tokio::io::unix::AsyncFd;
 
-use libc::{self, ioctl, TIOCSWINSZ};
+use libc::{self, TIOCSWINSZ, ioctl};
 use signal_hook::consts::*;
 
 use std::{
@@ -26,8 +26,8 @@ use std::{
     },
     process::{Child, Command},
     sync::{
-        atomic::{AtomicU32, Ordering},
         Arc, Mutex,
+        atomic::{AtomicU32, Ordering},
     },
     thread,
     time::Duration,
@@ -325,7 +325,9 @@ impl UnixPtyBackend {
     pub fn new() -> Result<Self, io::Error> {
         let current_termios = termios::tcgetattr(0).ok();
         if current_termios.is_none() {
-            log::warn!("Starting a server without a controlling terminal, using the default termios configuration.");
+            log::warn!(
+                "Starting a server without a controlling terminal, using the default termios configuration."
+            );
         }
         Ok(Self {
             orig_termios: Arc::new(Mutex::new(current_termios)),
@@ -411,7 +413,8 @@ impl UnixPtyBackend {
         {
             Some(Some(fd)) => *fd,
             _ => {
-                return Err(anyhow!("could not find raw file descriptor")).with_context(err_context)
+                return Err(anyhow!("could not find raw file descriptor"))
+                    .with_context(err_context);
             },
         };
 
@@ -473,7 +476,7 @@ impl UnixPtyBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nix::fcntl::{fcntl, FcntlArg, OFlag};
+    use nix::fcntl::{FcntlArg, OFlag, fcntl};
     use nix::sys::termios;
     use std::io::Read;
 

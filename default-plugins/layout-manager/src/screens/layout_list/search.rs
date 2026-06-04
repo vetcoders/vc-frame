@@ -1,7 +1,7 @@
-use crate::text_input::TextInput;
 use crate::DisplayLayout;
-use fuzzy_matcher::skim::SkimMatcherV2;
+use crate::text_input::TextInput;
 use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 use zellij_tile::prelude::*;
 
 #[derive(Clone)]

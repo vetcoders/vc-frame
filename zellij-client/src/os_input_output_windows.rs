@@ -1,5 +1,5 @@
 use crate::os_input_output_common::{
-    AsyncSignals, SignalEvent, DISABLE_MOUSE_SUPPORT, ENABLE_MOUSE_SUPPORT,
+    AsyncSignals, DISABLE_MOUSE_SUPPORT, ENABLE_MOUSE_SUPPORT, SignalEvent,
 };
 use crate::stdin_handler_windows::restore_vt_input;
 
@@ -82,7 +82,7 @@ mod win_ctrl_handler {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use windows_sys::Win32::Foundation::BOOL;
-    use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_C_EVENT};
+    use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT};
 
     pub static CTRL_QUIT_RECEIVED: AtomicBool = AtomicBool::new(false);
 

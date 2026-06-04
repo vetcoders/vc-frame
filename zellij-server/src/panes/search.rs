@@ -309,9 +309,10 @@ impl SearchResult {
 
     pub(crate) fn unset_active_selection_if_nonexistent(&mut self) {
         if let Some(active_idx) = self.active
-            && !self.selections.contains(&active_idx) {
-                self.active = None;
-            }
+            && !self.selections.contains(&active_idx)
+        {
+            self.active = None;
+        }
     }
 
     pub(crate) fn move_down(
@@ -331,22 +332,23 @@ impl SearchResult {
 
         // Search the new line for our needle
         if !self.needle.is_empty()
-            && let Some(row) = viewport.front() {
-                let mut tail = Vec::new();
-                loop {
-                    let tail_idx = 1 + tail.len();
-                    if tail_idx < viewport.len() && !viewport[tail_idx].is_canonical {
-                        tail.push(&viewport[tail_idx]);
-                    } else {
-                        break;
-                    }
-                }
-                let selections = self.search_row(0, row, &tail);
-                for selection in selections.iter().rev() {
-                    self.selections.insert(0, *selection);
-                    found_something = true;
+            && let Some(row) = viewport.front()
+        {
+            let mut tail = Vec::new();
+            loop {
+                let tail_idx = 1 + tail.len();
+                if tail_idx < viewport.len() && !viewport[tail_idx].is_canonical {
+                    tail.push(&viewport[tail_idx]);
+                } else {
+                    break;
                 }
             }
+            let selections = self.search_row(0, row, &tail);
+            for selection in selections.iter().rev() {
+                self.selections.insert(0, *selection);
+                found_something = true;
+            }
+        }
         found_something
     }
 
@@ -367,17 +369,18 @@ impl SearchResult {
 
         // Search the new line for our needle
         if !self.needle.is_empty()
-            && let Some(row) = viewport.back() {
-                let tail: Vec<&Row> = lines_below.iter().take_while(|r| !r.is_canonical).collect();
-                let selections = self.search_row(viewport.len() - 1, row, &tail);
-                for selection in selections {
-                    // We are only interested in results that start in the this new row
-                    if selection.start.line() as usize == viewport.len() - 1 {
-                        self.selections.push(selection);
-                        found_something = true;
-                    }
+            && let Some(row) = viewport.back()
+        {
+            let tail: Vec<&Row> = lines_below.iter().take_while(|r| !r.is_canonical).collect();
+            let selections = self.search_row(viewport.len() - 1, row, &tail);
+            for selection in selections {
+                // We are only interested in results that start in the this new row
+                if selection.start.line() as usize == viewport.len() - 1 {
+                    self.selections.push(selection);
+                    found_something = true;
                 }
             }
+        }
         found_something
     }
 

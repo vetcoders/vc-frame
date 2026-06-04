@@ -1,6 +1,6 @@
-use ansi_term::{unstyled_len, ANSIString, ANSIStrings, Style};
+use ansi_term::{ANSIString, ANSIStrings, Style, unstyled_len};
 
-use crate::{action_key, action_key_group, style_key_with_modifier, LinePart};
+use crate::{LinePart, action_key, action_key_group, style_key_with_modifier};
 use zellij_tile::prelude::{actions::Action, *};
 
 macro_rules! strings {

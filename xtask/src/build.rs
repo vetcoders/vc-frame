@@ -4,10 +4,10 @@
 //!
 //! - [`build`]: Builds general cargo projects (i.e. zellij components) with `cargo build`
 //! - [`manpage`]: Builds the manpage with `mandown`
-use crate::{flags, metadata, WorkspaceMember};
+use crate::{WorkspaceMember, flags, metadata};
 use anyhow::Context;
 use std::path::{Path, PathBuf};
-use xshell::{cmd, Shell};
+use xshell::{Shell, cmd};
 
 /// Build members of the zellij workspace.
 ///

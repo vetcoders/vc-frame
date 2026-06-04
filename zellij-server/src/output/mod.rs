@@ -4,10 +4,10 @@ use crate::panes::Row;
 
 use crate::panes::Selection;
 use crate::{
+    ClientId,
     panes::sixel::SixelImageStore,
     panes::terminal_character::{AnsiCode, CharacterStyles},
-    panes::{LinkHandler, PaneId, TerminalCharacter, DEFAULT_STYLES, EMPTY_TERMINAL_CHARACTER},
-    ClientId,
+    panes::{DEFAULT_STYLES, EMPTY_TERMINAL_CHARACTER, LinkHandler, PaneId, TerminalCharacter},
 };
 use std::cell::RefCell;
 use std::fmt::Write;
@@ -89,14 +89,18 @@ fn adjust_styles_for_custom_bg_fg(
     pane_default_bg: Option<AnsiCode>,
 ) -> CharacterStyles {
     let mut character_styles = character_styles;
-    if (character_styles.foreground.is_none() || character_styles.foreground == Some(AnsiCode::Reset))
-        && let Some(fg) = pane_default_fg {
-            character_styles.foreground = Some(fg);
-        }
-    if (character_styles.background.is_none() || character_styles.background == Some(AnsiCode::Reset))
-        && let Some(bg) = pane_default_bg {
-            character_styles.background = Some(bg);
-        }
+    if (character_styles.foreground.is_none()
+        || character_styles.foreground == Some(AnsiCode::Reset))
+        && let Some(fg) = pane_default_fg
+    {
+        character_styles.foreground = Some(fg);
+    }
+    if (character_styles.background.is_none()
+        || character_styles.background == Some(AnsiCode::Reset))
+        && let Some(bg) = pane_default_bg
+    {
+        character_styles.background = Some(bg);
+    }
     character_styles
 }
 
@@ -160,9 +164,10 @@ fn serialize_chunks_with_newlines(
         for t_character in character_chunk.terminal_characters.iter() {
             // Stop rendering if the next character would exceed max_size.cols
             if let Some(size) = max_size
-                && chunk_width + t_character.width() > size.cols {
-                    break; // Stop rendering this chunk
-                }
+                && chunk_width + t_character.width() > size.cols
+            {
+                break; // Stop rendering this chunk
+            }
 
             let current_character_styles = adjust_styles_for_custom_bg_fg(
                 adjust_styles_for_possible_selection(
@@ -224,9 +229,10 @@ fn serialize_chunks(
         for t_character in character_chunk.terminal_characters.iter() {
             // Stop rendering if the next character would exceed max_size.cols
             if let Some(size) = max_size
-                && chunk_width + t_character.width() > size.cols {
-                    break; // Stop rendering this chunk
-                }
+                && chunk_width + t_character.width() > size.cols
+            {
+                break; // Stop rendering this chunk
+            }
 
             let current_character_styles = adjust_styles_for_custom_bg_fg(
                 adjust_styles_for_possible_selection(
@@ -252,33 +258,34 @@ fn serialize_chunks(
         }
     }
     if let Some(sixel_image_store) = sixel_image_store
-        && let Some(sixel_chunks) = sixel_chunks {
-            for sixel_chunk in sixel_chunks {
-                // Skip sixel chunks that are completely outside the size bounds
-                if let Some(size) = max_size {
-                    if sixel_chunk.cell_y >= size.rows {
-                        continue; // Sixel chunk is below visible area
-                    }
-                    if sixel_chunk.cell_x >= size.cols {
-                        continue; // Sixel chunk starts outside visible area
-                    }
+        && let Some(sixel_chunks) = sixel_chunks
+    {
+        for sixel_chunk in sixel_chunks {
+            // Skip sixel chunks that are completely outside the size bounds
+            if let Some(size) = max_size {
+                if sixel_chunk.cell_y >= size.rows {
+                    continue; // Sixel chunk is below visible area
                 }
-
-                let serialized_sixel_image = sixel_image_store.serialize_image(
-                    sixel_chunk.sixel_image_id,
-                    sixel_chunk.sixel_image_pixel_x,
-                    sixel_chunk.sixel_image_pixel_y,
-                    sixel_chunk.sixel_image_pixel_width,
-                    sixel_chunk.sixel_image_pixel_height,
-                );
-                if let Some(serialized_sixel_image) = serialized_sixel_image {
-                    let sixel_vte = sixel_vte.get_or_insert_with(String::new);
-                    vte_goto_instruction(sixel_chunk.cell_x, sixel_chunk.cell_y, sixel_vte)
-                        .with_context(err_context)?;
-                    sixel_vte.push_str(&serialized_sixel_image);
+                if sixel_chunk.cell_x >= size.cols {
+                    continue; // Sixel chunk starts outside visible area
                 }
             }
+
+            let serialized_sixel_image = sixel_image_store.serialize_image(
+                sixel_chunk.sixel_image_id,
+                sixel_chunk.sixel_image_pixel_x,
+                sixel_chunk.sixel_image_pixel_y,
+                sixel_chunk.sixel_image_pixel_width,
+                sixel_chunk.sixel_image_pixel_height,
+            );
+            if let Some(serialized_sixel_image) = serialized_sixel_image {
+                let sixel_vte = sixel_vte.get_or_insert_with(String::new);
+                vte_goto_instruction(sixel_chunk.cell_x, sixel_chunk.cell_y, sixel_vte)
+                    .with_context(err_context)?;
+                sixel_vte.push_str(&serialized_sixel_image);
+            }
         }
+    }
     if let Some(ref sixel_vte) = sixel_vte {
         // we do this at the end because of the implied z-index,
         // images should be above text unless the text was explicitly inserted after them (the
@@ -565,22 +572,23 @@ impl Output {
 
             // Add padding instructions if max_size is larger than content_size
             if let (Some(max_size), Some(content_size)) = (max_size, content_size)
-                && (max_size.rows > content_size.rows || max_size.cols > content_size.cols) {
-                    // Clear each line from the end of rendered content to the end of the watcher's line
-                    for y in 0..content_size.rows {
-                        let padding_instruction = format!(
-                            "\u{1b}[{};{}H\u{1b}[m\u{1b}[K",
-                            y + 1,
-                            content_size.cols + 1
-                        );
-                        client_serialized_render_instructions.push_str(&padding_instruction);
-                    }
-
-                    // Clear all content below the last rendered line
-                    let clear_below_instruction =
-                        format!("\u{1b}[{};{}H\u{1b}[m\u{1b}[J", content_size.rows + 1, 1);
-                    client_serialized_render_instructions.push_str(&clear_below_instruction);
+                && (max_size.rows > content_size.rows || max_size.cols > content_size.cols)
+            {
+                // Clear each line from the end of rendered content to the end of the watcher's line
+                for y in 0..content_size.rows {
+                    let padding_instruction = format!(
+                        "\u{1b}[{};{}H\u{1b}[m\u{1b}[K",
+                        y + 1,
+                        content_size.cols + 1
+                    );
+                    client_serialized_render_instructions.push_str(&padding_instruction);
                 }
+
+                // Clear all content below the last rendered line
+                let clear_below_instruction =
+                    format!("\u{1b}[{};{}H\u{1b}[m\u{1b}[J", content_size.rows + 1, 1);
+                client_serialized_render_instructions.push_str(&clear_below_instruction);
+            }
 
             // append the actual vte with size constraints
             client_serialized_render_instructions.push_str(

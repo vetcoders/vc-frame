@@ -1,11 +1,11 @@
+use crate::ClientId;
 use crate::output::Output;
 use crate::panes::PaneId;
 use crate::tab::Pane;
 use crate::ui::boundaries::Boundaries;
 use crate::ui::pane_boundaries_frame::FrameParams;
-use crate::ClientId;
 use std::collections::{HashMap, HashSet};
-use zellij_utils::data::{client_id_to_colors, InputMode, PaletteColor, Style};
+use zellij_utils::data::{InputMode, PaletteColor, Style, client_id_to_colors};
 use zellij_utils::errors::prelude::*;
 pub struct PaneContentsAndUi<'a> {
     pane: &'a mut Box<dyn Pane>,
@@ -120,17 +120,18 @@ impl<'a> PaneContentsAndUi<'a> {
                 self.z_index,
             );
             if let Some(raw_vte_output) = raw_vte_output
-                && !raw_vte_output.is_empty() {
-                    self.output.add_post_vte_instruction_to_multiple_clients(
-                        clients.iter().copied(),
-                        &format!(
-                            "\u{1b}[{};{}H\u{1b}[m{}",
-                            self.pane.y() + 1,
-                            self.pane.x() + 1,
-                            raw_vte_output
-                        ),
-                    );
-                }
+                && !raw_vte_output.is_empty()
+            {
+                self.output.add_post_vte_instruction_to_multiple_clients(
+                    clients.iter().copied(),
+                    &format!(
+                        "\u{1b}[{};{}H\u{1b}[m{}",
+                        self.pane.y() + 1,
+                        self.pane.x() + 1,
+                        raw_vte_output
+                    ),
+                );
+            }
         }
         Ok(())
     }
@@ -200,17 +201,18 @@ impl<'a> PaneContentsAndUi<'a> {
                     })
                     .unwrap_or(false);
                 if cursor_is_visible
-                    && let Some(vte_output) = self.pane.render_fake_cursor(colors.0, colors.1) {
-                        self.output.add_post_vte_instruction_to_client(
-                            client_id,
-                            &format!(
-                                "\u{1b}[{};{}H\u{1b}[m{}",
-                                self.pane.y() + 1,
-                                self.pane.x() + 1,
-                                vte_output
-                            ),
-                        );
-                    }
+                    && let Some(vte_output) = self.pane.render_fake_cursor(colors.0, colors.1)
+                {
+                    self.output.add_post_vte_instruction_to_client(
+                        client_id,
+                        &format!(
+                            "\u{1b}[{};{}H\u{1b}[m{}",
+                            self.pane.y() + 1,
+                            self.pane.x() + 1,
+                            vte_output
+                        ),
+                    );
+                }
             }
         }
         Ok(())
@@ -226,9 +228,10 @@ impl<'a> PaneContentsAndUi<'a> {
         }
         let vte_output = self.pane.render_terminal_title(client_mode);
         if let Some(previous_title) = previous_title
-            && *previous_title == vte_output {
-                return;
-            }
+            && *previous_title == vte_output
+        {
+            return;
+        }
         *previous_title = Some(vte_output.clone());
         self.output
             .add_post_vte_instruction_to_client(client_id, &vte_output);

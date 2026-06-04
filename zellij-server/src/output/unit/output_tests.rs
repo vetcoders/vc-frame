@@ -1,8 +1,8 @@
 use super::super::{CharacterChunk, FloatingPanesStack, Output, OutputBuffer, SixelImageChunk};
+use crate::ClientId;
 use crate::panes::sixel::SixelImageStore;
 use crate::panes::terminal_character::AnsiCode;
 use crate::panes::{LinkHandler, Row, TerminalCharacter};
-use crate::ClientId;
 use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
 use std::rc::Rc;

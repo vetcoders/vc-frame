@@ -8,10 +8,10 @@ use zellij_tile::prelude::actions::Action;
 use zellij_tile::prelude::*;
 use zellij_tile_utils::palette_match;
 
-use crate::first_line::{to_char, KeyAction, KeyMode, KeyShortcut};
+use crate::first_line::{KeyAction, KeyMode, KeyShortcut, to_char};
 use crate::second_line::{system_clipboard_error, text_copied_hint};
-use crate::{action_key, action_key_group, color_elements, MORE_MSG, TO_NORMAL};
 use crate::{ColoredElements, LinePart};
+use crate::{MORE_MSG, TO_NORMAL, action_key, action_key_group, color_elements};
 use unicode_width::UnicodeWidthStr;
 
 pub fn one_line_ui(
@@ -1131,7 +1131,7 @@ fn add_shortcut(
     }
 
     ret.append(&style_key_with_modifier(keys, key_color_index)); // TODO: alternate
-                                                                 //
+    //
     let ribbon = if selected {
         serialize_ribbon(&Text::new(text.to_string()).selected())
     } else {
@@ -1298,11 +1298,7 @@ fn add_keygroup_separator(help: &ModeInfo, max_len: usize) -> Option<LinePart> {
     ret.part = format!("{}{}", ret.part, ANSIStrings(&bits));
     ret.len += 3; // padding and arrow fonts
 
-    if ret.len <= max_len {
-        Some(ret)
-    } else {
-        None
-    }
+    if ret.len <= max_len { Some(ret) } else { None }
 }
 
 fn full_shortcut_list(help: &ModeInfo) -> LinePart {
@@ -1568,11 +1564,7 @@ fn single_action_key(
 fn session_manager_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithModifier> {
     let mut matching = keymap.iter().find_map(|(key, acvec)| {
         let has_match = acvec.iter().any(|a| a.launches_plugin("session-manager"));
-        if has_match {
-            Some(key.clone())
-        } else {
-            None
-        }
+        if has_match { Some(key.clone()) } else { None }
     });
     if let Some(matching) = matching.take() {
         vec![matching]
@@ -1584,11 +1576,7 @@ fn session_manager_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWith
 fn share_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithModifier> {
     let mut matching = keymap.iter().find_map(|(key, acvec)| {
         let has_match = acvec.iter().any(|a| a.launches_plugin("zellij:share"));
-        if has_match {
-            Some(key.clone())
-        } else {
-            None
-        }
+        if has_match { Some(key.clone()) } else { None }
     });
     if let Some(matching) = matching.take() {
         vec![matching]
@@ -1600,11 +1588,7 @@ fn share_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithModifier> 
 fn plugin_manager_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithModifier> {
     let mut matching = keymap.iter().find_map(|(key, acvec)| {
         let has_match = acvec.iter().any(|a| a.launches_plugin("plugin-manager"));
-        if has_match {
-            Some(key.clone())
-        } else {
-            None
-        }
+        if has_match { Some(key.clone()) } else { None }
     });
     if let Some(matching) = matching.take() {
         vec![matching]
@@ -1618,11 +1602,7 @@ fn layout_manager_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithM
         let has_match = acvec
             .iter()
             .any(|a| a.launches_plugin("zellij:layout-manager"));
-        if has_match {
-            Some(key.clone())
-        } else {
-            None
-        }
+        if has_match { Some(key.clone()) } else { None }
     });
     if let Some(matching) = matching.take() {
         vec![matching]
@@ -1634,11 +1614,7 @@ fn layout_manager_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithM
 fn about_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithModifier> {
     let mut matching = keymap.iter().find_map(|(key, acvec)| {
         let has_match = acvec.iter().any(|a| a.launches_plugin("zellij:about"));
-        if has_match {
-            Some(key.clone())
-        } else {
-            None
-        }
+        if has_match { Some(key.clone()) } else { None }
     });
     if let Some(matching) = matching.take() {
         vec![matching]
@@ -1650,11 +1626,7 @@ fn about_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithModifier> 
 fn configuration_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithModifier> {
     let mut matching = keymap.iter().find_map(|(key, acvec)| {
         let has_match = acvec.iter().any(|a| a.launches_plugin("configuration"));
-        if has_match {
-            Some(key.clone())
-        } else {
-            None
-        }
+        if has_match { Some(key.clone()) } else { None }
     });
     if let Some(matching) = matching.take() {
         vec![matching]

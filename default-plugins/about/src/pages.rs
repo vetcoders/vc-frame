@@ -776,7 +776,7 @@ impl Page {
     }
     pub fn handle_mouse_hover(&mut self, x: usize, y: usize) -> bool {
         let hover_cleared = self.clear_hover(); // TODO: do the right thing if the same component was hovered from
-                                                // previous motion
+        // previous motion
         for rendered_component in &mut self.components_to_render {
             match rendered_component {
                 RenderedComponent::BulletinList(bulletin_list) => {
@@ -936,11 +936,10 @@ impl Page {
         }
         for rendered_component in &mut self.components_to_render {
             let is_help = matches!(rendered_component, RenderedComponent::HelpText(_));
-            if is_help
-                && let Some(error) = error {
-                    render_error(error, rows);
-                    continue;
-                }
+            if is_help && let Some(error) = error {
+                render_error(error, rows);
+                continue;
+            }
             let y = if is_help { rows } else { current_y };
             let columns = if is_help {
                 columns

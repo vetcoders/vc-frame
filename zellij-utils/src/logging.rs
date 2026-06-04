@@ -9,10 +9,10 @@ use std::{
 use log::LevelFilter;
 
 use log4rs::append::rolling_file::{
-    policy::compound::{
-        roll::fixed_window::FixedWindowRoller, trigger::size::SizeTrigger, CompoundPolicy,
-    },
     RollingFileAppender,
+    policy::compound::{
+        CompoundPolicy, roll::fixed_window::FixedWindowRoller, trigger::size::SizeTrigger,
+    },
 };
 use log4rs::config::{Appender, Config, Logger, Root};
 use log4rs::encode::pattern::PatternEncoder;

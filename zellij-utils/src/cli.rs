@@ -89,9 +89,10 @@ pub struct CliArgs {
 impl CliArgs {
     pub fn is_setup_clean(&self) -> bool {
         if let Some(Command::Setup(setup)) = &self.command
-            && setup.clean {
-                return true;
-            }
+            && setup.clean
+        {
+            return true;
+        }
         false
     }
     pub fn options(&self) -> Option<Options> {

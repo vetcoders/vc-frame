@@ -1,5 +1,5 @@
-use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 use uuid::Uuid;
 use zellij_tile::prelude::*;
 
@@ -178,7 +178,7 @@ impl NewPluginScreen {
         config_line_max_len: usize,
     ) -> NestedListItem {
         let config_line_max_len = config_line_max_len.saturating_sub(6); // 3 - line padding, 1 -
-                                                                         // cursor, 2 ": "
+        // cursor, 2 ": "
         let config_key_max_len = config_line_max_len / 2;
         let config_val_max_len = config_line_max_len.saturating_sub(config_key_max_len);
         let config_key = if config_key.chars().count() > config_key_max_len {
@@ -219,7 +219,7 @@ impl NewPluginScreen {
         config_line_max_len: usize,
     ) -> NestedListItem {
         let config_line_max_len = config_line_max_len.saturating_sub(5); // 3 - line padding,
-                                                                         // 2 - ": "
+        // 2 - ": "
         let config_key = if config_key.is_empty() {
             "<EMPTY>"
         } else {
@@ -861,15 +861,13 @@ impl State {
                 tab_of_plugin_id
             };
 
-        
         NestedListItem::new(format!("Tab: {}", tab_of_plugin_id))
             .color_range(2, ..=3)
             .indent(1)
     }
     pub fn render_help(&self, y: usize, cols: usize) {
         let full_text = "Help: <←↓↑→> - Navigate/Expand, <ENTER> - focus, <TAB> - Reload, <Del> - Close, <Ctrl a> - New, <ESC> - Exit";
-        let middle_text =
-            "Help: <←↓↑→/ENTER> - Navigate, <TAB> - Reload, <Del> - Close, <Ctrl a> - New, <ESC> - Exit";
+        let middle_text = "Help: <←↓↑→/ENTER> - Navigate, <TAB> - Reload, <Del> - Close, <Ctrl a> - New, <ESC> - Exit";
         let short_text =
             "<←↓↑→/ENTER/TAB/Del> - Navigate/Expand/Reload/Close, <Ctrl a> - New, <ESC> - Exit";
         if cols >= full_text.chars().count() {

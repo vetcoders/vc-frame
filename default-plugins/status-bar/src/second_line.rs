@@ -1,16 +1,15 @@
 use ansi_term::{
-    unstyled_len, ANSIString, ANSIStrings,
+    ANSIString, ANSIStrings,
     Color::{Fixed, RGB},
-    Style,
+    Style, unstyled_len,
 };
 use zellij_tile::prelude::actions::Action;
 use zellij_tile::prelude::*;
 use zellij_tile_utils::palette_match;
 
 use crate::{
-    action_key, action_key_group, style_key_with_modifier,
-    tip::{data::TIPS, TipFn},
-    LinePart, MORE_MSG, TO_NORMAL,
+    LinePart, MORE_MSG, TO_NORMAL, action_key, action_key_group, style_key_with_modifier,
+    tip::{TipFn, data::TIPS},
 };
 
 fn full_length_shortcut(
@@ -865,6 +864,9 @@ mod tests {
         let ret = keybinds(&mode_info, "quicknav", 500);
         let ret = unstyle(ret);
 
-        assert_eq!(ret, " <BACKSPACE> New / Ctrl + <a|ENTER|1|SPACE> Change Focus / <ESC> Close / <END> Toggle Fullscreen");
+        assert_eq!(
+            ret,
+            " <BACKSPACE> New / Ctrl + <a|ENTER|1|SPACE> Change Focus / <ESC> Close / <END> Toggle Fullscreen"
+        );
     }
 }

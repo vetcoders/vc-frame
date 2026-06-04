@@ -4,8 +4,8 @@ use crate::os_input_output::ClientOsApi;
 use crate::web_client::types::BRACKETED_PASTE_END;
 use crate::web_client::types::BRACKETED_PASTE_START;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
 use zellij_utils::{
@@ -140,7 +140,7 @@ fn dispatch_termwiz_event(
 }
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
-use futures::{prelude::stream::SplitSink, SinkExt};
+use futures::{SinkExt, prelude::stream::SplitSink};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio_util::sync::CancellationToken;
 

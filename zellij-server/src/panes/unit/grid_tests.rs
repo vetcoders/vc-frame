@@ -3476,7 +3476,7 @@ pub fn sixel_image_in_alternate_buffer() {
         vte_parser.advance(&mut grid, byte);
     }
     assert_snapshot!(format!("{:?}", grid)); // should include the image
-                                             //
+    //
     let move_away_from_alternate_screen = "\u{1b}[?1049l";
     for byte in move_away_from_alternate_screen.as_bytes() {
         vte_parser.advance(&mut grid, *byte);

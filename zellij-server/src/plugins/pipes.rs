@@ -9,7 +9,7 @@ use zellij_utils::plugin_api::pipe_message::ProtobufPipeMessage;
 use prost::Message;
 use zellij_utils::errors::prelude::*;
 
-use crate::{thread_bus::ThreadSenders, ClientId};
+use crate::{ClientId, thread_bus::ThreadSenders};
 
 #[derive(Debug, Clone)]
 pub enum PipeStateChange {

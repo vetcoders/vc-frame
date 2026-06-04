@@ -1,7 +1,7 @@
 use super::{PinnedExecutor, PluginId, PluginInstruction};
 use crate::global_async_runtime::get_tokio_runtime;
 use crate::plugins::pipes::{
-    apply_pipe_message_to_plugin, pipes_to_block_or_unblock, PendingPipes, PipeStateChange,
+    PendingPipes, PipeStateChange, apply_pipe_message_to_plugin, pipes_to_block_or_unblock,
 };
 use crate::plugins::plugin_loader::PluginLoader;
 use crate::plugins::plugin_map::{AtomicEvent, PluginEnv, PluginMap, RunningPlugin};
@@ -11,7 +11,7 @@ use crate::plugins::watch_filesystem::watch_filesystem;
 use crate::plugins::zellij_exports::{wasi_read_string, wasi_write_object};
 use highway::{HighwayHash, PortableHash};
 use log::info;
-use notify_debouncer_full::{notify::RecommendedWatcher, Debouncer, FileIdMap};
+use notify_debouncer_full::{Debouncer, FileIdMap, notify::RecommendedWatcher};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     path::PathBuf,
@@ -36,9 +36,9 @@ use prost::Message;
 use crate::panes::PaneId;
 use crate::plugins::plugin_map::RunningPluginAndSubscriptions;
 use crate::{
-    background_jobs::BackgroundJob, route::NotificationEnd, screen::ScreenInstruction,
-    thread_bus::ThreadSenders, ui::loading_indication::LoadingIndication, ClientId,
-    ServerInstruction,
+    ClientId, ServerInstruction, background_jobs::BackgroundJob, route::NotificationEnd,
+    screen::ScreenInstruction, thread_bus::ThreadSenders,
+    ui::loading_indication::LoadingIndication,
 };
 use zellij_utils::{
     data::{Event, EventType},
@@ -301,9 +301,9 @@ impl WasmBridge {
             .or(client_id) // if we got here, this is likely a cli client with no other clients
             // connected, or loading a background plugin on app start, we use the provided client id as a dummy to load the
             // plugin anyway
-            .with_context(|| {
-                "Plugins must have a client id, none was provided and none are connected"
-            })?;
+            .with_context(
+                || "Plugins must have a client id, none was provided and none are connected",
+            )?;
 
         let plugin_id = self.next_plugin_id;
 
@@ -915,55 +915,51 @@ impl WasmBridge {
                 if let Ok(event_type) = EventType::from_str(&event.to_string())
                     && (subs.contains(&event_type)
                         || event_type == EventType::PermissionRequestResult)
-                        && Self::message_is_directed_at_plugin(pid, cid, plugin_id, client_id)
-                    {
-                        // Execute directly on pinned thread (no async I/O needed for event processing)
-                        plugin_executor.execute_for_plugin(*plugin_id, {
-                            let plugin_id = *plugin_id;
-                            let client_id = *client_id;
-                            let running_plugin = running_plugin.clone();
-                            let event = event.clone();
-                            let _s = shutdown_sender.clone();
-                            let plugin_subs = subs.clone();
-                            move |senders,
-                                  _plugin_map,
-                                  _connected_clients,
-                                  _plugin_cache,
-                                  _engine| {
-                                let _s = _s; // guard to allow the task to complete before cleanup/shutdown
-                                let mut running_plugin = running_plugin.lock().unwrap();
-                                let mut plugin_render_assets = vec![];
-                                match apply_event_to_plugin(
-                                    plugin_id,
-                                    client_id,
-                                    &mut running_plugin,
-                                    &event,
-                                    &mut plugin_render_assets,
-                                    senders.clone(),
-                                    &plugin_subs,
-                                ) {
-                                    Ok(()) => {
-                                        let _ = senders.send_to_screen(
-                                            ScreenInstruction::PluginBytes(plugin_render_assets),
-                                        );
-                                    },
-                                    Err(e) => {
-                                        log::error!("{:?}", e);
+                    && Self::message_is_directed_at_plugin(pid, cid, plugin_id, client_id)
+                {
+                    // Execute directly on pinned thread (no async I/O needed for event processing)
+                    plugin_executor.execute_for_plugin(*plugin_id, {
+                        let plugin_id = *plugin_id;
+                        let client_id = *client_id;
+                        let running_plugin = running_plugin.clone();
+                        let event = event.clone();
+                        let _s = shutdown_sender.clone();
+                        let plugin_subs = subs.clone();
+                        move |senders, _plugin_map, _connected_clients, _plugin_cache, _engine| {
+                            let _s = _s; // guard to allow the task to complete before cleanup/shutdown
+                            let mut running_plugin = running_plugin.lock().unwrap();
+                            let mut plugin_render_assets = vec![];
+                            match apply_event_to_plugin(
+                                plugin_id,
+                                client_id,
+                                &mut running_plugin,
+                                &event,
+                                &mut plugin_render_assets,
+                                senders.clone(),
+                                &plugin_subs,
+                            ) {
+                                Ok(()) => {
+                                    let _ = senders.send_to_screen(ScreenInstruction::PluginBytes(
+                                        plugin_render_assets,
+                                    ));
+                                },
+                                Err(e) => {
+                                    log::error!("{:?}", e);
 
-                                        // https://stackoverflow.com/questions/66450942/in-rust-is-there-a-way-to-make-literal-newlines-in-r-using-windows-c
-                                        let stringified_error =
-                                            format!("{:?}", e).replace("\n", "\n\r");
+                                    // https://stackoverflow.com/questions/66450942/in-rust-is-there-a-way-to-make-literal-newlines-in-r-using-windows-c
+                                    let stringified_error =
+                                        format!("{:?}", e).replace("\n", "\n\r");
 
-                                        handle_plugin_crash(
-                                            plugin_id,
-                                            stringified_error,
-                                            senders.clone(),
-                                        );
-                                    },
-                                }
+                                    handle_plugin_crash(
+                                        plugin_id,
+                                        stringified_error,
+                                        senders.clone(),
+                                    );
+                                },
                             }
-                        });
-                    }
+                        }
+                    });
+                }
             }
         }
 
@@ -2096,9 +2092,10 @@ fn check_event_permission(
     };
 
     if let Some(permissions) = plugin_env.permissions.lock().unwrap().as_ref()
-        && permissions.contains(&permission) {
-            return (PermissionStatus::Granted, None);
-        }
+        && permissions.contains(&permission)
+    {
+        return (PermissionStatus::Granted, None);
+    }
 
     (PermissionStatus::Denied, Some(permission))
 }

@@ -1,9 +1,10 @@
 use zellij_utils::errors::prelude::*;
 
 use crate::resize_pty;
-use crate::tab::{get_next_terminal_position, HoldForCommand, Pane};
+use crate::tab::{HoldForCommand, Pane, get_next_terminal_position};
 
 use crate::{
+    ClientId, NotificationEnd,
     os_input_output::ServerOsApi,
     panes::sixel::SixelImageStore,
     panes::{FloatingPanes, TiledPanes},
@@ -11,7 +12,6 @@ use crate::{
     plugins::PluginInstruction,
     pty::PtyInstruction,
     thread_bus::ThreadSenders,
-    ClientId, NotificationEnd,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};

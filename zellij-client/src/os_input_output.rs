@@ -6,17 +6,17 @@ pub use crate::os_input_output_common::{AsyncSignals, SignalEvent};
 
 #[cfg(not(windows))]
 use crate::os_input_output_unix::{
-    disable_mouse_support, enable_mouse_support, setup_ipc, AsyncSignalListener,
-    BlockingSignalIterator,
+    AsyncSignalListener, BlockingSignalIterator, disable_mouse_support, enable_mouse_support,
+    setup_ipc,
 };
 #[cfg(windows)]
 use crate::os_input_output_windows::{
-    disable_mouse_support, enable_mouse_support, restore_console_mode, setup_ipc,
-    AsyncSignalListener, BlockingSignalIterator,
+    AsyncSignalListener, BlockingSignalIterator, disable_mouse_support, enable_mouse_support,
+    restore_console_mode, setup_ipc,
 };
 
-use std::io::prelude::*;
 use std::io::IsTerminal;
+use std::io::prelude::*;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::{io, thread, time};

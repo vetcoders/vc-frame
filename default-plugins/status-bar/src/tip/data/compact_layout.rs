@@ -1,7 +1,7 @@
 use ansi_term::{
-    unstyled_len, ANSIString, ANSIStrings,
+    ANSIString, ANSIStrings,
     Color::{Fixed, RGB},
-    Style,
+    Style, unstyled_len,
 };
 
 use crate::LinePart;

@@ -1,7 +1,7 @@
 //! Main input logic.
 use crate::{
-    os_input_output::ClientOsApi, stdin_ansi_parser::AnsiStdinInstruction, ClientId,
-    ClientInstruction, CommandIsExecuting, InputInstruction,
+    ClientId, ClientInstruction, CommandIsExecuting, InputInstruction,
+    os_input_output::ClientOsApi, stdin_ansi_parser::AnsiStdinInstruction,
 };
 use zellij_utils::{
     channels::{Receiver, SenderWithContext},

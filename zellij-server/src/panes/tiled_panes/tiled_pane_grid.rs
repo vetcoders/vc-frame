@@ -726,7 +726,9 @@ impl<'a> TiledPaneGrid<'a> {
         direction: &Direction,
     ) -> Result<BorderAndPaneIds> {
         let err_context = || {
-            format!("failed to find contiguous panes {direction} from pane {id:?} with {alignment} alignment")
+            format!(
+                "failed to find contiguous panes {direction} from pane {id:?} with {alignment} alignment"
+            )
         };
         let input_error =
             anyhow!("Invalid combination of alignment ({alignment}) and direction ({direction})");
@@ -882,7 +884,6 @@ impl<'a> TiledPaneGrid<'a> {
             .position(|(id, _)| *id == current_pane_id) // TODO: better
             .unwrap();
 
-        
         panes
             .get(active_pane_position + 1)
             .or_else(|| panes.first())
@@ -907,7 +908,6 @@ impl<'a> TiledPaneGrid<'a> {
             .position(|(id, _)| *id == current_pane_id) // TODO: better
             .unwrap();
 
-        
         if active_pane_position == 0 {
             *last_pane.0
         } else {
@@ -935,11 +935,9 @@ impl<'a> TiledPaneGrid<'a> {
         let next_pane_is_stacked = next_pane
             .map(|p| p.current_geom().is_stacked())
             .unwrap_or(false);
-        if next_pane_is_stacked
-            && let Some(next_pane_id) = next_pane.map(|p| p.pid()) {
-                return StackedPanes::new(self.panes.clone())
-                    .flexible_pane_id_in_stack(&next_pane_id);
-            }
+        if next_pane_is_stacked && let Some(next_pane_id) = next_pane.map(|p| p.pid()) {
+            return StackedPanes::new(self.panes.clone()).flexible_pane_id_in_stack(&next_pane_id);
+        }
         next_pane.map(|p| p.pid())
     }
     pub fn progress_stack_up_if_in_stack(&mut self, source_pane_id: &PaneId) -> Option<PaneId> {
@@ -951,7 +949,7 @@ impl<'a> TiledPaneGrid<'a> {
                 .filter(|(_, p)| p.selectable())
                 .map(|(p_id, p)| (*p_id, p))
                 .collect();
-            
+
             pane_list
                 .iter()
                 .enumerate()
@@ -984,7 +982,7 @@ impl<'a> TiledPaneGrid<'a> {
                 .filter(|(_, p)| p.selectable())
                 .map(|(p_id, p)| (*p_id, p))
                 .collect();
-            
+
             pane_list
                 .iter()
                 .enumerate()
@@ -1020,7 +1018,7 @@ impl<'a> TiledPaneGrid<'a> {
             .filter(|(_, p)| p.selectable())
             .map(|(p_id, p)| (*p_id, p))
             .collect();
-        
+
         panes
             .iter()
             .enumerate()
@@ -1045,7 +1043,7 @@ impl<'a> TiledPaneGrid<'a> {
             .filter(|(_, p)| p.selectable())
             .map(|(p_id, p)| (*p_id, p))
             .collect();
-        
+
         panes
             .iter()
             .enumerate()
@@ -1094,7 +1092,7 @@ impl<'a> TiledPaneGrid<'a> {
             .filter(|(_, p)| p.selectable())
             .map(|(p_id, p)| (*p_id, p))
             .collect();
-        
+
         panes
             .iter()
             .enumerate()
@@ -1133,11 +1131,9 @@ impl<'a> TiledPaneGrid<'a> {
         let next_pane_is_stacked = next_pane
             .map(|p| p.current_geom().is_stacked())
             .unwrap_or(false);
-        if next_pane_is_stacked
-            && let Some(next_pane_id) = next_pane.map(|p| p.pid()) {
-                return StackedPanes::new(self.panes.clone())
-                    .flexible_pane_id_in_stack(&next_pane_id);
-            }
+        if next_pane_is_stacked && let Some(next_pane_id) = next_pane.map(|p| p.pid()) {
+            return StackedPanes::new(self.panes.clone()).flexible_pane_id_in_stack(&next_pane_id);
+        }
         next_pane.map(|p| p.pid())
     }
     fn horizontal_borders(&self, pane_ids: &[PaneId]) -> HashSet<usize> {

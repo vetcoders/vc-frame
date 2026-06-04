@@ -1,7 +1,7 @@
 use ansi_term::ANSIStrings;
 use unicode_width::UnicodeWidthStr;
 
-use crate::{LinePart, ARROW_SEPARATOR};
+use crate::{ARROW_SEPARATOR, LinePart};
 use zellij_tile::prelude::actions::Action;
 use zellij_tile::prelude::*;
 use zellij_tile_utils::style;

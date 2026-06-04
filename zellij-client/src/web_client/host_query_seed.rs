@@ -113,9 +113,10 @@ fn build_color_registers(resolved: &ResolvedTheme) -> Vec<ColorRegister> {
     // synthesis (existing semantics) — apps will use their own defaults.
     for (i, slot) in resolved.indexed.iter().enumerate() {
         if let Some(css) = slot
-            && let Some(color) = css_rgb_to_xparse_color(css) {
-                registers.push(ColorRegister { index: i, color });
-            }
+            && let Some(color) = css_rgb_to_xparse_color(css)
+        {
+            registers.push(ColorRegister { index: i, color });
+        }
     }
 
     // Indices 16-255: canonical xterm-256 palette. xterm.js does not let
@@ -199,9 +200,10 @@ mod tests {
     fn find_register(msgs: &[ClientToServerMsg], index: usize) -> Option<String> {
         for msg in msgs {
             if let ClientToServerMsg::ColorRegisters { color_registers } = msg
-                && let Some(reg) = color_registers.iter().find(|r| r.index == index) {
-                    return Some(reg.color.clone());
-                }
+                && let Some(reg) = color_registers.iter().find(|r| r.index == index)
+            {
+                return Some(reg.color.clone());
+            }
         }
         None
     }

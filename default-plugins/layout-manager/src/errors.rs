@@ -21,11 +21,13 @@ pub fn format_kdl_error(error: LayoutParsingError) -> String {
             output
         },
         LayoutParsingError::SyntaxError => {
-            format!("Failed to deserialize KDL node. \nPossible reasons:\n{}\n{}\n{}\n{}",
-            "- Missing `;` after a node name, eg. { node; another_node; }",
-            "- Missing quotations (\") around an argument node eg. { first_node \"argument_node\"; }",
-            "- Missing an equal sign (=) between node arguments on a title line. eg. argument=\"value\"",
-            "- Found an extraneous equal sign (=) between node child arguments and their values. eg. { argument=\"value\" }")
+            format!(
+                "Failed to deserialize KDL node. \nPossible reasons:\n{}\n{}\n{}\n{}",
+                "- Missing `;` after a node name, eg. { node; another_node; }",
+                "- Missing quotations (\") around an argument node eg. { first_node \"argument_node\"; }",
+                "- Missing an equal sign (=) between node arguments on a title line. eg. argument=\"value\"",
+                "- Found an extraneous equal sign (=) between node child arguments and their values. eg. { argument=\"value\" }"
+            )
         },
     }
 }

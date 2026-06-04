@@ -37,6 +37,7 @@ use swap_layouts::SwapLayouts;
 use self::clipboard::ClipboardProvider;
 use crate::route::NotificationEnd;
 use crate::{
+    ClientId, ServerInstruction,
     os_input_output::ServerOsApi,
     output::{CharacterChunk, Output, SixelImageChunk},
     panes::floating_panes::floating_pane_grid::half_size_middle_geom,
@@ -47,7 +48,6 @@ use crate::{
     plugins::PluginInstruction,
     pty::{ClientTabIndexOrPaneId, PtyInstruction, VteBytes},
     thread_bus::ThreadSenders,
-    ClientId, ServerInstruction,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -1343,21 +1343,22 @@ impl Tab {
         }
         if self.floating_panes.panes_are_visible() {
             if let Some(focused_floating_pane_id) = self.floating_panes.active_pane_id(client_id)
-                && self.tiled_panes.has_room_for_new_pane() {
-                    let floating_pane_to_embed = self
+                && self.tiled_panes.has_room_for_new_pane()
+            {
+                let floating_pane_to_embed = self
                         .extract_pane(focused_floating_pane_id, true)
                         .with_context(|| format!(
                         "failed to find floating pane (ID: {focused_floating_pane_id:?}) to embed for client {client_id}",
                     ))
                         .with_context(err_context)?;
-                    self.hide_floating_panes();
-                    self.add_tiled_pane(
-                        floating_pane_to_embed,
-                        focused_floating_pane_id,
-                        false,
-                        Some(client_id),
-                    )?;
-                }
+                self.hide_floating_panes();
+                self.add_tiled_pane(
+                    floating_pane_to_embed,
+                    focused_floating_pane_id,
+                    false,
+                    Some(client_id),
+                )?;
+            }
         } else if let Some(focused_pane_id) = self.tiled_panes.focused_pane_id(client_id) {
             if self.get_selectable_tiled_panes().count() <= 1 {
                 // don't close the only pane on screen...
@@ -3246,7 +3247,7 @@ impl Tab {
     pub fn set_should_clear_display_before_rendering(&mut self) {
         self.should_clear_display_before_rendering = true;
         self.floating_panes.set_force_render(); // we do this to make sure pinned panes are
-                                                // rendered even if their surface is not visible
+        // rendered even if their surface is not visible
     }
     pub fn is_sync_panes_active(&self) -> bool {
         self.synchronize_is_active
@@ -3538,9 +3539,10 @@ impl Tab {
             self.draw_pane_frames,
         );
         if let Some(pane_id) = fullscreen_pane_to_restore
-            && self.tiled_panes.panes_contain(&pane_id) {
-                self.tiled_panes.toggle_pane_fullscreen(pane_id);
-            }
+            && self.tiled_panes.panes_contain(&pane_id)
+        {
+            self.tiled_panes.toggle_pane_fullscreen(pane_id);
+        }
         Ok(())
     }
     pub fn resize(&mut self, client_id: ClientId, strategy: ResizeStrategy) -> Result<()> {
@@ -4035,10 +4037,11 @@ impl Tab {
             closed_pane
         };
         if let Some(exit_status) = exit_status
-            && let Some(mut closed_pane) = closed_pane {
-                // in case we need to update on Drop
-                closed_pane.update_exit_status(exit_status);
-            }
+            && let Some(mut closed_pane) = closed_pane
+        {
+            // in case we need to update on Drop
+            closed_pane.update_exit_status(exit_status);
+        }
         let _ = self.senders.send_to_plugin(PluginInstruction::Update(vec![(
             None,
             None,
@@ -4212,16 +4215,17 @@ impl Tab {
         };
 
         if self.floating_panes.panes_are_visible()
-            && let Some(active_floating_pane_id) = self.floating_panes.active_pane_id(client_id) {
-                self.close_pane(active_floating_pane_id, false, None);
-                self.senders
-                    .send_to_pty(PtyInstruction::ClosePane(
-                        active_floating_pane_id,
-                        completion_tx,
-                    ))
-                    .with_context(|| err_context(active_floating_pane_id))?;
-                return Ok(());
-            }
+            && let Some(active_floating_pane_id) = self.floating_panes.active_pane_id(client_id)
+        {
+            self.close_pane(active_floating_pane_id, false, None);
+            self.senders
+                .send_to_pty(PtyInstruction::ClosePane(
+                    active_floating_pane_id,
+                    completion_tx,
+                ))
+                .with_context(|| err_context(active_floating_pane_id))?;
+            return Ok(());
+        }
         if let Some(active_pane_id) = self.tiled_panes.get_active_pane_id(client_id) {
             self.close_pane(active_pane_id, false, None);
             self.senders
@@ -4444,8 +4448,8 @@ impl Tab {
     pub fn scroll_terminal_up(&mut self, terminal_pane_id: u32) {
         if let Some(terminal_pane) = self.get_pane_with_id_mut(PaneId::Terminal(terminal_pane_id)) {
             let fictitious_client_id = 1; // this is not checked for terminal panes and we
-                                          // don't have an actual client id here
-                                          // TODO: traits were a mistake
+            // don't have an actual client id here
+            // TODO: traits were a mistake
             terminal_pane.scroll_up(1, fictitious_client_id);
         }
     }
@@ -4456,10 +4460,11 @@ impl Tab {
         if let Some(active_pane) = self.get_active_pane_or_floating_pane_mut(client_id) {
             active_pane.scroll_down(1, client_id);
             if !active_pane.is_scrolled()
-                && let PaneId::Terminal(raw_fd) = active_pane.pid() {
-                    self.process_pending_vte_events(raw_fd)
-                        .with_context(err_context)?;
-                }
+                && let PaneId::Terminal(raw_fd) = active_pane.pid()
+            {
+                self.process_pending_vte_events(raw_fd)
+                    .with_context(err_context)?;
+            }
         }
         Ok(())
     }
@@ -4467,8 +4472,8 @@ impl Tab {
     pub fn scroll_terminal_down(&mut self, terminal_pane_id: u32) {
         if let Some(terminal_pane) = self.get_pane_with_id_mut(PaneId::Terminal(terminal_pane_id)) {
             let fictitious_client_id = 1; // this is not checked for terminal panes and we
-                                          // don't have an actual client id here
-                                          // TODO: traits were a mistake
+            // don't have an actual client id here
+            // TODO: traits were a mistake
             terminal_pane.scroll_down(1, fictitious_client_id);
         }
     }
@@ -4484,9 +4489,9 @@ impl Tab {
     pub fn scroll_terminal_page_up(&mut self, terminal_pane_id: u32) {
         if let Some(terminal_pane) = self.get_pane_with_id_mut(PaneId::Terminal(terminal_pane_id)) {
             let fictitious_client_id = 1; // this is not checked for terminal panes and we
-                                          // don't have an actual client id here
-                                          // TODO: traits were a mistake
-                                          // prevent overflow when row == 0
+            // don't have an actual client id here
+            // TODO: traits were a mistake
+            // prevent overflow when row == 0
             let scroll_rows = terminal_pane.rows().max(1).saturating_sub(1);
             terminal_pane.scroll_up(scroll_rows, fictitious_client_id);
         }
@@ -4500,10 +4505,11 @@ impl Tab {
             let scroll_rows = active_pane.get_content_rows();
             active_pane.scroll_down(scroll_rows, client_id);
             if !active_pane.is_scrolled()
-                && let PaneId::Terminal(raw_fd) = active_pane.pid() {
-                    self.process_pending_vte_events(raw_fd)
-                        .with_context(err_context)?;
-                }
+                && let PaneId::Terminal(raw_fd) = active_pane.pid()
+            {
+                self.process_pending_vte_events(raw_fd)
+                    .with_context(err_context)?;
+            }
         }
         Ok(())
     }
@@ -4511,14 +4517,15 @@ impl Tab {
     pub fn scroll_terminal_page_down(&mut self, terminal_pane_id: u32) {
         if let Some(terminal_pane) = self.get_pane_with_id_mut(PaneId::Terminal(terminal_pane_id)) {
             let fictitious_client_id = 1; // this is not checked for terminal panes and we
-                                          // don't have an actual client id here
-                                          // TODO: traits were a mistake
+            // don't have an actual client id here
+            // TODO: traits were a mistake
             let scroll_rows = terminal_pane.get_content_rows();
             terminal_pane.scroll_down(scroll_rows, fictitious_client_id);
             if !terminal_pane.is_scrolled()
-                && let PaneId::Terminal(raw_fd) = terminal_pane.pid() {
-                    self.process_pending_vte_events(raw_fd).non_fatal()
-                }
+                && let PaneId::Terminal(raw_fd) = terminal_pane.pid()
+            {
+                self.process_pending_vte_events(raw_fd).non_fatal()
+            }
         }
     }
 
@@ -4538,10 +4545,11 @@ impl Tab {
             let scroll_rows = (active_pane.rows().max(1) - 1) / 2;
             active_pane.scroll_down(scroll_rows, client_id);
             if !active_pane.is_scrolled()
-                && let PaneId::Terminal(raw_fd) = active_pane.pid() {
-                    self.process_pending_vte_events(raw_fd)
-                        .with_context(err_context)?;
-                }
+                && let PaneId::Terminal(raw_fd) = active_pane.pid()
+            {
+                self.process_pending_vte_events(raw_fd)
+                    .with_context(err_context)?;
+            }
         }
         Ok(())
     }
@@ -4553,10 +4561,11 @@ impl Tab {
         if let Some(active_pane) = self.get_active_pane_or_floating_pane_mut(client_id) {
             active_pane.clear_scroll();
             if !active_pane.is_scrolled()
-                && let PaneId::Terminal(raw_fd) = active_pane.pid() {
-                    self.process_pending_vte_events(raw_fd)
-                        .with_context(err_context)?;
-                }
+                && let PaneId::Terminal(raw_fd) = active_pane.pid()
+            {
+                self.process_pending_vte_events(raw_fd)
+                    .with_context(err_context)?;
+            }
         }
         Ok(())
     }
@@ -4565,9 +4574,10 @@ impl Tab {
         if let Some(terminal_pane) = self.get_pane_with_id_mut(PaneId::Terminal(terminal_pane_id)) {
             terminal_pane.clear_scroll();
             if !terminal_pane.is_scrolled()
-                && let PaneId::Terminal(raw_fd) = terminal_pane.pid() {
-                    self.process_pending_vte_events(raw_fd).non_fatal();
-                }
+                && let PaneId::Terminal(raw_fd) = terminal_pane.pid()
+            {
+                self.process_pending_vte_events(raw_fd).non_fatal();
+            }
         }
     }
 
@@ -4586,8 +4596,8 @@ impl Tab {
             terminal_pane.clear_scroll();
             if let Some(size) = terminal_pane.get_line_number() {
                 let fictitious_client_id = 1; // this is not checked for terminal panes and we
-                                              // don't have an actual client id here
-                                              // TODO: traits were a mistake
+                // don't have an actual client id here
+                // TODO: traits were a mistake
                 terminal_pane.scroll_up(size, fictitious_client_id);
             }
         }
@@ -4601,10 +4611,11 @@ impl Tab {
         if let Some(active_pane) = self.get_active_pane_or_floating_pane_mut(client_id) {
             active_pane.clear_scroll();
             if !active_pane.is_scrolled()
-                && let PaneId::Terminal(raw_fd) = active_pane.pid() {
-                    self.process_pending_vte_events(raw_fd)
-                        .with_context(err_context)?;
-                }
+                && let PaneId::Terminal(raw_fd) = active_pane.pid()
+            {
+                self.process_pending_vte_events(raw_fd)
+                    .with_context(err_context)?;
+            }
         }
         Ok(())
     }
@@ -5449,7 +5460,7 @@ impl Tab {
             // only do this if we're already in this layout, otherwise it might be
             // confusing and not what the user intends
             self.swap_layouts.set_is_floating_damaged(); // we do this so that we won't skip to the
-                                                         // next layout
+            // next layout
             self.relayout_floating_panes(false)?;
         }
         Ok(())
@@ -5485,7 +5496,7 @@ impl Tab {
             // only do this if we're already in this layout, otherwise it might be
             // confusing and not what the user intends
             self.swap_layouts.set_is_tiled_damaged(); // we do this so that we won't skip to the
-                                                      // next layout
+            // next layout
             self.relayout_tiled_panes(false)?;
         }
         Ok(())
@@ -5503,7 +5514,7 @@ impl Tab {
             .add_pane_to_stack_of_pane_id(pane_id, pane, root_pane_id);
         self.set_should_clear_display_before_rendering();
         self.tiled_panes.expand_pane_in_stack(pane_id); // so that it will get focused by all
-                                                        // clients
+        // clients
         self.swap_layouts.set_is_tiled_damaged();
         Ok(())
     }
@@ -5535,15 +5546,16 @@ impl Tab {
                     .find(|s_p| s_p.1.pid() == PaneId::Plugin(pid))
                     .map(|s_p| &mut s_p.1);
                 if let Some(suppressed_pane) = suppressed_pane.as_mut()
-                    && permissions.is_some() {
-                        // here what happens is that we're requesting permissions for a pane that
-                        // is suppressed, meaning the user cannot see the permission request
-                        // so we temporarily focus this pane as a floating pane, marking it so that
-                        // once the permissions are accepted/rejected by the user, it will be
-                        // suppressed again
-                        suppressed_pane.set_should_be_suppressed(true);
-                        should_focus_pane = true;
-                    }
+                    && permissions.is_some()
+                {
+                    // here what happens is that we're requesting permissions for a pane that
+                    // is suppressed, meaning the user cannot see the permission request
+                    // so we temporarily focus this pane as a floating pane, marking it so that
+                    // once the permissions are accepted/rejected by the user, it will be
+                    // suppressed again
+                    suppressed_pane.set_should_be_suppressed(true);
+                    should_focus_pane = true;
+                }
                 suppressed_pane
             })
         {
@@ -5803,9 +5815,10 @@ impl Tab {
             if ((self.tiled_panes.panes_contain(pane_id)
                 && self.get_selectable_tiled_panes().count() <= 1)
                 || self.suppressed_panes.contains_key(pane_id))
-                && let Some(pane) = self.extract_pane(*pane_id, true) {
-                    self.add_floating_pane(pane, *pane_id, None, false)?;
-                }
+                && let Some(pane) = self.extract_pane(*pane_id, true)
+            {
+                self.add_floating_pane(pane, *pane_id, None, false)?;
+            }
         }
         self.floating_panes
             .change_pane_coordinates(*pane_id, floating_pane_coordinates)?;
@@ -5927,8 +5940,8 @@ impl Tab {
             None,
         );
         new_pane.update_name("EDITING SCROLLBACK"); // we do this here and not in the
-                                                    // constructor so it won't be overrided
-                                                    // by the editor
+        // constructor so it won't be overrided
+        // by the editor
         new_pane
     }
     fn insert_scrollback_editor_replaced_pane(
@@ -5959,9 +5972,10 @@ impl Tab {
         if let Some(pane) = self.get_pane_with_id_mut(pane_id) {
             pane.scroll_down(1, fictitious_client_id);
             if !pane.is_scrolled()
-                && let PaneId::Terminal(raw_fd) = pane.pid() {
-                    self.process_pending_vte_events(raw_fd)?;
-                }
+                && let PaneId::Terminal(raw_fd) = pane.pid()
+            {
+                self.process_pending_vte_events(raw_fd)?;
+            }
         }
         Ok(())
     }
@@ -5979,9 +5993,10 @@ impl Tab {
         if let Some(pane) = self.get_pane_with_id_mut(pane_id) {
             pane.clear_scroll();
             if !pane.is_scrolled()
-                && let PaneId::Terminal(raw_fd) = pane.pid() {
-                    self.process_pending_vte_events(raw_fd)?;
-                }
+                && let PaneId::Terminal(raw_fd) = pane.pid()
+            {
+                self.process_pending_vte_events(raw_fd)?;
+            }
         }
         Ok(())
     }
@@ -5998,9 +6013,10 @@ impl Tab {
             let scroll_rows = pane.get_content_rows();
             pane.scroll_down(scroll_rows, fictitious_client_id);
             if !pane.is_scrolled()
-                && let PaneId::Terminal(raw_fd) = pane.pid() {
-                    self.process_pending_vte_events(raw_fd)?;
-                }
+                && let PaneId::Terminal(raw_fd) = pane.pid()
+            {
+                self.process_pending_vte_events(raw_fd)?;
+            }
         }
         Ok(())
     }
@@ -6017,9 +6033,10 @@ impl Tab {
             let scroll_rows = (pane.rows().max(1).saturating_sub(1)) / 2;
             pane.scroll_down(scroll_rows, fictitious_client_id);
             if !pane.is_scrolled()
-                && let PaneId::Terminal(raw_fd) = pane.pid() {
-                    self.process_pending_vte_events(raw_fd)?;
-                }
+                && let PaneId::Terminal(raw_fd) = pane.pid()
+            {
+                self.process_pending_vte_events(raw_fd)?;
+            }
         }
         Ok(())
     }

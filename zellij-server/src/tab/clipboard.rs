@@ -3,7 +3,7 @@ use zellij_utils::{data::CopyDestination, input::options::Clipboard};
 
 use crate::ClientId;
 
-use super::{copy_command::CopyCommand, Output};
+use super::{Output, copy_command::CopyCommand};
 
 pub(crate) enum ClipboardProvider {
     Command(CopyCommand),

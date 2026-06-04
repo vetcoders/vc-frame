@@ -191,13 +191,15 @@ impl State {
     }
 
     fn configure_keybinds(&self) {
-        if !self.is_tooltip && self.toggle_tooltip_key.is_some()
-            && let Some(toggle_key) = &self.toggle_tooltip_key {
-                reconfigure(
-                    bind_toggle_key_config(toggle_key, self.own_client_id),
-                    false,
-                );
-            }
+        if !self.is_tooltip
+            && self.toggle_tooltip_key.is_some()
+            && let Some(toggle_key) = &self.toggle_tooltip_key
+        {
+            reconfigure(
+                bind_toggle_key_config(toggle_key, self.own_client_id),
+                false,
+            );
+        }
     }
 
     fn parse_bool_config(&self, key: &str, default: bool) -> bool {

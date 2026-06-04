@@ -5,17 +5,17 @@ use zellij_utils::{
 };
 
 use crate::resize_pty;
-use crate::tab::{pane_info_for_pane, Pane};
+use crate::tab::{Pane, pane_info_for_pane};
 use floating_pane_grid::FloatingPaneGrid;
 
 use crate::{
+    ClientId,
     os_input_output::ServerOsApi,
     output::{FloatingPanesStack, Output},
     panes::{ActivePanes, PaneId},
     plugins::PluginInstruction,
     thread_bus::ThreadSenders,
     ui::pane_contents_and_ui::PaneContentsAndUi,
-    ClientId,
 };
 use std::cell::RefCell;
 use std::cmp::Ordering;
@@ -1071,11 +1071,12 @@ impl FloatingPanes {
         if let Some((last_pane_id, initial_position)) = self
             .pane_being_moved_with_mouse
             .map(|(pane_id, initial_position, _)| (pane_id, initial_position))
-            && last_pane_id == pane_id {
-                // preserve initial_position
-                self.pane_being_moved_with_mouse = Some((pane_id, initial_position, last_position));
-                return;
-            }
+            && last_pane_id == pane_id
+        {
+            // preserve initial_position
+            self.pane_being_moved_with_mouse = Some((pane_id, initial_position, last_position));
+            return;
+        }
         self.pane_being_moved_with_mouse = Some((pane_id, last_position, last_position));
     }
     pub fn pane_is_being_moved_with_mouse(&self) -> bool {

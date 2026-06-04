@@ -1,11 +1,11 @@
 use super::{Output, Tab};
+use crate::Arc;
 use crate::panes::sixel::SixelImageStore;
 use crate::screen::CopyOptions;
-use crate::Arc;
 
 use crate::{
-    os_input_output::ServerOsApi, pane_groups::PaneGroups, panes::PaneId,
-    plugins::PluginInstruction, thread_bus::ThreadSenders, ClientId, ServerInstruction,
+    ClientId, ServerInstruction, os_input_output::ServerOsApi, pane_groups::PaneGroups,
+    panes::PaneId, plugins::PluginInstruction, thread_bus::ThreadSenders,
 };
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
@@ -17,7 +17,7 @@ use zellij_utils::data::Resize;
 use zellij_utils::data::ResizeStrategy;
 use zellij_utils::data::WebSharing;
 use zellij_utils::envs::set_session_name;
-use zellij_utils::errors::{prelude::*, ErrorContext};
+use zellij_utils::errors::{ErrorContext, prelude::*};
 use zellij_utils::input::layout::{
     FloatingPaneLayout, Layout, PercentOrFixed, RunPluginOrAlias, SwapFloatingLayout,
     SwapTiledLayout, TiledPaneLayout,
@@ -8785,8 +8785,8 @@ fn when_swapping_tiled_layouts_in_an_undamaged_state_pane_focuses_on_focused_nod
 }
 
 #[test]
-fn when_swapping_tiled_layouts_in_an_undamaged_state_with_no_focus_node_pane_focuses_on_deepest_node(
-) {
+fn when_swapping_tiled_layouts_in_an_undamaged_state_with_no_focus_node_pane_focuses_on_deepest_node()
+ {
     let size = Size {
         cols: 121,
         rows: 20,
@@ -9757,8 +9757,8 @@ fn when_swapping_floating_layouts_in_an_undamaged_state_pane_focuses_on_focused_
 }
 
 #[test]
-fn when_swapping_floating_layouts_in_an_undamaged_state_with_no_focus_node_pane_focuses_on_deepest_node(
-) {
+fn when_swapping_floating_layouts_in_an_undamaged_state_with_no_focus_node_pane_focuses_on_deepest_node()
+ {
     let size = Size {
         cols: 121,
         rows: 20,

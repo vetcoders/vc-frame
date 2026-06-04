@@ -1,5 +1,5 @@
-use crate::plugins::plugin_worker::MessageToWorker;
 use crate::plugins::PluginId;
+use crate::plugins::plugin_worker::MessageToWorker;
 use std::io::Write;
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
@@ -9,7 +9,7 @@ use std::{
 use wasmi::{Instance, Store, StoreLimits};
 use wasmi_wasi::WasiCtx;
 
-use crate::{thread_bus::ThreadSenders, ClientId};
+use crate::{ClientId, thread_bus::ThreadSenders};
 
 use tokio::sync::mpsc::UnboundedSender;
 use zellij_utils::{
@@ -57,9 +57,10 @@ impl PluginMap {
             self.plugin_assets.keys().copied().collect();
         for (plugin_id, client_id) in ids_in_plugin_map {
             if pid == plugin_id
-                && let Some(plugin_asset) = self.plugin_assets.remove(&(plugin_id, client_id)) {
-                    removed.insert((plugin_id, client_id), plugin_asset);
-                }
+                && let Some(plugin_asset) = self.plugin_assets.remove(&(plugin_id, client_id))
+            {
+                removed.insert((plugin_id, client_id), plugin_asset);
+            }
         }
         removed
     }

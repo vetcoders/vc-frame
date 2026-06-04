@@ -49,7 +49,7 @@ impl ZellijPlugin for App {
             return false;
         }
         intercept_key_presses(); // we do this here so that all clients (even those connected after
-                                 // load) will have their keys intercepted
+        // load) will have their keys intercepted
         match event {
             Event::ModeUpdate(mode_info) => self.handle_mode_update(mode_info),
             Event::PaneUpdate(pane_manifest) => self.handle_pane_update(pane_manifest),
@@ -330,9 +330,10 @@ impl App {
     }
     fn handle_timer(&mut self) -> bool {
         if let Some(own_plugin_id) = self.own_plugin_id
-            && self.doherty_threshold_elapsed_since_highlight() {
-                highlight_and_unhighlight_panes(vec![], vec![PaneId::Plugin(own_plugin_id)]);
-            }
+            && self.doherty_threshold_elapsed_since_highlight()
+        {
+            highlight_and_unhighlight_panes(vec![], vec![PaneId::Plugin(own_plugin_id)]);
+        }
         false
     }
 

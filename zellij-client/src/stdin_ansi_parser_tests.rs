@@ -1,6 +1,6 @@
 //! Unit tests for the continuous host-reply parser.
 
-use super::{schedule_forward_timeout, HostReply, StdinAnsiParser};
+use super::{HostReply, StdinAnsiParser, schedule_forward_timeout};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 

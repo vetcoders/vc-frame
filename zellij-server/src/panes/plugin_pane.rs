@@ -1,12 +1,13 @@
 use std::collections::{BTreeSet, HashMap};
 use std::time::Instant;
 
+use crate::ClientId;
 use crate::output::{CharacterChunk, SixelImageChunk};
 use crate::panes::{
+    LinkHandler, PaneId,
     grid::Grid,
     sixel::SixelImageStore,
     terminal_pane::{BRACKETED_PASTE_BEGIN, BRACKETED_PASTE_END},
-    LinkHandler, PaneId,
 };
 use crate::plugins::PluginInstruction;
 use crate::pty::VteBytes;
@@ -15,7 +16,6 @@ use crate::ui::{
     loading_indication::LoadingIndication,
     pane_boundaries_frame::{FrameParams, PaneFrame},
 };
-use crate::ClientId;
 use std::cell::RefCell;
 use std::rc::Rc;
 use vte;
@@ -385,7 +385,7 @@ impl Pane for PluginPane {
     fn request_permissions_from_user(&mut self, permissions: Option<PluginPermission>) {
         self.requesting_permissions = permissions;
         self.handle_plugin_bytes_for_all_clients(Default::default()); // to trigger the render of
-                                                                      // the permission message
+        // the permission message
     }
     fn render(
         &mut self,
@@ -395,24 +395,25 @@ impl Pane for PluginPane {
             return Ok(None);
         }
         if let Some(client_id) = client_id
-            && self.should_render.get(&client_id).copied().unwrap_or(false) {
-                let content_x = self.get_content_x();
-                let content_y = self.get_content_y();
-                let rows = self.get_content_rows();
-                let columns = self.get_content_columns();
-                if rows < 1 || columns < 1 {
-                    return Ok(None);
-                }
-                if let Some(grid) = self.grids.get_mut(&client_id) {
-                    match grid.render(content_x, content_y, &self.style) {
-                        Ok(rendered_assets) => {
-                            self.should_render.insert(client_id, false);
-                            return Ok(rendered_assets);
-                        },
-                        e => return e,
-                    }
+            && self.should_render.get(&client_id).copied().unwrap_or(false)
+        {
+            let content_x = self.get_content_x();
+            let content_y = self.get_content_y();
+            let rows = self.get_content_rows();
+            let columns = self.get_content_columns();
+            if rows < 1 || columns < 1 {
+                return Ok(None);
+            }
+            if let Some(grid) = self.grids.get_mut(&client_id) {
+                match grid.render(content_x, content_y, &self.style) {
+                    Ok(rendered_assets) => {
+                        self.should_render.insert(client_id, false);
+                        return Ok(rendered_assets);
+                    },
+                    e => return e,
                 }
             }
+        }
         Ok(None)
     }
     fn render_frame(
@@ -822,10 +823,11 @@ impl Pane for PluginPane {
         if self.position_is_on_frame(position) {
             let relative_position = self.relative_position(position);
             if let Some(client_frame) = self.frame.get_mut(&client_id)
-                && client_frame.clicked_on_pinned(relative_position) {
-                    self.toggle_pinned();
-                    return true;
-                }
+                && client_frame.clicked_on_pinned(relative_position)
+            {
+                self.toggle_pinned();
+                return true;
+            }
         }
         false
     }
@@ -834,10 +836,11 @@ impl Pane for PluginPane {
             let relative_position = self.relative_position(&event.position);
             if let MouseEventType::Press = event.event_type
                 && let Some(client_frame) = self.frame.get_mut(&client_id)
-                    && client_frame.clicked_on_pinned(relative_position) {
-                        self.toggle_pinned();
-                        return true;
-                    }
+                && client_frame.clicked_on_pinned(relative_position)
+            {
+                self.toggle_pinned();
+                return true;
+            }
         }
         false
     }

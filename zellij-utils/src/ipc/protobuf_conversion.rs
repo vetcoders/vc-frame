@@ -1,12 +1,11 @@
 use crate::{
     client_server_contract::client_server_contract::{
-        client_to_server_msg, server_to_client_msg, ActionMsg, AttachClientMsg,
-        AttachWatcherClientMsg, BackgroundColorMsg, CliPipeOutputMsg, ClientExitedMsg,
-        ClientToServerMsg as ProtoClientToServerMsg, ColorRegistersMsg, ConfigFileUpdatedMsg,
-        ConnStatusMsg, ConnectedMsg, DesktopNotificationResponseMsg, DetachSessionMsg, ExitMsg,
-        ExitReason as ProtoExitReason, FailedToStartWebServerMsg, FirstClientConnectedMsg,
-        ForegroundColorMsg, ForwardQueryToHostMsg, ForwardedReplyFromHostMsg,
-        HostTerminalThemeChangedMsg,
+        ActionMsg, AttachClientMsg, AttachWatcherClientMsg, BackgroundColorMsg, CliPipeOutputMsg,
+        ClientExitedMsg, ClientToServerMsg as ProtoClientToServerMsg, ColorRegistersMsg,
+        ConfigFileUpdatedMsg, ConnStatusMsg, ConnectedMsg, DesktopNotificationResponseMsg,
+        DetachSessionMsg, ExitMsg, ExitReason as ProtoExitReason, FailedToStartWebServerMsg,
+        FirstClientConnectedMsg, ForegroundColorMsg, ForwardQueryToHostMsg,
+        ForwardedReplyFromHostMsg, HostTerminalThemeChangedMsg,
         HostTerminalThemeIndication as ProtoHostTerminalThemeIndication,
         InputMode as ProtoInputMode, KeyMsg, KillSessionMsg, LayoutMetadata as ProtoLayoutMetadata,
         LogErrorMsg, LogMsg, PaneMetadata as ProtoPaneMetadata, PaneRenderUpdateMsg,
@@ -14,7 +13,7 @@ use crate::{
         ServerToClientMsg as ProtoServerToClientMsg, StartWebServerMsg, SubscribeToPaneRendersMsg,
         SubscribedPaneClosedMsg, SwitchSessionMsg, TabMetadata as ProtoTabMetadata,
         TerminalPixelDimensionsMsg, TerminalResizeMsg, UnblockCliPipeInputMsg,
-        UnblockInputThreadMsg, WebServerStartedMsg,
+        UnblockInputThreadMsg, WebServerStartedMsg, client_to_server_msg, server_to_client_msg,
     },
     data::{HostTerminalThemeMode, InputMode, PaneId},
     errors::prelude::*,
@@ -839,7 +838,6 @@ impl From<crate::input::actions::Action>
 {
     fn from(action: crate::input::actions::Action) -> Self {
         use crate::client_server_contract::client_server_contract::{
-            action::ActionType,
             AreFloatingPanesVisibleAction,
             BreakPaneAction,
             BreakPaneLeftAction,
@@ -982,6 +980,7 @@ impl From<crate::input::actions::Action>
             WriteCharsAction,
             WriteCharsToPaneIdAction,
             WriteToPaneIdAction,
+            action::ActionType,
         };
         use std::collections::HashMap;
 
@@ -3970,7 +3969,7 @@ impl From<crate::input::layout::RunPluginLocation>
 {
     fn from(location: crate::input::layout::RunPluginLocation) -> Self {
         use crate::client_server_contract::client_server_contract::{
-            run_plugin_location_data::LocationData, RunPluginLocation as ProtoRunPluginLocation,
+            RunPluginLocation as ProtoRunPluginLocation, run_plugin_location_data::LocationData,
         };
         match location {
             crate::input::layout::RunPluginLocation::File(path) => Self {
@@ -4015,8 +4014,8 @@ impl From<crate::data::CommandOrPlugin>
     for crate::client_server_contract::client_server_contract::CommandOrPlugin
 {
     fn from(cmd_or_plugin: crate::data::CommandOrPlugin) -> Self {
-        use crate::client_server_contract::client_server_contract::command_or_plugin::CommandOrPluginType;
         use crate::client_server_contract::client_server_contract::CommandOrPluginFile;
+        use crate::client_server_contract::client_server_contract::command_or_plugin::CommandOrPluginType;
         match cmd_or_plugin {
             crate::data::CommandOrPlugin::Command(cmd) => Self {
                 command_or_plugin_type: Some(CommandOrPluginType::Command(cmd.into())),
@@ -4469,7 +4468,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::RunPluginLoc
         location: crate::client_server_contract::client_server_contract::RunPluginLocationData,
     ) -> Result<Self> {
         use crate::client_server_contract::client_server_contract::{
-            run_plugin_location_data::LocationData, RunPluginLocation as ProtoRunPluginLocation,
+            RunPluginLocation as ProtoRunPluginLocation, run_plugin_location_data::LocationData,
         };
 
         let location_data = location

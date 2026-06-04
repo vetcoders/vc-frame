@@ -4,20 +4,20 @@ use crate::web_client::control_message::{
     WebClientToWebServerControlMessagePayload, WebServerToWebClientControlMessage,
 };
 use crate::web_client::message_handlers::{
-    parse_stdin, render_to_client, send_control_messages_to_client, StdinSession,
+    StdinSession, parse_stdin, render_to_client, send_control_messages_to_client,
 };
 use crate::web_client::server_listener::zellij_server_listener;
 use crate::web_client::types::{AppState, TerminalParams};
 
 use axum::{
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
         Path as AxumPath, Query, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
     },
     response::IntoResponse,
 };
 use futures::StreamExt;
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::{Arc, atomic::AtomicBool};
 use tokio_util::sync::CancellationToken;
 use zellij_utils::{
     input::mouse::MouseEvent,
@@ -258,13 +258,16 @@ async fn handle_ws_terminal(
                     .unwrap()
                     .get_client_os_api(&web_client_id)
                     .map(|api| api.box_clone())
-                { Some(client_connection) => {
-                    stdin_session.finalize(&*client_connection, &mut mouse_old_event);
-                } _ => {
-                    // No client to send drained events to — clear the
-                    // flag so we don't busy-loop the idle timer.
-                    stdin_session.clear_pending_finalize();
-                }}
+                {
+                    Some(client_connection) => {
+                        stdin_session.finalize(&*client_connection, &mut mouse_old_event);
+                    },
+                    _ => {
+                        // No client to send drained events to — clear the
+                        // flag so we don't busy-loop the idle timer.
+                        stdin_session.clear_pending_finalize();
+                    },
+                }
                 continue;
             },
         };

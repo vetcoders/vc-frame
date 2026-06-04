@@ -1,7 +1,7 @@
 use zellij_utils::pane_size::{Offset, Viewport};
 
 use crate::output::CharacterChunk;
-use crate::panes::terminal_character::{TerminalCharacter, EMPTY_TERMINAL_CHARACTER, RESET_STYLES};
+use crate::panes::terminal_character::{EMPTY_TERMINAL_CHARACTER, RESET_STYLES, TerminalCharacter};
 use crate::tab::Pane;
 use ansi_term::Colour::{Fixed, RGB};
 use std::collections::HashMap;
@@ -591,9 +591,11 @@ impl Boundaries {
                 continue;
             }
             character_chunks.push(CharacterChunk::new(
-                vec![boundary_character
-                    .as_terminal_character()
-                    .context("failed to render as terminal character")?],
+                vec![
+                    boundary_character
+                        .as_terminal_character()
+                        .context("failed to render as terminal character")?,
+                ],
                 coordinates.x,
                 coordinates.y,
             ));
@@ -636,11 +638,7 @@ impl Boundaries {
         rect.y() + rect.rows()
     }
     fn rect_bottom_boundary_col_start(&self, rect: &dyn Pane) -> usize {
-        if rect.x() == 0 {
-            0
-        } else {
-            rect.x() - 1
-        }
+        if rect.x() == 0 { 0 } else { rect.x() - 1 }
     }
     fn rect_bottom_boundary_col_end(&self, rect: &dyn Pane) -> usize {
         rect.x() + rect.cols()

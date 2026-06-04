@@ -143,11 +143,10 @@ impl ZellijPlugin for State {
                     self.handle_left_click(line);
                     should_render = true;
                 },
-                Mouse::Hover(line, _)
-                    if line >= 0 => {
-                        self.handle_mouse_hover(line);
-                        should_render = true;
-                    },
+                Mouse::Hover(line, _) if line >= 0 => {
+                    self.handle_mouse_hover(line);
+                    should_render = true;
+                },
                 _ => {},
             },
             _ => {

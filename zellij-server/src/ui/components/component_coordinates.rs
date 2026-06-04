@@ -26,16 +26,18 @@ pub fn is_too_wide(
     component_coordinates: &Option<Coordinates>,
 ) -> bool {
     if let Some(max_width) = component_coordinates.as_ref().and_then(|p| p.width)
-        && current_width + character_width > max_width {
-            return true;
-        }
+        && current_width + character_width > max_width
+    {
+        return true;
+    }
     false
 }
 
 pub fn is_too_high(current_height: usize, component_coordinates: &Option<Coordinates>) -> bool {
     if let Some(max_height) = component_coordinates.as_ref().and_then(|p| p.height)
-        && current_height > max_height {
-            return true;
-        }
+        && current_height > max_height
+    {
+        return true;
+    }
     false
 }

@@ -402,7 +402,12 @@ impl<'a> KdlLayoutParser<'a> {
         match kdl_get_child!(pane_node, "args") {
             Some(kdl_args) => {
                 if kdl_args.entries().is_empty() {
-                    return Err(kdl_parsing_error!(format!("args cannot be empty and should contain one or more command arguments (eg. args \"-h\" \"-v\")"), kdl_args));
+                    return Err(kdl_parsing_error!(
+                        format!(
+                            "args cannot be empty and should contain one or more command arguments (eg. args \"-h\" \"-v\")"
+                        ),
+                        kdl_args
+                    ));
                 }
                 Ok(Some(
                     kdl_string_arguments!(kdl_args)
@@ -801,7 +806,10 @@ impl<'a> KdlLayoutParser<'a> {
                 )
                 .map(|name| name.to_string());
                 Err(ConfigError::new_layout_kdl_error(
-                    format!("pane_template {}, is a floating pane template (derived from its properties) and cannot be applied to a tiled pane", pane_template_name.unwrap_or("".into())),
+                    format!(
+                        "pane_template {}, is a floating pane template (derived from its properties) and cannot be applied to a tiled pane",
+                        pane_template_name.unwrap_or("".into())
+                    ),
                     kdl_node.span().offset(),
                     kdl_node.span().len(),
                 ))
@@ -822,7 +830,10 @@ impl<'a> KdlLayoutParser<'a> {
                 )
                 .map(|name| name.to_string());
                 Err(ConfigError::new_layout_kdl_error(
-                    format!("pane_template {}, is a non-floating pane template (derived from its properties) and cannot be applied to a floating pane", pane_template_name.unwrap_or("".into())),
+                    format!(
+                        "pane_template {}, is a non-floating pane template (derived from its properties) and cannot be applied to a floating pane",
+                        pane_template_name.unwrap_or("".into())
+                    ),
                     kdl_node.span().offset(),
                     kdl_node.span().len(),
                 ))
@@ -1239,9 +1250,12 @@ impl<'a> KdlLayoutParser<'a> {
                 self.populate_floating_pane_children(child, child_floating_panes)?;
             } else if self.is_a_valid_tab_property(kdl_name!(child)) {
                 return Err(ConfigError::new_layout_kdl_error(
-                    format!("Tab property '{}' must be placed on the tab title line and not in the child braces", kdl_name!(child)),
+                    format!(
+                        "Tab property '{}' must be placed on the tab title line and not in the child braces",
+                        kdl_name!(child)
+                    ),
                     child.span().offset(),
-                    child.span().len()
+                    child.span().len(),
                 ));
             } else {
                 return Err(ConfigError::new_layout_kdl_error(
@@ -1345,19 +1359,25 @@ impl<'a> KdlLayoutParser<'a> {
     ) -> Result<(), ConfigError> {
         if let (None, None, true) = (pane_run, pane_template_run, args.is_some()) {
             return Err(kdl_parsing_error!(
-                format!("args can only be specified if a command was specified either in the pane_template or in the pane"),
+                format!(
+                    "args can only be specified if a command was specified either in the pane_template or in the pane"
+                ),
                 pane_node
             ));
         }
         if let (None, None, true) = (pane_run, pane_template_run, close_on_exit.is_some()) {
             return Err(kdl_parsing_error!(
-                format!("close_on_exit can only be specified if a command was specified either in the pane_template or in the pane"),
+                format!(
+                    "close_on_exit can only be specified if a command was specified either in the pane_template or in the pane"
+                ),
                 pane_node
             ));
         }
         if let (None, None, true) = (pane_run, pane_template_run, start_suspended.is_some()) {
             return Err(kdl_parsing_error!(
-                format!("start_suspended can only be specified if a command was specified either in the pane_template or in the pane"),
+                format!(
+                    "start_suspended can only be specified if a command was specified either in the pane_template or in the pane"
+                ),
                 pane_node
             ));
         }
@@ -1403,7 +1423,14 @@ impl<'a> KdlLayoutParser<'a> {
     ) -> Result<(), ConfigError> {
         let children_block_count = layout.children_block_count();
         if children_block_count != 1 {
-            return Err(ConfigError::new_layout_kdl_error(format!("This template has {} children blocks, only 1 is allowed when used to insert child panes", children_block_count), kdl_node.span().offset(), kdl_node.span().len()));
+            return Err(ConfigError::new_layout_kdl_error(
+                format!(
+                    "This template has {} children blocks, only 1 is allowed when used to insert child panes",
+                    children_block_count
+                ),
+                kdl_node.span().offset(),
+                kdl_node.span().len(),
+            ));
         }
         Ok(())
     }
@@ -1648,7 +1675,10 @@ impl<'a> KdlLayoutParser<'a> {
         }
         if self.pane_templates.contains_key(&template_name) {
             return Err(ConfigError::new_layout_kdl_error(
-                format!("There is already a pane_template with the name \"{}\" - can't have a tab_template with the same name", template_name),
+                format!(
+                    "There is already a pane_template with the name \"{}\" - can't have a tab_template with the same name",
+                    template_name
+                ),
                 kdl_node.span().offset(),
                 kdl_node.span().len(),
             ));
@@ -1714,9 +1744,12 @@ impl<'a> KdlLayoutParser<'a> {
                     self.populate_floating_pane_children(child, &mut tab_floating_children)?;
                 } else if self.is_a_valid_tab_property(kdl_name!(child)) {
                     return Err(ConfigError::new_layout_kdl_error(
-                        format!("Tab property '{}' must be placed on the tab_template title line and not in the child braces", kdl_name!(child)),
+                        format!(
+                            "Tab property '{}' must be placed on the tab_template title line and not in the child braces",
+                            kdl_name!(child)
+                        ),
                         child.span().offset(),
-                        child.span().len()
+                        child.span().len(),
                     ));
                 } else {
                     return Err(ConfigError::new_layout_kdl_error(

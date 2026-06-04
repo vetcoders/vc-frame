@@ -15,13 +15,13 @@ use single_screen::{SingleScreenMode, SingleScreenState};
 use single_screen_data::{DeleteTarget, UnifiedSearchResult};
 use single_screen_render::render_unified_results;
 use ui::{
+    SessionUiInfo,
     components::{
-        render_controls_line, render_error, render_new_session_block, render_prompt,
+        Colors, render_controls_line, render_error, render_new_session_block, render_prompt,
         render_renaming_session_screen, render_screen_toggle, render_single_screen_prompt,
-        render_unsaved_changes_line, Colors,
+        render_unsaved_changes_line,
     },
     welcome_screen::{render_banner, render_welcome_boundaries},
-    SessionUiInfo,
 };
 
 use resurrectable_sessions::ResurrectableSessions;
@@ -268,7 +268,7 @@ impl ZellijPlugin for State {
                             // prompt position stays stable regardless of result count
                             let max_table_rows = height.saturating_sub(5);
                             let content_height = 2 + max_table_rows; // prompt + header + max data rows
-                                                                     // Available space above help lines (2 help rows at bottom)
+                            // Available space above help lines (2 help rows at bottom)
                             let available = height.saturating_sub(3);
                             let y_offset = y + available.saturating_sub(content_height) / 2;
 
@@ -436,7 +436,7 @@ impl ZellijPlugin for State {
         }
         if self.is_welcome_screen {
             render_welcome_boundaries(rows, cols); // explicitly done in the end to override some
-                                                   // stuff, see comment in function
+            // stuff, see comment in function
         }
     }
 }
@@ -685,13 +685,14 @@ impl State {
                         close_self();
                     }
                 },
-                BareKey::Char('a') if key.has_modifiers(&[KeyModifier::Ctrl])
-                    && !self.is_welcome_screen => {
-                        // we don't want to save welcome screen sessions
-                        if let Err(e) = save_session() {
-                            self.show_error(&format!("Couldn't save session: {}", e));
-                        }
-                    },
+                BareKey::Char('a')
+                    if key.has_modifiers(&[KeyModifier::Ctrl]) && !self.is_welcome_screen =>
+                {
+                    // we don't want to save welcome screen sessions
+                    if let Err(e) = save_session() {
+                        self.show_error(&format!("Couldn't save session: {}", e));
+                    }
+                },
                 _ => {},
             }
         }
@@ -741,10 +742,9 @@ impl State {
                     .show_delete_all_sessions_warning();
                 should_render = true;
             },
-            BareKey::Esc if key.has_no_modifiers()
-                && !self.is_welcome_screen => {
-                    close_self();
-                },
+            BareKey::Esc if key.has_no_modifiers() && !self.is_welcome_screen => {
+                close_self();
+            },
             _ => {},
         }
         should_render
@@ -922,9 +922,10 @@ impl State {
             },
             BareKey::Char('a') if key.has_modifiers(&[KeyModifier::Ctrl]) => {
                 if !self.is_welcome_screen
-                    && let Err(e) = save_session() {
-                        self.show_error(&format!("Couldn't save session: {}", e));
-                    }
+                    && let Err(e) = save_session()
+                {
+                    self.show_error(&format!("Couldn't save session: {}", e));
+                }
             },
             BareKey::Char('c') if key.has_modifiers(&[KeyModifier::Ctrl]) => {
                 if !self.single_screen_state.search_term.is_empty() {

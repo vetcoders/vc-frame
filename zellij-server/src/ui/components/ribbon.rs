@@ -1,4 +1,4 @@
-use super::{text::stringify_text, Coordinates, Text};
+use super::{Coordinates, Text, text::stringify_text};
 use crate::panes::terminal_character::{AnsiCode, CharacterStyles, RESET_STYLES};
 use zellij_utils::data::{PaletteColor, Style};
 

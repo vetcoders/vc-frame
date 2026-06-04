@@ -333,11 +333,12 @@ fn activity_flag_reset_after_poll() {
     let child_pid = 100;
     let (mut pty, _rx) = make_pty_with_plugin_receiver(mock);
     set_active_terminal(&mut pty, 1, child_pid);
-    assert!(pty
-        .pane_activity_flags
-        .get(&1)
-        .unwrap()
-        .load(Ordering::Relaxed));
+    assert!(
+        pty.pane_activity_flags
+            .get(&1)
+            .unwrap()
+            .load(Ordering::Relaxed)
+    );
 
     pty.update_and_report_cwds();
 

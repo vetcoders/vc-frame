@@ -675,19 +675,15 @@ impl Action {
                 Some(pane_id_str) => {
                     let parsed_pane_id = PaneId::from_str(&pane_id_str);
                     match parsed_pane_id {
-                            Ok(parsed_pane_id) => {
-                                Ok(vec![Action::WriteToPaneId {
-                                    bytes,
-                                    pane_id: parsed_pane_id,
-                                }])
-                            },
-                            Err(_e) => {
-                                Err(format!(
-                                    "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
-                                    pane_id_str
-                                ))
-                            }
-                        }
+                        Ok(parsed_pane_id) => Ok(vec![Action::WriteToPaneId {
+                            bytes,
+                            pane_id: parsed_pane_id,
+                        }]),
+                        Err(_e) => Err(format!(
+                            "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
+                            pane_id_str
+                        )),
+                    }
                 },
                 None => Ok(vec![Action::Write {
                     key_with_modifier: None,
@@ -699,19 +695,15 @@ impl Action {
                 Some(pane_id_str) => {
                     let parsed_pane_id = PaneId::from_str(&pane_id_str);
                     match parsed_pane_id {
-                            Ok(parsed_pane_id) => {
-                                Ok(vec![Action::WriteCharsToPaneId {
-                                    chars,
-                                    pane_id: parsed_pane_id,
-                                }])
-                            },
-                            Err(_e) => {
-                                Err(format!(
-                                    "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
-                                    pane_id_str
-                                ))
-                            }
-                        }
+                        Ok(parsed_pane_id) => Ok(vec![Action::WriteCharsToPaneId {
+                            chars,
+                            pane_id: parsed_pane_id,
+                        }]),
+                        Err(_e) => Err(format!(
+                            "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
+                            pane_id_str
+                        )),
+                    }
                 },
                 None => Ok(vec![Action::WriteChars { chars }]),
             },
@@ -719,18 +711,14 @@ impl Action {
                 Some(pane_id_str) => {
                     let parsed_pane_id = PaneId::from_str(&pane_id_str);
                     match parsed_pane_id {
-                        Ok(parsed_pane_id) => {
-                            Ok(vec![Action::Paste {
-                                chars,
-                                pane_id: Some(parsed_pane_id),
-                            }])
-                        },
-                        Err(_e) => {
-                            Err(format!(
-                                "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
-                                pane_id_str
-                            ))
-                        }
+                        Ok(parsed_pane_id) => Ok(vec![Action::Paste {
+                            chars,
+                            pane_id: Some(parsed_pane_id),
+                        }]),
+                        Err(_e) => Err(format!(
+                            "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
+                            pane_id_str
+                        )),
                     }
                 },
                 None => Ok(vec![Action::Paste {
@@ -863,20 +851,16 @@ impl Action {
                 Some(pane_id_str) => {
                     let parsed_pane_id = PaneId::from_str(&pane_id_str);
                     match parsed_pane_id {
-                        Ok(parsed_pane_id) => {
-                            Ok(vec![Action::DumpScreen {
-                                file_path: path.map(|p| p.as_os_str().to_string_lossy().into()),
-                                include_scrollback: full,
-                                pane_id: Some(parsed_pane_id),
-                                ansi,
-                            }])
-                        },
-                        Err(_e) => {
-                            Err(format!(
-                                "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
-                                pane_id_str
-                            ))
-                        }
+                        Ok(parsed_pane_id) => Ok(vec![Action::DumpScreen {
+                            file_path: path.map(|p| p.as_os_str().to_string_lossy().into()),
+                            include_scrollback: full,
+                            pane_id: Some(parsed_pane_id),
+                            ansi,
+                        }]),
+                        Err(_e) => Err(format!(
+                            "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
+                            pane_id_str
+                        )),
                     }
                 },
                 None => Ok(vec![Action::DumpScreen {
@@ -1258,9 +1242,10 @@ impl Action {
                 let current_dir = get_current_dir();
                 let cwd = cwd.map(|cwd| current_dir.join(cwd)).or(Some(current_dir));
                 if file.is_relative()
-                    && let Some(cwd) = cwd.as_ref() {
-                        file = cwd.join(file);
-                    }
+                    && let Some(cwd) = cwd.as_ref()
+                {
+                    file = cwd.join(file);
+                }
                 let start_suppressed = false;
                 Ok(vec![Action::EditFile {
                     payload: OpenFilePayload::new(file, line_number, cwd),
@@ -1438,7 +1423,7 @@ impl Action {
                     let should_start_layout_commands_suspended = false;
                     let raw_layout_for_error = raw_layout.clone();
                     let mut layout = Layout::from_str(&raw_layout, path_to_raw_layout, swap_layouts.as_ref().map(|(f, p)| (f.as_str(), p.as_str())), cwd).map_err(|e| {
-                        
+
                         match e {
                             ConfigError::KdlError(kdl_error) => {
                                 let error = kdl_error.add_src(layout_source_name.clone(), raw_layout_for_error);
@@ -1554,7 +1539,7 @@ impl Action {
                             .map_err(|e| format!("Failed to load layout: {}", e))?
                     };
                     let mut layout = Layout::from_str(&raw_layout, path_to_raw_layout, swap_layouts.as_ref().map(|(f, p)| (f.as_str(), p.as_str())), cwd).map_err(|e| {
-                        
+
                         match e {
                             ConfigError::KdlError(kdl_error) => {
                                 let error = kdl_error.add_src(layout_source_name.clone(), raw_layout);
@@ -1715,20 +1700,17 @@ impl Action {
                     swap_layouts.as_ref().map(|(f, p)| (f.as_str(), p.as_str())),
                     None, // cwd
                 )
-                .map_err(|e| {
-                    
-                    match e {
-                        ConfigError::KdlError(kdl_error) => {
-                            let error = kdl_error.add_src(layout_source_name.clone(), raw_layout);
-                            let report: Report = error.into();
-                            format!("{:?}", report)
-                        },
-                        ConfigError::KdlDeserializationError(kdl_error) => {
-                            let error_message = kdl_error.to_string();
-                            format!("Failed to deserialize KDL layout: {}", error_message)
-                        },
-                        e => format!("{}", e),
-                    }
+                .map_err(|e| match e {
+                    ConfigError::KdlError(kdl_error) => {
+                        let error = kdl_error.add_src(layout_source_name.clone(), raw_layout);
+                        let report: Report = error.into();
+                        format!("{:?}", report)
+                    },
+                    ConfigError::KdlDeserializationError(kdl_error) => {
+                        let error_message = kdl_error.to_string();
+                        format!("Failed to deserialize KDL layout: {}", error_message)
+                    },
+                    e => format!("{}", e),
                 })?;
 
                 // Convert all tabs to Vec<TabLayoutInfo>
@@ -1929,12 +1911,10 @@ impl Action {
                     )
                     .collect();
                 if !malformed_ids.is_empty() {
-                    Err(
-                        format!(
-                            "Malformed pane ids: {}, expecting a space separated list of either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
-                            malformed_ids.join(", ")
-                        )
-                    )
+                    Err(format!(
+                        "Malformed pane ids: {}, expecting a space separated list of either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
+                        malformed_ids.join(", ")
+                    ))
                 } else {
                     Ok(vec![Action::StackPanes { pane_ids }])
                 }
@@ -1955,34 +1935,26 @@ impl Action {
                 };
                 let parsed_pane_id = PaneId::from_str(&pane_id);
                 match parsed_pane_id {
-                    Ok(parsed_pane_id) => {
-                        Ok(vec![Action::ChangeFloatingPaneCoordinates {
-                            pane_id: parsed_pane_id,
-                            coordinates,
-                        }])
-                    },
-                    Err(_e) => {
-                        Err(format!(
-                            "Malformed pane id: {}, expecting a space separated list of either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
-                            pane_id
-                        ))
-                    }
+                    Ok(parsed_pane_id) => Ok(vec![Action::ChangeFloatingPaneCoordinates {
+                        pane_id: parsed_pane_id,
+                        coordinates,
+                    }]),
+                    Err(_e) => Err(format!(
+                        "Malformed pane id: {}, expecting a space separated list of either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
+                        pane_id
+                    )),
                 }
             },
             CliAction::TogglePaneBorderless { pane_id } => {
                 let parsed_pane_id = PaneId::from_str(&pane_id);
                 match parsed_pane_id {
-                    Ok(parsed_pane_id) => {
-                        Ok(vec![Action::TogglePaneBorderless {
-                            pane_id: parsed_pane_id,
-                        }])
-                    },
-                    Err(_e) => {
-                        Err(format!(
-                            "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
-                            pane_id
-                        ))
-                    }
+                    Ok(parsed_pane_id) => Ok(vec![Action::TogglePaneBorderless {
+                        pane_id: parsed_pane_id,
+                    }]),
+                    Err(_e) => Err(format!(
+                        "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
+                        pane_id
+                    )),
                 }
             },
             CliAction::SetPaneBorderless {
@@ -1991,18 +1963,14 @@ impl Action {
             } => {
                 let parsed_pane_id = PaneId::from_str(&pane_id);
                 match parsed_pane_id {
-                    Ok(parsed_pane_id) => {
-                        Ok(vec![Action::SetPaneBorderless {
-                            pane_id: parsed_pane_id,
-                            borderless,
-                        }])
-                    },
-                    Err(_e) => {
-                        Err(format!(
-                            "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
-                            pane_id
-                        ))
-                    }
+                    Ok(parsed_pane_id) => Ok(vec![Action::SetPaneBorderless {
+                        pane_id: parsed_pane_id,
+                        borderless,
+                    }]),
+                    Err(_e) => Err(format!(
+                        "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
+                        pane_id
+                    )),
                 }
             },
             CliAction::SetPaneColor {
@@ -2020,11 +1988,7 @@ impl Action {
                 let parsed_pane_id = PaneId::from_str(&pane_id_str);
                 match parsed_pane_id {
                     Ok(parsed_pane_id) => {
-                        let (fg, bg) = if reset {
-                            (None, None)
-                        } else {
-                            (fg, bg)
-                        };
+                        let (fg, bg) = if reset { (None, None) } else { (fg, bg) };
                         Ok(vec![Action::SetPaneColor {
                             pane_id: parsed_pane_id,
                             fg,

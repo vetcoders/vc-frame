@@ -1,9 +1,9 @@
 //! Definitions and helpers for sending and receiving messages between threads.
 
-use crate::errors::{get_current_ctx, ErrorContext};
+use crate::errors::{ErrorContext, get_current_ctx};
 pub use crossbeam::channel::{
-    bounded, unbounded, Receiver, RecvError, RecvTimeoutError, Select, SendError, Sender,
-    TrySendError,
+    Receiver, RecvError, RecvTimeoutError, Select, SendError, Sender, TrySendError, bounded,
+    unbounded,
 };
 
 /// An [MPSC](mpsc) asynchronous channel with added error context.

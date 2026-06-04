@@ -5,7 +5,7 @@ mod tests;
 use clap::Parser;
 use zellij_utils::{
     cli::{CliAction, CliArgs, Command, Sessions},
-    consts::{create_config_and_cache_folders, VERSION},
+    consts::{VERSION, create_config_and_cache_folders},
     data::UnblockCondition,
     envs,
     input::config::Config,
@@ -171,9 +171,10 @@ fn main() {
             let mut file = file;
             let cwd = cwd.or_else(|| std::env::current_dir().ok());
             if file.is_relative()
-                && let Some(cwd) = cwd.as_ref() {
-                    file = cwd.join(file);
-                }
+                && let Some(cwd) = cwd.as_ref()
+            {
+                file = cwd.join(file);
+            }
             let command_cli_action = CliAction::Edit {
                 file,
                 direction,

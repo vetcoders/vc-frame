@@ -469,11 +469,12 @@ fn record_preserved(target_dir: &Path, summary: &mut InstallSummary) -> Result<(
             continue;
         }
         if meta.file_type().is_file()
-            && let Some(name) = path.file_name() {
-                summary
-                    .preserved_files
-                    .push(name.to_string_lossy().into_owned());
-            }
+            && let Some(name) = path.file_name()
+        {
+            summary
+                .preserved_files
+                .push(name.to_string_lossy().into_owned());
+        }
     }
     summary.preserved_files.sort();
     summary.preserved_files.dedup();
@@ -648,14 +649,18 @@ vibecraft.kdl=operator.kdl
         assert!(target_dir.path().join("vc-dashboard.kdl").is_symlink());
         assert!(target_dir.path().join("implement-dual.kdl").is_symlink());
         assert!(!target_dir.path().join("vibecraft.kdl").exists());
-        assert!(summary
-            .aliases_installed
-            .iter()
-            .any(|(o, n)| o == "vc-dashboard.kdl" && n == "dashboard.kdl"));
-        assert!(summary
-            .aliases_dropped
-            .iter()
-            .any(|(o, n)| o == "vibecraft.kdl" && n == "operator.kdl"));
+        assert!(
+            summary
+                .aliases_installed
+                .iter()
+                .any(|(o, n)| o == "vc-dashboard.kdl" && n == "dashboard.kdl")
+        );
+        assert!(
+            summary
+                .aliases_dropped
+                .iter()
+                .any(|(o, n)| o == "vibecraft.kdl" && n == "operator.kdl")
+        );
     }
 
     #[test]
@@ -739,9 +744,11 @@ vibecraft.kdl=operator.kdl
         )
         .unwrap();
         assert!(target_dir.path().join("my-custom.kdl").is_file());
-        assert!(summary
-            .preserved_files
-            .contains(&"my-custom.kdl".to_string()));
+        assert!(
+            summary
+                .preserved_files
+                .contains(&"my-custom.kdl".to_string())
+        );
     }
 
     #[test]
@@ -840,9 +847,10 @@ vibecraft.kdl=operator.kdl
         let resolved_canon = dunce::canonicalize(&resolved).unwrap_or(resolved);
         let canonical_layouts_dir = dunce::canonicalize(&layouts_dir).unwrap();
         assert_eq!(resolved_canon, canonical_layouts_dir.join("dashboard.kdl"));
-        assert!(s2
-            .aliases_installed
-            .iter()
-            .any(|(o, _)| o == "vc-dashboard.kdl"));
+        assert!(
+            s2.aliases_installed
+                .iter()
+                .any(|(o, _)| o == "vc-dashboard.kdl")
+        );
     }
 }

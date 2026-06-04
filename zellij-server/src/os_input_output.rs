@@ -1,6 +1,6 @@
 pub use crate::os_input_output_api::AsyncReader;
 pub(crate) use crate::os_input_output_api::NullAsyncReader;
-use crate::{panes::PaneId, ClientId};
+use crate::{ClientId, panes::PaneId};
 
 use interprocess::local_socket::Stream as LocalSocketStream;
 
@@ -73,9 +73,10 @@ fn build_command(
     let cmd = match terminal_action {
         TerminalAction::OpenFile(mut payload) => {
             if payload.path.is_relative()
-                && let Some(cwd) = payload.cwd.as_ref() {
-                    payload.path = cwd.join(payload.path);
-                }
+                && let Some(cwd) = payload.cwd.as_ref()
+            {
+                payload.path = cwd.join(payload.path);
+            }
             let mut command = default_editor.unwrap_or_else(|| {
                 PathBuf::from(
                     env::var("EDITOR")
@@ -428,9 +429,10 @@ impl ServerOsApi for ServerOsInputOutput {
         );
 
         if let Some(process) = system_info.process(sysinfo_pid)
-            && let Some(cwd) = process.cwd() {
-                return Some(cwd.to_path_buf());
-            }
+            && let Some(cwd) = process.cwd()
+        {
+            return Some(cwd.to_path_buf());
+        }
         None
     }
 

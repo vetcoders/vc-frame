@@ -167,12 +167,12 @@ impl SixelGrid {
                     if let Some(intersecting_rect) =
                         pixel_rect.intersecting_rect(&image_size_and_coordinates)
                         && intersecting_rect.x == pixel_rect.x
-                            && intersecting_rect.y == pixel_rect.y
-                            && intersecting_rect.height == pixel_rect.height
-                            && intersecting_rect.width == pixel_rect.width
-                        {
-                            self.image_ids_to_reap.push(*image_id);
-                        }
+                        && intersecting_rect.y == pixel_rect.y
+                        && intersecting_rect.height == pixel_rect.height
+                        && intersecting_rect.width == pixel_rect.width
+                    {
+                        self.image_ids_to_reap.push(*image_id);
+                    }
                 }
                 for image_id in &self.image_ids_to_reap {
                     self.sixel_image_locations.remove(image_id);
@@ -233,14 +233,15 @@ impl SixelGrid {
     pub fn character_cell_size_possibly_changed(&mut self) {
         if let (Some(previous_cell_size), Some(character_cell_size)) =
             (self.previous_cell_size, *self.character_cell_size.borrow())
-            && previous_cell_size != character_cell_size {
-                for (_image_id, pixel_rect) in self.sixel_image_locations.iter_mut() {
-                    pixel_rect.x =
-                        (pixel_rect.x / previous_cell_size.width) * character_cell_size.width;
-                    pixel_rect.y = (pixel_rect.y / previous_cell_size.height as isize)
-                        * character_cell_size.height as isize;
-                }
+            && previous_cell_size != character_cell_size
+        {
+            for (_image_id, pixel_rect) in self.sixel_image_locations.iter_mut() {
+                pixel_rect.x =
+                    (pixel_rect.x / previous_cell_size.width) * character_cell_size.width;
+                pixel_rect.y = (pixel_rect.y / previous_cell_size.height as isize)
+                    * character_cell_size.height as isize;
             }
+        }
         self.previous_cell_size = *self.character_cell_size.borrow();
     }
     pub fn clear(&mut self) -> Option<Vec<usize>> {

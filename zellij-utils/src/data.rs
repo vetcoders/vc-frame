@@ -278,9 +278,10 @@ impl FromStr for BareKey {
             "space" => Ok(BareKey::Char(' ')),
             _ => {
                 if key_str.chars().count() == 1
-                    && let Some(character) = key_str.chars().next() {
-                        return Ok(BareKey::Char(character));
-                    }
+                    && let Some(character) = key_str.chars().next()
+                {
+                    return Ok(BareKey::Char(character));
+                }
                 Err("unsupported key".into())
             },
         }

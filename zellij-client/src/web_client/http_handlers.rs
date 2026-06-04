@@ -2,10 +2,10 @@ use crate::web_client::authentication::{IsReadOnly, SessionTokenHash};
 use crate::web_client::types::{AppState, CreateClientIdResponse, LoginRequest, LoginResponse};
 use crate::web_client::utils::{get_mime_type, parse_cookies};
 use axum::{
-    extract::{Path as AxumPath, Request, State},
-    http::{header, StatusCode},
-    response::{Html, IntoResponse},
     Json,
+    extract::{Path as AxumPath, Request, State},
+    http::{StatusCode, header},
+    response::{Html, IntoResponse},
 };
 use axum_extra::extract::cookie::{Cookie, SameSite};
 use include_dir;

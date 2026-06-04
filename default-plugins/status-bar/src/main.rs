@@ -580,8 +580,8 @@ pub fn style_key_with_modifier(
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use ansi_term::unstyle;
     use ansi_term::ANSIStrings;
+    use ansi_term::unstyle;
 
     fn big_keymap() -> Vec<(KeyWithModifier, Vec<Action>)> {
         vec![

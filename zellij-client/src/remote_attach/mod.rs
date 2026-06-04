@@ -8,8 +8,8 @@ mod unit;
 
 pub use websockets::WebSocketConnections;
 
-use crate::os_input_output::ClientOsApi;
 use crate::RemoteClientError;
+use crate::os_input_output::ClientOsApi;
 use tokio::runtime::Handle;
 use zellij_utils::remote_session_tokens;
 
@@ -61,9 +61,10 @@ pub fn attach_to_remote_session(
             &server_url,
             ca_cert,
             insecure,
-        )? {
-            return Ok(connections);
-        }
+        )?
+    {
+        return Ok(connections);
+    }
 
     // Normal auth flow with retry logic
     authenticate_with_retry(

@@ -1,12 +1,12 @@
 use crate::{os_input_output::AsyncReader, screen::ScreenInstruction, thread_bus::ThreadSenders};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
 use tokio::task;
 use zellij_utils::{
-    errors::{get_current_ctx, prelude::*, ContextType},
+    errors::{ContextType, get_current_ctx, prelude::*},
     logging::debug_to_file,
 };
 

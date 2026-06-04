@@ -1,10 +1,5 @@
 pub use super::generated_api::api::{
     action::{
-        action::OptionalPayload,
-        command_or_plugin::CommandOrPluginType,
-        pane_run::RunType,
-        run_plugin_location_data::LocationData,
-        run_plugin_or_alias::PluginType,
         Action as ProtobufAction,
         ActionName as ProtobufActionName,
         AreFloatingPanesVisiblePayload,
@@ -72,6 +67,11 @@ pub use super::generated_api::api::{
         UnblockCondition as ProtobufUnblockCondition,
         WriteCharsPayload,
         WritePayload,
+        action::OptionalPayload,
+        command_or_plugin::CommandOrPluginType,
+        pane_run::RunType,
+        run_plugin_location_data::LocationData,
+        run_plugin_or_alias::PluginType,
     },
     input_mode::InputMode as ProtobufInputMode,
     resize::{Resize as ProtobufResize, ResizeDirection as ProtobufResizeDirection},
@@ -697,7 +697,7 @@ impl TryFrom<ProtobufAction> for Action {
                     .map_err(|_| "Malformed LaunchOrFocusPlugin payload")?;
                     let should_float = payload.should_float;
                     let _move_to_focused_tab = payload.move_to_focused_tab; // not actually used in
-                                                                            // this action
+                    // this action
                     let should_open_in_place = payload.should_open_in_place;
                     let skip_plugin_cache = payload.skip_plugin_cache;
                     Ok(Action::LaunchPlugin {
@@ -2486,8 +2486,8 @@ impl TryFrom<ProtobufNewPanePlacement> for NewPanePlacement {
 impl TryFrom<NewPanePlacement> for ProtobufNewPanePlacement {
     type Error = &'static str;
     fn try_from(placement: NewPanePlacement) -> Result<Self, &'static str> {
-        use super::generated_api::api::action::new_pane_placement::PlacementVariant;
         use super::generated_api::api::action::NoPreferenceOptions;
+        use super::generated_api::api::action::new_pane_placement::PlacementVariant;
 
         let placement_variant = match placement {
             NewPanePlacement::NoPreference { borderless } => {
@@ -2706,8 +2706,8 @@ impl TryFrom<RunPluginLocation> for ProtobufRunPluginLocationData {
     type Error = &'static str;
     fn try_from(internal: RunPluginLocation) -> Result<Self, Self::Error> {
         use super::generated_api::api::action::{
-            run_plugin_location_data::LocationData,
             RunPluginLocation as ProtobufRunPluginLocationType,
+            run_plugin_location_data::LocationData,
         };
         let (location_type, location_data) = match internal {
             RunPluginLocation::File(path) => (
@@ -2892,8 +2892,8 @@ impl TryFrom<ProtobufCommandOrPlugin> for CommandOrPlugin {
 impl TryFrom<CommandOrPlugin> for ProtobufCommandOrPlugin {
     type Error = &'static str;
     fn try_from(internal: CommandOrPlugin) -> Result<Self, Self::Error> {
-        use super::generated_api::api::action::command_or_plugin::CommandOrPluginType;
         use super::generated_api::api::action::CommandOrPluginFile;
+        use super::generated_api::api::action::command_or_plugin::CommandOrPluginType;
         let command_or_plugin_type = match internal {
             CommandOrPlugin::Command(cmd) => Some(CommandOrPluginType::Command(cmd.try_into()?)),
             CommandOrPlugin::Plugin(plugin) => {

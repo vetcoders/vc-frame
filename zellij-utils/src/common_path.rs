@@ -90,11 +90,7 @@ where
             break;
         }
     }
-    if found {
-        Some(final_path)
-    } else {
-        None
-    }
+    if found { Some(final_path) } else { None }
 }
 
 #[cfg(test)]

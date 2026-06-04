@@ -205,11 +205,7 @@ impl RunPluginOrAlias {
                             // caller_cwd is a special attribute given to alias and should not be
                             // considered when weighing configuration equivalency
                             to_compare.remove("caller_cwd");
-                            if to_compare.is_empty() {
-                                None
-                            } else {
-                                Some(c)
-                            }
+                            if to_compare.is_empty() { None } else { Some(c) }
                         })
             },
             (
@@ -353,25 +349,28 @@ impl Run {
         // and not empty
         if let Some(args) = args
             && let Run::Command(run_command) = self
-                && !args.is_empty() {
-                    run_command.args = args.clone();
-                }
+            && !args.is_empty()
+        {
+            run_command.args = args.clone();
+        }
     }
     pub fn add_close_on_exit(&mut self, close_on_exit: Option<bool>) {
         // overrides the hold_on_close of a Run::Command if it is Some
         // and not empty
         if let Some(close_on_exit) = close_on_exit
-            && let Run::Command(run_command) = self {
-                run_command.hold_on_close = !close_on_exit;
-            }
+            && let Run::Command(run_command) = self
+        {
+            run_command.hold_on_close = !close_on_exit;
+        }
     }
     pub fn add_start_suspended(&mut self, start_suspended: Option<bool>) {
         // overrides the hold_on_start of a Run::Command if they are Some
         // and not empty
         if let Some(start_suspended) = start_suspended
-            && let Run::Command(run_command) = self {
-                run_command.hold_on_start = start_suspended;
-            }
+            && let Run::Command(run_command) = self
+        {
+            run_command.hold_on_start = start_suspended;
+        }
     }
     pub fn is_same_category(first: &Option<Run>, second: &Option<Run>) -> bool {
         matches!(
@@ -494,12 +493,12 @@ impl PluginAlias {
                 .as_ref()
                 .map(|c| c.inner().get("caller_cwd").is_none())
                 .unwrap_or(true)
-            {
-                let configuration = self
-                    .configuration
-                    .get_or_insert_with(|| PluginUserConfiguration::new(BTreeMap::new()));
-                configuration.insert("caller_cwd", caller_cwd.display().to_string());
-            }
+        {
+            let configuration = self
+                .configuration
+                .get_or_insert_with(|| PluginUserConfiguration::new(BTreeMap::new()));
+            configuration.insert("caller_cwd", caller_cwd.display().to_string());
+        }
     }
 }
 
@@ -945,10 +944,12 @@ impl TiledPaneLayout {
                     // because we really should support that
                     let children_count = (max_panes - pane_count_in_layout) + 1;
                     let mut extra_children = vec![TiledPaneLayout::default(); children_count];
-                    if !layout_to_split.has_focused_node() && focus_layout_if_not_focused
-                        && let Some(last_child) = extra_children.last_mut() {
-                            last_child.focus = Some(true);
-                        }
+                    if !layout_to_split.has_focused_node()
+                        && focus_layout_if_not_focused
+                        && let Some(last_child) = extra_children.last_mut()
+                    {
+                        last_child.focus = Some(true);
+                    }
                     let _ = layout_to_split.insert_children_nodes(&mut extra_children);
                 } else {
                     layout_to_split.truncate(max_panes);
@@ -1273,9 +1274,9 @@ impl Layout {
                         ) {
                             Ok(_layout) => {
                                 let file_path = layout_dir.join(file.path()); // TODO: do we
-                                                                              // need
-                                                                              // file_stem()
-                                                                              // here too?
+                                // need
+                                // file_stem()
+                                // here too?
                                 available_layouts.push(LayoutInfo::File(
                                     layout_name,
                                     LayoutMetadata::from(&file_path),
@@ -1361,10 +1362,9 @@ impl Layout {
                 .map(|(r, f)| (r.as_str(), f.as_str())),
             None,
         );
-        if should_start_layout_commands_suspended
-            && let Some(l) = layout.iter_mut().next() {
-                l.recursively_add_start_suspended_including_template(Some(true))
-            }
+        if should_start_layout_commands_suspended && let Some(l) = layout.iter_mut().next() {
+            l.recursively_add_start_suspended_including_template(Some(true))
+        }
         layout
     }
     pub fn from_layout_info_with_config(
@@ -1402,10 +1402,9 @@ impl Layout {
                 .map(|(r, f)| (r.as_str(), f.as_str())),
             None,
         );
-        if should_start_layout_commands_suspended
-            && let Some(l) = layout.iter_mut().next() {
-                l.recursively_add_start_suspended_including_template(Some(true))
-            }
+        if should_start_layout_commands_suspended && let Some(l) = layout.iter_mut().next() {
+            l.recursively_add_start_suspended_including_template(Some(true))
+        }
         let config = Config::from_kdl(&raw_layout, config)?; // this merges the two config, with
         layout.map(|l| (l, config))
     }

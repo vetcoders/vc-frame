@@ -199,16 +199,14 @@ impl State {
     fn optimistic_rename_layout(&mut self, old_name: &str, new_name: &str) {
         for layout in &mut self.display_layouts {
             match layout {
-                DisplayLayout::Valid(LayoutInfo::File(file_name, _))
-                    if file_name == old_name => {
-                        let _ = std::mem::replace(file_name, new_name.to_string());
-                        break;
-                    },
-                DisplayLayout::Error { name, .. }
-                    if name == old_name => {
-                        let _ = std::mem::replace(name, new_name.to_string());
-                        break;
-                    },
+                DisplayLayout::Valid(LayoutInfo::File(file_name, _)) if file_name == old_name => {
+                    let _ = std::mem::replace(file_name, new_name.to_string());
+                    break;
+                },
+                DisplayLayout::Error { name, .. } if name == old_name => {
+                    let _ = std::mem::replace(name, new_name.to_string());
+                    break;
+                },
                 _ => {},
             }
         }

@@ -1,6 +1,6 @@
 use serde::{
-    de::{Error, Visitor},
     Deserialize, Deserializer, Serialize, Serializer,
+    de::{Error, Visitor},
 };
 use std::{
     collections::{BTreeMap, HashMap},

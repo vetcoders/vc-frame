@@ -90,7 +90,10 @@ impl<'a> LayoutDetail<'a> {
             return;
         }
 
-        let full_text = format!("{} is a built-in layout. Create your own layouts to automate or share workspace setup.", name);
+        let full_text = format!(
+            "{} is a built-in layout. Create your own layouts to automate or share workspace setup.",
+            name
+        );
         let wrapped_lines = wrap_text_to_width(&full_text, max_cols);
 
         for (idx, line) in wrapped_lines.iter().take(max_rows).enumerate() {
@@ -120,7 +123,7 @@ impl<'a> LayoutDetail<'a> {
         let available_rows = max_rows.saturating_sub(3);
 
         let mut current_y = y + 1; // + 1 (and saturating_sub(3) above) to be aligned witht he
-                                   // table on the left
+        // table on the left
         for line in wrapped_lines.iter().take(available_rows) {
             let text = Text::new(line).error_color_all();
             print_text_with_coordinates(text, x, current_y, None, None);

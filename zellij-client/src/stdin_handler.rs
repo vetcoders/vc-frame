@@ -1,10 +1,10 @@
+use crate::InputInstruction;
 use crate::keyboard_parser::{KittyKeyboardParser, KittyParseOutcome};
 use crate::os_input_output::ClientOsApi;
 use crate::stdin_ansi_parser::StdinAnsiParser;
 #[cfg(windows)]
 use crate::stdin_handler_windows::enable_vt_input;
-use crate::InputInstruction;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 use zellij_utils::{
     channels::SenderWithContext,

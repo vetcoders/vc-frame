@@ -1,4 +1,4 @@
-use crate::{line::tab_separator, LinePart};
+use crate::{LinePart, line::tab_separator};
 use ansi_term::{ANSIString, ANSIStrings};
 use unicode_width::UnicodeWidthStr;
 use zellij_tile::prelude::*;

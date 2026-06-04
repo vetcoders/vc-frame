@@ -1,16 +1,16 @@
-use crate::background_jobs::write_session_state_to_disk;
 use crate::background_jobs::BackgroundJob;
+use crate::background_jobs::write_session_state_to_disk;
 use crate::global_async_runtime::get_tokio_runtime as async_runtime;
 use crate::os_input_output::{AsyncReader, NullAsyncReader};
 use crate::route::NotificationEnd;
 use crate::terminal_bytes::TerminalBytes;
 use crate::{
+    ClientId, ServerInstruction,
     panes::PaneId,
     plugins::{DumpSessionLayoutResponse, PluginId, PluginInstruction},
     screen::{ScreenInstruction, TabOverrideResult},
     session_layout_metadata::SessionLayoutMetadata,
     thread_bus::{Bus, ThreadSenders},
-    ClientId, ServerInstruction,
 };
 use std::sync::Arc;
 use std::{collections::HashMap, path::PathBuf};
@@ -1191,10 +1191,11 @@ impl Pty {
                         file_to_open.path.clone(),
                         file_to_open.line_number,
                         file_to_open.cwd.clone(),
-                    )) {
-                        log::warn!("More initial_panes provided than empty slots available");
-                        break;
-                    }
+                    ))
+                {
+                    log::warn!("More initial_panes provided than empty slots available");
+                    break;
+                }
                 // Skip CommandOrPlugin::Plugin entries (already handled by plugin thread)
             }
         }
@@ -1206,9 +1207,9 @@ impl Pty {
             .map(|f| f.run.clone());
         let mut new_pane_pids: Vec<(u32, bool, Option<RunCommand>, Result<Box<dyn AsyncReader>>)> =
             vec![]; // (terminal_id,
-                    // starts_held,
-                    // run_command,
-                    // file_descriptor)
+        // starts_held,
+        // run_command,
+        // file_descriptor)
 
         let mut new_floating_panes_pids: Vec<(
             u32,
@@ -1216,8 +1217,8 @@ impl Pty {
             Option<RunCommand>,
             Result<Box<dyn AsyncReader>>,
         )> = vec![]; // same
-                     // as
-                     // new_pane_pids
+        // as
+        // new_pane_pids
 
         let mut originating_plugins_to_inform = vec![];
 
@@ -1404,9 +1405,9 @@ impl Pty {
             .map(|f| f.run.clone());
         let mut new_pane_pids: Vec<(u32, bool, Option<RunCommand>, Result<Box<dyn AsyncReader>>)> =
             vec![]; // (terminal_id,
-                    // starts_held,
-                    // run_command,
-                    // file_descriptor)
+        // starts_held,
+        // run_command,
+        // file_descriptor)
 
         let mut new_floating_panes_pids: Vec<(
             u32,
@@ -1414,8 +1415,8 @@ impl Pty {
             Option<RunCommand>,
             Result<Box<dyn AsyncReader>>,
         )> = vec![]; // same
-                     // as
-                     // new_pane_pids
+        // as
+        // new_pane_pids
 
         let mut originating_plugins_to_inform = vec![];
 
@@ -1606,18 +1607,19 @@ impl Pty {
                     let senders = self.bus.senders.clone();
                     move |pane_id, exit_status, command| {
                         if let PaneId::Terminal(terminal_pane_id) = pane_id
-                            && let Some(originating_plugin) = originating_plugin.as_ref() {
-                                let update_event = Event::CommandPaneExited(
-                                    terminal_pane_id,
-                                    exit_status,
-                                    originating_plugin.context.clone(),
-                                );
-                                let _ = senders.send_to_plugin(PluginInstruction::Update(vec![(
-                                    Some(originating_plugin.plugin_id),
-                                    Some(originating_plugin.client_id),
-                                    update_event,
-                                )]));
-                            }
+                            && let Some(originating_plugin) = originating_plugin.as_ref()
+                        {
+                            let update_event = Event::CommandPaneExited(
+                                terminal_pane_id,
+                                exit_status,
+                                originating_plugin.context.clone(),
+                            );
+                            let _ = senders.send_to_plugin(PluginInstruction::Update(vec![(
+                                Some(originating_plugin.plugin_id),
+                                Some(originating_plugin.client_id),
+                                update_event,
+                            )]));
+                        }
 
                         if hold_on_close {
                             let _ = senders.send_to_screen(ScreenInstruction::HoldPane(
@@ -1636,9 +1638,10 @@ impl Pty {
                     }
                 });
                 if command.cwd.is_none()
-                    && let TerminalAction::RunCommand(cmd) = default_shell {
-                        command.cwd = cmd.cwd;
-                    }
+                    && let TerminalAction::RunCommand(cmd) = default_shell
+                {
+                    command.cwd = cmd.cwd;
+                }
                 let cmd = TerminalAction::RunCommand(command.clone());
                 if starts_held {
                     // we don't actually open a terminal in this case, just wait for the user to run it
@@ -1854,18 +1857,19 @@ impl Pty {
                     let senders = self.bus.senders.clone();
                     move |pane_id, exit_status, command| {
                         if let PaneId::Terminal(pane_id) = pane_id
-                            && let Some(originating_plugin) = originating_plugin.as_ref() {
-                                let update_event = Event::CommandPaneExited(
-                                    pane_id,
-                                    exit_status,
-                                    originating_plugin.context.clone(),
-                                );
-                                let _ = senders.send_to_plugin(PluginInstruction::Update(vec![(
-                                    Some(originating_plugin.plugin_id),
-                                    Some(originating_plugin.client_id),
-                                    update_event,
-                                )]));
-                            }
+                            && let Some(originating_plugin) = originating_plugin.as_ref()
+                        {
+                            let update_event = Event::CommandPaneExited(
+                                pane_id,
+                                exit_status,
+                                originating_plugin.context.clone(),
+                            );
+                            let _ = senders.send_to_plugin(PluginInstruction::Update(vec![(
+                                Some(originating_plugin.plugin_id),
+                                Some(originating_plugin.client_id),
+                                update_event,
+                            )]));
+                        }
                         if hold_on_close {
                             let _ = senders.send_to_screen(ScreenInstruction::HoldPane(
                                 pane_id,
@@ -2045,9 +2049,10 @@ impl Pty {
     }
     fn capture_initial_cwd(&mut self, terminal_id: u32, child_pid: u32) {
         if let Some(os_input) = self.bus.os_input.as_ref()
-            && let Some(cwd) = os_input.get_cwd(child_pid) {
-                self.terminal_cwds.insert(terminal_id, cwd);
-            }
+            && let Some(cwd) = os_input.get_cwd(child_pid)
+        {
+            self.terminal_cwds.insert(terminal_id, cwd);
+        }
     }
 
     pub fn update_and_report_cwds(&mut self) {

@@ -1,32 +1,32 @@
 #[allow(unused_imports)] // some imports used only with web_server_capability feature
 use zellij_utils::consts::{
-    session_info_cache_file_name, session_info_folder_for_session, session_layout_cache_file_name,
-    VERSION, ZELLIJ_SESSION_INFO_CACHE_DIR, ZELLIJ_SOCK_DIR,
+    VERSION, ZELLIJ_SESSION_INFO_CACHE_DIR, ZELLIJ_SOCK_DIR, session_info_cache_file_name,
+    session_info_folder_for_session, session_layout_cache_file_name,
 };
 #[allow(unused_imports)]
 use zellij_utils::data::{Event, HttpVerb, LayoutInfo, SessionInfo, WebServerStatus};
-use zellij_utils::errors::{prelude::*, BackgroundJobContext, ContextType};
+use zellij_utils::errors::{BackgroundJobContext, ContextType, prelude::*};
 use zellij_utils::input::layout::RunPlugin;
 #[allow(unused_imports)]
 use zellij_utils::shared::parse_base_url;
 
 #[cfg(feature = "web_server_capability")]
 use zellij_utils::web_server_commands::{
-    discover_webserver_sockets, query_webserver_with_response, InstructionForWebServer,
-    WebServerResponse,
+    InstructionForWebServer, WebServerResponse, discover_webserver_sockets,
+    query_webserver_with_response,
 };
 
-use isahc::prelude::*;
 use isahc::AsyncReadResponseExt;
-use isahc::{config::RedirectPolicy, HttpClient, Request};
+use isahc::prelude::*;
+use isahc::{HttpClient, Request, config::RedirectPolicy};
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
 use zellij_utils::consts::is_ipc_socket;
@@ -154,7 +154,7 @@ pub(crate) fn background_jobs_main(
     });
     let last_serialization_time = Arc::new(Mutex::new(Instant::now()));
     let serialization_interval = serialization_interval.map(|s| s * 1000); // convert to
-                                                                           // milliseconds
+    // milliseconds
     let last_render_request: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
     let pending_help_text_clear: Arc<Mutex<HashMap<ClientId, Instant>>> =
         Arc::new(Mutex::new(HashMap::new()));
@@ -514,14 +514,14 @@ pub(crate) fn background_jobs_main(
                             {
                                 let mut last_render_request = last_render_request.lock().unwrap();
                                 if let Some(last_render_request) = *last_render_request
-                                    && last_render_request > task_start_time {
-                                        // another render request was received while we were
-                                        // sleeping, schedule this job again so that we can also
-                                        // render that request
-                                        let _ = senders.send_to_background_jobs(
-                                            BackgroundJob::RenderToClients,
-                                        );
-                                    }
+                                    && last_render_request > task_start_time
+                                {
+                                    // another render request was received while we were
+                                    // sleeping, schedule this job again so that we can also
+                                    // render that request
+                                    let _ = senders
+                                        .send_to_background_jobs(BackgroundJob::RenderToClients);
+                                }
                                 // reset the last_render_request so that the task will be spawned
                                 // again once a new request is received
                                 *last_render_request = None;
@@ -794,14 +794,15 @@ fn read_other_live_session_states(
         files.for_each(|file| {
             if let Ok(file) = file
                 && let Ok(file_name) = file.file_name().into_string()
-                    && is_ipc_socket(&file.file_type().unwrap()) {
-                        let creation_time = std::fs::metadata(file.path())
-                            .ok()
-                            .and_then(|f| f.created().ok().or_else(|| f.modified().ok()))
-                            .and_then(|d| d.elapsed().ok())
-                            .unwrap_or_default();
-                        other_session_names.push((file_name, creation_time));
-                    }
+                && is_ipc_socket(&file.file_type().unwrap())
+            {
+                let creation_time = std::fs::metadata(file.path())
+                    .ok()
+                    .and_then(|f| f.created().ok().or_else(|| f.modified().ok()))
+                    .and_then(|d| d.elapsed().ok())
+                    .unwrap_or_default();
+                other_session_names.push((file_name, creation_time));
+            }
         });
     }
 
@@ -812,10 +813,10 @@ fn read_other_live_session_states(
         if let Ok(raw_session_info) = fs::read_to_string(&session_cache_file_name)
             && let Ok(mut session_info) =
                 SessionInfo::from_string(&raw_session_info, current_session_name)
-            {
-                session_info.creation_time = creation_time;
-                session_infos_on_machine.insert(session_name, session_info);
-            }
+        {
+            session_info.creation_time = creation_time;
+            session_infos_on_machine.insert(session_name, session_info);
+        }
     }
     session_infos_on_machine
 }
@@ -844,7 +845,7 @@ fn find_resurrectable_sessions(
                         Err(e) => {
                             if e.kind() == std::io::ErrorKind::NotFound {
                                 return None; // no layout file, cannot resurrect session, let's not
-                                             // list it
+                            // list it
                             } else {
                                 log::error!(
                                     "Failed to read created stamp of resurrection file: {:?}",

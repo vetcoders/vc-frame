@@ -21,7 +21,7 @@ use crate::panes::PaneId;
 use crate::route::NotificationEnd;
 use crate::screen::ScreenInstruction;
 use crate::session_layout_metadata::SessionLayoutMetadata;
-use crate::{pty::PtyInstruction, thread_bus::Bus, ClientId, ServerInstruction};
+use crate::{ClientId, ServerInstruction, pty::PtyInstruction, thread_bus::Bus};
 use zellij_utils::data::PaneRenderReport;
 use zellij_utils::input::layout::TabLayoutInfo;
 
@@ -34,7 +34,7 @@ use zellij_utils::{
         LayoutInfo, LayoutWithError, MessageToPlugin, PermissionStatus, PermissionType,
         PipeMessage, PipeSource, WebServerStatus,
     },
-    errors::{prelude::*, ContextType, PluginContext},
+    errors::{ContextType, PluginContext, prelude::*},
     input::{
         actions::Action,
         command::TerminalAction,
@@ -537,20 +537,20 @@ pub(crate) fn plugin_thread_main(
 
                 // Match initial_panes plugins to empty slots in the layout
                 if let Some(ref initial_panes_vec) = initial_panes
-                    && let Some(ref mut tiled_layout) = tab_layout {
-                        for initial_pane in initial_panes_vec.iter() {
-                            if let CommandOrPlugin::Plugin(run_plugin_or_alias) = initial_pane
-                                && !tiled_layout.replace_next_empty_slot_with_run(Run::Plugin(
-                                    run_plugin_or_alias.clone(),
-                                )) {
-                                    log::warn!(
-                                        "More initial_panes provided than empty slots available"
-                                    );
-                                    break;
-                                }
-                            // Skip CommandOrPlugin::Command entries (handled by pty thread)
+                    && let Some(ref mut tiled_layout) = tab_layout
+                {
+                    for initial_pane in initial_panes_vec.iter() {
+                        if let CommandOrPlugin::Plugin(run_plugin_or_alias) = initial_pane
+                            && !tiled_layout.replace_next_empty_slot_with_run(Run::Plugin(
+                                run_plugin_or_alias.clone(),
+                            ))
+                        {
+                            log::warn!("More initial_panes provided than empty slots available");
+                            break;
                         }
+                        // Skip CommandOrPlugin::Command entries (handled by pty thread)
                     }
+                }
                 if let Some(t) = tab_layout.as_mut() {
                     t.populate_plugin_aliases_in_layout(&plugin_aliases);
                     if let Some(cwd) = cwd.as_ref() {
@@ -1107,7 +1107,9 @@ pub(crate) fn plugin_thread_main(
                         ));
                     },
                     (Some(plugin_url), Some(destination_plugin_id)) => {
-                        log::warn!("Message contains both a destination plugin url: {plugin_url} and a destination plugin id: {destination_plugin_id}, ignoring the url and prioritizing the id");
+                        log::warn!(
+                            "Message contains both a destination plugin url: {plugin_url} and a destination plugin id: {destination_plugin_id}, ignoring the url and prioritizing the id"
+                        );
                         let is_private = true;
                         pipe_messages.push((
                             Some(destination_plugin_id),

@@ -1,7 +1,7 @@
 //! IPC stuff for starting to split things into a client and server model.
 use crate::{
     data::{ClientId, ConnectToSession, HostTerminalThemeMode, KeyWithModifier, PaneId, Style},
-    errors::{prelude::*, ErrorContext},
+    errors::{ErrorContext, prelude::*},
     input::{actions::Action, cli_assets::CliAssets},
     pane_size::{Size, SizeInPixels},
 };
@@ -480,7 +480,7 @@ pub fn recv_protobuf_server_to_client(
 #[cfg(unix)]
 pub async fn async_send_kill_and_await(path: &std::path::Path) -> io::Result<()> {
     use interprocess::local_socket::traits::tokio::Stream as _;
-    use interprocess::local_socket::{prelude::*, GenericFilePath};
+    use interprocess::local_socket::{GenericFilePath, prelude::*};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let fs_name = path.to_fs_name::<GenericFilePath>()?;

@@ -4,7 +4,7 @@ use zellij_utils::data::FloatingPaneCoordinates;
 use zellij_utils::input::layout::{PercentOrFixed, RunPluginOrAlias};
 use zellij_utils::pane_size::Size;
 
-use crate::{panes::PaneId, pty::PtyInstruction, thread_bus::ThreadSenders, ClientId};
+use crate::{ClientId, panes::PaneId, pty::PtyInstruction, thread_bus::ThreadSenders};
 
 pub struct PaneGroups {
     panes_in_group: HashMap<ClientId, Vec<PaneId>>,
@@ -107,10 +107,9 @@ impl PaneGroups {
             }
         }
 
-        if should_launch
-            && let Some(first_client) = all_connected_clients.first() {
-                self.launch_plugin(screen_size, first_client);
-            }
+        if should_launch && let Some(first_client) = all_connected_clients.first() {
+            self.launch_plugin(screen_size, first_client);
+        }
     }
     pub fn override_groups_with(&mut self, new_pane_groups: HashMap<ClientId, Vec<PaneId>>) {
         self.panes_in_group = new_pane_groups;
@@ -303,14 +302,18 @@ mod tests {
         let screen_size = create_test_screen_size();
 
         pane_groups.add_pane_id_to_group(pane_id, screen_size, &client_id);
-        assert!(pane_groups
-            .get_client_pane_group(&client_id)
-            .contains(&pane_id));
+        assert!(
+            pane_groups
+                .get_client_pane_group(&client_id)
+                .contains(&pane_id)
+        );
 
         pane_groups.toggle_pane_id_in_group(pane_id, screen_size, &client_id);
-        assert!(!pane_groups
-            .get_client_pane_group(&client_id)
-            .contains(&pane_id));
+        assert!(
+            !pane_groups
+                .get_client_pane_group(&client_id)
+                .contains(&pane_id)
+        );
     }
 
     #[test]

@@ -6,9 +6,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use notify_debouncer_full::{
-    new_debouncer,
+    DebounceEventResult, Debouncer, FileIdMap, new_debouncer,
     notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher},
-    DebounceEventResult, Debouncer, FileIdMap,
 };
 use zellij_utils::{data::Event, errors::prelude::Result};
 

@@ -1,7 +1,7 @@
 use super::CoordinatesInLine;
 use crate::ui_components::{
-    hovering_on_line, render_text_with_underline, CurrentSessionSection, Usage,
-    WebServerStatusSection,
+    CurrentSessionSection, Usage, WebServerStatusSection, hovering_on_line,
+    render_text_with_underline,
 };
 use zellij_tile::prelude::*;
 

@@ -1,14 +1,14 @@
+use crate::ClientId;
 use crate::output::{CharacterChunk, SixelImageChunk};
-use crate::panes::sixel::SixelImageStore;
 use crate::panes::LinkHandler;
+use crate::panes::sixel::SixelImageStore;
 use crate::panes::{
     grid::Grid,
-    terminal_character::{render_first_run_banner, TerminalCharacter, EMPTY_TERMINAL_CHARACTER},
+    terminal_character::{EMPTY_TERMINAL_CHARACTER, TerminalCharacter, render_first_run_banner},
 };
 use crate::pty::VteBytes;
 use crate::route::NotificationEnd;
 use crate::tab::{AdjustedInput, Pane};
-use crate::ClientId;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
@@ -268,7 +268,7 @@ impl Pane for TerminalPane {
             // panes who do not work in this mode
             match raw_input_bytes.as_slice() {
                 BRACKETED_PASTE_BEGIN | BRACKETED_PASTE_END => {
-                    return Some(AdjustedInput::WriteBytesToTerminal(vec![]))
+                    return Some(AdjustedInput::WriteBytesToTerminal(vec![]));
                 },
                 _ => {},
             }
@@ -827,16 +827,18 @@ impl Pane for TerminalPane {
         self.invoked_with = Some(Run::Command(run_command.clone()));
         self.is_held = Some((exit_status, is_first_run, run_command));
         if let Some(notification_end) = self.notification_end.as_mut()
-            && let Some(exit_status) = exit_status {
-                notification_end.set_exit_status(exit_status);
+            && let Some(exit_status) = exit_status
+        {
+            notification_end.set_exit_status(exit_status);
 
-                // Check if unblock condition is met
-                if let Some(condition) = notification_end.unblock_condition()
-                    && condition.is_met(exit_status) {
-                        // Condition met - drop the NotificationEnd now to unblock
-                        drop(self.notification_end.take());
-                    }
+            // Check if unblock condition is met
+            if let Some(condition) = notification_end.unblock_condition()
+                && condition.is_met(exit_status)
+            {
+                // Condition met - drop the NotificationEnd now to unblock
+                drop(self.notification_end.take());
             }
+        }
         if is_first_run {
             self.render_first_run_banner();
         }
@@ -971,10 +973,11 @@ impl Pane for TerminalPane {
         if self.position_is_on_frame(position) {
             let relative_position = self.relative_position(position);
             if let Some(client_frame) = self.frame.get_mut(&client_id)
-                && client_frame.clicked_on_pinned(relative_position) {
-                    self.toggle_pinned();
-                    return true;
-                }
+                && client_frame.clicked_on_pinned(relative_position)
+            {
+                self.toggle_pinned();
+                return true;
+            }
         }
         false
     }
@@ -983,10 +986,11 @@ impl Pane for TerminalPane {
             let relative_position = self.relative_position(&event.position);
             if let MouseEventType::Press = event.event_type
                 && let Some(client_frame) = self.frame.get_mut(&client_id)
-                    && client_frame.clicked_on_pinned(relative_position) {
-                        self.toggle_pinned();
-                        return true;
-                    }
+                && client_frame.clicked_on_pinned(relative_position)
+            {
+                self.toggle_pinned();
+                return true;
+            }
         }
         false
     }
@@ -1016,10 +1020,11 @@ impl Pane for TerminalPane {
             notification_end.set_exit_status(exit_status);
             // Check if unblock condition is met
             if let Some(condition) = notification_end.unblock_condition()
-                && condition.is_met(exit_status) {
-                    // Condition met - drop the NotificationEnd now to unblock
-                    drop(self.notification_end.take());
-                }
+                && condition.is_met(exit_status)
+            {
+                // Condition met - drop the NotificationEnd now to unblock
+                drop(self.notification_end.take());
+            }
         }
     }
     fn set_plugin_regex_highlights(

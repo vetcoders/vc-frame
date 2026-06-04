@@ -938,10 +938,9 @@ impl ZellijPlugin for State {
                 },
                 _ => {},
             },
-            Event::CustomMessage(message, payload)
-                if message == "pong" => {
-                    self.received_payload = Some(payload.clone());
-                },
+            Event::CustomMessage(message, payload) if message == "pong" => {
+                self.received_payload = Some(payload.clone());
+            },
             Event::BeforeClose => {
                 // this is just to assert something to make sure this event was triggered
                 highlight_and_unhighlight_panes(vec![PaneId::Terminal(1)], vec![PaneId::Plugin(1)]);

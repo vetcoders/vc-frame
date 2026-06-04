@@ -1,7 +1,7 @@
-use super::{is_too_high, is_too_wide, stringify_text, Coordinates, Text};
+use super::{Coordinates, Text, is_too_high, is_too_wide, stringify_text};
 use crate::panes::{
-    terminal_character::{AnsiCode, RESET_STYLES},
     CharacterStyles,
+    terminal_character::{AnsiCode, RESET_STYLES},
 };
 use std::collections::BTreeMap;
 use zellij_utils::{data::Style, shared::ansi_len};

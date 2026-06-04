@@ -117,21 +117,21 @@ impl ZellijPlugin for App {
         let mut should_render = false;
         match event {
             Event::FailedToWriteConfigToDisk(file_path)
-                if self.waiting_for_config_to_be_written => {
-                    let error = match file_path {
-                        Some(file_path) => {
-                            format!("Failed to write config to disk at: {}", file_path)
-                        },
-                        None => "Failed to write config to disk.".to_string(),
-                    };
-                    eprintln!("{}", error);
-                    self.error = Some(error);
-                    should_render = true;
-                },
-            Event::ConfigWasWrittenToDisk
-                if self.waiting_for_config_to_be_written => {
-                    close_self();
-                },
+                if self.waiting_for_config_to_be_written =>
+            {
+                let error = match file_path {
+                    Some(file_path) => {
+                        format!("Failed to write config to disk at: {}", file_path)
+                    },
+                    None => "Failed to write config to disk.".to_string(),
+                };
+                eprintln!("{}", error);
+                self.error = Some(error);
+                should_render = true;
+            },
+            Event::ConfigWasWrittenToDisk if self.waiting_for_config_to_be_written => {
+                close_self();
+            },
             Event::TabUpdate(tab_info) => {
                 self.center_own_pane(tab_info);
             },

@@ -20,21 +20,20 @@ use std::{
 };
 
 use axum::{
-    middleware,
+    Router, middleware,
     routing::{any, get, post},
-    Router,
 };
 use tokio::runtime::Runtime;
 
-use axum_server::tls_rustls::RustlsConfig;
 use axum_server::Handle;
+use axum_server::tls_rustls::RustlsConfig;
 
 #[cfg(unix)]
 use daemonize::{self, Outcome};
 #[cfg(unix)]
 use interprocess::unnamed_pipe::pipe;
 #[cfg(unix)]
-use nix::sys::stat::{umask, Mode};
+use nix::sys::stat::{Mode, umask};
 
 #[cfg(unix)]
 use std::io::prelude::*;
@@ -314,7 +313,7 @@ fn daemonize_web_server(
                     _ => {
                         return Err(
                             "Must specify both web_server_cert and web_server_key".to_owned()
-                        )
+                        );
                     },
                 };
 
@@ -387,7 +386,7 @@ fn daemonize_web_server(
 ) -> (Runtime, std::net::TcpListener, Option<RustlsConfig>) {
     use std::env::current_exe;
     use std::net::TcpStream;
-    use std::process::{exit, Command};
+    use std::process::{Command, exit};
     use std::time::{Duration, Instant};
 
     let exe = current_exe().unwrap_or_else(|e| {

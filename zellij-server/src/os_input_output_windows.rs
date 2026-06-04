@@ -1,4 +1,4 @@
-use crate::os_input_output_api::{resolve_command, AsyncReader};
+use crate::os_input_output_api::{AsyncReader, resolve_command};
 use crate::panes::PaneId;
 
 use std::{
@@ -8,8 +8,8 @@ use std::{
     os::windows::ffi::OsStrExt,
     os::windows::io::{FromRawHandle, IntoRawHandle, OwnedHandle},
     sync::{
-        atomic::{AtomicU32, AtomicU64, Ordering},
         Arc, Mutex,
+        atomic::{AtomicU32, AtomicU64, Ordering},
     },
 };
 
@@ -18,18 +18,18 @@ use tokio::net::windows::named_pipe::NamedPipeServer;
 
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, S_OK};
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FlushFileBuffers, WriteFile, FILE_FLAG_OVERLAPPED, OPEN_EXISTING,
+    CreateFileW, FILE_FLAG_OVERLAPPED, FlushFileBuffers, OPEN_EXISTING, WriteFile,
 };
 use windows_sys::Win32::System::Console::{
-    ClosePseudoConsole, CreatePseudoConsole, GenerateConsoleCtrlEvent, ResizePseudoConsole, COORD,
-    CTRL_C_EVENT, HPCON,
+    COORD, CTRL_C_EVENT, ClosePseudoConsole, CreatePseudoConsole, GenerateConsoleCtrlEvent, HPCON,
+    ResizePseudoConsole,
 };
 use windows_sys::Win32::System::Pipes::{CreateNamedPipeW, CreatePipe};
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
-    InitializeProcThreadAttributeList, OpenProcess, TerminateProcess, UpdateProcThreadAttribute,
-    WaitForSingleObject, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, INFINITE,
-    PROCESS_INFORMATION, PROCESS_TERMINATE, STARTUPINFOEXW, STARTUPINFOW,
+    CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
+    EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList,
+    OpenProcess, PROCESS_INFORMATION, PROCESS_TERMINATE, STARTUPINFOEXW, STARTUPINFOW,
+    TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
 use zellij_utils::{errors::prelude::*, input::command::RunCommand};

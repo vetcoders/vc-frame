@@ -1,9 +1,9 @@
 use super::plugin_thread_main;
 use crate::screen::ScreenInstruction;
 use crate::{
+    ServerInstruction,
     channels::SenderWithContext,
     thread_bus::{Bus, ThreadSenders},
-    ServerInstruction,
 };
 use insta::assert_snapshot;
 use lazy_static::lazy_static;
@@ -888,7 +888,7 @@ pub fn load_new_plugin_with_plugin_alias() {
 #[ignore]
 pub fn plugin_workers() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let (plugin_thread_sender, screen_receiver, teardown) = create_plugin_thread(None, None);
     let plugin_should_float = Some(false);
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -973,7 +973,7 @@ pub fn plugin_workers() {
 #[ignore]
 pub fn plugin_workers_persist_state() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let (plugin_thread_sender, screen_receiver, teardown) = create_plugin_thread(None, None);
     let plugin_should_float = Some(false);
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -1067,7 +1067,7 @@ pub fn plugin_workers_persist_state() {
 #[ignore]
 pub fn can_subscribe_to_hd_events() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -1151,7 +1151,7 @@ pub fn can_subscribe_to_hd_events() {
 #[ignore]
 pub fn switch_to_mode_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -1228,7 +1228,7 @@ pub fn switch_to_mode_plugin_command() {
 #[ignore]
 pub fn switch_to_mode_plugin_command_permission_denied() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -1305,7 +1305,7 @@ pub fn switch_to_mode_plugin_command_permission_denied() {
 #[ignore]
 pub fn new_tabs_with_layout_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -1396,7 +1396,7 @@ pub fn new_tabs_with_layout_plugin_command() {
 #[ignore]
 pub fn new_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -1473,7 +1473,7 @@ pub fn new_tab_plugin_command() {
 #[ignore]
 pub fn go_to_next_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -1549,7 +1549,7 @@ pub fn go_to_next_tab_plugin_command() {
 #[ignore]
 pub fn go_to_previous_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -1625,7 +1625,7 @@ pub fn go_to_previous_tab_plugin_command() {
 #[ignore]
 pub fn resize_focused_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -1701,7 +1701,7 @@ pub fn resize_focused_pane_plugin_command() {
 #[ignore]
 pub fn resize_focused_pane_with_direction_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -1777,7 +1777,7 @@ pub fn resize_focused_pane_with_direction_plugin_command() {
 #[ignore]
 pub fn focus_next_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -1853,7 +1853,7 @@ pub fn focus_next_pane_plugin_command() {
 #[ignore]
 pub fn focus_previous_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -1929,7 +1929,7 @@ pub fn focus_previous_pane_plugin_command() {
 #[ignore]
 pub fn move_focus_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -2005,7 +2005,7 @@ pub fn move_focus_plugin_command() {
 #[ignore]
 pub fn move_focus_or_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -2081,7 +2081,7 @@ pub fn move_focus_or_tab_plugin_command() {
 #[ignore]
 pub fn edit_scrollback_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -2157,7 +2157,7 @@ pub fn edit_scrollback_plugin_command() {
 #[ignore]
 pub fn write_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -2233,7 +2233,7 @@ pub fn write_plugin_command() {
 #[ignore]
 pub fn write_chars_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -2309,7 +2309,7 @@ pub fn write_chars_plugin_command() {
 #[ignore]
 pub fn toggle_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -2385,7 +2385,7 @@ pub fn toggle_tab_plugin_command() {
 #[ignore]
 pub fn move_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -2461,7 +2461,7 @@ pub fn move_pane_plugin_command() {
 #[ignore]
 pub fn move_pane_with_direction_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -2537,7 +2537,7 @@ pub fn move_pane_with_direction_plugin_command() {
 #[ignore]
 pub fn clear_screen_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -2614,7 +2614,7 @@ pub fn clear_screen_plugin_command() {
 #[ignore]
 pub fn scroll_up_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -2691,7 +2691,7 @@ pub fn scroll_up_plugin_command() {
 #[ignore]
 pub fn scroll_down_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -2767,7 +2767,7 @@ pub fn scroll_down_plugin_command() {
 #[ignore]
 pub fn scroll_to_top_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -2843,7 +2843,7 @@ pub fn scroll_to_top_plugin_command() {
 #[ignore]
 pub fn scroll_to_bottom_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -2919,7 +2919,7 @@ pub fn scroll_to_bottom_plugin_command() {
 #[ignore]
 pub fn page_scroll_up_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -2995,7 +2995,7 @@ pub fn page_scroll_up_plugin_command() {
 #[ignore]
 pub fn page_scroll_down_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -3071,7 +3071,7 @@ pub fn page_scroll_down_plugin_command() {
 #[ignore]
 pub fn toggle_focus_fullscreen_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -3147,7 +3147,7 @@ pub fn toggle_focus_fullscreen_plugin_command() {
 #[ignore]
 pub fn toggle_pane_frames_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -3223,7 +3223,7 @@ pub fn toggle_pane_frames_plugin_command() {
 #[ignore]
 pub fn toggle_pane_embed_or_eject_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -3299,7 +3299,7 @@ pub fn toggle_pane_embed_or_eject_plugin_command() {
 #[ignore]
 pub fn undo_rename_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -3375,7 +3375,7 @@ pub fn undo_rename_pane_plugin_command() {
 #[ignore]
 pub fn close_focus_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -3451,7 +3451,7 @@ pub fn close_focus_plugin_command() {
 #[ignore]
 pub fn toggle_active_tab_sync_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -3527,7 +3527,7 @@ pub fn toggle_active_tab_sync_plugin_command() {
 #[ignore]
 pub fn close_focused_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -3603,7 +3603,7 @@ pub fn close_focused_tab_plugin_command() {
 #[ignore]
 pub fn undo_rename_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -3679,7 +3679,7 @@ pub fn undo_rename_tab_plugin_command() {
 #[ignore]
 pub fn previous_swap_layout_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -3755,7 +3755,7 @@ pub fn previous_swap_layout_plugin_command() {
 #[ignore]
 pub fn next_swap_layout_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -3831,7 +3831,7 @@ pub fn next_swap_layout_plugin_command() {
 #[ignore]
 pub fn go_to_tab_name_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -3907,7 +3907,7 @@ pub fn go_to_tab_name_plugin_command() {
 #[ignore]
 pub fn focus_or_create_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -3983,7 +3983,7 @@ pub fn focus_or_create_tab_plugin_command() {
 #[ignore]
 pub fn go_to_tab() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -4059,7 +4059,7 @@ pub fn go_to_tab() {
 #[ignore]
 pub fn start_or_reload_plugin() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -4135,7 +4135,7 @@ pub fn start_or_reload_plugin() {
 #[ignore]
 pub fn quit_zellij_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, server_receiver, screen_receiver, teardown) =
@@ -4218,7 +4218,7 @@ pub fn quit_zellij_plugin_command() {
 #[ignore]
 pub fn detach_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, server_receiver, screen_receiver, teardown) =
@@ -4301,7 +4301,7 @@ pub fn detach_plugin_command() {
 #[ignore]
 pub fn open_file_floating_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, pty_receiver, screen_receiver, teardown) =
@@ -4388,7 +4388,7 @@ pub fn open_file_floating_plugin_command() {
 #[ignore]
 pub fn open_file_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, pty_receiver, screen_receiver, teardown) =
@@ -4475,7 +4475,7 @@ pub fn open_file_plugin_command() {
 #[ignore]
 pub fn open_file_with_line_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, pty_receiver, screen_receiver, teardown) =
@@ -4563,7 +4563,7 @@ pub fn open_file_with_line_plugin_command() {
 #[ignore]
 pub fn open_file_with_line_floating_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, pty_receiver, screen_receiver, teardown) =
@@ -4650,7 +4650,7 @@ pub fn open_file_with_line_floating_plugin_command() {
 #[ignore]
 pub fn open_terminal_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, pty_receiver, screen_receiver, teardown) =
@@ -4733,7 +4733,7 @@ pub fn open_terminal_plugin_command() {
 #[ignore]
 pub fn open_terminal_floating_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, pty_receiver, screen_receiver, teardown) =
@@ -4816,7 +4816,7 @@ pub fn open_terminal_floating_plugin_command() {
 #[ignore]
 pub fn open_command_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, pty_receiver, screen_receiver, teardown) =
@@ -4899,7 +4899,7 @@ pub fn open_command_pane_plugin_command() {
 #[ignore]
 pub fn open_command_pane_floating_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, pty_receiver, screen_receiver, teardown) =
@@ -4982,7 +4982,7 @@ pub fn open_command_pane_floating_plugin_command() {
 #[ignore]
 pub fn switch_to_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -5058,7 +5058,7 @@ pub fn switch_to_tab_plugin_command() {
 #[ignore]
 pub fn hide_self_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -5134,7 +5134,7 @@ pub fn hide_self_plugin_command() {
 #[ignore]
 pub fn show_self_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -5209,7 +5209,7 @@ pub fn show_self_plugin_command() {
 #[ignore]
 pub fn close_terminal_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -5285,7 +5285,7 @@ pub fn close_terminal_pane_plugin_command() {
 #[ignore]
 pub fn close_plugin_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -5361,7 +5361,7 @@ pub fn close_plugin_pane_plugin_command() {
 #[ignore]
 pub fn focus_terminal_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -5437,7 +5437,7 @@ pub fn focus_terminal_pane_plugin_command() {
 #[ignore]
 pub fn focus_plugin_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -5513,7 +5513,7 @@ pub fn focus_plugin_pane_plugin_command() {
 #[ignore]
 pub fn rename_terminal_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -5589,7 +5589,7 @@ pub fn rename_terminal_pane_plugin_command() {
 #[ignore]
 pub fn rename_plugin_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -5665,7 +5665,7 @@ pub fn rename_plugin_pane_plugin_command() {
 #[ignore]
 pub fn rename_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -5741,7 +5741,7 @@ pub fn rename_tab_plugin_command() {
 #[ignore]
 pub fn send_configuration_to_plugins() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -6084,7 +6084,7 @@ pub fn denied_permission_request_result() {
 #[ignore]
 pub fn run_command_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, background_jobs_receiver, screen_receiver, teardown) =
@@ -6167,7 +6167,7 @@ pub fn run_command_plugin_command() {
 #[ignore]
 pub fn run_command_with_env_vars_and_cwd_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, background_jobs_receiver, screen_receiver, teardown) =
@@ -6250,7 +6250,7 @@ pub fn run_command_with_env_vars_and_cwd_plugin_command() {
 #[ignore]
 pub fn web_request_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, background_jobs_receiver, screen_receiver, teardown) =
@@ -6333,7 +6333,7 @@ pub fn web_request_plugin_command() {
 #[ignore]
 pub fn unblock_input_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -6420,7 +6420,7 @@ pub fn unblock_input_plugin_command() {
 #[ignore]
 pub fn block_input_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -6508,7 +6508,7 @@ pub fn block_input_plugin_command() {
 #[ignore]
 pub fn pipe_output_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, server_receiver, screen_receiver, teardown) =
@@ -6603,7 +6603,7 @@ pub fn pipe_output_plugin_command() {
 #[ignore]
 pub fn pipe_message_to_plugin_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -6695,7 +6695,7 @@ pub fn pipe_message_to_plugin_plugin_command() {
 #[ignore]
 pub fn switch_session_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, server_receiver, screen_receiver, teardown) =
@@ -6776,15 +6776,17 @@ pub fn switch_session_plugin_command() {
         .clone();
     // we do the replace below to avoid the randomness of the temporary folder in the snapshot
     // while still testing it
-    assert_snapshot!(format!("{:#?}", switch_session_event)
-        .replace(&format!("{:?}", temp_folder.path()), "\"CWD\""));
+    assert_snapshot!(
+        format!("{:#?}", switch_session_event)
+            .replace(&format!("{:?}", temp_folder.path()), "\"CWD\"")
+    );
 }
 
 #[test]
 #[ignore]
 pub fn switch_session_with_layout_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, server_receiver, screen_receiver, teardown) =
@@ -6865,15 +6867,17 @@ pub fn switch_session_with_layout_plugin_command() {
         .clone();
     // we do the replace below to avoid the randomness of the temporary folder in the snapshot
     // while still testing it
-    assert_snapshot!(format!("{:#?}", switch_session_event)
-        .replace(&format!("{:?}", temp_folder.path()), "\"CWD\""));
+    assert_snapshot!(
+        format!("{:#?}", switch_session_event)
+            .replace(&format!("{:?}", temp_folder.path()), "\"CWD\"")
+    );
 }
 
 #[test]
 #[ignore]
 pub fn switch_session_with_layout_and_cwd_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, server_receiver, screen_receiver, teardown) =
@@ -6959,7 +6963,7 @@ pub fn switch_session_with_layout_and_cwd_plugin_command() {
 #[ignore]
 pub fn disconnect_other_clients_plugins_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, server_receiver, screen_receiver, teardown) =
@@ -7045,7 +7049,7 @@ pub fn disconnect_other_clients_plugins_command() {
 #[ignore]
 pub fn reconfigure_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, server_receiver, screen_receiver, teardown) =
@@ -7133,7 +7137,7 @@ pub fn run_plugin_in_specific_cwd() {
     // note that this test might sometimes fail when run alone without the rest of the suite due to
     // timing issues
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, server_receiver, screen_receiver, teardown) =
@@ -7221,7 +7225,7 @@ pub fn run_plugin_in_specific_cwd() {
 #[ignore]
 pub fn hide_pane_with_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -7297,7 +7301,7 @@ pub fn hide_pane_with_id_plugin_command() {
 #[ignore]
 pub fn show_pane_with_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -7373,7 +7377,7 @@ pub fn show_pane_with_id_plugin_command() {
 #[ignore]
 pub fn open_command_pane_background_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, pty_receiver, screen_receiver, teardown) =
@@ -7460,7 +7464,7 @@ pub fn open_command_pane_background_plugin_command() {
 #[ignore]
 pub fn rerun_command_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -7536,7 +7540,7 @@ pub fn rerun_command_pane_plugin_command() {
 #[ignore]
 pub fn resize_pane_with_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -7612,7 +7616,7 @@ pub fn resize_pane_with_id_plugin_command() {
 #[ignore]
 pub fn edit_scrollback_for_pane_with_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -7688,7 +7692,7 @@ pub fn edit_scrollback_for_pane_with_id_plugin_command() {
 #[ignore]
 pub fn write_to_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -7764,7 +7768,7 @@ pub fn write_to_pane_id_plugin_command() {
 #[ignore]
 pub fn write_chars_to_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -7840,7 +7844,7 @@ pub fn write_chars_to_pane_id_plugin_command() {
 #[ignore]
 pub fn move_pane_with_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -7916,7 +7920,7 @@ pub fn move_pane_with_pane_id_plugin_command() {
 #[ignore]
 pub fn move_pane_with_pane_id_in_direction_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -7992,7 +7996,7 @@ pub fn move_pane_with_pane_id_in_direction_plugin_command() {
 #[ignore]
 pub fn clear_screen_for_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -8068,7 +8072,7 @@ pub fn clear_screen_for_pane_id_plugin_command() {
 #[ignore]
 pub fn scroll_up_in_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -8144,7 +8148,7 @@ pub fn scroll_up_in_pane_id_plugin_command() {
 #[ignore]
 pub fn scroll_down_in_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -8220,7 +8224,7 @@ pub fn scroll_down_in_pane_id_plugin_command() {
 #[ignore]
 pub fn scroll_to_top_in_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -8296,7 +8300,7 @@ pub fn scroll_to_top_in_pane_id_plugin_command() {
 #[ignore]
 pub fn scroll_to_bottom_in_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -8372,7 +8376,7 @@ pub fn scroll_to_bottom_in_pane_id_plugin_command() {
 #[ignore]
 pub fn page_scroll_up_in_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -8448,7 +8452,7 @@ pub fn page_scroll_up_in_pane_id_plugin_command() {
 #[ignore]
 pub fn page_scroll_down_in_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -8524,7 +8528,7 @@ pub fn page_scroll_down_in_pane_id_plugin_command() {
 #[ignore]
 pub fn toggle_pane_id_fullscreen_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -8600,7 +8604,7 @@ pub fn toggle_pane_id_fullscreen_plugin_command() {
 #[ignore]
 pub fn toggle_pane_embed_or_eject_for_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -8676,7 +8680,7 @@ pub fn toggle_pane_embed_or_eject_for_pane_id_plugin_command() {
 #[ignore]
 pub fn close_tab_with_index_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -8752,7 +8756,7 @@ pub fn close_tab_with_index_plugin_command() {
 #[ignore]
 pub fn break_panes_to_new_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -8828,7 +8832,7 @@ pub fn break_panes_to_new_tab_plugin_command() {
 #[ignore]
 pub fn break_panes_to_tab_with_index_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -8904,7 +8908,7 @@ pub fn break_panes_to_tab_with_index_plugin_command() {
 #[ignore]
 pub fn reload_plugin_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -8974,7 +8978,7 @@ pub fn reload_plugin_plugin_command() {
 #[ignore]
 pub fn load_new_plugin_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -9044,7 +9048,7 @@ pub fn load_new_plugin_plugin_command() {
 #[ignore]
 pub fn rebind_keys_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, server_receiver, screen_receiver, teardown) =
@@ -9130,7 +9134,7 @@ pub fn rebind_keys_plugin_command() {
 #[ignore]
 pub fn list_clients_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -9206,7 +9210,7 @@ pub fn list_clients_plugin_command() {
 #[ignore]
 pub fn before_close_plugin_event() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -9282,7 +9286,7 @@ pub fn before_close_plugin_event() {
 #[ignore]
 pub fn show_cursor_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -9362,7 +9366,7 @@ pub fn show_cursor_plugin_command() {
 #[ignore]
 pub fn hide_cursor_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -9443,7 +9447,7 @@ pub fn hide_cursor_plugin_command() {
 #[ignore]
 pub fn copy_to_clipboard_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -9523,7 +9527,7 @@ pub fn copy_to_clipboard_plugin_command() {
 #[ignore]
 pub fn run_action_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -12081,12 +12085,12 @@ pub fn plugin_receives_config_change_event() {
         .iter()
         .filter_map(|i| {
             if let ScreenInstruction::PluginBytes(plugin_render_assets) = i
-                && let Some(plugin_render_asset) = plugin_render_assets.first() {
-                    let plugin_bytes = plugin_render_asset.bytes.clone();
-                    let plugin_output =
-                        String::from_utf8_lossy(plugin_bytes.as_slice()).to_string();
-                    return Some(plugin_output);
-                }
+                && let Some(plugin_render_asset) = plugin_render_assets.first()
+            {
+                let plugin_bytes = plugin_render_asset.bytes.clone();
+                let plugin_output = String::from_utf8_lossy(plugin_bytes.as_slice()).to_string();
+                return Some(plugin_output);
+            }
             None
         })
         .collect::<Vec<_>>();
@@ -12207,12 +12211,12 @@ pub fn plugin_does_not_receive_event_when_config_unchanged() {
         .iter()
         .filter_map(|i| {
             if let ScreenInstruction::PluginBytes(plugin_render_assets) = i
-                && let Some(plugin_render_asset) = plugin_render_assets.first() {
-                    let plugin_bytes = plugin_render_asset.bytes.clone();
-                    let plugin_output =
-                        String::from_utf8_lossy(plugin_bytes.as_slice()).to_string();
-                    return Some(plugin_output);
-                }
+                && let Some(plugin_render_asset) = plugin_render_assets.first()
+            {
+                let plugin_bytes = plugin_render_asset.bytes.clone();
+                let plugin_output = String::from_utf8_lossy(plugin_bytes.as_slice()).to_string();
+                return Some(plugin_output);
+            }
             None
         })
         .collect::<Vec<_>>();

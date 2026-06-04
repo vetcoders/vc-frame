@@ -114,7 +114,6 @@ fn account_for_races_in_snapshot(snapshot: String) -> String {
     let snapshot = base_replace_tmux_mode_2
         .replace_all(&snapshot, "\n")
         .to_string();
-    
 
     eol_arrow_replace.replace_all(&snapshot, "\n").to_string()
 }
@@ -1193,7 +1192,7 @@ pub fn quit_and_resurrect_session() {
                     let mut step_is_complete = false;
                     if remote_terminal.snapshot_contains("Waiting to run: top") {
                         std::thread::sleep(std::time::Duration::from_millis(5000)); // wait for
-                                                                                    // serialization
+                        // serialization
                         remote_terminal.send_key(&QUIT);
                         step_is_complete = true;
                     }
@@ -1252,7 +1251,7 @@ pub fn quit_and_resurrect_session_with_viewport_serialization() {
                 let mut step_is_complete = false;
                 if remote_terminal.snapshot_contains("Waiting to run: top") {
                     std::thread::sleep(std::time::Duration::from_millis(5000)); // wait for
-                                                                                // serialization
+                    // serialization
                     remote_terminal.send_key(&QUIT);
                     step_is_complete = true;
                 }
@@ -2335,10 +2334,10 @@ pub fn send_command_through_the_cli() {
                     if remote_terminal.snapshot_contains("<Ctrl-c>") {
                         std::thread::sleep(std::time::Duration::from_millis(100));
                         remote_terminal.send_key(&SPACE); // run script - here we use SPACE
-                                                          // instead of the default ENTER because
-                                                          // sending ENTER over SSH can be a little
-                                                          // problematic (read: I couldn't get it
-                                                          // to pass consistently)
+                        // instead of the default ENTER because
+                        // sending ENTER over SSH can be a little
+                        // problematic (read: I couldn't get it
+                        // to pass consistently)
                         step_is_complete = true
                     }
                     step_is_complete
@@ -2353,10 +2352,10 @@ pub fn send_command_through_the_cli() {
                     {
                         std::thread::sleep(std::time::Duration::from_millis(100));
                         remote_terminal.send_key(&SPACE); // re-run script - here we use SPACE
-                                                          // instead of the default ENTER because
-                                                          // sending ENTER over SSH can be a little
-                                                          // problematic (read: I couldn't get it
-                                                          // to pass consistently)
+                        // instead of the default ENTER because
+                        // sending ENTER over SSH can be a little
+                        // problematic (read: I couldn't get it
+                        // to pass consistently)
                         step_is_complete = true
                     }
                     step_is_complete
@@ -2442,8 +2441,8 @@ pub fn send_blocking_command_through_the_cli() {
                     // The floating pane should appear with the running command
                     if remote_terminal.snapshot_contains("PIN [ ]") {
                         std::thread::sleep(std::time::Duration::from_millis(2000)); // wait for
-                                                                                    // command to
-                                                                                    // end
+                        // command to
+                        // end
                         step_is_complete = true
                     }
                     step_is_complete
@@ -2824,8 +2823,8 @@ pub fn watcher_client_functionality() {
                     name: "Main client re-attaches",
                     instruction: |remote_terminal: RemoteTerminal| -> bool {
                         std::thread::sleep(std::time::Duration::from_millis(500)); // wait for watcher
-                                                                                   // to fail running
-                                                                                   // commands
+                        // to fail running
+                        // commands
                         remote_terminal.status_bar_appears()
                             && remote_terminal.snapshot_contains("┐┌")
                     },

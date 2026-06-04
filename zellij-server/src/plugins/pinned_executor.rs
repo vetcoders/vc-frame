@@ -1,10 +1,10 @@
-use crate::plugins::plugin_map::PluginMap;
-use crate::plugins::wasm_bridge::PluginCache;
 use crate::ClientId;
 use crate::ThreadSenders;
+use crate::plugins::plugin_map::PluginMap;
+use crate::plugins::wasm_bridge::PluginCache;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{channel, Sender};
+use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use wasmi::Engine;
@@ -184,7 +184,7 @@ impl PinnedExecutor {
                     .unwrap_or_else(|| {
                         log::error!("Failed to find free thread to run the plugin!");
                         0 // this is a misconfiguration, but we don't want to crash the app
-                          // if it happens
+                        // if it happens
                     })
             }
         };
@@ -286,13 +286,13 @@ impl PinnedExecutor {
         self: &Arc<Self>,
         plugin_id: u32,
         f: impl FnOnce(
-                ThreadSenders,
-                Arc<Mutex<PluginMap>>,
-                Arc<Mutex<Vec<ClientId>>>,
-                PluginCache,
-                Engine,
-            ) + Send
-            + 'static,
+            ThreadSenders,
+            Arc<Mutex<PluginMap>>,
+            Arc<Mutex<Vec<ClientId>>>,
+            PluginCache,
+            Engine,
+        ) + Send
+        + 'static,
     ) {
         let executor = self.clone();
         self.execute_for_plugin(
@@ -314,9 +314,10 @@ impl PinnedExecutor {
         let mut thread_plugins = self.thread_plugins.lock().unwrap();
 
         if let Some(thread_idx) = assignments.remove(&plugin_id)
-            && let Some(plugins) = thread_plugins.get_mut(&thread_idx) {
-                plugins.remove(&plugin_id);
-            }
+            && let Some(plugins) = thread_plugins.get_mut(&thread_idx)
+        {
+            plugins.remove(&plugin_id);
+        }
 
         drop(assignments);
         drop(thread_plugins);
@@ -340,11 +341,7 @@ impl PinnedExecutor {
                         .get(&idx)
                         .map(|s| !s.is_empty())
                         .unwrap_or(false);
-                    if !has_plugins {
-                        Some(idx)
-                    } else {
-                        None
-                    }
+                    if !has_plugins { Some(idx) } else { None }
                 } else {
                     None
                 }
@@ -385,7 +382,7 @@ impl Drop for PinnedExecutor {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::mpsc::{channel, Sender};
+    use std::sync::mpsc::{Sender, channel};
     use std::sync::{Arc, Barrier, Mutex};
     use std::thread;
     use std::time::Duration;

@@ -267,10 +267,11 @@ impl HyperlinkTracker {
         }
 
         if (url.starts_with("http://") || url.starts_with("https://"))
-            && let Some(protocol_end) = url.find("://") {
-                let after_protocol = &url[protocol_end.saturating_add(3)..];
-                return !after_protocol.is_empty() && after_protocol.contains('.');
-            }
+            && let Some(protocol_end) = url.find("://")
+        {
+            let after_protocol = &url[protocol_end.saturating_add(3)..];
+            return !after_protocol.is_empty() && after_protocol.contains('.');
+        }
 
         if url.starts_with("ftp://") {
             let after_protocol = url.get(6..).unwrap_or("");
@@ -379,9 +380,10 @@ mod tests {
                 );
 
                 if i == 0
-                    && let Some(LinkAnchor::Start(id)) = &character.styles.link_anchor {
-                        link_id = Some(*id);
-                    }
+                    && let Some(LinkAnchor::Start(id)) = &character.styles.link_anchor
+                {
+                    link_id = Some(*id);
+                }
             }
         }
 
@@ -445,9 +447,10 @@ mod tests {
                 );
 
                 if i == 0
-                    && let Some(LinkAnchor::Start(id)) = &character.styles.link_anchor {
-                        link_id = Some(*id);
-                    }
+                    && let Some(LinkAnchor::Start(id)) = &character.styles.link_anchor
+                {
+                    link_id = Some(*id);
+                }
             }
         }
 
@@ -592,9 +595,10 @@ mod tests {
 
         let first_char_index = row.absolute_character_index(0);
         if let Some(character) = row.columns.get(first_char_index)
-            && let Some(LinkAnchor::Start(id)) = &character.styles.link_anchor {
-                link_id = Some(*id);
-            }
+            && let Some(LinkAnchor::Start(id)) = &character.styles.link_anchor
+        {
+            link_id = Some(*id);
+        }
         if let Some(id) = link_id {
             let links = link_handler.links();
             let stored_link = links.get(&id);
@@ -794,9 +798,10 @@ mod tests {
 
         let first_char_index = row0.absolute_character_index(0);
         if let Some(character) = row0.columns.get(first_char_index)
-            && let Some(LinkAnchor::Start(id)) = &character.styles.link_anchor {
-                link_id = Some(*id);
-            }
+            && let Some(LinkAnchor::Start(id)) = &character.styles.link_anchor
+        {
+            link_id = Some(*id);
+        }
 
         if let Some(id) = link_id {
             let links = link_handler.links();
@@ -1071,17 +1076,19 @@ mod tests {
         let mut first_link_id = None;
         let first_char_index = row.absolute_character_index(0);
         if let Some(character) = row.columns.get(first_char_index)
-            && let Some(LinkAnchor::Start(id)) = &character.styles.link_anchor {
-                first_link_id = Some(*id);
-            }
+            && let Some(LinkAnchor::Start(id)) = &character.styles.link_anchor
+        {
+            first_link_id = Some(*id);
+        }
 
         let mut second_link_id = None;
         let second_url_start = url1.len() + 1;
         let second_char_index = row.absolute_character_index(second_url_start);
         if let Some(character) = row.columns.get(second_char_index)
-            && let Some(LinkAnchor::Start(id)) = &character.styles.link_anchor {
-                second_link_id = Some(*id);
-            }
+            && let Some(LinkAnchor::Start(id)) = &character.styles.link_anchor
+        {
+            second_link_id = Some(*id);
+        }
         let links = link_handler.links();
 
         if let Some(id1) = first_link_id {

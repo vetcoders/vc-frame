@@ -92,12 +92,13 @@ mod not_wasm {
         };
 
         if raw_bytes == [10]
-            && let Some((keybinds, mode)) = keybinds_mode {
-                let ctrl_j = KeyWithModifier::new(BareKey::Char('j')).with_ctrl_modifier();
-                if key_is_bound(&ctrl_j, keybinds, mode) {
-                    return ctrl_j;
-                }
+            && let Some((keybinds, mode)) = keybinds_mode
+        {
+            let ctrl_j = KeyWithModifier::new(BareKey::Char('j')).with_ctrl_modifier();
+            if key_is_bound(&ctrl_j, keybinds, mode) {
+                return ctrl_j;
             }
+        }
         let mut modifiers = BTreeSet::new();
         if termwiz_modifiers.contains(Modifiers::CTRL) {
             modifiers.insert(KeyModifier::Ctrl);

@@ -3,8 +3,8 @@ mod layout_list;
 mod new_layout_from_session;
 mod rename_layout;
 
-use crate::ui::{truncate_line_with_ansi, wrap_text_to_width, ErrorMessage, MultiLineErrorMessage};
-use zellij_tile::prelude::{print_text_with_coordinates, KeyWithModifier, LayoutMetadata, Text};
+use crate::ui::{ErrorMessage, MultiLineErrorMessage, truncate_line_with_ansi, wrap_text_to_width};
+use zellij_tile::prelude::{KeyWithModifier, LayoutMetadata, Text, print_text_with_coordinates};
 
 pub use import_layout::ImportLayoutScreen;
 pub use layout_list::LayoutListScreen;

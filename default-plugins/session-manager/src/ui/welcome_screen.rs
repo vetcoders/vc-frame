@@ -126,13 +126,13 @@ pub fn render_welcome_boundaries(rows: usize, cols: usize) {
                 i + 1,
                 right_boundary_x + 1
             ); // this includes some
-               // ANSI magic to delete
-               // everything after this
-               // boundary in order to
-               // fix some rendering
-               // bugs in the legacy
-               // components of this
-               // plugin
+            // ANSI magic to delete
+            // everything after this
+            // boundary in order to
+            // fix some rendering
+            // bugs in the legacy
+            // components of this
+            // plugin
         }
     }
     if rows.saturating_sub(y_starting_point) > 25 && has_room_for_logos {

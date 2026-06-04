@@ -2,7 +2,7 @@ use super::{KeyResponse, LayoutListScreen, OptimisticUpdate, Screen};
 use crate::errors::format_kdl_error;
 use crate::screens::ErrorScreen;
 use crate::text_input::{InputAction, TextInput};
-use crate::ui::{truncate_with_ellipsis_start, LayoutDetail, Title};
+use crate::ui::{LayoutDetail, Title, truncate_with_ellipsis_start};
 use crate::{DisplayLayout, LayoutInfo};
 use zellij_tile::prelude::*;
 
@@ -192,15 +192,16 @@ impl ImportLayoutScreen {
         let mut cursor_position_in_line = 9 + cursor_pos;
 
         if let Some(max_width) = max_width
-            && text.chars().count() > max_width {
-                let truncated_display_name = truncate_with_ellipsis_start(
-                    display_name,
-                    max_width.saturating_sub(9 + text_suffix.chars().count()),
-                );
-                text = format!("Save as: {}{}", truncated_display_name, text_suffix);
-                let truncated_len = truncated_display_name.chars().count();
-                cursor_position_in_line = 9 + cursor_pos.min(truncated_len);
-            }
+            && text.chars().count() > max_width
+        {
+            let truncated_display_name = truncate_with_ellipsis_start(
+                display_name,
+                max_width.saturating_sub(9 + text_suffix.chars().count()),
+            );
+            text = format!("Save as: {}{}", truncated_display_name, text_suffix);
+            let truncated_len = truncated_display_name.chars().count();
+            cursor_position_in_line = 9 + cursor_pos.min(truncated_len);
+        }
 
         (text, cursor_position_in_line)
     }

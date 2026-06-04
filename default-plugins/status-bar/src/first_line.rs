@@ -1,12 +1,12 @@
-use ansi_term::{unstyled_len, ANSIStrings};
+use ansi_term::{ANSIStrings, unstyled_len};
 use zellij_tile::prelude::actions::Action;
 use zellij_tile::prelude::*;
 
 use crate::color_elements;
-use crate::{
-    action_key, action_key_group, get_common_modifiers, style_key_with_modifier, TO_NORMAL,
-};
 use crate::{ColoredElements, LinePart};
+use crate::{
+    TO_NORMAL, action_key, action_key_group, get_common_modifiers, style_key_with_modifier,
+};
 
 #[derive(Debug)]
 pub struct KeyShortcut {
@@ -372,7 +372,7 @@ fn swap_layout_status(
             swap_layout_name.make_ascii_uppercase();
             let keycode = swap_layout_keycode(mode_info);
             let swap_layout_name_len = swap_layout_name.len() + 3; // 2 for the arrow separators, one for the screen end buffer
-                                                                   //
+            //
             macro_rules! style_swap_layout_indicator {
                 ($style_name:ident) => {{
                     (
@@ -712,26 +712,27 @@ pub fn first_line(
     let mut key_indicators =
         key_indicators(max_len, &default_keys, colored_elements, separator, help);
     if key_indicators.len < max_len
-        && let Some(tab_info) = tab_info {
-            let mut remaining_space = max_len - key_indicators.len;
-            if let Some(swap_layout_status) = swap_layout_status(
-                remaining_space,
-                &tab_info.active_swap_layout_name,
-                tab_info.is_swap_layout_dirty,
-                help,
-                colored_elements,
-                separator,
-            ) {
-                remaining_space -= swap_layout_status.len;
-                for _ in 0..remaining_space {
-                    key_indicators.part.push_str(
-                        &ANSIStrings(&[colored_elements.superkey_prefix.paint(" ")]).to_string(),
-                    );
-                    key_indicators.len += 1;
-                }
-                key_indicators.append(&swap_layout_status);
+        && let Some(tab_info) = tab_info
+    {
+        let mut remaining_space = max_len - key_indicators.len;
+        if let Some(swap_layout_status) = swap_layout_status(
+            remaining_space,
+            &tab_info.active_swap_layout_name,
+            tab_info.is_swap_layout_dirty,
+            help,
+            colored_elements,
+            separator,
+        ) {
+            remaining_space -= swap_layout_status.len;
+            for _ in 0..remaining_space {
+                key_indicators.part.push_str(
+                    &ANSIStrings(&[colored_elements.superkey_prefix.paint(" ")]).to_string(),
+                );
+                key_indicators.len += 1;
             }
+            key_indicators.append(&swap_layout_status);
         }
+    }
     key_indicators
 }
 

@@ -1,6 +1,6 @@
 use crate::tab::Pane;
 
-use crate::{os_input_output::ServerOsApi, panes::PaneId, ClientId};
+use crate::{ClientId, os_input_output::ServerOsApi, panes::PaneId};
 use std::collections::{BTreeMap, HashMap};
 
 #[derive(Clone)]
@@ -88,19 +88,21 @@ impl ActivePanes {
     }
     fn unfocus_pane(&self, pane_id: PaneId, panes: &mut BTreeMap<PaneId, Box<dyn Pane>>) {
         if let PaneId::Terminal(terminal_id) = pane_id
-            && let Some(focus_event) = panes.get(&pane_id).and_then(|p| p.unfocus_event()) {
-                let _ = self
-                    .os_api
-                    .write_to_tty_stdin(terminal_id, focus_event.as_bytes());
-            }
+            && let Some(focus_event) = panes.get(&pane_id).and_then(|p| p.unfocus_event())
+        {
+            let _ = self
+                .os_api
+                .write_to_tty_stdin(terminal_id, focus_event.as_bytes());
+        }
     }
     fn focus_pane(&self, pane_id: PaneId, panes: &mut BTreeMap<PaneId, Box<dyn Pane>>) {
         if let PaneId::Terminal(terminal_id) = pane_id
-            && let Some(focus_event) = panes.get(&pane_id).and_then(|p| p.focus_event()) {
-                let _ = self
-                    .os_api
-                    .write_to_tty_stdin(terminal_id, focus_event.as_bytes());
-            }
+            && let Some(focus_event) = panes.get(&pane_id).and_then(|p| p.focus_event())
+        {
+            let _ = self
+                .os_api
+                .write_to_tty_stdin(terminal_id, focus_event.as_bytes());
+        }
     }
     pub fn pane_id_is_focused(&self, pane_id: &PaneId) -> bool {
         self.active_panes.values().any(|p_id| *p_id == *pane_id)

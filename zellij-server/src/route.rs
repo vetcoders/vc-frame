@@ -5,12 +5,12 @@ use tokio::sync::oneshot;
 use crate::global_async_runtime::get_tokio_runtime;
 use crate::thread_bus::ThreadSenders;
 use crate::{
+    ServerInstruction, SessionMetaData, SessionState,
     os_input_output::ServerOsApi,
     panes::PaneId,
     plugins::PluginInstruction,
     pty::{ClientTabIndexOrPaneId, PtyInstruction},
     screen::ScreenInstruction,
-    ServerInstruction, SessionMetaData, SessionState,
 };
 use std::thread;
 use std::time::Duration;
@@ -1583,21 +1583,24 @@ pub(crate) fn route_action(
             ..
         } => {
             drop(completion_tx); // releasing pipes is handled by the plugins, so we don't want
-                                 // this to block additionallu
+            // this to block additionallu
             if let Some(seen_cli_pipes) = seen_cli_pipes.as_mut()
-                && !seen_cli_pipes.contains(&pipe_id) {
-                    seen_cli_pipes.insert(pipe_id.clone());
-                    senders
-                        .send_to_server(ServerInstruction::AssociatePipeWithClient {
-                            pipe_id: pipe_id.clone(),
-                            client_id: cli_client_id.unwrap_or(client_id),
-                        })
-                        .with_context(err_context)?;
-                }
+                && !seen_cli_pipes.contains(&pipe_id)
+            {
+                seen_cli_pipes.insert(pipe_id.clone());
+                senders
+                    .send_to_server(ServerInstruction::AssociatePipeWithClient {
+                        pipe_id: pipe_id.clone(),
+                        client_id: cli_client_id.unwrap_or(client_id),
+                    })
+                    .with_context(err_context)?;
+            }
             if let Some(name) = name.take() {
                 let should_open_in_place = in_place.unwrap_or(false);
                 if should_open_in_place && pane_id.is_none() {
-                    log::error!("Was asked to open a new plugin in-place, but cannot identify the pane id... is the ZELLIJ_PANE_ID variable set?");
+                    log::error!(
+                        "Was asked to open a new plugin in-place, but cannot identify the pane id... is the ZELLIJ_PANE_ID variable set?"
+                    );
                 }
                 let pane_id_to_replace = if should_open_in_place { pane_id } else { None };
                 senders
@@ -2086,56 +2089,61 @@ pub(crate) fn route_action(
     let result = wait_for_action_completion(completion_rx, &action_name, wait_forever);
     if let Some(error_message) = &result.error_message {
         if let Some(cli_client_id) = cli_client_id
-            && let Some(ref os_input) = os_input {
-                let _ = os_input.send_to_client(
-                    cli_client_id,
-                    ServerToClientMsg::LogError {
-                        lines: vec![error_message.clone()],
-                    },
-                );
-            }
+            && let Some(ref os_input) = os_input
+        {
+            let _ = os_input.send_to_client(
+                cli_client_id,
+                ServerToClientMsg::LogError {
+                    lines: vec![error_message.clone()],
+                },
+            );
+        }
     } else if let Some(stdout_message) = &result.stdout_message {
         if let Some(cli_client_id) = cli_client_id
-            && let Some(ref os_input) = os_input {
-                let _ = os_input.send_to_client(
-                    cli_client_id,
-                    ServerToClientMsg::Log {
-                        lines: vec![stdout_message.clone()],
-                    },
-                );
-            }
+            && let Some(ref os_input) = os_input
+        {
+            let _ = os_input.send_to_client(
+                cli_client_id,
+                ServerToClientMsg::Log {
+                    lines: vec![stdout_message.clone()],
+                },
+            );
+        }
     } else if let Some(exit_status) = result.exit_status
         && let Some(cli_client_id) = cli_client_id
-            && let Some(ref os_input) = os_input {
-                let _ = os_input.send_to_client(
-                    cli_client_id,
-                    ServerToClientMsg::Exit {
-                        exit_reason: ExitReason::CustomExitStatus(exit_status),
-                    },
-                );
-            }
+        && let Some(ref os_input) = os_input
+    {
+        let _ = os_input.send_to_client(
+            cli_client_id,
+            ServerToClientMsg::Exit {
+                exit_reason: ExitReason::CustomExitStatus(exit_status),
+            },
+        );
+    }
     // Return tab ID to CLI clients as plain text
     if let Some(tab_id) = result.affected_tab_id
         && let Some(cli_client_id) = cli_client_id
-            && let Some(ref os_input) = os_input {
-                let _ = os_input.send_to_client(
-                    cli_client_id,
-                    ServerToClientMsg::Log {
-                        lines: vec![tab_id.to_string()],
-                    },
-                );
-            }
+        && let Some(ref os_input) = os_input
+    {
+        let _ = os_input.send_to_client(
+            cli_client_id,
+            ServerToClientMsg::Log {
+                lines: vec![tab_id.to_string()],
+            },
+        );
+    }
     // Return pane ID to CLI clients as plain text
     if let Some(pane_id) = result.affected_pane_id
         && let Some(cli_client_id) = cli_client_id
-            && let Some(ref os_input) = os_input {
-                let _ = os_input.send_to_client(
-                    cli_client_id,
-                    ServerToClientMsg::Log {
-                        lines: vec![pane_id.to_string()],
-                    },
-                );
-            }
+        && let Some(ref os_input) = os_input
+    {
+        let _ = os_input.send_to_client(
+            cli_client_id,
+            ServerToClientMsg::Log {
+                lines: vec![pane_id.to_string()],
+            },
+        );
+    }
     Ok((should_break, Some(result)))
 }
 
@@ -2193,21 +2201,21 @@ pub(crate) fn route_thread_main(
                                     && key.key_modifiers.contains(&KeyModifier::Ctrl))
                                     || key.bare_key == BareKey::Esc
                                     || (key.bare_key == BareKey::Char('c')
-                                        && key.key_modifiers.contains(&KeyModifier::Ctrl)))
-                                => {
-                                    let _ = os_input.send_to_client(
+                                        && key.key_modifiers.contains(&KeyModifier::Ctrl))) =>
+                            {
+                                let _ = os_input.send_to_client(
+                                    client_id,
+                                    ServerToClientMsg::Exit {
+                                        exit_reason: ExitReason::Normal,
+                                    },
+                                );
+                                let _ = senders.as_ref().map(|s| {
+                                    s.send_to_screen(ScreenInstruction::RemoveWatcherClient(
                                         client_id,
-                                        ServerToClientMsg::Exit {
-                                            exit_reason: ExitReason::Normal,
-                                        },
-                                    );
-                                    let _ = senders.as_ref().map(|s| {
-                                        s.send_to_screen(ScreenInstruction::RemoveWatcherClient(
-                                            client_id,
-                                        ))
-                                    });
-                                    should_break = true;
-                                },
+                                    ))
+                                });
+                                should_break = true;
+                            },
                             ClientToServerMsg::TerminalResize { new_size } => {
                                 // For watchers: send size to Screen for rendering adjustments, but
                                 // this does not affect the screen size
@@ -2645,7 +2653,9 @@ pub(crate) fn route_thread_main(
                     log::error!("Received unknown message from client.");
                 }
                 if consecutive_unknown_messages_received >= 1000 {
-                    log::error!("Client sent over 1000 consecutive unknown messages, this is probably an infinite loop, logging client out");
+                    log::error!(
+                        "Client sent over 1000 consecutive unknown messages, this is probably an infinite loop, logging client out"
+                    );
                     let _ = os_input.send_to_client(
                         client_id,
                         ServerToClientMsg::Exit {
@@ -2672,7 +2682,7 @@ fn request_panes_from_screen(
     senders: &ThreadSenders,
     show_all: bool,
 ) -> Result<Option<ListPanesResponse>> {
-    use crossbeam::channel::{unbounded, RecvTimeoutError};
+    use crossbeam::channel::{RecvTimeoutError, unbounded};
     use std::time::Duration;
 
     let (response_sender, response_receiver) = unbounded();
@@ -2698,7 +2708,7 @@ fn request_tabs_from_screen(
     senders: &ThreadSenders,
     client_id: ClientId,
 ) -> Result<Option<ListTabsResponse>> {
-    use crossbeam::channel::{unbounded, RecvTimeoutError};
+    use crossbeam::channel::{RecvTimeoutError, unbounded};
     use std::time::Duration;
 
     let (response_sender, response_receiver) = unbounded();
@@ -2724,7 +2734,7 @@ fn request_current_tab_info_from_screen(
     senders: &ThreadSenders,
     client_id: ClientId,
 ) -> Result<Option<TabInfo>> {
-    use crossbeam::channel::{unbounded, RecvTimeoutError};
+    use crossbeam::channel::{RecvTimeoutError, unbounded};
     use std::time::Duration;
 
     let (response_sender, response_receiver) = unbounded();
@@ -3087,14 +3097,15 @@ fn send_error_to_client(
     error_message: &str,
 ) {
     if let Some(cli_client_id) = cli_client_id
-        && let Some(os_input) = os_input {
-            let _ = os_input.send_to_client(
-                cli_client_id,
-                ServerToClientMsg::LogError {
-                    lines: vec![error_message.to_string()],
-                },
-            );
-        }
+        && let Some(os_input) = os_input
+    {
+        let _ = os_input.send_to_client(
+            cli_client_id,
+            ServerToClientMsg::LogError {
+                lines: vec![error_message.to_string()],
+            },
+        );
+    }
 }
 
 fn send_output_to_client(
@@ -3103,14 +3114,15 @@ fn send_output_to_client(
     output_lines: Vec<String>,
 ) {
     if let Some(cli_client_id) = cli_client_id
-        && let Some(os_input) = os_input {
-            let _ = os_input.send_to_client(
-                cli_client_id,
-                ServerToClientMsg::Log {
-                    lines: output_lines,
-                },
-            );
-        }
+        && let Some(os_input) = os_input
+    {
+        let _ = os_input.send_to_client(
+            cli_client_id,
+            ServerToClientMsg::Log {
+                lines: output_lines,
+            },
+        );
+    }
 }
 
 #[cfg(test)]

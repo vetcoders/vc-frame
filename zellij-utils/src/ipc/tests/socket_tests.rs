@@ -2,7 +2,7 @@ use crate::ipc::{
     ClientToServerMsg, IpcReceiverWithContext, IpcSenderWithContext, ServerToClientMsg,
 };
 use crate::pane_size::Size;
-use interprocess::local_socket::{prelude::*, ListenerOptions};
+use interprocess::local_socket::{ListenerOptions, prelude::*};
 
 use std::sync::atomic::{AtomicU32, Ordering};
 

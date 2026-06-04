@@ -2,7 +2,7 @@
 
 use crate::home::find_default_config_dir;
 use directories::ProjectDirs;
-use include_dir::{include_dir, Dir};
+use include_dir::{Dir, include_dir};
 use lazy_static::lazy_static;
 use std::{path::PathBuf, sync::OnceLock};
 use uuid::Uuid;
@@ -42,9 +42,10 @@ pub fn create_config_and_cache_folders() {
         log::error!("Failed to create cache dir: {:?}", e);
     }
     if let Some(config_dir) = find_default_config_dir()
-        && let Err(e) = std::fs::create_dir_all(config_dir.as_path()) {
-            log::error!("Failed to create config dir: {:?}", e);
-        }
+        && let Err(e) = std::fs::create_dir_all(config_dir.as_path())
+    {
+        log::error!("Failed to create config dir: {:?}", e);
+    }
     // while session_info is a child of cache currently, it won't necessarily always be this way,
     // and so it's explicitly created here
     if let Err(e) = std::fs::create_dir_all(ZELLIJ_SESSION_INFO_CACHE_DIR.as_path()) {
@@ -67,9 +68,10 @@ fn prune_empty_session_info_folders() {
             .is_some_and(|mut iter| iter.next().is_none());
         if is_empty
             && let Err(e) = std::fs::remove_dir(&path)
-                && e.kind() != std::io::ErrorKind::NotFound {
-                    log::debug!("Failed to prune empty session folder {:?}: {:?}", path, e);
-                }
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            log::debug!("Failed to prune empty session folder {:?}: {:?}", path, e);
+        }
     }
 }
 
@@ -195,14 +197,14 @@ pub fn is_ipc_socket(file_type: &std::fs::FileType) -> bool {
 /// On Windows, this uses named pipes via `GenericNamespaced`.
 #[cfg(unix)]
 pub fn ipc_connect(path: &std::path::Path) -> std::io::Result<interprocess::local_socket::Stream> {
-    use interprocess::local_socket::{prelude::*, GenericFilePath, Stream as LocalSocketStream};
+    use interprocess::local_socket::{GenericFilePath, Stream as LocalSocketStream, prelude::*};
     let fs_name = path.to_fs_name::<GenericFilePath>()?;
     LocalSocketStream::connect(fs_name)
 }
 
 #[cfg(windows)]
 pub fn ipc_connect(path: &std::path::Path) -> std::io::Result<interprocess::local_socket::Stream> {
-    use interprocess::local_socket::{prelude::*, GenericNamespaced, Stream as LocalSocketStream};
+    use interprocess::local_socket::{GenericNamespaced, Stream as LocalSocketStream, prelude::*};
     let name = path.to_string_lossy().to_string();
     let ns_name = name.to_ns_name::<GenericNamespaced>()?;
     LocalSocketStream::connect(ns_name)
@@ -215,14 +217,14 @@ pub fn ipc_connect(path: &std::path::Path) -> std::io::Result<interprocess::loca
 /// a marker file for session discovery.
 #[cfg(unix)]
 pub fn ipc_bind(path: &std::path::Path) -> std::io::Result<interprocess::local_socket::Listener> {
-    use interprocess::local_socket::{prelude::*, GenericFilePath, ListenerOptions};
+    use interprocess::local_socket::{GenericFilePath, ListenerOptions, prelude::*};
     let fs_name = path.to_fs_name::<GenericFilePath>()?;
     ListenerOptions::new().name(fs_name).create_sync()
 }
 
 #[cfg(windows)]
 pub fn ipc_bind(path: &std::path::Path) -> std::io::Result<interprocess::local_socket::Listener> {
-    use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions};
+    use interprocess::local_socket::{GenericNamespaced, ListenerOptions, prelude::*};
     let name = path.to_string_lossy().to_string();
     let ns_name = name.to_ns_name::<GenericNamespaced>()?;
     let listener = ListenerOptions::new().name(ns_name).create_sync()?;
@@ -239,7 +241,7 @@ pub fn ipc_bind(path: &std::path::Path) -> std::io::Result<interprocess::local_s
 pub fn ipc_bind_async(
     path: &std::path::Path,
 ) -> std::io::Result<interprocess::local_socket::tokio::Listener> {
-    use interprocess::local_socket::{prelude::*, GenericFilePath, ListenerOptions};
+    use interprocess::local_socket::{GenericFilePath, ListenerOptions, prelude::*};
     let fs_name = path.to_fs_name::<GenericFilePath>()?;
     ListenerOptions::new().name(fs_name).create_tokio()
 }
@@ -248,7 +250,7 @@ pub fn ipc_bind_async(
 pub fn ipc_bind_async(
     path: &std::path::Path,
 ) -> std::io::Result<interprocess::local_socket::tokio::Listener> {
-    use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions};
+    use interprocess::local_socket::{GenericNamespaced, ListenerOptions, prelude::*};
     let name = path.to_string_lossy().to_string();
     let ns_name = name.to_ns_name::<GenericNamespaced>()?;
     let listener = ListenerOptions::new().name(ns_name).create_tokio()?;
@@ -263,7 +265,7 @@ pub fn ipc_bind_async(
 pub fn ipc_connect_reply(
     path: &std::path::Path,
 ) -> std::io::Result<interprocess::local_socket::Stream> {
-    use interprocess::local_socket::{prelude::*, GenericNamespaced, Stream as LocalSocketStream};
+    use interprocess::local_socket::{GenericNamespaced, Stream as LocalSocketStream, prelude::*};
     let name = format!("{}-reply", path.to_string_lossy());
     let ns_name = name.to_ns_name::<GenericNamespaced>()?;
     LocalSocketStream::connect(ns_name)
@@ -276,7 +278,7 @@ pub fn ipc_connect_reply(
 pub fn ipc_bind_reply(
     path: &std::path::Path,
 ) -> std::io::Result<interprocess::local_socket::Listener> {
-    use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions};
+    use interprocess::local_socket::{GenericNamespaced, ListenerOptions, prelude::*};
     let name = format!("{}-reply", path.to_string_lossy());
     let ns_name = name.to_ns_name::<GenericNamespaced>()?;
     ListenerOptions::new().name(ns_name).create_sync()

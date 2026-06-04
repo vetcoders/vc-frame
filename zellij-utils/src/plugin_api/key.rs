@@ -1,9 +1,9 @@
 pub use super::generated_api::api::key::{
+    Key as ProtobufKey,
     key::{
         KeyModifier as ProtobufKeyModifier, MainKey as ProtobufMainKey,
         NamedKey as ProtobufNamedKey,
     },
-    Key as ProtobufKey,
 };
 use crate::data::{BareKey, KeyModifier, KeyWithModifier};
 

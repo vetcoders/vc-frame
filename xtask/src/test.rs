@@ -1,7 +1,7 @@
-use crate::{build, flags, metadata, WorkspaceMember};
-use anyhow::{anyhow, Context};
+use crate::{WorkspaceMember, build, flags, metadata};
+use anyhow::{Context, anyhow};
 use std::path::Path;
-use xshell::{cmd, Shell};
+use xshell::{Shell, cmd};
 
 pub fn test(sh: &Shell, flags: flags::Test) -> anyhow::Result<()> {
     let err_context = "failed to run task 'test'";

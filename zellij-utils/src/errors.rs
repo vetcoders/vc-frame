@@ -26,11 +26,11 @@ pub mod prelude {
     #[cfg(not(target_family = "wasm"))]
     pub use super::ToAnyhow;
     pub use super::ZellijError;
-    pub use anyhow::anyhow;
-    pub use anyhow::bail;
     pub use anyhow::Context;
     pub use anyhow::Error as anyError;
     pub use anyhow::Result;
+    pub use anyhow::anyhow;
+    pub use anyhow::bail;
 }
 
 pub trait ErrorInstruction {
@@ -769,9 +769,11 @@ mod not_wasm {
         // non-existent in the first place (Which really shouldn't happen, but you never know).
         fn show_backtrace(&self) -> String {
             if let Ok(var) = std::env::var("RUST_BACKTRACE")
-                && !var.is_empty() && var != "0" {
-                    return format!("\n\nPanic backtrace:\n{:?}", backtrace::Backtrace::new());
-                }
+                && !var.is_empty()
+                && var != "0"
+            {
+                return format!("\n\nPanic backtrace:\n{:?}", backtrace::Backtrace::new());
+            }
             "".into()
         }
 

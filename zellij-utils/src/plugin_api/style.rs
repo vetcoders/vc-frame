@@ -1,7 +1,7 @@
 use super::generated_api::api::style::{
-    color::Payload as ProtobufColorPayload, Color as ProtobufColor, ColorType as ProtobufColorType,
-    Palette as ProtobufPalette, RgbColorPayload as ProtobufRgbColorPayload, Style as ProtobufStyle,
-    Styling as ProtobufStyling, ThemeHue as ProtobufThemeHue,
+    Color as ProtobufColor, ColorType as ProtobufColorType, Palette as ProtobufPalette,
+    RgbColorPayload as ProtobufRgbColorPayload, Style as ProtobufStyle, Styling as ProtobufStyling,
+    ThemeHue as ProtobufThemeHue, color::Payload as ProtobufColorPayload,
 };
 use crate::data::{
     MultiplayerColors, Palette, PaletteColor, Style, StyleDeclaration, Styling, ThemeHue,

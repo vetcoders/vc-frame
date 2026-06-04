@@ -1,6 +1,6 @@
 use crate::os_input_output::{AsyncSignals, AsyncStdin, ClientOsApi, SignalEvent};
-use crate::remote_attach::websockets::MaybeTls;
 use crate::remote_attach::WebSocketConnections;
+use crate::remote_attach::websockets::MaybeTls;
 use crate::run_remote_client_terminal_loop;
 use crate::web_client::control_message::{
     WebClientToWebServerControlMessage, WebClientToWebServerControlMessagePayload,
@@ -166,12 +166,12 @@ impl Write for TestWriter {
 mod mock_ws_server {
     use super::*;
     use axum::{
+        Router,
         extract::{
-            ws::{WebSocket, WebSocketUpgrade},
             State,
+            ws::{WebSocket, WebSocketUpgrade},
         },
         routing::get,
-        Router,
     };
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;

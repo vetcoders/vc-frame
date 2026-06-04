@@ -1,9 +1,9 @@
 mod kdl_layout_parser;
 use crate::data::{
-    BareKey, Direction, FloatingPaneCoordinates, InputMode, KeyWithModifier, LayoutInfo,
-    LayoutMetadata, MultiplayerColors, Palette, PaletteColor, PaneId, PaneInfo, PaneManifest,
-    PermissionType, Resize, SessionInfo, StyleDeclaration, Styling, TabInfo, WebSharing,
-    DEFAULT_STYLES,
+    BareKey, DEFAULT_STYLES, Direction, FloatingPaneCoordinates, InputMode, KeyWithModifier,
+    LayoutInfo, LayoutMetadata, MultiplayerColors, Palette, PaletteColor, PaneId, PaneInfo,
+    PaneManifest, PermissionType, Resize, SessionInfo, StyleDeclaration, Styling, TabInfo,
+    WebSharing,
 };
 use crate::envs::EnvironmentVariables;
 use crate::home::{find_default_config_dir, get_layout_dir};
@@ -166,9 +166,7 @@ macro_rules! kdl_first_entry_as_bool {
 
 #[macro_export]
 macro_rules! entry_count {
-    ( $node:expr_2021 ) => {{
-        $node.entries().iter().len()
-    }};
+    ( $node:expr_2021 ) => {{ $node.entries().iter().len() }};
 }
 
 #[macro_export]
@@ -183,7 +181,7 @@ macro_rules! parse_kdl_action_char_or_string_arguments {
                         format!("All entries for action '{}' must be strings", $action_name),
                         kdl_entry.span().offset(),
                         kdl_entry.span().len(),
-                    ))
+                    ));
                 },
             }
         }
@@ -472,12 +470,12 @@ impl Action {
                             Err(_) => {
                                 return Err(ConfigError::new_kdl_error(
                                     format!(
-                                    "failed to read either of resize type or direction from '{}'",
-                                    word
-                                ),
+                                        "failed to read either of resize type or direction from '{}'",
+                                        word
+                                    ),
                                     action_node.span().offset(),
                                     action_node.span().len(),
-                                ))
+                                ));
                             },
                         },
                     }
@@ -2494,7 +2492,7 @@ macro_rules! kdl_get_bool_property_or_child_value_with_error {
                                     e.value()
                                 ),
                                 e
-                            ))
+                            ));
                         },
                     },
                     None => {
@@ -2584,7 +2582,7 @@ macro_rules! kdl_get_string_property_or_child_value_with_error {
                                     e.value()
                                 ),
                                 e
-                            ))
+                            ));
                         },
                     },
                     None => {
@@ -2799,21 +2797,22 @@ impl Options {
         let post_command_discovery_hook =
             kdl_property_first_arg_as_string_or_error!(kdl_options, "post_command_discovery_hook")
                 .map(|(hook, _entry)| hook.to_string());
-        let client_async_worker_tasks =
-            match kdl_property_first_arg_as_i64_or_error!(kdl_options, "client_async_worker_tasks")
-            {
-                Some((value, _)) if value >= 0 => Some(value as usize),
-                Some((value, entry)) => {
-                    return Err(kdl_parsing_error!(
-                        format!(
+        let client_async_worker_tasks = match kdl_property_first_arg_as_i64_or_error!(
+            kdl_options,
+            "client_async_worker_tasks"
+        ) {
+            Some((value, _)) if value >= 0 => Some(value as usize),
+            Some((value, entry)) => {
+                return Err(kdl_parsing_error!(
+                    format!(
                         "Number of client async worker tasks must be greater than 0, found '{}'",
                         value
                     ),
-                        entry
-                    ));
-                },
-                None => None,
-            };
+                    entry
+                ));
+            },
+            None => None,
+        };
         let visual_bell =
             kdl_property_first_arg_as_bool_or_error!(kdl_options, "visual_bell").map(|(v, _)| v);
         let focus_follows_mouse =
@@ -3047,8 +3046,8 @@ impl Options {
         }
     }
     fn default_shell_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
-        let comment_text =
-            format!("{}\n{}\n{}\n{}",
+        let comment_text = format!(
+            "{}\n{}\n{}\n{}",
             " ",
             "// Choose the path to the default shell that zellij will use for opening new panes",
             "// Default: $SHELL",
@@ -3381,7 +3380,8 @@ impl Options {
         }
     }
     fn copy_clipboard_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
-        let comment_text = format!("{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        let comment_text = format!(
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
             " ",
             "// Choose the destination for copied text",
             "// Allows using the primary selection buffer (on x11/wayland) instead of the system clipboard.",
@@ -3529,7 +3529,8 @@ impl Options {
         }
     }
     fn auto_layout_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
-        let comment_text = format!("{}\n{}\n{}\n{}\n{}\n{}",
+        let comment_text = format!(
+            "{}\n{}\n{}\n{}\n{}\n{}",
             " ",
             "// Toggle between having Zellij lay out panes according to a predefined set of layouts whenever possible",
             "// Options:",
@@ -3558,7 +3559,8 @@ impl Options {
         }
     }
     fn session_serialization_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
-        let comment_text = format!("{}\n{}\n{}\n{}\n{}\n{}",
+        let comment_text = format!(
+            "{}\n{}\n{}\n{}\n{}\n{}",
             " ",
             "// Whether sessions should be serialized to the cache folder (including their tabs/panes, cwds and running commands) so that they can later be resurrected",
             "// Options:",
@@ -3617,7 +3619,8 @@ impl Options {
         }
     }
     fn scrollback_lines_to_serialize_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
-        let comment_text = format!("{}\n{}\n{}\n{}\n{}",
+        let comment_text = format!(
+            "{}\n{}\n{}\n{}\n{}",
             " ",
             "// Scrollback lines to serialize along with the pane viewport when serializing sessions, 0",
             "// defaults to the scrollback size. If this number is higher than the scrollback size, it will",
@@ -3700,7 +3703,8 @@ impl Options {
         }
     }
     fn disable_session_metadata_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
-        let comment_text = format!("{}\n{}\n{}\n{}\n{}\n{}",
+        let comment_text = format!(
+            "{}\n{}\n{}\n{}\n{}\n{}",
             " ",
             "// Enable or disable writing of session metadata to disk (if disabled, other sessions might not know",
             "// metadata info on this session)",
@@ -3729,7 +3733,8 @@ impl Options {
         }
     }
     fn support_kitty_keyboard_protocol_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
-        let comment_text = format!("{}\n{}\n{}\n{}\n{}",
+        let comment_text = format!(
+            "{}\n{}\n{}\n{}\n{}",
             " ",
             "// Enable or disable support for the enhanced Kitty Keyboard Protocol (the host terminal must also support it)",
             "// (Requires restart)",
@@ -4447,11 +4452,13 @@ impl Layout {
 fn kdl_layout_error(kdl_error: kdl::KdlError, file_name: String, raw_layout: &str) -> ConfigError {
     let error_message = match kdl_error.kind {
         kdl::KdlErrorKind::Context("valid node terminator") => {
-            format!("Failed to deserialize KDL node. \nPossible reasons:\n{}\n{}\n{}\n{}",
-            "- Missing `;` after a node name, eg. { node; another_node; }",
-            "- Missing quotations (\") around an argument node eg. { first_node \"argument_node\"; }",
-            "- Missing an equal sign (=) between node arguments on a title line. eg. argument=\"value\"",
-            "- Found an extraneous equal sign (=) between node child arguments and their values. eg. { argument=\"value\" }")
+            format!(
+                "Failed to deserialize KDL node. \nPossible reasons:\n{}\n{}\n{}\n{}",
+                "- Missing `;` after a node name, eg. { node; another_node; }",
+                "- Missing quotations (\") around an argument node eg. { first_node \"argument_node\"; }",
+                "- Missing an equal sign (=) between node arguments on a title line. eg. argument=\"value\"",
+                "- Found an extraneous equal sign (=) between node child arguments and their values. eg. { argument=\"value\" }"
+            )
         },
         _ => String::from(kdl_error.help.unwrap_or("Kdl Deserialization Error")),
     };
@@ -5026,20 +5033,21 @@ pub fn load_plugins_to_kdl(
                 .map(|c| c.inner().clone()),
         };
         if let Some(configuration) = configuration
-            && !configuration.is_empty() {
-                has_children = true;
-                for (config_key, config_value) in configuration {
-                    let mut node = KdlNode::new(config_key.to_owned());
-                    if config_value == "true" {
-                        node.push(KdlValue::Bool(true));
-                    } else if config_value == "false" {
-                        node.push(KdlValue::Bool(false));
-                    } else {
-                        node.push(config_value.to_string());
-                    }
-                    background_plugin_children.nodes_mut().push(node);
+            && !configuration.is_empty()
+        {
+            has_children = true;
+            for (config_key, config_value) in configuration {
+                let mut node = KdlNode::new(config_key.to_owned());
+                if config_value == "true" {
+                    node.push(KdlValue::Bool(true));
+                } else if config_value == "false" {
+                    node.push(KdlValue::Bool(false));
+                } else {
+                    node.push(config_value.to_string());
                 }
+                background_plugin_children.nodes_mut().push(node);
             }
+        }
         if has_children {
             background_plugin_node.set_children(background_plugin_children);
         }
@@ -5357,9 +5365,10 @@ impl Themes {
             let entry = entry.map_err(|e| ConfigError::IoPath(e, path_to_theme_dir.clone()))?;
             let path = entry.path();
             if let Some(extension) = path.extension()
-                && extension == "kdl" {
-                    themes = themes.merge(Themes::from_path(path)?);
-                }
+                && extension == "kdl"
+            {
+                themes = themes.merge(Themes::from_path(path)?);
+            }
         }
         Ok(themes)
     }
@@ -5602,33 +5611,34 @@ impl SessionInfo {
                     let mut history = vec![];
                     if let Some(history_node) =
                         client_node.children().and_then(|c| c.get("history"))
-                        && let Some(history_children) = history_node.children() {
-                            for pane_id_node in history_children.nodes() {
-                                if pane_id_node.name().value() == "pane_id" {
-                                    let pane_type = pane_id_node
-                                        .entries()
-                                        .iter()
-                                        .find(|e| e.name().map(|n| n.value()) == Some("type"))
-                                        .and_then(|e| e.value().as_string());
-                                    let id = pane_id_node
-                                        .entries()
-                                        .iter()
-                                        .find(|e| e.name().is_none())
-                                        .and_then(|e| e.value().as_i64())
-                                        .map(|i| i as u32);
-                                    if let (Some(pane_type), Some(id)) = (pane_type, id) {
-                                        let pane_id = match pane_type {
-                                            "terminal" => Some(PaneId::Terminal(id)),
-                                            "plugin" => Some(PaneId::Plugin(id)),
-                                            _ => None,
-                                        };
-                                        if let Some(pane_id) = pane_id {
-                                            history.push(pane_id);
-                                        }
+                        && let Some(history_children) = history_node.children()
+                    {
+                        for pane_id_node in history_children.nodes() {
+                            if pane_id_node.name().value() == "pane_id" {
+                                let pane_type = pane_id_node
+                                    .entries()
+                                    .iter()
+                                    .find(|e| e.name().map(|n| n.value()) == Some("type"))
+                                    .and_then(|e| e.value().as_string());
+                                let id = pane_id_node
+                                    .entries()
+                                    .iter()
+                                    .find(|e| e.name().is_none())
+                                    .and_then(|e| e.value().as_i64())
+                                    .map(|i| i as u32);
+                                if let (Some(pane_type), Some(id)) = (pane_type, id) {
+                                    let pane_id = match pane_type {
+                                        "terminal" => Some(PaneId::Terminal(id)),
+                                        "plugin" => Some(PaneId::Plugin(id)),
+                                        _ => None,
+                                    };
+                                    if let Some(pane_id) = pane_id {
+                                        history.push(pane_id);
                                     }
                                 }
                             }
                         }
+                    }
                     pane_history.insert(client_id as u16, history);
                 }
             }
@@ -5960,11 +5970,11 @@ impl PaneManifest {
         for node in kdl_doucment.nodes() {
             if node.name().to_string() == "pane"
                 && let Some(pane_document) = node.children()
-                    && let Ok((tab_position, pane_info)) = PaneInfo::decode_from_kdl(pane_document)
-                    {
-                        let panes_in_tab_position = panes.entry(tab_position).or_default();
-                        panes_in_tab_position.push(pane_info);
-                    }
+                && let Ok((tab_position, pane_info)) = PaneInfo::decode_from_kdl(pane_document)
+            {
+                let panes_in_tab_position = panes.entry(tab_position).or_default();
+                panes_in_tab_position.push(pane_info);
+            }
         }
         PaneManifest { panes }
     }

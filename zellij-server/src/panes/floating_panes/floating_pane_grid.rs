@@ -607,7 +607,7 @@ impl<'a> FloatingPaneGrid<'a> {
             .filter(|(_, p)| p.selectable())
             .map(|(p_id, p)| (*p_id, p))
             .collect();
-        
+
         panes
             .iter()
             .enumerate()
@@ -632,7 +632,7 @@ impl<'a> FloatingPaneGrid<'a> {
             .filter(|(_, p)| p.selectable())
             .map(|(p_id, p)| (*p_id, p))
             .collect();
-        
+
         panes
             .iter()
             .enumerate()
@@ -677,7 +677,7 @@ impl<'a> FloatingPaneGrid<'a> {
             .filter(|(_, p)| p.selectable())
             .map(|(p_id, p)| (*p_id, p))
             .collect();
-        
+
         panes
             .iter()
             .enumerate()
@@ -703,7 +703,7 @@ impl<'a> FloatingPaneGrid<'a> {
             .filter(|(_, p)| p.selectable())
             .map(|(p_id, p)| (*p_id, p))
             .collect();
-        
+
         panes
             .iter()
             .enumerate()
@@ -729,7 +729,7 @@ impl<'a> FloatingPaneGrid<'a> {
             .filter(|(_, p)| p.selectable())
             .map(|(p_id, p)| (*p_id, p))
             .collect();
-        
+
         panes
             .iter()
             .enumerate()

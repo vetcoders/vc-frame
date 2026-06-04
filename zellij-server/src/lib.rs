@@ -26,14 +26,14 @@ mod terminal_bytes;
 mod thread_bus;
 mod ui;
 
-use background_jobs::{background_jobs_main, BackgroundJob};
+use background_jobs::{BackgroundJob, background_jobs_main};
 use log::info;
-use pty_writer::{pty_writer_main, PtyWriteInstruction};
+use pty_writer::{PtyWriteInstruction, pty_writer_main};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::{
     net::{IpAddr, Ipv4Addr},
     path::PathBuf,
-    sync::{atomic::AtomicBool, Arc, RwLock},
+    sync::{Arc, RwLock, atomic::AtomicBool},
     thread,
 };
 use zellij_utils::envs;
@@ -45,12 +45,12 @@ use wasmi::Engine;
 
 use crate::{
     os_input_output::ServerOsApi,
-    plugins::{plugin_thread_main, PluginInstruction},
-    pty::{get_default_shell, pty_thread_main, Pty, PtyInstruction},
-    screen::{screen_thread_main, ScreenInstruction},
+    plugins::{PluginInstruction, plugin_thread_main},
+    pty::{Pty, PtyInstruction, get_default_shell, pty_thread_main},
+    screen::{ScreenInstruction, screen_thread_main},
     thread_bus::{Bus, ThreadSenders},
 };
-use route::{route_thread_main, NotificationEnd};
+use route::{NotificationEnd, route_thread_main};
 use zellij_utils::{
     channels::{self, ChannelWithContext, SenderWithContext},
     consts::{
@@ -60,12 +60,12 @@ use zellij_utils::{
         ConnectToSession, InputMode, KeyWithModifier, LayoutInfo, LayoutWithError, Style,
         WebSharing,
     },
-    errors::{prelude::*, ContextType, ErrorInstruction, FatalError, ServerContext},
+    errors::{ContextType, ErrorInstruction, FatalError, ServerContext, prelude::*},
     home::{default_layout_dir, get_default_data_dir},
     input::{
         actions::Action,
         command::{RunCommand, TerminalAction},
-        config::{watch_config_file_changes, watch_layout_dir_changes, Config},
+        config::{Config, watch_config_file_changes, watch_layout_dir_changes},
         keybinds::Keybinds,
         layout::{FloatingPaneLayout, Layout, PluginAlias, Run, RunPluginOrAlias},
         options::Options,
@@ -464,12 +464,11 @@ impl SessionMetaData {
         }
 
         // Detect and notify plugins of configuration changes
-        if config_was_written_to_disk
-            && let Some(new_plugins) = new_plugin_config {
-                self.senders
-                    .send_to_plugin(PluginInstruction::DetectPluginConfigChanges(new_plugins))
-                    .unwrap();
-            }
+        if config_was_written_to_disk && let Some(new_plugins) = new_plugin_config {
+            self.senders
+                .send_to_plugin(PluginInstruction::DetectPluginConfigChanges(new_plugins))
+                .unwrap();
+        }
     }
 }
 
@@ -664,11 +663,7 @@ impl SessionState {
             .iter()
             .filter_map(
                 |(&c_id, &is_web_client)| {
-                    if is_web_client {
-                        Some(c_id)
-                    } else {
-                        None
-                    }
+                    if is_web_client { Some(c_id) } else { None }
                 },
             )
             .collect()
@@ -720,9 +715,10 @@ impl SessionState {
     /// only when no regular client is connected.
     pub fn pick_forward_target(&self) -> Option<ClientId> {
         if let Some(candidate) = self.last_active_client
-            && self.clients.contains_key(&candidate) {
-                return Some(candidate);
-            }
+            && self.clients.contains_key(&candidate)
+        {
+            return Some(candidate);
+        }
         self.clients.keys().copied().next()
     }
 }
@@ -732,7 +728,7 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
 
     #[cfg(unix)]
     {
-        use nix::sys::stat::{umask, Mode};
+        use nix::sys::stat::{Mode, umask};
         // preserve the current umask: read current value by setting to another mode, and then restoring it
         let current_umask = umask(Mode::all());
         umask(current_umask);
@@ -1339,9 +1335,9 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                     remove_client!(*client_id, os_input, session_state, session_data);
                 }
                 drop(completion_tx); // we do this here explicitly to signal that the clients have
-                                     // already disconnected and to prevent a deadlock below caused
-                                     // by us having to wait for session_data to send cleanup
-                                     // signals to the various threads
+                // already disconnected and to prevent a deadlock below caused
+                // by us having to wait for session_data to send cleanup
+                // signals to the various threads
                 for client_id in client_ids {
                     session_data
                         .write()
@@ -1617,7 +1613,9 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                     );
                 } else {
                     // TODO: test this
-                    log::error!("Cannot start web server: this instance of Zellij was compiled without web_server_capability");
+                    log::error!(
+                        "Cannot start web server: this instance of Zellij was compiled without web_server_capability"
+                    );
                 }
             },
             ServerInstruction::ShareCurrentSession(_client_id) => {
@@ -1638,7 +1636,9 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                             .unwrap();
                     }
                 } else {
-                    log::error!("Cannot share session: this instance of Zellij was compiled without web_server_capability");
+                    log::error!(
+                        "Cannot share session: this instance of Zellij was compiled without web_server_capability"
+                    );
                 }
             },
             ServerInstruction::StopSharingCurrentSession(_client_id) => {
@@ -1687,7 +1687,9 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                     }
                 } else {
                     // TODO: test this
-                    log::error!("Cannot start web server: this instance of Zellij was compiled without web_server_capability");
+                    log::error!(
+                        "Cannot start web server: this instance of Zellij was compiled without web_server_capability"
+                    );
                 }
             },
             ServerInstruction::WebServerStarted(base_url) => {
@@ -2116,12 +2118,13 @@ fn should_show_release_notes(
         return false;
     }
     if let Some(should_show_release_notes_config) = should_show_release_notes_config
-        && !should_show_release_notes_config {
-            // if we were explicitly told not to show release notes, we don't show them,
-            // otherwise we make sure we only show them if they were not seen AND we know
-            // we are able to write to the cache
-            return false;
-        }
+        && !should_show_release_notes_config
+    {
+        // if we were explicitly told not to show release notes, we don't show them,
+        // otherwise we make sure we only show them if they were not seen AND we know
+        // we are able to write to the cache
+        return false;
+    }
     if ZELLIJ_SEEN_RELEASE_NOTES_CACHE_FILE.exists() {
         false
     } else {

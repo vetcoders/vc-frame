@@ -1,8 +1,8 @@
 use crate::file_list_view::FsEntry;
 use crate::platform::Platform;
 use crate::shared::{calculate_list_bounds, render_list_tip};
-use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 use pretty_bytes::converter::convert as pretty_bytes;
 use unicode_width::UnicodeWidthStr;
 use zellij_tile::prelude::*;

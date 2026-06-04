@@ -1,10 +1,10 @@
 use ansi_term::{
-    unstyled_len, ANSIString, ANSIStrings,
+    ANSIString, ANSIStrings,
     Color::{Fixed, RGB},
-    Style,
+    Style, unstyled_len,
 };
 
-use crate::{action_key, style_key_with_modifier, LinePart};
+use crate::{LinePart, action_key, style_key_with_modifier};
 use zellij_tile::prelude::{actions::Action, *};
 use zellij_tile_utils::palette_match;
 

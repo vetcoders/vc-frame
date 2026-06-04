@@ -11,11 +11,11 @@ use vte;
 use zellij_utils::data::Style;
 use zellij_utils::errors::prelude::*;
 
-use component_coordinates::{is_too_high, is_too_wide, Coordinates};
+use component_coordinates::{Coordinates, is_too_high, is_too_wide};
 use nested_list::{nested_list, parse_nested_list_items};
 use ribbon::ribbon;
 use table::table;
-use text::{parse_text, parse_text_params, stringify_text, text, Text};
+use text::{Text, parse_text, parse_text_params, stringify_text, text};
 
 macro_rules! parse_next_param {
     ($next_param:expr, $type:ident, $component_name:expr, $item_name:expr) => {{

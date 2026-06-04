@@ -725,10 +725,7 @@ fn merge_attach_command_options(
     cli_config_options: Option<Options>,
     cli_args: &CliArgs,
 ) -> Option<Options> {
-    
-    if let Some(Command::Sessions(Sessions::Attach { options, .. })) =
-        cli_args.command.clone()
-    {
+    if let Some(Command::Sessions(Sessions::Attach { options, .. })) = cli_args.command.clone() {
         match options.clone().as_deref() {
             Some(SessionCommand::Options(options)) => match cli_config_options {
                 Some(cli_config_options) => {

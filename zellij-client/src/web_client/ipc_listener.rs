@@ -2,7 +2,7 @@ use axum_server::Handle;
 use interprocess::local_socket::traits::tokio::Listener;
 use std::net::IpAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use zellij_utils::consts::{ipc_bind_async, WEBSERVER_SOCKET_PATH};
+use zellij_utils::consts::{WEBSERVER_SOCKET_PATH, ipc_bind_async};
 use zellij_utils::prost::Message;
 use zellij_utils::web_server_commands::{InstructionForWebServer, VersionInfo, WebServerResponse};
 use zellij_utils::web_server_contract::web_server_contract::InstructionForWebServer as ProtoInstructionForWebServer;

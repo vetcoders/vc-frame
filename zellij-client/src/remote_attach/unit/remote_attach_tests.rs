@@ -11,11 +11,11 @@ use zellij_utils::remote_session_tokens;
 mod mock_server {
     use super::*;
     use axum::{
+        Json, Router,
         extract::State,
         http::StatusCode,
         response::Response,
         routing::{get, post},
-        Json, Router,
     };
     use axum_extra::extract::cookie::{Cookie, CookieJar};
     use serde::Deserialize;
@@ -218,10 +218,10 @@ mod mock_server {
 #[cfg(feature = "web_server_capability")]
 mod tls_mock_server {
     use super::mock_server::MockRemoteServerState;
-    use axum::routing::{get, post};
     use axum::Router;
-    use axum_server::tls_rustls::RustlsConfig;
+    use axum::routing::{get, post};
     use axum_server::Handle;
+    use axum_server::tls_rustls::RustlsConfig;
     use std::path::PathBuf;
     use std::time::Duration;
 

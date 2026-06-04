@@ -3,7 +3,7 @@ use std::time::Duration;
 use zellij_tile::prelude::*;
 
 use super::components::{
-    build_pane_ui_line, build_session_ui_line, build_tab_ui_line, Colors, LineToRender,
+    Colors, LineToRender, build_pane_ui_line, build_session_ui_line, build_tab_ui_line,
 };
 
 #[derive(Debug, Clone, Default)]

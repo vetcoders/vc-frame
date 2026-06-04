@@ -1,6 +1,6 @@
 use super::{
-    is_too_high, parse_indices, parse_opaque, parse_selected, parse_text, stringify_text,
-    Coordinates, Text,
+    Coordinates, Text, is_too_high, parse_indices, parse_opaque, parse_selected, parse_text,
+    stringify_text,
 };
 use crate::panes::terminal_character::{AnsiCode, CharacterStyles, RESET_STYLES};
 use zellij_utils::data::Style;

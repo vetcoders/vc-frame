@@ -1,4 +1,4 @@
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use std::collections::{BTreeMap, HashSet};
 use std::{
     io,
@@ -13,17 +13,14 @@ use zellij_utils::plugin_api::generated_api::api::plugin_command::{
     hide_floating_panes_response, save_session_response, show_floating_panes_response,
 };
 use zellij_utils::plugin_api::plugin_command::{
-    dump_layout_response, dump_session_layout_response, get_focused_pane_info_response,
-    get_pane_cwd_response, get_pane_running_command_response, get_session_list_response,
-    parse_layout_response, CreateTokenResponse, ListTokensResponse,
-    ProtobufBreakPanesToNewTabResponse, ProtobufBreakPanesToTabWithIdResponse,
-    ProtobufBreakPanesToTabWithIndexResponse, ProtobufCurrentSessionLastSavedTimeResponse,
-    ProtobufDeleteAllDeadSessionsResponse, ProtobufDeleteDeadSessionResponse,
-    ProtobufDeleteLayoutResponse, ProtobufDumpLayoutResponse, ProtobufDumpSessionLayoutResponse,
-    ProtobufEditLayoutResponse, ProtobufFocusOrCreateTabResponse,
-    ProtobufGenerateRandomNameResponse, ProtobufGetFocusedPaneInfoResponse,
-    ProtobufGetLayoutDirResponse, ProtobufGetPaneCwdResponse, ProtobufGetPaneInfoResponse,
-    ProtobufGetPanePidResponse, ProtobufGetPaneRunningCommandResponse,
+    CreateTokenResponse, ListTokensResponse, ProtobufBreakPanesToNewTabResponse,
+    ProtobufBreakPanesToTabWithIdResponse, ProtobufBreakPanesToTabWithIndexResponse,
+    ProtobufCurrentSessionLastSavedTimeResponse, ProtobufDeleteAllDeadSessionsResponse,
+    ProtobufDeleteDeadSessionResponse, ProtobufDeleteLayoutResponse, ProtobufDumpLayoutResponse,
+    ProtobufDumpSessionLayoutResponse, ProtobufEditLayoutResponse,
+    ProtobufFocusOrCreateTabResponse, ProtobufGenerateRandomNameResponse,
+    ProtobufGetFocusedPaneInfoResponse, ProtobufGetLayoutDirResponse, ProtobufGetPaneCwdResponse,
+    ProtobufGetPaneInfoResponse, ProtobufGetPanePidResponse, ProtobufGetPaneRunningCommandResponse,
     ProtobufGetSessionEnvironmentVariablesResponse, ProtobufGetSessionListResponse,
     ProtobufGetTabInfoResponse, ProtobufHideFloatingPanesResponse, ProtobufKillSessionsResponse,
     ProtobufNewTabResponse, ProtobufNewTabsResponse, ProtobufOpenCommandPaneBackgroundResponse,
@@ -40,7 +37,9 @@ use zellij_utils::plugin_api::plugin_command::{
     ProtobufOpenTerminalPaneInPlaceOfPaneIdResponse, ProtobufOpenTerminalResponse,
     ProtobufParseLayoutResponse, ProtobufPluginCommand, ProtobufRenameLayoutResponse,
     ProtobufSaveLayoutResponse, ProtobufSaveSessionResponse, ProtobufShowFloatingPanesResponse,
-    RenameWebTokenResponse, RevokeAllWebTokensResponse, RevokeTokenResponse,
+    RenameWebTokenResponse, RevokeAllWebTokensResponse, RevokeTokenResponse, dump_layout_response,
+    dump_session_layout_response, get_focused_pane_info_response, get_pane_cwd_response,
+    get_pane_running_command_response, get_session_list_response, parse_layout_response,
 };
 use zellij_utils::plugin_api::plugin_ids::{ProtobufPluginIds, ProtobufZellijVersion};
 

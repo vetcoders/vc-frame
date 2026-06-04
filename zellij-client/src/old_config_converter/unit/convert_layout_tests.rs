@@ -37,7 +37,10 @@ fn properly_convert_layout_with_session_name() -> Result<(), String> {
 
 #[test]
 fn properly_convert_layout_with_session_name_and_attach_false() -> Result<(), String> {
-    let fixture = PathBuf::from(format!("{}/src/old_config_converter/unit/fixtures/old_yaml_layout_with_session_name_and_attach_false.yaml", env!("CARGO_MANIFEST_DIR")));
+    let fixture = PathBuf::from(format!(
+        "{}/src/old_config_converter/unit/fixtures/old_yaml_layout_with_session_name_and_attach_false.yaml",
+        env!("CARGO_MANIFEST_DIR")
+    ));
     let mut handle = File::open(&fixture).map_err(|e| format!("{}", e))?;
     let mut raw_config_file = String::new();
     handle
@@ -66,7 +69,10 @@ fn properly_convert_layout_with_config() -> Result<(), String> {
 
 #[test]
 fn properly_convert_layout_with_config_and_session_name() -> Result<(), String> {
-    let fixture = PathBuf::from(format!("{}/src/old_config_converter/unit/fixtures/old_yaml_layout_with_config_and_session_name.yaml", env!("CARGO_MANIFEST_DIR")));
+    let fixture = PathBuf::from(format!(
+        "{}/src/old_config_converter/unit/fixtures/old_yaml_layout_with_config_and_session_name.yaml",
+        env!("CARGO_MANIFEST_DIR")
+    ));
     let mut handle = File::open(&fixture).map_err(|e| format!("{}", e))?;
     let mut raw_config_file = String::new();
     handle

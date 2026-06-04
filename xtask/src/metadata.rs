@@ -1,7 +1,7 @@
 //! Helper functions for querying cargo metadata
 use anyhow::Context;
 use serde_json::Value;
-use xshell::{cmd, Shell};
+use xshell::{Shell, cmd};
 
 /// Get cargo metadata for the workspace
 pub fn get_cargo_metadata(sh: &Shell) -> anyhow::Result<Value> {

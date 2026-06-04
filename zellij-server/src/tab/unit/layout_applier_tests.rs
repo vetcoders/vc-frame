@@ -5,7 +5,7 @@ use crate::panes::{LinkHandler, PaneId};
 use crate::plugins::PluginInstruction;
 use crate::pty::PtyInstruction;
 use crate::tab::layout_applier::LayoutApplier;
-use crate::{os_input_output::ServerOsApi, thread_bus::ThreadSenders, ClientId};
+use crate::{ClientId, os_input_output::ServerOsApi, thread_bus::ThreadSenders};
 use insta::assert_snapshot;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};

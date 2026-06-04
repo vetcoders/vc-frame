@@ -1,10 +1,10 @@
+use crate::plugins::PluginId;
 use crate::plugins::plugin_map::{
     PluginEnv, PluginMap, RunningPlugin, VecDequeInputStream, WriteOutputStream,
 };
-use crate::plugins::plugin_worker::{plugin_worker, RunningWorker};
+use crate::plugins::plugin_worker::{RunningWorker, plugin_worker};
 use crate::plugins::wasm_bridge::{LoadingContext, PluginCache};
 use crate::plugins::zellij_exports::{wasi_write_object, zellij_exports};
-use crate::plugins::PluginId;
 use prost::Message;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -13,14 +13,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 use wasmi::{Engine, Instance, Linker, Module, Store, StoreLimits};
-use wasmi_wasi::sync::WasiCtxBuilder;
-use wasmi_wasi::wasi_common::pipe::{ReadPipe, WritePipe};
 use wasmi_wasi::Dir;
 use wasmi_wasi::WasiCtx;
+use wasmi_wasi::sync::WasiCtxBuilder;
+use wasmi_wasi::wasi_common::pipe::{ReadPipe, WritePipe};
 
 use crate::{
-    logging_pipe::LoggingPipe, thread_bus::ThreadSenders,
-    ui::loading_indication::LoadingIndication, ClientId,
+    ClientId, logging_pipe::LoggingPipe, thread_bus::ThreadSenders,
+    ui::loading_indication::LoadingIndication,
 };
 
 use zellij_utils::plugin_api::action::ProtobufPluginConfiguration;
@@ -298,9 +298,10 @@ impl<'a> PluginLoader<'a> {
             .with_context(err_context)?;
 
         if let Some(func) = instance.get_func(&mut store, "_initialize")
-            && let Ok(typed_func) = func.typed::<(), ()>(&store) {
-                let _ = typed_func.call(&mut store, ());
-            }
+            && let Ok(typed_func) = func.typed::<(), ()>(&store)
+        {
+            let _ = typed_func.call(&mut store, ());
+        }
 
         self.plugin_cache
             .lock()
@@ -409,9 +410,10 @@ impl<'a> PluginLoader<'a> {
             .with_context(err_context)?;
 
         if let Some(func) = instance.get_func(&mut store, "_initialize")
-            && let Ok(typed_func) = func.typed::<(), ()>(&store) {
-                let _ = typed_func.call(&mut store, ());
-            }
+            && let Ok(typed_func) = func.typed::<(), ()>(&store)
+        {
+            let _ = typed_func.call(&mut store, ());
+        }
 
         Ok((store, instance))
     }

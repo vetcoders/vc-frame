@@ -1,6 +1,6 @@
 use super::config::connection_timeout;
 use isahc::prelude::*;
-use isahc::{config::RedirectPolicy, AsyncBody, HttpClient, Request, Response};
+use isahc::{AsyncBody, HttpClient, Request, Response, config::RedirectPolicy};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -49,23 +49,25 @@ impl HttpClientWithCookies {
 
         // Add cookies to request
         if let Ok(cookies) = self.cookies.lock()
-            && !cookies.is_empty() {
-                let cookie_header = cookies
-                    .iter()
-                    .map(|(k, v)| format!("{}={}", k, v))
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                req.headers_mut()
-                    .insert("cookie", cookie_header.parse().unwrap());
-            }
+            && !cookies.is_empty()
+        {
+            let cookie_header = cookies
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect::<Vec<_>>()
+                .join("; ");
+            req.headers_mut()
+                .insert("cookie", cookie_header.parse().unwrap());
+        }
 
         let response = self.client.send_async(req).await?;
 
         // Extract and store cookies from response
         if let Some(set_cookie_headers) = response.headers().get_all("set-cookie").iter().next()
-            && let Ok(cookie_str) = set_cookie_headers.to_str() {
-                self.parse_and_store_cookies(cookie_str);
-            }
+            && let Ok(cookie_str) = set_cookie_headers.to_str()
+        {
+            self.parse_and_store_cookies(cookie_str);
+        }
 
         Ok(response)
     }
@@ -91,14 +93,15 @@ impl HttpClientWithCookies {
 
     pub fn get_cookie_header(&self) -> Option<String> {
         if let Ok(cookies) = self.cookies.lock()
-            && !cookies.is_empty() {
-                let cookie_header = cookies
-                    .iter()
-                    .map(|(k, v)| format!("{}={}", k, v))
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                return Some(cookie_header);
-            }
+            && !cookies.is_empty()
+        {
+            let cookie_header = cookies
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Some(cookie_header);
+        }
         None
     }
 

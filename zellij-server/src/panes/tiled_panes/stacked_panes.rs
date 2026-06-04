@@ -1,6 +1,6 @@
 use crate::{
     panes::PaneId,
-    tab::{Pane, MIN_TERMINAL_HEIGHT},
+    tab::{MIN_TERMINAL_HEIGHT, Pane},
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -832,9 +832,9 @@ impl<'a> StackedPanes<'a> {
             if let Some(stack_id) = pane.current_geom().stacked
                 && let std::collections::hash_map::Entry::Vacant(e) =
                     positions_and_sizes_of_all_stacks.entry(stack_id)
-                {
-                    e.insert(self.position_and_size_of_stack(&pane.pid())?);
-                }
+            {
+                e.insert(self.position_and_size_of_stack(&pane.pid())?);
+            }
         }
         Some(positions_and_sizes_of_all_stacks)
     }

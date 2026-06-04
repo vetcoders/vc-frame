@@ -2,7 +2,7 @@
 //
 // It is supposed to be mostly self containing - please refrain from adding to it, importing
 // from it or changing it
-use super::old_config::{config_yaml_to_config_kdl, OldConfigFromYaml, OldRunCommand};
+use super::old_config::{OldConfigFromYaml, OldRunCommand, config_yaml_to_config_kdl};
 use serde::{Deserialize, Serialize};
 use std::vec::Vec;
 use std::{fmt, path::PathBuf};

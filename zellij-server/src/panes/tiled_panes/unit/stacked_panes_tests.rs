@@ -1,4 +1,4 @@
-use crate::{panes::tiled_panes::StackedPanes, panes::PaneId, tab::Pane};
+use crate::{panes::PaneId, panes::tiled_panes::StackedPanes, tab::Pane};
 use insta::assert_snapshot;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -10,9 +10,9 @@ use zellij_utils::pane_size::{Dimension, PaneGeom};
 
 use crate::ui::pane_boundaries_frame::FrameParams;
 use crate::{
+    ClientId,
     output::{CharacterChunk, SixelImageChunk},
     pty::VteBytes,
-    ClientId,
 };
 use std::time::Instant;
 use zellij_utils::data::{InputMode, PaletteColor, PaneContents};
@@ -200,8 +200,8 @@ fn combine_vertically_aligned_panes_to_stack_when_lower_pane_is_stacked() {
 }
 
 #[test]
-fn combine_vertically_aligned_panes_to_stack_when_lower_pane_is_stacked_and_flexible_pane_is_on_top_of_stack(
-) {
+fn combine_vertically_aligned_panes_to_stack_when_lower_pane_is_stacked_and_flexible_pane_is_on_top_of_stack()
+ {
     let mut mock_panes: HashMap<PaneId, &mut Box<dyn Pane>> = HashMap::new();
 
     mock_pane!(
@@ -258,8 +258,8 @@ fn combine_vertically_aligned_panes_to_stack_when_lower_pane_is_stacked_and_flex
 }
 
 #[test]
-fn combine_vertically_aligned_panes_to_stack_when_lower_pane_is_stacked_and_flexible_pane_is_mid_stack(
-) {
+fn combine_vertically_aligned_panes_to_stack_when_lower_pane_is_stacked_and_flexible_pane_is_mid_stack()
+ {
     let mut mock_panes: HashMap<PaneId, &mut Box<dyn Pane>> = HashMap::new();
 
     mock_pane!(

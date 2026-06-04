@@ -324,14 +324,16 @@ fn serialize_pane_title_and_attributes(
             .push(KdlEntry::new_prop("focus", KdlValue::Bool(true)));
     }
     if let Some(initial_pane_contents) = initial_pane_contents.as_ref()
-        && command.is_none() && edit.is_none() {
-            let file_name = format!("initial_contents_{}", pane_contents.keys().len() + 1);
-            kdl_node
-                .entries_mut()
-                .push(KdlEntry::new_prop("contents_file", file_name.clone()));
+        && command.is_none()
+        && edit.is_none()
+    {
+        let file_name = format!("initial_contents_{}", pane_contents.keys().len() + 1);
+        kdl_node
+            .entries_mut()
+            .push(KdlEntry::new_prop("contents_file", file_name.clone()));
 
-            pane_contents.insert(file_name, initial_pane_contents.clone());
-        }
+        pane_contents.insert(file_name, initial_pane_contents.clone());
+    }
 }
 
 fn serialize_args(args: Vec<String>, pane_node_children: &mut KdlDocument) {
@@ -873,9 +875,10 @@ fn get_floating_panes_layout_from_panegeoms(
         .map(|m| {
             let mut run = m.run.clone();
             if let Some(cwd) = &m.cwd
-                && let Some(r) = run.as_mut() {
-                    r.add_cwd(cwd)
-                }
+                && let Some(r) = run.as_mut()
+            {
+                r.add_cwd(cwd)
+            }
             FloatingPaneLayout {
                 name: m.title.clone(),
                 height: Some(m.geom.rows.into()),
@@ -2232,7 +2235,7 @@ mod tests {
 
     fn get_dim(dim_hm: &Value) -> Dimension {
         let constr_str = dim_hm["constraint"].to_string();
-        
+
         if constr_str.contains("Fixed") {
             let value = &constr_str[7..constr_str.len() - 2];
             Dimension::fixed(value.parse().unwrap())
