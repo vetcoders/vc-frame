@@ -56,6 +56,12 @@ const RESET_STYLE: &str = "\u{1b}[m";
 const SHOW_CURSOR: &str = "\u{1b}[?25h";
 const ENTER_KITTY_KEYBOARD_MODE: &str = "\u{1b}[>1u";
 const EXIT_KITTY_KEYBOARD_MODE: &str = "\u{1b}[<1u";
+/// Minimal terminal restore emitted from the panic hook so a hard crash never
+/// leaves the host terminal poisoned for the next session: exit kitty keyboard
+/// mode, cancel host-theme notify, leave the alternate screen, reset styling
+/// and show the cursor. Literal of EXIT_KITTY_KEYBOARD_MODE + DISABLE_HOST_THEME_NOTIFY
+/// + EXIT_ALTERNATE_SCREEN + RESET_STYLE + SHOW_CURSOR (consts can't concat at const time).
+const PANIC_TERMINAL_RESTORE: &str = "\u{1b}[<1u\u{1b}[?2031l\u{1b}[?1049l\u{1b}[m\u{1b}[?25h";
 const CLEAR_CLIENT_TERMINAL_ATTRIBUTES: &str = "\u{1b}[?1l\u{1b}=\u{1b}[r\u{1b}[?1000l\u{1b}[?1002l\u{1b}[?1003l\u{1b}[?1005l\u{1b}[?1006l\u{1b}[?12l";
 /// Subscribe to host color-palette theme notifications (CSI 2031). Hosts
 /// that support it begin emitting unsolicited DSR 997 reports on theme
@@ -685,6 +691,12 @@ pub fn start_remote_client(
         use zellij_utils::errors::handle_panic;
         let os_input = os_input.clone();
         Box::new(move |info| {
+            // Bulletproof teardown: emit the terminal restore unconditionally —
+            // before anything that can early-return — so a panic never leaves the
+            // host in the alternate screen with a hidden cursor for the next session.
+            let mut stdout = os_input.get_stdout_writer();
+            let _ = stdout.write_all(PANIC_TERMINAL_RESTORE.as_bytes());
+            let _ = stdout.flush();
             os_input.disable_mouse().non_fatal();
             os_input.restore_console_mode();
             if let Ok(()) = os_input.unset_raw_mode() {
@@ -1001,6 +1013,12 @@ pub fn start_client(
         let send_client_instructions = send_client_instructions.clone();
         let os_input = os_input.clone();
         Box::new(move |info| {
+            // Bulletproof teardown: emit the terminal restore unconditionally —
+            // before anything that can early-return — so a panic never leaves the
+            // host in the alternate screen with a hidden cursor for the next session.
+            let mut stdout = os_input.get_stdout_writer();
+            let _ = stdout.write_all(PANIC_TERMINAL_RESTORE.as_bytes());
+            let _ = stdout.flush();
             os_input.disable_mouse().non_fatal();
             os_input.restore_console_mode();
             if let Ok(()) = os_input.unset_raw_mode() {

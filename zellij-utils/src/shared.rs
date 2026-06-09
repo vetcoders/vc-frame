@@ -68,13 +68,22 @@ pub fn adjust_to_size(s: &str, rows: usize, columns: usize) -> String {
 }
 
 pub fn make_terminal_title(pane_title: &str) -> String {
+    // Strip control chars and linebreaks from both the session name and the
+    // pane title before they enter the OSC 0 title sequence. A raw "\n" or
+    // other control byte forwarded to the host terminal can crash fragile
+    // tokenizers (e.g. iTerm2's path/expression parser), and a multi-line
+    // title is never what we want in a tab label anyway.
+    let pane_title = clean_string_from_control_and_linebreak(pane_title);
     format!(
         "\u{1b}]0;{}{}\u{07}",
         get_session_name()
-            .map(|n| if pane_title.is_empty() {
-                n.to_string()
-            } else {
-                format!("{} | ", n)
+            .map(|n| {
+                let n = clean_string_from_control_and_linebreak(&n);
+                if pane_title.is_empty() {
+                    n
+                } else {
+                    format!("{} | ", n)
+                }
             })
             .unwrap_or_default(),
         pane_title

@@ -833,7 +833,15 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                                 .unwrap();
                         },
                         Err(err) => {
-                            panic!("err {:?}", err);
+                            // A failed accept() — most often EMFILE ("too many open
+                            // files") from an fd spike — used to panic!() here and take
+                            // the whole session down. accept() errors are transient and
+                            // recoverable: log, back off briefly so we don't busy-spin
+                            // re-hitting the same condition, and keep serving. The
+                            // listener stays open and the session survives the spike.
+                            log::error!("failed to accept client connection: {:?}", err);
+                            thread::sleep(std::time::Duration::from_millis(100));
+                            continue;
                         },
                     }
                 }
