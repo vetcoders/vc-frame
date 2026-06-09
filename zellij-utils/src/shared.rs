@@ -258,4 +258,59 @@ mod tests {
         let url = web_server_base_url_from_config(options);
         assert_eq!(url, "https://127.0.0.1:8082");
     }
+
+    #[test]
+    fn clean_string_strips_control_and_linebreaks() {
+        // newline, carriage return, tab, NUL, and the unicode line/paragraph
+        // separators must all be removed; printable text (incl. non-ASCII) stays.
+        let dirty = "ta\nb\r\t\u{0}ti\u{2028}tle\u{2029}ąść";
+        assert_eq!(
+            clean_string_from_control_and_linebreak(dirty),
+            "tabtitleąść"
+        );
+    }
+
+    #[test]
+    fn clean_string_leaves_clean_input_untouched() {
+        let clean = "operator | nvim ~/project";
+        assert_eq!(clean_string_from_control_and_linebreak(clean), clean);
+    }
+
+    #[test]
+    fn make_terminal_title_strips_newlines_from_pane_title() {
+        // Regression guard for the iTerm2 tokenizer crash: a raw newline in a
+        // pane title must never reach the OSC 0 sequence forwarded to the host.
+        let title = make_terminal_title("zellij --session foo\n--new-session");
+        assert!(
+            !title.contains('\n') && !title.contains('\r'),
+            "OSC title leaked a linebreak: {:?}",
+            title
+        );
+        // The OSC 0 framing must still be intact: ESC ] 0 ; ... BEL
+        assert!(
+            title.starts_with("\u{1b}]0;"),
+            "missing OSC 0 prefix: {:?}",
+            title
+        );
+        assert!(
+            title.ends_with('\u{07}'),
+            "missing BEL terminator: {:?}",
+            title
+        );
+    }
+
+    #[test]
+    fn make_terminal_title_strips_control_chars_from_pane_title() {
+        let title = make_terminal_title("foo\u{0}\u{7f}bar");
+        // The only control chars allowed are the OSC framing itself: the leading
+        // ESC (\u{1b}) and the trailing BEL (\u{07}). Counting them (rather than
+        // byte-slicing) stays correct even if a concurrent test set a non-ASCII
+        // ZELLIJ_SESSION_NAME into the env-derived prefix.
+        let control_count = title.chars().filter(|c| c.is_control()).count();
+        assert_eq!(
+            control_count, 2,
+            "OSC title body retained extra control chars: {:?}",
+            title
+        );
+    }
 }

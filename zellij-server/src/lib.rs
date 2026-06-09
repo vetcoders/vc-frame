@@ -796,9 +796,14 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                 #[cfg(windows)]
                 let reply_listener = zellij_utils::consts::ipc_bind_reply(&socket_path).unwrap();
 
+                // Counts consecutive accept() failures so a sustained error storm
+                // (e.g. a prolonged EMFILE fd-exhaustion spike) is rate-limited
+                // rather than flooding the log ~10×/s with identical lines.
+                let mut consecutive_accept_errors: u64 = 0;
                 for stream in listener.incoming() {
                     match stream {
                         Ok(stream) => {
+                            consecutive_accept_errors = 0;
                             let mut os_input = os_input.clone();
                             let client_id = session_state.write().unwrap().new_client();
 
@@ -839,7 +844,27 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                             // recoverable: log, back off briefly so we don't busy-spin
                             // re-hitting the same condition, and keep serving. The
                             // listener stays open and the session survives the spike.
-                            log::error!("failed to accept client connection: {:?}", err);
+                            //
+                            // Rate-limit the log: emit the first failure, then only
+                            // every 50th (~once per 5s at the 100ms backoff) so a
+                            // sustained storm doesn't drown the very log that helps
+                            // diagnose the underlying fd leak.
+                            if consecutive_accept_errors == 0 {
+                                log::error!(
+                                    "failed to accept client connection: {:?} \
+                                     (recoverable; backing off, further identical \
+                                     errors rate-limited)",
+                                    err
+                                );
+                            } else if consecutive_accept_errors.is_multiple_of(50) {
+                                log::error!(
+                                    "still failing to accept client connections after \
+                                     {} consecutive errors: {:?}",
+                                    consecutive_accept_errors + 1,
+                                    err
+                                );
+                            }
+                            consecutive_accept_errors = consecutive_accept_errors.saturating_add(1);
                             thread::sleep(std::time::Duration::from_millis(100));
                             continue;
                         },
