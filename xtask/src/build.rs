@@ -280,7 +280,7 @@ pub fn manpage(sh: &Shell) -> anyhow::Result<()> {
         // A broken mandown can emit zero bytes with exit code 0; never let
         // that silently clobber a good committed manpage with an empty file.
         let existing = asset_dir.join("vc-frame.1");
-        if std::fs::metadata(&existing).map_or(false, |m| m.len() > 0) {
+        if std::fs::metadata(&existing).is_ok_and(|m| m.len() > 0) {
             eprintln!("!! mandown produced empty output; keeping existing assets/man/vc-frame.1");
             return Ok(());
         }
