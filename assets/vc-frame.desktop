@@ -1,10 +1,10 @@
 [Desktop Entry]
 Version=1.0
-Name=Zellij
+Name=VC Frame
 Type=Application
-Comment=Manage Your Terminal Applications
+Comment=VC Frame vibecrafted terminal runtime
 Terminal=true
-Exec=zellij
-Icon=zellij
+Exec=vc-frame
+Icon=vc-frame
 Categories=ConsoleOnly;System;
 GenericName=Terminal Multiplexer

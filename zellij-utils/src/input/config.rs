@@ -576,7 +576,21 @@ pub async fn watch_layout_dir_changes<F, Fut>(
                             on_layout_change(layouts, layout_errors).await;
                         }
                     },
-                    Err(_) => break,
+                    // PollWatcher can report per-entry errors for dangling
+                    // symlinks inside the watched layout directory. Rescan the
+                    // directory instead of tearing down the watcher so valid
+                    // layout changes are still observed.
+                    Err(_) => {
+                        if !layout_dir.exists() {
+                            break;
+                        }
+
+                        let (layouts, layout_errors) = Layout::list_available_layouts(
+                            Some(layout_dir.clone()),
+                            &default_layout_name,
+                        );
+                        on_layout_change(layouts, layout_errors).await;
+                    },
                 }
             }
         }

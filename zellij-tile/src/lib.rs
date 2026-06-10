@@ -84,7 +84,7 @@ Please refer to the documentation for further information:
 /// Used to register a plugin implementing the [`ZellijPlugin`] trait.
 ///
 /// eg.
-/// ```rust
+/// ```rust,no_run
 /// use zellij_tile::prelude::*;
 ///
 /// #[derive(Default)]
@@ -174,7 +174,7 @@ macro_rules! register_plugin {
 /// Used to register a plugin worker implementing the [`ZellijWorker`] trait.
 ///
 /// eg.
-/// ```rust
+/// ```rust,no_run
 /// use zellij_tile::prelude::*;
 /// use serde::{Deserialize, Serialize};
 ///

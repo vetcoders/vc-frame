@@ -5,7 +5,7 @@ use std::path::PathBuf;
 xflags::xflags! {
     src "./src/flags.rs"
 
-    /// Custom build commands for zellij
+    /// Custom build commands for vc-frame
     cmd xtask {
         /// Deprecation warning. Compatibility to transition from `cargo make`.
         cmd deprecated {
@@ -42,7 +42,7 @@ xflags::xflags! {
         /// Build the manpage
         cmd manpage {}
 
-        /// Publish zellij and all the sub-crates
+        /// Publish vc-frame and all the sub-crates
         cmd publish {
             /// Perform a dry-run (don't push/publish anything)
             optional --dry-run
@@ -54,7 +54,7 @@ xflags::xflags! {
             optional --cargo-registry registry: OsString
         }
 
-        /// Package zellij for distribution (result found in ./target/dist)
+        /// Package vc-frame for distribution (result found in ./target/dist)
         cmd dist {}
 
         /// Run `cargo clippy` on all crates
@@ -70,18 +70,18 @@ xflags::xflags! {
             optional --no-web
         }
 
-        /// Generate a runnable `zellij` executable with plugins bundled
+        /// Generate a runnable `vc-frame` executable with plugins bundled
         cmd install {
             required destination: PathBuf
             /// Compile without web server support
             optional --no-web
         }
 
-        /// Run debug version of zellij
+        /// Run debug version of vc-frame
         cmd run {
             /// Take plugins from asset folder, skip building plugins.
             optional --quick-run
-            /// Take plugins from here, skip building plugins. Passed to zellij verbatim
+            /// Take plugins from here, skip building plugins. Passed to vc-frame verbatim
             optional --data-dir path: PathBuf
             /// Disable optimizing dependencies
             optional --disable-deps-optimize

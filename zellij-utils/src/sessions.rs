@@ -374,7 +374,7 @@ pub fn list_sessions(no_formatting: bool, short: bool, reverse: bool) {
                 all_sessions.insert(session_name.clone(), (duration, false));
             }
             if all_sessions.is_empty() {
-                eprintln!("No active zellij sessions found.");
+                eprintln!("No active VC Frame sessions found.");
                 1
             } else {
                 print_sessions(

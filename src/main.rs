@@ -16,6 +16,7 @@ use zellij_utils::{
 
 fn main() {
     configure_logger();
+    envs::normalize_vc_frame_env_aliases();
     create_config_and_cache_folders();
     let opts = CliArgs::parse();
 
@@ -336,11 +337,11 @@ fn main() {
                     if version != VERSION {
                         println!();
                         println!(
-                            "Note: this version differs from the current Zellij version: {}.",
+                            "Note: this version differs from the current VC Frame version: {}.",
                             VERSION
                         );
-                        println!("Consider stopping the server with: zellij web --stop");
-                        println!("And then restarting it with: zellij web --start");
+                        println!("Consider stopping the server with: vc-frame web --stop");
+                        println!("And then restarting it with: vc-frame web --start");
                     }
                 },
                 Err(_e) => {

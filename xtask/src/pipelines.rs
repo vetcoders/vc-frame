@@ -96,14 +96,14 @@ pub fn install(sh: &Shell, flags: flags::Install) -> anyhow::Result<()> {
             .join(&flags.destination)
     };
     sh.change_dir(crate::project_root());
-    sh.copy_file("target/release/zellij", &destination)
+    sh.copy_file("target/release/vc-frame", &destination)
         .with_context(err_context)?;
 
     // On macOS (Apple Silicon especially), `cargo build --release` with
     // `strip = true` produces a stripped, ad-hoc "linker-signed" Mach-O.
     // Copying it to the destination leaves a code signature the kernel then
     // rejects, so the installed binary is SIGKILLed at exec ("Killed: 9",
-    // exit 137) — even though target/release/zellij itself runs fine. Re-sign
+    // exit 137) — even though target/release/vc-frame itself runs fine. Re-sign
     // the installed copy ad-hoc in place so it is executable.
     #[cfg(target_os = "macos")]
     cmd!(sh, "codesign --force --sign - {destination}")
@@ -113,7 +113,7 @@ pub fn install(sh: &Shell, flags: flags::Install) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Run zellij debug build.
+/// Run vc-frame debug build.
 pub fn run(sh: &Shell, mut flags: flags::Run) -> anyhow::Result<()> {
     let err_context =
         |flags: &flags::Run| format!("failed to run pipeline 'run' with args {:?}", flags);
@@ -144,6 +144,7 @@ pub fn run(sh: &Shell, mut flags: flags::Run) -> anyhow::Result<()> {
             .and_then(|cargo| {
                 cmd!(sh, "{cargo} run")
                     .args(["--package", "zellij"])
+                    .args(["--bin", "vc-frame"])
                     .arg("--no-default-features")
                     .args(["--features", features])
                     .args(["--profile", profile])
@@ -171,7 +172,10 @@ pub fn run(sh: &Shell, mut flags: flags::Run) -> anyhow::Result<()> {
                     .context("Failed to check web features for main crate")?
                 {
                     Some(features) => {
-                        let mut cmd = cmd!(sh, "{cargo} run").args(["--no-default-features"]);
+                        let mut cmd = cmd!(sh, "{cargo} run")
+                            .args(["--package", "zellij"])
+                            .args(["--bin", "vc-frame"])
+                            .args(["--no-default-features"]);
 
                         if !features.is_empty() {
                             cmd = cmd.args(["--features", &features]);
@@ -186,6 +190,8 @@ pub fn run(sh: &Shell, mut flags: flags::Run) -> anyhow::Result<()> {
                     None => {
                         // Main crate doesn't have web_server_capability, run normally
                         cmd!(sh, "{cargo} run")
+                            .args(["--package", "zellij"])
+                            .args(["--bin", "vc-frame"])
                             .args(["--profile", profile])
                             .args(["--"])
                             .args(&flags.args)
@@ -195,6 +201,8 @@ pub fn run(sh: &Shell, mut flags: flags::Run) -> anyhow::Result<()> {
                 }
             } else {
                 cmd!(sh, "{cargo} run")
+                    .args(["--package", "zellij"])
+                    .args(["--bin", "vc-frame"])
                     .args(["--profile", profile])
                     .args(["--"])
                     .args(&flags.args)
@@ -208,7 +216,7 @@ pub fn run(sh: &Shell, mut flags: flags::Run) -> anyhow::Result<()> {
 
 /// Bundle all distributable content to `target/dist`.
 ///
-/// This includes the optimized zellij executable from the [`install`] pipeline, the man page, the
+/// This includes the optimized vc-frame executable from the [`install`] pipeline, the man page, the
 /// `.desktop` file and the application logo.
 pub fn dist(sh: &Shell, _flags: flags::Dist) -> anyhow::Result<()> {
     let err_context = || "failed to run pipeline 'dist'";
@@ -223,7 +231,7 @@ pub fn dist(sh: &Shell, _flags: flags::Dist) -> anyhow::Result<()> {
             install(
                 sh,
                 flags::Install {
-                    destination: crate::project_root().join("./target/dist/zellij"),
+                    destination: crate::project_root().join("./target/dist/vc-frame"),
                     no_web: false,
                 },
             )
@@ -231,8 +239,8 @@ pub fn dist(sh: &Shell, _flags: flags::Dist) -> anyhow::Result<()> {
         .with_context(err_context)?;
 
     sh.create_dir("target/dist/man")
-        .and_then(|_| sh.copy_file("assets/man/zellij.1", "target/dist/man/zellij.1"))
-        .and_then(|_| sh.copy_file("assets/zellij.desktop", "target/dist/zellij.desktop"))
+        .and_then(|_| sh.copy_file("assets/man/vc-frame.1", "target/dist/man/vc-frame.1"))
+        .and_then(|_| sh.copy_file("assets/vc-frame.desktop", "target/dist/vc-frame.desktop"))
         .and_then(|_| sh.copy_file("assets/logo.png", "target/dist/logo.png"))
         .with_context(err_context)
 }

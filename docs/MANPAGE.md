@@ -1,45 +1,47 @@
 NAME
 ====
 
-**zellij** - run zellij
+**vc-frame** - run VC Frame
 
 DESCRIPTION
 ===========
 
-Zellij is a workspace aimed at developers, ops-oriented people and anyone who
-loves the terminal. At its core, it is a terminal multiplexer (similar to tmux
-and screen), but this is merely its infrastructure layer.
+VC Frame is a vibecrafted runtime and terminal workspace aimed at developers,
+operators, AI-agent workflows, and anyone who loves the terminal. At its core,
+it is a terminal multiplexer (similar to tmux and screen), but this is merely
+its infrastructure layer.
 
-Zellij includes a layout system, and a plugin system allowing one to create
+VC Frame includes a layout system, and a plugin system allowing one to create
 plugins in any language that compiles to WebAssembly.
 
-To list currently running sessions run: `zellij list-sessions`
-To attach to a currently running session run: `zellij attach [session-name]`
+To list currently running sessions run: `vc-frame list-sessions`
+To attach to a currently running session run: `vc-frame attach [session-name]`
 
 OPTIONS
 =======
 
-Run `zellij --help` to see available flags and subcommamds.
+Run `vc-frame --help` to see available flags and subcommands.
 
 CONFIGURATION
 =============
 
-Zellij looks for configuration file in the following order:
+VC Frame looks for configuration file in the following order:
 
 1. the file provided with _--config_
-2. under the path provided in *ZELLIJ_CONFIG_FILE* environment variable
+2. under the path provided in *VC_FRAME_CONFIG_FILE* or *ZELLIJ_CONFIG_FILE*
+   environment variable
 3. the default location (see FILES section)
 4. the system location
 
-Run `zellij setup --check` in order to see possible issues with the
+Run `vc-frame setup --check` in order to see possible issues with the
 configuration.
 
 LAYOUTS
 =======
 
-Layouts are yaml files which Zellij can load on startup when _--layout_ flag is
+Layouts are yaml files which VC Frame can load on startup when _--layout_ flag is
 provided.
-By default Zellij will load a layout called `default.yaml`,
+By default VC Frame will load a layout called `default.yaml`,
 but this can be changed by using the `default_layout: [LAYOUT_NAME]` configuration option.
 
 
@@ -63,7 +65,7 @@ parts:
         Percent: 50
 ```
 
-will tell Zellij to create this layout:
+will tell VC Frame to create this layout:
 ```
 ┌─────┬─────┐
 │     │     │
@@ -85,7 +87,7 @@ Each node has following fields:
   space or a fixed size of columns/rows from its parent's space.
     * __Percent: <1-100\>__
     * __Fixed: <lines_number/columns_number\>__
-* __plugin: /path/to/plugin.wasm__ - optional path to a compiled Zellij plugin.
+* __plugin: /path/to/plugin.wasm__ - optional path to a compiled VC Frame plugin.
   If indicated loads a plugin into the created space. For more information see
   PLUGINS section.
 * __default_fg: \<color\>__ - set the default foreground color for a pane (e.g. `"#00e000"`).
@@ -94,7 +96,7 @@ Each node has following fields:
 KEYBINDINGS
 ===========
 
-Zellij comes with a default set of keybindings which aims to fit as many users
+VC Frame comes with a default set of keybindings which aims to fit as many users
 as possible but that behaviour can be overridden or modified in user
 configuration files. The information about bindings is available in the
 _keybinds_ section of configuration. For example, to introduce a keybinding that
@@ -108,7 +110,7 @@ keybinds:
 ```
 
 where "normal" stands for a mode name (see MODES section), "action" part
-specifies the actions to be executed by Zellij (see ACTIONS section) and "key"
+specifies the actions to be executed by VC Frame (see ACTIONS section) and "key"
 is used to list  keys or key combinations bound to given actions (see KEYS). 
 
 The default keybinds can be unbound either for a specific mode, or for every mode.

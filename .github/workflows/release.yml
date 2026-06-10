@@ -119,27 +119,27 @@ jobs:
         if: runner.os != 'Windows'
         id: make-artifact-unix
         run: |
-          asset_name="zellij-${{ matrix.target }}.tar.gz"
-          tar cvzf "${asset_name}" -C "target/${{ matrix.target }}/release" zellij
+          asset_name="vc-frame-${{ matrix.target }}.tar.gz"
+          tar cvzf "${asset_name}" -C "target/${{ matrix.target }}/release" vc-frame
           echo "asset_name=${asset_name}" >> "$GITHUB_OUTPUT"
 
       - name: Create artifact (Windows)
         if: runner.os == 'Windows'
         id: make-artifact-windows
         run: |
-          $asset_name = "zellij-${{ matrix.target }}.zip"
-          Compress-Archive -Path "target/release/zellij.exe" -DestinationPath $asset_name
+          $asset_name = "vc-frame-${{ matrix.target }}.zip"
+          Compress-Archive -Path "target/release/vc-frame.exe" -DestinationPath $asset_name
           echo "asset_name=$asset_name" >> $env:GITHUB_OUTPUT
 
       - name: Create checksum (Unix)
         if: runner.os != 'Windows'
         id: make-checksum-unix
         run: |
-          checksum_name="zellij-${{ matrix.target }}.sha256sum"
+          checksum_name="vc-frame-${{ matrix.target }}.sha256sum"
           if [[ "$RUNNER_OS" != "macOS" ]]; then
-            sha256sum "target/${{ matrix.target }}/release/zellij" > "${checksum_name}"
+            sha256sum "target/${{ matrix.target }}/release/vc-frame" > "${checksum_name}"
           else
-            shasum -a 256 "target/${{ matrix.target }}/release/zellij" > "${checksum_name}"
+            shasum -a 256 "target/${{ matrix.target }}/release/vc-frame" > "${checksum_name}"
           fi
           echo "checksum_name=${checksum_name}" >> "$GITHUB_OUTPUT"
 
@@ -147,9 +147,9 @@ jobs:
         if: runner.os == 'Windows'
         id: make-checksum-windows
         run: |
-          $checksum_name = "zellij-${{ matrix.target }}.sha256sum"
-          $hash = (Get-FileHash "target/release/zellij.exe" -Algorithm SHA256).Hash.ToLower()
-          "$hash  target/release/zellij.exe" | Out-File -Encoding ascii $checksum_name
+          $checksum_name = "vc-frame-${{ matrix.target }}.sha256sum"
+          $hash = (Get-FileHash "target/release/vc-frame.exe" -Algorithm SHA256).Hash.ToLower()
+          "$hash  target/release/vc-frame.exe" | Out-File -Encoding ascii $checksum_name
           echo "checksum_name=$checksum_name" >> $env:GITHUB_OUTPUT
 
       - name: Upload release archive
@@ -159,7 +159,7 @@ jobs:
         with:
           upload_url: ${{ needs.create-release.outputs.upload_url }}
           asset_path: ${{ steps.make-artifact-unix.outputs.asset_name || steps.make-artifact-windows.outputs.asset_name }}
-          asset_name: ${{ runner.os == 'Windows' && format('zellij-{0}.zip', matrix.target) || format('zellij-{0}.tar.gz', matrix.target) }}
+          asset_name: ${{ runner.os == 'Windows' && format('vc-frame-{0}.zip', matrix.target) || format('vc-frame-{0}.tar.gz', matrix.target) }}
           asset_content_type: application/octet-stream
 
       - name: Upload checksum
@@ -320,27 +320,27 @@ jobs:
         if: runner.os != 'Windows'
         id: make-artifact-unix
         run: |
-          asset_name="zellij-no-web-${{ matrix.target }}.tar.gz"
-          tar cvzf "${asset_name}" -C "target/${{ matrix.target }}/release" zellij
+          asset_name="vc-frame-no-web-${{ matrix.target }}.tar.gz"
+          tar cvzf "${asset_name}" -C "target/${{ matrix.target }}/release" vc-frame
           echo "asset_name=${asset_name}" >> "$GITHUB_OUTPUT"
 
       - name: Create artifact (Windows)
         if: runner.os == 'Windows'
         id: make-artifact-windows
         run: |
-          $asset_name = "zellij-no-web-${{ matrix.target }}.zip"
-          Compress-Archive -Path "target/release/zellij.exe" -DestinationPath $asset_name
+          $asset_name = "vc-frame-no-web-${{ matrix.target }}.zip"
+          Compress-Archive -Path "target/release/vc-frame.exe" -DestinationPath $asset_name
           echo "asset_name=$asset_name" >> $env:GITHUB_OUTPUT
 
       - name: Create checksum (Unix)
         if: runner.os != 'Windows'
         id: make-checksum-unix
         run: |
-          checksum_name="zellij-no-web-${{ matrix.target }}.sha256sum"
+          checksum_name="vc-frame-no-web-${{ matrix.target }}.sha256sum"
           if [[ "$RUNNER_OS" != "macOS" ]]; then
-            sha256sum "target/${{ matrix.target }}/release/zellij" > "${checksum_name}"
+            sha256sum "target/${{ matrix.target }}/release/vc-frame" > "${checksum_name}"
           else
-            shasum -a 256 "target/${{ matrix.target }}/release/zellij" > "${checksum_name}"
+            shasum -a 256 "target/${{ matrix.target }}/release/vc-frame" > "${checksum_name}"
           fi
           echo "checksum_name=${checksum_name}" >> "$GITHUB_OUTPUT"
 
@@ -348,9 +348,9 @@ jobs:
         if: runner.os == 'Windows'
         id: make-checksum-windows
         run: |
-          $checksum_name = "zellij-no-web-${{ matrix.target }}.sha256sum"
-          $hash = (Get-FileHash "target/release/zellij.exe" -Algorithm SHA256).Hash.ToLower()
-          "$hash  target/release/zellij.exe" | Out-File -Encoding ascii $checksum_name
+          $checksum_name = "vc-frame-no-web-${{ matrix.target }}.sha256sum"
+          $hash = (Get-FileHash "target/release/vc-frame.exe" -Algorithm SHA256).Hash.ToLower()
+          "$hash  target/release/vc-frame.exe" | Out-File -Encoding ascii $checksum_name
           echo "checksum_name=$checksum_name" >> $env:GITHUB_OUTPUT
 
       - name: Upload release archive
@@ -360,7 +360,7 @@ jobs:
         with:
           upload_url: ${{ needs.create-release.outputs.upload_url }}
           asset_path: ${{ steps.make-artifact-unix.outputs.asset_name || steps.make-artifact-windows.outputs.asset_name }}
-          asset_name: ${{ runner.os == 'Windows' && format('zellij-no-web-{0}.zip', matrix.target) || format('zellij-no-web-{0}.tar.gz', matrix.target) }}
+          asset_name: ${{ runner.os == 'Windows' && format('vc-frame-no-web-{0}.zip', matrix.target) || format('vc-frame-no-web-{0}.tar.gz', matrix.target) }}
           asset_content_type: application/octet-stream
 
       - name: Upload checksum
@@ -370,7 +370,7 @@ jobs:
         with:
           upload_url: ${{ needs.create-release.outputs.upload_url }}
           asset_path: ${{ steps.make-checksum-unix.outputs.checksum_name || steps.make-checksum-windows.outputs.checksum_name }}
-          asset_name: zellij-no-web-${{matrix.target}}.sha256sum
+          asset_name: vc-frame-no-web-${{matrix.target}}.sha256sum
           asset_content_type: text/plain
 
       # ===== Windows MSI installer (no-web) =====
@@ -391,15 +391,15 @@ jobs:
             -d Version=$version `
             -arch x64 `
             -ext WixToolset.UI.wixext `
-            -o target\wix\zellij-no-web-${{ matrix.target }}-installer.msi
+            -o target\wix\vc-frame-no-web-${{ matrix.target }}-installer.msi
 
       - name: Create MSI checksum (no-web)
         if: runner.os == 'Windows'
         id: make-checksum-msi
         run: |
-          $checksum_name = "zellij-no-web-${{ matrix.target }}-installer.sha256sum"
-          $hash = (Get-FileHash "target\wix\zellij-no-web-${{ matrix.target }}-installer.msi" -Algorithm SHA256).Hash.ToLower()
-          "$hash  zellij-no-web-${{ matrix.target }}-installer.msi" | Out-File -Encoding ascii $checksum_name
+          $checksum_name = "vc-frame-no-web-${{ matrix.target }}-installer.sha256sum"
+          $hash = (Get-FileHash "target\wix\vc-frame-no-web-${{ matrix.target }}-installer.msi" -Algorithm SHA256).Hash.ToLower()
+          "$hash  vc-frame-no-web-${{ matrix.target }}-installer.msi" | Out-File -Encoding ascii $checksum_name
           echo "checksum_name=$checksum_name" >> $env:GITHUB_OUTPUT
 
       - name: Upload MSI installer (no-web)
@@ -409,8 +409,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: target\wix\zellij-no-web-${{ matrix.target }}-installer.msi
-          asset_name: zellij-no-web-${{ matrix.target }}-installer.msi
+          asset_path: target\wix\vc-frame-no-web-${{ matrix.target }}-installer.msi
+          asset_name: vc-frame-no-web-${{ matrix.target }}-installer.msi
           asset_content_type: application/octet-stream
 
       - name: Upload MSI checksum (no-web)
@@ -421,5 +421,5 @@ jobs:
         with:
           upload_url: ${{ needs.create-release.outputs.upload_url }}
           asset_path: ${{ steps.make-checksum-msi.outputs.checksum_name }}
-          asset_name: zellij-no-web-${{ matrix.target }}-installer.sha256sum
+          asset_name: vc-frame-no-web-${{ matrix.target }}-installer.sha256sum
           asset_content_type: text/plain

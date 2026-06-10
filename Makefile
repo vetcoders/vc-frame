@@ -69,7 +69,7 @@ C_RESET  := \033[0m
 # Top-level targets
 # ──────────────────────────────────────────────────────────
 
-## Build everything: WASM plugins first, then the zellij binary
+## Build everything: WASM plugins first, then the vc-frame binary
 all: build
 
 build: doctor-quiet
@@ -87,21 +87,24 @@ binary: doctor-quiet
 release: doctor-quiet
 	$(CARGO) xtask build --release
 
-## Build + install the zellij binary (with bundled plugins), then expose it on ~/.local/bin
-## Usage: make install  OR  make install DEST=/usr/local/bin/zellij
-DEST ?= $(CARGO_BIN_DIR)/zellij
+## Build + install the vc-frame binary (with bundled plugins), then expose aliases on ~/.local/bin
+## Usage: make install  OR  make install DEST=/usr/local/bin/vc-frame
+DEST ?= $(CARGO_BIN_DIR)/vc-frame
 LOCAL_BIN_DIR ?= $(HOME)/.local/bin
+LOCAL_VC_FRAME_ALIAS ?= $(LOCAL_BIN_DIR)/vc-frame
 LOCAL_ZELLIJ_ALIAS ?= $(LOCAL_BIN_DIR)/zellij
 install: doctor-quiet doctor-install-quiet
 	$(CARGO) xtask install $(DEST)
 	@mkdir -p "$(LOCAL_BIN_DIR)"
 	@installed="$(DEST)"; \
-	if [ -d "$$installed" ]; then installed="$$installed/zellij"; fi; \
+	if [ -d "$$installed" ]; then installed="$$installed/vc-frame"; fi; \
+	ln -sfn "$$installed" "$(LOCAL_VC_FRAME_ALIAS)"; \
 	ln -sfn "$$installed" "$(LOCAL_ZELLIJ_ALIAS)"; \
-	echo "✓ Installed zellij: $$installed"; \
+	echo "✓ Installed vc-frame: $$installed"; \
+	echo "✓ Linked $(LOCAL_VC_FRAME_ALIAS) -> $$installed"; \
 	echo "✓ Linked $(LOCAL_ZELLIJ_ALIAS) -> $$installed"
 
-## Run the locally built zellij
+## Run the locally built vc-frame
 run: doctor-quiet
 	$(CARGO) xtask run
 
@@ -247,8 +250,8 @@ help:
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "plugins" "Build only WASM plugins"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "binary" "Build only host binary (plugins must exist)"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "release" "Build everything in release mode"
-	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "install" "Release build + install to ~/.cargo/bin + link ~/.local/bin/zellij"
-	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "run" "Run the locally built zellij"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "install" "Release build + install to ~/.cargo/bin + link vc-frame and zellij aliases"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "run" "Run the locally built vc-frame"
 	@printf "\n  $(C_YELLOW)QUALITY GATES$(C_RESET)\n"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "precheck" "Format check + clippy -D warnings + workspace typecheck"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "ci" "Precheck + full test suite"
@@ -270,4 +273,4 @@ help:
 	@printf "    make precheck       # format + clippy + typecheck\n"
 	@printf "    make plugins        # refresh WASM plugin artifacts for local gates\n"
 	@printf "    make install        # canonical release install + ~/.local/bin alias\n"
-	@printf "    make run            # run local debug zellij\n\n"
+	@printf "    make run            # run local debug vc-frame\n\n"

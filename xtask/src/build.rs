@@ -2,14 +2,14 @@
 //!
 //! Currently has the following functions:
 //!
-//! - [`build`]: Builds general cargo projects (i.e. zellij components) with `cargo build`
+//! - [`build`]: Builds general cargo projects (i.e. vc-frame components) with `cargo build`
 //! - [`manpage`]: Builds the manpage with `mandown`
 use crate::{WorkspaceMember, flags, metadata};
 use anyhow::Context;
 use std::path::{Path, PathBuf};
 use xshell::{Shell, cmd};
 
-/// Build members of the zellij workspace.
+/// Build members of the vc-frame workspace.
 ///
 /// Build behavior is controlled by the [`flags`](flags::Build). Calls some variation of `cargo
 /// build` under the hood.
@@ -262,7 +262,7 @@ fn move_plugin_to_assets(sh: &Shell, plugin_name: &str) -> anyhow::Result<()> {
 
 /// Build the manpage with `mandown`.
 //      mkdir -p ${root_dir}/assets/man
-//      mandown ${root_dir}/docs/MANPAGE.md 1 > ${root_dir}/assets/man/zellij.1
+//      mandown ${root_dir}/docs/MANPAGE.md 1 > ${root_dir}/assets/man/vc-frame.1
 pub fn manpage(sh: &Shell) -> anyhow::Result<()> {
     let err_context = "failed to generate manpage";
 
@@ -275,7 +275,7 @@ pub fn manpage(sh: &Shell) -> anyhow::Result<()> {
 
     cmd!(sh, "{mandown} {project_root}/docs/MANPAGE.md 1")
         .read()
-        .and_then(|text| sh.write_file("zellij.1", text))
+        .and_then(|text| sh.write_file("vc-frame.1", text))
         .context(err_context)
 }
 

@@ -46,16 +46,16 @@ impl Page {
     pub fn tip_1(link_executable: Rc<RefCell<String>>) -> Self {
         Page::new()
             .main_screen()
-            .with_title(Text::new("Zellij Tip #1").color_range(0, ..))
+            .with_title(Text::new("VC Frame Tip #1").color_range(0, ..))
             .with_paragraph(vec![
                 ComponentLine::new(vec![
                     ActiveComponent::new(TextOrCustomRender::Text(
-                            Text::new("Check out the Zellij screencasts/tutorials to learn how to better take advantage")
+                            Text::new("Check out the VC Frame screencasts/tutorials to learn how to better take advantage")
                     ))
                 ]),
                 ComponentLine::new(vec![
                     ActiveComponent::new(TextOrCustomRender::Text(
-                            Text::new("of all the Zellij features. Learn about basic usage, layouts, sessions and more!")
+                            Text::new("of all the VC Frame features. Learn about basic usage, layouts, sessions and more!")
                     ))
                 ])
             ])
@@ -90,7 +90,7 @@ impl Page {
     pub fn tip_2(link_executable: Rc<RefCell<String>>, base_mode: Rc<RefCell<InputMode>>) -> Self {
         Page::new()
             .main_screen()
-            .with_title(Text::new("Zellij Tip #2").color_range(0, ..))
+            .with_title(Text::new("VC Frame Tip #2").color_range(0, ..))
             .with_paragraph(vec![
                 ComponentLine::new(vec![
                     ActiveComponent::new(TextOrCustomRender::Text(
@@ -141,7 +141,7 @@ impl Page {
     pub fn tip_3(link_executable: Rc<RefCell<String>>) -> Self {
         Page::new()
             .main_screen()
-            .with_title(Text::new("Zellij Tip #3").color_range(0, ..))
+            .with_title(Text::new("VC Frame Tip #3").color_range(0, ..))
             .with_paragraph(vec![
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new("Want to make your floating pane bigger?"),
@@ -173,7 +173,7 @@ impl Page {
     fn tip_4(link_executable: Rc<RefCell<String>>, base_mode: Rc<RefCell<InputMode>>) -> Page {
         Page::new()
             .main_screen()
-            .with_title(Text::new("Zellij tip #4").color_range(0, ..))
+            .with_title(Text::new("VC Frame tip #4").color_range(0, ..))
             .with_paragraph(vec![
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new("It's possible to \"pin\" a floating pane so that it will always"),
@@ -231,7 +231,7 @@ impl Page {
     pub fn tip_5(link_executable: Rc<RefCell<String>>) -> Page {
         Page::new()
             .main_screen()
-            .with_title(Text::new("Zellij Tip #5").color_range(0, ..))
+            .with_title(Text::new("VC Frame Tip #5").color_range(0, ..))
             .with_paragraph(vec![
                 ComponentLine::new(vec![
                     ActiveComponent::new(TextOrCustomRender::Text(Text::new("Panes can be resized into stacks to be managed easier."))),
@@ -266,7 +266,7 @@ impl Page {
             .with_paragraph(vec![
                 ComponentLine::new(vec![
                     ActiveComponent::new(TextOrCustomRender::Text(
-                            Text::new("To disable this behavior, add stacked_resize false to the Zellij Configuration")
+                            Text::new("To disable this behavior, add stacked_resize false to the VC Frame Configuration")
                                 .color_range(3, 30..=49)
                     )),
                 ])
@@ -301,10 +301,10 @@ impl Page {
     pub fn tip_6(link_executable: Rc<RefCell<String>>, base_mode: Rc<RefCell<InputMode>>) -> Page {
         Page::new()
             .main_screen()
-            .with_title(Text::new("Zellij Tip #6").color_range(0, ..))
+            .with_title(Text::new("VC Frame Tip #6").color_range(0, ..))
             .with_paragraph(vec![
                 ComponentLine::new(vec![
-                    ActiveComponent::new(TextOrCustomRender::Text(Text::new("Are the Zellij keybindings colliding with other applications for you?")))
+                    ActiveComponent::new(TextOrCustomRender::Text(Text::new("Are the VC Frame keybindings colliding with other applications for you?")))
                 ]),
             ])
             .with_bulletin_list(BulletinList::new(Text::new("Check out the non-colliding keybindings preset:"))
@@ -312,12 +312,12 @@ impl Page {
                     ActiveComponent::new(TextOrCustomRender::Text(
                             match *base_mode.borrow() {
                                 InputMode::Locked => {
-                                    Text::new("Open the Zellij configuration with Ctrl g + o + c")
+                                    Text::new("Open the VC Frame configuration with Ctrl g + o + c")
                                         .color_range(3, 35..=40)
                                         .color_indices(3, vec![44, 48])
                                 },
                                 _ => {
-                                    Text::new("Open the Zellij configuration with Ctrl o + c")
+                                    Text::new("Open the VC Frame configuration with Ctrl o + c")
                                         .color_range(3, 35..=40)
                                         .color_indices(3, vec![44])
                                 }
@@ -364,10 +364,10 @@ impl Page {
     pub fn tip_7(link_executable: Rc<RefCell<String>>) -> Page {
         Page::new()
             .main_screen()
-            .with_title(Text::new("Zellij Tip #7").color_range(0, ..))
+            .with_title(Text::new("VC Frame Tip #7").color_range(0, ..))
             .with_paragraph(vec![ComponentLine::new(vec![ActiveComponent::new(
                 TextOrCustomRender::Text(Text::new(
-                    "Want to customize the appearance and colors of Zellij?",
+                    "Want to customize the appearance and colors of VC Frame?",
                 )),
             )])])
             .with_paragraph(vec![
@@ -423,7 +423,7 @@ impl Page {
     pub fn tip_8(link_executable: Rc<RefCell<String>>) -> Page {
         Page::new()
             .main_screen()
-            .with_title(Text::new("Zellij Tip #8").color_range(0, ..))
+            .with_title(Text::new("VC Frame Tip #8").color_range(0, ..))
             .with_paragraph(vec![
                 ComponentLine::new(vec![
                     ActiveComponent::new(TextOrCustomRender::Text(
@@ -457,7 +457,7 @@ impl Page {
     pub fn tip_9(link_executable: Rc<RefCell<String>>) -> Page {
         Page::new()
             .main_screen()
-            .with_title(Text::new("Zellij Tip #9").color_range(0, ..))
+            .with_title(Text::new("VC Frame Tip #9").color_range(0, ..))
             .with_paragraph(vec![
                 ComponentLine::new(vec![
                     ActiveComponent::new(TextOrCustomRender::Text(
@@ -531,10 +531,10 @@ impl Page {
     pub fn tip_10(link_executable: Rc<RefCell<String>>, base_mode: Rc<RefCell<InputMode>>) -> Page {
         Page::new()
             .main_screen()
-            .with_title(Text::new("Zellij Tip #10").color_range(0, ..))
+            .with_title(Text::new("VC Frame Tip #10").color_range(0, ..))
             .with_bulletin_list(
                 BulletinList::new(
-                    Text::new("The Zellij session-manager can:").color_range(2, 11..=25),
+                    Text::new("The VC Frame session-manager can:").color_range(2, 11..=27),
                 )
                 .with_items(vec![
                     ActiveComponent::new(TextOrCustomRender::Text(Text::new(
@@ -566,7 +566,7 @@ impl Page {
             )])])
             .with_paragraph(vec![ComponentLine::new(vec![ActiveComponent::new(
                 TextOrCustomRender::Text(
-                    Text::new("You can also use it as a welcome screen with: zellij -l welcome")
+                    Text::new("You can also use it as a welcome screen with: vc-frame -l welcome")
                         .color_range(0, 46..=62),
                 ),
             )])])
@@ -589,7 +589,7 @@ impl Page {
     pub fn tip_11(link_executable: Rc<RefCell<String>>) -> Page {
         Page::new()
             .main_screen()
-            .with_title(Text::new("Zellij Tip #11").color_range(0, ..))
+            .with_title(Text::new("VC Frame Tip #11").color_range(0, ..))
             .with_paragraph(vec![
                 ComponentLine::new(vec![
                     ActiveComponent::new(TextOrCustomRender::Text(
@@ -642,11 +642,11 @@ impl Page {
     pub fn tip_12(link_executable: Rc<RefCell<String>>, base_mode: Rc<RefCell<InputMode>>) -> Page {
         Page::new()
             .main_screen()
-            .with_title(Text::new("Zellij Tip #12").color_range(0, ..))
+            .with_title(Text::new("VC Frame Tip #12").color_range(0, ..))
             .with_paragraph(vec![
                 ComponentLine::new(vec![
                     ActiveComponent::new(TextOrCustomRender::Text(
-                        Text::new("Zellij plugins can be loaded, reloaded and tracked from the plugin-manager.")
+                        Text::new("VC Frame plugins can be loaded, reloaded and tracked from the plugin-manager.")
                     )),
                 ]),
                 ComponentLine::new(vec![
@@ -816,7 +816,7 @@ fn theme_list_selected_len() -> usize {
 }
 
 fn support_the_developer_text() -> Text {
-    let support_text = "Please support the VibeCrafted / Zellij craft <3: ".to_string();
+    let support_text = "Please support the VC Frame craft <3: ".to_string();
     Text::new(support_text).color_range(3, ..)
 }
 

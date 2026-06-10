@@ -2,7 +2,7 @@
   <br>
   <img src="https://raw.githubusercontent.com/zellij-org/zellij/main/assets/logo.png" alt="logo" width="200">
   <br>
-  Zellij
+  VC Frame ⚒ (vibecrafted runtime)
   <br>
   <br>
 </h1>
@@ -20,7 +20,7 @@
 <p align="center">
   <a href="https://discord.gg/CrUAFH3"><img alt="Discord Chat" src="https://img.shields.io/discord/771367133715628073?color=5865F2&label=discord&style=flat-square"></a>
   <a href="https://matrix.to/#/#zellij_general:matrix.org"><img alt="Matrix Chat" src="https://img.shields.io/matrix/zellij_general:matrix.org?color=1d7e64&label=matrix%20chat&style=flat-square&logo=matrix"></a>
-  <a href="https://zellij.dev/documentation/"><img alt="Zellij documentation" src="https://img.shields.io/badge/zellij-documentation-fc0060?style=flat-square"></a>
+  <a href="https://zellij.dev/documentation/"><img alt="VC Frame documentation" src="https://img.shields.io/badge/vc--frame-documentation-fc0060?style=flat-square"></a>
 </p>
 
 <br>
@@ -41,43 +41,30 @@
 
 # What is this?
 
-[Zellij](#origin-of-the-name) is a workspace aimed at developers, ops-oriented people and anyone who loves the terminal. Similar programs are sometimes called "Terminal Multiplexers".
+VC Frame is a vibecrafted runtime and terminal workspace built on the Zellij core. It is aimed at developers, operators, AI-agent workflows, and anyone who lives in the terminal. Similar programs are sometimes called "Terminal Multiplexers".
 
-Zellij is designed around the philosophy that one must not sacrifice simplicity for power, taking pride in its great experience out of the box as well as the advanced features it places at its users' fingertips.
+VC Frame keeps the Zellij philosophy that one must not sacrifice simplicity for power, while adding a fork-owned surface for Vibecrafted operator workflows.
 
-Zellij is geared toward beginner and power users alike - allowing deep customizability, personal automation through [layouts](https://zellij.dev/documentation/layouts.html), true multiplayer collaboration, unique UX features such as floating and stacked panes, and a [plugin system](https://zellij.dev/documentation/plugins.html) allowing one to create plugins in any language that compiles to WebAssembly.
+VC Frame is geared toward beginner and power users alike - allowing deep customizability, personal automation through [layouts](https://zellij.dev/documentation/layouts.html), true multiplayer collaboration, unique UX features such as floating and stacked panes, and a [plugin system](https://zellij.dev/documentation/plugins.html) allowing one to create plugins in any language that compiles to WebAssembly.
 
-Zellij includes a built-in [web-client](https://zellij.dev/tutorials/web-client/), making a terminal optional.
+VC Frame includes a built-in [web-client](https://zellij.dev/tutorials/web-client/), making a terminal optional.
 
-You can get started by [installing](https://zellij.dev/documentation/installation.html) Zellij and checking out the [Screencasts & Tutorials](https://zellij.dev/screencasts/).
+You can get started by building `vc-frame` locally or using the compatibility `zellij` alias.
 
 For more details about our future plans, read about upcoming features in our [roadmap](#roadmap).
 
 ## How do I install it?
 
-The easiest way to install Zellij is through a [package for your OS](./docs/THIRD_PARTY_INSTALL.md).
+The canonical local install path is:
 
-If one is not available for your OS, you could download a prebuilt binary from the [latest release](https://github.com/zellij-org/zellij/releases/latest) and place it in your `$PATH`. If you'd like, we could [automatically choose one for you](#try-zellij-without-installing).
-
-You can also install (compile) with `cargo`:
-
-```
-cargo install --locked zellij
-```
-
-#### Try Zellij without installing
-
-bash/zsh:
 ```bash
-bash <(curl -L https://zellij.dev/launch)
+make install
 ```
-fish/xonsh:
-```bash
-bash -c 'bash <(curl -L https://zellij.dev/launch)'
-```
+
+This installs `vc-frame` and keeps `zellij` as a compatibility symlink for existing sessions and scripts.
 
 #### Installing from `main`
-Installing Zellij from the `main` branch is not recommended. This branch represents pre-release code, is constantly being worked on and may contain broken or unusable features. In addition, using it may corrupt the cache for future versions, forcing users to clear it before they can use the officially released version.
+Installing VC Frame from an arbitrary development branch is not recommended for daily use. Development branches represent pre-release code, are constantly being worked on, and may contain broken or unusable features.
 
 That being said - no-one will stop you from using it (and bug reports involving new features are greatly appreciated), but please consider using the latest release instead as detailed at the top of this section.
 
@@ -90,7 +77,7 @@ That being said - no-one will stop you from using it (and bug reports involving 
 For more build commands, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Configuration
-For configuring Zellij, please see the [Configuration Documentation](https://zellij.dev/documentation/configuration.html).
+For configuring VC Frame, please see the [Configuration Documentation](https://zellij.dev/documentation/configuration.html).
 
 ## VibeCrafted Shell Layouts
 This fork also ships built-in VibeCrafted operator layouts meant to back the
@@ -105,10 +92,10 @@ This fork also ships built-in VibeCrafted operator layouts meant to back the
 Use them the same way as the stock built-ins, for example:
 
 ```bash
-zellij -l vibecrafted
-zellij -l vc-dashboard
-zellij setup --dump-layout vibecrafted
-zellij setup --dump-layout vc-dashboard
+vc-frame -l vibecrafted
+vc-frame -l vc-dashboard
+vc-frame setup --dump-layout vibecrafted
+vc-frame setup --dump-layout vc-dashboard
 ```
 
 They are exposed as first-class built-ins, so they also surface in layout
@@ -119,7 +106,7 @@ The shell-provider layouts resolve mission-control helpers from the standard
 home store first, then from a companion repo checkout at
 `~/Libraxis/vibecrafted` via `VIBECRAFTED_COMPANION_ROOT`, and finally from
 repo-local stores. `vc-dashboard` also acts as a branded control hub for the
-native Zellij surfaces we lean on most: live monitoring, session atlas, layout
+native VC Frame surfaces we lean on most: live monitoring, session atlas, layout
 forge, configuration control, plugin curation, workspace navigation, sharing,
 and the VibeCrafted shell guide.
 
@@ -128,12 +115,12 @@ and the VibeCrafted shell guide.
 The Vibecrafted framework ships its canonical layouts (`dashboard`, `marbles`,
 `operator`, `research`, `workflow`) as real `.kdl` files under
 `<vibecrafted-root>/config/zellij/layouts/`. To make them visible to stock
-`zellij --layout <name>` invocations, run:
+`vc-frame --layout <name>` invocations, run:
 
 ```bash
-zellij setup --install-vibecrafted-layouts
+vc-frame setup --install-vibecrafted-layouts
 # or with explicit root:
-zellij setup --install-vibecrafted-layouts --vibecrafted-root /path/to/vibecrafted
+vc-frame setup --install-vibecrafted-layouts --vibecrafted-root /path/to/vibecrafted
 ```
 
 The installer:
