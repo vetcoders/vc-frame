@@ -14891,3 +14891,146 @@ fn hidden_cursor_still_emits_cup_for_host_terminal_positioning() {
         "Show-cursor sequence must not be present when app has hidden the cursor"
     );
 }
+
+#[test]
+fn drag_selection_past_pane_top_scrolls_viewport() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+
+    // Fill the pane with many lines to create scrollback
+    let mut content = String::new();
+    for i in 0..50 {
+        content.push_str(&format!("Line {}\r\n", i));
+    }
+    tab.handle_pty_bytes(1, Vec::from(content.as_bytes()))
+        .unwrap();
+    assert!(
+        !tab.get_pane_with_id(PaneId::Terminal(1))
+            .unwrap()
+            .is_scrolled(),
+        "pane starts unscrolled"
+    );
+
+    // Start selecting inside the pane content, then drag above the pane's top
+    // edge (with frames on, screen row 0 is the frame => relative line -1)
+    tab.handle_mouse_event(
+        &MouseEvent::new_left_press_event(Position::new(10, 20)),
+        client_id,
+    )
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(15)); // selection scroll rate limit
+    tab.handle_mouse_event(
+        &MouseEvent::new_left_motion_event(Position::new(0, 20)),
+        client_id,
+    )
+    .unwrap();
+
+    let pane = tab.get_pane_with_id(PaneId::Terminal(1)).unwrap();
+    assert!(
+        pane.is_scrolled(),
+        "dragging a selection past the pane top scrolls the viewport into the scrollback"
+    );
+    let selected_text = pane.get_selected_text(client_id).unwrap_or_default();
+    assert!(
+        selected_text.contains('\n'),
+        "the selection extends to the row revealed by the scroll, got: {:?}",
+        selected_text
+    );
+}
+
+#[test]
+fn drag_selection_pinned_at_screen_top_scrolls_viewport() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab_without_pane_frames(size, ModeInfo::default());
+
+    // Fill the pane with many lines to create scrollback
+    let mut content = String::new();
+    for i in 0..50 {
+        content.push_str(&format!("Line {}\r\n", i));
+    }
+    tab.handle_pty_bytes(1, Vec::from(content.as_bytes()))
+        .unwrap();
+
+    // Without frames the pane content starts at screen row 0: the cursor can
+    // never report a position above the pane, so dragging against the first
+    // screen row must still engage selection autoscroll
+    tab.handle_mouse_event(
+        &MouseEvent::new_left_press_event(Position::new(10, 20)),
+        client_id,
+    )
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(15)); // selection scroll rate limit
+    tab.handle_mouse_event(
+        &MouseEvent::new_left_motion_event(Position::new(0, 20)),
+        client_id,
+    )
+    .unwrap();
+
+    let pane = tab.get_pane_with_id(PaneId::Terminal(1)).unwrap();
+    assert!(
+        pane.is_scrolled(),
+        "dragging a selection against the first screen row scrolls the viewport"
+    );
+}
+
+#[test]
+fn drag_selection_pinned_at_screen_bottom_scrolls_viewport_down() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab_without_pane_frames(size, ModeInfo::default());
+
+    // Fill the pane with many lines to create scrollback, then scroll up so
+    // there are lines below the viewport
+    let mut content = String::new();
+    for i in 0..50 {
+        content.push_str(&format!("Line {}\r\n", i));
+    }
+    tab.handle_pty_bytes(1, Vec::from(content.as_bytes()))
+        .unwrap();
+    for _ in 0..3 {
+        tab.handle_mouse_event(
+            &MouseEvent::new_scroll_up_event(Position::new(10, 20)),
+            client_id,
+        )
+        .unwrap();
+    }
+    assert!(
+        tab.get_pane_with_id(PaneId::Terminal(1))
+            .unwrap()
+            .is_scrolled(),
+        "pane is scrolled up before the drag"
+    );
+
+    // Without frames the pane content ends at the last screen row: dragging
+    // against it must scroll the viewport back down towards the prompt
+    tab.handle_mouse_event(
+        &MouseEvent::new_left_press_event(Position::new(10, 20)),
+        client_id,
+    )
+    .unwrap();
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(15)); // selection scroll rate limit
+        tab.handle_mouse_event(
+            &MouseEvent::new_left_motion_event(Position::new(19, 20)),
+            client_id,
+        )
+        .unwrap();
+    }
+
+    let pane = tab.get_pane_with_id(PaneId::Terminal(1)).unwrap();
+    assert!(
+        !pane.is_scrolled(),
+        "dragging a selection against the last screen row scrolls the viewport back down"
+    );
+}

@@ -745,11 +745,24 @@ impl MouseHandler {
                 }
             },
             MouseAction::UpdateSelection { position } => {
+                let last_screen_row = tab.display_area.borrow().rows.saturating_sub(1) as isize;
                 if let Some(pane_id_with_selection) = tab.selecting_with_mouse_in_pane
                     && let Some(pane_with_selection) =
                         tab.get_pane_with_id_mut(pane_id_with_selection)
                 {
-                    let relative_position = pane_with_selection.relative_position(&position);
+                    let mut relative_position = pane_with_selection.relative_position(&position);
+                    // when the pane touches the screen edge the cursor can never
+                    // report a position past the pane's content, so dragging
+                    // against the first/last screen row must count as crossing
+                    // the pane edge for selection autoscroll to engage
+                    let content_rows = pane_with_selection.get_content_rows() as isize;
+                    if position.line() <= 0 && relative_position.line.0 == 0 {
+                        relative_position.change_line(-1);
+                    } else if position.line() >= last_screen_row
+                        && relative_position.line.0 == content_rows.saturating_sub(1)
+                    {
+                        relative_position.change_line(content_rows);
+                    }
                     pane_with_selection.update_selection(&relative_position, client_id);
                 }
                 Ok(MouseEffect::default())

@@ -24,6 +24,12 @@ const CONFIG_TOGGLE_TOOLTIP_KEY: &str = "tooltip";
 const CONFIG_BRAND_TEXT: &str = "brand_text";
 const CONFIG_BRAND_TEXT_SHORT: &str = "brand_text_short";
 const MSG_TOGGLE_TOOLTIP: &str = "toggle_tooltip";
+// the status-bar shows up in the pane manifest as "zellij:status-bar" when
+// loaded by url and as "status-bar" when loaded through its config alias
+const STATUS_BAR_PLUGIN_URLS: [&str; 2] = ["zellij:status-bar", "status-bar"];
+/// How long the clipboard notification ("Text copied...") stays on the bar
+/// before dismissing itself without requiring user input.
+const CLIPBOARD_HINT_TTL_SECONDS: f64 = 2.0;
 const MSG_TOGGLE_PERSISTED_TOOLTIP: &str = "toggle_persisted_tooltip";
 const MSG_LAUNCH_TOOLTIP: &str = "launch_tooltip_if_not_launched";
 
@@ -49,6 +55,10 @@ struct State {
     // Clipboard state
     text_copy_destination: Option<CopyDestination>,
     display_system_clipboard_failure: bool,
+    pending_clipboard_hint_timers: usize,
+    // when a status-bar is also present in the layout it owns the clipboard
+    // hint line, so we defer to it instead of showing the hint twice
+    status_bar_is_present: bool,
 
     // Plugin configuration
     config: BTreeMap<String, String>,
@@ -117,6 +127,7 @@ impl ZellijPlugin for State {
                 self.handle_clipboard_copy(copy_destination)
             },
             Event::SystemClipboardFailure => self.handle_clipboard_failure(),
+            Event::Timer(_) => self.handle_clipboard_hint_timeout(),
             Event::InputReceived => self.handle_input_received(),
             _ => false,
         }
@@ -184,6 +195,7 @@ impl State {
                 EventType::InputReceived,
                 EventType::SystemClipboardFailure,
                 EventType::InitialKeybinds,
+                EventType::Timer,
             ]
         };
 
@@ -269,6 +281,7 @@ impl State {
     }
 
     fn handle_pane_update(&mut self, pane_manifest: PaneManifest) -> bool {
+        self.status_bar_is_present = self.detect_status_bar_presence(&pane_manifest);
         if self.toggle_tooltip_key.is_some() {
             let previous_tooltip_state = self.tooltip_is_active;
             self.tooltip_is_active = self.detect_tooltip_presence(&pane_manifest);
@@ -293,7 +306,7 @@ impl State {
     }
 
     fn handle_clipboard_copy(&mut self, copy_destination: CopyDestination) -> bool {
-        if self.is_tooltip {
+        if self.is_tooltip || self.status_bar_is_present {
             return false;
         }
 
@@ -303,16 +316,34 @@ impl State {
         };
 
         self.text_copy_destination = Some(copy_destination);
+        self.pending_clipboard_hint_timers += 1;
+        set_timeout(CLIPBOARD_HINT_TTL_SECONDS);
         should_render
     }
 
     fn handle_clipboard_failure(&mut self) -> bool {
-        if self.is_tooltip {
+        if self.is_tooltip || self.status_bar_is_present {
             return false;
         }
 
         self.display_system_clipboard_failure = true;
+        self.pending_clipboard_hint_timers += 1;
+        set_timeout(CLIPBOARD_HINT_TTL_SECONDS);
         true
+    }
+
+    fn handle_clipboard_hint_timeout(&mut self) -> bool {
+        // only the timer set by the most recent notification may dismiss it -
+        // earlier timers are stale (the TTL restarted)
+        self.pending_clipboard_hint_timers = self.pending_clipboard_hint_timers.saturating_sub(1);
+        if self.pending_clipboard_hint_timers == 0
+            && (self.text_copy_destination.is_some() || self.display_system_clipboard_failure)
+        {
+            self.clear_clipboard_state();
+            true
+        } else {
+            false
+        }
     }
 
     fn handle_input_received(&mut self) -> bool {
@@ -346,6 +377,14 @@ impl State {
                 break;
             }
         }
+    }
+
+    fn detect_status_bar_presence(&self, pane_manifest: &PaneManifest) -> bool {
+        pane_manifest.panes.values().flatten().any(|pane| {
+            pane.plugin_url
+                .as_deref()
+                .is_some_and(|url| STATUS_BAR_PLUGIN_URLS.contains(&url))
+        })
     }
 
     fn detect_tooltip_presence(&self, pane_manifest: &PaneManifest) -> bool {

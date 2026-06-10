@@ -27,6 +27,9 @@ use tip::utils::get_cached_tip_name;
 // for more of these, copy paste from: https://en.wikipedia.org/wiki/Box-drawing_character
 static ARROW_SEPARATOR: &str = "";
 static MORE_MSG: &str = " ... ";
+/// How long the clipboard notification ("Text copied...") stays on the bar
+/// before dismissing itself without requiring user input.
+const CLIPBOARD_HINT_TTL_SECONDS: f64 = 2.0;
 /// Shorthand for `Action::SwitchToMode{input_mode: InputMode::Normal}`.
 const TO_NORMAL: Action = Action::SwitchToMode {
     input_mode: InputMode::Normal,
@@ -39,6 +42,7 @@ struct State {
     mode_info: ModeInfo,
     text_copy_destination: Option<CopyDestination>,
     display_system_clipboard_failure: bool,
+    pending_clipboard_hint_timers: usize,
     classic_ui: bool,
     base_mode_is_locked: bool,
     cached_keybinds: KeybindsVec,
@@ -209,6 +213,7 @@ impl ZellijPlugin for State {
             EventType::InputReceived,
             EventType::SystemClipboardFailure,
             EventType::InitialKeybinds,
+            EventType::Timer,
         ]);
     }
 
@@ -252,10 +257,28 @@ impl ZellijPlugin for State {
                     },
                 }
                 self.text_copy_destination = Some(copy_destination);
+                self.pending_clipboard_hint_timers += 1;
+                set_timeout(CLIPBOARD_HINT_TTL_SECONDS);
             },
             Event::SystemClipboardFailure => {
                 should_render = true;
                 self.display_system_clipboard_failure = true;
+                self.pending_clipboard_hint_timers += 1;
+                set_timeout(CLIPBOARD_HINT_TTL_SECONDS);
+            },
+            Event::Timer(_) => {
+                // only the timer set by the most recent notification may
+                // dismiss it - earlier timers are stale (the TTL restarted)
+                self.pending_clipboard_hint_timers =
+                    self.pending_clipboard_hint_timers.saturating_sub(1);
+                if self.pending_clipboard_hint_timers == 0
+                    && (self.text_copy_destination.is_some()
+                        || self.display_system_clipboard_failure)
+                {
+                    self.text_copy_destination = None;
+                    self.display_system_clipboard_failure = false;
+                    should_render = true;
+                }
             },
             Event::InputReceived => {
                 if self.text_copy_destination.is_some() || self.display_system_clipboard_failure {
