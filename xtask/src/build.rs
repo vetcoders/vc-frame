@@ -273,10 +273,22 @@ pub fn manpage(sh: &Shell) -> anyhow::Result<()> {
     sh.create_dir(asset_dir).context(err_context)?;
     let _pd = sh.push_dir(asset_dir);
 
-    cmd!(sh, "{mandown} {project_root}/docs/MANPAGE.md 1")
+    let text = cmd!(sh, "{mandown} {project_root}/docs/MANPAGE.md 1")
         .read()
-        .and_then(|text| sh.write_file("vc-frame.1", text))
-        .context(err_context)
+        .context(err_context)?;
+    if text.trim().is_empty() {
+        // A broken mandown can emit zero bytes with exit code 0; never let
+        // that silently clobber a good committed manpage with an empty file.
+        let existing = asset_dir.join("vc-frame.1");
+        if std::fs::metadata(&existing).map_or(false, |m| m.len() > 0) {
+            eprintln!("!! mandown produced empty output; keeping existing assets/man/vc-frame.1");
+            return Ok(());
+        }
+        anyhow::bail!(
+            "mandown produced an empty manpage and no usable assets/man/vc-frame.1 exists"
+        );
+    }
+    sh.write_file("vc-frame.1", text).context(err_context)
 }
 
 /// Get the path to a `mandown` executable.
