@@ -507,7 +507,7 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
                 } else {
                     floating_panes_layout
                 };
-                pty.spawn_terminals_for_layout(
+                if let Err(e) = pty.spawn_terminals_for_layout(
                     cwd,
                     (*tab_layout).unwrap_or_else(|| layout.new_tab().0),
                     floating_panes_layout,
@@ -519,8 +519,9 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
                     should_change_focus_to_new_tab,
                     client_id_and_is_web_client,
                     completion_tx,
-                )
-                .with_context(err_context)?;
+                ) {
+                    Err::<(), _>(e).with_context(err_context).non_fatal();
+                }
             },
             PtyInstruction::OverrideLayout(
                 cwd,

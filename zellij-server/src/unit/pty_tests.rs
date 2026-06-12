@@ -1,9 +1,10 @@
 use super::*;
 use crate::os_input_output::ServerOsApi;
 use crate::plugins::PluginInstruction;
-use crate::thread_bus::Bus;
+use crate::thread_bus::{Bus, ThreadSenders};
 use interprocess::local_socket::Stream as LocalSocketStream;
 use std::collections::HashMap;
+use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -18,6 +19,7 @@ struct MockOsApi {
     cwds: Arc<Mutex<HashMap<u32, PathBuf>>>,
     cmds: Arc<Mutex<HashMap<u32, Vec<String>>>>,
     cmds_by_ppid: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    fail_spawn_terminal: Arc<AtomicBool>,
 }
 
 impl MockOsApi {
@@ -26,7 +28,11 @@ impl MockOsApi {
             cwds: Arc::new(Mutex::new(HashMap::new())),
             cmds: Arc::new(Mutex::new(HashMap::new())),
             cmds_by_ppid: Arc::new(Mutex::new(HashMap::new())),
+            fail_spawn_terminal: Arc::new(AtomicBool::new(false)),
         }
+    }
+    fn fail_spawn_terminal(&self) {
+        self.fail_spawn_terminal.store(true, Ordering::Relaxed);
     }
     fn set_cwd(&self, pid: u32, path: PathBuf) {
         self.cwds.lock().unwrap().insert(pid, path);
@@ -62,6 +68,11 @@ impl ServerOsApi for MockOsApi {
         _: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
         _: Option<PathBuf>,
     ) -> anyhow::Result<(u32, Box<dyn AsyncReader>, Option<u32>)> {
+        if self.fail_spawn_terminal.load(Ordering::Relaxed) {
+            return Err(anyhow::Error::new(io::Error::from_raw_os_error(
+                libc::EMFILE,
+            )));
+        }
         unimplemented!()
     }
     fn write_to_tty_stdin(&self, _: u32, buf: &[u8]) -> anyhow::Result<usize> {
@@ -189,6 +200,50 @@ fn collect_command_changed_events(
         }
     }
     events
+}
+
+#[test]
+fn new_tab_spawn_failure_does_not_terminate_pty_thread() {
+    let mock = MockOsApi::new();
+    mock.fail_spawn_terminal();
+    let (pty_tx, pty_rx) = channels::unbounded();
+    let pty_sender = SenderWithContext::new(pty_tx);
+    let (screen_tx, _screen_rx) = channels::unbounded();
+    let screen_sender = SenderWithContext::new(screen_tx);
+    let bus = Bus::new(
+        vec![pty_rx],
+        ThreadSenders {
+            to_screen: Some(screen_sender),
+            should_silently_fail: true,
+            ..Default::default()
+        },
+        Some(Box::new(mock)),
+    );
+    let pty = Pty::new(bus, false, None, None);
+
+    pty_sender
+        .send(PtyInstruction::NewTab(
+            None,
+            None,
+            Box::new(Some(TiledPaneLayout::default())),
+            vec![],
+            0,
+            HashMap::new(),
+            None,
+            false,
+            true,
+            (0, false),
+            None,
+        ))
+        .unwrap();
+    pty_sender.send(PtyInstruction::Exit).unwrap();
+
+    let result = pty_thread_main(pty, Box::<Layout>::default());
+
+    assert!(
+        result.is_ok(),
+        "new-tab spawn failures such as EMFILE must be logged and keep the pty thread alive"
+    );
 }
 
 #[test]
