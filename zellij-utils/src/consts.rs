@@ -4,7 +4,10 @@ use crate::home::find_default_config_dir;
 use directories::ProjectDirs;
 use include_dir::{Dir, include_dir};
 use lazy_static::lazy_static;
-use std::{path::PathBuf, sync::OnceLock};
+use std::{
+    path::{Path, PathBuf},
+    sync::OnceLock,
+};
 use uuid::Uuid;
 
 pub const ZELLIJ_CONFIG_FILE_ENV: &str = "ZELLIJ_CONFIG_FILE";
@@ -25,6 +28,13 @@ pub static ZELLIJ_DEFAULT_THEMES: Dir = include_dir!("$CARGO_MANIFEST_DIR/assets
 
 pub const CLIENT_SERVER_CONTRACT_VERSION: usize = 1;
 
+const VC_FRAME_PROJECT_QUALIFIER: &str = "io";
+const VC_FRAME_PROJECT_ORGANIZATION: &str = "VetCoders";
+const VC_FRAME_PROJECT_APPLICATION: &str = "vc-frame";
+const LEGACY_ZELLIJ_PROJECT_QUALIFIER: &str = "org";
+const LEGACY_ZELLIJ_PROJECT_ORGANIZATION: &str = concat!("Zellij ", "Contributors");
+const LEGACY_ZELLIJ_PROJECT_APPLICATION: &str = "Zellij";
+
 pub fn session_info_cache_file_name(session_name: &str) -> PathBuf {
     session_info_folder_for_session(session_name).join("session-metadata.kdl")
 }
@@ -38,6 +48,8 @@ pub fn session_info_folder_for_session(session_name: &str) -> PathBuf {
 }
 
 pub fn create_config_and_cache_folders() {
+    migrate_legacy_project_dirs();
+
     if let Err(e) = std::fs::create_dir_all(ZELLIJ_CACHE_DIR.as_path()) {
         log::error!("Failed to create cache dir: {:?}", e);
     }
@@ -52,6 +64,77 @@ pub fn create_config_and_cache_folders() {
         log::error!("Failed to create session_info cache dir: {:?}", e);
     }
     prune_empty_session_info_folders();
+}
+
+fn vc_frame_project_dirs() -> ProjectDirs {
+    ProjectDirs::from(
+        VC_FRAME_PROJECT_QUALIFIER,
+        VC_FRAME_PROJECT_ORGANIZATION,
+        VC_FRAME_PROJECT_APPLICATION,
+    )
+    .unwrap()
+}
+
+fn legacy_zellij_project_dirs() -> ProjectDirs {
+    if cfg!(windows) {
+        ProjectDirs::from("", "", LEGACY_ZELLIJ_PROJECT_APPLICATION).unwrap()
+    } else {
+        ProjectDirs::from(
+            LEGACY_ZELLIJ_PROJECT_QUALIFIER,
+            LEGACY_ZELLIJ_PROJECT_ORGANIZATION,
+            LEGACY_ZELLIJ_PROJECT_APPLICATION,
+        )
+        .unwrap()
+    }
+}
+
+fn migrate_legacy_project_dirs() {
+    let legacy_dirs = legacy_zellij_project_dirs();
+    migrate_legacy_path(legacy_dirs.config_dir(), ZELLIJ_PROJ_DIR.config_dir());
+    migrate_legacy_path(legacy_dirs.cache_dir(), ZELLIJ_PROJ_DIR.cache_dir());
+    migrate_legacy_path(legacy_dirs.data_dir(), ZELLIJ_PROJ_DIR.data_dir());
+    if let (Some(legacy_state_dir), Some(vc_frame_state_dir)) =
+        (legacy_dirs.state_dir(), ZELLIJ_PROJ_DIR.state_dir())
+    {
+        migrate_legacy_path(legacy_state_dir, vc_frame_state_dir);
+    }
+}
+
+fn migrate_legacy_path(legacy_path: &Path, vc_frame_path: &Path) {
+    if let Err(e) = copy_path_if_target_absent(legacy_path, vc_frame_path) {
+        log::debug!(
+            "Failed to migrate legacy vc-frame path {:?} to {:?}: {:?}",
+            legacy_path,
+            vc_frame_path,
+            e
+        );
+    }
+}
+
+fn copy_path_if_target_absent(source: &Path, target: &Path) -> std::io::Result<()> {
+    if !source.exists() || target.exists() {
+        return Ok(());
+    }
+
+    if source.is_dir() {
+        copy_dir_recursively(source, target)
+    } else {
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(source, target).map(|_| ())
+    }
+}
+
+fn copy_dir_recursively(source: &Path, target: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(target)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        copy_path_if_target_absent(&source_path, &target_path)?;
+    }
+    Ok(())
 }
 
 fn prune_empty_session_info_folders() {
@@ -88,13 +171,7 @@ const fn system_default_data_dir() -> &'static str {
 lazy_static! {
     pub static ref CLIENT_SERVER_CONTRACT_DIR: String =
         format!("contract_version_{}", CLIENT_SERVER_CONTRACT_VERSION);
-    pub static ref ZELLIJ_PROJ_DIR: ProjectDirs = {
-        if cfg!(windows) {
-            ProjectDirs::from("", "", "Zellij").unwrap()
-        } else {
-            ProjectDirs::from("org", "Zellij Contributors", "Zellij").unwrap()
-        }
-    };
+    pub static ref ZELLIJ_PROJ_DIR: ProjectDirs = vc_frame_project_dirs();
     pub static ref ZELLIJ_CACHE_DIR: PathBuf = ZELLIJ_PROJ_DIR.cache_dir().to_path_buf();
     pub static ref ZELLIJ_SESSION_CACHE_DIR: PathBuf = ZELLIJ_PROJ_DIR
         .cache_dir()
@@ -309,8 +386,8 @@ mod unix_only {
 
     lazy_static! {
         static ref UID: Uid = Uid::current();
-        pub static ref ZELLIJ_TMP_DIR: PathBuf = temp_dir().join(format!("zellij-{}", *UID));
-        pub static ref ZELLIJ_TMP_LOG_DIR: PathBuf = ZELLIJ_TMP_DIR.join("zellij-log");
+        pub static ref ZELLIJ_TMP_DIR: PathBuf = temp_dir().join(format!("vc-frame-{}", *UID));
+        pub static ref ZELLIJ_TMP_LOG_DIR: PathBuf = ZELLIJ_TMP_DIR.join("vc-frame-log");
         pub static ref ZELLIJ_TMP_LOG_FILE: PathBuf = ZELLIJ_TMP_LOG_DIR.join("zellij.log");
         pub static ref ZELLIJ_SOCK_DIR: PathBuf = {
             let mut ipc_dir = envs::get_socket_dir().map_or_else(
@@ -356,9 +433,9 @@ mod not_unix {
     lazy_static! {
         pub static ref ZELLIJ_TMP_DIR: PathBuf = {
             let tmp_dir = canonicalize_path(temp_dir());
-            tmp_dir.join("zellij")
+            tmp_dir.join("vc-frame")
         };
-        pub static ref ZELLIJ_TMP_LOG_DIR: PathBuf = ZELLIJ_TMP_DIR.join("zellij-log");
+        pub static ref ZELLIJ_TMP_LOG_DIR: PathBuf = ZELLIJ_TMP_DIR.join("vc-frame-log");
         pub static ref ZELLIJ_TMP_LOG_FILE: PathBuf = ZELLIJ_TMP_LOG_DIR.join("zellij.log");
         pub static ref ZELLIJ_SOCK_DIR: PathBuf = {
             let mut ipc_dir = canonicalize_path(envs::get_socket_dir().map_or_else(
@@ -373,5 +450,68 @@ mod not_unix {
             ipc_dir
         };
         pub static ref WEBSERVER_SOCKET_PATH: PathBuf = ZELLIJ_SOCK_DIR.join("web_server_bus");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vc_frame_project_dirs_use_owned_namespace() {
+        let cache_dir = vc_frame_project_dirs()
+            .cache_dir()
+            .to_string_lossy()
+            .to_string();
+
+        assert!(cache_dir.contains(VC_FRAME_PROJECT_APPLICATION));
+        assert!(!cache_dir.contains(LEGACY_ZELLIJ_PROJECT_APPLICATION));
+
+        #[cfg(target_os = "macos")]
+        assert!(cache_dir.contains("io.VetCoders.vc-frame"));
+    }
+
+    #[test]
+    fn copy_path_if_target_absent_copies_recursively_without_overwriting() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let source = tmp_dir.path().join("source");
+        let target = tmp_dir.path().join("target");
+        let nested = source.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("token.txt"), "legacy").unwrap();
+
+        copy_path_if_target_absent(&source, &target).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(target.join("nested").join("token.txt")).unwrap(),
+            "legacy"
+        );
+
+        std::fs::write(target.join("nested").join("token.txt"), "owned").unwrap();
+        copy_path_if_target_absent(&source, &target).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(target.join("nested").join("token.txt")).unwrap(),
+            "owned"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_tmp_dir_uses_vc_frame_namespace() {
+        assert!(
+            ZELLIJ_TMP_DIR
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("vc-frame-")
+        );
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn non_unix_tmp_dir_uses_vc_frame_namespace() {
+        assert_eq!(
+            ZELLIJ_TMP_DIR.file_name().unwrap().to_string_lossy(),
+            "vc-frame"
+        );
     }
 }
