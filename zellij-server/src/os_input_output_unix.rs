@@ -33,7 +33,7 @@ use std::{
     time::Duration,
 };
 
-use zellij_utils::{errors::prelude::*, input::command::RunCommand};
+use zellij_utils::{envs, errors::prelude::*, input::command::RunCommand};
 
 pub use async_trait::async_trait;
 
@@ -204,7 +204,8 @@ where
     unsafe {
         command
             .args(&cmd.args)
-            .env("ZELLIJ_PANE_ID", format!("{}", terminal_id))
+            .env(envs::VC_FRAME_PANE_ID_ENV_KEY, format!("{}", terminal_id))
+            .env(envs::PANE_ID_ENV_KEY, format!("{}", terminal_id))
             .pre_exec(pre_exec)
             .spawn()
     }

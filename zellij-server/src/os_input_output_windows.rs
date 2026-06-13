@@ -32,7 +32,7 @@ use windows_sys::Win32::System::Threading::{
     TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
-use zellij_utils::{errors::prelude::*, input::command::RunCommand};
+use zellij_utils::{envs, errors::prelude::*, input::command::RunCommand};
 
 pub use async_trait::async_trait;
 
@@ -170,20 +170,22 @@ fn build_command_line(cmd: &RunCommand) -> Vec<u16> {
 
 /// Build a UTF-16 environment block (each entry `KEY=VALUE\0`, terminated by
 /// an extra `\0`) from the current process environment, adding
-/// `ZELLIJ_PANE_ID`.
+/// `VC_FRAME_PANE_ID` and the transition alias `ZELLIJ_PANE_ID`.
 fn build_environment_block(terminal_id: u32) -> Vec<u16> {
     let mut block: Vec<u16> = Vec::new();
     for (key, value) in std::env::vars() {
-        if key == "ZELLIJ_PANE_ID" {
+        if key == envs::VC_FRAME_PANE_ID_ENV_KEY || key == envs::PANE_ID_ENV_KEY {
             continue;
         }
         let entry = format!("{}={}", key, value);
         block.extend(OsStr::new(&entry).encode_wide());
         block.push(0);
     }
-    let pane_entry = format!("ZELLIJ_PANE_ID={}", terminal_id);
-    block.extend(OsStr::new(&pane_entry).encode_wide());
-    block.push(0);
+    for pane_id_key in [envs::VC_FRAME_PANE_ID_ENV_KEY, envs::PANE_ID_ENV_KEY] {
+        let pane_entry = format!("{}={}", pane_id_key, terminal_id);
+        block.extend(OsStr::new(&pane_entry).encode_wide());
+        block.push(0);
+    }
     block.push(0); // double-null terminator
     block
 }

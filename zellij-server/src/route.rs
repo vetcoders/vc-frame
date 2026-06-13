@@ -1599,7 +1599,7 @@ pub(crate) fn route_action(
                 let should_open_in_place = in_place.unwrap_or(false);
                 if should_open_in_place && pane_id.is_none() {
                     log::error!(
-                        "Was asked to open a new plugin in-place, but cannot identify the pane id... is the ZELLIJ_PANE_ID variable set?"
+                        "Was asked to open a new plugin in-place, but cannot identify the pane id... is the VC_FRAME_PANE_ID or ZELLIJ_PANE_ID variable set?"
                     );
                 }
                 let pane_id_to_replace = if should_open_in_place { pane_id } else { None };

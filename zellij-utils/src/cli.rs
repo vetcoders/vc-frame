@@ -1,7 +1,7 @@
 use crate::data::{Direction, InputMode, Resize, UnblockCondition};
 use crate::setup::Setup;
 use crate::{
-    consts::{ZELLIJ_CONFIG_DIR_ENV, ZELLIJ_CONFIG_FILE_ENV},
+    consts::{VC_FRAME_CONFIG_DIR_ENV, VC_FRAME_CONFIG_FILE_ENV},
     input::{layout::PluginUserConfiguration, options::Options},
 };
 use clap::{ArgEnum, Args, Parser, Subcommand};
@@ -71,11 +71,11 @@ pub struct CliArgs {
     pub new_session_with_layout: Option<PathBuf>,
 
     /// Change where VC Frame looks for the configuration file
-    #[clap(short, long, overrides_with = "config", env = ZELLIJ_CONFIG_FILE_ENV, value_parser)]
+    #[clap(short, long, overrides_with = "config", env = VC_FRAME_CONFIG_FILE_ENV, value_parser)]
     pub config: Option<PathBuf>,
 
     /// Change where VC Frame looks for the configuration directory
-    #[clap(long, overrides_with = "config_dir", env = ZELLIJ_CONFIG_DIR_ENV, value_parser)]
+    #[clap(long, overrides_with = "config_dir", env = VC_FRAME_CONFIG_DIR_ENV, value_parser)]
     pub config_dir: Option<PathBuf>,
 
     #[clap(subcommand)]
@@ -1653,7 +1653,7 @@ tail -f /tmp/my-live-logfile | vc-frame action pipe --name logs --plugin https:/
     /// Set the default foreground/background color of a pane
     SetPaneColor {
         /// The pane_id of the pane, eg. terminal_1, plugin_2 or 3 (equivalent to terminal_3).
-        /// Defaults to $ZELLIJ_PANE_ID if not provided.
+        /// Defaults to $VC_FRAME_PANE_ID, then $ZELLIJ_PANE_ID, if not provided.
         #[clap(short, long, value_parser)]
         pane_id: Option<String>,
         /// Foreground color (e.g. "#00e000", "rgb:00/e0/00")

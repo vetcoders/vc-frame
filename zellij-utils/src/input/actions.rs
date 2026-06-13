@@ -11,6 +11,7 @@ use crate::data::{
     PaneId, Resize, UnblockCondition,
 };
 use crate::data::{FloatingPaneCoordinates, InputMode};
+use crate::envs::{PANE_ID_ENV_KEY, VC_FRAME_PANE_ID_ENV_KEY, get_pane_id};
 use crate::home::{find_default_config_dir, get_layout_dir};
 use crate::input::config::{Config, ConfigError, KdlError};
 use crate::input::mouse::MouseEvent;
@@ -1981,8 +1982,11 @@ impl Action {
             } => {
                 let pane_id_str = match pane_id {
                     Some(id) => id,
-                    None => std::env::var("ZELLIJ_PANE_ID").map_err(|_| {
-                        "No --pane-id provided and ZELLIJ_PANE_ID is not set".to_string()
+                    None => get_pane_id().map_err(|_| {
+                        format!(
+                            "No --pane-id provided and neither {} nor {} is set",
+                            VC_FRAME_PANE_ID_ENV_KEY, PANE_ID_ENV_KEY
+                        )
                     })?,
                 };
                 let parsed_pane_id = PaneId::from_str(&pane_id_str);
