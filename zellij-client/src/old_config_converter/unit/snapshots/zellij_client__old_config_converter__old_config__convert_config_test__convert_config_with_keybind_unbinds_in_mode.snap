@@ -394,11 +394,11 @@ keybinds clear-defaults=true {
 //
 // mirror_session true
 
-// The folder in which Zellij will look for layouts
+// The folder in which VC Frame will look for layouts
 //
 // layout_dir /path/to/my/layout_dir
 
-// The folder in which Zellij will look for themes
+// The folder in which VC Frame will look for themes
 //
 // theme_dir "/path/to/my/theme_dir"
 

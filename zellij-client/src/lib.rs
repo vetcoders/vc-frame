@@ -333,7 +333,7 @@ fn spawn_web_server(cli_args: &CliArgs) -> Result<String, String> {
 #[cfg(not(feature = "web_server_capability"))]
 fn spawn_web_server(_cli_args: &CliArgs) -> Result<String, String> {
     log::error!(
-        "This version of Zellij was compiled without web server support, cannot run web server!"
+        "This version of VC Frame was compiled without web server support, cannot run web server!"
     );
     Ok("".to_owned())
 }
@@ -729,7 +729,7 @@ pub fn start_remote_client(
         connections,
     ))?;
 
-    let exit_msg = String::from("Bye from Zellij!");
+    let exit_msg = String::from("Bye from 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍.");
 
     if reconnect_to_session.is_none() {
         reset_controlling_terminal_state(exit_msg, 0);

@@ -89,7 +89,7 @@ pub fn convert_old_yaml_files(opts: &CliArgs) {
 fn print_conversion_title_message() {
     println!();
     println!(
-        "\u{1b}[1mZellij has moved to a new configuration format (KDL - https://kdl.dev) and has now been run with an old YAML configuration/layout/theme file.\u{1b}[m"
+        "\u{1b}[1mVC Frame has moved to a new configuration format (KDL - https://kdl.dev) and has now been run with an old YAML configuration/layout/theme file.\u{1b}[m"
     );
 }
 
@@ -159,7 +159,7 @@ fn print_flag_help_message(
             kdl_explicitly_specified_layout.set_extension("kdl");
             if yaml_config_was_explicitly_set {
                 println!(
-                    "Since both the YAML config and a YAML layout file were explicitly specified, you'll need to re-run Zellij and point it to the new files:"
+                    "Since both the YAML config and a YAML layout file were explicitly specified, you'll need to re-run VC Frame and point it to the new files:"
                 );
                 println!(
                     "\u{1b}[1;33mzellij --config {} --layout {}\u{1b}[m",
@@ -171,7 +171,7 @@ fn print_flag_help_message(
                 );
             } else {
                 println!(
-                    "Since a YAML layout was explicitly specified, you'll need to re-run Zellij and point it to the new layout:"
+                    "Since a YAML layout was explicitly specified, you'll need to re-run VC Frame and point it to the new layout:"
                 );
                 println!(
                     "\u{1b}[1;33mzellij --layout {}\u{1b}[m",
@@ -187,7 +187,7 @@ fn print_flag_help_message(
                 let mut kdl_config_file_path = yaml_config_file.to_path_buf();
                 kdl_config_file_path.set_extension("kdl");
                 println!(
-                    "Since the YAML config was explicitly specified, you'll need to re-run Zellij and point it to the new config:"
+                    "Since the YAML config was explicitly specified, you'll need to re-run VC Frame and point it to the new config:"
                 );
                 println!(
                     "\u{1b}[1;33mzellij --config {}\u{1b}[m",

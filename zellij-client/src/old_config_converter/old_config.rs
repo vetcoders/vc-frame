@@ -121,12 +121,12 @@ const DEFAULT_LAYOUT_DESCRIPTION: &str = "
 ";
 
 const LAYOUT_DIR_DESCRIPTION: &str = "
-// The folder in which Zellij will look for layouts
+// The folder in which VC Frame will look for layouts
 //
 ";
 
 const THEME_DIR_DESCRIPTION: &str = "
-// The folder in which Zellij will look for themes
+// The folder in which VC Frame will look for themes
 //
 ";
 

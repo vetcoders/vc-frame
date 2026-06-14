@@ -3132,7 +3132,7 @@ impl Options {
         let comment_text = format!(
             "{}\n{}\n{}\n{}",
             " ",
-            "// The folder in which Zellij will look for layouts",
+            "// The folder in which VC Frame will look for layouts",
             "// (Requires restart)",
             "// ",
         );
@@ -3160,7 +3160,7 @@ impl Options {
         let comment_text = format!(
             "{}\n{}\n{}\n{}",
             " ",
-            "// The folder in which Zellij will look for themes",
+            "// The folder in which VC Frame will look for themes",
             "// (Requires restart)",
             "// ",
         );
@@ -3473,7 +3473,7 @@ impl Options {
         let comment_text = format!(
             "{}\n{}\n{}\n{}\n{}\n{}",
             " ",
-            "// A fixed name to always give the Zellij session.",
+            "// A fixed name to always give the VC Frame session.",
             "// Consider also setting `attach_to_session true,`",
             "// otherwise this will error if such a session exists.",
             "// Default: <RANDOM>",
@@ -3532,7 +3532,7 @@ impl Options {
         let comment_text = format!(
             "{}\n{}\n{}\n{}\n{}\n{}",
             " ",
-            "// Toggle between having Zellij lay out panes according to a predefined set of layouts whenever possible",
+            "// Toggle between having VC Frame lay out panes according to a predefined set of layouts whenever possible",
             "// Options:",
             "//   - true (default)",
             "//   - false",
@@ -3764,14 +3764,14 @@ impl Options {
     fn web_server_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
         let comment_text = format!(
             "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
-            "// Whether to make sure a local web server is running when a new Zellij session starts.",
+            "// Whether to make sure a local web server is running when a new VC Frame session starts.",
             "// This web server will allow creating new sessions and attaching to existing ones that have",
             "// opted in to being shared in the browser.",
             "// When enabled, navigate to http://127.0.0.1:8082",
             "// (Requires restart)",
             "// ",
-            "// Note: a local web server can still be manually started from within a Zellij session or from the CLI.",
-            "// If this is not desired, one can use a version of Zellij compiled without",
+            "// Note: a local web server can still be manually started from within a VC Frame session or from the CLI.",
+            "// If this is not desired, one can use a version of VC Frame compiled without",
             "// `web_server_capability`",
             "// ",
             "// Possible values:",
@@ -4196,7 +4196,7 @@ impl Options {
             "{}\n{}\n{}\n{}\n{}\n{}",
             " ",
             "// A command to run (will be wrapped with sh -c and provided the RESURRECT_COMMAND env variable) ",
-            "// after Zellij attempts to discover a command inside a pane when resurrecting sessions, the STDOUT",
+            "// after VC Frame attempts to discover a command inside a pane when resurrecting sessions, the STDOUT",
             "// of this command will be used instead of the discovered RESURRECT_COMMAND",
             "// can be useful for removing wrappers around commands",
             "// Note: be sure to escape backslashes and similar characters properly",
@@ -4994,7 +4994,7 @@ impl PluginAliases {
         if add_comments {
             plugins.set_leading(format!(
                 "\n{}\n{}\n",
-                "// Plugin aliases - can be used to change the implementation of Zellij",
+                "// Plugin aliases - can be used to change the implementation of VC Frame",
                 "// changing these requires a restart to take effect",
             ));
         }

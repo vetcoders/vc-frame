@@ -1091,7 +1091,7 @@ impl PermissionType {
             PermissionType::Reconfigure => "Change Zellij runtime configuration".to_owned(),
             PermissionType::FullHdAccess => "Full access to the hard-drive".to_owned(),
             PermissionType::StartWebServer => {
-                "Start a local web server to serve Zellij sessions".to_owned()
+                "Start a local web server to serve VC Frame sessions".to_owned()
             },
             PermissionType::InterceptInput => "Intercept Input (keyboard & mouse)".to_owned(),
             PermissionType::ReadPaneContents => {
