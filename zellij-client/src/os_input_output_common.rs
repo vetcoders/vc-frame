@@ -9,6 +9,7 @@ pub(crate) const DISABLE_MOUSE_SUPPORT: &str =
 pub enum SignalEvent {
     Resize,
     Quit,
+    Detach,
 }
 
 /// Trait for async signal listening, allowing for testable implementations.

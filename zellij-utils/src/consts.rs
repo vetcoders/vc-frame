@@ -10,21 +10,17 @@ use std::{
 };
 use uuid::Uuid;
 
-pub const ZELLIJ_CONFIG_FILE_ENV: &str = "ZELLIJ_CONFIG_FILE";
-pub const ZELLIJ_CONFIG_DIR_ENV: &str = "ZELLIJ_CONFIG_DIR";
-pub const ZELLIJ_LAYOUT_DIR_ENV: &str = "ZELLIJ_LAYOUT_DIR";
 pub const VC_FRAME_CONFIG_FILE_ENV: &str = "VC_FRAME_CONFIG_FILE";
 pub const VC_FRAME_CONFIG_DIR_ENV: &str = "VC_FRAME_CONFIG_DIR";
-pub const VC_FRAME_LAYOUT_DIR_ENV: &str = "VC_FRAME_LAYOUT_DIR";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const DEFAULT_SCROLL_BUFFER_SIZE: usize = 10_000;
 pub static SCROLL_BUFFER_SIZE: OnceLock<usize> = OnceLock::new();
 pub static DEBUG_MODE: OnceLock<bool> = OnceLock::new();
 
 #[cfg(not(windows))]
-pub const SYSTEM_DEFAULT_CONFIG_DIR: &str = "/etc/zellij";
+pub const SYSTEM_DEFAULT_CONFIG_DIR: &str = "/etc/vc-frame";
 #[cfg(windows)]
-pub const SYSTEM_DEFAULT_CONFIG_DIR: &str = "C:\\ProgramData\\Zellij";
+pub const SYSTEM_DEFAULT_CONFIG_DIR: &str = "C:\\ProgramData\\vc-frame";
 pub const SYSTEM_DEFAULT_DATA_DIR_PREFIX: &str = system_default_data_dir();
 
 pub static ZELLIJ_DEFAULT_THEMES: Dir = include_dir!("$CARGO_MANIFEST_DIR/assets/themes");

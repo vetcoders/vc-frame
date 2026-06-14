@@ -136,12 +136,12 @@ test-no-web:
 # Quality gates
 # ──────────────────────────────────────────────────────────
 
-## Quick typecheck (no output binary)
-check:
+## Quick typecheck (builds bundled WASM plugins first)
+check: plugins
 	$(CARGO) check --workspace
 
-## Clippy: zero warnings, with project-agreed allowances
-clippy:
+## Clippy: zero warnings, with project-agreed allowances; builds bundled WASM plugins first
+clippy: plugins
 	$(CARGO) clippy --workspace --all-targets -- \
 		-D warnings \
 		-A clippy::too_many_arguments \
@@ -157,18 +157,22 @@ fmt:
 fmt-check:
 	$(CARGO) xtask format --check
 
-## Full pre-push gate: format → clippy → typecheck
+## Full pre-push gate: format → plugin build → clippy → typecheck
 ## This is what CI runs. If this passes locally, CI will pass.
 precheck:
 	@echo "╔══════════════════════════════════════╗"
 	@echo "║  vc-frame precheck                   ║"
 	@echo "╚══════════════════════════════════════╝"
 	@echo ""
-	@echo "→ [1/3] Formatting..."
+	@echo "→ [1/4] Formatting..."
 	@$(CARGO) xtask format --check || { echo "✗ Run 'make fmt' to fix"; exit 1; }
 	@echo "✓ Format OK"
 	@echo ""
-	@echo "→ [2/3] Clippy..."
+	@echo "→ [2/4] WASM plugins..."
+	@$(CARGO) xtask build --plugins-only
+	@echo "✓ Plugins OK"
+	@echo ""
+	@echo "→ [3/4] Clippy..."
 	@$(CARGO) clippy --workspace --all-targets -- \
 		-D warnings \
 		-A clippy::too_many_arguments \
@@ -177,7 +181,7 @@ precheck:
 		-A clippy::ptr_arg
 	@echo "✓ Clippy OK"
 	@echo ""
-	@echo "→ [3/3] Typecheck..."
+	@echo "→ [4/4] Typecheck..."
 	@$(CARGO) check --workspace
 	@echo "✓ Check OK"
 	@echo ""

@@ -125,6 +125,7 @@ pub trait ClientOsApi: Send + Sync + std::fmt::Debug {
         &self,
         sigwinch_cb: Box<dyn Fn()>,
         quit_cb: Box<dyn Fn()>,
+        detach_cb: Box<dyn Fn()>,
         resize_receiver: Option<std::sync::mpsc::Receiver<()>>,
     );
     /// Establish a connection with the server socket.
@@ -246,6 +247,7 @@ impl ClientOsApi for ClientOsInputOutput {
         &self,
         sigwinch_cb: Box<dyn Fn()>,
         quit_cb: Box<dyn Fn()>,
+        detach_cb: Box<dyn Fn()>,
         resize_receiver: Option<std::sync::mpsc::Receiver<()>>,
     ) {
         let mut sigwinch_cb_timestamp = time::Instant::now();
@@ -262,6 +264,10 @@ impl ClientOsApi for ClientOsInputOutput {
                 },
                 SignalEvent::Quit => {
                     quit_cb();
+                    break;
+                },
+                SignalEvent::Detach => {
+                    detach_cb();
                     break;
                 },
             }

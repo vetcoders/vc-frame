@@ -810,13 +810,15 @@ fn read_other_live_session_states(
         let session_cache_file_name = session_info_cache_dir
             .join(&session_name)
             .join("session-metadata.kdl");
-        if let Ok(raw_session_info) = fs::read_to_string(&session_cache_file_name)
-            && let Ok(mut session_info) =
-                SessionInfo::from_string(&raw_session_info, current_session_name)
-        {
-            session_info.creation_time = creation_time;
-            session_infos_on_machine.insert(session_name, session_info);
-        }
+        let mut session_info = fs::read_to_string(&session_cache_file_name)
+            .ok()
+            .and_then(|raw_session_info| {
+                SessionInfo::from_string(&raw_session_info, current_session_name).ok()
+            })
+            .unwrap_or_else(|| SessionInfo::new(session_name.clone()));
+        session_info.creation_time = creation_time;
+        session_info.is_current_session = session_name == current_session_name;
+        session_infos_on_machine.insert(session_name, session_info);
     }
     session_infos_on_machine
 }
@@ -961,6 +963,26 @@ mod tests {
         );
         assert_eq!(live.len(), 1);
         assert!(live.contains_key(peer));
+        assert!(resurrectable.is_empty());
+    }
+
+    #[test]
+    fn scan_session_list_keeps_live_socket_without_metadata() {
+        let sock_dir = tempdir().unwrap();
+        let info_dir = tempdir().unwrap();
+        let peer = "peer-without-metadata";
+        let _listener = make_socket(sock_dir.path(), peer);
+
+        let (live, resurrectable) = scan_session_list(
+            "me",
+            &[],
+            &BTreeMap::new(),
+            sock_dir.path(),
+            info_dir.path(),
+        );
+        let peer_info = live.get(peer).expect("live socket should be visible");
+        assert_eq!(peer_info.name, peer);
+        assert!(!peer_info.is_current_session);
         assert!(resurrectable.is_empty());
     }
 

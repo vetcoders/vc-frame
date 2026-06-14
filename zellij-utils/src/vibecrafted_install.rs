@@ -1,8 +1,8 @@
 //! Vibecrafted layout installer.
 //!
-//! Manages symlinks under `~/.config/zellij/layouts/` so that the canonical
+//! Manages symlinks under the vc-frame layout directory so that the canonical
 //! Vibecrafted layouts shipped in `<vibecrafted-root>/config/zellij/layouts/*.kdl`
-//! are picked up by stock `zellij --layout <name>` invocations.
+//! are picked up by `vc-frame --layout <name>` invocations.
 //!
 //! The installer is intentionally narrow:
 //!
@@ -16,7 +16,7 @@
 //! 3. Legacy compatibility redirects come from an optional data file at
 //!    `<root>/config/zellij/layouts/aliases.txt` (`old=new`, one per line).
 //!    No rebuild required to add a rename redirect.
-//! 4. Every run cleans up symlinks under `~/.config/zellij/layouts/` whose
+//! 4. Every run cleans up symlinks under the vc-frame layout directory whose
 //!    target either no longer exists or has drifted to a stale copy of the
 //!    vibecrafted tree. Hand-written files and symlinks pointing at unrelated
 //!    frameworks are preserved.
@@ -269,11 +269,11 @@ fn resolve_user_layouts_dir() -> Result<PathBuf, InstallError> {
     Ok(config.join("layouts"))
 }
 
-/// Install / refresh vibecrafted layouts under the user's zellij config dir.
+/// Install / refresh Vibecrafted layouts under the user's vc-frame config dir.
 ///
 /// `root_override` is the value of the `--vibecrafted-root` CLI flag, if any.
 /// `target_override` lets tests redirect the install dir; production callers
-/// pass `None` and the standard `~/.config/zellij/layouts/` is used.
+/// pass `None` and the standard vc-frame layout directory is used.
 pub fn install(
     root_override: Option<PathBuf>,
     target_override: Option<PathBuf>,

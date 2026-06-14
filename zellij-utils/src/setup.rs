@@ -322,8 +322,8 @@ pub struct Setup {
     #[clap(long, value_name = "SHELL", value_parser)]
     pub generate_auto_start: Option<String>,
 
-    /// Install / refresh the Vibecrafted zellij layouts into the user's
-    /// `~/.config/zellij/layouts/` directory. Resolution order for the
+    /// Install / refresh the Vibecrafted layouts into the user's vc-frame
+    /// layout directory. Resolution order for the
     /// framework root: `--vibecrafted-root` flag → `$VIBECRAFTED_HOME` env →
     /// `which vibecrafted` walk-up. Idempotent.
     #[clap(long, value_parser)]

@@ -3277,6 +3277,7 @@ impl ClientOsApi for MockClientOsApi {
         &self,
         _sigwinch_cb: Box<dyn Fn()>,
         _quit_cb: Box<dyn Fn()>,
+        _detach_cb: Box<dyn Fn()>,
         _resize_receiver: Option<std::sync::mpsc::Receiver<()>>,
     ) {
     }

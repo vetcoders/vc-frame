@@ -165,7 +165,7 @@ use zellij_utils::{
     data::{ClientId, ConnectToSession, KeyWithModifier, LayoutInfo, LayoutMetadata},
     envs,
     errors::{ClientContext, ContextType, ErrorInstruction},
-    input::{cli_assets::CliAssets, config::Config, options::Options},
+    input::{actions::Action, cli_assets::CliAssets, config::Config, options::Options},
     ipc::{ClientToServerMsg, ExitReason, ServerToClientMsg},
     pane_size::Size,
     vendored::termwiz::input::InputEvent,
@@ -520,6 +520,9 @@ pub async fn run_remote_client_terminal_loop(
                         }
                     }
                     crate::os_input_output::SignalEvent::Quit => {
+                        break;
+                    }
+                    crate::os_input_output::SignalEvent::Detach => {
                         break;
                     }
                 }
@@ -1106,6 +1109,17 @@ pub fn start_client(
                         move || {
                             os_api.send_to_server(ClientToServerMsg::Action {
                                 action: on_force_close.into(),
+                                terminal_id: None,
+                                client_id: None,
+                                is_cli_client: false,
+                            });
+                        }
+                    }),
+                    Box::new({
+                        let os_api = os_input.clone();
+                        move || {
+                            os_api.send_to_server(ClientToServerMsg::Action {
+                                action: Action::Detach,
                                 terminal_id: None,
                                 client_id: None,
                                 is_cli_client: false,

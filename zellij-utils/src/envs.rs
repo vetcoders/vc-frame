@@ -47,9 +47,6 @@ const ENV_ALIASES: &[(&str, &str)] = &[
     (VC_FRAME_SESSION_NAME_ENV_KEY, SESSION_NAME_ENV_KEY),
     (VC_FRAME_SOCKET_DIR_ENV_KEY, SOCKET_DIR_ENV_KEY),
     (VC_FRAME_PANE_ID_ENV_KEY, PANE_ID_ENV_KEY),
-    ("VC_FRAME_CONFIG_FILE", "ZELLIJ_CONFIG_FILE"),
-    ("VC_FRAME_CONFIG_DIR", "ZELLIJ_CONFIG_DIR"),
-    ("VC_FRAME_LAYOUT_DIR", "ZELLIJ_LAYOUT_DIR"),
     ("VC_FRAME_AUTO_ATTACH", "ZELLIJ_AUTO_ATTACH"),
     ("VC_FRAME_AUTO_EXIT", "ZELLIJ_AUTO_EXIT"),
 ];
@@ -188,20 +185,22 @@ mod tests {
     }
 
     #[test]
-    fn normalization_mirrors_config_alias_for_clap_env_lookup() {
+    fn normalization_does_not_import_legacy_config_aliases() {
         let _guard = env_lock();
-        remove_test_env("VC_FRAME_CONFIG_FILE");
-        remove_test_env("ZELLIJ_CONFIG_FILE");
+        remove_test_env("VC_FRAME_CONFIG_DIR");
+        remove_test_env("ZELLIJ_CONFIG_DIR");
 
-        set_process_env("VC_FRAME_CONFIG_FILE", "/tmp/vc-frame.kdl");
+        set_process_env("ZELLIJ_CONFIG_DIR", "/tmp/user-zellij");
         normalize_vc_frame_env_aliases();
+
+        assert!(std::env::var("VC_FRAME_CONFIG_DIR").is_err());
         assert_eq!(
-            std::env::var("ZELLIJ_CONFIG_FILE").unwrap(),
-            "/tmp/vc-frame.kdl"
+            std::env::var("ZELLIJ_CONFIG_DIR").unwrap(),
+            "/tmp/user-zellij"
         );
 
-        remove_test_env("VC_FRAME_CONFIG_FILE");
-        remove_test_env("ZELLIJ_CONFIG_FILE");
+        remove_test_env("VC_FRAME_CONFIG_DIR");
+        remove_test_env("ZELLIJ_CONFIG_DIR");
     }
 
     #[test]
