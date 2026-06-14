@@ -1,5 +1,5 @@
 [package]
-name = "zellij"
+name = "vc-frame"
 autobins = false
 build = "src/build.rs"
 authors = ["Aram Drevekenin <aram@poor.dev>"]

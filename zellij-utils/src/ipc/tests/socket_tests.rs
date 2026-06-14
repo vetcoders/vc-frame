@@ -4,9 +4,34 @@ use crate::ipc::{
 use crate::pane_size::Size;
 use interprocess::local_socket::{ListenerOptions, prelude::*};
 
+use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 static IPC_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+struct CloneFails;
+
+impl Read for CloneFails {
+    fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+        Ok(0)
+    }
+}
+
+impl Write for CloneFails {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl super::super::IpcStream for CloneFails {
+    fn try_clone_stream(&self) -> io::Result<Box<dyn super::super::IpcStream>> {
+        Err(io::Error::from_raw_os_error(libc::EMFILE))
+    }
+}
 
 // --- Cross-platform IPC helpers ---
 // On Unix: use filesystem-based sockets (TempDir + PathBuf + GenericFilePath)
@@ -89,6 +114,23 @@ fn try_connect(name: &IpcName) -> std::io::Result<interprocess::local_socket::St
 fn try_connect(name: &IpcName) -> std::io::Result<interprocess::local_socket::Stream> {
     use interprocess::local_socket::{GenericNamespaced, Stream as LocalSocketStream};
     LocalSocketStream::connect(name.as_str().to_ns_name::<GenericNamespaced>().unwrap())
+}
+
+#[test]
+fn receiver_try_get_sender_reports_clone_error_instead_of_panicking() {
+    let receiver: IpcReceiverWithContext<ClientToServerMsg> =
+        IpcReceiverWithContext::from_boxed(Box::new(CloneFails));
+
+    let err = match receiver.try_get_sender::<ServerToClientMsg>() {
+        Ok(_) => panic!("clone failure should be returned"),
+        Err(err) => err,
+    };
+
+    assert_eq!(
+        err.downcast_ref::<io::Error>()
+            .and_then(|e| e.raw_os_error()),
+        Some(libc::EMFILE)
+    );
 }
 
 #[test]

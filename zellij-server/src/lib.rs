@@ -813,16 +813,44 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                                 .expect("failed to accept reply connection");
 
                             #[cfg(windows)]
-                            let receiver = os_input
-                                .new_client_with_reply(client_id, stream, reply_stream)
-                                .unwrap();
+                            let receiver = match os_input.new_client_with_reply(
+                                client_id,
+                                stream,
+                                reply_stream,
+                            ) {
+                                Ok(receiver) => receiver,
+                                Err(err) => {
+                                    log::error!(
+                                        "failed to register client {client_id}: {:?} \
+                                         (recoverable; dropping client)",
+                                        err
+                                    );
+                                    let _ = session_state.write().map(|mut state| {
+                                        state.remove_client(client_id);
+                                    });
+                                    continue;
+                                },
+                            };
                             #[cfg(not(windows))]
-                            let receiver = os_input.new_client(client_id, stream).unwrap();
+                            let receiver = match os_input.new_client(client_id, stream) {
+                                Ok(receiver) => receiver,
+                                Err(err) => {
+                                    log::error!(
+                                        "failed to register client {client_id}: {:?} \
+                                         (recoverable; dropping client)",
+                                        err
+                                    );
+                                    let _ = session_state.write().map(|mut state| {
+                                        state.remove_client(client_id);
+                                    });
+                                    continue;
+                                },
+                            };
 
                             let session_data = session_data.clone();
                             let session_state = session_state.clone();
                             let to_server = to_server.clone();
-                            thread::Builder::new()
+                            if let Err(err) = thread::Builder::new()
                                 .name("server_router".to_string())
                                 .spawn(move || {
                                     route_thread_main(
@@ -835,7 +863,13 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                                     )
                                     .fatal()
                                 })
-                                .unwrap();
+                            {
+                                log::error!(
+                                    "failed to spawn route thread for client {client_id}: {:?} \
+                                     (recoverable; dropping client)",
+                                    err
+                                );
+                            }
                         },
                         Err(err) => {
                             // A failed accept() — most often EMFILE ("too many open

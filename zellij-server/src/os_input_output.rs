@@ -377,7 +377,12 @@ impl ServerOsApi for ServerOsInputOutput {
         stream: LocalSocketStream,
     ) -> Result<IpcReceiverWithContext<ClientToServerMsg>> {
         let receiver = IpcReceiverWithContext::new(stream);
-        let sender = ClientSender::new(client_id, receiver.get_sender());
+        let sender = ClientSender::new(
+            client_id,
+            receiver
+                .try_get_sender()
+                .with_context(|| format!("failed to clone client {client_id} IPC stream"))?,
+        );
         self.client_senders
             .lock()
             .to_anyhow()
