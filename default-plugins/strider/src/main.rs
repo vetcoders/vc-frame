@@ -11,7 +11,7 @@ use shared::{
 };
 use state::State;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use zellij_tile::prelude::*;
 
 register_plugin!(State);
@@ -50,16 +50,19 @@ impl ZellijPlugin for State {
         ]);
         self.file_list_view.clear_selected();
 
-        match configuration
+        let artifacts_mode = artifacts_mode_enabled(&configuration);
+        let configured_cwd = match configuration
             .get("caller_cwd")
             .map(|c| Platform::normalize(&PathBuf::from(c)))
         {
-            Some(caller_cwd) => {
-                self.file_list_view.path = caller_cwd;
-            },
-            None => {
-                self.file_list_view.path = self.initial_cwd.clone();
-            },
+            Some(caller_cwd) => caller_cwd,
+            None => self.initial_cwd.clone(),
+        };
+        self.file_list_view.path = resolve_configured_cwd(configured_cwd, artifacts_mode, |name| {
+            std::env::var(name).ok()
+        });
+        if artifacts_mode {
+            self.initial_cwd = self.file_list_view.path.clone();
         }
         if self.initial_cwd != self.file_list_view.path {
             change_host_folder(self.file_list_view.path.clone());
@@ -207,5 +210,115 @@ impl ZellijPlugin for State {
             }
         }
         render_instruction_line(rows, cols);
+    }
+}
+
+fn artifacts_mode_enabled(configuration: &BTreeMap<String, String>) -> bool {
+    configuration.get("mode").map(|v| v.as_str()) == Some("artifacts")
+        || (configuration.get("file_filter").map(|v| v.as_str()) == Some("*.md")
+            && configuration.get("sort_by").map(|v| v.as_str()) == Some("modified_desc"))
+}
+
+fn resolve_configured_cwd<F>(candidate: PathBuf, artifacts_mode: bool, env_lookup: F) -> PathBuf
+where
+    F: Fn(&str) -> Option<String>,
+{
+    if is_existing_dir(&candidate) {
+        return candidate;
+    }
+    if !artifacts_mode && !contains_vibecrafted_marker(&candidate) {
+        return candidate;
+    }
+    vibecrafted_artifacts_fallback(env_lookup).unwrap_or(candidate)
+}
+
+fn contains_vibecrafted_marker(path: &Path) -> bool {
+    let path = path.to_string_lossy();
+    path.contains("${")
+        || path.contains('}')
+        || path.contains("VIBECRAFTED_HOME")
+        || path.contains(".vibecrafted")
+}
+
+fn vibecrafted_artifacts_fallback<F>(env_lookup: F) -> Option<PathBuf>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    env_lookup("VIBECRAFTED_HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join("artifacts"))
+        .filter(|path| is_existing_dir(path))
+        .or_else(|| {
+            env_lookup("HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join(".vibecrafted").join("artifacts"))
+                .filter(|path| is_existing_dir(path))
+        })
+}
+
+fn is_existing_dir(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|metadata| metadata.is_dir())
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn unique_temp_dir(test_name: &str) -> PathBuf {
+        let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "strider-{}-{}-{}",
+            test_name,
+            std::process::id(),
+            id
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn invalid_vibecrafted_cwd_falls_back_to_vibecrafted_home_artifacts() {
+        let temp_dir = unique_temp_dir("vibecrafted-home");
+        let artifacts_dir = temp_dir.join("artifacts");
+        std::fs::create_dir_all(&artifacts_dir).unwrap();
+
+        let resolved = resolve_configured_cwd(
+            PathBuf::from("${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/artifacts"),
+            false,
+            |name| match name {
+                "VIBECRAFTED_HOME" => Some(temp_dir.display().to_string()),
+                "HOME" => None,
+                _ => None,
+            },
+        );
+
+        assert_eq!(resolved, artifacts_dir);
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn plain_invalid_cwd_stays_unchanged_without_vibecrafted_markers() {
+        let temp_dir = unique_temp_dir("plain-invalid");
+        let fallback_home = temp_dir.join("home");
+        let fallback_artifacts = fallback_home.join(".vibecrafted").join("artifacts");
+        std::fs::create_dir_all(&fallback_artifacts).unwrap();
+        let invalid_plain_path = temp_dir.join("does-not-exist");
+
+        let resolved =
+            resolve_configured_cwd(invalid_plain_path.clone(), false, |name| match name {
+                "VIBECRAFTED_HOME" => None,
+                "HOME" => Some(fallback_home.display().to_string()),
+                _ => None,
+            });
+
+        assert_eq!(resolved, invalid_plain_path);
+        let _ = std::fs::remove_dir_all(temp_dir);
     }
 }
