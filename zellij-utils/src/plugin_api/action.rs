@@ -228,6 +228,12 @@ impl TryFrom<ProtobufAction> for Action {
                 },
                 _ => Err("Wrong payload for Action::DumpScreen"),
             },
+            Some(ProtobufActionName::CopyPaneScrollback) => {
+                match protobuf_action.optional_payload {
+                    Some(_) => Err("CopyPaneScrollback should not have a payload"),
+                    None => Ok(Action::CopyPaneScrollback),
+                }
+            },
             Some(ProtobufActionName::EditScrollback) => match protobuf_action.optional_payload {
                 Some(_) => Err("EditScrollback should not have a payload"),
                 None => Ok(Action::EditScrollback { ansi: false }),
@@ -1232,6 +1238,10 @@ impl TryFrom<Action> for ProtobufAction {
                     })),
                 })
             },
+            Action::CopyPaneScrollback => Ok(ProtobufAction {
+                name: ProtobufActionName::CopyPaneScrollback as i32,
+                optional_payload: None,
+            }),
             Action::EditScrollback { .. } => Ok(ProtobufAction {
                 name: ProtobufActionName::EditScrollback as i32,
                 optional_payload: None,

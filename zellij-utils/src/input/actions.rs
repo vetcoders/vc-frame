@@ -185,6 +185,8 @@ pub enum Action {
         pane_id: Option<PaneId>,
         ansi: bool,
     },
+    /// Copy the focused pane with full scrollback to the configured clipboard target.
+    CopyPaneScrollback,
     /// Dumps
     DumpLayout,
     /// Save the current session state to disk

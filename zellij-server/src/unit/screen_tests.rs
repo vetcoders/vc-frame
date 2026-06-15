@@ -7369,6 +7369,71 @@ pub fn send_cli_dump_screen_action_without_ansi_strips_codes() {
 }
 
 #[test]
+pub fn copy_pane_scrollback_action_pipes_focused_pane_full_scrollback_to_copy_command() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let copy_script_path = temp_dir.path().join("copy-current-pane.sh");
+    let copied_text_path = temp_dir.path().join("copied-pane.txt");
+    std::fs::write(&copy_script_path, "cat > \"$1\"\n").unwrap();
+
+    let size = Size { cols: 80, rows: 5 };
+    let client_id = 10;
+    let initial_layout = TiledPaneLayout {
+        children_split_direction: SplitDirection::Vertical,
+        children: vec![TiledPaneLayout::default(), TiledPaneLayout::default()],
+        ..Default::default()
+    };
+
+    let mut mock_screen = MockScreen::new(size);
+    mock_screen.config.options.copy_command = Some(format!(
+        "/bin/sh {} {}",
+        copy_script_path.display(),
+        copied_text_path.display()
+    ));
+    let session_metadata = mock_screen.clone_session_metadata();
+    let screen_thread = mock_screen.run(Some(initial_layout), vec![]);
+    let received_server_instructions = Arc::new(Mutex::new(vec![]));
+    let server_receiver = mock_screen.server_receiver.take().unwrap();
+    let server_thread = log_actions_in_thread!(
+        received_server_instructions,
+        ServerInstruction::KillSession,
+        server_receiver
+    );
+
+    let pane_text = (0..10)
+        .map(|line| format!("copy-current-pane-line-{line}\r\n"))
+        .collect::<String>();
+    let _ = mock_screen
+        .to_screen
+        .send(ScreenInstruction::PtyBytes(0, pane_text.into_bytes()));
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    route_action(
+        Action::CopyPaneScrollback,
+        client_id,
+        None,
+        None,
+        session_metadata.senders.clone(),
+        None,
+        None,
+        InputMode::Normal,
+        None,
+    )
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    mock_screen.teardown(vec![server_thread, screen_thread]);
+    let copied_text = std::fs::read_to_string(copied_text_path).unwrap();
+    assert!(
+        copied_text.contains("copy-current-pane-line-0"),
+        "copy must include full scrollback, not only the viewport: {copied_text:?}"
+    );
+    assert!(
+        copied_text.contains("copy-current-pane-line-9"),
+        "copy must include the visible tail of the current pane: {copied_text:?}"
+    );
+}
+
+#[test]
 pub fn send_cli_edit_scrollback_action_with_ansi() {
     let size = Size { cols: 80, rows: 20 };
     let client_id = 10;

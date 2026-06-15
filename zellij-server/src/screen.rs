@@ -414,6 +414,7 @@ pub enum ScreenInstruction {
         Option<ClientId>, // cli_client_id - used to send output to the CLI client's STDOUT
         bool,             // ansi - preserve ANSI styling in the dump output
     ),
+    CopyPaneScrollback(ClientId, Option<NotificationEnd>),
     DumpLayout(Option<PathBuf>, ClientId, Option<NotificationEnd>), // PathBuf is the default configured
     // shell
     SaveSession(ClientId, Option<NotificationEnd>),
@@ -939,6 +940,7 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::Exit => ScreenContext::Exit,
             ScreenInstruction::ClearScreen(..) => ScreenContext::ClearScreen,
             ScreenInstruction::DumpScreen(..) => ScreenContext::DumpScreen,
+            ScreenInstruction::CopyPaneScrollback(..) => ScreenContext::CopyPaneScrollback,
             ScreenInstruction::DumpLayout(..) => ScreenContext::DumpLayout,
             ScreenInstruction::SaveSession(..) => ScreenContext::SaveSession,
             ScreenInstruction::DumpLayoutToPlugin { .. } => ScreenContext::DumpLayoutToPlugin,
@@ -6435,6 +6437,21 @@ pub(crate) fn screen_thread_main(
                         ))?;
                     },
                 }
+            },
+            ScreenInstruction::CopyPaneScrollback(
+                client_id,
+                _completion_tx, // the action ends here, dropping this will release anything waiting for it
+            ) => {
+                active_tab_and_connected_client_id!(
+                    screen,
+                    client_id,
+                    |tab: &mut Tab, client_id: ClientId| {
+                        let text = tab.get_dump_active_terminal_screen(client_id, true);
+                        tab.copy_text_to_clipboard(&text)
+                    },
+                    ?
+                );
+                screen.render(None)?;
             },
             ScreenInstruction::DumpLayout(default_shell, client_id, completion_tx) => {
                 let err_context = || "Failed to dump layout".to_string();

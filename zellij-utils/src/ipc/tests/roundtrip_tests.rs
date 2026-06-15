@@ -920,6 +920,12 @@ fn test_client_messages() {
         is_cli_client: true,
     });
     test_client_roundtrip!(ClientToServerMsg::Action {
+        action: Action::CopyPaneScrollback,
+        terminal_id: Some(1),
+        client_id: Some(100),
+        is_cli_client: false,
+    });
+    test_client_roundtrip!(ClientToServerMsg::Action {
         action: Action::DumpLayout,
         terminal_id: Some(1),
         client_id: Some(100),

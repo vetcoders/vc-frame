@@ -854,6 +854,7 @@ impl From<crate::input::actions::Action>
             CloseTerminalPaneAction,
             ConfirmAction,
             CopyAction,
+            CopyPaneScrollbackAction,
             CurrentTabInfoAction,
             DenyAction,
             DetachAction,
@@ -1076,6 +1077,9 @@ impl From<crate::input::actions::Action>
                     dump_to_stdout,
                     ansi,
                 })
+            },
+            crate::input::actions::Action::CopyPaneScrollback => {
+                ActionType::CopyPaneScrollback(CopyPaneScrollbackAction {})
             },
             crate::input::actions::Action::DumpLayout => {
                 ActionType::DumpLayout(DumpLayoutAction {})
@@ -1939,6 +1943,9 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                     pane_id: dump_screen_action.pane_id.and_then(|p| p.try_into().ok()),
                     ansi: dump_screen_action.ansi,
                 })
+            },
+            ActionType::CopyPaneScrollback(_) => {
+                Ok(crate::input::actions::Action::CopyPaneScrollback)
             },
             ActionType::DumpLayout(_) => Ok(crate::input::actions::Action::DumpLayout),
             ActionType::SaveSession(_) => Ok(crate::input::actions::Action::SaveSession),

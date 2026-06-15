@@ -78,6 +78,7 @@ macro_rules! parse_kdl_action_arguments {
                 "SetLightTheme" => Ok(Action::SetLightTheme),
                 "ToggleTheme" => Ok(Action::ToggleTheme),
                 "Copy" => Ok(Action::Copy),
+                "CopyPaneScrollback" => Ok(Action::CopyPaneScrollback),
                 "Confirm" => Ok(Action::Confirm),
                 "Deny" => Ok(Action::Deny),
                 "ToggleMouseMode" => Ok(Action::ToggleMouseMode),
@@ -544,6 +545,7 @@ impl Action {
                 pane_id: None,
                 ansi: false,
             }),
+            "CopyPaneScrollback" => Ok(Action::CopyPaneScrollback),
             "DumpLayout" => Ok(Action::DumpLayout),
             "NewPane" => {
                 if string.is_empty() {
@@ -705,6 +707,7 @@ impl Action {
             Action::DumpScreen {
                 file_path: None, ..
             } => None,
+            Action::CopyPaneScrollback => Some(KdlNode::new("CopyPaneScrollback")),
             Action::DumpLayout => Some(KdlNode::new("DumpLayout")),
             Action::EditScrollback { ansi } => {
                 let mut node = KdlNode::new("EditScrollback");
@@ -1579,6 +1582,9 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                 parse_kdl_action_arguments!(action_name, action_arguments, kdl_action)
             },
             "Detach" => parse_kdl_action_arguments!(action_name, action_arguments, kdl_action),
+            "CopyPaneScrollback" => {
+                parse_kdl_action_arguments!(action_name, action_arguments, kdl_action)
+            },
             "SwitchSession" => {
                 let name = kdl_get_string_property_or_child_value!(kdl_action, "name")
                     .map(|s| s.to_string())
@@ -6462,6 +6468,30 @@ fn keybinds_to_string_with_multiple_actions() {
         "Deserialized serialized config equals original config"
     );
     insta::assert_snapshot!(serialized.to_string());
+}
+
+#[test]
+fn keybind_copy_pane_scrollback_is_bindable_and_serializable() {
+    let fake_config = r#"
+        keybinds {
+            pane {
+                bind "y" { CopyPaneScrollback; }
+            }
+        }"#;
+    let document: KdlDocument = fake_config.parse().unwrap();
+    let deserialized = Keybinds::from_kdl(
+        document.get("keybinds").unwrap(),
+        Default::default(),
+        &Default::default(),
+    )
+    .unwrap();
+    let clear_defaults = true;
+    let serialized = Keybinds::to_kdl(&deserialized, clear_defaults).to_string();
+
+    assert!(
+        serialized.contains("CopyPaneScrollback"),
+        "copy-current-pane keybind action must survive KDL roundtrip: {serialized}"
+    );
 }
 
 #[test]

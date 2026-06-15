@@ -493,6 +493,7 @@ enum ActionName {
     SetDarkTheme = 101;
     SetLightTheme = 102;
     ToggleTheme = 103;
+    CopyPaneScrollback = 104;
 }
 
 message Position {

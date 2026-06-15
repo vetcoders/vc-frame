@@ -277,6 +277,7 @@ message Action {
     SetDarkThemeAction set_dark_theme = 137;
     SetLightThemeAction set_light_theme = 138;
     ToggleThemeAction toggle_theme = 139;
+    CopyPaneScrollbackAction copy_pane_scrollback = 140;
   }
 }
 
@@ -289,6 +290,7 @@ message FocusPreviousPaneAction {}
 message SwitchFocusAction {}
 message MovePaneBackwardsAction {}
 message ClearScreenAction {}
+message CopyPaneScrollbackAction {}
 message DumpLayoutAction {}
 message SaveSessionAction {}
 message EditScrollbackAction {
