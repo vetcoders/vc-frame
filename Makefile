@@ -87,22 +87,20 @@ binary: doctor-quiet
 release: doctor-quiet
 	$(CARGO) xtask build --release
 
-## Build + install the vc-frame binary (with bundled plugins), then expose aliases on ~/.local/bin
+## Build + install the vc-frame binary (with bundled plugins), then expose the vc-frame alias on ~/.local/bin
+## vc-frame replaces zellij 100% in the runtime — no `zellij` alias is created.
 ## Usage: make install  OR  make install DEST=/usr/local/bin/vc-frame
 DEST ?= $(CARGO_BIN_DIR)/vc-frame
 LOCAL_BIN_DIR ?= $(HOME)/.local/bin
 LOCAL_VC_FRAME_ALIAS ?= $(LOCAL_BIN_DIR)/vc-frame
-LOCAL_ZELLIJ_ALIAS ?= $(LOCAL_BIN_DIR)/zellij
 install: doctor-quiet doctor-install-quiet
 	$(CARGO) xtask install $(DEST)
 	@mkdir -p "$(LOCAL_BIN_DIR)"
 	@installed="$(DEST)"; \
 	if [ -d "$$installed" ]; then installed="$$installed/vc-frame"; fi; \
 	ln -sfn "$$installed" "$(LOCAL_VC_FRAME_ALIAS)"; \
-	ln -sfn "$$installed" "$(LOCAL_ZELLIJ_ALIAS)"; \
 	echo "✓ Installed vc-frame: $$installed"; \
-	echo "✓ Linked $(LOCAL_VC_FRAME_ALIAS) -> $$installed"; \
-	echo "✓ Linked $(LOCAL_ZELLIJ_ALIAS) -> $$installed"
+	echo "✓ Linked $(LOCAL_VC_FRAME_ALIAS) -> $$installed"
 
 ## Run the locally built vc-frame
 run: doctor-quiet
@@ -254,7 +252,7 @@ help:
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "plugins" "Build only WASM plugins"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "binary" "Build only host binary (plugins must exist)"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "release" "Build everything in release mode"
-	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "install" "Release build + install to ~/.cargo/bin + link vc-frame and zellij aliases"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "install" "Release build + install to ~/.cargo/bin + link the vc-frame alias"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "run" "Run the locally built vc-frame"
 	@printf "\n  $(C_YELLOW)QUALITY GATES$(C_RESET)\n"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "precheck" "Format check + clippy -D warnings + workspace typecheck"
