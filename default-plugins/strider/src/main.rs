@@ -4,6 +4,7 @@ mod search_view;
 mod shared;
 mod state;
 
+use file_list_view::FileListMode;
 use platform::Platform;
 use shared::{
     refresh_directory, render_current_path, render_instruction_line, render_search_term,
@@ -51,6 +52,11 @@ impl ZellijPlugin for State {
         self.file_list_view.clear_selected();
 
         let artifacts_mode = artifacts_mode_enabled(&configuration);
+        self.file_list_view.mode = if artifacts_mode {
+            FileListMode::MarkdownNewest
+        } else {
+            FileListMode::Default
+        };
         let configured_cwd = match configuration
             .get("caller_cwd")
             .map(|c| Platform::normalize(&PathBuf::from(c)))
@@ -320,5 +326,14 @@ mod tests {
 
         assert_eq!(resolved, invalid_plain_path);
         let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn file_filter_and_modified_desc_config_enable_artifacts_mode() {
+        let mut configuration = BTreeMap::new();
+        configuration.insert("file_filter".to_owned(), "*.md".to_owned());
+        configuration.insert("sort_by".to_owned(), "modified_desc".to_owned());
+
+        assert!(artifacts_mode_enabled(&configuration));
     }
 }
