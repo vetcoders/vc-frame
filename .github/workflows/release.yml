@@ -131,15 +131,18 @@ jobs:
           Compress-Archive -Path "target/release/vc-frame.exe" -DestinationPath $asset_name
           echo "asset_name=$asset_name" >> $env:GITHUB_OUTPUT
 
+      # Checksum covers the published ARCHIVE (not the raw binary), so the
+      # installer can verify download integrity before it ever unpacks the tar.
       - name: Create checksum (Unix)
         if: runner.os != 'Windows'
         id: make-checksum-unix
         run: |
-          checksum_name="vc-frame-${{ matrix.target }}.sha256sum"
-          if [[ "$RUNNER_OS" != "macOS" ]]; then
-            sha256sum "target/${{ matrix.target }}/release/vc-frame" > "${checksum_name}"
+          asset_name="${{ steps.make-artifact-unix.outputs.asset_name }}"
+          checksum_name="${asset_name}.sha256"
+          if [ "$RUNNER_OS" != "macOS" ]; then
+            sha256sum "${asset_name}" > "${checksum_name}"
           else
-            shasum -a 256 "target/${{ matrix.target }}/release/vc-frame" > "${checksum_name}"
+            shasum -a 256 "${asset_name}" > "${checksum_name}"
           fi
           echo "checksum_name=${checksum_name}" >> "$GITHUB_OUTPUT"
 
@@ -147,10 +150,41 @@ jobs:
         if: runner.os == 'Windows'
         id: make-checksum-windows
         run: |
-          $checksum_name = "vc-frame-${{ matrix.target }}.sha256sum"
-          $hash = (Get-FileHash "target/release/vc-frame.exe" -Algorithm SHA256).Hash.ToLower()
-          "$hash  target/release/vc-frame.exe" | Out-File -Encoding ascii $checksum_name
+          $asset_name = "${{ steps.make-artifact-windows.outputs.asset_name }}"
+          $checksum_name = "$asset_name.sha256"
+          $hash = (Get-FileHash $asset_name -Algorithm SHA256).Hash.ToLower()
+          "$hash  $asset_name" | Out-File -Encoding ascii $checksum_name
           echo "checksum_name=$checksum_name" >> $env:GITHUB_OUTPUT
+
+      # GPG is the release trust root. The PRIVATE key + passphrase are provided
+      # by the operator/runner at release time via secrets — never embedded here.
+      # When the secret is absent (e.g. workflow_dispatch dry-run) the build
+      # still succeeds but emits UNSIGNED artifacts and a loud warning.
+      - name: Import GPG signing key
+        id: gpg
+        if: runner.os != 'Windows'
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          if [ -z "${GPG_PRIVATE_KEY:-}" ]; then
+            echo "signing_enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::GPG_PRIVATE_KEY secret not set; release artifacts will be UNSIGNED"
+            exit 0
+          fi
+          printf '%s\n' "$GPG_PRIVATE_KEY" | gpg --batch --import
+          echo "signing_enabled=true" >> "$GITHUB_OUTPUT"
+
+      - name: Sign artifact (Unix)
+        id: sign-unix
+        if: runner.os != 'Windows' && steps.gpg.outputs.signing_enabled == 'true'
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          asset_name="${{ steps.make-artifact-unix.outputs.asset_name }}"
+          gpg --batch --yes --pinentry-mode loopback \
+            ${GPG_PASSPHRASE:+--passphrase "$GPG_PASSPHRASE"} \
+            --detach-sign --output "${asset_name}.sig" "${asset_name}"
+          echo "sig_name=${asset_name}.sig" >> "$GITHUB_OUTPUT"
 
       - name: Upload release archive
         uses: actions/upload-release-asset@v1.0.2
@@ -169,8 +203,19 @@ jobs:
         with:
           upload_url: ${{ needs.create-release.outputs.upload_url }}
           asset_path: ${{ steps.make-checksum-unix.outputs.checksum_name || steps.make-checksum-windows.outputs.checksum_name }}
-          asset_name: zellij-${{matrix.target}}.sha256sum
+          asset_name: ${{ runner.os == 'Windows' && format('vc-frame-{0}.zip.sha256', matrix.target) || format('vc-frame-{0}.tar.gz.sha256', matrix.target) }}
           asset_content_type: text/plain
+
+      - name: Upload signature
+        if: runner.os != 'Windows' && steps.gpg.outputs.signing_enabled == 'true'
+        uses: actions/upload-release-asset@v1.0.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ${{ steps.sign-unix.outputs.sig_name }}
+          asset_name: ${{ format('vc-frame-{0}.tar.gz.sig', matrix.target) }}
+          asset_content_type: application/pgp-signature
 
       # ===== Windows MSI installer =====
       - name: Install WiX v6
@@ -186,19 +231,19 @@ jobs:
         run: |
           $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
           New-Item -ItemType Directory -Force -Path target\wix
-          wix build wix\main.wxs wix\Zellij.wxl `
+          wix build wix\main.wxs wix\VcFrame.wxl `
             -d Version=$version `
             -arch x64 `
             -ext WixToolset.UI.wixext `
-            -o target\wix\zellij-x86_64-pc-windows-msvc-installer.msi
+            -o target\wix\vc-frame-x86_64-pc-windows-msvc-installer.msi
 
       - name: Create MSI checksum
         if: runner.os == 'Windows'
         id: make-checksum-msi
         run: |
-          $checksum_name = "zellij-${{ matrix.target }}-installer.sha256sum"
-          $hash = (Get-FileHash "target\wix\zellij-${{ matrix.target }}-installer.msi" -Algorithm SHA256).Hash.ToLower()
-          "$hash  zellij-${{ matrix.target }}-installer.msi" | Out-File -Encoding ascii $checksum_name
+          $checksum_name = "vc-frame-${{ matrix.target }}-installer.msi.sha256"
+          $hash = (Get-FileHash "target\wix\vc-frame-${{ matrix.target }}-installer.msi" -Algorithm SHA256).Hash.ToLower()
+          "$hash  vc-frame-${{ matrix.target }}-installer.msi" | Out-File -Encoding ascii $checksum_name
           echo "checksum_name=$checksum_name" >> $env:GITHUB_OUTPUT
 
       - name: Upload MSI installer
@@ -208,8 +253,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: target\wix\zellij-${{ matrix.target }}-installer.msi
-          asset_name: zellij-${{ matrix.target }}-installer.msi
+          asset_path: target\wix\vc-frame-${{ matrix.target }}-installer.msi
+          asset_name: vc-frame-${{ matrix.target }}-installer.msi
           asset_content_type: application/octet-stream
 
       - name: Upload MSI checksum
@@ -220,7 +265,7 @@ jobs:
         with:
           upload_url: ${{ needs.create-release.outputs.upload_url }}
           asset_path: ${{ steps.make-checksum-msi.outputs.checksum_name }}
-          asset_name: zellij-${{ matrix.target }}-installer.sha256sum
+          asset_name: vc-frame-${{ matrix.target }}-installer.msi.sha256
           asset_content_type: text/plain
 
   build-release-noweb:
@@ -387,7 +432,7 @@ jobs:
         run: |
           $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
           New-Item -ItemType Directory -Force -Path target\wix
-          wix build wix\main.wxs wix\Zellij.wxl `
+          wix build wix\main.wxs wix\VcFrame.wxl `
             -d Version=$version `
             -arch x64 `
             -ext WixToolset.UI.wixext `
@@ -422,4 +467,88 @@ jobs:
           upload_url: ${{ needs.create-release.outputs.upload_url }}
           asset_path: ${{ steps.make-checksum-msi.outputs.checksum_name }}
           asset_name: vc-frame-no-web-${{ matrix.target }}-installer.sha256sum
+          asset_content_type: text/plain
+
+  # ===========================================================================
+  # Finalize: publish the release manifest + the GPG public key.
+  #
+  # The manifest is the source of truth the canonical installer (tools/install.sh)
+  # reads to resolve the per-target archive name. It is generated deterministically
+  # from the build matrix — the installer pulls each archive's SHA256 from the
+  # per-artifact `.sha256` sidecar, so the manifest only needs to carry names.
+  #
+  # `vc-frame-signing.asc` is the PUBLIC half of the release key, published so
+  # `tools/install.sh` can establish the GPG trust root. The private key never
+  # appears here; it lives only in the operator-provided secrets used to sign.
+  # ===========================================================================
+  publish-manifest:
+    needs: [create-release, build-release-normal]
+    name: publish-manifest
+    runs-on: [self-hosted, ops-linux]
+    steps:
+      - name: Set release tag
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ]; then
+            echo "RELEASE_TAG=main" >> "$GITHUB_ENV"
+          else
+            echo "RELEASE_TAG=${GITHUB_REF#refs/tags/}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate manifest.json
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          targets="x86_64-apple-darwin aarch64-apple-darwin x86_64-unknown-linux-musl aarch64-unknown-linux-musl"
+          {
+            printf '{\n'
+            printf '  "product": "vc-frame",\n'
+            printf '  "version": "%s",\n' "$version"
+            printf '  "tag": "%s",\n' "$RELEASE_TAG"
+            printf '  "signing_key": "vc-frame-signing.asc",\n'
+            printf '  "artifacts": {\n'
+            first=1
+            for t in $targets; do
+              [ "$first" -eq 1 ] || printf ',\n'
+              first=0
+              printf '    "%s": "vc-frame-%s.tar.gz"' "$t" "$t"
+            done
+            printf '\n  }\n'
+            printf '}\n'
+          } > manifest.json
+          cat manifest.json
+
+      - name: Write GPG public key
+        id: pubkey
+        env:
+          GPG_PUBLIC_KEY: ${{ secrets.GPG_PUBLIC_KEY }}
+        run: |
+          if [ -z "${GPG_PUBLIC_KEY:-}" ]; then
+            echo "have_key=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::GPG_PUBLIC_KEY secret not set; signing key will NOT be published"
+            exit 0
+          fi
+          printf '%s\n' "$GPG_PUBLIC_KEY" > vc-frame-signing.asc
+          echo "have_key=true" >> "$GITHUB_OUTPUT"
+
+      - name: Upload manifest.json
+        uses: actions/upload-release-asset@v1.0.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: manifest.json
+          asset_name: manifest.json
+          asset_content_type: application/json
+
+      - name: Upload GPG public key
+        if: steps.pubkey.outputs.have_key == 'true'
+        uses: actions/upload-release-asset@v1.0.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: vc-frame-signing.asc
+          asset_name: vc-frame-signing.asc
           asset_content_type: text/plain
