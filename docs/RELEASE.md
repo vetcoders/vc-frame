@@ -1,144 +1,173 @@
-# How to release a zellij version
+# How to release vc-frame
 
-This document is primarily target at zellij maintainers in need to (prepare to)
-release a new zellij version.
+`vc-frame` is a standalone Rust binary (a Vibecrafted-tuned zellij fork). A
+release ships prebuilt, checksummed, GPG-signed binaries plus a `manifest.json`,
+and is installable from a single `curl … | sh`. This document is the runbook for
+cutting one.
 
+There is **no undo button** for a real release: it is triggered by pushing a
+`vX.Y.Z` tag, which fires `.github/workflows/release.yml`. Read the whole
+runbook, do the dry-run, and only then cut the tag.
 
-## Simulating a release
+---
 
-This section explains how to do a "dry-run" of the release process. This is
-useful to check if a release is successful beforehand, i.e. before publishing
-it to the world. Because there is no "undo"-button for a real release as
-described below, it is recommended to perform a simulated release first.
+## What a release publishes
 
+For each supported target, `release.yml` uploads to the GitHub release:
 
-### Requirements
+| Asset | Purpose |
+|---|---|
+| `vc-frame-<target>.tar.gz` (`.zip` on Windows) | the binary archive (bare `vc-frame` at the archive root) |
+| `vc-frame-<target>.tar.gz.sha256` | SHA256 of the **archive** (verify-before-extract) |
+| `vc-frame-<target>.tar.gz.sig` | detached GPG signature of the archive (Unix targets) |
+| `vc-frame-<target>-installer.msi` + `.sha256` | Windows MSI (built from `wix/main.wxs` + `wix/VcFrame.wxl`) |
 
-You only need a publicly accessible Git repository to provide a cargo registry.
+Once per release, a `publish-manifest` job also uploads:
 
+| Asset | Purpose |
+|---|---|
+| `manifest.json` | source of truth the installer reads to resolve the per-target archive name |
+| `vc-frame-signing.asc` | the **public** half of the release key (GPG trust root for the installer) |
 
-### High-level concept
+A `-no-web` variant of each archive is built in parallel for environments
+without the web/control-plane assets. The canonical installer resolves the full
+(web) build; `-no-web` is a secondary channel.
 
-The setup explained below will host a third-party cargo registry software
-([ktra](https://github.com/moriturus/ktra)) locally on your PC. In order for
-`cargo` to pick this up and be able to work with it, we must perform a few
-modifications to the zellij repository and other components. Once setup, we
-release a zellij version to this private registry and install zellij from there
-to make sure it works as expected.
+### Supported targets
 
+The build matrix (`release.yml`) covers:
 
-### Step-by-step guide
+- `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` — **musl-static**.
+  vc-frame is standalone (no native embedder), so musl is the maximally-portable
+  choice. The installer's `target_triple()` resolves Linux to `-musl`; these
+  names **must** stay in lockstep with what `release.yml` uploads.
+- `x86_64-apple-darwin`, `aarch64-apple-darwin`
+- `x86_64-pc-windows-msvc`
 
-1. Create a cargo index repository
-    1. Create a new repo on some git forge (GitHub/GitLab/...)
-    1. Clone the repo **with HTTPS (not SSH)**, we'll refer to the `https://`
-       clone-url as `$INDEX_REPO` for the remainder of this text
-    1. Add a file named `config.json` with the following content in the root:
-       ```json
-       {"dl":"http://localhost:8000/dl","api":"http://localhost:8000"}
-       ```
-    1. Generate an access token for full repo access, we'll refer to this as
-       `$TOKEN` for the remained of this text
-    1. Create and push a commit with these changes. Provide the following HTTPS
-       credentials:
-        1. Username: Your git-forge username
-        1. Password: `$TOKEN`
-1. Prepare the zellij repo
-    1. `cd` into your local copy of the zellij repository
-    1. Add a new cargo registry to `.cargo/config.toml` like this:
-       ```toml
-       
-       [registries]
-       ktra = { index = "https://$INDEX_REPO" }
-       ```
-    1. Modify **all** `Cargo.toml` in the zellij repo to retrieve the individual
-       zellij subcrates from the private registry:
-        1. Find all dependencies that look like this:
-           ```toml
-           zellij-utils = { path = "../zellij-utils/", version = "XXX" }
-           ```
-        1. Change them to look like this
-           ```toml
-           zellij-utils = { path = "../zellij-utils/", version = "XXX", registry = "ktra" }
-           ```
-        1. This applies to all zellij subcrates, e.g. `zellij-client`,
-           `zellij-server`, ... You can ignore the plugins, because these aren't
-           released as sources.
-1. Launch your private registry
-    1. Create the file `~/.cargo/config.toml` with the following content:
-       ```
-       [registries.ktra]
-       index = "https://$INDEX_REPO"
-       ```
-    1. Install `ktra`, the registry server: `cargo install ktra`
-    1. In a separate shell/pane/whatever, navigate to some folder where you
-       want to store all data for the registry
-    1. Create a config file for `ktra` named `ktra.toml` there with the
-       following content:
-       ```toml
-       [index_config]
-       remote_url = "https://$INDEX_REPO"
-       https_username = "your-git-username"
-       https_password = "$TOKEN" 
-       branch = "main"  # Or whatever branch name you used
-       ```
-    1. Launch ktra (with logging to see what happens): `RUST_LOG=debug ktra`
-    1. Get a registry token for `ktra` (The details don't really matter, unless
-       you want to reuse this registry):
-       ```bash
-       curl -X POST -H 'Content-Type: application/json' -d '{"password":"PASSWORD"}' http://localhost:8000/ktra/api/v1/new_user/ALICE
-       ```
-    1. Login to the registry with the token you received as reply to the
-       previous command:
-       ```bash
-       cargo login --registry ktra "KTRA_TOKEN"
-       ```
-1. **Install safety measures to prevent accidentally performing a real release**:
-    1. In your `zellij` repo, remove all configured remotes that allow you to
-       push/publish directly to the zellij main GitHub repo. Setup a fork of
-       the main zellij repo instead and configure a remote that allows you to
-       push/publish to that. Please, this is very important.
-    1. Comment out the entire `[registry]` section in `~/.cargo/credentials` to
-       prevent accidentally pushing a new release to `crates.io`.
-1. **Simulate a release**
-    1. Go back to the zellij repo, type:
-       ```bash
-       cargo x publish --git-remote <YOUR_ZELLIJ_FORK> --cargo-registry ktra
-       ```
-    1. A prompt will open with the commit message for the release commit. Just
-       save and close your editor to continue
-    1. If all goes well, the release will be done in a few minutes and all the
-       crates are published to the private `ktra` registry!
-1. Testing the release binary
-    1. Install zellij from the registry to some local directory like this:
-       ```bash
-       $ cargo install --registry ktra --root /tmp zellij
-       ```
-    1. Execute the binary to see if all went well:
-       ```bash
-       $ /tmp/bin/zellij
-       ```
-1. Cleaning up
-    1. Uncomment the `[registry]` section in `~/.cargo/config.toml`
-    1. Restore your original git remotes for the zellij repo
-    1. Undo your last commit:
-       ```bash
-       $ git reset --hard HEAD~1
-       ```
-    1. Undo your last commit in the remote zellij repo:
-       ```bash
-       $ git push --force <YOUR_ZELLIJ_FORK>
-       ```
-    1. Delete the release tag:
-       ```bash
-       $ git tag -d "vX.Y.Z"
-       ```
-    1. Delete the release tag in the remote zellij repo
-       ```bash
-       $ git push <YOUR_ZELLIJ_FORK> --force --delete "vX.Y.Z"
-       ```
+---
 
-You're done! :tada:
+## Signing (operator-provided key material)
 
+GPG is the release trust root. The **private** key never lives in this repo or
+in any agent-authored file — only the signing *step* and the public-key publish
+are wired in `release.yml`. The key is provided at release time via repository
+secrets:
 
-## Releasing a new version
+- `GPG_PRIVATE_KEY` — ASCII-armored private key, imported on each build runner.
+- `GPG_PASSPHRASE` — passphrase for that key (loopback pinentry).
+- `GPG_PUBLIC_KEY` — ASCII-armored public key, published as `vc-frame-signing.asc`.
+
+The operator's keys live in the `~/.keys` vault. When the secrets are absent
+(e.g. a `workflow_dispatch` dry-run), the build still succeeds but emits
+**unsigned** artifacts and a loud `::warning::`. A real `vX.Y.Z` release must run
+with the secrets present.
+
+Once the release key is minted, record its fingerprint and set it as the
+installer default (`VCFRAME_GPG_FINGERPRINT`) so foreign installs pin the key
+instead of trusting-on-publish.
+
+---
+
+## The canonical installer
+
+`tools/install.sh` is the script `https://vibecrafted.io/install.sh` serves
+(operator turf — see *Operator buttons* below). It:
+
+1. resolves `target_triple()` (Linux → `-musl`),
+2. fetches `manifest.json` → the per-target archive name,
+3. downloads the archive + `.sha256` + `.sig`,
+4. verifies the SHA256 (always) and the GPG signature (trust root under
+   `VCFRAME_REQUIRE_GPG=1`, the default),
+5. extracts the bare `vc-frame` binary into `INSTALL_DIR` (default `~/.local/bin`),
+6. ensures `INSTALL_DIR` is on `PATH`,
+7. hard-checks `vc-frame --version` — the exact contract the Vibecrafted
+   foundations gate enforces (`binary_runs vc-frame`).
+
+Env overrides (full list in the script header): `VCFRAME_VERSION`,
+`VCFRAME_BASE_URL`, `VCFRAME_GPG_KEY_URL`, `VCFRAME_GPG_FINGERPRINT`,
+`VCFRAME_REQUIRE_GPG`, `INSTALL_DIR`, `VCFRAME_NO_PROFILE_UPDATE`.
+
+---
+
+## Dry-run before cutting a tag
+
+A real release is irreversible. Validate first.
+
+### 1. Build artifacts without releasing
+
+Trigger the workflow via **`workflow_dispatch`** (Actions → Release → Run
+workflow). This produces a *draft* release with all artifacts under the `main`
+tag name and never publishes a `vX.Y.Z`. Inspect the asset names — every asset
+must be `vc-frame-`prefixed and each archive's checksum/signature name must match
+its archive.
+
+### 2. Smoke-test the installer locally
+
+Point the installer at a local `file://` test release built from any `vc-frame`
+binary (the layout exactly mirrors what `release.yml` uploads):
+
+```sh
+REL=/tmp/vcframe-test/0.45.4; mkdir -p "$REL" /tmp/stage
+cp "$(command -v vc-frame)" /tmp/stage/vc-frame
+target="$(uname -m)-apple-darwin"            # or *-unknown-linux-musl on Linux
+tar czf "$REL/vc-frame-$target.tar.gz" -C /tmp/stage vc-frame
+( cd "$REL" && shasum -a 256 "vc-frame-$target.tar.gz" > "vc-frame-$target.tar.gz.sha256" )
+printf '{ "artifacts": { "%s": "vc-frame-%s.tar.gz" } }\n' "$target" "$target" > "$REL/manifest.json"
+
+VCFRAME_VERSION=0.45.4 VCFRAME_BASE_URL="file:///tmp/vcframe-test" \
+VCFRAME_REQUIRE_GPG=0 INSTALL_DIR=/tmp/vcframe-bin VCFRAME_NO_PROFILE_UPDATE=1 \
+sh tools/install.sh
+/tmp/vcframe-bin/vc-frame --version    # must print: vc-frame X.Y.Z
+```
+
+When a signed release exists, drop `VCFRAME_REQUIRE_GPG=0` to exercise the full
+GPG path against the published `vc-frame-signing.asc`.
+
+---
+
+## Cutting the real release
+
+> ⛔ **Operator button.** The steps below trigger an irreversible release and
+> must be performed by the operator, not an agent.
+
+1. Bump `version` in the workspace `[workspace.package]` of the root `Cargo.toml`.
+2. Confirm `GPG_PRIVATE_KEY` / `GPG_PASSPHRASE` / `GPG_PUBLIC_KEY` secrets are set.
+3. Commit, then tag and push:
+   ```sh
+   git tag vX.Y.Z
+   git push origin vX.Y.Z
+   ```
+4. `release.yml` builds the matrix, signs each Unix archive, and publishes the
+   artifacts + `manifest.json` + `vc-frame-signing.asc`.
+5. The operator's `vibecrafted-io` (`make site*` / `make release*`) serves
+   `https://vibecrafted.io/install.sh` (this script) and the release artifacts.
+
+---
+
+## The non-fakeable proof (foundations gate)
+
+A green tag-build is not a shipped release. The only proof is a **clean foreign
+machine** completing the Vibecrafted foundations gate:
+
+```sh
+curl -fsSL https://vibecrafted.io/install.sh | sh   # installs vc-frame
+vc-frame --version                                   # must run
+# then, in a vibecrafted checkout:
+make install                                         # foundations gate must pass
+```
+
+The gate (`scripts/install-foundations.sh` → `install_vcframe`) runs
+`binary_runs vc-frame` after `curl $VCFRAME_INSTALL_URL | sh`. GPG is **not**
+required at the gate — only that `vc-frame --version`/`--help` succeeds. Before
+this runbook existed, that gate failed with `vc-frame: MISSING` and aborted
+every foreign `make install`. A release is "done" only when this line is green
+on a machine that never built vc-frame.
+
+---
+
+## Operator buttons (never an agent)
+
+- Cutting the `vX.Y.Z` tag (triggers the irreversible release).
+- Wiring/serving `vibecrafted.io/install.sh` + the artifacts via `vibecrafted-io`.
+- The GPG **private** key material in `~/.keys` (the runner/secret provides it at
+  release time; an agent only wires the signing step and publishes the public key).
