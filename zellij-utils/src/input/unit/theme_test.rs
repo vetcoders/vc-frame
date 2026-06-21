@@ -21,3 +21,18 @@ fn no_theme_is_err() {
     let theme = Themes::from_path(path);
     assert!(theme.is_err());
 }
+
+#[test]
+fn default_themes_from_assets() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let assets_dir = root.join("assets/themes");
+    for entry in std::fs::read_dir(assets_dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "kdl") {
+            let theme = Themes::from_path(path);
+            assert!(theme.is_ok(), "Failed to parse theme");
+        }
+    }
+}
+

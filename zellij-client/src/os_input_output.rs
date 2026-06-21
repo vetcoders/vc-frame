@@ -350,8 +350,6 @@ pub fn get_cli_client_os_input() -> Result<ClientOsInputOutput, std::io::Error> 
     })
 }
 
-pub const DEFAULT_STDIN_POLL_TIMEOUT_MS: u64 = 10;
-
 #[cfg(test)]
 mod tests {
     use super::*;
