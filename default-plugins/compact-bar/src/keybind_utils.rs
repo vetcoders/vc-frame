@@ -723,9 +723,12 @@ impl KeybindProcessor {
                 let ordered_predicates = vec![
                     |action: &Action| matches!(action, Action::Detach),
                     |action: &Action| action.launches_plugin("session-manager"),
+                    |action: &Action| action.launches_plugin("zellij:layout-manager"),
                     |action: &Action| action.launches_plugin("plugin-manager"),
                     |action: &Action| action.launches_plugin("configuration"),
+                    |action: &Action| action.launches_plugin("zellij:share"),
                     |action: &Action| action.launches_plugin("zellij:about"),
+                    |action: &Action| matches!(action, Action::Quit),
                 ];
                 Self::find_predetermined_actions(mode_info, mode, ordered_predicates)
             },

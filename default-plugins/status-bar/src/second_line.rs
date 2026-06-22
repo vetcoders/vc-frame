@@ -253,7 +253,13 @@ fn get_keys_and_hints(mi: &ModeInfo) -> Vec<(String, String, Vec<KeyWithModifier
             action_key(&km, &[A::SearchToggleOption{option: SOpt::WholeWord}])),
     ]} else if mi.mode == IM::Session { vec![
         (s("Detach"), s("Detach"), action_key(&km, &[Action::Detach])),
-        (s("Session Manager"), s("Manager"), action_key(&km, &[A::LaunchOrFocusPlugin{plugin: Default::default(), should_float: true, move_to_focused_tab: true, should_open_in_place: false, close_replaced_pane: false, skip_cache: false, tab_id: None}, TO_NORMAL])), // not entirely accurate
+        (s("Session Manager"), s("Manager"), plugin_key(&km, "session-manager")),
+        (s("Layout Manager"), s("Layouts"), plugin_key(&km, "zellij:layout-manager")),
+        (s("Plugin Manager"), s("Plugins"), plugin_key(&km, "plugin-manager")),
+        (s("Configure"), s("Config"), plugin_key(&km, "configuration")),
+        (s("Share"), s("Share"), plugin_key(&km, "zellij:share")),
+        (s("About"), s("About"), plugin_key(&km, "zellij:about")),
+        (s("Quit"), s("Quit"), action_key(&km, &[Action::Quit])),
         (s("Select pane"), s("Select"), to_normal_key),
     ]} else if mi.mode == IM::Tmux { vec![
         (s("Move focus"), s("Move"), action_key_group(&km, &[
@@ -348,6 +354,19 @@ fn best_effort_shortcut_list(help: &ModeInfo, tip: TipFn, max_len: usize) -> Lin
         },
         _ => best_effort_shortcut_list_nonstandard_mode(help, max_len),
     }
+}
+
+fn plugin_key(keymap: &[(KeyWithModifier, Vec<Action>)], plugin_url: &str) -> Vec<KeyWithModifier> {
+    keymap
+        .iter()
+        .find_map(|(key, acvec)| {
+            acvec
+                .iter()
+                .any(|action| action.launches_plugin(plugin_url))
+                .then(|| key.clone())
+        })
+        .into_iter()
+        .collect()
 }
 
 pub fn keybinds(help: &ModeInfo, tip_name: &str, max_width: usize) -> LinePart {

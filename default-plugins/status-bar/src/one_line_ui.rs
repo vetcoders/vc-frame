@@ -1475,11 +1475,12 @@ fn get_keys_and_hints(mi: &ModeInfo) -> Vec<(String, String, Vec<KeyWithModifier
     ]} else if mi.mode == IM::Session { vec![
         (s("Detach"), s("Detach"), action_key(&km, &[Action::Detach])),
         (s("Session Manager"), s("Manager"), session_manager_key(&km)),
-        (s("Share"), s("Share"), share_key(&km)),
-        (s("Configure"), s("Config"), configuration_key(&km)),
         (s("Layout Manager"), s("Layouts"), layout_manager_key(&km)),
         (s("Plugin Manager"), s("Plugins"), plugin_manager_key(&km)),
+        (s("Configure"), s("Config"), configuration_key(&km)),
+        (s("Share"), s("Share"), share_key(&km)),
         (s("About"), s("About"), about_key(&km)),
+        (s("Quit"), s("Quit"), action_key(&km, &[Action::Quit])),
         (s("Select pane"), s("Select"), to_basemode_key),
     ]} else if mi.mode == IM::Tmux { vec![
         (s("Move focus"), s("Move"), action_key_group(&km, &[
