@@ -22,12 +22,12 @@ macro_rules! strings {
 }
 
 pub fn zellij_setup_check_full(help: &ModeInfo) -> LinePart {
-    // Tip: Having issues with VC Frame? Try running "vc-frame setup --check"
+    // Tip: Having issues with vc-frame? Try running "vc-frame setup --check"
     let orange_color = palette_match!(help.style.colors.text_unselected.emphasis_0);
 
     strings!(&[
         Style::new().paint(" Tip: "),
-        Style::new().paint("Having issues with VC Frame? Try running "),
+        Style::new().paint("Having issues with vc-frame? Try running "),
         Style::new()
             .fg(orange_color)
             .bold()
