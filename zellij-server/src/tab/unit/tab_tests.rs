@@ -2,7 +2,7 @@ use super::Tab;
 use crate::pane_groups::PaneGroups;
 use crate::panes::sixel::SixelImageStore;
 use crate::screen::CopyOptions;
-use crate::{ClientId, os_input_output::ServerOsApi, panes::PaneId, thread_bus::ThreadSenders};
+use crate::{os_input_output::ServerOsApi, panes::PaneId, thread_bus::ThreadSenders, ClientId};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use zellij_utils::data::{Direction, NewPanePlacement, Resize, ResizeStrategy, WebSharing};
@@ -635,6 +635,57 @@ fn split_panes_horizontally() {
         10,
         "second pane row count"
     );
+}
+
+#[test]
+fn can_stack_two_short_horizontally_split_panes() {
+    let size = Size {
+        cols: 121,
+        rows: 10,
+    };
+    let stacked_resize = true;
+    let mut tab = create_new_tab(size, stacked_resize);
+    tab.horizontal_split(PaneId::Terminal(2), None, 1, None, None)
+        .unwrap();
+
+    assert_eq!(
+        tab.tiled_panes
+            .panes
+            .get(&PaneId::Terminal(1))
+            .unwrap()
+            .position_and_size()
+            .rows
+            .as_usize(),
+        5,
+        "root pane row count before stacking"
+    );
+    assert!(
+        tab.has_room_for_stack(PaneId::Terminal(1), 2),
+        "two panes can stack in a five-row root pane"
+    );
+
+    tab.set_tiled_panes_damaged();
+    let pane_to_stack = tab.extract_pane(PaneId::Terminal(2), true).unwrap();
+    tab.stack_panes(PaneId::Terminal(1), vec![pane_to_stack]);
+
+    let root_geom = tab
+        .tiled_panes
+        .panes
+        .get(&PaneId::Terminal(1))
+        .unwrap()
+        .position_and_size();
+    let stacked_geom = tab
+        .tiled_panes
+        .panes
+        .get(&PaneId::Terminal(2))
+        .unwrap()
+        .position_and_size();
+    let stacked_rows = [root_geom.rows.as_usize(), stacked_geom.rows.as_usize()];
+
+    assert!(root_geom.stacked.is_some());
+    assert_eq!(root_geom.stacked, stacked_geom.stacked);
+    assert!(stacked_rows.contains(&1));
+    assert!(stacked_rows.iter().all(|rows| *rows > 0));
 }
 
 #[test]

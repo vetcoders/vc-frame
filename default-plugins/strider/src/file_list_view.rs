@@ -171,7 +171,7 @@ impl FileListView {
                     Text::new(text)
                 };
                 if entry.is_folder() {
-                    text_element = text_element.color_range(0, ..);
+                    text_element = text_element.color_range(1, ..);
                 }
                 print_text_with_coordinates(
                     text_element,

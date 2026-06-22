@@ -3,6 +3,9 @@ use std::time::Instant;
 use zellij_tile::prelude::actions::Action;
 use zellij_tile::prelude::*;
 
+const MIN_FLOATING_PANE_WIDTH: usize = 48;
+const MIN_FLOATING_PANE_HEIGHT: usize = 10;
+
 #[derive(Debug, Default)]
 pub struct App {
     own_plugin_id: Option<u32>,
@@ -21,6 +24,7 @@ pub struct App {
     display_area_rows: usize,
     display_area_cols: usize,
     alternate_coordinates: bool,
+    initial_coordinates_applied: bool,
 }
 
 register_plugin!(App);
@@ -62,6 +66,7 @@ impl ZellijPlugin for App {
 
     fn render(&mut self, rows: usize, cols: usize) {
         self.update_current_size(rows, cols);
+        self.ensure_initial_coordinates();
 
         if self.grouped_panes_count == 0 {
             self.render_no_panes_message(rows, cols);
@@ -207,6 +212,7 @@ impl App {
             if tab.active {
                 self.display_area_rows = tab.display_area_rows;
                 self.display_area_cols = tab.display_area_columns;
+                self.ensure_initial_coordinates();
                 break;
             }
         }
@@ -468,14 +474,25 @@ impl App {
         self.closing = true;
         close_self();
     }
-    pub fn next_coordinates(&mut self) {
+    fn ensure_initial_coordinates(&mut self) {
+        if !self.initial_coordinates_applied
+            && self.own_plugin_id.is_some()
+            && self.display_area_rows > 0
+            && self.display_area_cols > 0
+            && self.move_to_coordinates(false)
+        {
+            self.alternate_coordinates = true;
+            self.initial_coordinates_applied = true;
+        }
+    }
+    fn move_to_coordinates(&self, alternate_coordinates: bool) -> bool {
         let width_30_percent = (self.display_area_cols as f64 * 0.3) as usize;
         let height_30_percent = (self.display_area_rows as f64 * 0.3) as usize;
-        let width = std::cmp::max(width_30_percent, 48);
-        let height = std::cmp::max(height_30_percent, 10);
+        let width = std::cmp::max(width_30_percent, MIN_FLOATING_PANE_WIDTH);
+        let height = std::cmp::max(height_30_percent, MIN_FLOATING_PANE_HEIGHT);
         let y_position = self.display_area_rows.saturating_sub(height + 2);
         if let Some(own_plugin_id) = self.own_plugin_id {
-            if self.alternate_coordinates {
+            if alternate_coordinates {
                 let x_position = 2;
                 let Some(next_coordinates) = FloatingPaneCoordinates::new(
                     Some(format!("{}", x_position)),
@@ -485,13 +502,12 @@ impl App {
                     Some(true),
                     Some(false),
                 ) else {
-                    return;
+                    return false;
                 };
                 change_floating_panes_coordinates(vec![(
                     PaneId::Plugin(own_plugin_id),
                     next_coordinates,
                 )]);
-                self.alternate_coordinates = false;
             } else {
                 let x_position = self
                     .display_area_cols
@@ -505,14 +521,21 @@ impl App {
                     Some(true),
                     Some(false),
                 ) else {
-                    return;
+                    return false;
                 };
                 change_floating_panes_coordinates(vec![(
                     PaneId::Plugin(own_plugin_id),
                     next_coordinates,
                 )]);
-                self.alternate_coordinates = true;
             }
+            true
+        } else {
+            false
+        }
+    }
+    pub fn next_coordinates(&mut self) {
+        if self.move_to_coordinates(self.alternate_coordinates) {
+            self.alternate_coordinates = !self.alternate_coordinates;
         }
     }
 }

@@ -5750,14 +5750,15 @@ impl Tab {
             return false;
         }
         if self.pane_is_stacked(root_pane_id) {
+            let panes_to_add_to_stack = stack_size.saturating_sub(1);
             let room_left_in_stack = self
                 .tiled_panes
                 .room_left_in_stack_of_pane_id(&root_pane_id)
                 .unwrap_or(0);
-            stack_size <= room_left_in_stack
+            panes_to_add_to_stack <= room_left_in_stack
         } else {
             self.get_pane_with_id(root_pane_id)
-                .map(|p| p.position_and_size().rows.as_usize() >= stack_size + MIN_TERMINAL_HEIGHT)
+                .map(|p| p.position_and_size().rows.as_usize() >= stack_size)
                 .unwrap_or(false)
         }
     }
