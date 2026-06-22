@@ -100,7 +100,7 @@ cargo xtask run --singlepass
 
 ## How we treat clippy lints
 
-We currently use clippy in [GitHub Actions](https://github.com/zellij-org/zellij/blob/main/.github/workflows/rust.yml) with the default settings that report only [`clippy::correctness`](https://github.com/rust-lang/rust-clippy#readme) as errors and other lints as warnings because Zellij is still unstable. This means that all warnings can be ignored depending on the situation at that time, even though they are also helpful to keep the code quality.
+We currently use clippy in [GitHub Actions](https://github.com/vetcoders/vc-frame/blob/main/.github/workflows/rust.yml) with the default settings that report only [`clippy::correctness`](https://github.com/rust-lang/rust-clippy#readme) as errors and other lints as warnings because Zellij is still unstable. This means that all warnings can be ignored depending on the situation at that time, even though they are also helpful to keep the code quality.
 Since we just cannot afford to manage them, we are always welcome to fix them!
 
 Here is [the detailed discussion](https://github.com/zellij-org/zellij/pull/1090) if you want to see it.
@@ -138,7 +138,7 @@ If you are new contributor to `Zellij` going through
 something interesting to work on and guide through.
 
 [discord-invite-link]: https://discord.gg/feHDHahHCz
-[good-first-issue]: https://github.com/zellij-org/zellij/labels/good%20first%20issue
+[good-first-issue]: https://github.com/vetcoders/vc-frame/labels/good%20first%20issue
 
 
 ## Tips for Code Contributions
@@ -164,10 +164,10 @@ something interesting to work on and guide through.
 - Use `anyhow::Error::downcast_ref::<ZellijError>()` to recover underlying errors
 - *Further reading*: [See here][error-docs-zellijerror]
 
-[error-docs-context]: https://github.com/zellij-org/zellij/blob/main/docs/ERROR_HANDLING.md#attaching-context
-[error-docs-result]: https://github.com/zellij-org/zellij/blob/main/docs/ERROR_HANDLING.md#converting-a-function-to-return-a-result-type
-[error-docs-logging]: https://github.com/zellij-org/zellij/blob/main/docs/ERROR_HANDLING.md#logging-errors
-[error-docs-zellijerror]: https://github.com/zellij-org/zellij/blob/main/docs/ERROR_HANDLING.md#adding-concrete-errors-handling-specific-errors
+[error-docs-context]: https://github.com/vetcoders/vc-frame/blob/main/docs/ERROR_HANDLING.md#attaching-context
+[error-docs-result]: https://github.com/vetcoders/vc-frame/blob/main/docs/ERROR_HANDLING.md#converting-a-function-to-return-a-result-type
+[error-docs-logging]: https://github.com/vetcoders/vc-frame/blob/main/docs/ERROR_HANDLING.md#logging-errors
+[error-docs-zellijerror]: https://github.com/vetcoders/vc-frame/blob/main/docs/ERROR_HANDLING.md#adding-concrete-errors-handling-specific-errors
 
 
 ## Filing Issues
@@ -181,7 +181,7 @@ the plugin consider opening [an issue][plugin-issue] and describing your
 requirements.
 
 [plugin-issue]:
-https://github.com/zellij-org/zellij/issues/new?assignees=&labels=plugin%20system
+https://github.com/vetcoders/vc-frame/issues/new?assignees=&labels=plugin%20system
 
 ### How Do I Submit A (Good) Bug Report?
 
