@@ -1,6 +1,6 @@
-# Contributing to Zellij
+# Contributing to vc-frame
 
-Thanks for considering contributing to Zellij!
+Thanks for considering contributing to vc-frame!
 
 **First**: if you're unsure of anything, feel free to ask on our [Discord
 server](https://discord.gg/MHV3n76PDq), or on [Matrix](https://matrix.to/#/#zellij_general:matrix.org). We're a friendly and welcoming bunch!
@@ -19,13 +19,13 @@ If you're still eager to contribute minor fixes, please note that we might take 
 
 ## Building
 
-To build Zellij, we're using cargo xtask. This is a standalone package shipped
+To build vc-frame, we're using cargo xtask. This is a standalone package shipped
 inside the repository, so you don't have to install additional dependencies.
 
 To edit our manpage, the mandown crate (`cargo install --locked
 mandown`) is used and the work is done on a markdown file in docs/MANPAGE.md.
 
-To build zellij, you'll need [`protoc`](https://github.com/protocolbuffers/protobuf#protobuf-compiler-installation) installed. This is used to compile the .proto files into Rust assets. These protocol buffers are used for communication between Zellij and its plugins across the wasm boundary.
+To build vc-frame, you'll need [`protoc`](https://github.com/protocolbuffers/protobuf#protobuf-compiler-installation) installed. This is used to compile the .proto files into Rust assets. These protocol buffers are used for communication between vc-frame and its plugins across the wasm boundary.
 
 Here are some of the commands currently supported by the build system:
 
@@ -36,13 +36,13 @@ cargo xtask
 cargo xtask format
 cargo xtask build
 cargo xtask test
-# Run Zellij (optionally with additional arguments)
+# Run vc-frame (optionally with additional arguments)
 cargo xtask run
 cargo xtask run -l strider
 # Run Clippy
 cargo xtask clippy
-# Install Zellij to some directory
-cargo xtask install /path/of/zellij/binary
+# Install vc-frame to some directory
+cargo xtask install /path/of/vc-frame/binary
 # Publish the zellij and zellij-tile crates
 cargo xtask publish
 # Update manpage
@@ -55,8 +55,8 @@ You can see a list of all commands (with supported arguments) with `cargo xtask
 To run `test`, you will need the package `pkg-config` and a version of `openssl`.
 
 ## Running the end-to-end tests
-Zellij includes some end-to-end tests which test the whole application as a black-box from the outside.
-These tests work by running a docker container which contains the Zellij binary, connecting to it via ssh, sending some commands and comparing the output received against predefined snapshots.
+vc-frame includes some end-to-end tests which test the whole application as a black-box from the outside.
+These tests work by running a docker container which contains the vc-frame binary, connecting to it via ssh, sending some commands and comparing the output received against predefined snapshots.
 
 <details>
 <summary>macOS prerequisites (expand here):</summary>
@@ -72,13 +72,13 @@ To run these tests locally, you'll need to have either `docker` or `podman` and 
 Once you do, in the repository root:
 
 1. `docker compose up -d` will start up the docker container
-2. `cargo xtask ci e2e --build` will build the Zellij binary in the target folder, which is shared with the container
+2. `cargo xtask ci e2e --build` will build the vc-frame binary in the target folder, which is shared with the container
 3. `cargo xtask ci e2e --test` will run the tests
 
 To re-run the tests after you've changed something in the code base, be sure to repeat steps 2 and 3.
 
 ## Debugging / Troubleshooting while developing
-Zellij uses the excellent [`log`](https://crates.io/crates/log) crate to handle its internal logging. The output of these logs will go to `/$temp_dir/zellij-<UID>/zellij-log/zellij.log` which `$temp_dir` refers to [std::env::temp_dir()](https://doc.rust-lang.org/std/env/fn.temp_dir.html). On most of operating systems it points to `/tmp`, but there are exceptions, such as `/var/folders/dr/xxxxxxxxxxxxxx/T/` for Mac.
+vc-frame uses the excellent [`log`](https://crates.io/crates/log) crate to handle its internal logging. The output of these logs will go to `/$temp_dir/vc-frame-<UID>/vc-frame-log/zellij.log` which `$temp_dir` refers to [std::env::temp_dir()](https://doc.rust-lang.org/std/env/fn.temp_dir.html). On most of operating systems it points to `/tmp`, but there are exceptions, such as `/var/folders/dr/xxxxxxxxxxxxxx/T/` for Mac.
 
 Example:
 ```rust
@@ -86,12 +86,12 @@ let my_variable = some_function();
 log::info!("my variable is: {:?}", my_variable);
 ```
 
-Note that the output is truncated at 100KB. This can be adjusted for the purposes of debugging through the `LOG_MAX_BYTES` constant, at the time of writing here: https://github.com/zellij-org/zellij/blob/main/zellij-utils/src/logging.rs#L24
+Note that the output is truncated at 100KB. This can be adjusted for the purposes of debugging through the `LOG_MAX_BYTES` constant, at the time of writing here: https://github.com/vetcoders/vc-frame/blob/main/zellij-utils/src/logging.rs#L24
 
-When running Zellij with the `--debug` flag, Zellij will dump a copy of all bytes received over the pty for each pane in: `/$temp_dir/zellij-<UID>/zellij-log/zellij-<pane_id>.log`. These might be useful when troubleshooting terminal issues.
+When running vc-frame with the `--debug` flag, vc-frame will dump a copy of all bytes received over the pty for each pane in: `/$temp_dir/vc-frame-<UID>/vc-frame-log/zellij-<pane_id>.log`. These might be useful when troubleshooting terminal issues.
 
 ## Testing plugins
-Zellij allows the use of the singlepass [Winch](https://crates.io/crates/wasmtime-winch) compiler for wasmtime. This can enable great gains in compilation time of plugins at the cost of slower execution and less supported architectures.
+vc-frame allows the use of the singlepass [Winch](https://crates.io/crates/wasmtime-winch) compiler for wasmtime. This can enable great gains in compilation time of plugins at the cost of slower execution and less supported architectures.
 
 To enable the singlepass compiler, use the `singlepass` flag. E.g.:
 ```sh
@@ -100,7 +100,7 @@ cargo xtask run --singlepass
 
 ## How we treat clippy lints
 
-We currently use clippy in [GitHub Actions](https://github.com/vetcoders/vc-frame/blob/main/.github/workflows/rust.yml) with the default settings that report only [`clippy::correctness`](https://github.com/rust-lang/rust-clippy#readme) as errors and other lints as warnings because Zellij is still unstable. This means that all warnings can be ignored depending on the situation at that time, even though they are also helpful to keep the code quality.
+We currently use clippy in [GitHub Actions](https://github.com/vetcoders/vc-frame/blob/main/.github/workflows/rust.yml) with the default settings that report only [`clippy::correctness`](https://github.com/rust-lang/rust-clippy#readme) as errors and other lints as warnings because vc-frame is still unstable. This means that all warnings can be ignored depending on the situation at that time, even though they are also helpful to keep the code quality.
 Since we just cannot afford to manage them, we are always welcome to fix them!
 
 Here is [the detailed discussion](https://github.com/zellij-org/zellij/pull/1090) if you want to see it.
@@ -123,7 +123,7 @@ performed afterward.
 At this point in time, there is no MSRV policy. As our resources are limited,
 we try to focus on making the code work with whatever development toolchain is
 currently mentioned in `rust-toolchain.toml`. While it may still be possible to
-compile Zellij with older Rust versions, we cannot offer support in such
+compile vc-frame with older Rust versions, we cannot offer support in such
 situations.
 
 For questions and suggestions regarding the currently used Rust toolchain
@@ -132,7 +132,7 @@ version, please mention @har7an in your issue or pull request.
 
 ## Looking for something to work on?
 
-If you are new contributor to `Zellij` going through
+If you are new contributor to `vc-frame` going through
 [beginners][good-first-issue] should be a good start or you can join our public
 [Discord server][discord-invite-link], we would be happy to help finding
 something interesting to work on and guide through.
@@ -174,9 +174,9 @@ something interesting to work on and guide through.
 
 Bugs and enhancement suggestions are tracked as GitHub issues.
 
-### Lacking API for plugin in Zellij?
+### Lacking API for plugin in vc-frame?
 
-If you have a plugin idea, but Zellij still doesn't have API required to make
+If you have a plugin idea, but vc-frame still doesn't have API required to make
 the plugin consider opening [an issue][plugin-issue] and describing your
 requirements.
 
