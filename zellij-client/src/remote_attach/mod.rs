@@ -21,7 +21,7 @@ const MAX_AUTH_ATTEMPTS: u32 = 1;
 #[cfg(not(test))]
 const MAX_AUTH_ATTEMPTS: u32 = 3;
 
-/// Attach to a remote VC Frame session via HTTP(S)
+/// Attach to a remote vc-frame session via HTTP(S)
 ///
 /// This function handles the complete authentication flow including:
 /// - URL validation

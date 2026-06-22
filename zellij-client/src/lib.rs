@@ -333,7 +333,7 @@ fn spawn_web_server(cli_args: &CliArgs) -> Result<String, String> {
 #[cfg(not(feature = "web_server_capability"))]
 fn spawn_web_server(_cli_args: &CliArgs) -> Result<String, String> {
     log::error!(
-        "This version of VC Frame was compiled without web server support, cannot run web server!"
+        "This version of vc-frame was compiled without web server support, cannot run web server!"
     );
     Ok("".to_owned())
 }
