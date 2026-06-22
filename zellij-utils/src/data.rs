@@ -1074,10 +1074,10 @@ impl PermissionType {
     pub fn display_name(&self) -> String {
         match self {
             PermissionType::ReadApplicationState => {
-                "Access Zellij state (Panes, Tabs and UI)".to_owned()
+                "Access VC Frame state (Panes, Tabs and UI)".to_owned()
             },
             PermissionType::ChangeApplicationState => {
-                "Change Zellij state (Panes, Tabs and UI) and run commands".to_owned()
+                "Change VC Frame state (Panes, Tabs and UI) and run commands".to_owned()
             },
             PermissionType::OpenFiles => "Open files (eg. for editing)".to_owned(),
             PermissionType::RunCommands => "Run commands".to_owned(),
@@ -1088,7 +1088,7 @@ impl PermissionType {
             PermissionType::MessageAndLaunchOtherPlugins => {
                 "Send messages to and launch other plugins".to_owned()
             },
-            PermissionType::Reconfigure => "Change Zellij runtime configuration".to_owned(),
+            PermissionType::Reconfigure => "Change VC Frame runtime configuration".to_owned(),
             PermissionType::FullHdAccess => "Full access to the hard-drive".to_owned(),
             PermissionType::StartWebServer => {
                 "Start a local web server to serve VC Frame sessions".to_owned()

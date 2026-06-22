@@ -22,21 +22,21 @@ macro_rules! strings {
 }
 
 pub fn zellij_setup_check_full(help: &ModeInfo) -> LinePart {
-    // Tip: Having issues with Zellij? Try running "zellij setup --check"
+    // Tip: Having issues with VC Frame? Try running "vc-frame setup --check"
     let orange_color = palette_match!(help.style.colors.text_unselected.emphasis_0);
 
     strings!(&[
         Style::new().paint(" Tip: "),
-        Style::new().paint("Having issues with Zellij? Try running "),
+        Style::new().paint("Having issues with VC Frame? Try running "),
         Style::new()
             .fg(orange_color)
             .bold()
-            .paint("zellij setup --check"),
+            .paint("vc-frame setup --check"),
     ])
 }
 
 pub fn zellij_setup_check_medium(help: &ModeInfo) -> LinePart {
-    // Tip: Run "zellij setup --check" to find issues
+    // Tip: Run "vc-frame setup --check" to find issues
     let orange_color = palette_match!(help.style.colors.text_unselected.emphasis_0);
 
     strings!(&[
@@ -45,13 +45,13 @@ pub fn zellij_setup_check_medium(help: &ModeInfo) -> LinePart {
         Style::new()
             .fg(orange_color)
             .bold()
-            .paint("zellij setup --check"),
+            .paint("vc-frame setup --check"),
         Style::new().paint(" to find issues"),
     ])
 }
 
 pub fn zellij_setup_check_short(help: &ModeInfo) -> LinePart {
-    // Run "zellij setup --check" to find issues
+    // Run "vc-frame setup --check" to find issues
     let orange_color = palette_match!(help.style.colors.text_unselected.emphasis_0);
 
     strings!(&[
@@ -59,7 +59,7 @@ pub fn zellij_setup_check_short(help: &ModeInfo) -> LinePart {
         Style::new()
             .fg(orange_color)
             .bold()
-            .paint("zellij setup --check"),
+            .paint("vc-frame setup --check"),
         Style::new().paint(" to find issues"),
     ])
 }
