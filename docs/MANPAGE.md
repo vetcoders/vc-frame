@@ -1,17 +1,17 @@
 NAME
 ====
 
-**vc-frame** - run VC Frame
+**vc-frame** - run vc-frame
 
 DESCRIPTION
 ===========
 
-VC Frame is a vibecrafted runtime and terminal workspace aimed at developers,
+vc-frame is a vibecrafted runtime and terminal workspace aimed at developers,
 operators, AI-agent workflows, and anyone who loves the terminal. At its core,
 it is a terminal multiplexer (similar to tmux and screen), but this is merely
 its infrastructure layer.
 
-VC Frame includes a layout system, and a plugin system allowing one to create
+vc-frame includes a layout system, and a plugin system allowing one to create
 plugins in any language that compiles to WebAssembly.
 
 To list currently running sessions run: `vc-frame list-sessions`
@@ -25,11 +25,10 @@ Run `vc-frame --help` to see available flags and subcommands.
 CONFIGURATION
 =============
 
-VC Frame looks for configuration file in the following order:
+vc-frame looks for configuration file in the following order:
 
 1. the file provided with _--config_
-2. under the path provided in *VC_FRAME_CONFIG_FILE* or *ZELLIJ_CONFIG_FILE*
-   environment variable
+2. under the path provided in the *VC_FRAME_CONFIG_FILE* environment variable
 3. the default location (see FILES section)
 4. the system location
 
@@ -39,9 +38,9 @@ configuration.
 LAYOUTS
 =======
 
-Layouts are yaml files which VC Frame can load on startup when _--layout_ flag is
+Layouts are yaml files which vc-frame can load on startup when _--layout_ flag is
 provided.
-By default VC Frame will load a layout called `default.yaml`,
+By default vc-frame will load a layout called `default.yaml`,
 but this can be changed by using the `default_layout: [LAYOUT_NAME]` configuration option.
 
 
@@ -65,7 +64,7 @@ parts:
         Percent: 50
 ```
 
-will tell VC Frame to create this layout:
+will tell vc-frame to create this layout:
 ```
 ┌─────┬─────┐
 │     │     │
@@ -87,7 +86,7 @@ Each node has following fields:
   space or a fixed size of columns/rows from its parent's space.
     * __Percent: <1-100\>__
     * __Fixed: <lines_number/columns_number\>__
-* __plugin: /path/to/plugin.wasm__ - optional path to a compiled VC Frame plugin.
+* __plugin: /path/to/plugin.wasm__ - optional path to a compiled vc-frame plugin.
   If indicated loads a plugin into the created space. For more information see
   PLUGINS section.
 * __default_fg: \<color\>__ - set the default foreground color for a pane (e.g. `"#00e000"`).
@@ -96,7 +95,7 @@ Each node has following fields:
 KEYBINDINGS
 ===========
 
-VC Frame comes with a default set of keybindings which aims to fit as many users
+vc-frame comes with a default set of keybindings which aims to fit as many users
 as possible but that behaviour can be overridden or modified in user
 configuration files. The information about bindings is available in the
 _keybinds_ section of configuration. For example, to introduce a keybinding that
@@ -110,7 +109,7 @@ keybinds:
 ```
 
 where "normal" stands for a mode name (see MODES section), "action" part
-specifies the actions to be executed by VC Frame (see ACTIONS section) and "key"
+specifies the actions to be executed by vc-frame (see ACTIONS section) and "key"
 is used to list  keys or key combinations bound to given actions (see KEYS). 
 
 The default keybinds can be unbound either for a specific mode, or for every mode.
@@ -279,23 +278,29 @@ FILES
 =====
 
 Default user configuration directory location:
-* Linux: _$XDG_HOME/zellij /home/alice/.config/zellij_
-* macOS: _/Users/Alice/Library/Application Support/com.Zellij-Contributors.zellij_
+* Linux: _$XDG_CONFIG_HOME/vc-frame /home/alice/.config/vc-frame_
+* macOS: _/Users/Alice/Library/Application Support/io.VetCoders.vc-frame_
 
 Default user layout directory location:
 * Subdirectory called `layouts` inside of the configuration directory.
-* Linux: _$XDG_HOME/zellij/layouts /home/alice/.config/zellij/layouts
-* macOS: _/Users/Alice/Library/Application/layouts Support/com.Zellij-Contributors.zellij/layouts_
+* Linux: _$XDG_CONFIG_HOME/vc-frame/layouts /home/alice/.config/vc-frame/layouts_
+* macOS: _/Users/Alice/Library/Application Support/io.VetCoders.vc-frame/layouts_
 
 Default plugin directory location:
-* Linux: _$XDG_DATA_HOME/zellij/plugins /home/alice/.local/share/plugins
+* Linux: _$XDG_DATA_HOME/vc-frame/plugins /home/alice/.local/share/vc-frame/plugins_
+* macOS: _/Users/Alice/Library/Application Support/io.VetCoders.vc-frame/plugins_
+
+Legacy Zellij directories are migrated automatically on first run and used
+only as a fallback source:
+* Linux: _$XDG_CONFIG_HOME/zellij /home/alice/.config/zellij_
+* macOS: _/Users/Alice/Library/Application Support/com.Zellij-Contributors.zellij_
 
 
 ENVIRONMENT
 ===========
-ZELLIJ_CONFIG_FILE
+VC_FRAME_CONFIG_FILE
   Path of vc-frame config to load.
-ZELLIJ_CONFIG_DIR
+VC_FRAME_CONFIG_DIR
   Path of the vc-frame config directory.
 
 

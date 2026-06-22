@@ -273,7 +273,7 @@ pub fn manpage(sh: &Shell) -> anyhow::Result<()> {
     sh.create_dir(asset_dir).context(err_context)?;
     let _pd = sh.push_dir(asset_dir);
 
-    let text = cmd!(sh, "{mandown} {project_root}/docs/MANPAGE.md 1")
+    let text = cmd!(sh, "{mandown} {project_root}/docs/MANPAGE.md vc-frame 1")
         .read()
         .context(err_context)?;
     if text.trim().is_empty() {
