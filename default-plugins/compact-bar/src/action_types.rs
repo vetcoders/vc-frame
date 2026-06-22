@@ -58,7 +58,7 @@ impl ActionType {
             ActionType::SessionManager => "Session manager".to_string(),
             ActionType::PluginManager => "Plugin manager".to_string(),
             ActionType::Configuration => "Configuration".to_string(),
-            ActionType::About => "About Zellij".to_string(),
+            ActionType::About => "About vc-frame".to_string(),
             ActionType::SwitchToMode(input_mode) if input_mode == &InputMode::RenamePane => {
                 "Rename pane".to_string()
             },
