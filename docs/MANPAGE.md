@@ -144,7 +144,7 @@ Will unbind every default keybind for `n` and `^g` for the `normal` mode.
 ACTIONS
 -------
 
-* __Quit__ - quits Zellij
+* __Quit__ - quits vc-frame
 * __SwitchToMode: <InputMode\>__ - switches to the specified input mode. See
   MODES section for possible values.
 * __Resize: <Direction\>__ - resizes focused pane in the specified direction
@@ -208,10 +208,10 @@ KEYS
 MODES
 -----
 
-* __normal__ - the default startup mode of Zellij. Provides the ability to
+* __normal__ - the default startup mode of vc-frame. Provides the ability to
   switch to different modes, as well as some quick navigation shortcuts.
 * __locked__ - disables all keybindings except the one that would switch the
-  mode to normal (_ctrl-g_ by default). Useful when Zellij's keybindings
+  mode to normal (_ctrl-g_ by default). Useful when vc-frame's keybindings
   conflict with those of a chosen terminal app. 
 * __tmux__ - provides convenience keybindings emulating simple tmux behaviour
 * __pane__ - includes instructions that manipulate the panes (adding new panes,
@@ -260,19 +260,19 @@ themes:
     orange: [0,0,0]
 ```
 
-If the theme is called `default`, then zellij will pick it on startup.
-To specify a different theme, run zellij with:
+If the theme is called `default`, then vc-frame will pick it on startup.
+To specify a different theme, run vc-frame with:
 ```
-zellij options --theme [NAME]
+vc-frame options --theme [NAME]
 ```
 or put the name in the configuration file with `theme: [NAME]`.
 
 PLUGINS
 =======
 
-Zellij has a plugin system based on WebAssembly. Any language that can run on
+vc-frame has a plugin system based on WebAssembly. Any language that can run on
 WASI can be used to develop a plugin. To load a plugin include it in a layout
-file. Zellij comes with default plugins included: _status-bar_, _strider_,
+file. vc-frame comes with default plugins included: _status-bar_, _strider_,
 _tab-bar_.
 
 FILES
@@ -294,9 +294,9 @@ Default plugin directory location:
 ENVIRONMENT
 ===========
 ZELLIJ_CONFIG_FILE
-  Path of Zellij config to load.
+  Path of vc-frame config to load.
 ZELLIJ_CONFIG_DIR
-  Path of the Zellij config directory.
+  Path of the vc-frame config directory.
 
 
 
