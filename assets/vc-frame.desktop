@@ -1,8 +1,8 @@
 [Desktop Entry]
 Version=1.0
-Name=VC Frame
+Name=vc-frame
 Type=Application
-Comment=VC Frame vibecrafted terminal runtime
+Comment=vc-frame vibecrafted terminal runtime
 Terminal=true
 Exec=vc-frame
 Icon=vc-frame

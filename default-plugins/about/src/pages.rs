@@ -294,11 +294,11 @@ impl Page {
             .with_title(Text::new("VibeCrafted Mission Control").color_range(0, ..))
             .with_paragraph(vec![
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("A branded shell-provider surface built on top of native VC Frame control decks."),
+                    Text::new("A branded shell-provider surface built on top of native vc-frame control decks."),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new(format!(
-                        "This guide is wired into VC Frame {} so operators can jump from telemetry into action without leaving the dashboard.",
+                        "This guide is wired into vc-frame {} so operators can jump from telemetry into action without leaving the dashboard.",
                         zellij_version
                     ))
                     .color_substring(2, "operators")
@@ -385,7 +385,7 @@ impl Page {
             ])
             .with_paragraph(vec![ComponentLine::new(vec![
                 ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("Learn more about the native VC Frame surfaces behind this shell: ")
+                    Text::new("Learn more about the native vc-frame surfaces behind this shell: ")
                         .color_range(2, ..),
                 )),
                 ActiveComponent::new(TextOrCustomRender::Text(Text::new(
@@ -408,7 +408,7 @@ impl Page {
             .with_title(Text::new("Windows Support").color_range(0, ..))
             .with_paragraph(vec![
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("VC Frame now runs natively on Windows."),
+                    Text::new("vc-frame now runs natively on Windows."),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new("Windows users can now enjoy the same workspace management, plugin ecosystem"),
@@ -426,25 +426,25 @@ impl Page {
             .with_title(Text::new("Remote Sessions").color_range(0, ..))
             .with_paragraph(vec![
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("Attach to remote VC Frame sessions over HTTPS, directly from the terminal."),
+                    Text::new("Attach to remote vc-frame sessions over HTTPS, directly from the terminal."),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("The remote session needs to be running the VC Frame web client."),
+                    Text::new("The remote session needs to be running the vc-frame web client."),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("VC Frame will attach to it exactly as a browser would, through the same interface."),
+                    Text::new("vc-frame will attach to it exactly as a browser would, through the same interface."),
                 ))]),
             ])
             .with_bulletin_list(
                 BulletinList::new(Text::new("Try it:").color_range(2, ..))
                     .with_items(vec![
                         ActiveComponent::new(TextOrCustomRender::Text(
-                            Text::new("Run the VC Frame web server on one machine")
-                                .color_substring(3, "VC Frame web server"),
+                            Text::new("Run the vc-frame web server on one machine")
+                                .color_substring(3, "vc-frame web server"),
                         ))
                         .with_hover(TextOrCustomRender::Text(
-                            Text::new("Run the VC Frame web server on one machine")
-                                .color_substring(3, "VC Frame web server")
+                            Text::new("Run the vc-frame web server on one machine")
+                                .color_substring(3, "vc-frame web server")
                                 .selected(),
                         ))
                         .with_left_click_action(ClickAction::new_launch_plugin(
@@ -619,7 +619,7 @@ impl Page {
             .with_title(Text::new("Click-to-Open File Paths").color_range(0, ..))
             .with_paragraph(vec![
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("VC Frame now detects file paths in the terminal viewport."),
+                    Text::new("vc-frame now detects file paths in the terminal viewport."),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new("Alt-Click on a file path to open it.")
@@ -1044,12 +1044,12 @@ fn whats_new_title() -> Text {
 fn main_screen_title(version: String, is_release_notes: bool) -> Text {
     if is_release_notes {
         let title_text = format!(
-            "Hi there, welcome to VC Frame ⚒ (vibecrafted runtime) {}!",
+            "Hi there, welcome to vc-frame ⚒ (vibecrafted runtime) {}!",
             &version
         );
         Text::new(title_text).color_range(2, 21..=56 + version.chars().count())
     } else {
-        let title_text = format!("VC Frame ⚒ (vibecrafted runtime) {}", &version);
+        let title_text = format!("vc-frame ⚒ (vibecrafted runtime) {}", &version);
         Text::new(title_text).color_range(2, ..)
     }
 }
@@ -1117,7 +1117,7 @@ fn main_menu_item(item_name: &str) -> Text {
 }
 
 fn support_the_developer_text() -> Text {
-    let support_text = "Please support the VC Frame craft <3: ".to_string();
+    let support_text = "Please support the vc-frame craft <3: ".to_string();
     Text::new(support_text).color_range(3, ..)
 }
 
