@@ -337,7 +337,7 @@ fn main() {
                     if version != VERSION {
                         println!();
                         println!(
-                            "Note: this version differs from the current VC Frame version: {}.",
+                            "Note: this version differs from the current vc-frame version: {}.",
                             VERSION
                         );
                         println!("Consider stopping the server with: vc-frame web --stop");

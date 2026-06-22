@@ -122,7 +122,7 @@ impl EnvironmentVariables {
 }
 
 fn set_process_env<K: AsRef<std::ffi::OsStr>, V: AsRef<std::ffi::OsStr>>(key: K, value: V) {
-    // SAFETY: VC Frame applies these process-wide variables during startup/configuration before
+    // SAFETY: vc-frame applies these process-wide variables during startup/configuration before
     // handing control to worker threads that read them.
     unsafe {
         set_var(key, value);

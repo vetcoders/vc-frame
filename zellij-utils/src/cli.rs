@@ -35,13 +35,13 @@ fn validate_session(name: &str) -> Result<String, String> {
 }
 
 #[derive(Parser, Default, Debug, Clone, Serialize, Deserialize)]
-#[clap(version, name = "vc-frame", about = "VC Frame ⚒ (vibecrafted runtime)")]
+#[clap(version, name = "vc-frame", about = "vc-frame ⚒ (vibecrafted runtime)")]
 pub struct CliArgs {
     /// Maximum panes on screen, caution: opening more panes will close old ones
     #[clap(long, value_parser)]
     pub max_panes: Option<usize>,
 
-    /// Change where VC Frame looks for plugins
+    /// Change where vc-frame looks for plugins
     #[clap(long, value_parser, overrides_with = "data_dir")]
     pub data_dir: Option<PathBuf>,
 
@@ -70,11 +70,11 @@ pub struct CliArgs {
     #[clap(short, long, value_parser, overrides_with = "new_session_with_layout")]
     pub new_session_with_layout: Option<PathBuf>,
 
-    /// Change where VC Frame looks for the configuration file
+    /// Change where vc-frame looks for the configuration file
     #[clap(short, long, overrides_with = "config", env = VC_FRAME_CONFIG_FILE_ENV, value_parser)]
     pub config: Option<PathBuf>,
 
-    /// Change where VC Frame looks for the configuration directory
+    /// Change where vc-frame looks for the configuration directory
     #[clap(long, overrides_with = "config_dir", env = VC_FRAME_CONFIG_DIR_ENV, value_parser)]
     pub config_dir: Option<PathBuf>,
 
@@ -111,11 +111,11 @@ pub struct CliOptions {
 
 #[derive(Debug, Subcommand, Clone, Serialize, Deserialize)]
 pub enum Command {
-    /// Change the behaviour of VC Frame
+    /// Change the behaviour of vc-frame
     #[clap(name = "options", value_parser)]
     Options(CliOptions),
 
-    /// Setup VC Frame and check its configuration
+    /// Setup vc-frame and check its configuration
     #[clap(name = "setup", value_parser)]
     Setup(Setup),
 
@@ -128,7 +128,7 @@ pub enum Command {
     #[clap(subcommand)]
     Action(Box<CliAction>),
 
-    /// Explore existing VC Frame sessions
+    /// Explore existing vc-frame sessions
     #[clap(flatten)]
     Sessions(Sessions),
 
@@ -277,7 +277,7 @@ impl WebCli {
 
 #[derive(Debug, Subcommand, Clone, Serialize, Deserialize)]
 pub enum SessionCommand {
-    /// Change the behaviour of VC Frame
+    /// Change the behaviour of vc-frame
     #[clap(name = "options")]
     Options(Options),
 }
@@ -321,7 +321,7 @@ pub enum Sessions {
         #[clap(long, value_parser)]
         index: Option<usize>,
 
-        /// Change the behaviour of VC Frame
+        /// Change the behaviour of vc-frame
         #[clap(subcommand, name = "options")]
         options: Option<Box<SessionCommand>>,
 
@@ -1044,7 +1044,7 @@ pub enum CliAction {
         )]
         tab_id: Option<usize>,
     },
-    /// Open the specified file in a new VC Frame pane with your default EDITOR
+    /// Open the specified file in a new vc-frame pane with your default EDITOR
     /// Returns: Created pane ID (format: terminal_<id>)
     Edit {
         file: PathBuf,

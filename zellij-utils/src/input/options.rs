@@ -122,7 +122,7 @@ pub struct Options {
     #[clap(long, value_parser)]
     pub scrollback_editor: Option<PathBuf>,
 
-    /// The name of the session to create when starting VC Frame
+    /// The name of the session to create when starting vc-frame
     #[clap(long, value_parser)]
     #[serde(default)]
     pub session_name: Option<String>,
@@ -174,12 +174,12 @@ pub struct Options {
     #[serde(default)]
     pub support_kitty_keyboard_protocol: Option<bool>,
 
-    /// Whether to make sure a local web server is running when a new VC Frame session starts.
+    /// Whether to make sure a local web server is running when a new vc-frame session starts.
     /// This web server will allow creating new sessions and attaching to existing ones that have
     /// opted in to being shared in the browser.
     ///
-    /// Note: a local web server can still be manually started from within a VC Frame session or from the CLI.
-    /// If this is not desired, one can use a version of VC Frame compiled without
+    /// Note: a local web server can still be manually started from within a vc-frame session or from the CLI.
+    /// If this is not desired, one can use a version of vc-frame compiled without
     /// web_server_capability
     ///
     /// Possible values:
@@ -194,7 +194,7 @@ pub struct Options {
     /// Whether to allow new sessions to be shared through a local web server, assuming one is
     /// running (see the `web_server` option for more details).
     ///
-    /// Note: if VC Frame was compiled without web_server_capability, this option will be locked to
+    /// Note: if vc-frame was compiled without web_server_capability, this option will be locked to
     /// "disabled"
     ///
     /// Possible values:
