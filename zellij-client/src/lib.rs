@@ -643,13 +643,13 @@ pub fn start_remote_client(
     insecure: bool,
     async_worker_tasks: Option<usize>,
 ) -> Result<Option<ConnectToSession>, RemoteClientError> {
-    info!("Starting Zellij client!");
+    info!("Starting vc-frame client!");
 
     // See start_client(): an interactive (remote) client needs a real TTY for
     // raw mode; fail fast instead of panicking in set_raw_mode() without one.
     if !os_input.stdin_is_terminal() {
         eprintln!(
-            "zellij: stdin is not a terminal (TTY); cannot start an interactive session. Run zellij from a real terminal."
+            "vc-frame: stdin is not a terminal (TTY); cannot start an interactive session. Run vc-frame from a real terminal."
         );
         std::process::exit(1);
     }
@@ -776,11 +776,11 @@ pub fn start_client(
     // so launchers (vibecrafted operator session) can detect it cleanly.
     if !os_input.stdin_is_terminal() {
         eprintln!(
-            "zellij: stdin is not a terminal (TTY); cannot start an interactive session. Run zellij from a real terminal."
+            "vc-frame: stdin is not a terminal (TTY); cannot start an interactive session. Run vc-frame from a real terminal."
         );
         std::process::exit(1);
     }
-    info!("Starting Zellij client!");
+    info!("Starting vc-frame client!");
 
     let explicitly_disable_kitty_keyboard_protocol = config_options
         .support_kitty_keyboard_protocol

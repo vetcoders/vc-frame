@@ -3108,7 +3108,7 @@ fn undo_rename_tab(env: &PluginEnv) {
 }
 
 fn quit_zellij(env: &PluginEnv) {
-    let error_msg = || format!("failed to quit zellij in plugin {}", env.name());
+    let error_msg = || format!("failed to quit vc-frame in plugin {}", env.name());
     let action = Action::Quit;
     apply_action!(action, error_msg, env);
 }
@@ -4922,7 +4922,7 @@ fn stop_web_server(_env: &PluginEnv) {
     #[cfg(feature = "web_server_capability")]
     let _ = shutdown_all_webserver_instances();
     #[cfg(not(feature = "web_server_capability"))]
-    log::error!("This instance of Zellij was compiled without web server capabilities");
+    log::error!("This instance of vc-frame was compiled without web server capabilities");
 }
 
 fn query_web_server_status(env: &PluginEnv) {
@@ -5023,7 +5023,7 @@ fn generate_web_login_token(env: &PluginEnv, token_label: Option<String>, read_o
 
 #[cfg(not(feature = "web_server_capability"))]
 fn generate_web_login_token(env: &PluginEnv, _token_label: Option<String>, _read_only: bool) {
-    log::error!("This version of Zellij was compiled without the web server capabilities!");
+    log::error!("This version of vc-frame was compiled without the web server capabilities!");
     let empty_vec: Vec<&str> = vec![];
     let _ = wasi_write_object(env, &empty_vec);
 }
@@ -5049,7 +5049,7 @@ fn revoke_web_login_token(env: &PluginEnv, token_label: String) {
 
 #[cfg(not(feature = "web_server_capability"))]
 fn revoke_web_login_token(env: &PluginEnv, _token_label: String) {
-    log::error!("This version of Zellij was compiled without the web server capabilities!");
+    log::error!("This version of vc-frame was compiled without the web server capabilities!");
     let empty_vec: Vec<&str> = vec![];
     let _ = wasi_write_object(env, &empty_vec);
 }
@@ -5071,7 +5071,7 @@ fn revoke_all_web_login_tokens(env: &PluginEnv) {
 
 #[cfg(not(feature = "web_server_capability"))]
 fn revoke_all_web_login_tokens(env: &PluginEnv) {
-    log::error!("This version of Zellij was compiled without the web server capabilities!");
+    log::error!("This version of vc-frame was compiled without the web server capabilities!");
     let empty_vec: Vec<&str> = vec![];
     let _ = wasi_write_object(env, &empty_vec);
 }
@@ -5093,7 +5093,7 @@ fn rename_web_login_token(env: &PluginEnv, old_name: String, new_name: String) {
 
 #[cfg(not(feature = "web_server_capability"))]
 fn rename_web_login_token(env: &PluginEnv, _old_name: String, _new_name: String) {
-    log::error!("This version of Zellij was compiled without the web server capabilities!");
+    log::error!("This version of vc-frame was compiled without the web server capabilities!");
     let empty_vec: Vec<&str> = vec![];
     let _ = wasi_write_object(env, &empty_vec);
 }
@@ -5119,7 +5119,7 @@ fn list_web_login_tokens(env: &PluginEnv) {
 
 #[cfg(not(feature = "web_server_capability"))]
 fn list_web_login_tokens(env: &PluginEnv) {
-    log::error!("This version of Zellij was compiled without the web server capabilities!");
+    log::error!("This version of vc-frame was compiled without the web server capabilities!");
     let empty_vec: Vec<&str> = vec![];
     let _ = wasi_write_object(env, &empty_vec);
 }

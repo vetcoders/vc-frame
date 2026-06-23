@@ -83,7 +83,7 @@ impl KdlError {
 
 impl std::fmt::Display for KdlError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        write!(f, "Failed to parse Zellij configuration")
+        write!(f, "Failed to parse vc-frame configuration")
     }
 }
 use std::fmt::Display;

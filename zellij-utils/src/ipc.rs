@@ -257,15 +257,15 @@ impl Display for ExitReason {
             ),
             Self::Disconnect => {
                 let session_tip = match crate::envs::get_session_name() {
-                    Ok(name) => format!("`zellij attach {}`", name),
-                    Err(_) => "see `zellij ls` and `zellij attach`".to_string(),
+                    Ok(name) => format!("`vc-frame attach {}`", name),
+                    Err(_) => "see `vc-frame ls` and `vc-frame attach`".to_string(),
                 };
                 write!(
                     f,
                     "
-Your zellij client lost connection to the zellij server.
+Your vc-frame client lost connection to the vc-frame server.
 
-As a safety measure, you have been disconnected from the current zellij session.
+As a safety measure, you have been disconnected from the current vc-frame session.
 However, the session should still exist and none of your data should be lost.
 
 This usually means that your terminal didn't process server messages quick

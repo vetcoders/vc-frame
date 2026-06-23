@@ -286,11 +286,11 @@ pub struct Setup {
     pub dump_config: bool,
 
     /// Disables loading of configuration file at default location,
-    /// loads the defaults that zellij ships with
+    /// loads the defaults that vc-frame ships with
     #[clap(long, value_parser)]
     pub clean: bool,
 
-    /// Checks the configuration of zellij and displays
+    /// Checks the configuration of vc-frame and displays
     /// currently used directories
     #[clap(long, value_parser)]
     pub check: bool,
@@ -341,9 +341,9 @@ impl Setup {
     /// Merges options from the config file and the command line options
     /// into `[Options]`, the command line options superceeding the layout
     /// file options, superceeding the config file options:
-    /// 1. command line options (`zellij options`)
+    /// 1. command line options (`vc-frame options`)
     /// 2. layout options
-    ///    (`layout.kdl` / `zellij --layout`)
+    ///    (`layout.kdl` / `vc-frame --layout`)
     /// 3. config options (`config.kdl`)
     pub fn from_cli_args(
         cli_args: &CliArgs,
@@ -517,7 +517,7 @@ impl Setup {
                 .collect::<Vec<PathBuf>>();
             default_config_dirs.dedup();
             message.push_str(
-                " On your system zellij looks in the following config directories by default:\n",
+                " On your system vc-frame looks in the following config directories by default:\n",
             );
             for dir in default_config_dirs {
                 writeln!(&mut message, " \"{}\"", dir.display()).unwrap();
@@ -534,7 +534,7 @@ impl Setup {
                 Ok(_) => message.push_str("[CONFIG FILE]: Well defined.\n"),
                 Err(e) => writeln!(
                     &mut message,
-                    "[CONFIG ERROR]: {}. \n By default, zellij loads default configuration",
+                    "[CONFIG ERROR]: {}. \n By default, vc-frame loads default configuration",
                     e
                 )
                 .unwrap(),
@@ -543,7 +543,7 @@ impl Setup {
             message.push_str("[CONFIG FILE]: Not Found\n");
             writeln!(
                 &mut message,
-                " By default zellij looks for a file called [{}] in the configuration directory",
+                " By default vc-frame looks for a file called [{}] in the configuration directory",
                 CONFIG_NAME
             )
             .unwrap();
@@ -577,12 +577,12 @@ impl Setup {
 
         writeln!(&mut message, "[ARROW SEPARATOR]: {}", ARROW_SEPARATOR).unwrap();
         message.push_str(" Is the [ARROW_SEPARATOR] displayed correctly?\n");
-        message.push_str(" If not you may want to either start zellij with a compatible mode: 'zellij options --simplified-ui true'\n");
+        message.push_str(" If not you may want to either start vc-frame with a compatible mode: 'vc-frame options --simplified-ui true'\n");
         let mut hyperlink_compat = String::new();
         hyperlink_compat.push_str(hyperlink_start);
         hyperlink_compat.push_str("https://zellij.dev/documentation/compatibility.html#the-status-bar-fonts-dont-render-correctly");
         hyperlink_compat.push_str(hyperlink_mid);
-        hyperlink_compat.push_str("https://zellij.dev/documentation/compatibility.html#the-status-bar-fonts-dont-render-correctly");
+        hyperlink_compat.push_str("upstream compatibility notes");
         hyperlink_compat.push_str(hyperlink_end);
         write!(
             &mut message,
@@ -592,7 +592,7 @@ impl Setup {
         .unwrap();
         message.push_str("[MOUSE INTERACTION]: \n");
         message.push_str(" Can be temporarily disabled through pressing the [SHIFT] key.\n");
-        message.push_str(" If that doesn't fix any issues consider to disable the mouse handling of zellij: 'zellij options --disable-mouse-mode'\n");
+        message.push_str(" If that doesn't fix any issues consider disabling mouse handling in vc-frame: 'vc-frame options --disable-mouse-mode'\n");
 
         let default_editor = std::env::var("EDITOR")
             .or_else(|_| std::env::var("VISUAL"))
@@ -603,7 +603,7 @@ impl Setup {
         hyperlink.push_str(hyperlink_start);
         hyperlink.push_str("https://www.zellij.dev/documentation/");
         hyperlink.push_str(hyperlink_mid);
-        hyperlink.push_str("zellij.dev/documentation");
+        hyperlink.push_str("upstream documentation");
         hyperlink.push_str(hyperlink_end);
         writeln!(&mut message, "[DOCUMENTATION]: {}", hyperlink).unwrap();
         //printf '\e]8;;http://example.com\e\\This is a link\e]8;;\e\\\n'
@@ -621,7 +621,7 @@ impl Setup {
             },
         };
         let mut out = std::io::stdout();
-        clap_complete::generate(shell, &mut CliArgs::command(), "zellij", &mut out);
+        clap_complete::generate(shell, &mut CliArgs::command(), "vc-frame", &mut out);
         // add shell dependent extra completion
         match shell {
             Shell::Bash => {

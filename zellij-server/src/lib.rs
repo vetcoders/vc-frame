@@ -724,7 +724,7 @@ impl SessionState {
 }
 
 pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
-    info!("Starting Zellij server!");
+    info!("Starting vc-frame server!");
 
     #[cfg(unix)]
     {
@@ -1681,7 +1681,7 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                 } else {
                     // TODO: test this
                     log::error!(
-                        "Cannot start web server: this instance of Zellij was compiled without web_server_capability"
+                        "Cannot start web server: this instance of vc-frame was compiled without web_server_capability"
                     );
                 }
             },
@@ -1704,7 +1704,7 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                     }
                 } else {
                     log::error!(
-                        "Cannot share session: this instance of Zellij was compiled without web_server_capability"
+                        "Cannot share session: this instance of vc-frame was compiled without web_server_capability"
                     );
                 }
             },
@@ -1755,7 +1755,7 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                 } else {
                     // TODO: test this
                     log::error!(
-                        "Cannot start web server: this instance of Zellij was compiled without web_server_capability"
+                        "Cannot start web server: this instance of vc-frame was compiled without web_server_capability"
                     );
                 }
             },
