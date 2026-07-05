@@ -7,6 +7,7 @@ mod single_screen_data;
 mod single_screen_render;
 mod ui;
 use std::collections::BTreeMap;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use uuid::Uuid;
 use zellij_tile::prelude::*;
 
@@ -56,16 +57,22 @@ struct State {
     current_session_last_saved_time: Option<u64>,
     is_visible: bool,
     refresh_timer_armed: bool,
+    is_rail: bool,
 }
 
 register_plugin!(State);
 
 impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
+        self.is_rail = configuration
+            .get("rail")
+            .map(|v| v == "true")
+            .unwrap_or(false);
         self.is_welcome_screen = configuration
             .get("welcome_screen")
             .map(|v| v == "true")
-            .unwrap_or(false);
+            .unwrap_or(false)
+            && !self.is_rail;
         if self.is_welcome_screen {
             self.active_screen = ActiveScreen::NewSession;
         }
@@ -73,9 +80,12 @@ impl ZellijPlugin for State {
         self.is_multi_screen = configuration
             .get("multi_screen")
             .map(|v| v == "true")
-            .unwrap_or(false);
+            .unwrap_or(false)
+            || self.is_rail;
         if !self.is_multi_screen {
             self.active_screen = ActiveScreen::SingleScreen;
+        } else if self.is_rail {
+            self.active_screen = ActiveScreen::AttachToSession;
         }
         self.single_screen_state.is_welcome_screen = self.is_welcome_screen;
         self.is_visible = true;
@@ -87,7 +97,12 @@ impl ZellijPlugin for State {
             EventType::Timer,
             EventType::Visible,
         ]);
-        let pane_title = if self.is_welcome_screen {
+        let pane_title = if self.is_rail {
+            configuration
+                .get("pane_title")
+                .cloned()
+                .unwrap_or_else(|| "Sessions".to_owned())
+        } else if self.is_welcome_screen {
             configuration
                 .get("pane_title")
                 .cloned()
@@ -206,6 +221,14 @@ impl ZellijPlugin for State {
     }
 
     fn render(&mut self, rows: usize, cols: usize) {
+        if self.is_rail {
+            self.render_session_rail(rows, cols);
+            if let Some(error) = self.error.as_ref() {
+                render_error(error, rows, cols, 0, 0);
+            }
+            return;
+        }
+
         let (x, y, width, height) = self.main_menu_size(rows, cols);
 
         let background = self.colors.palette.text_unselected.background;
@@ -441,14 +464,211 @@ impl ZellijPlugin for State {
     }
 }
 
+fn rail_ordinal_key_to_index(character: char) -> Option<usize> {
+    match character {
+        '1'..='9' => Some(character as usize - '1' as usize),
+        '0' => Some(9),
+        _ => None,
+    }
+}
+
+fn format_session_rail_entry(session: &SessionUiInfo, ordinal: usize) -> String {
+    let status = if session.is_current_session { "*" } else { "-" };
+    format!("{:02} {} {}", ordinal, status, session.name)
+}
+
+fn rail_range_to_render(
+    visible_rows: usize,
+    results_len: usize,
+    selected_index: Option<usize>,
+) -> (usize, usize) {
+    if visible_rows == 0 || results_len == 0 {
+        return (0, 0);
+    }
+    if visible_rows >= results_len {
+        return (0, results_len);
+    }
+    let anchor = selected_index
+        .unwrap_or(0)
+        .min(results_len.saturating_sub(1));
+    let half = visible_rows / 2;
+    let mut start = anchor.saturating_sub(half);
+    let mut end = start + visible_rows;
+    if end > results_len {
+        end = results_len;
+        start = results_len.saturating_sub(visible_rows);
+    }
+    (start, end)
+}
+
+fn fit_rail_line(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let mut fitted = truncate_to_width(text, width);
+    let fitted_width = fitted.width();
+    if fitted_width < width {
+        fitted.push_str(&" ".repeat(width - fitted_width));
+    }
+    fitted
+}
+
+fn truncate_to_width(text: &str, width: usize) -> String {
+    let mut current_width = 0;
+    let mut truncated = String::new();
+    for character in text.chars() {
+        let character_width = character.width().unwrap_or(0);
+        if current_width + character_width > width {
+            break;
+        }
+        current_width += character_width;
+        truncated.push(character);
+    }
+    truncated
+}
+
 impl State {
     fn reset_selected_index(&mut self) {
         self.sessions.reset_selected_index();
+    }
+    fn ensure_rail_selection(&mut self) {
+        if self.sessions.session_ui_infos.is_empty() {
+            self.reset_selected_index();
+            return;
+        }
+        if let Some(selected_index) = self.sessions.selected_index.0
+            && selected_index < self.sessions.session_ui_infos.len()
+        {
+            return;
+        }
+        let current_session_index = self
+            .sessions
+            .session_ui_infos
+            .iter()
+            .position(|s| s.is_current_session)
+            .unwrap_or(0);
+        self.sessions.select_session_index(current_session_index);
+    }
+    fn render_session_rail(&mut self, rows: usize, cols: usize) {
+        if rows == 0 || cols == 0 {
+            return;
+        }
+        self.ensure_rail_selection();
+
+        let session_count = self.sessions.session_ui_infos.len();
+        let header = fit_rail_line(&format!("SESSIONS {}", session_count), cols);
+        let mut header = Text::new(header);
+        if cols >= 8 {
+            header = header.color_range(1, 0..8);
+        }
+        print_text_with_coordinates(header, 0, 0, None, None);
+
+        let list_rows = rows.saturating_sub(1);
+        if list_rows == 0 {
+            return;
+        }
+        let footer_rows = usize::from(session_count > list_rows && list_rows > 1);
+        let entry_rows = list_rows.saturating_sub(footer_rows);
+        let selected_index = self.sessions.selected_index.0;
+        let (start, end) = rail_range_to_render(entry_rows, session_count, selected_index);
+        let mut row = 1;
+
+        for (index, session) in self.sessions.session_ui_infos[start..end]
+            .iter()
+            .enumerate()
+        {
+            let session_index = start + index;
+            let line = fit_rail_line(&format_session_rail_entry(session, session_index + 1), cols);
+            let mut text = Text::new(line);
+            if cols >= 4 {
+                text = text.color_range(1, 3..4);
+            }
+            if selected_index == Some(session_index) {
+                text = text.selected();
+            }
+            print_text_with_coordinates(text, 0, row, None, None);
+            row += 1;
+        }
+
+        if footer_rows == 1 && row < rows {
+            let hidden_above = start;
+            let hidden_below = session_count.saturating_sub(end);
+            let footer = match (hidden_above, hidden_below) {
+                (0, below) => format!("+{} more", below),
+                (above, 0) => format!("+{} above", above),
+                (above, below) => format!("+{} above +{} more", above, below),
+            };
+            print_text_with_coordinates(
+                Text::new(fit_rail_line(&footer, cols)),
+                0,
+                row,
+                None,
+                None,
+            );
+            row += 1;
+        }
+
+        while row < rows {
+            print_text_with_coordinates(Text::new(" ".repeat(cols)), 0, row, None, None);
+            row += 1;
+        }
+    }
+    fn handle_session_rail_key(&mut self, key: KeyWithModifier) -> bool {
+        match key.bare_key {
+            BareKey::Down if key.has_no_modifiers() => {
+                self.sessions.move_session_selection_down();
+                true
+            },
+            BareKey::Up if key.has_no_modifiers() => {
+                self.sessions.move_session_selection_up();
+                true
+            },
+            BareKey::Enter if key.has_no_modifiers() => {
+                self.handle_session_rail_selection();
+                true
+            },
+            BareKey::Char(character) if key.has_no_modifiers() => {
+                if character == '\n' {
+                    self.handle_session_rail_selection();
+                    true
+                } else if let Some(index) = rail_ordinal_key_to_index(character) {
+                    if self.sessions.select_session_index(index) {
+                        self.handle_session_rail_selection();
+                    }
+                    true
+                } else {
+                    false
+                }
+            },
+            BareKey::Char('c') if key.has_modifiers(&[KeyModifier::Ctrl]) => {
+                hide_self();
+                true
+            },
+            BareKey::Esc if key.has_no_modifiers() => {
+                hide_self();
+                true
+            },
+            _ => false,
+        }
+    }
+    fn handle_session_rail_selection(&mut self) {
+        self.ensure_rail_selection();
+        if let Some(selected_session_name) = self.sessions.get_selected_session_name() {
+            if self.sessions.selected_is_current_session() {
+                self.show_error("Already attached...");
+            } else {
+                switch_session_with_focus(&selected_session_name, None, None);
+                self.reset_selected_index();
+            }
+        }
     }
     fn handle_key(&mut self, key: KeyWithModifier) -> bool {
         if self.error.is_some() {
             self.error = None;
             return true;
+        }
+        if self.is_rail {
+            return self.handle_session_rail_key(key);
         }
         match self.active_screen {
             ActiveScreen::NewSession => self.handle_new_session_key(key),
@@ -1441,5 +1661,46 @@ impl State {
             None,
             None,
         );
+    }
+}
+
+#[cfg(test)]
+mod rail_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn session(name: &str, is_current_session: bool) -> SessionUiInfo {
+        SessionUiInfo {
+            name: name.to_owned(),
+            tabs: vec![],
+            connected_users: 1,
+            is_current_session,
+            creation_time: Duration::ZERO,
+        }
+    }
+
+    #[test]
+    fn rail_entries_include_ordinal_status_and_name() {
+        assert_eq!(
+            format_session_rail_entry(&session("alpha", true), 1),
+            "01 * alpha"
+        );
+        assert_eq!(
+            format_session_rail_entry(&session("beta", false), 12),
+            "12 - beta"
+        );
+    }
+
+    #[test]
+    fn rail_range_keeps_selected_session_visible() {
+        assert_eq!(rail_range_to_render(4, 10, Some(7)), (5, 9));
+        assert_eq!(rail_range_to_render(4, 10, Some(0)), (0, 4));
+        assert_eq!(rail_range_to_render(4, 10, Some(9)), (6, 10));
+    }
+
+    #[test]
+    fn rail_lines_are_clipped_and_padded_to_width() {
+        assert_eq!(fit_rail_line("abcdef", 4), "abcd");
+        assert_eq!(fit_rail_line("ab", 4), "ab  ");
     }
 }

@@ -1411,146 +1411,143 @@ pub struct MultiplayerColors {
     pub player_10: PaletteColor,
 }
 
-/// Calm / zen default palette: a grayscale base plus one restrained accent.
+/// Grayscale-first fallback palette for a fresh vc-frame start.
 ///
-/// Replaces the historical neon rainbow (green/orange/cyan/magenta) so the
-/// out-of-box UI reads quiet and intentional. The single accent is a soft
-/// teal-gray; functional color is kept only where it carries meaning (a muted
-/// brick for errors, a muted sage for success). Opt-in `monochrome`/`pastel`
-/// themes still live in `assets/themes/` for users who want zero color or soft
-/// multicolor respectively.
-mod calm {
-    pub const BG: u8 = 234; // #1c1c1c — deep calm background
-    pub const BG_RAISED: u8 = 237; // #3a3a3a — selected / raised surface
-    pub const DIM: u8 = 240; // #585858 — muted detail
-    pub const GRAY: u8 = 244; // #808080 — secondary text
-    pub const LIGHT: u8 = 250; // #bcbcbc — soft light
-    pub const FG: u8 = 252; // #d0d0d0 — primary text
+/// Normal chrome stays neutral: frame bars, lists, tables, ribbons, and text
+/// accents are all grayscale. Color is reserved for functional attention states
+/// such as highlights and explicit success/error markers. Opt-in color themes
+/// remain available in `assets/themes/`.
+mod grayscale {
+    pub const BG: u8 = 234; // #1c1c1c, deep background
+    pub const SURFACE: u8 = 236; // #303030, quiet raised surface
+    pub const SELECTED: u8 = 238; // #444444, selected surface
+    pub const DIM: u8 = 240; // #585858, muted detail
+    pub const MUTED: u8 = 244; // #808080, secondary text
+    pub const SOFT: u8 = 250; // #bcbcbc, soft light
+    pub const FG: u8 = 252; // #d0d0d0, primary text
     pub const INK: u8 = 16; // near-black ink for light pills
-    pub const ACCENT: u8 = 109; // #87afaf — the single soft teal-gray focus accent
-    pub const SAGE: u8 = 108; // #87af87 — muted success
-    pub const ERROR: u8 = 131; // #af5f5f — desaturated brick, functional alert
-    pub const SAND: u8 = 144; // #afaf87 — muted warning
-    pub const SLATE: u8 = 103; // #8787af — muted secondary player accent
+    pub const ATTENTION: u8 = 109; // #87afaf, restrained active highlight
+    pub const SUCCESS: u8 = 108; // #87af87, functional success
+    pub const ERROR: u8 = 131; // #af5f5f, functional alert
 }
 
 pub const DEFAULT_STYLES: Styling = Styling {
     text_unselected: StyleDeclaration {
-        base: PaletteColor::EightBit(calm::FG),
-        emphasis_0: PaletteColor::EightBit(calm::ACCENT),
-        emphasis_1: PaletteColor::EightBit(calm::GRAY),
-        emphasis_2: PaletteColor::EightBit(calm::ACCENT),
-        emphasis_3: PaletteColor::EightBit(calm::LIGHT),
-        background: PaletteColor::EightBit(calm::BG),
+        base: PaletteColor::EightBit(grayscale::FG),
+        emphasis_0: PaletteColor::EightBit(grayscale::SOFT),
+        emphasis_1: PaletteColor::EightBit(grayscale::MUTED),
+        emphasis_2: PaletteColor::EightBit(grayscale::DIM),
+        emphasis_3: PaletteColor::EightBit(grayscale::SOFT),
+        background: PaletteColor::EightBit(grayscale::BG),
     },
     text_selected: StyleDeclaration {
-        base: PaletteColor::EightBit(calm::FG),
-        emphasis_0: PaletteColor::EightBit(calm::ACCENT),
-        emphasis_1: PaletteColor::EightBit(calm::GRAY),
-        emphasis_2: PaletteColor::EightBit(calm::ACCENT),
-        emphasis_3: PaletteColor::EightBit(calm::LIGHT),
-        background: PaletteColor::EightBit(calm::BG_RAISED),
+        base: PaletteColor::EightBit(grayscale::FG),
+        emphasis_0: PaletteColor::EightBit(grayscale::SOFT),
+        emphasis_1: PaletteColor::EightBit(grayscale::MUTED),
+        emphasis_2: PaletteColor::EightBit(grayscale::DIM),
+        emphasis_3: PaletteColor::EightBit(grayscale::SOFT),
+        background: PaletteColor::EightBit(grayscale::SELECTED),
     },
     ribbon_unselected: StyleDeclaration {
-        base: PaletteColor::EightBit(calm::LIGHT),
-        emphasis_0: PaletteColor::EightBit(calm::ERROR),
-        emphasis_1: PaletteColor::EightBit(calm::LIGHT),
-        emphasis_2: PaletteColor::EightBit(calm::ACCENT),
-        emphasis_3: PaletteColor::EightBit(calm::GRAY),
-        background: PaletteColor::EightBit(calm::BG_RAISED),
+        base: PaletteColor::EightBit(grayscale::SOFT),
+        emphasis_0: PaletteColor::EightBit(grayscale::FG),
+        emphasis_1: PaletteColor::EightBit(grayscale::FG),
+        emphasis_2: PaletteColor::EightBit(grayscale::MUTED),
+        emphasis_3: PaletteColor::EightBit(grayscale::DIM),
+        background: PaletteColor::EightBit(grayscale::SURFACE),
     },
     ribbon_selected: StyleDeclaration {
-        base: PaletteColor::EightBit(calm::INK),
-        emphasis_0: PaletteColor::EightBit(calm::ERROR),
-        emphasis_1: PaletteColor::EightBit(calm::INK),
-        emphasis_2: PaletteColor::EightBit(calm::INK),
-        emphasis_3: PaletteColor::EightBit(calm::DIM),
-        background: PaletteColor::EightBit(calm::ACCENT),
+        base: PaletteColor::EightBit(grayscale::INK),
+        emphasis_0: PaletteColor::EightBit(grayscale::INK),
+        emphasis_1: PaletteColor::EightBit(grayscale::INK),
+        emphasis_2: PaletteColor::EightBit(grayscale::DIM),
+        emphasis_3: PaletteColor::EightBit(grayscale::MUTED),
+        background: PaletteColor::EightBit(grayscale::SOFT),
     },
     exit_code_success: StyleDeclaration {
-        base: PaletteColor::EightBit(calm::SAGE),
-        emphasis_0: PaletteColor::EightBit(calm::ACCENT),
-        emphasis_1: PaletteColor::EightBit(calm::INK),
-        emphasis_2: PaletteColor::EightBit(calm::LIGHT),
-        emphasis_3: PaletteColor::EightBit(calm::DIM),
-        background: PaletteColor::EightBit(calm::BG),
+        base: PaletteColor::EightBit(grayscale::SUCCESS),
+        emphasis_0: PaletteColor::EightBit(grayscale::SOFT),
+        emphasis_1: PaletteColor::EightBit(grayscale::INK),
+        emphasis_2: PaletteColor::EightBit(grayscale::FG),
+        emphasis_3: PaletteColor::EightBit(grayscale::DIM),
+        background: PaletteColor::EightBit(grayscale::BG),
     },
     exit_code_error: StyleDeclaration {
-        base: PaletteColor::EightBit(calm::ERROR),
-        emphasis_0: PaletteColor::EightBit(calm::SAND),
-        emphasis_1: PaletteColor::EightBit(calm::GRAY),
-        emphasis_2: PaletteColor::EightBit(calm::LIGHT),
-        emphasis_3: PaletteColor::EightBit(calm::DIM),
-        background: PaletteColor::EightBit(calm::BG),
+        base: PaletteColor::EightBit(grayscale::ERROR),
+        emphasis_0: PaletteColor::EightBit(grayscale::ERROR),
+        emphasis_1: PaletteColor::EightBit(grayscale::MUTED),
+        emphasis_2: PaletteColor::EightBit(grayscale::SOFT),
+        emphasis_3: PaletteColor::EightBit(grayscale::DIM),
+        background: PaletteColor::EightBit(grayscale::BG),
     },
     frame_unselected: None,
     frame_selected: StyleDeclaration {
-        base: PaletteColor::EightBit(calm::ACCENT),
-        emphasis_0: PaletteColor::EightBit(calm::GRAY),
-        emphasis_1: PaletteColor::EightBit(calm::LIGHT),
-        emphasis_2: PaletteColor::EightBit(calm::INK),
-        emphasis_3: PaletteColor::EightBit(calm::DIM),
-        background: PaletteColor::EightBit(calm::BG),
+        base: PaletteColor::EightBit(grayscale::SOFT),
+        emphasis_0: PaletteColor::EightBit(grayscale::MUTED),
+        emphasis_1: PaletteColor::EightBit(grayscale::FG),
+        emphasis_2: PaletteColor::EightBit(grayscale::INK),
+        emphasis_3: PaletteColor::EightBit(grayscale::DIM),
+        background: PaletteColor::EightBit(grayscale::BG),
     },
     frame_highlight: StyleDeclaration {
-        base: PaletteColor::EightBit(calm::ACCENT),
-        emphasis_0: PaletteColor::EightBit(calm::LIGHT),
-        emphasis_1: PaletteColor::EightBit(calm::FG),
-        emphasis_2: PaletteColor::EightBit(calm::ACCENT),
-        emphasis_3: PaletteColor::EightBit(calm::ACCENT),
-        background: PaletteColor::EightBit(calm::BG),
+        base: PaletteColor::EightBit(grayscale::ATTENTION),
+        emphasis_0: PaletteColor::EightBit(grayscale::SOFT),
+        emphasis_1: PaletteColor::EightBit(grayscale::FG),
+        emphasis_2: PaletteColor::EightBit(grayscale::ATTENTION),
+        emphasis_3: PaletteColor::EightBit(grayscale::ATTENTION),
+        background: PaletteColor::EightBit(grayscale::BG),
     },
     table_title: StyleDeclaration {
-        base: PaletteColor::EightBit(calm::ACCENT),
-        emphasis_0: PaletteColor::EightBit(calm::GRAY),
-        emphasis_1: PaletteColor::EightBit(calm::LIGHT),
-        emphasis_2: PaletteColor::EightBit(calm::ACCENT),
-        emphasis_3: PaletteColor::EightBit(calm::GRAY),
-        background: PaletteColor::EightBit(calm::BG),
+        base: PaletteColor::EightBit(grayscale::SOFT),
+        emphasis_0: PaletteColor::EightBit(grayscale::MUTED),
+        emphasis_1: PaletteColor::EightBit(grayscale::FG),
+        emphasis_2: PaletteColor::EightBit(grayscale::SOFT),
+        emphasis_3: PaletteColor::EightBit(grayscale::MUTED),
+        background: PaletteColor::EightBit(grayscale::BG),
     },
     table_cell_unselected: StyleDeclaration {
-        base: PaletteColor::EightBit(calm::FG),
-        emphasis_0: PaletteColor::EightBit(calm::ACCENT),
-        emphasis_1: PaletteColor::EightBit(calm::GRAY),
-        emphasis_2: PaletteColor::EightBit(calm::ACCENT),
-        emphasis_3: PaletteColor::EightBit(calm::LIGHT),
-        background: PaletteColor::EightBit(calm::BG),
+        base: PaletteColor::EightBit(grayscale::FG),
+        emphasis_0: PaletteColor::EightBit(grayscale::SOFT),
+        emphasis_1: PaletteColor::EightBit(grayscale::MUTED),
+        emphasis_2: PaletteColor::EightBit(grayscale::DIM),
+        emphasis_3: PaletteColor::EightBit(grayscale::SOFT),
+        background: PaletteColor::EightBit(grayscale::BG),
     },
     table_cell_selected: StyleDeclaration {
-        base: PaletteColor::EightBit(calm::ACCENT),
-        emphasis_0: PaletteColor::EightBit(calm::GRAY),
-        emphasis_1: PaletteColor::EightBit(calm::LIGHT),
-        emphasis_2: PaletteColor::EightBit(calm::ERROR),
-        emphasis_3: PaletteColor::EightBit(calm::GRAY),
-        background: PaletteColor::EightBit(calm::BG_RAISED),
+        base: PaletteColor::EightBit(grayscale::FG),
+        emphasis_0: PaletteColor::EightBit(grayscale::MUTED),
+        emphasis_1: PaletteColor::EightBit(grayscale::SOFT),
+        emphasis_2: PaletteColor::EightBit(grayscale::DIM),
+        emphasis_3: PaletteColor::EightBit(grayscale::MUTED),
+        background: PaletteColor::EightBit(grayscale::SELECTED),
     },
     list_unselected: StyleDeclaration {
-        base: PaletteColor::EightBit(calm::FG),
-        emphasis_0: PaletteColor::EightBit(calm::ACCENT),
-        emphasis_1: PaletteColor::EightBit(calm::GRAY),
-        emphasis_2: PaletteColor::EightBit(calm::ACCENT),
-        emphasis_3: PaletteColor::EightBit(calm::LIGHT),
-        background: PaletteColor::EightBit(calm::BG),
+        base: PaletteColor::EightBit(grayscale::FG),
+        emphasis_0: PaletteColor::EightBit(grayscale::SOFT),
+        emphasis_1: PaletteColor::EightBit(grayscale::MUTED),
+        emphasis_2: PaletteColor::EightBit(grayscale::DIM),
+        emphasis_3: PaletteColor::EightBit(grayscale::SOFT),
+        background: PaletteColor::EightBit(grayscale::BG),
     },
     list_selected: StyleDeclaration {
-        base: PaletteColor::EightBit(calm::ACCENT),
-        emphasis_0: PaletteColor::EightBit(calm::GRAY),
-        emphasis_1: PaletteColor::EightBit(calm::LIGHT),
-        emphasis_2: PaletteColor::EightBit(calm::ERROR),
-        emphasis_3: PaletteColor::EightBit(calm::GRAY),
-        background: PaletteColor::EightBit(calm::BG_RAISED),
+        base: PaletteColor::EightBit(grayscale::FG),
+        emphasis_0: PaletteColor::EightBit(grayscale::MUTED),
+        emphasis_1: PaletteColor::EightBit(grayscale::SOFT),
+        emphasis_2: PaletteColor::EightBit(grayscale::DIM),
+        emphasis_3: PaletteColor::EightBit(grayscale::MUTED),
+        background: PaletteColor::EightBit(grayscale::SELECTED),
     },
     multiplayer_user_colors: MultiplayerColors {
-        player_1: PaletteColor::EightBit(calm::ACCENT),
-        player_2: PaletteColor::EightBit(calm::SAGE),
-        player_3: PaletteColor::EightBit(calm::SAND),
-        player_4: PaletteColor::EightBit(calm::SLATE),
-        player_5: PaletteColor::EightBit(calm::LIGHT),
-        player_6: PaletteColor::EightBit(calm::GRAY),
-        player_7: PaletteColor::EightBit(calm::ERROR),
-        player_8: PaletteColor::EightBit(calm::DIM),
-        player_9: PaletteColor::EightBit(calm::FG),
-        player_10: PaletteColor::EightBit(calm::SLATE),
+        player_1: PaletteColor::EightBit(grayscale::FG),
+        player_2: PaletteColor::EightBit(grayscale::SOFT),
+        player_3: PaletteColor::EightBit(grayscale::MUTED),
+        player_4: PaletteColor::EightBit(grayscale::DIM),
+        player_5: PaletteColor::EightBit(grayscale::SELECTED),
+        player_6: PaletteColor::EightBit(grayscale::SURFACE),
+        player_7: PaletteColor::EightBit(grayscale::FG),
+        player_8: PaletteColor::EightBit(grayscale::SOFT),
+        player_9: PaletteColor::EightBit(grayscale::MUTED),
+        player_10: PaletteColor::EightBit(grayscale::DIM),
     },
 };
 
@@ -3730,6 +3727,62 @@ pub type OpenCommandPaneInPlaceOfPaneIdResponse = Option<PaneId>;
 pub type OpenTerminalPaneInPlaceOfPaneIdResponse = Option<PaneId>;
 pub type OpenEditPaneInPlaceOfPaneIdResponse = Option<PaneId>;
 pub type OpenPluginPaneFloatingResponse = Option<PaneId>;
+
+#[test]
+pub fn default_styles_keep_ordinary_surfaces_grayscale() {
+    for style in [
+        DEFAULT_STYLES.text_unselected,
+        DEFAULT_STYLES.text_selected,
+        DEFAULT_STYLES.ribbon_unselected,
+        DEFAULT_STYLES.ribbon_selected,
+        DEFAULT_STYLES.frame_selected,
+        DEFAULT_STYLES.table_title,
+        DEFAULT_STYLES.table_cell_unselected,
+        DEFAULT_STYLES.table_cell_selected,
+        DEFAULT_STYLES.list_unselected,
+        DEFAULT_STYLES.list_selected,
+    ] {
+        for color in [
+            style.base,
+            style.background,
+            style.emphasis_0,
+            style.emphasis_1,
+            style.emphasis_2,
+            style.emphasis_3,
+        ] {
+            assert_default_grayscale(color);
+        }
+    }
+    assert_eq!(
+        DEFAULT_STYLES.frame_highlight.base,
+        PaletteColor::EightBit(grayscale::ATTENTION)
+    );
+}
+
+#[cfg(test)]
+fn assert_default_grayscale(color: PaletteColor) {
+    match color {
+        PaletteColor::EightBit(color) => assert!(
+            [
+                grayscale::BG,
+                grayscale::SURFACE,
+                grayscale::SELECTED,
+                grayscale::DIM,
+                grayscale::MUTED,
+                grayscale::SOFT,
+                grayscale::FG,
+                grayscale::INK,
+            ]
+            .contains(&color),
+            "default ordinary surfaces must stay grayscale, found xterm color {}",
+            color
+        ),
+        PaletteColor::Rgb((red, green, blue)) => {
+            assert_eq!(red, green, "red/green differ for {:?}", color);
+            assert_eq!(green, blue, "green/blue differ for {:?}", color);
+        },
+    }
+}
 
 #[test]
 pub fn can_parse_unicode_bare_keys() {

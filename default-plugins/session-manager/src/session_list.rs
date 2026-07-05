@@ -523,6 +523,39 @@ impl SessionList {
     pub fn reset_selected_index(&mut self) {
         self.selected_index.reset();
     }
+    pub fn select_session_index(&mut self, session_index: usize) -> bool {
+        if session_index >= self.session_ui_infos.len() {
+            return false;
+        }
+        self.selected_index.0 = Some(session_index);
+        self.selected_index.1 = None;
+        self.selected_index.2 = None;
+        true
+    }
+    pub fn move_session_selection_down(&mut self) {
+        let session_count = self.session_ui_infos.len();
+        if session_count == 0 {
+            self.reset_selected_index();
+            return;
+        }
+        let next_index = match self.selected_index.0 {
+            Some(index) if index + 1 < session_count => index + 1,
+            _ => 0,
+        };
+        self.select_session_index(next_index);
+    }
+    pub fn move_session_selection_up(&mut self) {
+        let session_count = self.session_ui_infos.len();
+        if session_count == 0 {
+            self.reset_selected_index();
+            return;
+        }
+        let next_index = match self.selected_index.0 {
+            Some(0) | None => session_count.saturating_sub(1),
+            Some(index) => index.saturating_sub(1),
+        };
+        self.select_session_index(next_index);
+    }
     /// After deleting one or more entries (and re-running `update_search_term`
     /// to rebuild `search_results`), put the cursor back on a sensible
     /// neighbour at the same numeric row -- the entry that took the deleted

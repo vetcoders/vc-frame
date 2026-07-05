@@ -215,6 +215,21 @@ Config {
                 ),
                 initial_cwd: None,
             },
+            "session-rail": RunPlugin {
+                _allow_exec_host_cmd: false,
+                location: Zellij(
+                    PluginTag(
+                        "session-manager",
+                    ),
+                ),
+                configuration: PluginUserConfiguration(
+                    {
+                        "pane_title": "Sessions",
+                        "rail": "true",
+                    },
+                ),
+                initial_cwd: None,
+            },
             "status-bar": RunPlugin {
                 _allow_exec_host_cmd: false,
                 location: Zellij(
