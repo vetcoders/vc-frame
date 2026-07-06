@@ -1692,6 +1692,15 @@ mod rail_tests {
     }
 
     #[test]
+    fn rail_ordinal_keys_map_to_session_indices() {
+        assert_eq!(rail_ordinal_key_to_index('1'), Some(0));
+        assert_eq!(rail_ordinal_key_to_index('2'), Some(1));
+        assert_eq!(rail_ordinal_key_to_index('9'), Some(8));
+        assert_eq!(rail_ordinal_key_to_index('0'), Some(9));
+        assert_eq!(rail_ordinal_key_to_index('a'), None);
+    }
+
+    #[test]
     fn rail_range_keeps_selected_session_visible() {
         assert_eq!(rail_range_to_render(4, 10, Some(7)), (5, 9));
         assert_eq!(rail_range_to_render(4, 10, Some(0)), (0, 4));
