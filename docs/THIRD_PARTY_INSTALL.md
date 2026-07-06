@@ -1,4 +1,4 @@
-# Third Party Install
+# Upstream Zellij Packages
 
 * [Packages](#packages)
     * [Arch Linux](#arch-linux)
@@ -6,9 +6,20 @@
     * [Fedora Linux](#fedora-linux)
     * [Void Linux](#void-linux)
 
+This page lists third-party packages for upstream `zellij`. They are useful
+when you want stock Zellij compatibility, but they do **not** install the
+VetCoders `vc-frame` runtime, its grayscale default surface, or its left
+session rail.
+
+For vc-frame itself:
+
+- Source-build preview: `make install`
+- Release-grade path: [RELEASE.md](RELEASE.md)
+- Product surface: [VC_FRAME_OPERATOR_SURFACE.md](VC_FRAME_OPERATOR_SURFACE.md)
+
 ## Packages
 
- :warning: **These packages are not affiliated with the Zellij maintainers and are provided here for convenience.**
+ :warning: **These packages are not affiliated with the Zellij maintainers, are provided here for convenience, and should not be presented as vc-frame distribution channels.**
 
 [![Packaging status](https://repology.org/badge/vertical-allrepos/zellij.svg)](https://repology.org/project/zellij/versions)
 

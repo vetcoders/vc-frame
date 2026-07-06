@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="560" viewBox="0 0 1040 560" role="img" aria-labelledby="title desc">
+  <title id="title">vc-frame default operator surface</title>
+  <desc id="desc">A grayscale terminal frame showing sessions in a left rail and runs in the top tab bar.</desc>
+  <rect width="1040" height="560" rx="18" fill="#111111"/>
+  <rect x="24" y="24" width="992" height="512" rx="12" fill="#1b1b1b" stroke="#6f6f6f" stroke-width="2"/>
+
+  <rect x="24" y="24" width="992" height="44" rx="12" fill="#303030"/>
+  <rect x="24" y="52" width="992" height="16" fill="#303030"/>
+  <text x="48" y="52" fill="#eeeeee" font-family="JetBrains Mono, Menlo, Consolas, monospace" font-size="18">vc-frame operator</text>
+  <text x="448" y="52" fill="#cfcfcf" font-family="JetBrains Mono, Menlo, Consolas, monospace" font-size="18">Tab #1  run: hydrate</text>
+  <text x="880" y="52" fill="#9f9f9f" font-family="JetBrains Mono, Menlo, Consolas, monospace" font-size="16">LOCK ready</text>
+
+  <rect x="24" y="68" width="232" height="420" fill="#202020" stroke="#595959" stroke-width="1"/>
+  <text x="48" y="104" fill="#f2f2f2" font-family="JetBrains Mono, Menlo, Consolas, monospace" font-size="17">SESSIONS 2</text>
+  <text x="48" y="146" fill="#ffffff" font-family="JetBrains Mono, Menlo, Consolas, monospace" font-size="17">01 * vibecrafted</text>
+  <text x="48" y="182" fill="#bdbdbd" font-family="JetBrains Mono, Menlo, Consolas, monospace" font-size="17">02 - release</text>
+  <text x="48" y="234" fill="#8f8f8f" font-family="JetBrains Mono, Menlo, Consolas, monospace" font-size="14">Alt-h focus rail</text>
+  <text x="48" y="260" fill="#8f8f8f" font-family="JetBrains Mono, Menlo, Consolas, monospace" font-size="14">1..0 switch</text>
+  <text x="48" y="286" fill="#8f8f8f" font-family="JetBrains Mono, Menlo, Consolas, monospace" font-size="14">Esc collapse</text>
+
+  <rect x="256" y="68" width="760" height="420" fill="#181818"/>
+  <text x="292" y="118" fill="#e7e7e7" font-family="JetBrains Mono, Menlo, Consolas, monospace" font-size="20">Vibecrafted runtime</text>
+  <text x="292" y="164" fill="#cfcfcf" font-family="JetBrains Mono, Menlo, Consolas, monospace" font-size="18">left rail: sessions</text>
+  <text x="292" y="202" fill="#cfcfcf" font-family="JetBrains Mono, Menlo, Consolas, monospace" font-size="18">top rail: runs and tabs</text>
+  <text x="292" y="240" fill="#cfcfcf" font-family="JetBrains Mono, Menlo, Consolas, monospace" font-size="18">default theme: built-in grayscale</text>
+  <text x="292" y="300" fill="#9f9f9f" font-family="JetBrains Mono, Menlo, Consolas, monospace" font-size="16">$ vc-frame list-sessions --no-formatting</text>
+  <text x="292" y="336" fill="#f1f1f1" font-family="JetBrains Mono, Menlo, Consolas, monospace" font-size="16">vibecrafted [Created ...] (current)</text>
+  <text x="292" y="370" fill="#bdbdbd" font-family="JetBrains Mono, Menlo, Consolas, monospace" font-size="16">release      [Created ...]</text>
+
+  <rect x="24" y="488" width="992" height="48" rx="0" fill="#2a2a2a"/>
+  <text x="48" y="518" fill="#dedede" font-family="JetBrains Mono, Menlo, Consolas, monospace" font-size="16">NORMAL | sessions-left / runs-top | VC_FRAME_PANE_ID + VC_FRAME_SESSION_NAME intact</text>
+</svg>

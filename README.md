@@ -1,43 +1,20 @@
 <h1 align="center">
   <br>
-  <img src="https://raw.githubusercontent.com/zellij-org/zellij/main/assets/logo.png" alt="logo" width="200">
-  <br>
   vc-frame ⚒ (vibecrafted runtime)
   <br>
   <br>
 </h1>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/zellij-org/zellij/main/assets/demo.gif" alt="demo">
+  <img src="docs/assets/vc-frame-dual-rail-terminal.svg" alt="vc-frame default operator surface: left sessions rail, top run tabs, grayscale chrome">
 </p>
 <h4 align="center">
-  [<a href="https://zellij.dev/documentation/installation">Installation</a>]
-  [<a href="https://zellij.dev/screencasts/">Screencasts & Tutorials</a>]
-  [<a href="https://zellij.dev/documentation/configuration">Configuration</a>]
-  [<a href="https://zellij.dev/documentation/layouts">Layouts</a>]
-  [<a href="https://zellij.dev/documentation/faq">FAQ</a>]
+  [<a href="docs/VC_FRAME_OPERATOR_SURFACE.md">Operator Surface</a>]
+  [<a href="#how-do-i-install-it">Install</a>]
+  [<a href="docs/RELEASE.md">Release Runbook</a>]
+  [<a href="docs/TERMINOLOGY.md">Terminology</a>]
+  [<a href="https://zellij.dev/documentation/">Upstream Zellij Docs</a>]
 </h4>
-<p align="center">
-  <a href="https://discord.gg/CrUAFH3"><img alt="Discord Chat" src="https://img.shields.io/discord/771367133715628073?color=5865F2&label=discord&style=flat-square"></a>
-  <a href="https://matrix.to/#/#zellij_general:matrix.org"><img alt="Matrix Chat" src="https://img.shields.io/matrix/zellij_general:matrix.org?color=1d7e64&label=matrix%20chat&style=flat-square&logo=matrix"></a>
-  <a href="https://zellij.dev/documentation/"><img alt="vc-frame documentation" src="https://img.shields.io/badge/vc--frame-documentation-fc0060?style=flat-square"></a>
-</p>
-
-<br>
-    <p align="center">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/bc5daac4-140a-4b83-8729-71c944ee1100">
-      <img src="https://github.com/user-attachments/assets/55156624-a71a-46b5-939e-f562e3b2dd7f" alt="Sponsored by ">
-    </picture>
-    &nbsp;
-    &nbsp;
-    <a href="https://www.gresearch.com/">
-        <picture>
-          <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/d609936a-abf8-4406-8cfc-889f76a09d74">
-          <img src="https://github.com/user-attachments/assets/742ae902-fe9d-41c6-baf2-4bc143061da3" alt="gresearch logo">
-        </picture>
-    </a>
-</p>
 
 # What is this?
 
@@ -45,17 +22,30 @@ vc-frame is a vibecrafted runtime and terminal workspace built on the Zellij cor
 
 vc-frame keeps the Zellij philosophy that one must not sacrifice simplicity for power, while adding a fork-owned surface for Vibecrafted operator workflows.
 
+The default vc-frame surface is now grayscale-first and dual-rail: sessions live in a persistent left rail, while runs and tabs stay in the familiar top bar. Color themes remain available as explicit opt-in themes.
+
 vc-frame is geared toward beginner and power users alike - allowing deep customizability, personal automation through [layouts](https://zellij.dev/documentation/layouts.html), true multiplayer collaboration, unique UX features such as floating and stacked panes, and a [plugin system](https://zellij.dev/documentation/plugins.html) allowing one to create plugins in any language that compiles to WebAssembly.
 
 vc-frame includes a built-in [web-client](https://zellij.dev/tutorials/web-client/), making a terminal optional.
 
 You can get started by building `vc-frame` locally or using the compatibility `zellij` alias.
 
-For more details about our future plans, read about upcoming features in our [roadmap](#roadmap).
+For the redesign promise, proof, and quick-start path, read [docs/VC_FRAME_OPERATOR_SURFACE.md](docs/VC_FRAME_OPERATOR_SURFACE.md).
+
+## Default operator surface
+
+Fresh starts with no theme configured use built-in grayscale styling for ordinary chrome: frames, tab bars, status ribbons, lists, tables, and default text accents. Named color themes are still shipped, but they are opt-in.
+
+The default layout has two rails:
+
+- **Sessions left:** a 24-column `session-manager` rail (`rail true`) with ordinal switching.
+- **Runs top:** the existing `tab-bar` remains the run/tab surface.
+
+The Vibecrafted fleet contracts are still release-blocking: `list-sessions --no-formatting` keeps `[Created ...]` / `(current)` liveness output, and panes still receive `VC_FRAME_PANE_ID` / `VC_FRAME_SESSION_NAME`.
 
 ## How do I install it?
 
-The canonical local install path is:
+The current supported preview path is a source checkout plus local install:
 
 ```bash
 make install
@@ -63,10 +53,12 @@ make install
 
 This installs `vc-frame` and keeps `zellij` as a compatibility symlink for existing sessions and scripts.
 
+This is not the same as a public package channel. Upstream distro/Homebrew packages named `zellij` install upstream Zellij, not this VetCoders `vc-frame` runtime. See [docs/THIRD_PARTY_INSTALL.md](docs/THIRD_PARTY_INSTALL.md) for that compatibility boundary and [docs/RELEASE.md](docs/RELEASE.md) for the release-grade `curl ... | sh` path.
+
 #### Installing from `main`
 Installing vc-frame from an arbitrary development branch is not recommended for daily use. Development branches represent pre-release code, are constantly being worked on, and may contain broken or unusable features.
 
-That being said - no-one will stop you from using it (and bug reports involving new features are greatly appreciated), but please consider using the latest release instead as detailed at the top of this section.
+That being said - no-one will stop you from using it (and bug reports involving new features are greatly appreciated), but outside users should prefer a tagged vc-frame release once one is published.
 
 ## How do I start a development environment?
 
@@ -77,7 +69,7 @@ That being said - no-one will stop you from using it (and bug reports involving 
 For more build commands, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Configuration
-For configuring vc-frame, please see the [Configuration Documentation](https://zellij.dev/documentation/configuration.html).
+vc-frame keeps compatibility with Zellij configuration and layout concepts. For inherited syntax, see the [upstream Zellij configuration documentation](https://zellij.dev/documentation/configuration.html). For vc-frame-specific default surface and theme behavior, see [docs/VC_FRAME_OPERATOR_SURFACE.md](docs/VC_FRAME_OPERATOR_SURFACE.md).
 
 ## VibeCrafted Shell Layouts
 This fork also ships built-in VibeCrafted operator layouts meant to back the
@@ -173,8 +165,8 @@ vibecrafted.kdl=operator.kdl
 ## About issues in this repository
 Issues in this repository, whether open or closed, do not necessarily indicate a problem or a bug in the software. They only indicate that the reporter wanted to communicate their experiences or thoughts to the maintainers. The vc-frame maintainers do their best to go over and reply to all issue reports, but unfortunately cannot promise these will always be dealt with or even read. Your understanding is appreciated.
 
-## Roadmap
-Presented here is the project roadmap, divided into three main sections.
+## Upstream roadmap
+Presented here is the inherited upstream Zellij roadmap, divided into three main sections.
 
 These are issues that are either being actively worked on or are planned for the near future.
 
@@ -182,7 +174,7 @@ These are issues that are either being actively worked on or are planned for the
 
 [![roadmap](https://github.com/user-attachments/assets/bb55d213-4a68-4c84-ae72-7db5c9bf94fb)](https://zellij.dev/roadmap)
 
-## Origin of the Name
+## Origin of the upstream name
 [From Wikipedia, the free encyclopedia](https://en.wikipedia.org/wiki/Zellij)
 
 Zellij (Arabic: الزليج, romanized: zillīj; also spelled zillij or zellige) is a style of mosaic tilework made from individually hand-chiseled tile pieces. The pieces were typically of different colours and fitted together to form various patterns on the basis of tessellations, most notably elaborate Islamic geometric motifs such as radiating star patterns composed of various polygons. This form of Islamic art is one of the main characteristics of architecture in the western Islamic world. It is found in the architecture of Morocco, the architecture of Algeria, early Islamic sites in Tunisia, and in the historic monuments of al-Andalus (in the Iberian Peninsula).
@@ -190,6 +182,3 @@ Zellij (Arabic: الزليج, romanized: zillīj; also spelled zillij or zellige
 ## License
 
 MIT
-
-## Sponsored by
-<a href="https://terminaltrove.com/"><img src="https://avatars.githubusercontent.com/u/121595180?s=200&v=4" width="80px"></a>
