@@ -4,8 +4,11 @@ use crate::{
     consts::{VC_FRAME_CONFIG_DIR_ENV, VC_FRAME_CONFIG_FILE_ENV},
     input::{layout::PluginUserConfiguration, options::Options},
 };
-use clap::{ArgEnum, Args, Parser, Subcommand};
+use clap::{
+    Arg, ArgEnum, ArgMatches, Args, Command as ClapCommand, Error, ErrorKind, Parser, Subcommand,
+};
 use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use url::Url;
@@ -87,6 +90,594 @@ pub struct CliArgs {
 }
 
 impl CliArgs {
+    pub fn parse() -> Self {
+        Self::parse_from(std::env::args_os())
+    }
+
+    pub fn parse_from<I, T>(itr: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString>,
+    {
+        Self::try_parse_from(itr).unwrap_or_else(|e| e.exit())
+    }
+
+    pub fn try_parse_from<I, T>(itr: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString>,
+    {
+        let args: Vec<OsString> = itr.into_iter().map(Into::into).collect();
+        if args.iter().any(|arg| arg == "subscribe") {
+            return Self::try_parse_subscribe_from(args);
+        }
+        if args.iter().any(|arg| arg == "web") {
+            return Self::try_parse_web_from(args);
+        }
+
+        <Self as Parser>::try_parse_from(args)
+    }
+
+    fn try_parse_subscribe_from(args: Vec<OsString>) -> Result<Self, clap::Error> {
+        let mut cli = CliArgs::default();
+        let mut args = args.into_iter();
+        let _program_name = args.next();
+        let mut args = args.peekable();
+
+        while let Some(arg) = args.next() {
+            let arg = Self::os_to_string(arg, "argument")?;
+            if arg == "subscribe" {
+                cli.command = Some(Command::Subscribe(Self::parse_subscribe_cli(
+                    args.collect(),
+                )?));
+                return Ok(cli);
+            }
+
+            match arg.as_str() {
+                "--session" | "-s" => {
+                    let session = Self::next_string_value(&mut args, "--session")?;
+                    cli.session = Some(validate_session(&session).map_err(|err| {
+                        Error::raw(
+                            ErrorKind::ValueValidation,
+                            format!("Invalid session: {err}"),
+                        )
+                    })?);
+                },
+                "--config" | "-c" => {
+                    cli.config = Some(PathBuf::from(Self::next_os_value(&mut args, "--config")?));
+                },
+                "--config-dir" => {
+                    cli.config_dir = Some(PathBuf::from(Self::next_os_value(
+                        &mut args,
+                        "--config-dir",
+                    )?));
+                },
+                "--debug" | "-d" => {
+                    cli.debug = true;
+                },
+                _ if arg.starts_with("--session=") => {
+                    let session = arg.trim_start_matches("--session=");
+                    cli.session = Some(validate_session(session).map_err(|err| {
+                        Error::raw(
+                            ErrorKind::ValueValidation,
+                            format!("Invalid session: {err}"),
+                        )
+                    })?);
+                },
+                _ if arg.starts_with("--config=") => {
+                    cli.config = Some(PathBuf::from(arg.trim_start_matches("--config=")));
+                },
+                _ if arg.starts_with("--config-dir=") => {
+                    cli.config_dir = Some(PathBuf::from(arg.trim_start_matches("--config-dir=")));
+                },
+                _ => {
+                    return Err(Error::raw(
+                        ErrorKind::UnknownArgument,
+                        format!("Unexpected argument before subscribe: {arg}"),
+                    ));
+                },
+            }
+        }
+
+        Err(Error::raw(
+            ErrorKind::MissingSubcommand,
+            "Expected subscribe subcommand",
+        ))
+    }
+
+    fn try_parse_web_from(args: Vec<OsString>) -> Result<Self, clap::Error> {
+        let mut cli = CliArgs::default();
+        let mut args = args.into_iter();
+        let _program_name = args.next();
+        let mut args = args.peekable();
+
+        while let Some(arg) = args.next() {
+            let arg = Self::os_to_string(arg, "argument")?;
+            if arg == "web" {
+                cli.command = Some(Command::Web(Self::parse_web_cli(args.collect())?));
+                return Ok(cli);
+            }
+
+            match arg.as_str() {
+                "--session" | "-s" => {
+                    let session = Self::next_string_value(&mut args, "--session")?;
+                    cli.session = Some(validate_session(&session).map_err(|err| {
+                        Error::raw(
+                            ErrorKind::ValueValidation,
+                            format!("Invalid session: {err}"),
+                        )
+                    })?);
+                },
+                "--config" | "-c" => {
+                    cli.config = Some(PathBuf::from(Self::next_os_value(&mut args, "--config")?));
+                },
+                "--config-dir" => {
+                    cli.config_dir = Some(PathBuf::from(Self::next_os_value(
+                        &mut args,
+                        "--config-dir",
+                    )?));
+                },
+                "--debug" | "-d" => {
+                    cli.debug = true;
+                },
+                _ if arg.starts_with("--session=") => {
+                    let session = arg.trim_start_matches("--session=");
+                    cli.session = Some(validate_session(session).map_err(|err| {
+                        Error::raw(
+                            ErrorKind::ValueValidation,
+                            format!("Invalid session: {err}"),
+                        )
+                    })?);
+                },
+                _ if arg.starts_with("--config=") => {
+                    cli.config = Some(PathBuf::from(arg.trim_start_matches("--config=")));
+                },
+                _ if arg.starts_with("--config-dir=") => {
+                    cli.config_dir = Some(PathBuf::from(arg.trim_start_matches("--config-dir=")));
+                },
+                _ => {
+                    return Err(Error::raw(
+                        ErrorKind::UnknownArgument,
+                        format!("Unexpected argument before web: {arg}"),
+                    ));
+                },
+            }
+        }
+
+        Err(Error::raw(
+            ErrorKind::MissingSubcommand,
+            "Expected web subcommand",
+        ))
+    }
+
+    fn parse_subscribe_cli(args: Vec<OsString>) -> Result<SubscribeCli, clap::Error> {
+        let mut pane_id = vec![];
+        let mut scrollback = None;
+        let mut format = SubscribeFormat::Raw;
+        let mut ansi = false;
+        let mut args = args.into_iter().peekable();
+
+        while let Some(arg) = args.next() {
+            let arg = Self::os_to_string(arg, "subscribe argument")?;
+            match arg.as_str() {
+                "--pane-id" | "-p" => {
+                    pane_id.push(Self::next_string_value(&mut args, "--pane-id")?);
+                },
+                "--scrollback" => {
+                    scrollback = if args
+                        .peek()
+                        .map(|next| !next.to_string_lossy().starts_with('-'))
+                        .unwrap_or(false)
+                    {
+                        Some(Self::parse_usize(
+                            &Self::os_to_string(args.next().unwrap(), "--scrollback")?,
+                            "--scrollback",
+                        )?)
+                    } else {
+                        Some(0)
+                    };
+                },
+                "--format" | "-f" => {
+                    format = Self::parse_subscribe_format(&Self::next_string_value(
+                        &mut args, "--format",
+                    )?)?;
+                },
+                "--ansi" => {
+                    ansi = true;
+                },
+                _ if arg.starts_with("--pane-id=") => {
+                    pane_id.push(arg.trim_start_matches("--pane-id=").to_string());
+                },
+                _ if arg.starts_with("--scrollback=") => {
+                    scrollback = Some(Self::parse_usize(
+                        arg.trim_start_matches("--scrollback="),
+                        "--scrollback",
+                    )?);
+                },
+                _ if arg.starts_with("--format=") => {
+                    format = Self::parse_subscribe_format(arg.trim_start_matches("--format="))?;
+                },
+                _ => {
+                    return Err(Error::raw(
+                        ErrorKind::UnknownArgument,
+                        format!("Unexpected subscribe argument: {arg}"),
+                    ));
+                },
+            }
+        }
+
+        if pane_id.is_empty() {
+            return Err(Error::raw(
+                ErrorKind::MissingRequiredArgument,
+                "The following required argument was not provided: pane_id",
+            ));
+        }
+
+        Ok(SubscribeCli {
+            pane_id,
+            scrollback,
+            format,
+            ansi,
+        })
+    }
+
+    fn parse_web_cli(args: Vec<OsString>) -> Result<WebCli, clap::Error> {
+        let mut web = WebCli {
+            start: false,
+            stop: false,
+            status: false,
+            timeout: None,
+            daemonize: false,
+            server_startup_timeout: None,
+            create_token: false,
+            token_name: None,
+            create_read_only_token: false,
+            revoke_token: None,
+            revoke_all_tokens: false,
+            list_tokens: false,
+            ip: None,
+            port: None,
+            cert: None,
+            key: None,
+        };
+        let mut args = args.into_iter().peekable();
+
+        while let Some(arg) = args.next() {
+            let arg = Self::os_to_string(arg, "web argument")?;
+            match arg.as_str() {
+                "--start" => web.start = true,
+                "--stop" => web.stop = true,
+                "--status" => web.status = true,
+                "--timeout" => {
+                    web.timeout = Some(Self::parse_u64(
+                        &Self::next_string_value(&mut args, "--timeout")?,
+                        "--timeout",
+                    )?);
+                },
+                "--daemonize" | "-d" => web.daemonize = true,
+                "--server-startup-timeout" => {
+                    web.server_startup_timeout = Some(Self::parse_u64(
+                        &Self::next_string_value(&mut args, "--server-startup-timeout")?,
+                        "--server-startup-timeout",
+                    )?);
+                },
+                "--create-token" => web.create_token = true,
+                "--token-name" => {
+                    web.token_name = Some(Self::next_string_value(&mut args, "--token-name")?);
+                },
+                "--create-read-only-token" => web.create_read_only_token = true,
+                "--revoke-token" => {
+                    web.revoke_token = Some(Self::next_string_value(&mut args, "--revoke-token")?);
+                },
+                "--revoke-all-tokens" => web.revoke_all_tokens = true,
+                "--list-tokens" => web.list_tokens = true,
+                "--ip" => {
+                    web.ip = Some(Self::parse_ip_addr(
+                        &Self::next_string_value(&mut args, "--ip")?,
+                        "--ip",
+                    )?);
+                },
+                "--port" => {
+                    web.port = Some(Self::parse_u16(
+                        &Self::next_string_value(&mut args, "--port")?,
+                        "--port",
+                    )?);
+                },
+                "--cert" => {
+                    web.cert = Some(PathBuf::from(Self::next_os_value(&mut args, "--cert")?));
+                },
+                "--key" => {
+                    web.key = Some(PathBuf::from(Self::next_os_value(&mut args, "--key")?));
+                },
+                _ if arg.starts_with("--timeout=") => {
+                    web.timeout = Some(Self::parse_u64(
+                        arg.trim_start_matches("--timeout="),
+                        "--timeout",
+                    )?);
+                },
+                _ if arg.starts_with("--server-startup-timeout=") => {
+                    web.server_startup_timeout = Some(Self::parse_u64(
+                        arg.trim_start_matches("--server-startup-timeout="),
+                        "--server-startup-timeout",
+                    )?);
+                },
+                _ if arg.starts_with("--token-name=") => {
+                    web.token_name = Some(arg.trim_start_matches("--token-name=").to_string());
+                },
+                _ if arg.starts_with("--revoke-token=") => {
+                    web.revoke_token = Some(arg.trim_start_matches("--revoke-token=").to_string());
+                },
+                _ if arg.starts_with("--ip=") => {
+                    web.ip = Some(Self::parse_ip_addr(
+                        arg.trim_start_matches("--ip="),
+                        "--ip",
+                    )?);
+                },
+                _ if arg.starts_with("--port=") => {
+                    web.port = Some(Self::parse_u16(
+                        arg.trim_start_matches("--port="),
+                        "--port",
+                    )?);
+                },
+                _ if arg.starts_with("--cert=") => {
+                    web.cert = Some(PathBuf::from(arg.trim_start_matches("--cert=")));
+                },
+                _ if arg.starts_with("--key=") => {
+                    web.key = Some(PathBuf::from(arg.trim_start_matches("--key=")));
+                },
+                _ => {
+                    return Err(Error::raw(
+                        ErrorKind::UnknownArgument,
+                        format!("Unexpected web argument: {arg}"),
+                    ));
+                },
+            }
+        }
+
+        Self::validate_web_cli(&web)?;
+        Ok(web)
+    }
+
+    fn validate_web_cli(web: &WebCli) -> Result<(), clap::Error> {
+        if web.timeout.is_some() && !web.status {
+            return Err(Error::raw(
+                ErrorKind::MissingRequiredArgument,
+                "--timeout requires --status",
+            ));
+        }
+        if web.status && web.start {
+            return Err(Error::raw(
+                ErrorKind::ArgumentConflict,
+                "--status conflicts with --start",
+            ));
+        }
+        if web.status && web.stop {
+            return Err(Error::raw(
+                ErrorKind::ArgumentConflict,
+                "--status conflicts with --stop",
+            ));
+        }
+        if web.stop
+            && (web.start
+                || web.timeout.is_some()
+                || web.daemonize
+                || web.server_startup_timeout.is_some()
+                || web.create_token
+                || web.token_name.is_some()
+                || web.create_read_only_token
+                || web.revoke_token.is_some()
+                || web.revoke_all_tokens
+                || web.list_tokens
+                || web.ip.is_some()
+                || web.port.is_some()
+                || web.cert.is_some()
+                || web.key.is_some())
+        {
+            return Err(Error::raw(
+                ErrorKind::ArgumentConflict,
+                "--stop conflicts with other web options",
+            ));
+        }
+        if web.daemonize
+            && (web.stop
+                || web.status
+                || web.create_token
+                || web.revoke_token.is_some()
+                || web.revoke_all_tokens)
+        {
+            return Err(Error::raw(
+                ErrorKind::ArgumentConflict,
+                "--daemonize conflicts with the selected web option",
+            ));
+        }
+        if web.create_token
+            && (web.start
+                || web.stop
+                || web.status
+                || web.timeout.is_some()
+                || web.daemonize
+                || web.create_read_only_token
+                || web.revoke_token.is_some()
+                || web.revoke_all_tokens
+                || web.list_tokens
+                || web.ip.is_some()
+                || web.port.is_some()
+                || web.cert.is_some()
+                || web.key.is_some())
+        {
+            return Err(Error::raw(
+                ErrorKind::ArgumentConflict,
+                "--create-token conflicts with the selected web option",
+            ));
+        }
+        if web.create_read_only_token
+            && (web.start
+                || web.stop
+                || web.status
+                || web.timeout.is_some()
+                || web.daemonize
+                || web.create_token
+                || web.revoke_token.is_some()
+                || web.revoke_all_tokens
+                || web.list_tokens
+                || web.ip.is_some()
+                || web.port.is_some()
+                || web.cert.is_some()
+                || web.key.is_some())
+        {
+            return Err(Error::raw(
+                ErrorKind::ArgumentConflict,
+                "--create-read-only-token conflicts with the selected web option",
+            ));
+        }
+        if web.revoke_token.is_some()
+            && (web.start
+                || web.stop
+                || web.status
+                || web.timeout.is_some()
+                || web.daemonize
+                || web.create_token
+                || web.token_name.is_some()
+                || web.create_read_only_token
+                || web.revoke_all_tokens
+                || web.list_tokens
+                || web.ip.is_some()
+                || web.port.is_some()
+                || web.cert.is_some()
+                || web.key.is_some())
+        {
+            return Err(Error::raw(
+                ErrorKind::ArgumentConflict,
+                "--revoke-token conflicts with other web options",
+            ));
+        }
+        if web.revoke_all_tokens
+            && (web.start
+                || web.stop
+                || web.status
+                || web.timeout.is_some()
+                || web.daemonize
+                || web.create_token
+                || web.token_name.is_some()
+                || web.create_read_only_token
+                || web.revoke_token.is_some()
+                || web.list_tokens
+                || web.ip.is_some()
+                || web.port.is_some()
+                || web.cert.is_some()
+                || web.key.is_some())
+        {
+            return Err(Error::raw(
+                ErrorKind::ArgumentConflict,
+                "--revoke-all-tokens conflicts with other web options",
+            ));
+        }
+        if web.list_tokens
+            && (web.start
+                || web.stop
+                || web.status
+                || web.timeout.is_some()
+                || web.daemonize
+                || web.create_token
+                || web.token_name.is_some()
+                || web.create_read_only_token
+                || web.revoke_token.is_some()
+                || web.revoke_all_tokens
+                || web.ip.is_some()
+                || web.port.is_some()
+                || web.cert.is_some()
+                || web.key.is_some())
+        {
+            return Err(Error::raw(
+                ErrorKind::ArgumentConflict,
+                "--list-tokens conflicts with other web options",
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn parse_subscribe_format(value: &str) -> Result<SubscribeFormat, clap::Error> {
+        match value {
+            "raw" => Ok(SubscribeFormat::Raw),
+            "json" => Ok(SubscribeFormat::Json),
+            _ => Err(Error::raw(
+                ErrorKind::InvalidValue,
+                format!("Invalid value for format: {value}"),
+            )),
+        }
+    }
+
+    fn parse_usize(value: &str, arg_name: &str) -> Result<usize, clap::Error> {
+        value.parse::<usize>().map_err(|err| {
+            Error::raw(
+                ErrorKind::ValueValidation,
+                format!("Invalid value for {arg_name}: {err}"),
+            )
+        })
+    }
+
+    fn parse_u64(value: &str, arg_name: &str) -> Result<u64, clap::Error> {
+        value.parse::<u64>().map_err(|err| {
+            Error::raw(
+                ErrorKind::ValueValidation,
+                format!("Invalid value for {arg_name}: {err}"),
+            )
+        })
+    }
+
+    fn parse_u16(value: &str, arg_name: &str) -> Result<u16, clap::Error> {
+        value.parse::<u16>().map_err(|err| {
+            Error::raw(
+                ErrorKind::ValueValidation,
+                format!("Invalid value for {arg_name}: {err}"),
+            )
+        })
+    }
+
+    fn parse_ip_addr(value: &str, arg_name: &str) -> Result<IpAddr, clap::Error> {
+        value.parse::<IpAddr>().map_err(|err| {
+            Error::raw(
+                ErrorKind::ValueValidation,
+                format!("Invalid value for {arg_name}: {err}"),
+            )
+        })
+    }
+
+    fn next_string_value<I>(
+        args: &mut std::iter::Peekable<I>,
+        arg_name: &str,
+    ) -> Result<String, clap::Error>
+    where
+        I: Iterator<Item = OsString>,
+    {
+        Self::os_to_string(Self::next_os_value(args, arg_name)?, arg_name)
+    }
+
+    fn next_os_value<I>(
+        args: &mut std::iter::Peekable<I>,
+        arg_name: &str,
+    ) -> Result<OsString, clap::Error>
+    where
+        I: Iterator<Item = OsString>,
+    {
+        args.next().ok_or_else(|| {
+            Error::raw(
+                ErrorKind::MissingRequiredArgument,
+                format!("Expected value for {arg_name}"),
+            )
+        })
+    }
+
+    fn os_to_string(value: OsString, arg_name: &str) -> Result<String, clap::Error> {
+        value.into_string().map_err(|_| {
+            Error::raw(
+                ErrorKind::InvalidUtf8,
+                format!("Invalid UTF-8 in {arg_name}"),
+            )
+        })
+    }
+
     pub fn is_setup_clean(&self) -> bool {
         if let Some(Command::Setup(setup)) = &self.command
             && setup.clean
@@ -139,30 +730,90 @@ pub enum Command {
     Subscribe(SubscribeCli),
 }
 
-#[derive(Debug, Args, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscribeCli {
     /// Pane ID(s) to subscribe to (e.g. terminal_1, plugin_2, or bare number like 1)
-    #[clap(short, long, required = true)]
     pub pane_id: Vec<String>,
 
     /// Include scrollback lines in initial delivery.
     /// Bare --scrollback = all scrollback, --scrollback N = last N lines.
-    #[clap(
-        short,
-        long,
-        min_values = 0,
-        max_values = 1,
-        default_missing_value = "0"
-    )]
     pub scrollback: Option<usize>,
 
     /// Output format
-    #[clap(short, long, default_value = "raw", arg_enum)]
     pub format: SubscribeFormat,
 
     /// Preserve ANSI styling in the output
-    #[clap(long, value_parser, default_value("false"), takes_value(false))]
     pub ansi: bool,
+}
+
+impl clap::Args for SubscribeCli {
+    fn augment_args(cmd: ClapCommand<'_>) -> ClapCommand<'_> {
+        cmd.arg(
+            Arg::new("pane_id")
+                .short('p')
+                .long("pane-id")
+                .takes_value(true)
+                .required(true)
+                .multiple_occurrences(true)
+                .help(
+                    "Pane ID(s) to subscribe to (e.g. terminal_1, plugin_2, or bare number like 1)",
+                ),
+        )
+        .arg(
+            Arg::new("subscribe_scrollback")
+                .long("scrollback")
+                .takes_value(true)
+                .help("Include scrollback lines in initial delivery"),
+        )
+        .arg(
+            Arg::new("format")
+                .short('f')
+                .long("format")
+                .takes_value(true)
+                .default_value("raw")
+                .possible_values(["raw", "json"])
+                .help("Output format"),
+        )
+        .arg(
+            Arg::new("ansi")
+                .long("ansi")
+                .takes_value(false)
+                .help("Preserve ANSI styling in the output"),
+        )
+    }
+
+    fn augment_args_for_update(cmd: ClapCommand<'_>) -> ClapCommand<'_> {
+        Self::augment_args(cmd)
+    }
+}
+
+impl clap::FromArgMatches for SubscribeCli {
+    fn from_arg_matches(matches: &ArgMatches) -> Result<Self, Error> {
+        Self::from_arg_matches_mut(&mut matches.clone())
+    }
+
+    fn from_arg_matches_mut(matches: &mut ArgMatches) -> Result<Self, Error> {
+        if matches.subcommand_name() == Some("subscribe") {
+            let (_, mut subscribe_matches) = matches.remove_subcommand().ok_or_else(|| {
+                Error::raw(
+                    ErrorKind::MissingSubcommand,
+                    "Expected subscribe subcommand matches",
+                )
+            })?;
+            return Self::from_subscribe_matches(&mut subscribe_matches);
+        }
+
+        Self::from_subscribe_matches(matches)
+    }
+
+    fn update_from_arg_matches(&mut self, matches: &ArgMatches) -> Result<(), Error> {
+        self.update_from_arg_matches_mut(&mut matches.clone())
+    }
+
+    fn update_from_arg_matches_mut(&mut self, matches: &mut ArgMatches) -> Result<(), Error> {
+        *self = Self::from_arg_matches_mut(matches)?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ArgEnum)]
@@ -171,98 +822,414 @@ pub enum SubscribeFormat {
     Json,
 }
 
-#[derive(Debug, Clone, Args, Serialize, Deserialize)]
+impl SubscribeCli {
+    fn from_subscribe_matches(matches: &mut ArgMatches) -> Result<Self, Error> {
+        let pane_id = matches
+            .remove_many::<String>("pane_id")
+            .map(|values| values.collect::<Vec<_>>())
+            .unwrap_or_default();
+        if pane_id.is_empty() {
+            return Err(Error::raw(
+                ErrorKind::MissingRequiredArgument,
+                "The following required argument was not provided: pane_id",
+            ));
+        }
+
+        let scrollback = matches
+            .remove_one::<String>("subscribe_scrollback")
+            .map(|value| {
+                value.parse::<usize>().map_err(|err| {
+                    Error::raw(
+                        ErrorKind::ValueValidation,
+                        format!("Invalid value for scrollback: {err}"),
+                    )
+                })
+            })
+            .transpose()?;
+
+        let format = match matches
+            .remove_one::<String>("format")
+            .unwrap_or_else(|| "raw".to_string())
+            .as_str()
+        {
+            "raw" => SubscribeFormat::Raw,
+            "json" => SubscribeFormat::Json,
+            other => {
+                return Err(Error::raw(
+                    ErrorKind::ValueValidation,
+                    format!("Invalid value for format: {other}"),
+                ));
+            },
+        };
+
+        Ok(Self {
+            pane_id,
+            scrollback,
+            format,
+            ansi: matches.is_present("ansi"),
+        })
+    }
+
+    pub fn scrollback_lines(&self) -> Option<usize> {
+        self.scrollback
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebCli {
     /// Start the server (default unless other arguments are specified)
-    #[clap(long, value_parser, display_order = 1)]
     pub start: bool,
 
     /// Stop the server
-    #[clap(long, value_parser, exclusive(true), display_order = 2)]
     pub stop: bool,
 
     /// Get the server status
-    #[clap(long, value_parser, conflicts_with("start"), display_order = 3)]
     pub status: bool,
 
     /// Timeout in seconds for the status check (default: 30)
-    #[clap(long, value_parser, requires = "status", display_order = 4)]
     pub timeout: Option<u64>,
 
     /// Run the server in the background
-    #[clap(
-        short,
-        long,
-        value_parser,
-        conflicts_with_all(&["stop", "status", "create-token", "revoke-token", "revoke-all-tokens"]),
-        display_order = 5
-    )]
     pub daemonize: bool,
     /// Timeout in seconds waiting for the server to start (default: 10).
     /// Only used on Windows where the daemonized server is polled via TCP.
     /// On Unix, startup signaling uses pipes and this option is ignored.
-    #[clap(long, value_parser, display_order = 6)]
     pub server_startup_timeout: Option<u64>,
     /// Create a login token for the web interface, will only be displayed once and cannot later be
     /// retrieved. Returns the token name and the token.
-    #[clap(long, value_parser, exclusive(true), display_order = 7)]
     pub create_token: bool,
     /// Optional name for the token
-    #[clap(long, value_parser, value_name = "TOKEN_NAME", display_order = 8)]
     pub token_name: Option<String>,
     /// Create a read-only login token (can only attach to existing sessions as watcher)
-    #[clap(long, value_parser, exclusive(true), display_order = 9)]
     pub create_read_only_token: bool,
     /// Revoke a login token by its name
-    #[clap(
-        long,
-        value_parser,
-        exclusive(true),
-        value_name = "TOKEN NAME",
-        display_order = 10
-    )]
     pub revoke_token: Option<String>,
     /// Revoke all login tokens
-    #[clap(long, value_parser, exclusive(true), display_order = 11)]
     pub revoke_all_tokens: bool,
     /// List token names and their creation dates (cannot show actual tokens)
-    #[clap(long, value_parser, exclusive(true), display_order = 12)]
     pub list_tokens: bool,
     /// The ip address to listen on locally for connections (defaults to 127.0.0.1)
-    #[clap(
-        long,
-        value_parser,
-        conflicts_with_all(&["stop", "create-token", "revoke-token", "revoke-all-tokens"]),
-        display_order = 13
-    )]
     pub ip: Option<IpAddr>,
     /// The port to listen on locally for connections (defaults to 8082)
-    #[clap(
-        long,
-        value_parser,
-        conflicts_with_all(&["stop", "create-token", "revoke-token", "revoke-all-tokens"]),
-        display_order = 14
-    )]
     pub port: Option<u16>,
     /// The path to the SSL certificate (required if not listening on 127.0.0.1)
-    #[clap(
-        long,
-        value_parser,
-        conflicts_with_all(&["stop", "status", "create-token", "revoke-token", "revoke-all-tokens"]),
-        display_order = 15
-    )]
     pub cert: Option<PathBuf>,
     /// The path to the SSL key (required if not listening on 127.0.0.1)
-    #[clap(
-        long,
-        value_parser,
-        conflicts_with_all(&["stop", "status", "create-token", "revoke-token", "revoke-all-tokens"]),
-        display_order = 16
-    )]
     pub key: Option<PathBuf>,
 }
 
+impl clap::Args for WebCli {
+    fn augment_args(cmd: ClapCommand<'_>) -> ClapCommand<'_> {
+        cmd.arg(
+            Arg::new("start")
+                .long("start")
+                .takes_value(false)
+                .display_order(1)
+                .help("Start the server (default unless other arguments are specified)"),
+        )
+        .arg(
+            Arg::new("stop")
+                .long("stop")
+                .takes_value(false)
+                .conflicts_with_all(&[
+                    "start",
+                    "status",
+                    "timeout",
+                    "daemonize",
+                    "server-startup-timeout",
+                    "create-token",
+                    "token-name",
+                    "create-read-only-token",
+                    "revoke-token",
+                    "revoke-all-tokens",
+                    "list-tokens",
+                    "ip",
+                    "port",
+                    "cert",
+                    "key",
+                ])
+                .display_order(2)
+                .help("Stop the server"),
+        )
+        .arg(
+            Arg::new("status")
+                .long("status")
+                .takes_value(false)
+                .conflicts_with("start")
+                .display_order(3)
+                .help("Get the server status"),
+        )
+        .arg(
+            Arg::new("timeout")
+                .long("timeout")
+                .takes_value(true)
+                .requires("status")
+                .display_order(4)
+                .help("Timeout in seconds for the status check (default: 30)"),
+        )
+        .arg(
+            Arg::new("daemonize")
+                .short('d')
+                .long("daemonize")
+                .takes_value(false)
+                .conflicts_with_all(&[
+                    "stop",
+                    "status",
+                    "create-token",
+                    "revoke-token",
+                    "revoke-all-tokens",
+                ])
+                .display_order(5)
+                .help("Run the server in the background"),
+        )
+        .arg(
+            Arg::new("server-startup-timeout")
+                .long("server-startup-timeout")
+                .takes_value(true)
+                .display_order(6)
+                .help("Timeout in seconds waiting for the server to start (default: 10)"),
+        )
+        .arg(
+            Arg::new("create-token")
+                .long("create-token")
+                .takes_value(false)
+                .conflicts_with_all(&[
+                    "start",
+                    "stop",
+                    "status",
+                    "timeout",
+                    "daemonize",
+                    "revoke-token",
+                    "revoke-all-tokens",
+                    "list-tokens",
+                    "ip",
+                    "port",
+                    "cert",
+                    "key",
+                ])
+                .display_order(7)
+                .help("Create a login token for the web interface"),
+        )
+        .arg(
+            Arg::new("token-name")
+                .long("token-name")
+                .takes_value(true)
+                .value_name("TOKEN_NAME")
+                .display_order(8)
+                .help("Optional name for the token"),
+        )
+        .arg(
+            Arg::new("create-read-only-token")
+                .long("create-read-only-token")
+                .takes_value(false)
+                .conflicts_with_all(&[
+                    "start",
+                    "stop",
+                    "status",
+                    "timeout",
+                    "daemonize",
+                    "revoke-token",
+                    "revoke-all-tokens",
+                    "list-tokens",
+                    "ip",
+                    "port",
+                    "cert",
+                    "key",
+                ])
+                .display_order(9)
+                .help("Create a read-only login token"),
+        )
+        .arg(
+            Arg::new("revoke-token")
+                .long("revoke-token")
+                .takes_value(true)
+                .value_name("TOKEN NAME")
+                .conflicts_with_all(&[
+                    "start",
+                    "stop",
+                    "status",
+                    "timeout",
+                    "daemonize",
+                    "create-token",
+                    "token-name",
+                    "create-read-only-token",
+                    "revoke-all-tokens",
+                    "list-tokens",
+                    "ip",
+                    "port",
+                    "cert",
+                    "key",
+                ])
+                .display_order(10)
+                .help("Revoke a login token by its name"),
+        )
+        .arg(
+            Arg::new("revoke-all-tokens")
+                .long("revoke-all-tokens")
+                .takes_value(false)
+                .conflicts_with_all(&[
+                    "start",
+                    "stop",
+                    "status",
+                    "timeout",
+                    "daemonize",
+                    "create-token",
+                    "token-name",
+                    "create-read-only-token",
+                    "revoke-token",
+                    "list-tokens",
+                    "ip",
+                    "port",
+                    "cert",
+                    "key",
+                ])
+                .display_order(11)
+                .help("Revoke all login tokens"),
+        )
+        .arg(
+            Arg::new("list-tokens")
+                .long("list-tokens")
+                .takes_value(false)
+                .conflicts_with_all(&[
+                    "start",
+                    "stop",
+                    "status",
+                    "timeout",
+                    "daemonize",
+                    "create-token",
+                    "token-name",
+                    "create-read-only-token",
+                    "revoke-token",
+                    "revoke-all-tokens",
+                    "ip",
+                    "port",
+                    "cert",
+                    "key",
+                ])
+                .display_order(12)
+                .help("List token names and their creation dates"),
+        )
+        .arg(
+            Arg::new("ip")
+                .long("ip")
+                .takes_value(true)
+                .conflicts_with_all(&["stop", "create-token", "revoke-token", "revoke-all-tokens"])
+                .display_order(13)
+                .help("The ip address to listen on locally for connections"),
+        )
+        .arg(
+            Arg::new("port")
+                .long("port")
+                .takes_value(true)
+                .conflicts_with_all(&["stop", "create-token", "revoke-token", "revoke-all-tokens"])
+                .display_order(14)
+                .help("The port to listen on locally for connections"),
+        )
+        .arg(
+            Arg::new("cert")
+                .long("cert")
+                .takes_value(true)
+                .conflicts_with_all(&[
+                    "stop",
+                    "status",
+                    "create-token",
+                    "revoke-token",
+                    "revoke-all-tokens",
+                ])
+                .display_order(15)
+                .help("The path to the SSL certificate"),
+        )
+        .arg(
+            Arg::new("key")
+                .long("key")
+                .takes_value(true)
+                .conflicts_with_all(&[
+                    "stop",
+                    "status",
+                    "create-token",
+                    "revoke-token",
+                    "revoke-all-tokens",
+                ])
+                .display_order(16)
+                .help("The path to the SSL key"),
+        )
+    }
+
+    fn augment_args_for_update(cmd: ClapCommand<'_>) -> ClapCommand<'_> {
+        Self::augment_args(cmd)
+    }
+}
+
+impl clap::FromArgMatches for WebCli {
+    fn from_arg_matches(matches: &ArgMatches) -> Result<Self, Error> {
+        Self::from_arg_matches_mut(&mut matches.clone())
+    }
+
+    fn from_arg_matches_mut(matches: &mut ArgMatches) -> Result<Self, Error> {
+        if matches.subcommand_name() == Some("web") {
+            let (_, mut web_matches) = matches.remove_subcommand().ok_or_else(|| {
+                Error::raw(
+                    ErrorKind::MissingSubcommand,
+                    "Expected web subcommand matches",
+                )
+            })?;
+            return Self::from_web_matches(&mut web_matches);
+        }
+
+        Self::from_web_matches(matches)
+    }
+
+    fn update_from_arg_matches(&mut self, matches: &ArgMatches) -> Result<(), Error> {
+        self.update_from_arg_matches_mut(&mut matches.clone())
+    }
+
+    fn update_from_arg_matches_mut(&mut self, matches: &mut ArgMatches) -> Result<(), Error> {
+        *self = Self::from_arg_matches_mut(matches)?;
+        Ok(())
+    }
+}
+
 impl WebCli {
+    fn from_web_matches(matches: &mut ArgMatches) -> Result<Self, Error> {
+        let timeout = matches
+            .remove_one::<String>("timeout")
+            .map(|value| CliArgs::parse_u64(&value, "--timeout"))
+            .transpose()?;
+        let server_startup_timeout = matches
+            .remove_one::<String>("server-startup-timeout")
+            .map(|value| CliArgs::parse_u64(&value, "--server-startup-timeout"))
+            .transpose()?;
+        let ip = matches
+            .remove_one::<String>("ip")
+            .map(|value| CliArgs::parse_ip_addr(&value, "--ip"))
+            .transpose()?;
+        let port = matches
+            .remove_one::<String>("port")
+            .map(|value| CliArgs::parse_u16(&value, "--port"))
+            .transpose()?;
+
+        let web = Self {
+            start: matches.is_present("start"),
+            stop: matches.is_present("stop"),
+            status: matches.is_present("status"),
+            timeout,
+            daemonize: matches.is_present("daemonize"),
+            server_startup_timeout,
+            create_token: matches.is_present("create-token"),
+            token_name: matches.remove_one::<String>("token-name"),
+            create_read_only_token: matches.is_present("create-read-only-token"),
+            revoke_token: matches.remove_one::<String>("revoke-token"),
+            revoke_all_tokens: matches.is_present("revoke-all-tokens"),
+            list_tokens: matches.is_present("list-tokens"),
+            ip,
+            port,
+            cert: matches.remove_one::<String>("cert").map(PathBuf::from),
+            key: matches.remove_one::<String>("key").map(PathBuf::from),
+        };
+        CliArgs::validate_web_cli(&web)?;
+        Ok(web)
+    }
+
     pub fn get_start(&self) -> bool {
         self.start
             || !(self.stop
@@ -1671,7 +2638,6 @@ tail -f /tmp/my-live-logfile | vc-frame action pipe --name logs --plugin https:/
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
 
     fn parse_subscribe(args: &[&str]) -> SubscribeCli {
         let mut full_args = vec!["vc-frame"];
@@ -1686,7 +2652,7 @@ mod tests {
     #[test]
     fn subscribe_scrollback_bare_flag() {
         let s = parse_subscribe(&["subscribe", "--pane-id", "terminal_1", "--scrollback"]);
-        assert_eq!(s.scrollback, Some(0));
+        assert_eq!(s.scrollback_lines(), Some(0));
     }
 
     #[test]
@@ -1698,13 +2664,13 @@ mod tests {
             "--scrollback",
             "100",
         ]);
-        assert_eq!(s.scrollback, Some(100));
+        assert_eq!(s.scrollback_lines(), Some(100));
     }
 
     #[test]
     fn subscribe_scrollback_absent() {
         let s = parse_subscribe(&["subscribe", "--pane-id", "terminal_1"]);
-        assert_eq!(s.scrollback, None);
+        assert_eq!(s.scrollback_lines(), None);
     }
 
     #[test]

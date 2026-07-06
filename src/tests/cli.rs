@@ -1,11 +1,17 @@
 use std::net::{IpAddr, Ipv4Addr};
 
-use clap::{CommandFactory, Parser};
+use clap::CommandFactory;
 use zellij_utils::cli::{CliArgs, Command};
 
 #[test]
 fn verify_cli() {
-    CliArgs::command().debug_assert();
+    std::thread::Builder::new()
+        .name("verify-cli-command".to_string())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| CliArgs::command().debug_assert())
+        .expect("failed to spawn CLI verifier")
+        .join()
+        .expect("CLI verifier panicked");
 }
 
 #[test]

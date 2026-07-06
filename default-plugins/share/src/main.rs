@@ -8,8 +8,8 @@ use zellij_tile::prelude::*;
 
 use std::collections::{BTreeMap, HashMap};
 
-use main_screen::MainScreen;
-use token_management_screen::TokenManagementScreen;
+use main_screen::{MainScreen, MainScreenInput};
+use token_management_screen::{TokenManagementScreen, TokenManagementScreenInput};
 use token_screen::TokenScreen;
 
 static WEB_SERVER_QUERY_DURATION: f64 = 0.4; // Doherty threshold
@@ -429,20 +429,20 @@ impl App {
     }
 
     fn render_main_screen(&mut self, rows: usize, cols: usize) {
-        let state_changes = MainScreen::new(
-            self.tokens.list.is_empty(),
-            self.web_server.started,
-            &self.web_server.error,
-            &self.web_server.different_version_error,
-            &self.web_server.base_url,
-            self.web_server.ip,
-            self.web_server.port,
-            &self.state.session_name,
-            self.web_server.sharing,
-            self.ui.hover_coordinates,
-            &self.state.info,
-            &self.ui.link_executable,
-        )
+        let state_changes = MainScreen::new(MainScreenInput {
+            token_list_is_empty: self.tokens.list.is_empty(),
+            web_server_started: self.web_server.started,
+            web_server_error: &self.web_server.error,
+            web_server_different_version_error: &self.web_server.different_version_error,
+            web_server_base_url: &self.web_server.base_url,
+            web_server_ip: self.web_server.ip,
+            web_server_port: self.web_server.port,
+            session_name: &self.state.session_name,
+            web_sharing: self.web_server.sharing,
+            hover_coordinates: self.ui.hover_coordinates,
+            info: &self.state.info,
+            link_executable: &self.ui.link_executable,
+        })
         .render(rows, cols);
 
         self.ui.currently_hovering_over_link = state_changes.currently_hovering_over_link;
@@ -465,16 +465,16 @@ impl App {
             &self.tokens.entering_new_read_only_name
         };
 
-        TokenManagementScreen::new(
-            &self.tokens.list,
-            self.tokens.selected_index,
-            &self.tokens.renaming_token,
+        TokenManagementScreen::new(TokenManagementScreenInput {
+            token_list: &self.tokens.list,
+            selected_list_index: self.tokens.selected_index,
+            renaming_token: &self.tokens.renaming_token,
             entering_new_token_name,
-            &self.web_server.error,
-            &self.state.info,
+            error: &self.web_server.error,
+            info: &self.state.info,
             rows,
             cols,
-        )
+        })
         .render();
     }
 

@@ -29,6 +29,21 @@ pub struct MainScreen<'a> {
     link_executable: &'a Option<&'a str>,
 }
 
+pub struct MainScreenInput<'a> {
+    pub token_list_is_empty: bool,
+    pub web_server_started: bool,
+    pub web_server_error: &'a Option<String>,
+    pub web_server_different_version_error: &'a Option<String>,
+    pub web_server_base_url: &'a String,
+    pub web_server_ip: Option<std::net::IpAddr>,
+    pub web_server_port: Option<u16>,
+    pub session_name: &'a Option<String>,
+    pub web_sharing: WebSharing,
+    pub hover_coordinates: Option<(usize, usize)>,
+    pub info: &'a Option<String>,
+    pub link_executable: &'a Option<&'a str>,
+}
+
 impl<'a> MainScreen<'a> {
     const TITLE_TEXT: &'static str = "Share Session Locally in the Browser";
     const WARNING_TEXT: &'static str =
@@ -37,33 +52,20 @@ impl<'a> MainScreen<'a> {
     const SSL_URL: &'static str = "https://zellij.dev/documentation/web-client.html#https";
     const HELP_TEXT_WITH_CLICK: &'static str = "Help: Click or Shift-Click to open in browser";
     const HELP_TEXT_SHIFT_ONLY: &'static str = "Help: Shift-Click to open in browser";
-    pub fn new(
-        token_list_is_empty: bool,
-        web_server_started: bool,
-        web_server_error: &'a Option<String>,
-        web_server_different_version_error: &'a Option<String>,
-        web_server_base_url: &'a String,
-        web_server_ip: Option<std::net::IpAddr>,
-        web_server_port: Option<u16>,
-        session_name: &'a Option<String>,
-        web_sharing: WebSharing,
-        hover_coordinates: Option<(usize, usize)>,
-        info: &'a Option<String>,
-        link_executable: &'a Option<&'a str>,
-    ) -> Self {
+    pub fn new(input: MainScreenInput<'a>) -> Self {
         Self {
-            token_list_is_empty,
-            web_server_started,
-            web_server_error,
-            web_server_different_version_error,
-            web_server_base_url,
-            web_server_ip,
-            web_server_port,
-            session_name,
-            web_sharing,
-            hover_coordinates,
-            info,
-            link_executable,
+            token_list_is_empty: input.token_list_is_empty,
+            web_server_started: input.web_server_started,
+            web_server_error: input.web_server_error,
+            web_server_different_version_error: input.web_server_different_version_error,
+            web_server_base_url: input.web_server_base_url,
+            web_server_ip: input.web_server_ip,
+            web_server_port: input.web_server_port,
+            session_name: input.session_name,
+            web_sharing: input.web_sharing,
+            hover_coordinates: input.hover_coordinates,
+            info: input.info,
+            link_executable: input.link_executable,
         }
     }
 

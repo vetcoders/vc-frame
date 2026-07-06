@@ -303,7 +303,7 @@ pub fn start_subscribe_client(
     // Send subscribe message
     os_input.send_to_server(ClientToServerMsg::SubscribeToPaneRenders {
         pane_ids: pane_ids.clone(),
-        scrollback: subscribe_cli.scrollback,
+        scrollback: subscribe_cli.scrollback_lines(),
         ansi: subscribe_cli.ansi,
     });
 
