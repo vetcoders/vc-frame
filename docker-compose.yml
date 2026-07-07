@@ -21,4 +21,7 @@ services:
         target: /usr/src/zellij/fixtures
     ports:
       - "127.0.0.1:2222:2222/tcp"
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
     restart: unless-stopped
