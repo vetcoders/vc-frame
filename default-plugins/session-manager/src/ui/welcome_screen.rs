@@ -67,7 +67,7 @@ pub fn render_banner(x: usize, y: usize, rows: usize, cols: usize) {
 }
 
 fn render_brand_subtitle(cols: usize, y: usize) {
-    let subtitle = "Mission Control shell provider, powered by Zellij";
+    let subtitle = "Mission Control shell provider, powered by vc-frame";
     let x = cols.saturating_sub(subtitle.chars().count()) / 2;
     print!("\u{1b}[{};{}H{}", y + 1, x + 1, subtitle);
 }
