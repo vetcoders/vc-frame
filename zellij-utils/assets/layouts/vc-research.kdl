@@ -10,7 +10,15 @@ layout {
                 brand_text_short " VC. "
             }
         }
-        children
+        pane split_direction="vertical" {
+            pane size=24 borderless=true {
+                plugin location="session-manager" {
+                    rail true
+                    pane_title "Sessions"
+                }
+            }
+            pane { children; }
+        }
         pane size=1 borderless=true {
             plugin location="status-bar"
         }
@@ -22,7 +30,7 @@ layout {
             pane split_direction="horizontal" size="45%" {
                 pane name="claude"
                 pane name="codex"
-                pane name="gemini"
+                pane name="agy"
             }
         }
     }
@@ -35,7 +43,7 @@ layout {
                     pane name="codex"
                 }
                 pane split_direction="vertical" size="50%" {
-                    pane name="gemini"
+                    pane name="agy"
                     pane name="synthesis" focus=true
                 }
             }
