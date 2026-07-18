@@ -143,20 +143,38 @@ pub fn get_sessions_sorted_by_mtime() -> anyhow::Result<Vec<String>> {
 /// On Unix, connects and sends a `ConnStatus` message to verify the server responds.
 /// On Windows, reads the server PID from the marker file and checks process liveness.
 #[cfg(unix)]
+const SESSION_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
+
+#[cfg(unix)]
+fn probe_socket_stream(stream: interprocess::local_socket::Stream, timeout: Duration) -> bool {
+    use interprocess::local_socket::traits::Stream as _;
+
+    if stream.set_recv_timeout(Some(timeout)).is_err()
+        || stream.set_send_timeout(Some(timeout)).is_err()
+    {
+        return false;
+    }
+
+    let mut sender: IpcSenderWithContext<ClientToServerMsg> = IpcSenderWithContext::new(stream);
+    if sender
+        .send_client_msg(ClientToServerMsg::ConnStatus)
+        .is_err()
+    {
+        return false;
+    }
+    let mut receiver: IpcReceiverWithContext<ServerToClientMsg> = sender.get_receiver();
+    matches!(
+        receiver.recv_server_msg(),
+        Some((ServerToClientMsg::Connected, _))
+    )
+}
+
+#[cfg(unix)]
 fn assert_socket(name: &str) -> bool {
-    use crate::consts::ipc_connect;
+    use crate::consts::ipc_connect_timeout;
     let path = &*ZELLIJ_SOCK_DIR.join(name);
-    match ipc_connect(path) {
-        Ok(stream) => {
-            let mut sender: IpcSenderWithContext<ClientToServerMsg> =
-                IpcSenderWithContext::new(stream);
-            let _ = sender.send_client_msg(ClientToServerMsg::ConnStatus);
-            let mut receiver: IpcReceiverWithContext<ServerToClientMsg> = sender.get_receiver();
-            match receiver.recv_server_msg() {
-                Some((ServerToClientMsg::Connected, _)) => true,
-                None | Some((_, _)) => false,
-            }
-        },
+    match ipc_connect_timeout(path, SESSION_PROBE_TIMEOUT) {
+        Ok(stream) => probe_socket_stream(stream, SESSION_PROBE_TIMEOUT),
         Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {
             drop(fs::remove_file(path));
             false
@@ -207,6 +225,47 @@ fn assert_socket(name: &str) -> bool {
 #[cfg(not(any(unix, windows)))]
 fn assert_socket(_name: &str) -> bool {
     true
+}
+
+#[cfg(all(test, unix))]
+mod session_probe_timeout_tests {
+    use super::*;
+    use interprocess::local_socket::{GenericFilePath, ListenerOptions, prelude::*};
+    use std::time::Instant;
+
+    #[test]
+    fn silent_session_socket_is_rejected_within_the_probe_deadline() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let socket = dir.path().join("silent-session.sock");
+        let listener = ListenerOptions::new()
+            .name(socket.as_path().to_fs_name::<GenericFilePath>().unwrap())
+            .create_sync()
+            .expect("bind silent socket");
+
+        let server = std::thread::spawn(move || {
+            let _stream = listener
+                .incoming()
+                .next()
+                .expect("incoming connection")
+                .expect("accept silent client");
+            std::thread::sleep(Duration::from_secs(2));
+        });
+
+        let stream = crate::consts::ipc_connect_timeout(&socket, Duration::from_millis(75))
+            .expect("connect silent socket");
+        let started = Instant::now();
+        let alive = probe_socket_stream(stream, Duration::from_millis(75));
+
+        assert!(
+            !alive,
+            "a server that never answers ConnStatus is not healthy"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "session discovery must not block on a silent socket"
+        );
+        server.join().expect("silent server thread");
+    }
 }
 
 pub fn print_sessions(

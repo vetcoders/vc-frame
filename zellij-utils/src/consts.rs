@@ -277,6 +277,154 @@ pub fn ipc_connect(path: &std::path::Path) -> std::io::Result<interprocess::loca
     LocalSocketStream::connect(fs_name)
 }
 
+/// Connect to a Unix session socket with a hard deadline.
+///
+/// Session discovery must never inherit an unbounded `connect(2)`: one stale
+/// or backlog-saturated socket would otherwise freeze the entire session rail.
+#[cfg(unix)]
+pub fn ipc_connect_timeout(
+    path: &std::path::Path,
+    timeout: std::time::Duration,
+) -> std::io::Result<interprocess::local_socket::Stream> {
+    use std::{
+        ffi::OsStr,
+        io,
+        os::{
+            fd::{AsRawFd, FromRawFd, OwnedFd},
+            unix::{ffi::OsStrExt, net::UnixStream},
+        },
+        time::Instant,
+    };
+
+    fn invalid_path(path: &OsStr, reason: &str) -> io::Error {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid Unix socket path {:?}: {reason}", path),
+        )
+    }
+
+    let bytes = path.as_os_str().as_bytes();
+    if bytes.contains(&0) {
+        return Err(invalid_path(path.as_os_str(), "contains a NUL byte"));
+    }
+
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    if bytes.len() >= address.sun_path.len() {
+        return Err(invalid_path(path.as_os_str(), "is too long"));
+    }
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (target, source) in address.sun_path.iter_mut().zip(bytes.iter().copied()) {
+        *target = source as libc::c_char;
+    }
+    let address_len = std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1;
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    {
+        address.sun_len = address_len as u8;
+    }
+
+    let raw_fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    if raw_fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+    let original_flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+    if original_flags < 0
+        || unsafe {
+            libc::fcntl(
+                fd.as_raw_fd(),
+                libc::F_SETFL,
+                original_flags | libc::O_NONBLOCK,
+            )
+        } < 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+
+    let connect_result = unsafe {
+        libc::connect(
+            fd.as_raw_fd(),
+            (&raw const address).cast::<libc::sockaddr>(),
+            address_len as libc::socklen_t,
+        )
+    };
+    if connect_result < 0 {
+        let error = io::Error::last_os_error();
+        if !matches!(
+            error.raw_os_error(),
+            Some(code)
+                if code == libc::EINPROGRESS
+                    || code == libc::EAGAIN
+                    || code == libc::EWOULDBLOCK
+        ) {
+            return Err(error);
+        }
+
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Unix socket connect deadline elapsed",
+                ));
+            }
+            let timeout_ms = remaining.as_millis().clamp(1, i32::MAX as u128) as i32;
+            let mut descriptor = libc::pollfd {
+                fd: fd.as_raw_fd(),
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            let poll_result = unsafe { libc::poll(&mut descriptor, 1, timeout_ms) };
+            if poll_result == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Unix socket connect deadline elapsed",
+                ));
+            }
+            if poll_result < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error);
+            }
+
+            let mut socket_error: libc::c_int = 0;
+            let mut socket_error_len = std::mem::size_of_val(&socket_error) as libc::socklen_t;
+            if unsafe {
+                libc::getsockopt(
+                    fd.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_ERROR,
+                    (&raw mut socket_error).cast(),
+                    &mut socket_error_len,
+                )
+            } < 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            if socket_error != 0 {
+                return Err(io::Error::from_raw_os_error(socket_error));
+            }
+            break;
+        }
+    }
+
+    if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, original_flags) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let stream = UnixStream::from(fd);
+    let platform_stream = interprocess::os::unix::uds_local_socket::Stream::from(stream);
+    Ok(platform_stream.into())
+}
+
 #[cfg(windows)]
 pub fn ipc_connect(path: &std::path::Path) -> std::io::Result<interprocess::local_socket::Stream> {
     use interprocess::local_socket::{GenericNamespaced, Stream as LocalSocketStream, prelude::*};

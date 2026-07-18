@@ -214,7 +214,6 @@ fn get_top_canonical_row_and_wraps(rows: &mut VecDeque<Row>) -> Vec<Row> {
 fn transfer_rows_from_lines_above_to_viewport(
     lines_above: &mut VecDeque<Row>,
     viewport: &mut VecDeque<Row>,
-    sixel_grid: &mut SixelGrid,
     count: usize,
     max_viewport_width: usize,
 ) -> usize {
@@ -246,7 +245,9 @@ fn transfer_rows_from_lines_above_to_viewport(
     }
     if !next_lines.is_empty() {
         let excess_row = Row::from_rows(next_lines);
-        bounded_push(lines_above, sixel_grid, excess_row);
+        // This is the remainder of the line popped above, not new history.
+        // Restoring it cannot exceed the pre-existing scrollback budget.
+        lines_above.push_back(excess_row);
     }
     usize::try_from(lines_added_to_viewport).unwrap_or(0)
 }
@@ -257,26 +258,25 @@ fn transfer_rows_from_viewport_to_lines_above(
     sixel_grid: &mut SixelGrid,
     count: usize,
     max_viewport_width: usize,
-) -> isize {
-    let mut transferred_rows_count: isize = 0;
+    scrollback_buffer_lines: &mut usize,
+) {
     let drained_lines = std::cmp::min(count, viewport.len());
     for next_line in viewport.drain(..drained_lines) {
         let mut next_lines: Vec<Row> = vec![];
-        transferred_rows_count +=
-            calculate_row_display_height(next_line.width(), max_viewport_width) as isize;
         if !next_line.is_canonical {
             let mut bottom_canonical_row_and_wraps_in_dst =
                 get_lines_above_bottom_canonical_row_and_wraps(lines_above);
             next_lines.append(&mut bottom_canonical_row_and_wraps_in_dst);
         }
         next_lines.push(next_line);
-        let dropped_line_width = bounded_push(lines_above, sixel_grid, Row::from_rows(next_lines));
-        if let Some(width) = dropped_line_width {
-            transferred_rows_count -=
-                calculate_row_display_height(width, max_viewport_width) as isize;
-        }
+        bounded_push(
+            lines_above,
+            sixel_grid,
+            Row::from_rows(next_lines),
+            max_viewport_width,
+            scrollback_buffer_lines,
+        );
     }
-    transferred_rows_count
 }
 
 fn transfer_rows_from_lines_below_to_viewport(
@@ -319,17 +319,37 @@ fn transfer_rows_from_lines_below_to_viewport(
     }
 }
 
-fn bounded_push(vec: &mut VecDeque<Row>, sixel_grid: &mut SixelGrid, value: Row) -> Option<usize> {
-    let mut dropped_line_width = None;
-    if vec.len() >= *SCROLL_BUFFER_SIZE.get().unwrap() {
-        let line = vec.pop_front();
-        if let Some(line) = line {
+fn bounded_push(
+    vec: &mut VecDeque<Row>,
+    sixel_grid: &mut SixelGrid,
+    mut value: Row,
+    viewport_width: usize,
+    current_display_lines: &mut usize,
+) {
+    let max_display_lines = *SCROLL_BUFFER_SIZE.get().unwrap();
+    if max_display_lines == 0 {
+        vec.clear();
+        *current_display_lines = 0;
+        return;
+    }
+
+    let viewport_width = viewport_width.max(1);
+    value.trim_front_to_width(max_display_lines.saturating_mul(viewport_width));
+    let value_display_lines = calculate_row_display_height(value.width(), viewport_width);
+
+    while !vec.is_empty()
+        && (vec.len() >= max_display_lines
+            || current_display_lines.saturating_add(value_display_lines) > max_display_lines)
+    {
+        if let Some(line) = vec.pop_front() {
             sixel_grid.offset_grid_top();
-            dropped_line_width = Some(line.width());
+            *current_display_lines = current_display_lines
+                .saturating_sub(calculate_row_display_height(line.width(), viewport_width));
         }
     }
+
     vec.push_back(value);
-    dropped_line_width
+    *current_display_lines = current_display_lines.saturating_add(value_display_lines);
 }
 
 pub fn create_horizontal_tabstops(columns: usize) -> BTreeSet<usize> {
@@ -350,14 +370,6 @@ fn calculate_row_display_height(row_width: usize, viewport_width: usize) -> usiz
         return 1;
     }
     (row_width as f64 / viewport_width as f64).ceil() as usize
-}
-
-fn subtract_isize_from_usize(u: usize, i: isize) -> usize {
-    if i.is_negative() {
-        u - i.unsigned_abs()
-    } else {
-        u + i as usize
-    }
 }
 
 pub fn parse_osc7_path(raw: &[u8]) -> Option<std::path::PathBuf> {
@@ -1151,7 +1163,6 @@ impl Grid {
             let transferred_rows_height = transfer_rows_from_lines_above_to_viewport(
                 &mut self.lines_above,
                 &mut self.viewport,
-                &mut self.sixel_grid,
                 1,
                 self.width,
             );
@@ -1176,9 +1187,6 @@ impl Grid {
         {
             let mut line_to_push_up = self.viewport.pop_front().unwrap();
 
-            self.scrollback_buffer_lines +=
-                calculate_row_display_height(line_to_push_up.width(), self.width);
-
             let line_to_push_up = if line_to_push_up.is_canonical {
                 line_to_push_up
             } else {
@@ -1195,15 +1203,13 @@ impl Grid {
                 }
             };
 
-            let dropped_line_width =
-                bounded_push(&mut self.lines_above, &mut self.sixel_grid, line_to_push_up);
-            if let Some(width) = dropped_line_width {
-                let dropped_line_height = calculate_row_display_height(width, self.width);
-
-                self.scrollback_buffer_lines = self
-                    .scrollback_buffer_lines
-                    .saturating_sub(dropped_line_height);
-            }
+            bounded_push(
+                &mut self.lines_above,
+                &mut self.sixel_grid,
+                line_to_push_up,
+                self.width,
+                &mut self.scrollback_buffer_lines,
+            );
 
             transfer_rows_from_lines_below_to_viewport(
                 &mut self.lines_below,
@@ -1409,7 +1415,6 @@ impl Grid {
                     transfer_rows_from_lines_above_to_viewport(
                         &mut self.lines_above,
                         &mut self.viewport,
-                        &mut self.sixel_grid,
                         row_count_to_transfer,
                         new_columns,
                     );
@@ -1439,6 +1444,7 @@ impl Grid {
                         &mut self.sixel_grid,
                         row_count_to_transfer,
                         new_columns,
+                        &mut self.scrollback_buffer_lines,
                     );
                 },
                 Ordering::Equal => {},
@@ -2876,16 +2882,14 @@ impl Grid {
         }
     }
     fn transfer_rows_to_lines_above(&mut self, count: usize) {
-        let transferred_rows_count = transfer_rows_from_viewport_to_lines_above(
+        transfer_rows_from_viewport_to_lines_above(
             &mut self.viewport,
             &mut self.lines_above,
             &mut self.sixel_grid,
             count,
             self.width,
+            &mut self.scrollback_buffer_lines,
         );
-
-        self.scrollback_buffer_lines =
-            subtract_isize_from_usize(self.scrollback_buffer_lines, transferred_rows_count);
     }
     fn move_cursor_down_by_pixels(&mut self, pixel_count: usize) {
         if let Some(character_cell_size) = { *self.character_cell_size.borrow() } {
@@ -4522,6 +4526,71 @@ impl AlternateScreenState {
 #[cfg(test)]
 #[path = "./unit/grid_tests.rs"]
 mod grid_tests;
+
+#[cfg(test)]
+mod scrollback_memory_budget_tests {
+    use super::*;
+    use crate::panes::terminal_character::TerminalCharacter;
+
+    fn row_of(character: char, width: usize) -> Row {
+        Row::from_columns(VecDeque::from(vec![
+            TerminalCharacter::new(character);
+            width
+        ]))
+        .canonical()
+    }
+
+    #[test]
+    fn one_logical_line_cannot_bypass_the_display_line_budget() {
+        let max_lines = *SCROLL_BUFFER_SIZE.get_or_init(|| DEFAULT_SCROLL_BUFFER_SIZE);
+        let viewport_width = 2;
+        let mut lines = VecDeque::new();
+        let mut sixel_grid = SixelGrid::default();
+        let mut display_lines = 0;
+
+        bounded_push(
+            &mut lines,
+            &mut sixel_grid,
+            row_of('x', max_lines * viewport_width + 37),
+            viewport_width,
+            &mut display_lines,
+        );
+
+        assert!(display_lines <= max_lines);
+        assert!(lines.front().unwrap().width() <= max_lines * viewport_width);
+    }
+
+    #[test]
+    fn adding_new_history_evicts_enough_old_display_lines() {
+        let max_lines = *SCROLL_BUFFER_SIZE.get_or_init(|| DEFAULT_SCROLL_BUFFER_SIZE);
+        let viewport_width = 2;
+        let mut lines = VecDeque::new();
+        let mut sixel_grid = SixelGrid::default();
+        let mut display_lines = 0;
+
+        bounded_push(
+            &mut lines,
+            &mut sixel_grid,
+            row_of('a', max_lines * viewport_width),
+            viewport_width,
+            &mut display_lines,
+        );
+        bounded_push(
+            &mut lines,
+            &mut sixel_grid,
+            row_of('b', (max_lines / 2 + 1) * viewport_width),
+            viewport_width,
+            &mut display_lines,
+        );
+
+        assert!(display_lines <= max_lines);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            lines.front().unwrap().columns.front().unwrap().character,
+            'b'
+        );
+    }
+}
 
 #[cfg(test)]
 mod osc7_parser_tests {

@@ -227,6 +227,32 @@ impl Row {
         }
         self.width = None;
     }
+    /// Keep only the newest suffix whose rendered width fits `max_width`.
+    ///
+    /// One terminal logical line can contain millions of wrapped cells. A
+    /// scrollback limit expressed only as a count of logical lines therefore
+    /// does not bound memory. Once the beginning is discarded, the retained
+    /// suffix becomes a canonical line for future reflow.
+    pub fn trim_front_to_width(&mut self, max_width: usize) {
+        let current_width = self.width();
+        if current_width <= max_width {
+            return;
+        }
+
+        let width_to_remove = current_width.saturating_sub(max_width);
+        let mut removed_width = 0;
+        let mut columns_to_remove = 0;
+        for character in &self.columns {
+            if removed_width >= width_to_remove {
+                break;
+            }
+            removed_width += character.width();
+            columns_to_remove += 1;
+        }
+        self.columns.drain(..columns_to_remove);
+        self.is_canonical = true;
+        self.width = Some(current_width.saturating_sub(removed_width));
+    }
     pub fn position_accounting_for_widechars(&self, x: usize) -> usize {
         let mut position = x;
         for (index, terminal_character) in self.columns.iter().enumerate() {
