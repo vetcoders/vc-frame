@@ -268,13 +268,12 @@ pub(crate) fn background_jobs_main(
                             let current_session_name =
                                 current_session_name.lock().unwrap().to_string();
                             let current_session_info = current_session_info.lock().unwrap().clone();
-                            let available_layouts = current_session_info.available_layouts.clone();
                             let current_session_layout =
                                 current_session_layout.lock().unwrap().clone();
                             if !disable_session_metadata {
                                 write_session_state_to_disk(
                                     current_session_name.clone(),
-                                    current_session_info,
+                                    current_session_info.clone(),
                                     current_session_layout,
                                 );
 
@@ -293,16 +292,14 @@ pub(crate) fn background_jobs_main(
                                 &ZELLIJ_SOCK_DIR,
                                 &ZELLIJ_SESSION_INFO_CACHE_DIR,
                             );
-                            for (session_name, session_info) in session_infos_on_machine.iter_mut()
-                            {
-                                if session_name == &current_session_name {
-                                    let current_session_plugin_list =
-                                        current_session_plugin_list.lock().unwrap().clone();
-                                    session_info.populate_plugin_list(current_session_plugin_list);
-                                    // these are not serialized, so must be explicitly added
-                                    session_info.available_layouts = available_layouts.clone();
-                                }
-                            }
+                            let current_session_plugin_list =
+                                current_session_plugin_list.lock().unwrap().clone();
+                            overlay_current_session_info(
+                                &mut session_infos_on_machine,
+                                &current_session_name,
+                                &current_session_info,
+                                &current_session_plugin_list,
+                            );
                             let resurrectable_sessions = find_resurrectable_sessions(
                                 &session_infos_on_machine,
                                 &ZELLIJ_SESSION_INFO_CACHE_DIR,
@@ -767,6 +764,23 @@ pub fn scan_session_list(
     (session_infos_on_machine, resurrectable_sessions)
 }
 
+pub(crate) fn overlay_current_session_info(
+    session_infos: &mut BTreeMap<String, SessionInfo>,
+    current_session_name: &str,
+    current_session_info: &SessionInfo,
+    current_session_plugin_list: &BTreeMap<PluginId, RunPlugin>,
+) {
+    if current_session_info.name == current_session_name
+        && session_infos.contains_key(current_session_name)
+    {
+        let mut live_current_session = current_session_info.clone();
+        live_current_session.name = current_session_name.to_string();
+        live_current_session.is_current_session = true;
+        live_current_session.populate_plugin_list(current_session_plugin_list.clone());
+        session_infos.insert(current_session_name.to_string(), live_current_session);
+    }
+}
+
 pub fn scan_session_list_default_dirs(
     current_session_name: &str,
     available_layouts: &[LayoutInfo],
@@ -913,7 +927,7 @@ mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
     use tempfile::tempdir;
-    use zellij_utils::data::SessionInfo;
+    use zellij_utils::data::{PaneInfo, PaneManifest, SessionInfo};
 
     fn make_socket(dir: &std::path::Path, name: &str) -> UnixListener {
         UnixListener::bind(dir.join(name)).expect("bind unix socket")
@@ -984,6 +998,53 @@ mod tests {
         assert_eq!(peer_info.name, peer);
         assert!(!peer_info.is_current_session);
         assert!(resurrectable.is_empty());
+    }
+
+    #[test]
+    fn live_current_session_truth_replaces_stale_disk_snapshot() {
+        let mut scanned_sessions = BTreeMap::from([
+            ("me".to_string(), SessionInfo::new("me".to_string())),
+            ("peer".to_string(), SessionInfo::new("peer".to_string())),
+        ]);
+        let mut panes = HashMap::new();
+        panes.insert(
+            0,
+            vec![PaneInfo {
+                title: "agent".to_string(),
+                terminal_command: Some("codex".to_string()),
+                ..Default::default()
+            }],
+        );
+        let mut current_session = SessionInfo::new("me".to_string());
+        current_session.panes = PaneManifest { panes };
+
+        overlay_current_session_info(
+            &mut scanned_sessions,
+            "me",
+            &current_session,
+            &BTreeMap::new(),
+        );
+
+        let current = scanned_sessions.get("me").unwrap();
+        assert_eq!(current.panes, current_session.panes);
+        assert!(current.is_current_session);
+        assert_eq!(scanned_sessions.get("peer").unwrap().name, "peer");
+    }
+
+    #[test]
+    fn uninitialized_current_session_truth_does_not_erase_disk_snapshot() {
+        let mut scanned_session = SessionInfo::new("me".to_string());
+        scanned_session.connected_clients = 2;
+        let mut scanned_sessions = BTreeMap::from([("me".to_string(), scanned_session)]);
+
+        overlay_current_session_info(
+            &mut scanned_sessions,
+            "me",
+            &SessionInfo::default(),
+            &BTreeMap::new(),
+        );
+
+        assert_eq!(scanned_sessions.get("me").unwrap().connected_clients, 2);
     }
 
     #[test]

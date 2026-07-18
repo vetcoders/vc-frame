@@ -5,6 +5,7 @@ use std::rc::Rc;
 
 use crate::pages::{
     ActiveComponent, BulletinList, ClickAction, ComponentLine, Page, TextOrCustomRender,
+    VC_FRAME_REPOSITORY_URL,
 };
 
 pub const MAX_TIP_INDEX: usize = 11;
@@ -79,7 +80,7 @@ impl Page {
                         Box::new(sponsors_link_text_selected_len),
                     ))
                     .with_left_click_action(ClickAction::new_open_link(
-                        "https://github.com/sponsors/imsnif".to_owned(),
+                        VC_FRAME_REPOSITORY_URL.to_owned(),
                         link_executable.clone(),
                     )),
             ])])
@@ -130,7 +131,7 @@ impl Page {
                         Box::new(sponsors_link_text_selected_len),
                     ))
                     .with_left_click_action(ClickAction::new_open_link(
-                        "https://github.com/sponsors/imsnif".to_owned(),
+                        VC_FRAME_REPOSITORY_URL.to_owned(),
                         link_executable.clone(),
                     )),
             ])])
@@ -162,7 +163,7 @@ impl Page {
                         Box::new(sponsors_link_text_selected_len),
                     ))
                     .with_left_click_action(ClickAction::new_open_link(
-                        "https://github.com/sponsors/imsnif".to_owned(),
+                        VC_FRAME_REPOSITORY_URL.to_owned(),
                         link_executable.clone(),
                     )),
             ])])
@@ -220,7 +221,7 @@ impl Page {
                         Box::new(sponsors_link_text_selected_len),
                     ))
                     .with_left_click_action(ClickAction::new_open_link(
-                        "https://github.com/sponsors/imsnif".to_owned(),
+                        VC_FRAME_REPOSITORY_URL.to_owned(),
                         link_executable.clone(),
                     )),
             ])])
@@ -290,7 +291,7 @@ impl Page {
                         Box::new(sponsors_link_text_selected_len),
                     ))
                     .with_left_click_action(ClickAction::new_open_link(
-                        "https://github.com/sponsors/imsnif".to_owned(),
+                        VC_FRAME_REPOSITORY_URL.to_owned(),
                         link_executable.clone(),
                     )),
             ])])
@@ -353,7 +354,7 @@ impl Page {
                         Box::new(sponsors_link_text_selected_len),
                     ))
                     .with_left_click_action(ClickAction::new_open_link(
-                        "https://github.com/sponsors/imsnif".to_owned(),
+                        VC_FRAME_REPOSITORY_URL.to_owned(),
                         link_executable.clone(),
                     )),
             ])])
@@ -412,7 +413,7 @@ impl Page {
                         Box::new(sponsors_link_text_selected_len),
                     ))
                     .with_left_click_action(ClickAction::new_open_link(
-                        "https://github.com/sponsors/imsnif".to_owned(),
+                        VC_FRAME_REPOSITORY_URL.to_owned(),
                         link_executable.clone(),
                     )),
             ])])
@@ -446,7 +447,7 @@ impl Page {
                         Box::new(sponsors_link_text_selected_len),
                     ))
                     .with_left_click_action(ClickAction::new_open_link(
-                        "https://github.com/sponsors/imsnif".to_owned(),
+                        VC_FRAME_REPOSITORY_URL.to_owned(),
                         link_executable.clone(),
                     )),
             ])])
@@ -520,7 +521,7 @@ impl Page {
                         Box::new(sponsors_link_text_selected_len),
                     ))
                     .with_left_click_action(ClickAction::new_open_link(
-                        "https://github.com/sponsors/imsnif".to_owned(),
+                        VC_FRAME_REPOSITORY_URL.to_owned(),
                         link_executable.clone(),
                     )),
             ])])
@@ -578,7 +579,7 @@ impl Page {
                         Box::new(sponsors_link_text_selected_len),
                     ))
                     .with_left_click_action(ClickAction::new_open_link(
-                        "https://github.com/sponsors/imsnif".to_owned(),
+                        VC_FRAME_REPOSITORY_URL.to_owned(),
                         link_executable.clone(),
                     )),
             ])])
@@ -631,7 +632,7 @@ impl Page {
                         Box::new(sponsors_link_text_selected_len),
                     ))
                     .with_left_click_action(ClickAction::new_open_link(
-                        "https://github.com/sponsors/imsnif".to_owned(),
+                        VC_FRAME_REPOSITORY_URL.to_owned(),
                         link_executable.clone(),
                     )),
             ])])
@@ -686,7 +687,7 @@ impl Page {
                         Box::new(sponsors_link_text_selected_len),
                     ))
                     .with_left_click_action(ClickAction::new_open_link(
-                        "https://github.com/sponsors/imsnif".to_owned(),
+                        VC_FRAME_REPOSITORY_URL.to_owned(),
                         link_executable.clone(),
                     )),
             ])])
@@ -697,20 +698,21 @@ impl Page {
 }
 
 fn sponsors_link_text_unselected() -> Text {
-    Text::new("https://github.com/sponsors/imsnif")
+    Text::new(VC_FRAME_REPOSITORY_URL)
 }
 
 fn sponsors_link_text_selected(x: usize, y: usize) -> usize {
     print!(
-        "\u{1b}[{};{}H\u{1b}[m\u{1b}[1;4mhttps://github.com/sponsors/imsnif",
+        "\u{1b}[{};{}H\u{1b}[m\u{1b}[1;4m{}",
         y + 1,
-        x + 1
+        x + 1,
+        VC_FRAME_REPOSITORY_URL
     );
-    34
+    VC_FRAME_REPOSITORY_URL.chars().count()
 }
 
 fn sponsors_link_text_selected_len() -> usize {
-    34
+    VC_FRAME_REPOSITORY_URL.chars().count()
 }
 
 fn plugin_docs_link_text_selected(x: usize, y: usize) -> usize {
@@ -816,7 +818,7 @@ fn theme_list_selected_len() -> usize {
 }
 
 fn support_the_developer_text() -> Text {
-    let support_text = "Please support the vc-frame craft <3: ".to_string();
+    let support_text = "Source, issues, and the vc-frame craft: ".to_string();
     Text::new(support_text).color_range(3, ..)
 }
 

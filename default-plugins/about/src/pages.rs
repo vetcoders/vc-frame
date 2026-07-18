@@ -1,5 +1,7 @@
 use zellij_tile::prelude::*;
 
+pub const VC_FRAME_REPOSITORY_URL: &str = "https://github.com/vetcoders/vc-frame";
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -171,7 +173,7 @@ impl Page {
     pub fn new_main_screen(
         link_executable: Rc<RefCell<String>>,
         zellij_version: String,
-        _base_mode: Rc<RefCell<InputMode>>,
+        base_mode: Rc<RefCell<InputMode>>,
         is_release_notes: bool,
     ) -> Self {
         Page::new()
@@ -179,13 +181,22 @@ impl Page {
             .with_title(main_screen_title(zellij_version.clone(), is_release_notes))
             .with_bulletin_list(BulletinList::new(whats_new_title()).with_items(vec![
                     ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
-                        "Windows Support",
+                        "Live Agent Session Rail",
                     )))
                     .with_hover(TextOrCustomRender::Text(
-                        main_menu_item("Windows Support").selected(),
+                        main_menu_item("Live Agent Session Rail").selected(),
                     ))
                     .with_left_click_action(ClickAction::new_change_page({
-                        move || Page::new_windows_support()
+                        let link_executable = link_executable.clone();
+                        let zellij_version = zellij_version.clone();
+                        let base_mode = base_mode.clone();
+                        move || {
+                            Page::new_vibecrafted_mission_control(
+                                link_executable.clone(),
+                                zellij_version.clone(),
+                                base_mode.clone(),
+                            )
+                        }
                     })),
                     ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
                         "Remote Sessions",
@@ -244,9 +255,18 @@ impl Page {
                     .with_left_click_action(ClickAction::new_change_page({
                         move || Page::new_layout_manager()
                     })),
+                    ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
+                        "Windows Support",
+                    )))
+                    .with_hover(TextOrCustomRender::Text(
+                        main_menu_item("Windows Support").selected(),
+                    ))
+                    .with_left_click_action(ClickAction::new_change_page({
+                        move || Page::new_windows_support()
+                    })),
                 ]))
             .with_paragraph(vec![ComponentLine::new(vec![
-                ActiveComponent::new(TextOrCustomRender::Text(Text::new("Full Changelog: "))),
+                ActiveComponent::new(TextOrCustomRender::Text(Text::new("VC Frame release: "))),
                 ActiveComponent::new(TextOrCustomRender::Text(changelog_link_unselected(
                     zellij_version.clone(),
                 )))
@@ -255,10 +275,7 @@ impl Page {
                     Box::new(changelog_link_selected_len(zellij_version.clone())),
                 ))
                 .with_left_click_action(ClickAction::new_open_link(
-                    format!(
-                        "https://github.com/zellij-org/zellij/releases/tag/v{}",
-                        zellij_version.clone()
-                    ),
+                    vc_frame_release_url(&zellij_version),
                     link_executable.clone(),
                 )),
             ])])
@@ -270,7 +287,7 @@ impl Page {
                         Box::new(sponsors_link_text_selected_len),
                     ))
                     .with_left_click_action(ClickAction::new_open_link(
-                        "https://github.com/sponsors/imsnif".to_owned(),
+                        VC_FRAME_REPOSITORY_URL.to_owned(),
                         link_executable.clone(),
                     )),
             ])])
@@ -970,44 +987,46 @@ fn render_error(error: &str, y: usize) {
 }
 
 fn changelog_link_unselected(version: String) -> Text {
-    let full_changelog_text = format!(
-        "https://github.com/zellij-org/zellij/releases/tag/v{}",
-        version
-    );
-    Text::new(full_changelog_text)
+    Text::new(vc_frame_release_url(&version))
 }
 
 fn changelog_link_selected(version: String) -> Box<dyn Fn(usize, usize) -> usize> {
     Box::new(move |x, y| {
+        let release_url = vc_frame_release_url(&version);
         print!(
-            "\u{1b}[{};{}H\u{1b}[m\u{1b}[1;4mhttps://github.com/zellij-org/zellij/releases/tag/v{}",
+            "\u{1b}[{};{}H\u{1b}[m\u{1b}[1;4m{}",
             y + 1,
             x + 1,
-            version
+            release_url
         );
-        51 + version.chars().count()
+        release_url.chars().count()
     })
 }
 
 fn changelog_link_selected_len(version: String) -> Box<dyn Fn() -> usize> {
-    Box::new(move || 51 + version.chars().count())
+    Box::new(move || vc_frame_release_url(&version).chars().count())
 }
 
 fn sponsors_link_text_unselected() -> Text {
-    Text::new("https://github.com/sponsors/imsnif")
+    Text::new(VC_FRAME_REPOSITORY_URL)
 }
 
 fn sponsors_link_text_selected(x: usize, y: usize) -> usize {
     print!(
-        "\u{1b}[{};{}H\u{1b}[m\u{1b}[1;4mhttps://github.com/sponsors/imsnif",
+        "\u{1b}[{};{}H\u{1b}[m\u{1b}[1;4m{}",
         y + 1,
-        x + 1
+        x + 1,
+        VC_FRAME_REPOSITORY_URL
     );
-    34
+    VC_FRAME_REPOSITORY_URL.chars().count()
 }
 
 fn sponsors_link_text_selected_len() -> usize {
-    34
+    VC_FRAME_REPOSITORY_URL.chars().count()
+}
+
+fn vc_frame_release_url(version: &str) -> String {
+    format!("{VC_FRAME_REPOSITORY_URL}/releases/tag/v{version}")
 }
 
 fn cli_automation_link_selected(x: usize, y: usize) -> usize {
@@ -1038,7 +1057,7 @@ fn web_client_link_selected_len() -> usize {
 
 // Text components
 fn whats_new_title() -> Text {
-    Text::new("What's new?")
+    Text::new("Operator surfaces")
 }
 
 fn main_screen_title(version: String, is_release_notes: bool) -> Text {
@@ -1117,7 +1136,7 @@ fn main_menu_item(item_name: &str) -> Text {
 }
 
 fn support_the_developer_text() -> Text {
-    let support_text = "Please support the vc-frame craft <3: ".to_string();
+    let support_text = "Source, issues, and the vc-frame craft: ".to_string();
     Text::new(support_text).color_range(3, ..)
 }
 
@@ -1368,5 +1387,32 @@ impl ComponentLine {
 impl ComponentLine {
     pub fn new(components: Vec<ActiveComponent>) -> Self {
         ComponentLine { components }
+    }
+}
+
+#[cfg(test)]
+mod product_identity_tests {
+    use super::*;
+
+    #[test]
+    fn about_links_to_vc_frame_release_and_repository() {
+        assert_eq!(
+            vc_frame_release_url("0.45.4"),
+            "https://github.com/vetcoders/vc-frame/releases/tag/v0.45.4"
+        );
+        assert_eq!(
+            VC_FRAME_REPOSITORY_URL,
+            "https://github.com/vetcoders/vc-frame"
+        );
+    }
+
+    #[test]
+    fn about_surface_contains_no_upstream_owner_or_sponsor_links() {
+        let source = concat!(include_str!("pages.rs"), include_str!("tips.rs"));
+        let upstream_release_owner = ["zellij-org", "zellij", "releases"].join("/");
+        let upstream_sponsor = ["sponsors", "imsnif"].join("/");
+
+        assert!(!source.contains(&upstream_release_owner));
+        assert!(!source.contains(&upstream_sponsor));
     }
 }

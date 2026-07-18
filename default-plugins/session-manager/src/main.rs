@@ -16,7 +16,7 @@ use single_screen::{SingleScreenMode, SingleScreenState};
 use single_screen_data::{DeleteTarget, UnifiedSearchResult};
 use single_screen_render::render_unified_results;
 use ui::{
-    SessionUiInfo,
+    SessionUiInfo, TabUiInfo,
     components::{
         Colors, render_controls_line, render_error, render_new_session_block, render_prompt,
         render_renaming_session_screen, render_screen_toggle, render_single_screen_prompt,
@@ -477,6 +477,62 @@ fn format_session_rail_entry(session: &SessionUiInfo, ordinal: usize) -> String 
     format!("{:02} {} {}", ordinal, status, session.name)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SessionRailRowKind {
+    Session(usize),
+    LiveProcess { session_index: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionRailRow {
+    kind: SessionRailRowKind,
+    text: String,
+}
+
+impl SessionRailRow {
+    fn is_live_process(&self) -> bool {
+        matches!(self.kind, SessionRailRowKind::LiveProcess { .. })
+    }
+}
+
+fn format_process_tab_rail_entry(tab: &TabUiInfo) -> String {
+    let activity = if tab.is_active { "●" } else { "·" };
+    let mut text = format!("   {} {}", activity, tab.name);
+    if let Some(process_label) = tab.primary_process_label()
+        && process_label != tab.name
+        && !process_label.contains(&tab.name)
+    {
+        text.push_str(" · ");
+        text.push_str(process_label);
+    }
+    let additional_processes = tab.live_process_count().saturating_sub(1);
+    if additional_processes > 0 {
+        text.push_str(&format!(" +{}", additional_processes));
+    }
+    text
+}
+
+fn session_rail_rows(sessions: &[SessionUiInfo]) -> Vec<SessionRailRow> {
+    let mut rows = vec![];
+    for (session_index, session) in sessions.iter().enumerate() {
+        rows.push(SessionRailRow {
+            kind: SessionRailRowKind::Session(session_index),
+            text: format_session_rail_entry(session, session_index + 1),
+        });
+        rows.extend(
+            session
+                .tabs
+                .iter()
+                .filter(|tab| tab.live_process_count() > 0)
+                .map(|tab| SessionRailRow {
+                    kind: SessionRailRowKind::LiveProcess { session_index },
+                    text: format_process_tab_rail_entry(tab),
+                }),
+        );
+    }
+    rows
+}
+
 fn rail_range_to_render(
     visible_rows: usize,
     results_len: usize,
@@ -556,7 +612,12 @@ impl State {
         self.ensure_rail_selection();
 
         let session_count = self.sessions.session_ui_infos.len();
-        let header = fit_rail_line(&format!("SESSIONS {}", session_count), cols);
+        let rail_rows = session_rail_rows(&self.sessions.session_ui_infos);
+        let live_process_count = rail_rows.iter().filter(|row| row.is_live_process()).count();
+        let header = fit_rail_line(
+            &format!("SESSIONS {} · LIVE {}", session_count, live_process_count),
+            cols,
+        );
         let mut header = Text::new(header);
         if cols >= 8 {
             header = header.color_range(1, 0..8);
@@ -567,24 +628,33 @@ impl State {
         if list_rows == 0 {
             return;
         }
-        let footer_rows = usize::from(session_count > list_rows && list_rows > 1);
+        let footer_rows = usize::from(rail_rows.len() > list_rows && list_rows > 1);
         let entry_rows = list_rows.saturating_sub(footer_rows);
         let selected_index = self.sessions.selected_index.0;
-        let (start, end) = rail_range_to_render(entry_rows, session_count, selected_index);
+        let selected_row_index = selected_index.and_then(|selected_session_index| {
+            rail_rows
+                .iter()
+                .position(|row| row.kind == SessionRailRowKind::Session(selected_session_index))
+        });
+        let (start, end) = rail_range_to_render(entry_rows, rail_rows.len(), selected_row_index);
         let mut row = 1;
 
-        for (index, session) in self.sessions.session_ui_infos[start..end]
-            .iter()
-            .enumerate()
-        {
-            let session_index = start + index;
-            let line = fit_rail_line(&format_session_rail_entry(session, session_index + 1), cols);
-            let mut text = Text::new(line);
-            if cols >= 4 {
-                text = text.color_range(1, 3..4);
-            }
-            if selected_index == Some(session_index) {
-                text = text.selected();
+        for rail_row in &rail_rows[start..end] {
+            let mut text = Text::new(fit_rail_line(&rail_row.text, cols));
+            match rail_row.kind {
+                SessionRailRowKind::Session(session_index) => {
+                    if cols >= 4 {
+                        text = text.color_range(1, 3..4);
+                    }
+                    if selected_index == Some(session_index) {
+                        text = text.selected();
+                    }
+                },
+                SessionRailRowKind::LiveProcess { .. } => {
+                    if cols >= 4 {
+                        text = text.color_range(2, 3..4);
+                    }
+                },
             }
             print_text_with_coordinates(text, 0, row, None, None);
             row += 1;
@@ -592,7 +662,7 @@ impl State {
 
         if footer_rows == 1 && row < rows {
             let hidden_above = start;
-            let hidden_below = session_count.saturating_sub(end);
+            let hidden_below = rail_rows.len().saturating_sub(end);
             let footer = match (hidden_above, hidden_below) {
                 (0, below) => format!("+{} more", below),
                 (above, 0) => format!("+{} above", above),
@@ -1689,6 +1759,38 @@ mod rail_tests {
             format_session_rail_entry(&session("beta", false), 12),
             "12 - beta"
         );
+    }
+
+    #[test]
+    fn rail_expands_sessions_with_live_process_tabs_only() {
+        let mut alpha = session("alpha", true);
+        alpha.tabs = vec![
+            TabUiInfo::for_rail_test("impl-260718-120000-01000", true, "claude", 1),
+            TabUiInfo::for_rail_test("old-run", false, "codex", 0),
+            TabUiInfo::for_rail_test("audit-260718-130000-02000", false, "codex", 2),
+        ];
+        let beta = session("beta", false);
+
+        let rows = session_rail_rows(&[alpha, beta]);
+        let text: Vec<&str> = rows.iter().map(|row| row.text.as_str()).collect();
+
+        assert_eq!(
+            text,
+            vec![
+                "01 * alpha",
+                "   ● impl-260718-120000-01000 · claude",
+                "   · audit-260718-130000-02000 · codex +1",
+                "02 - beta",
+            ]
+        );
+        assert_eq!(rows.iter().filter(|row| row.is_live_process()).count(), 2);
+    }
+
+    #[test]
+    fn rail_does_not_repeat_process_label_when_tab_already_names_the_agent() {
+        let tab = TabUiInfo::for_rail_test("claude", true, "claude", 1);
+
+        assert_eq!(format_process_tab_rail_entry(&tab), "   ● claude");
     }
 
     #[test]

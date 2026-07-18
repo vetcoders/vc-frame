@@ -278,17 +278,19 @@ mod tests {
         SessionUiInfo {
             name: name.to_string(),
             tabs: (0..tabs)
-                .map(|i| crate::ui::TabUiInfo {
-                    name: format!("tab-{}", i),
-                    panes: (0..panes_per_tab)
+                .map(|i| {
+                    let mut tab =
+                        crate::ui::TabUiInfo::for_rail_test(&format!("tab-{}", i), i == 0, "", 0);
+                    tab.panes = (0..panes_per_tab)
                         .map(|j| crate::ui::PaneUiInfo {
                             name: format!("pane-{}", j),
                             exit_code: None,
                             pane_id: j as u32,
                             is_plugin: false,
                         })
-                        .collect(),
-                    position: i,
+                        .collect();
+                    tab.position = i;
+                    tab
                 })
                 .collect(),
             connected_users: connected,
