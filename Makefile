@@ -14,7 +14,7 @@
 #   - protobuf compiler (protoc)
 
 .PHONY: all build plugins binary install run test test-server test-utils \
-        test-client test-no-web check clippy precheck fmt clean doctor \
+        test-client test-no-web check clippy precheck semgrep fmt clean doctor \
         doctor-quiet doctor-install-quiet help
 
 # ──────────────────────────────────────────────────────────
@@ -193,6 +193,14 @@ ci: precheck test
 	@echo "══════════════════════════════════════"
 	@echo "  ✓ CI-equivalent gates passed"
 	@echo "══════════════════════════════════════"
+
+## Release security gate — fail on every Semgrep finding
+semgrep:
+	@command -v semgrep >/dev/null 2>&1 || { \
+		echo "ERROR: semgrep is required for release verification" >&2; \
+		exit 1; \
+	}
+	semgrep scan --config p/rust --error --metrics off .
 
 # ──────────────────────────────────────────────────────────
 # Housekeeping

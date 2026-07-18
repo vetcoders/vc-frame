@@ -40,8 +40,7 @@ vc-frame setup --dump-config
 vc-frame
 ```
 
-The source install keeps a `zellij` compatibility symlink for existing scripts
-and sessions. Public packages named `zellij` are upstream Zellij packages, not
+Public packages and executables named `zellij` belong to upstream Zellij, not
 the VetCoders vc-frame runtime.
 
 ## Release Channel
@@ -51,7 +50,8 @@ release should provide prebuilt `vc-frame-*` artifacts, checksums, signatures,
 `manifest.json`, and a served installer:
 
 ```bash
-curl -fsSL https://vibecrafted.io/install.sh | sh
+VCFRAME_GPG_FINGERPRINT=<pinned-fingerprint> \
+  sh -c "$(curl -fsSL https://github.com/vetcoders/vc-frame/releases/latest/download/install.sh)"
 vc-frame --version
 ```
 

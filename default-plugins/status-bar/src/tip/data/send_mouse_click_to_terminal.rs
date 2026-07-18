@@ -31,7 +31,8 @@ pub fn mouse_click_to_terminal_full(help: &ModeInfo) -> LinePart {
         Style::new().fg(orange_color).bold().paint("Shift"),
         Style::new().paint(" + <"),
         Style::new().fg(green_color).bold().paint("mouse-click"),
-        Style::new().paint("> bypasses vc-frame and sends the mouse click directly to the terminal."),
+        Style::new()
+            .paint("> bypasses vc-frame and sends the mouse click directly to the terminal."),
     ])
 }
 

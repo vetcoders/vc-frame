@@ -1,173 +1,143 @@
-# How to release vc-frame
+# Releasing vc-frame
 
-`vc-frame` is a standalone Rust binary (a Vibecrafted-tuned zellij fork). A
-release ships prebuilt, checksummed, GPG-signed binaries plus a `manifest.json`,
-and is installable from a single `curl … | sh`. This document is the runbook for
-cutting one.
+vc-frame uses a **single-repository, single-tag release**: one `vX.Y.Z` tag in
+`vetcoders/vc-frame` creates one draft GitHub Release, builds the complete
+platform matrix, verifies the asset contract, and only then publishes it. The
+shape is intentionally Zellij-like; the trust and verification gates are
+Loctree-grade.
 
-There is **no undo button** for a real release: it is triggered by pushing a
-`vX.Y.Z` tag, which fires `.github/workflows/release.yml`. Read the whole
-runbook, do the dry-run, and only then cut the tag.
+GitHub Releases is the canonical artifact and installer owner. A future
+`vibecrafted.io` endpoint may mirror or redirect to it, but it is not on the
+critical path.
 
----
+## Why this shape
 
-## What a release publishes
+| Concern | Zellij model | Loctree suite model | vc-frame decision |
+|---|---|---|---|
+| Ownership | One source repo and one GitHub Release | Suite orchestrates crates, thin repos, npm, bundles and taps | One source repo and one GitHub Release |
+| Trigger | Version tag or manual draft | Several manual/tag workflows and downstream releases | Version tag or manual candidate draft |
+| Platform builds | One normal/no-web matrix | Several matrices across binary, package and bundle channels | One normal/no-web matrix |
+| Trust | Checksums; limited signing policy | GPG sidecars, Apple signing/notarization, cross-channel gates | SHA256 plus mandatory GPG for Unix archives; no unsigned publish |
+| Atomicity | Release is assembled directly | Cascade is powerful but has more partial-failure boundaries | Draft first, publish only after every required asset exists |
+| Installer | Release assets are primary | Multiple package/install channels | Versionless `install.sh` asset points to the tagged assets |
+| Complexity | Low | High, justified by a product suite | Low until vc-frame has real downstream channels |
 
-For each supported target, `release.yml` uploads to the GitHub release:
+Do not copy Loctree's multi-repository cascade into vc-frame until vc-frame
+actually has crates, npm platform packages, taps, or thin distribution repos to
+coordinate. Adding those boundaries early would create failure modes without
+creating user value.
 
-| Asset | Purpose |
-|---|---|
-| `vc-frame-<target>.tar.gz` (`.zip` on Windows) | the binary archive (bare `vc-frame` at the archive root) |
-| `vc-frame-<target>.tar.gz.sha256` | SHA256 of the **archive** (verify-before-extract) |
-| `vc-frame-<target>.tar.gz.sig` | detached GPG signature of the archive (Unix targets) |
-| `vc-frame-<target>-installer.msi` + `.sha256` | Windows MSI (built from `wix/main.wxs` + `wix/VcFrame.wxl`) |
+## Release asset contract
 
-Once per release, a `publish-manifest` job also uploads:
+Every supported target publishes a full build and a `no-web` build:
 
-| Asset | Purpose |
-|---|---|
-| `manifest.json` | source of truth the installer reads to resolve the per-target archive name |
-| `vc-frame-signing.asc` | the **public** half of the release key (GPG trust root for the installer) |
+- `vc-frame-<target>.tar.gz` on Unix, or `.zip` on Windows
+- an archive-level `.sha256` sidecar
+- a detached `.sig` for every Unix archive
+- Windows MSI installers and checksum sidecars
 
-A `-no-web` variant of each archive is built in parallel for environments
-without the web/control-plane assets. The canonical installer resolves the full
-(web) build; `-no-web` is a secondary channel.
+The release also contains:
 
-### Supported targets
+- `manifest.json`, the installer's target-to-archive map
+- `vc-frame-signing.asc`, the public release key
+- `install.sh`, the versionless canonical installer
 
-The build matrix (`release.yml`) covers:
+Supported targets are x86_64/aarch64 Linux musl, x86_64/aarch64 macOS, and
+x86_64 Windows MSVC.
 
-- `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` — **musl-static**.
-  vc-frame is standalone (no native embedder), so musl is the maximally-portable
-  choice. The installer's `target_triple()` resolves Linux to `-musl`; these
-  names **must** stay in lockstep with what `release.yml` uploads.
-- `x86_64-apple-darwin`, `aarch64-apple-darwin`
-- `x86_64-pc-windows-msvc`
+## Trust root
 
----
+The workflow accepts three repository secrets:
 
-## Signing (operator-provided key material)
+- `GPG_PRIVATE_KEY`: ASCII-armored private signing key
+- `GPG_PASSPHRASE`: optional passphrase for that key
+- `GPG_PUBLIC_KEY`: ASCII-armored public key published with the release
 
-GPG is the release trust root. The **private** key never lives in this repo or
-in any agent-authored file — only the signing *step* and the public-key publish
-are wired in `release.yml`. The key is provided at release time via repository
-secrets:
+Candidates and tags fail before building if the private or public key is
+missing. `tools/install.sh` defaults to strict GPG verification and also
+requires a pinned `VCFRAME_GPG_FINGERPRINT`; downloading a key and signature
+from the same untrusted location is not treated as proof of identity.
 
-- `GPG_PRIVATE_KEY` — ASCII-armored private key, imported on each build runner.
-- `GPG_PASSPHRASE` — passphrase for that key (loopback pinentry).
-- `GPG_PUBLIC_KEY` — ASCII-armored public key, published as `vc-frame-signing.asc`.
+The operator vault's `vibecrafted-signing.key/.pub` pair is RSA/PEM, not GPG,
+so it cannot be dropped into this contract without changing the signature
+format and installer. Loctree's release path can use a GPG identity already in
+the runner keyring. Reusing that GPG identity is technically valid if VetCoders
+intentionally wants one product-family trust root, but a dedicated vc-frame
+key or signing subkey gives cleaner revocation and blast-radius boundaries. In
+either case, never commit private key material.
 
-The operator's keys live in the `~/.keys` vault. When the secrets are absent
-(e.g. a `workflow_dispatch` dry-run), the build still succeeds but emits
-**unsigned** artifacts and a loud `::warning::`. A real `vX.Y.Z` release must run
-with the secrets present.
+Before the first public release:
 
-Once the release key is minted, record its fingerprint and set it as the
-installer default (`VCFRAME_GPG_FINGERPRINT`) so foreign installs pin the key
-instead of trusting-on-publish.
+1. Configure the three repository secrets.
+2. Record the selected public key fingerprint as the installer's default or
+   require callers to pass `VCFRAME_GPG_FINGERPRINT`.
+3. Run the candidate workflow and prove the signed installer path.
 
----
+## Candidate release
 
-## The canonical installer
+Run **Actions → Release → Run workflow**. The workflow:
 
-`tools/install.sh` is the script `https://vibecrafted.io/install.sh` serves
-(operator turf — see *Operator buttons* below). It:
+1. verifies Cargo and installer versions match;
+2. requires signing inputs;
+3. runs `make semgrep` and `make ci`;
+4. creates draft `candidate-<run-id>`;
+5. builds and signs the full matrix;
+6. verifies the complete asset list;
+7. leaves the candidate as a draft.
 
-1. resolves `target_triple()` (Linux → `-musl`),
-2. fetches `manifest.json` → the per-target archive name,
-3. downloads the archive + `.sha256` + `.sig`,
-4. verifies the SHA256 (always) and the GPG signature (trust root under
-   `VCFRAME_REQUIRE_GPG=1`, the default),
-5. extracts the bare `vc-frame` binary into `INSTALL_DIR` (default `~/.local/bin`),
-6. ensures `INSTALL_DIR` is on `PATH`,
-7. hard-checks `vc-frame --version` — the exact contract the Vibecrafted
-   foundations gate enforces (`binary_runs vc-frame`).
+Candidate runs never become `latest` and never publish a production release.
 
-Env overrides (full list in the script header): `VCFRAME_VERSION`,
-`VCFRAME_BASE_URL`, `VCFRAME_GPG_KEY_URL`, `VCFRAME_GPG_FINGERPRINT`,
-`VCFRAME_REQUIRE_GPG`, `INSTALL_DIR`, `VCFRAME_NO_PROFILE_UPDATE`.
+## Real release
 
----
-
-## Dry-run before cutting a tag
-
-A real release is irreversible. Validate first.
-
-### 1. Build artifacts without releasing
-
-Trigger the workflow via **`workflow_dispatch`** (Actions → Release → Run
-workflow). This produces a *draft* release with all artifacts under the `main`
-tag name and never publishes a `vX.Y.Z`. Inspect the asset names — every asset
-must be `vc-frame-`prefixed and each archive's checksum/signature name must match
-its archive.
-
-### 2. Smoke-test the installer locally
-
-Point the installer at a local `file://` test release built from any `vc-frame`
-binary (the layout exactly mirrors what `release.yml` uploads):
+Only cut a tag from the reviewed commit on `main`:
 
 ```sh
-REL=/tmp/vcframe-test/0.45.4; mkdir -p "$REL" /tmp/stage
-cp "$(command -v vc-frame)" /tmp/stage/vc-frame
-target="$(uname -m)-apple-darwin"            # or *-unknown-linux-musl on Linux
-tar czf "$REL/vc-frame-$target.tar.gz" -C /tmp/stage vc-frame
-( cd "$REL" && shasum -a 256 "vc-frame-$target.tar.gz" > "vc-frame-$target.tar.gz.sha256" )
-printf '{ "artifacts": { "%s": "vc-frame-%s.tar.gz" } }\n' "$target" "$target" > "$REL/manifest.json"
-
-VCFRAME_VERSION=0.45.4 VCFRAME_BASE_URL="file:///tmp/vcframe-test" \
-VCFRAME_REQUIRE_GPG=0 INSTALL_DIR=/tmp/vcframe-bin VCFRAME_NO_PROFILE_UPDATE=1 \
-sh tools/install.sh
-/tmp/vcframe-bin/vc-frame --version    # must print: vc-frame X.Y.Z
+version=0.45.4
+git switch main
+git pull --ff-only origin main
+git tag -a "v$version" -m "vc-frame v$version"
+git push origin "v$version"
 ```
 
-When a signed release exists, drop `VCFRAME_REQUIRE_GPG=0` to exercise the full
-GPG path against the published `vc-frame-signing.asc`.
+The tag must match `[workspace.package].version` in `Cargo.toml` and the default
+version in `tools/install.sh`. The workflow creates a draft, uploads all assets,
+checks the contract through the GitHub API, and publishes only after all jobs
+succeed.
 
----
-
-## Cutting the real release
-
-> ⛔ **Operator button.** The steps below trigger an irreversible release and
-> must be performed by the operator, not an agent.
-
-1. Bump `version` in the workspace `[workspace.package]` of the root `Cargo.toml`.
-2. Confirm `GPG_PRIVATE_KEY` / `GPG_PASSPHRASE` / `GPG_PUBLIC_KEY` secrets are set.
-3. Commit, then tag and push:
-   ```sh
-   git tag vX.Y.Z
-   git push origin vX.Y.Z
-   ```
-4. `release.yml` builds the matrix, signs each Unix archive, and publishes the
-   artifacts + `manifest.json` + `vc-frame-signing.asc`.
-5. The operator's `vibecrafted-io` (`make site*` / `make release*`) serves
-   `https://vibecrafted.io/install.sh` (this script) and the release artifacts.
-
----
-
-## The non-fakeable proof (foundations gate)
-
-A green tag-build is not a shipped release. The only proof is a **clean foreign
-machine** completing the Vibecrafted foundations gate:
+The canonical cold install is:
 
 ```sh
-curl -fsSL https://vibecrafted.io/install.sh | sh   # installs vc-frame
-vc-frame --version                                   # must run
-# then, in a vibecrafted checkout:
-make install                                         # foundations gate must pass
+VCFRAME_GPG_FINGERPRINT=<pinned-fingerprint> \
+  sh -c "$(curl -fsSL https://github.com/vetcoders/vc-frame/releases/latest/download/install.sh)"
+vc-frame --version
 ```
 
-The gate (`scripts/install-foundations.sh` → `install_vcframe`) runs
-`binary_runs vc-frame` after `curl $VCFRAME_INSTALL_URL | sh`. GPG is **not**
-required at the gate — only that `vc-frame --version`/`--help` succeeds. Before
-this runbook existed, that gate failed with `vc-frame: MISSING` and aborted
-every foreign `make install`. A release is "done" only when this line is green
-on a machine that never built vc-frame.
+## Local installer smoke
 
----
+An unsigned local fixture may exercise archive resolution and SHA verification:
 
-## Operator buttons (never an agent)
+```sh
+REL=/tmp/vcframe-test/v0.45.4
+mkdir -p "$REL" /tmp/vcframe-stage
+cp "$(command -v vc-frame)" /tmp/vcframe-stage/vc-frame
+target="$(uname -m)-apple-darwin" # use *-unknown-linux-musl on Linux
+tar czf "$REL/vc-frame-$target.tar.gz" -C /tmp/vcframe-stage vc-frame
+(cd "$REL" && shasum -a 256 "vc-frame-$target.tar.gz" > "vc-frame-$target.tar.gz.sha256")
+printf '{"artifacts":{"%s":"vc-frame-%s.tar.gz"}}\n' "$target" "$target" > "$REL/manifest.json"
 
-- Cutting the `vX.Y.Z` tag (triggers the irreversible release).
-- Wiring/serving `vibecrafted.io/install.sh` + the artifacts via `vibecrafted-io`.
-- The GPG **private** key material in `~/.keys` (the runner/secret provides it at
-  release time; an agent only wires the signing step and publishes the public key).
+VCFRAME_VERSION=0.45.4 VCFRAME_BASE_URL=file:///tmp/vcframe-test \
+VCFRAME_REQUIRE_GPG=0 INSTALL_DIR=/tmp/vcframe-bin \
+VCFRAME_NO_PROFILE_UPDATE=1 sh tools/install.sh
+/tmp/vcframe-bin/vc-frame --version
+```
+
+The candidate and final release must additionally prove strict GPG
+verification against the selected pinned fingerprint.
+
+## Rollback
+
+Release assets are immutable. Do not replace files underneath an existing tag.
+If a candidate is wrong, delete its draft. If a published release is wrong,
+mark it non-latest, document the defect, and publish a fixed patch version. A
+rollback is complete only when the canonical installer resolves to a verified
+good release and a clean-machine smoke passes.

@@ -2,7 +2,7 @@ use super::Tab;
 use crate::pane_groups::PaneGroups;
 use crate::panes::sixel::SixelImageStore;
 use crate::screen::CopyOptions;
-use crate::{os_input_output::ServerOsApi, panes::PaneId, thread_bus::ThreadSenders, ClientId};
+use crate::{ClientId, os_input_output::ServerOsApi, panes::PaneId, thread_bus::ThreadSenders};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use zellij_utils::data::{Direction, NewPanePlacement, Resize, ResizeStrategy, WebSharing};

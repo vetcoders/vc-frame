@@ -28,7 +28,7 @@ vc-frame is geared toward beginner and power users alike - allowing deep customi
 
 vc-frame includes a built-in [web-client](https://zellij.dev/tutorials/web-client/), making a terminal optional.
 
-You can get started by building `vc-frame` locally or using the compatibility `zellij` alias.
+You can get started from a tagged release or build `vc-frame` locally.
 
 For the redesign promise, proof, and quick-start path, read [docs/VC_FRAME_OPERATOR_SURFACE.md](docs/VC_FRAME_OPERATOR_SURFACE.md).
 
@@ -45,13 +45,23 @@ The Vibecrafted fleet contracts are still release-blocking: `list-sessions --no-
 
 ## How do I install it?
 
-The current supported preview path is a source checkout plus local install:
+For a published release, use the signed GitHub Release installer:
+
+```bash
+VCFRAME_GPG_FINGERPRINT=<pinned-fingerprint> \
+  sh -c "$(curl -fsSL https://github.com/vetcoders/vc-frame/releases/latest/download/install.sh)"
+vc-frame --version
+```
+
+Before the first release is published, use a source checkout:
 
 ```bash
 make install
 ```
 
-This installs `vc-frame` and keeps `zellij` as a compatibility symlink for existing sessions and scripts.
+This installs `vc-frame`. Existing Zellij configuration and layout concepts
+remain compatible, but vc-frame does not claim ownership of the public
+`zellij` executable or package channel.
 
 This is not the same as a public package channel. Upstream distro/Homebrew packages named `zellij` install upstream Zellij, not this VetCoders `vc-frame` runtime. See [docs/THIRD_PARTY_INSTALL.md](docs/THIRD_PARTY_INSTALL.md) for that compatibility boundary and [docs/RELEASE.md](docs/RELEASE.md) for the release-grade `curl ... | sh` path.
 

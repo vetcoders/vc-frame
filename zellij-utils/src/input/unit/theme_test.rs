@@ -7,7 +7,6 @@ fn theme_test_dir(theme: String) -> PathBuf {
     let theme_dir = root.join("src/input/unit/fixtures/themes");
     theme_dir.join(theme)
 }
-
 #[test]
 fn dracula_theme_from_file() {
     let path = theme_test_dir("dracula.kdl".into());
@@ -35,4 +34,3 @@ fn default_themes_from_assets() {
         }
     }
 }
-

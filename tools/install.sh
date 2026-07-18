@@ -2,21 +2,19 @@
 # vc-frame installer — canonical curl | sh entry point.
 #
 # Usage:
-#   curl -fsSL https://vibecrafted.io/install.sh | sh
+#   VCFRAME_GPG_FINGERPRINT=<pinned-fingerprint> \
+#     sh -c "$(curl -fsSL https://github.com/vetcoders/vc-frame/releases/latest/download/install.sh)"
 #
 # Env overrides:
 #   VCFRAME_VERSION        release version (default: 0.45.4)
 #   INSTALL_DIR            where the `vc-frame` binary is placed (default: ~/.local/bin)
-#   VCFRAME_BASE_URL       release base URL (default: https://vibecrafted.io/releases)
-#                          The per-version artifacts live under $BASE_URL/$VERSION/.
-#                          Point this at a GitHub release download dir to test:
-#                          VCFRAME_BASE_URL=https://github.com/VetCoders/vc-frame/releases/download
+#   VCFRAME_BASE_URL       release base URL (default: GitHub Releases download root)
+#                          Per-version artifacts live under $BASE_URL/v$VERSION/.
 #   VCFRAME_GPG_KEY_URL    release signing public key URL
-#                          (default: $BASE_URL/$VERSION/vc-frame-signing.asc)
-#   VCFRAME_GPG_FINGERPRINT  expected release key fingerprint. When set, the
-#                          imported public key MUST match it. When empty, the
-#                          published key is trusted on publish (signature still
-#                          verified) — set this once the release key is known.
+#                          (default: $BASE_URL/v$VERSION/vc-frame-signing.asc)
+#   VCFRAME_GPG_FINGERPRINT  expected release key fingerprint. The imported
+#                          public key MUST match it. Strict mode rejects an
+#                          empty fingerprint.
 #   VCFRAME_REQUIRE_GPG=1  fail if the GPG key or .sig sidecar is unavailable
 #                          (default: 1). Set 0 to allow install without a
 #                          signature (still enforces the SHA256 sidecar).
@@ -44,9 +42,10 @@ umask 022
 
 VERSION="${VCFRAME_VERSION:-0.45.4}"
 INSTALL_DIR="${INSTALL_DIR:-"$HOME/.local/bin"}"
-BASE_URL="${VCFRAME_BASE_URL:-https://vibecrafted.io/releases}"
+BASE_URL="${VCFRAME_BASE_URL:-https://github.com/vetcoders/vc-frame/releases/download}"
 REQUIRE_GPG="${VCFRAME_REQUIRE_GPG:-1}"
-GPG_FINGERPRINT="${VCFRAME_GPG_FINGERPRINT:-}"
+DEFAULT_GPG_FINGERPRINT=""
+GPG_FINGERPRINT="${VCFRAME_GPG_FINGERPRINT:-$DEFAULT_GPG_FINGERPRINT}"
 BIN_NAME="vc-frame"
 
 red() { printf '\033[0;31m%s\033[0m\n' "$*"; }
@@ -123,6 +122,11 @@ verify_gpg_signature() {
   pub_file="$tmp/vc-frame-signing.asc"
   gnupg_home="$tmp/gnupg"
 
+  if [ "$REQUIRE_GPG" = "1" ] && [ -z "$GPG_FINGERPRINT" ]; then
+    red "strict mode requires a pinned VCFRAME_GPG_FINGERPRINT"
+    exit 1
+  fi
+
   if ! command -v gpg >/dev/null 2>&1; then
     skip_signature_verification "gpg unavailable"
     return 0
@@ -146,8 +150,6 @@ verify_gpg_signature() {
       exit 1
     fi
     green "GPG key fingerprint ok: $actual_fingerprint"
-  else
-    yellow "VCFRAME_GPG_FINGERPRINT not set; trusting the published key on publish"
   fi
 
   if ! curl -fsSL "$base_url/$(basename "$sig_file")" -o "$sig_file" 2>/dev/null; then
@@ -167,7 +169,7 @@ verify_gpg_signature() {
 
 install_prebuilt() {
   target="$1"
-  artifact_base="$BASE_URL/$VERSION"
+  artifact_base="$BASE_URL/v$VERSION"
   key_url="${VCFRAME_GPG_KEY_URL:-$artifact_base/vc-frame-signing.asc}"
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
