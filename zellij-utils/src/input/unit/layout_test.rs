@@ -315,7 +315,10 @@ fn vibecrafted_layouts_include_companion_repo_fallbacks() {
     let expected_companion_root =
         "${VIBECRAFTED_COMPANION_ROOT:-$HOME/Libraxis/vibecrafted}/skills/vc-agents";
 
-    for layout_name in ["vibecrafted", "vc-dashboard", "vc-marbles"] {
+    // "vibecrafted" dropped 2026-07-20: the default operator layout is now the
+    // operator-authored capture (plain suspended shell in the operator pane);
+    // mission-control helper resolution lives on in the dashboard/marbles layouts.
+    for layout_name in ["vc-dashboard", "vc-marbles"] {
         let (_path, raw_layout, _swap_layout) =
             Layout::stringified_from_default_assets(Path::new(layout_name)).unwrap();
         assert!(

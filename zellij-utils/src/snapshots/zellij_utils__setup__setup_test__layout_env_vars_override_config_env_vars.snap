@@ -18,11 +18,71 @@ Config {
             KeyWithModifier {
                 bare_key: Down,
                 key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Down,
+                key_modifiers: {
                     Alt,
                 },
             }: [
                 MoveFocus {
                     direction: Down,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Up,
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -330,6 +390,66 @@ Config {
         },
         Locked: {
             KeyWithModifier {
+                bare_key: Down,
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Up,
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
                 bare_key: Char(
                     'g',
                 ),
@@ -378,6 +498,36 @@ Config {
             KeyWithModifier {
                 bare_key: Down,
                 key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Down,
+                key_modifiers: {
                     Alt,
                 },
             }: [
@@ -394,6 +544,36 @@ Config {
                     direction: Some(
                         Up,
                     ),
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Up,
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -893,6 +1073,36 @@ Config {
             KeyWithModifier {
                 bare_key: Down,
                 key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Down,
+                key_modifiers: {
                     Alt,
                 },
             }: [
@@ -906,6 +1116,36 @@ Config {
             }: [
                 MoveFocus {
                     direction: Up,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Up,
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -1455,6 +1695,36 @@ Config {
             KeyWithModifier {
                 bare_key: Down,
                 key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Down,
+                key_modifiers: {
                     Alt,
                 },
             }: [
@@ -1467,6 +1737,36 @@ Config {
                 key_modifiers: {},
             }: [
                 GoToPreviousTab,
+            ],
+            KeyWithModifier {
+                bare_key: Up,
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
             ],
             KeyWithModifier {
                 bare_key: Up,
@@ -2077,6 +2377,36 @@ Config {
             KeyWithModifier {
                 bare_key: Down,
                 key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Down,
+                key_modifiers: {
                     Alt,
                 },
             }: [
@@ -2089,6 +2419,36 @@ Config {
                 key_modifiers: {},
             }: [
                 ScrollUp,
+            ],
+            KeyWithModifier {
+                bare_key: Up,
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
             ],
             KeyWithModifier {
                 bare_key: Up,
@@ -2526,11 +2886,71 @@ Config {
             KeyWithModifier {
                 bare_key: Down,
                 key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Down,
+                key_modifiers: {
                     Alt,
                 },
             }: [
                 MoveFocus {
                     direction: Down,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Up,
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -2902,6 +3322,36 @@ Config {
             KeyWithModifier {
                 bare_key: Down,
                 key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Down,
+                key_modifiers: {
                     Alt,
                 },
             }: [
@@ -2914,6 +3364,36 @@ Config {
                 key_modifiers: {},
             }: [
                 ScrollUp,
+            ],
+            KeyWithModifier {
+                bare_key: Up,
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
             ],
             KeyWithModifier {
                 bare_key: Up,
@@ -3373,11 +3853,71 @@ Config {
             KeyWithModifier {
                 bare_key: Down,
                 key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Down,
+                key_modifiers: {
                     Alt,
                 },
             }: [
                 MoveFocus {
                     direction: Down,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Up,
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -3726,11 +4266,71 @@ Config {
             KeyWithModifier {
                 bare_key: Down,
                 key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Down,
+                key_modifiers: {
                     Alt,
                 },
             }: [
                 MoveFocus {
                     direction: Down,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Up,
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -4079,11 +4679,71 @@ Config {
             KeyWithModifier {
                 bare_key: Down,
                 key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Down,
+                key_modifiers: {
                     Alt,
                 },
             }: [
                 MoveFocus {
                     direction: Down,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Up,
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -4663,6 +5323,36 @@ Config {
             KeyWithModifier {
                 bare_key: Down,
                 key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Down,
+                key_modifiers: {
                     Alt,
                 },
             }: [
@@ -4678,6 +5368,36 @@ Config {
                     direction: Some(
                         Up,
                     ),
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Up,
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -5097,11 +5817,71 @@ Config {
             KeyWithModifier {
                 bare_key: Down,
                 key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Down,
+                key_modifiers: {
                     Alt,
                 },
             }: [
                 MoveFocus {
                     direction: Down,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Up,
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -5459,6 +6239,36 @@ Config {
             KeyWithModifier {
                 bare_key: Down,
                 key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Down,
+                key_modifiers: {
                     Alt,
                 },
             }: [
@@ -5475,6 +6285,36 @@ Config {
                 },
                 SwitchToMode {
                     input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Up,
+                key_modifiers: {
+                    Ctrl,
+                    Shift,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {

@@ -150,6 +150,22 @@ keybinds clear-defaults=true {
             SwitchToMode "normal"
         }
     }
+    shared {
+        bind "Ctrl Shift down" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "down"
+                floating false
+            }
+        }
+        bind "Ctrl Shift up" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "up"
+                floating false
+            }
+        }
+    }
     shared_except "locked" {
         bind "Alt left" { MoveFocusOrTab "left"; }
         bind "Alt down" { MoveFocus "down"; }
@@ -286,3 +302,4 @@ load_plugins {
 web_client {
     font "monospace"
 }
+
