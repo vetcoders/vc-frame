@@ -41,6 +41,9 @@ worktree_dirty() {
   [[ -n "$(git -C "$REPO" status --porcelain --untracked-files=no)" ]]
 }
 
+# RETURNS non-zero rather than exiting, so callers can use it as a predicate
+# (the self-test must survive a deliberate rejection to restore its canary).
+# The dispatcher at the bottom turns a failed guard into a non-zero exit.
 guard() {
   print -- "== release provenance guard =="
   git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 \
@@ -53,17 +56,18 @@ guard() {
     print -u2 -- ""
     git -C "$REPO" status --porcelain --untracked-files=no >&2
     print -u2 -- ""
-    exit 1
+    return 1
   fi
 
   local sha; sha="$(git -C "$REPO" rev-parse HEAD)"
   info "commit: $sha"
   info "clean:  yes (tracked files match HEAD)"
   print -- "== guard passed =="
+  return 0
 }
 
 package() {
-  guard
+  guard || exit 1
 
   local sha version target
   sha="$(git -C "$REPO" rev-parse HEAD)"
@@ -151,10 +155,13 @@ self_test() {
   print -- "  PASS"
 
   local canary="$REPO/Cargo.toml"
-  local backup; backup="$(mktemp)"
-  cp "$canary" "$backup"
+  # Script-scope, not local: the EXIT trap body is evaluated when it fires,
+  # by which time a function-local would already be out of scope.
+  typeset -g SELFTEST_CANARY="$canary"
+  typeset -g SELFTEST_BACKUP; SELFTEST_BACKUP="$(mktemp)"
+  cp "$canary" "$SELFTEST_BACKUP"
   # Restore the tracked file no matter how we leave this function.
-  trap 'cp "$backup" "$canary"; rm -f "$backup"' EXIT INT TERM
+  trap 'cp "$SELFTEST_BACKUP" "$SELFTEST_CANARY"; rm -f "$SELFTEST_BACKUP"' EXIT INT TERM
 
   print -- "[2/3] dirty tree must be rejected"
   printf '\n# release-provenance self-test canary\n' >> "$canary"
@@ -163,10 +170,12 @@ self_test() {
   fi
   print -- "  PASS"
 
-  cp "$backup" "$canary"; rm -f "$backup"; trap - EXIT INT TERM
+  cp "$SELFTEST_BACKUP" "$canary"; rm -f "$SELFTEST_BACKUP"; trap - EXIT INT TERM
 
   print -- "[3/3] restored tree must pass again"
-  worktree_dirty && die "self-test failed to restore $canary"
+  if worktree_dirty; then
+    die "self-test failed to restore $canary"
+  fi
   guard >/dev/null || die "guard rejected the restored tree"
   print -- "  PASS"
 
