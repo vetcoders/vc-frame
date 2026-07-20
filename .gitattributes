@@ -1,0 +1,2 @@
+# Insta snapshots capture rendered terminal grids — trailing whitespace is data.
+*.snap -whitespace

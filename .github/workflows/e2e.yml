@@ -2,9 +2,9 @@ name: End to End tests
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, develop ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, develop ]
 
 env:
   CARGO_TERM_COLOR: always
@@ -12,6 +12,7 @@ env:
 jobs:
   test-e2e:
     name: Build generic binary and run tests on it
+    timeout-minutes: 90
     runs-on: [self-hosted, ops-linux]
     environment: cachix
 
@@ -47,6 +48,7 @@ jobs:
     - name: Install Rust
       uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
       with:
+        target: wasm32-wasip1
         rustflags: ""
 
     - name: Create target folder

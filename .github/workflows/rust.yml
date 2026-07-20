@@ -2,9 +2,9 @@ name: Rust
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
-    branches: [main]
+    branches: [main, develop]
   workflow_dispatch:
 
 env:
@@ -14,6 +14,7 @@ env:
 jobs:
   build:
     name: Build
+    timeout-minutes: 60
 
     strategy:
       fail-fast: false
@@ -38,6 +39,7 @@ jobs:
       - name: Setup toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
+          target: wasm32-wasip1
           rustflags: ""
 
       - name: Build
@@ -45,6 +47,7 @@ jobs:
 
   build-windows:
     name: Build (Windows)
+    timeout-minutes: 60
     runs-on: [self-hosted, windows]
 
     steps:
@@ -74,6 +77,7 @@ jobs:
 
   test:
     name: Test
+    timeout-minutes: 90
 
     strategy:
       fail-fast: false
@@ -98,13 +102,20 @@ jobs:
       - name: Setup toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
+          target: wasm32-wasip1
           rustflags: ""
 
-      - name: Test
-        run: cargo xtask test
+      - name: Workflow contract
+        run: ./scripts/workflow-contract.sh
+
+      # Canonical repo-native gate: precheck (fmt, plugins, clippy, check)
+      # + full test suite. Same command, same meaning, locally and here.
+      - name: CI gate (make ci)
+        run: make ci
 
   test-windows:
     name: Test (Windows)
+    timeout-minutes: 60
     runs-on: [self-hosted, windows]
 
     steps:
@@ -136,6 +147,7 @@ jobs:
 
   test-no-web:
     name: Test (No Web)
+    timeout-minutes: 90
     runs-on: [self-hosted, ops-linux]
 
     steps:
@@ -154,6 +166,7 @@ jobs:
       - name: Setup toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
+          target: wasm32-wasip1
           rustflags: ""
 
       - name: Test without web support
@@ -161,6 +174,7 @@ jobs:
 
   format:
     name: Check Formatting
+    timeout-minutes: 15
     runs-on: [self-hosted, ops-linux]
 
     steps:

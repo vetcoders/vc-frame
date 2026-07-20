@@ -192,14 +192,12 @@ impl ZellijPlugin for State {
             Event::Key(key) => {
                 should_render = self.handle_key(key);
             },
-            Event::Mouse(mouse_event) => {
-                if self.is_rail {
-                    if self.error.is_some() {
-                        self.error = None;
-                        should_render = true;
-                    } else {
-                        should_render = self.handle_session_rail_mouse(mouse_event);
-                    }
+            Event::Mouse(mouse_event) if self.is_rail => {
+                if self.error.is_some() {
+                    self.error = None;
+                    should_render = true;
+                } else {
+                    should_render = self.handle_session_rail_mouse(mouse_event);
                 }
             },
             Event::PermissionRequestResult(_result) => {
@@ -1899,7 +1897,10 @@ mod rail_tests {
         );
 
         let at_end = vec![session("alpha", false), session("beta", true)];
-        assert_eq!(relative_session_target(&at_end, 1), Some("alpha".to_owned()));
+        assert_eq!(
+            relative_session_target(&at_end, 1),
+            Some("alpha".to_owned())
+        );
     }
 
     #[test]
