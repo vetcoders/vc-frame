@@ -31,6 +31,7 @@ interprocess = { workspace = true }
 log = { workspace = true }
 miette = { workspace = true }
 names = { workspace = true }
+serde_json = { workspace = true }
 suggest = { workspace = true }
 thiserror = { workspace = true }
 isahc = { workspace = true }

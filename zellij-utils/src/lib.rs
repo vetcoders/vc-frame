@@ -15,6 +15,7 @@ pub mod kdl;
 pub mod pane_size;
 pub mod plugin_api;
 pub mod position;
+pub mod run_triage;
 pub mod session_serialization;
 pub mod setup;
 pub mod shared;

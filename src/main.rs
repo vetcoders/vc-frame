@@ -1,4 +1,5 @@
 mod commands;
+mod run_triage_cli;
 #[cfg(test)]
 mod tests;
 
@@ -201,6 +202,42 @@ fn main() {
             };
             commands::send_action_to_session(command_cli_action, opts.session, config);
             std::process::exit(0);
+        }
+        if let Some(Command::Sessions(Sessions::TriageRun {
+            run,
+            exit_code,
+            origin_session,
+            origin_tab,
+            pane_id,
+            cwd,
+            dry_run,
+            command,
+        })) = opts.command
+        {
+            match run_triage_cli::triage_run(
+                run,
+                exit_code,
+                origin_session,
+                origin_tab,
+                pane_id,
+                cwd,
+                dry_run,
+                command,
+            ) {
+                Ok(report) => {
+                    println!(
+                        "{} → {} (scrollback: {})",
+                        report.run,
+                        report.bucket.session_name(),
+                        report.scrollback.display()
+                    );
+                    std::process::exit(0);
+                },
+                Err(e) => {
+                    eprintln!("{}", e);
+                    std::process::exit(2);
+                },
+            }
         }
         if let Some(Command::Sessions(Sessions::ConvertConfig { old_config_file })) = opts.command {
             commands::convert_old_config_file(old_config_file);

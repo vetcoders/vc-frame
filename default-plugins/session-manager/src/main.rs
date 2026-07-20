@@ -496,10 +496,54 @@ fn format_session_rail_entry(session: &SessionUiInfo, ordinal: usize) -> String 
     format!("{:02} {} {}", ordinal, status, session.name)
 }
 
+/// Status buckets finished runs are transferred into.
+///
+/// These names are a wire contract with the triage reaper — they must stay
+/// identical to `FINALIZED_RUNS_SESSION` / `NEEDS_ATTENTION_SESSION` in
+/// `zellij-utils/src/run_triage.rs`. The plugin cannot import them (pulling
+/// zellij-utils into a wasm plugin for two string literals is not worth it),
+/// so `bucket_names_match_the_triage_contract` pins them from this side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BucketKind {
+    Finalized,
+    NeedsAttention,
+}
+
+const RAIL_BUCKETS: [BucketKind; 2] = [BucketKind::Finalized, BucketKind::NeedsAttention];
+
+impl BucketKind {
+    fn session_name(&self) -> &'static str {
+        match self {
+            BucketKind::Finalized => "Finalized runs",
+            BucketKind::NeedsAttention => "Needs attention",
+        }
+    }
+    /// Hotkey, deliberately outside the '0'-'9' range the session ordinals use.
+    fn hotkey(&self) -> char {
+        match self {
+            BucketKind::Finalized => 'f',
+            BucketKind::NeedsAttention => 'n',
+        }
+    }
+    fn from_session_name(name: &str) -> Option<Self> {
+        RAIL_BUCKETS
+            .into_iter()
+            .find(|bucket| bucket.session_name() == name)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SessionRailRowKind {
     Session(usize),
-    LiveProcess { session_index: usize },
+    LiveProcess {
+        session_index: usize,
+    },
+    /// Pinned bucket row. `session_index` is `None` until the reaper has had a
+    /// reason to create the bucket session — the row still shows, at zero.
+    Bucket {
+        bucket: BucketKind,
+        session_index: Option<usize>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -512,6 +556,20 @@ impl SessionRailRow {
     fn is_live_process(&self) -> bool {
         matches!(self.kind, SessionRailRowKind::LiveProcess { .. })
     }
+    fn is_bucket(&self) -> bool {
+        matches!(self.kind, SessionRailRowKind::Bucket { .. })
+    }
+}
+
+fn format_bucket_rail_entry(bucket: BucketKind, count: usize, is_current_session: bool) -> String {
+    let status = if is_current_session { "*" } else { "-" };
+    format!(
+        " {} {} {} · {}",
+        bucket.hotkey(),
+        status,
+        bucket.session_name(),
+        count
+    )
 }
 
 fn format_process_tab_rail_entry(tab: &TabUiInfo) -> String {
@@ -548,12 +606,31 @@ fn relative_session_target(sessions: &[SessionUiInfo], offset: isize) -> Option<
     sessions.get(target).map(|s| s.name.clone())
 }
 
+/// Working sessions in rail order — bucket sessions are pinned separately and
+/// must not also appear in the ordinary listing.
+fn working_session_indices(sessions: &[SessionUiInfo]) -> Vec<usize> {
+    sessions
+        .iter()
+        .enumerate()
+        .filter(|(_, session)| BucketKind::from_session_name(&session.name).is_none())
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// Resolve an ordinal keypress against the *working* sessions, so the buckets
+/// sitting at the bottom of the rail do not shift what `3` means.
+fn rail_ordinal_target(sessions: &[SessionUiInfo], character: char) -> Option<usize> {
+    let ordinal = rail_ordinal_key_to_index(character)?;
+    working_session_indices(sessions).get(ordinal).copied()
+}
+
 fn session_rail_rows(sessions: &[SessionUiInfo]) -> Vec<SessionRailRow> {
     let mut rows = vec![];
-    for (session_index, session) in sessions.iter().enumerate() {
+    for (ordinal, session_index) in working_session_indices(sessions).into_iter().enumerate() {
+        let session = &sessions[session_index];
         rows.push(SessionRailRow {
             kind: SessionRailRowKind::Session(session_index),
-            text: format_session_rail_entry(session, session_index + 1),
+            text: format_session_rail_entry(session, ordinal + 1),
         });
         rows.extend(
             session
@@ -566,7 +643,33 @@ fn session_rail_rows(sessions: &[SessionUiInfo]) -> Vec<SessionRailRow> {
                 }),
         );
     }
+    rows.extend(bucket_rail_rows(sessions));
     rows
+}
+
+/// The pinned tail of the rail. Always both buckets, whether or not their
+/// sessions exist yet — a permanent entry point beats one that appears only
+/// once something has already failed.
+fn bucket_rail_rows(sessions: &[SessionUiInfo]) -> Vec<SessionRailRow> {
+    RAIL_BUCKETS
+        .into_iter()
+        .map(|bucket| {
+            let session_index = sessions
+                .iter()
+                .position(|session| session.name == bucket.session_name());
+            let session = session_index.map(|index| &sessions[index]);
+            // One transferred run is one tab, so the tab count is the bucket count.
+            let count = session.map(|session| session.tabs.len()).unwrap_or(0);
+            let is_current_session = session.is_some_and(|session| session.is_current_session);
+            SessionRailRow {
+                kind: SessionRailRowKind::Bucket {
+                    bucket,
+                    session_index,
+                },
+                text: format_bucket_rail_entry(bucket, count, is_current_session),
+            }
+        })
+        .collect()
 }
 
 fn rail_range_to_render(
@@ -647,8 +750,13 @@ impl State {
         }
         self.ensure_rail_selection();
 
-        let session_count = self.sessions.session_ui_infos.len();
-        let rail_rows = session_rail_rows(&self.sessions.session_ui_infos);
+        let all_rows = session_rail_rows(&self.sessions.session_ui_infos);
+        // The buckets are pinned to the bottom of the rail, so only the leading
+        // working-session rows take part in scrolling.
+        let bucket_row_start = all_rows.iter().position(|row| row.is_bucket()).unwrap_or(0);
+        let (rail_rows, bucket_rows) = all_rows.split_at(bucket_row_start);
+
+        let session_count = working_session_indices(&self.sessions.session_ui_infos).len();
         let live_process_count = rail_rows.iter().filter(|row| row.is_live_process()).count();
         let header = fit_rail_line(
             &format!("SESSIONS {} · LIVE {}", session_count, live_process_count),
@@ -664,8 +772,12 @@ impl State {
         if list_rows == 0 {
             return;
         }
-        let footer_rows = usize::from(rail_rows.len() > list_rows && list_rows > 1);
-        let entry_rows = list_rows.saturating_sub(footer_rows);
+        // Buckets only give up their pinned slots when the rail is too short to
+        // hold even one working session alongside them.
+        let pinned_rows = bucket_rows.len().min(list_rows.saturating_sub(1));
+        let scrollable_rows = list_rows.saturating_sub(pinned_rows);
+        let footer_rows = usize::from(rail_rows.len() > scrollable_rows && scrollable_rows > 1);
+        let entry_rows = scrollable_rows.saturating_sub(footer_rows);
         let selected_index = self.sessions.selected_index.0;
         let selected_row_index = selected_index.and_then(|selected_session_index| {
             rail_rows
@@ -693,6 +805,7 @@ impl State {
                         text = text.color_range(2, 3..4);
                     }
                 },
+                SessionRailRowKind::Bucket { .. } => {},
             }
             print_text_with_coordinates(text, 0, row, None, None);
             row += 1;
@@ -716,8 +829,30 @@ impl State {
             row += 1;
         }
 
-        while row < rows {
+        // Blank out the gap so the buckets always sit flush with the bottom
+        // edge, whatever the working-session list is doing above them.
+        let first_pinned_row = rows.saturating_sub(pinned_rows);
+        while row < first_pinned_row {
             print_text_with_coordinates(Text::new(" ".repeat(cols)), 0, row, None, None);
+            row += 1;
+        }
+
+        for bucket_row in &bucket_rows[bucket_rows.len() - pinned_rows..] {
+            let mut text = Text::new(fit_rail_line(&bucket_row.text, cols));
+            if cols >= 4 {
+                text = text.color_range(3, 3..4);
+            }
+            if let SessionRailRowKind::Bucket {
+                session_index: Some(session_index),
+                ..
+            } = bucket_row.kind
+            {
+                if selected_index == Some(session_index) {
+                    text = text.selected();
+                }
+                self.rail_click_map.insert(row, session_index);
+            }
+            print_text_with_coordinates(text, 0, row, None, None);
             row += 1;
         }
     }
@@ -739,10 +874,18 @@ impl State {
                 if character == '\n' {
                     self.handle_session_rail_selection();
                     true
-                } else if let Some(index) = rail_ordinal_key_to_index(character) {
+                } else if let Some(index) =
+                    rail_ordinal_target(&self.sessions.session_ui_infos, character)
+                {
                     if self.sessions.select_session_index(index) {
                         self.handle_session_rail_selection();
                     }
+                    true
+                } else if let Some(bucket) = RAIL_BUCKETS
+                    .into_iter()
+                    .find(|bucket| bucket.hotkey() == character)
+                {
+                    self.jump_to_bucket(bucket);
                     true
                 } else {
                     false
@@ -777,6 +920,25 @@ impl State {
                 true
             },
             _ => false,
+        }
+    }
+    /// Hop to a bucket session. An empty bucket has no session behind it yet,
+    /// and conjuring one on a keypress would clutter the rail with sessions the
+    /// operator never asked for — say so instead.
+    fn jump_to_bucket(&mut self, bucket: BucketKind) {
+        let exists = self
+            .sessions
+            .session_ui_infos
+            .iter()
+            .find(|session| session.name == bucket.session_name());
+        match exists {
+            Some(session) if session.is_current_session => self.show_error("Already attached..."),
+            Some(session) => {
+                let name = session.name.clone();
+                switch_session_with_focus(&name, None, None);
+                self.reset_selected_index();
+            },
+            None => self.show_error(&format!("{} is empty", bucket.session_name())),
         }
     }
     fn switch_session_relative(&mut self, offset: isize) {
@@ -1846,6 +2008,9 @@ mod rail_tests {
                 "   ● impl-260718-120000-01000 · claude",
                 "   · audit-260718-130000-02000 · codex +1",
                 "02 - beta",
+                // the buckets are always pinned to the tail of the rail
+                " f - Finalized runs · 0",
+                " n - Needs attention · 0",
             ]
         );
         assert_eq!(rows.iter().filter(|row| row.is_live_process()).count(), 2);
@@ -1856,6 +2021,116 @@ mod rail_tests {
         let tab = TabUiInfo::for_rail_test("claude", true, "claude", 1);
 
         assert_eq!(format_process_tab_rail_entry(&tab), "   ● claude");
+    }
+
+    fn bucket_session(name: &str, tabs: usize) -> SessionUiInfo {
+        let mut bucket = session(name, false);
+        bucket.tabs = (0..tabs)
+            .map(|index| TabUiInfo::for_rail_test(&format!("run-{}", index), false, "", 0))
+            .collect();
+        bucket
+    }
+
+    #[test]
+    fn bucket_names_match_the_triage_contract() {
+        // Pinned against zellij-utils/src/run_triage.rs — the reaper creates
+        // sessions by these exact names, and a silent rename here would leave
+        // transferred runs invisible in the rail.
+        assert_eq!(BucketKind::Finalized.session_name(), "Finalized runs");
+        assert_eq!(BucketKind::NeedsAttention.session_name(), "Needs attention");
+    }
+
+    #[test]
+    fn buckets_are_pinned_below_the_working_sessions_with_live_counts() {
+        let rows = session_rail_rows(&[
+            session("alpha", true),
+            bucket_session("Finalized runs", 3),
+            session("beta", false),
+            bucket_session("Needs attention", 1),
+        ]);
+        let text: Vec<&str> = rows.iter().map(|row| row.text.as_str()).collect();
+
+        assert_eq!(
+            text,
+            vec![
+                "01 * alpha",
+                "02 - beta",
+                " f - Finalized runs · 3",
+                " n - Needs attention · 1",
+            ]
+        );
+    }
+
+    #[test]
+    fn bucket_rows_show_even_before_their_sessions_exist() {
+        let rows = session_rail_rows(&[session("alpha", true)]);
+        let buckets: Vec<&SessionRailRow> = rows.iter().filter(|row| row.is_bucket()).collect();
+
+        assert_eq!(buckets.len(), 2);
+        assert_eq!(buckets[0].text, " f - Finalized runs · 0");
+        assert_eq!(buckets[1].text, " n - Needs attention · 0");
+        assert!(matches!(
+            buckets[0].kind,
+            SessionRailRowKind::Bucket {
+                session_index: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn bucket_rows_carry_the_session_index_so_clicks_reuse_the_existing_plumbing() {
+        let rows =
+            session_rail_rows(&[session("alpha", true), bucket_session("Needs attention", 2)]);
+        let needs_attention = rows
+            .iter()
+            .find(|row| row.is_bucket() && row.text.contains("Needs"))
+            .unwrap();
+
+        assert_eq!(
+            needs_attention.kind,
+            SessionRailRowKind::Bucket {
+                bucket: BucketKind::NeedsAttention,
+                session_index: Some(1),
+            }
+        );
+    }
+
+    #[test]
+    fn buckets_do_not_shift_the_working_session_ordinals() {
+        // "Finalized runs" sits at index 1, but pressing 2 must still mean beta.
+        let sessions = vec![
+            session("alpha", true),
+            bucket_session("Finalized runs", 5),
+            session("beta", false),
+        ];
+
+        assert_eq!(rail_ordinal_target(&sessions, '1'), Some(0));
+        assert_eq!(rail_ordinal_target(&sessions, '2'), Some(2));
+        assert_eq!(rail_ordinal_target(&sessions, '3'), None);
+        assert_eq!(rail_ordinal_target(&sessions, 'f'), None);
+    }
+
+    #[test]
+    fn bucket_hotkeys_stay_clear_of_the_session_ordinals() {
+        for bucket in RAIL_BUCKETS {
+            assert_eq!(rail_ordinal_key_to_index(bucket.hotkey()), None);
+        }
+        assert_eq!(BucketKind::Finalized.hotkey(), 'f');
+        assert_eq!(BucketKind::NeedsAttention.hotkey(), 'n');
+    }
+
+    #[test]
+    fn a_bucket_session_is_never_listed_twice() {
+        let rows = session_rail_rows(&[bucket_session("Finalized runs", 2)]);
+
+        assert_eq!(rows.iter().filter(|row| row.is_bucket()).count(), 2);
+        assert!(
+            !rows
+                .iter()
+                .any(|row| matches!(row.kind, SessionRailRowKind::Session(_))),
+            "bucket session leaked into the ordinary listing"
+        );
     }
 
     #[test]

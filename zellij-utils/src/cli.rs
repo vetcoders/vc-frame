@@ -1688,6 +1688,47 @@ tail -f /tmp/my-live-logfile | vc-frame pipe --name logs --plugin https://exampl
         #[clap(short('c'), long, value_parser, display_order(4))]
         plugin_configuration: Option<PluginUserConfiguration>,
     },
+
+    /// Transfer a finished run's tab into its status bucket session
+    ///
+    /// Captures the pane's scrollback and the run metadata to durable storage,
+    /// recreates a viewer/rerun tab in "Finalized runs" (exit 0) or
+    /// "Needs attention" (exit 1+), and only then closes the origin tab. A PTY
+    /// cannot migrate between sessions, so this recreates rather than moves.
+    #[clap(name = "triage-run")]
+    TriageRun {
+        /// Run identifier — names the capture directory and the bucket tab
+        #[clap(long, value_parser)]
+        run: String,
+
+        /// Exit code of the finished run; decides the bucket
+        #[clap(long, value_parser)]
+        exit_code: i32,
+
+        /// Session the run lived in (defaults to the current session)
+        #[clap(long, value_parser)]
+        origin_session: Option<String>,
+
+        /// Tab to close once the capture is durable (defaults to the run id)
+        #[clap(long, value_parser)]
+        origin_tab: Option<String>,
+
+        /// Pane to dump, eg. terminal_3. Defaults to the focused pane.
+        #[clap(long, value_parser)]
+        pane_id: Option<String>,
+
+        /// Working directory recorded for rerun
+        #[clap(long, value_parser)]
+        cwd: Option<PathBuf>,
+
+        /// Report what would happen without touching any session
+        #[clap(long, value_parser, default_value("false"), takes_value(false))]
+        dry_run: bool,
+
+        /// The original command line, preserved so the bucket tab can rerun it
+        #[clap(last(true), value_parser)]
+        command: Vec<String>,
+    },
 }
 
 #[derive(Debug, Subcommand, Clone, Serialize, Deserialize)]
