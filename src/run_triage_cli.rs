@@ -15,7 +15,8 @@ use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use zellij_utils::run_triage::{
-    FinishedRun, RunMeta, TransferReport, TriageIo, control_plane_root, transfer_finished_run,
+    BucketKind, FinishedRun, RunMeta, TransferReport, TriageIo, control_plane_root,
+    transfer_finished_run,
 };
 use zellij_utils::sessions::session_exists;
 
@@ -190,6 +191,7 @@ impl TriageIo for CliTriageIo {
 pub(crate) fn triage_run(
     run: String,
     exit_code: i32,
+    bucket_verdict: Option<BucketKind>,
     origin_session: Option<String>,
     origin_tab: Option<String>,
     pane_id: Option<String>,
@@ -213,6 +215,7 @@ pub(crate) fn triage_run(
         pane_id,
         command,
         cwd,
+        bucket_verdict,
     };
     let root = control_plane_root()
         .ok_or_else(|| "cannot resolve the control plane root (set VIBECRAFTED_HOME)".to_owned())?;
@@ -252,7 +255,6 @@ pub(crate) fn triage_run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zellij_utils::run_triage::BucketKind;
 
     fn meta(command: Vec<&str>) -> RunMeta {
         RunMeta {

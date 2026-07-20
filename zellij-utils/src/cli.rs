@@ -1692,18 +1692,28 @@ tail -f /tmp/my-live-logfile | vc-frame pipe --name logs --plugin https://exampl
     /// Transfer a finished run's tab into its status bucket session
     ///
     /// Captures the pane's scrollback and the run metadata to durable storage,
-    /// recreates a viewer/rerun tab in "Finalized runs" (exit 0) or
-    /// "Needs attention" (exit 1+), and only then closes the origin tab. A PTY
-    /// cannot migrate between sessions, so this recreates rather than moves.
+    /// recreates a viewer/rerun tab in "Finalized runs", "Failed runs" or
+    /// "Needs attention", and only then closes the origin tab. A PTY cannot
+    /// migrate between sessions, so this recreates rather than moves.
     #[clap(name = "triage-run")]
     TriageRun {
         /// Run identifier — names the capture directory and the bucket tab
         #[clap(long, value_parser)]
         run: String,
 
-        /// Exit code of the finished run; decides the bucket
+        /// Exit code of the finished run; picks the bucket when --bucket is absent
         #[clap(long, value_parser)]
         exit_code: i32,
+
+        /// Bucket verdict from the caller: finalized, failed or needs-attention.
+        ///
+        /// The drawer is a conjunction of signals — exit code, report state, log
+        /// volume — and only the caller can see all of them. When given, this
+        /// overrides the exit-code derivation. When absent, the exit code decides
+        /// and a non-zero exit lands in "Needs attention" rather than claiming a
+        /// clean failure it cannot verify.
+        #[clap(long, value_parser = crate::run_triage::parse_bucket_verdict)]
+        bucket: Option<crate::run_triage::BucketKind>,
 
         /// Session the run lived in (defaults to the current session)
         #[clap(long, value_parser)]

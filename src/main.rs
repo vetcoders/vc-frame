@@ -206,6 +206,7 @@ fn main() {
         if let Some(Command::Sessions(Sessions::TriageRun {
             run,
             exit_code,
+            bucket,
             origin_session,
             origin_tab,
             pane_id,
@@ -217,6 +218,7 @@ fn main() {
             match run_triage_cli::triage_run(
                 run,
                 exit_code,
+                bucket,
                 origin_session,
                 origin_tab,
                 pane_id,

@@ -16,21 +16,42 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// Canonical bucket session for runs that exited cleanly.
+/// Canonical bucket session for runs that finished cleanly.
 pub const FINALIZED_RUNS_SESSION: &str = "Finalized runs";
-/// Canonical bucket session for runs that exited with a failure code.
+/// Canonical bucket session for runs that failed cleanly — the failure is
+/// understood, there is nothing to investigate.
+pub const FAILED_RUNS_SESSION: &str = "Failed runs";
+/// Canonical bucket session for runs whose signals disagree, or are missing.
 pub const NEEDS_ATTENTION_SESSION: &str = "Needs attention";
 
-/// Which bucket a finished run belongs to, decided purely by its exit code.
+/// Which drawer a finished run lands in.
+///
+/// The verdict is a *conjunction of signals* — exit code, report presence and
+/// state, log volume. Only the caller can see all of them: report and log
+/// signals live in vibecrafted's control plane, not in this repo. So this
+/// module transports a verdict, it does not invent one. [`for_exit_code`] is
+/// the fallback for callers that have no verdict to give.
+///
+/// [`for_exit_code`]: BucketKind::for_exit_code
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BucketKind {
-    /// exit 0
+    /// Exited 0 *and* delivered a report.
     Finalized,
-    /// exit 1 and above, or a signal death
+    /// Exited non-zero, no report, minimal log — a clean, legible failure.
+    Failed,
+    /// Anything in between, or with signals that contradict each other.
     NeedsAttention,
 }
 
 impl BucketKind {
+    /// Fallback derivation for callers with nothing but an exit code —
+    /// a manual `triage-run` invocation, mostly.
+    ///
+    /// Note what this deliberately never returns: `Failed`. "Clean failure"
+    /// is a claim about the report and the log as much as about the exit
+    /// code, and a caller that cannot see those signals cannot make it. A
+    /// bare non-zero exit is contradictory *by ignorance*, so it lands in
+    /// `NeedsAttention` — the fallback must not fake certainty it lacks.
     pub fn for_exit_code(exit_code: i32) -> Self {
         if exit_code == 0 {
             BucketKind::Finalized
@@ -42,6 +63,7 @@ impl BucketKind {
     pub fn session_name(&self) -> &'static str {
         match self {
             BucketKind::Finalized => FINALIZED_RUNS_SESSION,
+            BucketKind::Failed => FAILED_RUNS_SESSION,
             BucketKind::NeedsAttention => NEEDS_ATTENTION_SESSION,
         }
     }
@@ -51,9 +73,34 @@ impl BucketKind {
     pub fn from_session_name(name: &str) -> Option<Self> {
         match name {
             FINALIZED_RUNS_SESSION => Some(BucketKind::Finalized),
+            FAILED_RUNS_SESSION => Some(BucketKind::Failed),
             NEEDS_ATTENTION_SESSION => Some(BucketKind::NeedsAttention),
             _ => None,
         }
+    }
+
+    /// The `--bucket` spelling, kebab-case and stable — it is a wire contract
+    /// with the caller-side classifier.
+    pub fn cli_value(&self) -> &'static str {
+        match self {
+            BucketKind::Finalized => "finalized",
+            BucketKind::Failed => "failed",
+            BucketKind::NeedsAttention => "needs-attention",
+        }
+    }
+}
+
+/// Parse an explicit `--bucket` verdict. Rejects anything it does not know
+/// rather than guessing — a typo'd verdict must not silently become a bucket.
+pub fn parse_bucket_verdict(value: &str) -> Result<BucketKind, String> {
+    match value {
+        "finalized" => Ok(BucketKind::Finalized),
+        "failed" => Ok(BucketKind::Failed),
+        "needs-attention" => Ok(BucketKind::NeedsAttention),
+        other => Err(format!(
+            "unknown bucket verdict '{}' (expected finalized, failed or needs-attention)",
+            other
+        )),
     }
 }
 
@@ -72,11 +119,17 @@ pub struct FinishedRun {
     /// Command line, preserved so the bucket tab can offer a one-keypress rerun.
     pub command: Vec<String>,
     pub cwd: Option<PathBuf>,
+    /// The caller's verdict, when it has one. `None` means "I only know the
+    /// exit code" and hands the decision to [`BucketKind::for_exit_code`].
+    pub bucket_verdict: Option<BucketKind>,
 }
 
 impl FinishedRun {
+    /// The caller's verdict wins whenever there is one — it saw the report and
+    /// the log; we only ever saw the exit code.
     pub fn bucket(&self) -> BucketKind {
-        BucketKind::for_exit_code(self.exit_code)
+        self.bucket_verdict
+            .unwrap_or_else(|| BucketKind::for_exit_code(self.exit_code))
     }
 }
 
@@ -278,6 +331,14 @@ mod tests {
             pane_id: Some("terminal_3".to_owned()),
             command: vec!["claude".to_owned(), "--resume".to_owned()],
             cwd: Some(PathBuf::from("/repo")),
+            bucket_verdict: None,
+        }
+    }
+
+    fn with_verdict(exit_code: i32, verdict: BucketKind) -> FinishedRun {
+        FinishedRun {
+            bucket_verdict: Some(verdict),
+            ..finished(exit_code)
         }
     }
 
@@ -344,8 +405,10 @@ mod tests {
     }
 
     #[test]
-    fn exit_code_decides_the_bucket() {
+    fn the_exit_code_fallback_never_claims_a_clean_failure() {
         assert_eq!(BucketKind::for_exit_code(0), BucketKind::Finalized);
+        // Not `Failed`: without report and log signals a non-zero exit is
+        // contradictory by ignorance, and the fallback must not fake certainty.
         assert_eq!(BucketKind::for_exit_code(1), BucketKind::NeedsAttention);
         assert_eq!(BucketKind::for_exit_code(137), BucketKind::NeedsAttention);
         assert_eq!(
@@ -359,16 +422,74 @@ mod tests {
     }
 
     #[test]
+    fn an_explicit_verdict_overrides_the_exit_code_derivation() {
+        // The caller saw the report and the log; we only saw the exit code.
+        assert_eq!(
+            with_verdict(1, BucketKind::Failed).bucket(),
+            BucketKind::Failed
+        );
+        // Exit 0 with a missing report is still not a finalized run.
+        assert_eq!(
+            with_verdict(0, BucketKind::NeedsAttention).bucket(),
+            BucketKind::NeedsAttention
+        );
+        assert_eq!(
+            with_verdict(3, BucketKind::Finalized).bucket(),
+            BucketKind::Finalized
+        );
+    }
+
+    #[test]
+    fn a_verdictless_run_still_falls_back_to_the_exit_code() {
+        // Backward compatibility: the flag-less W2-B-2 caller keeps working.
+        assert_eq!(finished(0).bucket(), BucketKind::Finalized);
+        assert_eq!(finished(1).bucket(), BucketKind::NeedsAttention);
+    }
+
+    #[test]
+    fn bucket_verdicts_round_trip_through_their_cli_spelling() {
+        for bucket in [
+            BucketKind::Finalized,
+            BucketKind::Failed,
+            BucketKind::NeedsAttention,
+        ] {
+            assert_eq!(parse_bucket_verdict(bucket.cli_value()), Ok(bucket));
+        }
+        // A typo must not silently become a bucket.
+        assert!(parse_bucket_verdict("needs_attention").is_err());
+        assert!(parse_bucket_verdict("").is_err());
+    }
+
+    #[test]
     fn bucket_sessions_are_recognised_by_name() {
         assert_eq!(
             BucketKind::from_session_name("Finalized runs"),
             Some(BucketKind::Finalized)
         );
         assert_eq!(
+            BucketKind::from_session_name("Failed runs"),
+            Some(BucketKind::Failed)
+        );
+        assert_eq!(
             BucketKind::from_session_name("Needs attention"),
             Some(BucketKind::NeedsAttention)
         );
         assert_eq!(BucketKind::from_session_name("Operator"), None);
+    }
+
+    #[test]
+    fn a_failed_verdict_transfers_into_its_own_drawer() {
+        let mut io = FakeIo::healthy();
+        let report = transfer_finished_run(
+            &mut io,
+            &with_verdict(1, BucketKind::Failed),
+            Path::new("/cp"),
+            1_753_000_000,
+        )
+        .unwrap();
+
+        assert_eq!(report.bucket, BucketKind::Failed);
+        assert_eq!(report.bucket.session_name(), "Failed runs");
     }
 
     #[test]

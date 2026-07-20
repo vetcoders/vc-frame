@@ -499,29 +499,40 @@ fn format_session_rail_entry(session: &SessionUiInfo, ordinal: usize) -> String 
 /// Status buckets finished runs are transferred into.
 ///
 /// These names are a wire contract with the triage reaper — they must stay
-/// identical to `FINALIZED_RUNS_SESSION` / `NEEDS_ATTENTION_SESSION` in
-/// `zellij-utils/src/run_triage.rs`. The plugin cannot import them (pulling
-/// zellij-utils into a wasm plugin for two string literals is not worth it),
-/// so `bucket_names_match_the_triage_contract` pins them from this side.
+/// identical to `FINALIZED_RUNS_SESSION` / `FAILED_RUNS_SESSION` /
+/// `NEEDS_ATTENTION_SESSION` in `zellij-utils/src/run_triage.rs`. The plugin
+/// cannot import them (pulling zellij-utils into a wasm plugin for three string
+/// literals is not worth it), so `bucket_names_match_the_triage_contract` pins
+/// them from this side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BucketKind {
     Finalized,
+    Failed,
     NeedsAttention,
 }
 
-const RAIL_BUCKETS: [BucketKind; 2] = [BucketKind::Finalized, BucketKind::NeedsAttention];
+/// Rail order, top to bottom. Best outcome first, ambiguity last.
+const RAIL_BUCKETS: [BucketKind; 3] = [
+    BucketKind::Finalized,
+    BucketKind::Failed,
+    BucketKind::NeedsAttention,
+];
 
 impl BucketKind {
     fn session_name(&self) -> &'static str {
         match self {
             BucketKind::Finalized => "Finalized runs",
+            BucketKind::Failed => "Failed runs",
             BucketKind::NeedsAttention => "Needs attention",
         }
     }
     /// Hotkey, deliberately outside the '0'-'9' range the session ordinals use.
+    /// `x` rather than the initial `f` for "failed" — `f` is already finalized,
+    /// and these three are the only character keys the rail claims.
     fn hotkey(&self) -> char {
         match self {
             BucketKind::Finalized => 'f',
+            BucketKind::Failed => 'x',
             BucketKind::NeedsAttention => 'n',
         }
     }
@@ -647,7 +658,7 @@ fn session_rail_rows(sessions: &[SessionUiInfo]) -> Vec<SessionRailRow> {
     rows
 }
 
-/// The pinned tail of the rail. Always both buckets, whether or not their
+/// The pinned tail of the rail. Always all three buckets, whether or not their
 /// sessions exist yet — a permanent entry point beats one that appears only
 /// once something has already failed.
 fn bucket_rail_rows(sessions: &[SessionUiInfo]) -> Vec<SessionRailRow> {
@@ -2010,6 +2021,7 @@ mod rail_tests {
                 "02 - beta",
                 // the buckets are always pinned to the tail of the rail
                 " f - Finalized runs · 0",
+                " x - Failed runs · 0",
                 " n - Needs attention · 0",
             ]
         );
@@ -2037,6 +2049,7 @@ mod rail_tests {
         // sessions by these exact names, and a silent rename here would leave
         // transferred runs invisible in the rail.
         assert_eq!(BucketKind::Finalized.session_name(), "Finalized runs");
+        assert_eq!(BucketKind::Failed.session_name(), "Failed runs");
         assert_eq!(BucketKind::NeedsAttention.session_name(), "Needs attention");
     }
 
@@ -2047,15 +2060,18 @@ mod rail_tests {
             bucket_session("Finalized runs", 3),
             session("beta", false),
             bucket_session("Needs attention", 1),
+            bucket_session("Failed runs", 2),
         ]);
         let text: Vec<&str> = rows.iter().map(|row| row.text.as_str()).collect();
 
+        // Drawer order is fixed by RAIL_BUCKETS, not by session creation order.
         assert_eq!(
             text,
             vec![
                 "01 * alpha",
                 "02 - beta",
                 " f - Finalized runs · 3",
+                " x - Failed runs · 2",
                 " n - Needs attention · 1",
             ]
         );
@@ -2066,9 +2082,10 @@ mod rail_tests {
         let rows = session_rail_rows(&[session("alpha", true)]);
         let buckets: Vec<&SessionRailRow> = rows.iter().filter(|row| row.is_bucket()).collect();
 
-        assert_eq!(buckets.len(), 2);
+        assert_eq!(buckets.len(), 3);
         assert_eq!(buckets[0].text, " f - Finalized runs · 0");
-        assert_eq!(buckets[1].text, " n - Needs attention · 0");
+        assert_eq!(buckets[1].text, " x - Failed runs · 0");
+        assert_eq!(buckets[2].text, " n - Needs attention · 0");
         assert!(matches!(
             buckets[0].kind,
             SessionRailRowKind::Bucket {
@@ -2098,25 +2115,39 @@ mod rail_tests {
 
     #[test]
     fn buckets_do_not_shift_the_working_session_ordinals() {
-        // "Finalized runs" sits at index 1, but pressing 2 must still mean beta.
+        // All three drawers interleaved with the working sessions: pressing 2
+        // must still mean beta no matter how many buckets sit above it.
         let sessions = vec![
             session("alpha", true),
             bucket_session("Finalized runs", 5),
             session("beta", false),
+            bucket_session("Failed runs", 4),
+            bucket_session("Needs attention", 3),
+            session("gamma", false),
         ];
 
         assert_eq!(rail_ordinal_target(&sessions, '1'), Some(0));
         assert_eq!(rail_ordinal_target(&sessions, '2'), Some(2));
-        assert_eq!(rail_ordinal_target(&sessions, '3'), None);
-        assert_eq!(rail_ordinal_target(&sessions, 'f'), None);
+        assert_eq!(rail_ordinal_target(&sessions, '3'), Some(5));
+        assert_eq!(rail_ordinal_target(&sessions, '4'), None);
+        for bucket in RAIL_BUCKETS {
+            assert_eq!(rail_ordinal_target(&sessions, bucket.hotkey()), None);
+        }
     }
 
     #[test]
-    fn bucket_hotkeys_stay_clear_of_the_session_ordinals() {
-        for bucket in RAIL_BUCKETS {
-            assert_eq!(rail_ordinal_key_to_index(bucket.hotkey()), None);
+    fn bucket_hotkeys_stay_clear_of_the_session_ordinals_and_of_each_other() {
+        let mut hotkeys: Vec<char> = RAIL_BUCKETS.into_iter().map(|b| b.hotkey()).collect();
+        for hotkey in &hotkeys {
+            assert_eq!(rail_ordinal_key_to_index(*hotkey), None);
         }
+        let claimed = hotkeys.len();
+        hotkeys.sort_unstable();
+        hotkeys.dedup();
+        assert_eq!(hotkeys.len(), claimed, "two buckets claim the same hotkey");
+
         assert_eq!(BucketKind::Finalized.hotkey(), 'f');
+        assert_eq!(BucketKind::Failed.hotkey(), 'x');
         assert_eq!(BucketKind::NeedsAttention.hotkey(), 'n');
     }
 
@@ -2124,7 +2155,7 @@ mod rail_tests {
     fn a_bucket_session_is_never_listed_twice() {
         let rows = session_rail_rows(&[bucket_session("Finalized runs", 2)]);
 
-        assert_eq!(rows.iter().filter(|row| row.is_bucket()).count(), 2);
+        assert_eq!(rows.iter().filter(|row| row.is_bucket()).count(), 3);
         assert!(
             !rows
                 .iter()
