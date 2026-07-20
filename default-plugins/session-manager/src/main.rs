@@ -58,6 +58,9 @@ struct State {
     is_visible: bool,
     refresh_timer_armed: bool,
     is_rail: bool,
+    // screen row -> session index, rebuilt on every rail render so mouse
+    // clicks resolve against exactly what is on screen (incl. scroll window)
+    rail_click_map: BTreeMap<usize, usize>,
 }
 
 register_plugin!(State);
@@ -93,6 +96,7 @@ impl ZellijPlugin for State {
             EventType::ModeUpdate,
             EventType::SessionUpdate,
             EventType::Key,
+            EventType::Mouse,
             EventType::RunCommandResult,
             EventType::Timer,
             EventType::Visible,
@@ -121,7 +125,14 @@ impl ZellijPlugin for State {
     }
 
     fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
-        if pipe_message.name == "filepicker_result" {
+        if pipe_message.name == "vc_rail_nav" {
+            match pipe_message.payload.as_deref() {
+                Some("up") => self.switch_session_relative(-1),
+                Some("down") => self.switch_session_relative(1),
+                _ => (),
+            }
+            true
+        } else if pipe_message.name == "filepicker_result" {
             if let (Some(payload), Some(request_id)) =
                 (pipe_message.payload, pipe_message.args.get("request_id"))
             {
@@ -180,6 +191,16 @@ impl ZellijPlugin for State {
             },
             Event::Key(key) => {
                 should_render = self.handle_key(key);
+            },
+            Event::Mouse(mouse_event) => {
+                if self.is_rail {
+                    if self.error.is_some() {
+                        self.error = None;
+                        should_render = true;
+                    } else {
+                        should_render = self.handle_session_rail_mouse(mouse_event);
+                    }
+                }
             },
             Event::PermissionRequestResult(_result) => {
                 should_render = true;
@@ -512,6 +533,23 @@ fn format_process_tab_rail_entry(tab: &TabUiInfo) -> String {
     text
 }
 
+// Direct rail navigation (vc_rail_nav pipe, bound to Ctrl+Shift+Up/Down even
+// in locked mode): the target is resolved relative to the *current* session
+// with wrap-around, so every rail instance receiving the broadcast computes
+// the same destination and the switch stays idempotent.
+fn relative_session_target(sessions: &[SessionUiInfo], offset: isize) -> Option<String> {
+    if sessions.len() < 2 {
+        return None;
+    }
+    let current = sessions.iter().position(|s| s.is_current_session)?;
+    let count = sessions.len() as isize;
+    let target = (current as isize + offset).rem_euclid(count) as usize;
+    if target == current {
+        return None;
+    }
+    sessions.get(target).map(|s| s.name.clone())
+}
+
 fn session_rail_rows(sessions: &[SessionUiInfo]) -> Vec<SessionRailRow> {
     let mut rows = vec![];
     for (session_index, session) in sessions.iter().enumerate() {
@@ -639,6 +677,7 @@ impl State {
         let (start, end) = rail_range_to_render(entry_rows, rail_rows.len(), selected_row_index);
         let mut row = 1;
 
+        self.rail_click_map.clear();
         for rail_row in &rail_rows[start..end] {
             let mut text = Text::new(fit_rail_line(&rail_row.text, cols));
             match rail_row.kind {
@@ -649,6 +688,7 @@ impl State {
                     if selected_index == Some(session_index) {
                         text = text.selected();
                     }
+                    self.rail_click_map.insert(row, session_index);
                 },
                 SessionRailRowKind::LiveProcess { .. } => {
                     if cols >= 4 {
@@ -719,6 +759,33 @@ impl State {
                 true
             },
             _ => false,
+        }
+    }
+    fn handle_session_rail_mouse(&mut self, mouse_event: Mouse) -> bool {
+        match mouse_event {
+            Mouse::LeftClick(line, _column) => {
+                let Ok(row) = usize::try_from(line) else {
+                    return false;
+                };
+                let Some(session_index) = self.rail_click_map.get(&row).copied() else {
+                    return false;
+                };
+                if !self.sessions.select_session_index(session_index) {
+                    return false;
+                }
+                if !self.sessions.selected_is_current_session() {
+                    self.handle_session_rail_selection();
+                }
+                true
+            },
+            _ => false,
+        }
+    }
+    fn switch_session_relative(&mut self, offset: isize) {
+        if let Some(target_session_name) =
+            relative_session_target(&self.sessions.session_ui_infos, offset)
+        {
+            switch_session_with_focus(&target_session_name, None, None);
         }
     }
     fn handle_session_rail_selection(&mut self) {
@@ -1813,5 +1880,34 @@ mod rail_tests {
     fn rail_lines_are_clipped_and_padded_to_width() {
         assert_eq!(fit_rail_line("abcdef", 4), "abcd");
         assert_eq!(fit_rail_line("ab", 4), "ab  ");
+    }
+
+    #[test]
+    fn relative_session_target_wraps_in_both_directions() {
+        let sessions = vec![
+            session("alpha", false),
+            session("beta", true),
+            session("gamma", false),
+        ];
+        assert_eq!(
+            relative_session_target(&sessions, 1),
+            Some("gamma".to_owned())
+        );
+        assert_eq!(
+            relative_session_target(&sessions, -1),
+            Some("alpha".to_owned())
+        );
+
+        let at_end = vec![session("alpha", false), session("beta", true)];
+        assert_eq!(relative_session_target(&at_end, 1), Some("alpha".to_owned()));
+    }
+
+    #[test]
+    fn relative_session_target_refuses_degenerate_lists() {
+        assert_eq!(relative_session_target(&[], 1), None);
+        assert_eq!(relative_session_target(&[session("solo", true)], 1), None);
+        // no current session marker — nothing sane to be relative to
+        let orphaned = vec![session("alpha", false), session("beta", false)];
+        assert_eq!(relative_session_target(&orphaned, 1), None);
     }
 }

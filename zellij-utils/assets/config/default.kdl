@@ -187,6 +187,22 @@ keybinds {
         bind "Space" { NextSwapLayout; }
         bind "x" { CloseFocus; SwitchToMode "Normal"; }
     }
+    shared {
+        // direct session-rail hop, deliberately alive in locked mode too:
+        // the keybind pipes to the rail plugin, so no unlock round-trip
+        bind "Ctrl Shift Up" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "up"
+            };
+        }
+        bind "Ctrl Shift Down" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "down"
+            };
+        }
+    }
     shared_except "locked" {
         bind "Ctrl g" { SwitchToMode "Locked"; }
         bind "Ctrl q" { Quit; }
