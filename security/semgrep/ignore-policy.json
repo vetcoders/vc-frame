@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "allowed_ignores": [
+    {
+      "pattern": "zellij-client/assets/",
+      "owner": "Upstream vendored browser assets",
+      "invariant": "Only byte-for-byte vendored xterm and web-links browser bundles live below this directory; first-party Rust, scripts, workflows and configuration remain scanned.",
+      "evidence": [
+        "zellij-client/assets/",
+        "security/semgrep/EVIDENCE.md#vendored-browser-assets"
+      ]
+    }
+  ]
+}

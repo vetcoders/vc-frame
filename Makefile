@@ -214,13 +214,13 @@ ci: precheck test
 	@echo "  ✓ CI-equivalent gates passed"
 	@echo "══════════════════════════════════════"
 
-## Release security gate — fail on every Semgrep finding
+## Release security gate — fail on unexplained Semgrep findings or baseline drift
 semgrep:
 	@command -v semgrep >/dev/null 2>&1 || { \
 		echo "ERROR: semgrep is required for release verification" >&2; \
 		exit 1; \
 	}
-	semgrep scan --config p/rust --error --metrics off .
+	python3 tools/semgrep_inventory.py scan --config p/rust
 
 # ──────────────────────────────────────────────────────────
 # Housekeeping
