@@ -13,7 +13,8 @@
 #   - wasm32-wasip1 target installed
 #   - protobuf compiler (protoc)
 
-.PHONY: all build plugins binary install run test test-server test-utils \
+.PHONY: all build plugins plugins-assets plugins-parity plugins-parity-double \
+        plugins-parity-self-test binary install run test test-server test-utils \
         test-client test-no-web check clippy precheck semgrep fmt clean doctor \
         doctor-quiet doctor-install-quiet help
 
@@ -76,8 +77,27 @@ build: doctor-quiet
 	$(CARGO) xtask build
 
 ## Build only WASM plugins (no host binary)
+## Without --release this is a compile check only — it does NOT refresh
+## zellij-utils/assets/plugins/*.wasm. Use plugins-assets for the product surface.
 plugins: doctor-quiet
 	$(CARGO) xtask build --plugins-only
+
+## Canonical product-surface producer: release-build plugins and copy into assets/
+plugins-assets: doctor-quiet
+	$(CARGO) xtask build --release --plugins-only
+	@./scripts/plugins-parity.zsh write-manifest
+
+## CI-fast parity: on-disk assets must match committed SHA256SUMS
+plugins-parity:
+	@./scripts/plugins-parity.zsh check
+
+## Two isolated consecutive rebuilds must produce identical hashes (W0-C gate)
+plugins-parity-double: doctor-quiet
+	@./scripts/plugins-parity.zsh double-rebuild
+
+## Positive + deliberate perturbation negative + restore
+plugins-parity-self-test:
+	@./scripts/plugins-parity.zsh self-test
 
 ## Build only the host binary (assumes plugins are already built)
 binary: doctor-quiet
@@ -257,7 +277,9 @@ help:
 	@printf "$(C_CYAN)────────────────────────────────────────────────────────────────────────$(C_RESET)\n\n"
 	@printf "  $(C_YELLOW)BUILD$(C_RESET)\n"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "build" "Build plugins + binary (default)"
-	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "plugins" "Build only WASM plugins"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "plugins" "Compile-check WASM plugins (no asset copy)"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "plugins-assets" "Release-build plugins into assets/ + SHA256SUMS"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "plugins-parity" "Verify assets match SHA256SUMS"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "binary" "Build only host binary (plugins must exist)"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "release" "Build everything in release mode"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "install" "Release build + install to ~/.cargo/bin + link the vc-frame alias"
@@ -281,6 +303,7 @@ help:
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "help" "Show this help"
 	@printf "\n  $(C_CYAN)Quick start:$(C_RESET)\n"
 	@printf "    make precheck       # format + clippy + typecheck\n"
-	@printf "    make plugins        # refresh WASM plugin artifacts for local gates\n"
+	@printf "    make plugins-assets # release-build + refresh bundled WASM + SHA256SUMS\n"
+	@printf "    make plugins-parity # verify bundled WASM hashes\n"
 	@printf "    make install        # canonical release install + ~/.local/bin alias\n"
 	@printf "    make run            # run local debug vc-frame\n\n"

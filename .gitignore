@@ -10,3 +10,4 @@ target/
 /.claude
 /.antigravitycli
 *.log
+/build/

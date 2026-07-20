@@ -603,6 +603,91 @@ mod not_unix {
 mod tests {
     use super::*;
 
+    /// Runtime identity probe: every ASSET_MAP plugin byte-matches the on-disk
+    /// bundled artifact and the committed SHA256SUMS receipt.
+    ///
+    /// Skipped under `plugins_from_target` debug builds where ASSET_MAP loads
+    /// from `target/wasm32-wasip1/debug` instead of `assets/plugins`.
+    #[cfg(all(not(target_family = "wasm"), not(feature = "plugins_from_target")))]
+    #[test]
+    fn asset_map_matches_bundled_plugin_files_and_manifest() {
+        use sha2::{Digest, Sha256};
+        use std::collections::HashMap;
+        use std::path::PathBuf;
+
+        let plugins_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/plugins");
+        let manifest_path = plugins_dir.join("SHA256SUMS");
+        let manifest = std::fs::read_to_string(&manifest_path)
+            .unwrap_or_else(|e| panic!("missing {}: {e}", manifest_path.display()));
+
+        let mut expected: HashMap<String, String> = HashMap::new();
+        for line in manifest.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut parts = line.split_whitespace();
+            let hash = parts
+                .next()
+                .unwrap_or_else(|| panic!("bad SHA256SUMS line: {line}"));
+            let name = parts
+                .next()
+                .unwrap_or_else(|| panic!("bad SHA256SUMS line (no name): {line}"));
+            expected.insert(name.to_string(), hash.to_string());
+        }
+
+        assert!(
+            !ASSET_MAP.is_empty(),
+            "ASSET_MAP must embed at least one runtime plugin"
+        );
+
+        for (key, bytes) in ASSET_MAP.iter() {
+            let name = key
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or_else(|| panic!("plugin key without file name: {key:?}"));
+            let on_disk = plugins_dir.join(name);
+            let disk_bytes = std::fs::read(&on_disk)
+                .unwrap_or_else(|e| panic!("read {}: {e}", on_disk.display()));
+            assert_eq!(
+                &disk_bytes, bytes,
+                "runtime ASSET_MAP bytes for {name} differ from on-disk artifact"
+            );
+
+            let mut hasher = Sha256::new();
+            hasher.update(bytes);
+            let digest = format!("{:x}", hasher.finalize());
+            let want = expected
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} missing from SHA256SUMS"));
+            assert_eq!(
+                &digest, want,
+                "runtime/on-disk hash for {name} disagrees with SHA256SUMS"
+            );
+        }
+    }
+
+    /// Deliberate negative: a corrupted on-disk byte stream must not match
+    /// ASSET_MAP (proves the positive probe is not a tautology).
+    #[cfg(all(not(target_family = "wasm"), not(feature = "plugins_from_target")))]
+    #[test]
+    fn asset_map_detects_on_disk_perturbation() {
+        use std::path::PathBuf;
+
+        let plugins_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/plugins");
+        let name = "about.wasm";
+        let key = PathBuf::from("plugins").join(name);
+        let embedded = ASSET_MAP
+            .get(&key)
+            .unwrap_or_else(|| panic!("ASSET_MAP missing {name}"));
+        let mut perturbed = std::fs::read(plugins_dir.join(name)).expect("read about.wasm");
+        perturbed.push(0xFF);
+        assert_ne!(
+            &perturbed, embedded,
+            "perturbed fixture must differ from runtime identity"
+        );
+    }
+
     #[test]
     fn vc_frame_project_dirs_use_owned_namespace() {
         let cache_dir = vc_frame_project_dirs()
