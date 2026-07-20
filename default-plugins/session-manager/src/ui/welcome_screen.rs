@@ -1,28 +1,30 @@
+// Brand banners in the same ANSI Shadow face the upstream greeting used,
+// degrading VIBECRAFTED. -> VIBE. -> VC. as columns shrink.
 static BANNER: &str = "
-██╗  ██╗██╗    ███████╗██████╗  ██████╗ ███╗   ███╗    ███████╗███████╗██╗     ██╗     ██╗     ██╗██╗
-██║  ██║██║    ██╔════╝██╔══██╗██╔═══██╗████╗ ████║    ╚══███╔╝██╔════╝██║     ██║     ██║     ██║██║
-███████║██║    █████╗  ██████╔╝██║   ██║██╔████╔██║      ███╔╝ █████╗  ██║     ██║     ██║     ██║██║
-██╔══██║██║    ██╔══╝  ██╔══██╗██║   ██║██║╚██╔╝██║     ███╔╝  ██╔══╝  ██║     ██║     ██║██   ██║╚═╝
-██║  ██║██║    ██║     ██║  ██║╚██████╔╝██║ ╚═╝ ██║    ███████╗███████╗███████╗███████╗██║╚█████╔╝██╗
-╚═╝  ╚═╝╚═╝    ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝     ╚═╝    ╚══════╝╚══════╝╚══════╝╚══════╝╚═╝ ╚════╝ ╚═╝
+██╗   ██╗██╗██████╗ ███████╗ ██████╗██████╗  █████╗ ███████╗████████╗███████╗██████╗
+██║   ██║██║██╔══██╗██╔════╝██╔════╝██╔══██╗██╔══██╗██╔════╝╚══██╔══╝██╔════╝██╔══██╗
+██║   ██║██║██████╔╝█████╗  ██║     ██████╔╝███████║█████╗     ██║   █████╗  ██║  ██║
+╚██╗ ██╔╝██║██╔══██╗██╔══╝  ██║     ██╔══██╗██╔══██║██╔══╝     ██║   ██╔══╝  ██║  ██║
+ ╚████╔╝ ██║██████╔╝███████╗╚██████╗██║  ██║██║  ██║██║        ██║   ███████╗██████╔╝██╗
+  ╚═══╝  ╚═╝╚═════╝ ╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝        ╚═╝   ╚══════╝╚═════╝ ╚═╝
 ";
 
 static SMALL_BANNER: &str = "
-██╗  ██╗██╗    ██╗
-██║  ██║██║    ██║
-███████║██║    ██║
-██╔══██║██║    ╚═╝
-██║  ██║██║    ██╗
-╚═╝  ╚═╝╚═╝    ╚═╝
+██╗   ██╗ ██████╗
+██║   ██║██╔════╝
+██║   ██║██║
+╚██╗ ██╔╝██║
+ ╚████╔╝ ╚██████╗ ██╗
+  ╚═══╝   ╚═════╝ ╚═╝
 ";
 
 static MEDIUM_BANNER: &str = "
-██╗  ██╗██╗    ████████╗██╗  ██╗███████╗██████╗ ███████╗    ██╗
-██║  ██║██║    ╚══██╔══╝██║  ██║██╔════╝██╔══██╗██╔════╝    ██║
-███████║██║       ██║   ███████║█████╗  ██████╔╝█████╗      ██║
-██╔══██║██║       ██║   ██╔══██║██╔══╝  ██╔══██╗██╔══╝      ╚═╝
-██║  ██║██║       ██║   ██║  ██║███████╗██║  ██║███████╗    ██╗
-╚═╝  ╚═╝╚═╝       ╚═╝   ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚══════╝    ╚═╝                 
+██╗   ██╗██╗██████╗ ███████╗
+██║   ██║██║██╔══██╗██╔════╝
+██║   ██║██║██████╔╝█████╗
+╚██╗ ██╔╝██║██╔══██╗██╔══╝
+ ╚████╔╝ ██║██████╔╝███████╗██╗
+  ╚═══╝  ╚═╝╚═════╝ ╚══════╝╚═╝
 ";
 
 pub fn render_banner(x: usize, y: usize, rows: usize, cols: usize) {
@@ -30,8 +32,9 @@ pub fn render_banner(x: usize, y: usize, rows: usize, cols: usize) {
         if cols > 100 {
             let banner_y = y + rows.saturating_sub(8) / 2;
             println!("\u{1b}[{}H", banner_y);
+            let x = (cols.saturating_sub(88) as f64 / 2.0) as usize;
             for line in BANNER.lines() {
-                println!("\u{1b}[{}C{}", x.saturating_sub(1), line);
+                println!("\u{1b}[{}C{}", x, line);
             }
             if rows >= 11 {
                 render_brand_subtitle(cols, banner_y + 8);
@@ -39,7 +42,7 @@ pub fn render_banner(x: usize, y: usize, rows: usize, cols: usize) {
         } else if cols > 63 {
             let banner_y = y + rows.saturating_sub(8) / 2;
             println!("\u{1b}[{}H", banner_y);
-            let x = (cols.saturating_sub(63) as f64 / 2.0) as usize;
+            let x = (cols.saturating_sub(31) as f64 / 2.0) as usize;
             for line in MEDIUM_BANNER.lines() {
                 println!("\u{1b}[{}C{}", x, line);
             }
@@ -49,7 +52,7 @@ pub fn render_banner(x: usize, y: usize, rows: usize, cols: usize) {
         } else {
             let banner_y = y + rows.saturating_sub(8) / 2;
             println!("\u{1b}[{}H", banner_y);
-            let x = (cols.saturating_sub(18) as f64 / 2.0) as usize;
+            let x = (cols.saturating_sub(21) as f64 / 2.0) as usize;
             for line in SMALL_BANNER.lines() {
                 println!("\u{1b}[{}C{}", x, line);
             }
