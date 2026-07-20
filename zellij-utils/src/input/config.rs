@@ -617,6 +617,66 @@ mod config_test {
     use tempfile::tempdir;
 
     #[cfg(unix)]
+    fn open_file_descriptor_count() -> usize {
+        #[cfg(target_os = "linux")]
+        let descriptor_dir = "/proc/self/fd";
+        #[cfg(not(target_os = "linux"))]
+        let descriptor_dir = "/dev/fd";
+
+        std::fs::read_dir(descriptor_dir)
+            .expect("failed to enumerate process descriptors")
+            .count()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn config_and_layout_watchers_release_descriptors_after_repeated_teardown() {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let tmp = tempdir().unwrap();
+            let config_file = tmp.path().join("config.kdl");
+            let layout_dir = tmp.path().join("layouts");
+            std::fs::write(&config_file, "simplified_ui true\n").unwrap();
+            std::fs::create_dir(&layout_dir).unwrap();
+            std::fs::write(layout_dir.join("stress.kdl"), "layout { pane; }").unwrap();
+
+            // Count after the current-thread Tokio runtime and tempfile have
+            // initialized so their stable descriptors are part of the baseline.
+            let baseline = open_file_descriptor_count();
+
+            for _ in 0..12 {
+                let config_task =
+                    tokio::spawn(watch_config_file_changes(config_file.clone(), |_| async {}));
+                let layout_task = tokio::spawn(watch_layout_dir_changes(
+                    layout_dir.clone(),
+                    None,
+                    |_, _| async {},
+                ));
+
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                config_task.abort();
+                layout_task.abort();
+                let _ = config_task.await;
+                let _ = layout_task.await;
+                tokio::task::yield_now().await;
+            }
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let final_count = open_file_descriptor_count();
+            // This is a process-wide counter and the full test binary runs
+            // unrelated socket-heavy tests concurrently. Keep a small
+            // concurrency allowance here; the isolated runtime stress harness
+            // asserts an exact return to its server baseline.
+            const CONCURRENT_TEST_FD_ALLOWANCE: usize = 16;
+            assert!(
+                final_count <= baseline + CONCURRENT_TEST_FD_ALLOWANCE,
+                "watcher teardown leaked descriptors: baseline={baseline}, final={final_count}"
+            );
+        })
+        .await
+        .expect("watcher descriptor stress exceeded its 15 s timeout");
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn watch_layout_dir_changes_handles_dangling_symlinks() {
         let tmp = tempdir().unwrap();

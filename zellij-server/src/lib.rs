@@ -796,14 +796,13 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                 #[cfg(windows)]
                 let reply_listener = zellij_utils::consts::ipc_bind_reply(&socket_path).unwrap();
 
-                // Counts consecutive accept() failures so a sustained error storm
-                // (e.g. a prolonged EMFILE fd-exhaustion spike) is rate-limited
-                // rather than flooding the log ~10×/s with identical lines.
-                let mut consecutive_accept_errors: u64 = 0;
+                // Counts consecutive accept/registration failures so a sustained
+                // error storm (eg. EMFILE during accept or stream cloning) backs
+                // off instead of spinning and flooding the log.
+                let mut consecutive_connection_errors: u64 = 0;
                 for stream in listener.incoming() {
                     match stream {
                         Ok(stream) => {
-                            consecutive_accept_errors = 0;
                             let mut os_input = os_input.clone();
                             let client_id = session_state.write().unwrap().new_client();
 
@@ -813,39 +812,40 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                                 .expect("failed to accept reply connection");
 
                             #[cfg(windows)]
-                            let receiver = match os_input.new_client_with_reply(
-                                client_id,
-                                stream,
-                                reply_stream,
-                            ) {
-                                Ok(receiver) => receiver,
-                                Err(err) => {
-                                    log::error!(
-                                        "failed to register client {client_id}: {:?} \
-                                         (recoverable; dropping client)",
-                                        err
-                                    );
-                                    let _ = session_state.write().map(|mut state| {
-                                        state.remove_client(client_id);
-                                    });
-                                    continue;
-                                },
-                            };
+                            let receiver =
+                                os_input.new_client_with_reply(client_id, stream, reply_stream);
                             #[cfg(not(windows))]
-                            let receiver = match os_input.new_client(client_id, stream) {
+                            let receiver = os_input.new_client(client_id, stream);
+
+                            let receiver = match receiver {
                                 Ok(receiver) => receiver,
                                 Err(err) => {
-                                    log::error!(
-                                        "failed to register client {client_id}: {:?} \
-                                         (recoverable; dropping client)",
-                                        err
-                                    );
+                                    if consecutive_connection_errors == 0 {
+                                        log::error!(
+                                            "failed to register client {client_id}: {:?} \
+                                             (recoverable; backing off, further identical \
+                                             errors rate-limited)",
+                                            err
+                                        );
+                                    } else if consecutive_connection_errors.is_multiple_of(50) {
+                                        log::error!(
+                                            "still failing to register clients after {} \
+                                             consecutive connection errors: {:?}",
+                                            consecutive_connection_errors + 1,
+                                            err
+                                        );
+                                    }
+                                    consecutive_connection_errors =
+                                        consecutive_connection_errors.saturating_add(1);
                                     let _ = session_state.write().map(|mut state| {
                                         state.remove_client(client_id);
                                     });
+                                    thread::sleep(std::time::Duration::from_millis(100));
                                     continue;
                                 },
                             };
+
+                            consecutive_connection_errors = 0;
 
                             let session_data = session_data.clone();
                             let session_state = session_state.clone();
@@ -883,22 +883,23 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                             // every 50th (~once per 5s at the 100ms backoff) so a
                             // sustained storm doesn't drown the very log that helps
                             // diagnose the underlying fd leak.
-                            if consecutive_accept_errors == 0 {
+                            if consecutive_connection_errors == 0 {
                                 log::error!(
                                     "failed to accept client connection: {:?} \
                                      (recoverable; backing off, further identical \
                                      errors rate-limited)",
                                     err
                                 );
-                            } else if consecutive_accept_errors.is_multiple_of(50) {
+                            } else if consecutive_connection_errors.is_multiple_of(50) {
                                 log::error!(
                                     "still failing to accept client connections after \
                                      {} consecutive errors: {:?}",
-                                    consecutive_accept_errors + 1,
+                                    consecutive_connection_errors + 1,
                                     err
                                 );
                             }
-                            consecutive_accept_errors = consecutive_accept_errors.saturating_add(1);
+                            consecutive_connection_errors =
+                                consecutive_connection_errors.saturating_add(1);
                             thread::sleep(std::time::Duration::from_millis(100));
                             continue;
                         },
