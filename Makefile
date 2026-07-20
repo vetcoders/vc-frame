@@ -16,7 +16,8 @@
 .PHONY: all build plugins plugins-assets plugins-parity plugins-parity-double \
         plugins-parity-self-test binary install run test test-server test-utils \
         test-client test-no-web check clippy precheck semgrep fmt clean doctor \
-        doctor-quiet doctor-install-quiet help
+        doctor-quiet doctor-install-quiet help release-guard \
+        release-guard-self-test package install-test
 
 # ──────────────────────────────────────────────────────────
 # Toolchain resolution.
@@ -214,6 +215,22 @@ ci: precheck test
 	@echo "  ✓ CI-equivalent gates passed"
 	@echo "══════════════════════════════════════"
 
+## Packaging provenance guard — refuse to package a dirty worktree
+release-guard:
+	@./scripts/release-provenance.zsh guard
+
+## Prove the provenance guard rejects a dirty tree (and restores it)
+release-guard-self-test:
+	@./scripts/release-provenance.zsh self-test
+
+## Canonical local package: guard → release build → archive → checksum → receipt
+package:
+	@./scripts/release-provenance.zsh package
+
+## Installer negative matrix — proves tools/install.sh fails closed
+install-test:
+	@sh tools/install_test.sh
+
 ## Release security gate — fail on unexplained Semgrep findings or baseline drift
 semgrep:
 	@command -v semgrep >/dev/null 2>&1 || { \
@@ -291,6 +308,10 @@ help:
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "fmt" "Format code"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "fmt-check" "Check formatting without modifying files"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "check" "Quick workspace typecheck"
+	@printf "\n  $(C_YELLOW)RELEASE PROVENANCE$(C_RESET)\n"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "release-guard" "Refuse to package a dirty worktree"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "package" "Guard + release build + archive + receipt"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "install-test" "Installer fail-closed negative matrix"
 	@printf "\n  $(C_YELLOW)TEST$(C_RESET)\n"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "test" "Full test suite"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "test-server" "Test zellij-server only"

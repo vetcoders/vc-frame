@@ -5,7 +5,7 @@ authors = ["Kunal Mohan <kunalmohan99@gmail.com>"]
 edition.workspace = true
 description = "A utility library for Zellij client and server"
 license.workspace = true
-include = ["src/**/*", "assets/"]
+include = ["src/**/*", "assets/", "build.rs"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

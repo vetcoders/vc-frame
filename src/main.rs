@@ -19,6 +19,13 @@ fn main() {
     create_config_and_cache_folders();
     let opts = CliArgs::parse();
 
+    // Provenance is a pure read of embedded values — answer before any session,
+    // config or IPC work so it stays usable on a broken install.
+    if opts.build_info {
+        println!("{}", zellij_utils::build_info::build_info().to_json());
+        std::process::exit(0);
+    }
+
     {
         let config = Config::try_from(&opts).ok();
         if let Some(Command::Action(cli_action)) = opts.command {

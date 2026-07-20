@@ -4,7 +4,7 @@ use crate::input::theme::Themes;
 #[allow(unused_imports)]
 use crate::{
     cli::{CliArgs, CliOptions, Command, SessionCommand, Sessions},
-    consts::{FEATURES, VERSION, ZELLIJ_CACHE_DIR, ZELLIJ_DEFAULT_THEMES},
+    consts::{FEATURES, ZELLIJ_CACHE_DIR, ZELLIJ_DEFAULT_THEMES},
     data::LayoutInfo,
     errors::prelude::*,
     home::*,
@@ -506,7 +506,14 @@ impl Setup {
 
         let mut message = String::new();
 
-        writeln!(&mut message, "[Version]: {:?}", VERSION).unwrap();
+        // One provenance owner: the same identity `--version` and `--build-info`
+        // report, so a diagnostics dump can never disagree with the binary.
+        writeln!(
+            &mut message,
+            "[Version]: {}",
+            crate::build_info::build_info().diagnostic_line()
+        )
+        .unwrap();
         if let Some(config_dir) = config_dir {
             writeln!(&mut message, "[CONFIG DIR]: \"{}\"", config_dir.display()).unwrap();
         } else {

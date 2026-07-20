@@ -20,6 +20,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      # Provenance comes first: everything downstream claims to describe an
+      # exact commit, so refuse to start if the checkout does not match HEAD.
+      - name: Verify build provenance is clean
+        run: ./scripts/release-provenance.zsh guard
+
+      - name: Verify installer fails closed
+        run: sh tools/install_test.sh
+
       - name: Verify version, security, and signing inputs
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
@@ -96,6 +104,10 @@ jobs:
     runs-on: ${{ matrix.runner }}
     env:
       RUST_BACKTRACE: 1
+      # Immutable provenance from the outer layer: every matrix runner embeds
+      # the same commit, regardless of local git availability or checkout depth.
+      VC_FRAME_GIT_SHA: ${{ github.sha }}
+      VC_FRAME_GIT_DIRTY: "0"
     strategy:
       fail-fast: false
       matrix:
@@ -341,6 +353,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     env:
       RUST_BACKTRACE: 1
+      VC_FRAME_GIT_SHA: ${{ github.sha }}
+      VC_FRAME_GIT_DIRTY: "0"
     strategy:
       fail-fast: false
       matrix:

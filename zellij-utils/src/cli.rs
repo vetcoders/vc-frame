@@ -38,7 +38,11 @@ fn validate_session(name: &str) -> Result<String, String> {
 }
 
 #[derive(Parser, Default, Debug, Clone, Serialize, Deserialize)]
-#[clap(version, name = "vc-frame", about = "vc-frame ⚒ (vibecrafted runtime)")]
+#[clap(
+    version = crate::build_info::HUMAN_VERSION,
+    name = "vc-frame",
+    about = "vc-frame ⚒ (vibecrafted runtime)"
+)]
 pub struct CliArgs {
     /// Maximum panes on screen, caution: opening more panes will close old ones
     #[clap(long, value_parser)]
@@ -87,6 +91,10 @@ pub struct CliArgs {
     /// Specify emitting additional debug information
     #[clap(short, long, value_parser)]
     pub debug: bool,
+
+    /// Print the embedded build provenance as JSON and exit
+    #[clap(long, value_parser)]
+    pub build_info: bool,
 }
 
 impl CliArgs {

@@ -112,24 +112,87 @@ VCFRAME_GPG_FINGERPRINT=<pinned-fingerprint> \
 vc-frame --version
 ```
 
-## Local installer smoke
+## Build provenance
 
-An unsigned local fixture may exercise archive resolution and SHA verification:
+Every binary carries its own identity, embedded at build time by
+`zellij-utils/build.rs` and owned by `zellij-utils/src/build_info.rs`. That
+module is the **single owner**: clap's `--version`, `--build-info`, and the
+`setup --check` dump all read from it, so they cannot disagree. Nothing invokes
+git at runtime — an installed binary knows what it is with no repository in
+sight.
+
+```console
+$ vc-frame --version
+vc-frame 0.45.4+gbcd9e175
+
+$ vc-frame --build-info
+{
+  "product": "vc-frame",
+  "version": "0.45.4",
+  "human_version": "0.45.4+gbcd9e175",
+  "git_sha": "bcd9e175b5267fb0f0bdcbd12d657072db351999",
+  "git_sha_short": "bcd9e175",
+  "git_dirty": false,
+  "build_time_utc": "2026-07-20T17:24:11Z",
+  "profile": "release"
+}
+```
+
+A build from a modified tree reports `0.45.4+gbcd9e175.dirty`, and packaging
+refuses to proceed at all — see below.
+
+The commit identity resolves in this order:
+
+1. `VC_FRAME_GIT_SHA` / `VC_FRAME_GIT_DIRTY` from the environment. The release
+   workflow sets these from `github.sha` so every matrix runner embeds the same
+   commit regardless of local git availability.
+2. `git` in the checkout.
+3. Nothing — debug builds record `unknown`, and **release builds fail closed**.
+   A release binary must never claim an identity it does not have. Building a
+   release outside a git checkout is supported only by passing the values in:
+
+   ```sh
+   VC_FRAME_GIT_SHA=<40-hex-sha> VC_FRAME_GIT_DIRTY=0 cargo build --release
+   ```
+
+`VC_FRAME_BUILD_TIME_UTC` can be pinned the same way for reproducible builds.
+
+## Packaging provenance
 
 ```sh
-REL=/tmp/vcframe-test/v0.45.4
-mkdir -p "$REL" /tmp/vcframe-stage
-cp "$(command -v vc-frame)" /tmp/vcframe-stage/vc-frame
-target="$(uname -m)-apple-darwin" # use *-unknown-linux-musl on Linux
-tar czf "$REL/vc-frame-$target.tar.gz" -C /tmp/vcframe-stage vc-frame
-(cd "$REL" && shasum -a 256 "vc-frame-$target.tar.gz" > "vc-frame-$target.tar.gz.sha256")
-printf '{"artifacts":{"%s":"vc-frame-%s.tar.gz"}}\n' "$target" "$target" > "$REL/manifest.json"
-
-VCFRAME_VERSION=0.45.4 VCFRAME_BASE_URL=file:///tmp/vcframe-test \
-VCFRAME_REQUIRE_GPG=0 INSTALL_DIR=/tmp/vcframe-bin \
-VCFRAME_NO_PROFILE_UPDATE=1 sh tools/install.sh
-/tmp/vcframe-bin/vc-frame --version
+make release-guard   # refuse to package a dirty worktree
+make package         # guard → release build → archive → checksum → receipt
 ```
+
+`make package` writes `target/dist/RECEIPT.json`, which names the exact bytes:
+archive and binary SHA256 plus sizes, the source commit, the toolchain, and the
+provenance the packaged binary reports **about itself**. Packaging aborts if
+that self-report disagrees with the commit being packaged, so the receipt cannot
+describe a binary other than the one produced.
+
+The same guard runs first in the release workflow's `verify-release` job.
+
+## Local installer smoke
+
+The installer is fail-closed, and `make install-test` proves it:
+
+```sh
+make install-test
+```
+
+It builds synthetic release trees, serves them over `file://`, and asserts the
+installer **rejects** every one of: missing manifest, malformed manifest,
+foreign-product manifest, version-mismatched manifest, manifest without this
+target, missing archive, missing checksum sidecar, checksum mismatch, strict
+mode without a pinned fingerprint, strict mode with no published key, and a
+binary that fails any part of the post-install smoke contract (`--version`,
+`--build-info`, `setup --check`, or a session command). The positive control
+additionally asserts the resulting prefix holds `vc-frame` and no `zellij`
+alias.
+
+`manifest.json` is **mandatory**. There is no guessed-filename fallback: a
+guessed name can only agree with the release by luck, and luck is not
+provenance.
 
 The candidate and final release must additionally prove strict GPG
 verification against the selected pinned fingerprint.

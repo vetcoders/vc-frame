@@ -25,15 +25,17 @@
 #     any download/verification failure fails loudly.
 #   - GPG is the trust root under VCFRAME_REQUIRE_GPG=1; the SHA256 sidecar is
 #     always enforced.
-#   - The per-target archive name is resolved from manifest.json when present,
-#     and falls back to the deterministic `vc-frame-<target>.tar.gz` name the
-#     release workflow uploads.
+#   - manifest.json is MANDATORY and is the only source of the archive name.
+#     A missing, malformed, foreign or version-mismatched manifest aborts the
+#     install; there is no guessed-filename fallback. A guessed name can only
+#     ever agree with the release by luck, and "by luck" is not provenance.
 #   - Linux targets resolve to the musl-static build (`-unknown-linux-musl`),
 #     which is the maximally-portable choice for this standalone binary — the
 #     name MUST match what .github/workflows/release.yml uploads.
 #   - The release tarball contains a bare `vc-frame` binary at its root.
-#   - Runs `vc-frame --version` as a post-install check (hard fail if it does
-#     not run) — the same contract the Vibecrafted foundations gate enforces.
+#   - Post-install smoke is a contract, not a liveness ping: `--version`,
+#     `--build-info` (embedded provenance), `setup --check`, and one real
+#     session command must all behave. Any failure aborts the install.
 #   - Whole script runs through main() invoked on the last line, so a truncated
 #     `curl | sh` transfer executes nothing.
 
@@ -98,18 +100,57 @@ target_triple() {
   esac
 }
 
-# Extract the artifact file name for a target from manifest.json. POSIX sh, no
-# jq: split JSON on commas/braces (URLs and file names contain neither), then
-# pull the first quoted string that ends in "-<target>.tar.gz" and strip any
-# URL path prefix.
+# POSIX sh JSON reads, no jq. Split on commas/braces (URLs and file names
+# contain neither) so each key/value lands on its own line.
+#
+# Both helpers match on the KEY, never on the shape of the value: a manifest
+# that merely happens to mention a string ending in "-<target>.tar.gz" must not
+# satisfy a lookup for that target.
+manifest_string_field() {
+  tr ',{}' '\n\n\n' < "$1" \
+    | sed -n 's/^[[:space:]]*"'"$2"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    | head -n 1
+}
+
 manifest_artifact_name() {
   manifest_file="$1"
   mf_target="$2"
   raw="$(tr ',{}' '\n\n\n' < "$manifest_file" \
-    | sed -n 's/.*"\([^"]*-'"$mf_target"'\.tar\.gz\)".*/\1/p' \
+    | sed -n 's/^[[:space:]]*"'"$mf_target"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
     | head -n 1)"
   [ -n "$raw" ] || return 1
+  # Strip any URL path prefix; we only want the asset file name.
   printf '%s\n' "${raw##*/}"
+}
+
+# The manifest is the provenance root for the download. Reject anything that is
+# not a well-formed vc-frame manifest for exactly the version being installed.
+validate_manifest() {
+  manifest_file="$1"
+
+  if ! grep -q '"artifacts"' "$manifest_file" 2>/dev/null; then
+    red "release manifest is malformed: no \"artifacts\" section"
+    exit 1
+  fi
+
+  mf_product="$(manifest_string_field "$manifest_file" product)"
+  if [ "$mf_product" != "vc-frame" ]; then
+    red "release manifest is not a vc-frame manifest (product: ${mf_product:-<missing>})"
+    exit 1
+  fi
+
+  mf_version="$(manifest_string_field "$manifest_file" version)"
+  if [ -z "$mf_version" ]; then
+    red "release manifest does not declare a version"
+    exit 1
+  fi
+  if [ "$mf_version" != "$VERSION" ]; then
+    red "release manifest version mismatch"
+    printf 'requested: %s\nmanifest:  %s\n' "$VERSION" "$mf_version"
+    exit 1
+  fi
+
+  green "manifest ok: vc-frame $mf_version"
 }
 
 # GPG verification — the trust root under strict mode.
@@ -178,25 +219,19 @@ install_prebuilt() {
   need_cmd curl
   need_cmd tar
 
-  archive=""
   manifest_file="$tmp/manifest.json"
-  if curl -fsSL "$artifact_base/manifest.json" -o "$manifest_file" 2>/dev/null; then
-    if archive="$(manifest_artifact_name "$manifest_file" "$target")"; then
-      green "artifact (from manifest): $archive"
-    else
-      archive=""
-      if grep -q '"artifacts"' "$manifest_file" 2>/dev/null; then
-        red "release $VERSION does not provide a bundle for $target (per manifest.json)"
-        exit 1
-      fi
-      yellow "manifest.json has no artifact entries; using deterministic name"
-    fi
-  else
-    yellow "manifest.json unavailable for $VERSION; using deterministic name"
+  if ! curl -fsSL "$artifact_base/manifest.json" -o "$manifest_file" 2>/dev/null; then
+    red "release manifest unavailable: $artifact_base/manifest.json"
+    red "vc-frame will not install from a guessed artifact name."
+    exit 1
   fi
-  if [ -z "$archive" ]; then
-    archive="vc-frame-$target.tar.gz"
+  validate_manifest "$manifest_file"
+
+  if ! archive="$(manifest_artifact_name "$manifest_file" "$target")"; then
+    red "release $VERSION does not provide a bundle for $target (per manifest.json)"
+    exit 1
   fi
+  green "artifact (from manifest): $archive"
   url="$artifact_base/$archive"
   sha_url="$url.sha256"
 
@@ -264,18 +299,63 @@ ensure_path() {
   fi
 }
 
+smoke_fail() {
+  red "post-install check failed: $1"
+  shift
+  [ "$#" -eq 0 ] || printf '%s\n' "$@"
+  exit 1
+}
+
 post_install_check() {
   blue "post-install check"
-  if [ ! -x "$INSTALL_DIR/$BIN_NAME" ]; then
-    red "post-install check failed: $INSTALL_DIR/$BIN_NAME is missing or not executable"
-    exit 1
+  bin="$INSTALL_DIR/$BIN_NAME"
+
+  if [ ! -x "$bin" ]; then
+    smoke_fail "$bin is missing or not executable"
   fi
-  if ! version_output="$("$INSTALL_DIR/$BIN_NAME" --version 2>&1)"; then
-    red "post-install check failed: $INSTALL_DIR/$BIN_NAME --version exited non-zero"
-    printf '%s\n' "$version_output"
-    exit 1
+
+  # 1. The binary runs and reports a version.
+  if ! version_output="$("$bin" --version 2>&1)"; then
+    smoke_fail "$bin --version exited non-zero" "$version_output"
   fi
   green "$BIN_NAME --version: $version_output"
+
+  # 2. Provenance is embedded — an installed binary must know what it is
+  #    without a repository anywhere near it.
+  if ! build_info="$("$bin" --build-info 2>&1)"; then
+    smoke_fail "$bin --build-info exited non-zero" "$build_info"
+  fi
+  case "$build_info" in
+    *'"git_sha"'*) ;;
+    *) smoke_fail "$bin --build-info carries no commit provenance" "$build_info" ;;
+  esac
+  green "$BIN_NAME --build-info: provenance embedded"
+
+  # 3. Config/setup subsystem resolves.
+  if ! setup_output="$("$bin" setup --check 2>&1)"; then
+    smoke_fail "$bin setup --check exited non-zero" "$setup_output"
+  fi
+  green "$BIN_NAME setup --check: ok"
+
+  # 4. One real session command. On a fresh machine there are no sessions yet,
+  #    and `list-sessions` exits 1 for that — which still proves the session
+  #    discovery path ran. Anything else is a genuine failure.
+  session_output="$("$bin" list-sessions 2>&1)" && session_status=0 || session_status=$?
+  if [ "$session_status" -ne 0 ]; then
+    case "$session_output" in
+      *"No active vc-frame sessions found"*) ;;
+      *) smoke_fail "$bin list-sessions failed" "$session_output" ;;
+    esac
+  fi
+  green "$BIN_NAME list-sessions: ok"
+
+  # 5. vc-frame replaces zellij outright; this installer never creates an alias.
+  #    A pre-existing foreign `zellij` in the prefix is the user's own file, so
+  #    warn rather than fail on something we do not own.
+  if [ -e "$INSTALL_DIR/zellij" ]; then
+    yellow "note: $INSTALL_DIR/zellij exists and was NOT created by this installer"
+    yellow "      vc-frame does not provide or manage a 'zellij' alias"
+  fi
 }
 
 main() {
