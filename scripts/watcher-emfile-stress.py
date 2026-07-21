@@ -69,15 +69,84 @@ def server_pid_for_socket(socket_path: Path) -> int | None:
     return None
 
 
+class ServerDied(AssertionError):
+    """The isolated server exited while the probe was still measuring it."""
+
+
+def process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def fd_count(pid: int) -> int:
-    result = subprocess.run(
-        ["lsof", "-a", "-p", str(pid), "-Fn"],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        check=True,
-    )
-    return sum(1 for line in result.stdout.splitlines() if line.startswith("f"))
+    # lsof exits non-zero both when the process is gone and on transient
+    # hiccups. The probe polls this often enough to hit the latter, so the two
+    # cases are separated here instead of surfacing as an opaque CalledProcessError.
+    for _attempt in range(3):
+        result = subprocess.run(
+            ["lsof", "-a", "-p", str(pid), "-Fn"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if result.returncode == 0:
+            return sum(1 for line in result.stdout.splitlines() if line.startswith("f"))
+        if not process_alive(pid):
+            raise ServerDied(f"isolated server {pid} exited during measurement")
+        time.sleep(0.2)
+    raise AssertionError(f"lsof kept failing for live pid {pid}")
+
+
+def wait_for_stable_fd_count(
+    pid: int,
+    *,
+    deadline: float,
+    stable_seconds: float = 4.0,
+    warmup_seconds: float = 5.0,
+    interval: float = 0.5,
+) -> int:
+    """Return the FD count once it has stopped moving for ``stable_seconds``.
+
+    Server startup ramps descriptors (plugin workers plus both poll watchers
+    initialize asynchronously). That ramp is staged, not smooth: it plateaus
+    part-way up for over a second before climbing again, so a short
+    "N equal samples" check latches onto an intermediate plateau and yields a
+    baseline far below the settled value. Requiring the value to hold for a
+    window wider than those plateaus, after a minimum warmup, measures the
+    real idle floor instead.
+    """
+    started = time.monotonic()
+    required = max(2, int(stable_seconds / interval))
+    history: list[int] = []
+    while time.monotonic() < deadline:
+        history.append(fd_count(pid))
+        settled = len(history) >= required and len(set(history[-required:])) == 1
+        if settled and time.monotonic() - started >= warmup_seconds:
+            return history[-1]
+        time.sleep(interval)
+    raise TimeoutError(f"descriptor count never stabilized (samples: {history[-20:]})")
+
+
+def wait_for_fd_within(pid: int, *, bound: int, deadline: float, description: str) -> int:
+    """Return the FD count once it falls back to ``bound``.
+
+    Closing a client socket is not synchronous with the server reclaiming the
+    descriptor: the router thread has to observe EOF and unwind. Measuring on a
+    fixed sleep samples mid-unwind, so poll to the bound instead.
+    """
+    observed = fd_count(pid)
+    while time.monotonic() < deadline:
+        observed = fd_count(pid)
+        if observed <= bound:
+            return observed
+        time.sleep(0.5)
+    raise TimeoutError(f"{description}: descriptor count stayed at {observed} (bound {bound})")
 
 
 def cpu_seconds(pid: int) -> float:
@@ -146,7 +215,7 @@ def main() -> int:
     parser.add_argument("--binary", type=Path, default=Path("target/debug/vc-frame"))
     parser.add_argument("--cycles", type=int, default=3)
     parser.add_argument("--fd-limit", type=int, default=128)
-    parser.add_argument("--timeout", type=int, default=75)
+    parser.add_argument("--timeout", type=int, default=150)
     parser.add_argument("--receipt", type=Path)
     args = parser.parse_args()
 
@@ -249,9 +318,11 @@ def main() -> int:
             receipt["server_pid"] = server_pid
             # The detached client returns once the socket is ready, while plugin
             # workers and both poll watchers finish initializing asynchronously.
-            # Exclude that expected startup ramp from the leak baseline.
-            time.sleep(5.0)
-            receipt["fd_baseline"] = fd_count(server_pid)
+            # Exclude that expected startup ramp from the leak baseline by
+            # waiting for the ramp to settle rather than guessing its duration.
+            receipt["fd_baseline"] = wait_for_stable_fd_count(
+                server_pid, deadline=time.monotonic() + 30
+            )
             baseline_cpu_before = cpu_seconds(server_pid)
             time.sleep(3.0)
             receipt["cpu_seconds_during_baseline"] = round(
@@ -268,9 +339,15 @@ def main() -> int:
                 parked_layout.rename(layout_dir)
                 time.sleep(3.2)  # exceed the missing-root retry interval
 
-            receipt["fd_after_watcher_churn"] = fd_count(server_pid)
-            if int(receipt["fd_after_watcher_churn"]) > int(receipt["fd_baseline"]) + 3:
-                raise AssertionError(f"watcher FD count escaped bound: {receipt}")
+            try:
+                receipt["fd_after_watcher_churn"] = wait_for_fd_within(
+                    server_pid,
+                    bound=int(receipt["fd_baseline"]) + 3,
+                    deadline=time.monotonic() + 30,
+                    description="watcher FD count escaped bound",
+                )
+            except TimeoutError as error:
+                raise AssertionError(f"{error}: {json.dumps(receipt, sort_keys=True)}") from error
 
             log_offset = log_path.stat().st_size if log_path.exists() else 0
             pressure_started = time.monotonic()
@@ -348,10 +425,19 @@ def main() -> int:
             for client in pressure_sockets:
                 client.close()
             pressure_sockets.clear()
-            time.sleep(1.0)
-            receipt["fd_after_pressure_release"] = fd_count(server_pid)
-            if int(receipt["fd_after_pressure_release"]) > int(receipt["fd_baseline"]) + 3:
-                raise AssertionError(f"pressure descriptors were not released: {receipt}")
+            release_started = time.monotonic()
+            try:
+                receipt["fd_after_pressure_release"] = wait_for_fd_within(
+                    server_pid,
+                    bound=int(receipt["fd_baseline"]) + 3,
+                    deadline=time.monotonic() + 30,
+                    description="pressure descriptors were not released",
+                )
+            except TimeoutError as error:
+                raise AssertionError(f"{error}: {json.dumps(receipt, sort_keys=True)}") from error
+            receipt["pressure_release_settle_seconds"] = round(
+                time.monotonic() - release_started, 3
+            )
 
             sessions = run(
                 [str(binary), "list-sessions"], env=env, timeout=5
