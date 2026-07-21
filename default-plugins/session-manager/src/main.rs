@@ -986,11 +986,7 @@ impl State {
                             // the plugin shim bumps it for Action::GoToTab.
                             go_to_tab(tab_position as u32);
                         } else {
-                            switch_session_with_focus(
-                                &session_name,
-                                Some(tab_position),
-                                None,
-                            );
+                            switch_session_with_focus(&session_name, Some(tab_position), None);
                             self.reset_selected_index();
                         }
                         true
@@ -2381,7 +2377,7 @@ mod rail_tests {
             "second data row is the second working session"
         );
         // Header never maps — LeftClick(0) is a no-op.
-        assert!(click_map.get(&0).is_none());
+        assert!(!click_map.contains_key(&0));
     }
 
     #[test]
@@ -2436,10 +2432,10 @@ mod rail_tests {
         // Pure map lookup mirrors handle_session_rail_mouse: missing key → false.
         let click_map: BTreeMap<usize, RailClickTarget> = BTreeMap::new();
         assert!(
-            click_map.get(&0).is_none(),
+            !click_map.contains_key(&0),
             "header / empty map must not resolve a target"
         );
-        assert!(click_map.get(&99).is_none());
+        assert!(!click_map.contains_key(&99));
         // Negative lines are rejected before map lookup via usize::try_from.
         assert!(usize::try_from(-1_isize).is_err());
     }

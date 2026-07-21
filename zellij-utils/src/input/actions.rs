@@ -3487,10 +3487,12 @@ mod tests {
             Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None)
                 .expect("TEST");
         match actions.as_slice() {
-            [Action::NewTab {
-                should_change_focus_to_new_tab,
-                ..
-            }] => *should_change_focus_to_new_tab,
+            [
+                Action::NewTab {
+                    should_change_focus_to_new_tab,
+                    ..
+                },
+            ] => *should_change_focus_to_new_tab,
             other => panic!("Expected a single NewTab action, got {other:?}"),
         }
     }
@@ -3530,11 +3532,13 @@ mod tests {
         )
         .expect("TEST");
         match actions.as_slice() {
-            [Action::NewTab {
-                placement,
-                should_change_focus_to_new_tab,
-                ..
-            }] => {
+            [
+                Action::NewTab {
+                    placement,
+                    should_change_focus_to_new_tab,
+                    ..
+                },
+            ] => {
                 assert_eq!(*placement, TabPlacement::AfterBase);
                 assert!(
                     !*should_change_focus_to_new_tab,

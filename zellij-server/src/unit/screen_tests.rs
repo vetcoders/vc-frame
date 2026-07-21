@@ -1005,14 +1005,7 @@ fn new_tab_without_focus_leaves_the_active_tab_alone() {
     };
     let mut screen = create_new_screen(size, true, true);
 
-    new_named_tab_with_placement_and_focus(
-        &mut screen,
-        1,
-        0,
-        "base",
-        TabPlacement::Append,
-        true,
-    );
+    new_named_tab_with_placement_and_focus(&mut screen, 1, 0, "base", TabPlacement::Append, true);
     assert_eq!(
         screen.get_active_tab(1).unwrap().name,
         "base",
@@ -1048,14 +1041,7 @@ fn new_tab_no_focus_with_after_base_places_quietly() {
     };
     let mut screen = create_new_screen(size, true, true);
 
-    new_named_tab_with_placement_and_focus(
-        &mut screen,
-        1,
-        0,
-        "base",
-        TabPlacement::Append,
-        true,
-    );
+    new_named_tab_with_placement_and_focus(&mut screen, 1, 0, "base", TabPlacement::Append, true);
     new_named_tab_with_placement_and_focus(
         &mut screen,
         2,
