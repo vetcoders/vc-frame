@@ -14,10 +14,10 @@ layout {
                     rail "true"
                 }
             }
-            pane name="VibeCrafted Shell Guide" {
+            pane name="Vibecrafted Shell Guide" {
                 plugin location="zellij:about" {
                     guide_mode "mission-control"
-                    pane_title "VibeCrafted Shell Guide"
+                    pane_title "Vibecrafted Shell Guide"
                 }
             }
         }

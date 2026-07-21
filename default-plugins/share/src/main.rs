@@ -336,7 +336,12 @@ impl App {
         match event {
             Mouse::LeftClick(line, column) => self.handle_link_click(line, column),
             Mouse::Hover(line, column) => {
-                self.ui.hover_coordinates = Some((column, line as usize));
+                // Server may send line < 0 as "cursor left this pane".
+                if line < 0 {
+                    self.ui.hover_coordinates = None;
+                } else {
+                    self.ui.hover_coordinates = Some((column, line as usize));
+                }
                 true
             },
             _ => false,

@@ -308,7 +308,7 @@ impl Page {
     ) -> Self {
         Page::new()
             .main_screen()
-            .with_title(Text::new("VibeCrafted Mission Control").color_range(0, ..))
+            .with_title(Text::new("Vibecrafted Mission Control").color_range(0, ..))
             .with_paragraph(vec![
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new("A branded shell-provider surface built on top of native vc-frame control decks."),
@@ -878,7 +878,8 @@ impl Page {
             };
         });
     }
-    fn clear_hover(&mut self) -> bool {
+    /// Drop all component hover highlights. Used on cursor-leave (line < 0).
+    pub fn clear_hover(&mut self) -> bool {
         let had_hover = self.has_hover;
         self.menu_item_is_selected = false;
         self.hovering_over_link = false;

@@ -2102,11 +2102,11 @@ fn collect_leaf_panes(
 impl LayoutInfo {
     fn branded_builtin_label(name: &str) -> Option<&'static str> {
         match name {
-            "vibecrafted" => Some("VibeCrafted Operator Shell"),
-            "vc-dashboard" => Some("VibeCrafted Mission Control"),
-            "vc-workflow" => Some("VibeCrafted Workflow Surface"),
-            "vc-marbles" => Some("VibeCrafted Marbles Surface"),
-            "vc-research" => Some("VibeCrafted Research Surface"),
+            "vibecrafted" => Some("Vibecrafted Operator Shell"),
+            "vc-dashboard" => Some("Vibecrafted Mission Control"),
+            "vc-workflow" => Some("Vibecrafted Workflow Surface"),
+            "vc-marbles" => Some("Vibecrafted Marbles Surface"),
+            "vc-research" => Some("Vibecrafted Research Surface"),
             _ => None,
         }
     }

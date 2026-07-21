@@ -62,7 +62,7 @@ pub fn render_banner(x: usize, y: usize, rows: usize, cols: usize) {
         }
     } else if rows > 2 {
         println!(
-            "\u{1b}[{};{}H\u{1b}[1mVibeCrafted Shell",
+            "\u{1b}[{};{}H\u{1b}[1mVibecrafted Shell",
             (y + rows / 2) + 1,
             (x + cols.saturating_sub(18) / 2).saturating_sub(1)
         );

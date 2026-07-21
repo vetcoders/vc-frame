@@ -187,13 +187,13 @@ impl App {
                 let pane_title = self
                     .pane_title
                     .clone()
-                    .unwrap_or_else(|| "VibeCrafted Shell Guide".to_owned());
+                    .unwrap_or_else(|| "Vibecrafted Shell Guide".to_owned());
                 rename_plugin_pane(own_plugin_id, &pane_title);
             } else {
                 let pane_title = self
                     .pane_title
                     .clone()
-                    .unwrap_or_else(|| "About VibeCrafted Shell".to_owned());
+                    .unwrap_or_else(|| "About Vibecrafted Shell".to_owned());
                 rename_plugin_pane(own_plugin_id, &pane_title);
             }
         }
@@ -231,7 +231,12 @@ impl App {
                 }
             },
             Mouse::Hover(line, column) => {
-                should_render = self.active_page.handle_mouse_hover(column, line as usize);
+                // Server may send line < 0 as "cursor left this pane".
+                if line < 0 {
+                    should_render = self.active_page.clear_hover();
+                } else {
+                    should_render = self.active_page.handle_mouse_hover(column, line as usize);
+                }
             },
             _ => {},
         }

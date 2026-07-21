@@ -1,7 +1,7 @@
 // vc-marbles — convergence workspace
 // Launch: vibecrafted marbles dashboard | vibecrafted dashboard vc-marbles
 //
-// VibeCrafted with AI Agents (c)2026 VetCoders
+// Vibecrafted with AI Agents (c)2026 VetCoders
 layout {
     default_tab_template {
         pane size=1 borderless=true {

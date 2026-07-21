@@ -303,7 +303,8 @@ fn vibecrafted_layouts_can_be_loaded_from_builtin_assets() {
         let (_path, raw_layout, _swap_layout) =
             Layout::stringified_from_default_assets(Path::new(layout_name)).unwrap();
         assert!(
-            raw_layout.contains("VibeCrafted with AI Agents")
+            raw_layout.contains("Vibecrafted")
+                || raw_layout.contains("vibecrafted")
                 || raw_layout.contains("𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍."),
             "expected {layout_name} to resolve from built-in assets"
         );
@@ -337,9 +338,85 @@ fn vc_dashboard_guide_tab_uses_branded_mission_control_mode() {
         "expected vc-dashboard to configure the about plugin for the mission-control guide"
     );
     assert!(
-        raw_layout.contains("pane_title \"VibeCrafted Shell Guide\""),
+        raw_layout.contains("pane_title \"Vibecrafted Shell Guide\""),
         "expected vc-dashboard guide tab to set a branded pane title"
     );
+}
+
+#[test]
+fn product_layouts_always_include_sessions_rail() {
+    // Contract: left Sessions column is not optional on product surfaces.
+    // Every built-in product layout must embed session-manager with rail true
+    // (default_tab_template or explicit pane). Legacy compact/classic/strider
+    // are deliberately off the product picker.
+    for layout_name in [
+        "default",
+        "vibecrafted",
+        "vc-dashboard",
+        "vc-workflow",
+        "vc-marbles",
+        "vc-research",
+    ] {
+        let (_path, raw_layout, swap) =
+            Layout::stringified_from_default_assets(Path::new(layout_name)).unwrap();
+        let combined = match &swap {
+            Some((_, swap_body)) => format!("{raw_layout}\n{swap_body}"),
+            None => raw_layout.clone(),
+        };
+        assert!(
+            combined.contains("session-manager"),
+            "{layout_name}: missing session-manager (Sessions rail)"
+        );
+        assert!(
+            combined.contains("rail true") || combined.contains("rail \"true\""),
+            "{layout_name}: session-manager must set rail true"
+        );
+        // Parse must succeed — broken kdl is not "optional rail".
+        let (layout, _config) =
+            Layout::from_default_assets(Path::new(layout_name), None, Config::default()).unwrap();
+        assert!(
+            layout.has_tabs() || !layout.is_empty(),
+            "{layout_name}: empty after parse"
+        );
+    }
+}
+
+#[test]
+fn product_picker_excludes_legacy_no_rail_zellij_layouts() {
+    let (available, _) = Layout::list_available_layouts(None, &Some("vibecrafted".to_owned()));
+    let names: Vec<_> = available
+        .iter()
+        .filter_map(|info| match info {
+            LayoutInfo::BuiltIn(name) => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    for banned in [
+        "strider",
+        "compact",
+        "classic",
+        "welcome",
+        "disable-status-bar",
+        "no-plugins",
+    ] {
+        assert!(
+            !names.contains(&banned),
+            "product picker must not offer legacy no-rail layout {banned}"
+        );
+    }
+    for required in [
+        "default",
+        "vibecrafted",
+        "vc-dashboard",
+        "vc-workflow",
+        "vc-marbles",
+        "vc-research",
+    ] {
+        assert!(
+            names.contains(&required),
+            "product picker missing {required}"
+        );
+    }
 }
 
 #[test]

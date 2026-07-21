@@ -1025,10 +1025,10 @@ impl State {
             },
             Mouse::Hover(line, _column) => {
                 // Only clickable rows highlight. Header / blank / footer /
-                // out-of-bounds clear hover so the strip does not stick.
-                // Note: Mouse::Hover is delivered only while this pane is
-                // focused (server active-pane path). Leaving the pane without
-                // another Hover leaves last highlight until next map miss.
+                // out-of-bounds / leave (line < 0 from server) clear hover.
+                // Hover is delivered both while focused (SendToTerminal) and
+                // while unfocused (UpdateHover → mouse_event) so the rail
+                // lights under the cursor without a prior click.
                 let next = rail_hover_target(line, &self.rail_click_map);
                 if self.rail_hover_row != next {
                     self.rail_hover_row = next;
@@ -2513,9 +2513,36 @@ mod rail_tests {
             Some(2),
             "empty Finalized drawer stays hoverable"
         );
-        // Header, blank gap, out-of-bounds, negative → clear.
+        // Header, blank gap, out-of-bounds, negative leave → clear.
         assert_eq!(rail_hover_target(0, &click_map), None);
         assert_eq!(rail_hover_target(99, &click_map), None);
         assert_eq!(rail_hover_target(-1, &click_map), None);
+    }
+
+    #[test]
+    fn bucket_and_session_status_share_accent_column_index_3() {
+        // Session: "01 * alpha" — status `*` at byte index 3.
+        // Bucket:  " f - Finalized runs · 0" — status `-` at byte index 3.
+        let session_text = session_rail_rows(&[session("alpha", true)])
+            .into_iter()
+            .find(|r| matches!(r.kind, SessionRailRowKind::Session(_)))
+            .unwrap()
+            .text;
+        let bucket_text = format_bucket_rail_entry(BucketKind::Finalized, 0, false);
+        assert_eq!(
+            session_text.as_bytes().get(3),
+            Some(&b'*'),
+            "session status column"
+        );
+        assert_eq!(
+            bucket_text.as_bytes().get(3),
+            Some(&b'-'),
+            "bucket status column (same index as session)"
+        );
+        assert_eq!(
+            session_text.as_bytes().get(3).map(|_| 3),
+            bucket_text.as_bytes().get(3).map(|_| 3),
+            "color_range(1, 3..4) targets the same column for both"
+        );
     }
 }

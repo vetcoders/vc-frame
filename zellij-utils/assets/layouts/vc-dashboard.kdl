@@ -4,7 +4,7 @@
 // Design: pure monitoring surface — no work pane. Four quadrants showing
 // live system state. Agent tabs spawned during monitoring sessions get
 // branded chrome via default_tab_template.
-// Dashboard tabs expose the native Zellij control surfaces we rely on for
+// Dashboard tabs expose the native vc-frame control surfaces we rely on for
 // operators: sessions, layouts, configuration, plugin curation, workspace
 // navigation, sharing, and shell guidance.
 //
@@ -13,7 +13,7 @@
 //   "stacked"  — vertical stack (narrow terminals)
 //   "focused"  — single large pane + compact sidebar
 //
-// VibeCrafted with AI Agents (c)2026 VetCoders
+// Vibecrafted with AI Agents (c)2026 VetCoders
 layout {
     default_tab_template {
         pane size=1 borderless=true {
@@ -60,7 +60,7 @@ layout {
     tab name="Sessions" {
         pane name="session atlas" focus=true {
             plugin location="session-manager" {
-                pane_title "VibeCrafted Session Atlas"
+                pane_title "Vibecrafted Session Atlas"
             }
         }
     }
@@ -68,7 +68,7 @@ layout {
     tab name="Layouts" {
         pane name="layout forge" focus=true {
             plugin location="zellij:layout-manager" {
-                pane_title "VibeCrafted Layout Forge"
+                pane_title "Vibecrafted Layout Forge"
             }
         }
     }
@@ -76,7 +76,7 @@ layout {
     tab name="Control" {
         pane name="control deck" focus=true {
             plugin location="zellij:configuration" {
-                pane_title "VibeCrafted Control Deck"
+                pane_title "Vibecrafted Control Deck"
             }
         }
     }
@@ -84,7 +84,7 @@ layout {
     tab name="Plugins" {
         pane name="plugin forge" focus=true {
             plugin location="zellij:plugin-manager" {
-                pane_title "VibeCrafted Plugin Forge"
+                pane_title "Vibecrafted Plugin Forge"
             }
         }
     }
@@ -92,7 +92,7 @@ layout {
     tab name="Workspace" {
         pane name="workspace atlas" focus=true {
             plugin location="strider" {
-                pane_title "VibeCrafted Workspace Atlas"
+                pane_title "Vibecrafted Workspace Atlas"
             }
         }
     }
@@ -100,7 +100,7 @@ layout {
     tab name="Share" {
         pane name="share relay" focus=true {
             plugin location="zellij:share" {
-                pane_title "VibeCrafted Share Relay"
+                pane_title "Vibecrafted Share Relay"
             }
         }
     }
@@ -108,7 +108,7 @@ layout {
     tab name="Guide" {
         pane name="shell guide" focus=true {
             plugin location="about" {
-                pane_title "VibeCrafted Shell Guide"
+                pane_title "Vibecrafted Shell Guide"
                 guide_mode "mission-control"
             }
         }

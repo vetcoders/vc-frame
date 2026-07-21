@@ -1229,14 +1229,17 @@ impl Default for LayoutParts {
     }
 }
 
+/// Product surface layouts offered in the picker. Every entry MUST keep the
+/// left Sessions rail (session-manager + `rail true`) — enforced by
+/// `product_layouts_always_include_sessions_rail` in layout_test.
+///
+/// Legacy Zellij layouts (strider / compact / classic / welcome /
+/// disable-status-bar) remain loadable by name via
+/// `stringified_from_default_assets` for dump/tests, but are not product.
 const BUILTIN_LAYOUT_NAMES: &[&str] = &[
     "default",
-    "strider",
-    "disable-status-bar",
-    "compact",
-    "classic",
-    "vc-dashboard",
     "vibecrafted",
+    "vc-dashboard",
     "vc-workflow",
     "vc-marbles",
     "vc-research",
@@ -1645,27 +1648,27 @@ impl Layout {
                 None,
             )),
             Some("vc-dashboard") => Ok((
-                "VibeCrafted mission control layout".into(),
+                "Vibecrafted mission control layout".into(),
                 Self::stringified_vc_dashboard_from_assets()?,
                 None,
             )),
             Some("vibecrafted") => Ok((
-                "VibeCrafted operator layout".into(),
+                "Vibecrafted operator layout".into(),
                 Self::stringified_vibecrafted_from_assets()?,
                 None,
             )),
             Some("vc-workflow") => Ok((
-                "VibeCrafted workflow layout".into(),
+                "Vibecrafted workflow layout".into(),
                 Self::stringified_vc_workflow_from_assets()?,
                 None,
             )),
             Some("vc-marbles") => Ok((
-                "VibeCrafted marbles layout".into(),
+                "Vibecrafted marbles layout".into(),
                 Self::stringified_vc_marbles_from_assets()?,
                 None,
             )),
             Some("vc-research") => Ok((
-                "VibeCrafted research layout".into(),
+                "Vibecrafted research layout".into(),
                 Self::stringified_vc_research_from_assets()?,
                 None,
             )),

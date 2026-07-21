@@ -12,11 +12,53 @@ use crate::plugins::PluginInstruction;
 
 use super::{Pane, Tab};
 
+/// Leave signal for plugins: out-of-bounds Hover so they can drop row
+/// highlights (session-manager rail, strider ignores line < 0, etc.).
+fn plugin_hover_leave_event() -> MouseEvent {
+    MouseEvent::new_buttonless_motion(Position::new(-1, 0))
+}
+
+/// Pure UpdateHover policy — no Tab, no focus steal.
+///
+/// `focus_follows_mouse` is intentionally out of this path: hover highlights
+/// on unfocused plugins (SESSIONS rail) must not re-focus panes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HoverUpdatePolicy {
+    /// Drop chrome/plugin hover on the previous unfocused target.
+    clear_previous_unfocused: bool,
+    /// Drop hover on the focused pane when the cursor left it.
+    clear_active_on_leave: bool,
+    /// Deliver Motion hover to the pane under the cursor when it is not active.
+    deliver_unfocused_hover: bool,
+}
+
+fn hover_update_policy(
+    pane_under_cursor: Option<PaneId>,
+    previous_unfocused_hover: Option<PaneId>,
+    active_pane: Option<PaneId>,
+    has_position: bool,
+) -> HoverUpdatePolicy {
+    HoverUpdatePolicy {
+        clear_previous_unfocused: previous_unfocused_hover.is_some()
+            && previous_unfocused_hover != pane_under_cursor,
+        clear_active_on_leave: active_pane.is_some()
+            && active_pane != pane_under_cursor
+            && previous_unfocused_hover != active_pane,
+        deliver_unfocused_hover: has_position
+            && pane_under_cursor.is_some()
+            && pane_under_cursor != active_pane,
+    }
+}
+
 /// Remove the hover pane tracking for `client_id` and clear the hover position
 /// on the previously hovered pane (if any).  Returns `true` if a pane was
 /// cleared.
 fn clear_hover_for_client(tab: &mut Tab, client_id: ClientId) -> bool {
     if let Some(prev_pid) = tab.mouse_hover_pane_id.remove(&client_id) {
+        // Plugin panes only see hover via mouse_event — notify leave first.
+        if let Some(pane) = tab.get_pane_with_id(prev_pid) {
+            let _ = pane.mouse_event(&plugin_hover_leave_event(), client_id);
+        }
         if let Some(pane) = tab.get_pane_with_id_mut(prev_pid) {
             pane.set_hover_position(None);
         }
@@ -1082,11 +1124,18 @@ impl MouseHandler {
     fn execute_update_hover(
         tab: &mut Tab,
         pane_id: Option<PaneId>,
-        _position: Option<Position>,
+        position: Option<Position>,
         client_id: ClientId,
     ) -> Result<MouseEffect> {
         let mut should_render = false;
         let previous_hover_pane_id = tab.mouse_hover_pane_id.get(&client_id).copied();
+        let active_pane_id = tab.get_active_pane_id(client_id);
+        let policy = hover_update_policy(
+            pane_id,
+            previous_hover_pane_id,
+            active_pane_id,
+            position.is_some(),
+        );
         match pane_id {
             Some(pid) => {
                 if let Some(pane) = tab.get_pane_with_id(pid) {
@@ -1107,15 +1156,47 @@ impl MouseHandler {
             },
         }
 
-        // Clear hover position on previously hovered pane when the hovered
-        // pane has changed (or cursor left all panes).  Hover position is
-        // intentionally not set on unfocused panes so that hover-only plugin
-        // highlights only activate on the focused pane.
-        if let Some(prev_pane_id) = previous_hover_pane_id
-            && Some(prev_pane_id) != pane_id
-            && let Some(pane) = tab.get_pane_with_id_mut(prev_pane_id)
+        // Clear previous unfocused hover target (terminal chrome + plugin leave).
+        if policy.clear_previous_unfocused
+            && let Some(prev_pane_id) = previous_hover_pane_id
         {
-            pane.set_hover_position(None);
+            if let Some(pane) = tab.get_pane_with_id(prev_pane_id) {
+                let _ = pane.mouse_event(&plugin_hover_leave_event(), client_id);
+            }
+            if let Some(pane) = tab.get_pane_with_id_mut(prev_pane_id)
+                && pane.set_hover_position(None)
+            {
+                should_render = true;
+            }
+        }
+
+        // Focused path never stores mouse_hover_pane_id (SendToTerminal clears
+        // it). Without an explicit leave, plugin highlights (session rail)
+        // stick after the cursor exits the focused pane.
+        if policy.clear_active_on_leave
+            && let Some(active) = active_pane_id
+        {
+            if let Some(pane) = tab.get_pane_with_id(active) {
+                let _ = pane.mouse_event(&plugin_hover_leave_event(), client_id);
+            }
+            if let Some(pane) = tab.get_pane_with_id_mut(active)
+                && pane.set_hover_position(None)
+            {
+                should_render = true;
+            }
+        }
+
+        // Deliver hover to *unfocused* panes so plugins can highlight without
+        // a prior click-to-focus (Session Canvas SESSIONS rail). Does not
+        // change focus. Terminal apps do not receive these bytes — we only
+        // invoke mouse_event for the plugin instruction path / ignore return.
+        if policy.deliver_unfocused_hover
+            && let (Some(pid), Some(pos)) = (pane_id, position)
+            && let Some(pane) = tab.get_pane_with_id(pid)
+        {
+            let relative = pane.relative_position(&pos);
+            let motion = MouseEvent::new_buttonless_motion(relative);
+            let _ = pane.mouse_event(&motion, client_id);
         }
 
         if tab.mouse_help_text_visible.remove(&client_id).is_some() {
@@ -1689,5 +1770,76 @@ impl MouseHandler {
         if let Some(pane) = tab.get_pane_with_id_mut(pane_id) {
             pane.set_mouse_selection_support(selection_support);
         }
+    }
+}
+
+#[cfg(test)]
+mod hover_policy_tests {
+    use super::*;
+
+    const RAIL: PaneId = PaneId::Plugin(1);
+    const SHELL: PaneId = PaneId::Terminal(2);
+    const OTHER: PaneId = PaneId::Plugin(3);
+
+    #[test]
+    fn unfocused_rail_gets_hover_without_stealing_focus() {
+        // Cursor over rail while shell is focused → deliver hover, clear nothing on shell
+        // only if we also left shell... clear_active_on_leave is true when leaving shell.
+        let p = hover_update_policy(Some(RAIL), None, Some(SHELL), true);
+        assert!(
+            p.deliver_unfocused_hover,
+            "rail must receive hover while unfocused"
+        );
+        assert!(
+            p.clear_active_on_leave,
+            "leaving shell clears shell plugin hover if any"
+        );
+        assert!(!p.clear_previous_unfocused);
+        // Policy never mentions focus_follows_mouse — focus stays on SHELL.
+    }
+
+    #[test]
+    fn leave_rail_clears_previous_unfocused_highlight() {
+        let p = hover_update_policy(Some(SHELL), Some(RAIL), Some(SHELL), true);
+        assert!(p.clear_previous_unfocused);
+        assert!(
+            !p.deliver_unfocused_hover,
+            "shell is active — no unfocused path"
+        );
+        assert!(!p.clear_active_on_leave);
+    }
+
+    #[test]
+    fn leave_all_panes_clears_active_and_previous() {
+        let p = hover_update_policy(None, Some(RAIL), Some(SHELL), false);
+        assert!(p.clear_previous_unfocused);
+        assert!(p.clear_active_on_leave);
+        assert!(!p.deliver_unfocused_hover);
+    }
+
+    #[test]
+    fn focused_rail_does_not_use_unfocused_delivery() {
+        // Focused path is SendToTerminal, not UpdateHover delivery.
+        let p = hover_update_policy(Some(RAIL), None, Some(RAIL), true);
+        assert!(!p.deliver_unfocused_hover);
+        assert!(!p.clear_active_on_leave);
+        assert!(!p.clear_previous_unfocused);
+    }
+
+    #[test]
+    fn plugin_leave_event_is_out_of_bounds_motion() {
+        let ev = plugin_hover_leave_event();
+        assert_eq!(ev.event_type, MouseEventType::Motion);
+        assert!(!ev.left && !ev.right && !ev.middle);
+        assert_eq!(ev.position.line(), -1);
+        assert_eq!(ev.position.column(), 0);
+    }
+
+    #[test]
+    fn switching_unfocused_targets_clears_old_delivers_new() {
+        let p = hover_update_policy(Some(OTHER), Some(RAIL), Some(SHELL), true);
+        assert!(p.clear_previous_unfocused);
+        assert!(p.deliver_unfocused_hover);
+        assert!(p.clear_active_on_leave);
     }
 }

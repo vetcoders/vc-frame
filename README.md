@@ -81,8 +81,8 @@ For more build commands, see [CONTRIBUTING.md](CONTRIBUTING.md).
 ## Configuration
 vc-frame keeps compatibility with Zellij configuration and layout concepts. For inherited syntax, see the [upstream Zellij configuration documentation](https://zellij.dev/documentation/configuration.html). For vc-frame-specific default surface and theme behavior, see [docs/VC_FRAME_OPERATOR_SURFACE.md](docs/VC_FRAME_OPERATOR_SURFACE.md).
 
-## VibeCrafted Shell Layouts
-This fork also ships built-in VibeCrafted operator layouts meant to back the
+## Vibecrafted Shell Layouts
+This fork also ships built-in Vibecrafted operator layouts meant to back the
 `vibecrafted` flow when repo-owned config is not available:
 
 - `vibecrafted` — operator-first shell surface
@@ -110,7 +110,7 @@ home store first, then from a companion repo checkout at
 repo-local stores. `vc-dashboard` also acts as a branded control hub for the
 native vc-frame surfaces we lean on most: live monitoring, session atlas, layout
 forge, configuration control, plugin curation, workspace navigation, sharing,
-and the VibeCrafted shell guide.
+and the Vibecrafted shell guide.
 
 ### Installing repo-owned layouts into `~/.config/zellij/layouts/`
 
