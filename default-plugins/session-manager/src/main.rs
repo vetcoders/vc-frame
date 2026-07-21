@@ -592,6 +592,14 @@ fn rail_row_click_target(kind: &SessionRailRowKind) -> RailClickTarget {
     }
 }
 
+/// Resolve hover highlight for a plugin-relative mouse line.
+/// Missing map key / negative line → clear (no sticky highlight on chrome gaps).
+fn rail_hover_target(line: isize, click_map: &BTreeMap<usize, RailClickTarget>) -> Option<usize> {
+    usize::try_from(line)
+        .ok()
+        .filter(|row| click_map.contains_key(row))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SessionRailRow {
     kind: SessionRailRowKind,
@@ -895,9 +903,10 @@ impl State {
 
         for bucket_row in &bucket_rows[bucket_rows.len() - pinned_rows..] {
             let mut text = Text::new(fit_rail_line(&bucket_row.text, cols));
-            // Same hotkey accent as session ordinals (slot at cols 1..4).
+            // Same accent column as session status (`*`/`-` at index 3 in
+            // `"01 * name"` / `" f - Finalized…"`) — color_range(1, 3..4).
             if cols >= 4 {
-                text = text.color_range(1, 1..2);
+                text = text.color_range(1, 3..4);
             }
             if let SessionRailRowKind::Bucket {
                 session_index: Some(session_index),
@@ -1015,9 +1024,14 @@ impl State {
                 }
             },
             Mouse::Hover(line, _column) => {
-                let row = usize::try_from(line).ok();
-                if self.rail_hover_row != row {
-                    self.rail_hover_row = row;
+                // Only clickable rows highlight. Header / blank / footer /
+                // out-of-bounds clear hover so the strip does not stick.
+                // Note: Mouse::Hover is delivered only while this pane is
+                // focused (server active-pane path). Leaving the pane without
+                // another Hover leaves last highlight until next map miss.
+                let next = rail_hover_target(line, &self.rail_click_map);
+                if self.rail_hover_row != next {
+                    self.rail_hover_row = next;
                     true
                 } else {
                     false
@@ -1078,7 +1092,7 @@ impl State {
         self.ensure_rail_selection();
         if let Some(selected_session_name) = self.sessions.get_selected_session_name() {
             if self.sessions.selected_is_current_session() {
-                self.show_error("Already attached...");
+                // Already here — quiet (same contract as jump_to_bucket).
             } else {
                 switch_session_with_focus(&selected_session_name, None, None);
                 self.reset_selected_index();
@@ -1723,7 +1737,7 @@ impl State {
                         } else if let Some(tab_position) = selected_tab {
                             go_to_tab(tab_position as u32);
                         } else {
-                            self.show_error("Already attached...");
+                            // Already on this session with no tab/pane target — quiet.
                         }
                     } else {
                         switch_session_with_focus(
@@ -1797,7 +1811,7 @@ impl State {
                                     is_current_session, ..
                                 } => {
                                     if *is_current_session {
-                                        self.show_error("Already attached...");
+                                        // Already here — quiet (same contract as rail drawers).
                                     } else {
                                         switch_session_with_focus(&session_name, None, None);
                                     }
@@ -1836,7 +1850,7 @@ impl State {
                             // Check exact match against active sessions
                             if self.sessions.has_session(&typed_name) {
                                 if self.session_name.as_deref() == Some(&typed_name) {
-                                    self.show_error("Already attached...");
+                                    // Already here — quiet (same contract as rail drawers).
                                 } else {
                                     switch_session_with_focus(&typed_name, None, None);
                                     if self.is_welcome_screen {
@@ -2483,5 +2497,25 @@ mod rail_tests {
         assert!(!click_map.contains_key(&99));
         // Negative lines are rejected before map lookup via usize::try_from.
         assert!(usize::try_from(-1_isize).is_err());
+    }
+
+    #[test]
+    fn rail_hover_only_on_clickable_rows_and_clears_elsewhere() {
+        let rows = session_rail_rows(&[session("alpha", true)]);
+        let mut click_map: BTreeMap<usize, RailClickTarget> = BTreeMap::new();
+        for (offset, row) in rows.iter().enumerate() {
+            click_map.insert(offset + 1, rail_row_click_target(&row.kind));
+        }
+        // Data rows (1 = session, 2..=4 = drawers) highlight.
+        assert_eq!(rail_hover_target(1, &click_map), Some(1));
+        assert_eq!(
+            rail_hover_target(2, &click_map),
+            Some(2),
+            "empty Finalized drawer stays hoverable"
+        );
+        // Header, blank gap, out-of-bounds, negative → clear.
+        assert_eq!(rail_hover_target(0, &click_map), None);
+        assert_eq!(rail_hover_target(99, &click_map), None);
+        assert_eq!(rail_hover_target(-1, &click_map), None);
     }
 }
