@@ -8,7 +8,7 @@ use insta::assert_snapshot;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use zellij_utils::cli::CliAction;
-use zellij_utils::data::{Event, EventType, Resize, Style, WebSharing};
+use zellij_utils::data::{Event, EventType, Resize, Style, TabPlacement, WebSharing};
 use zellij_utils::errors::{ErrorContext, prelude::*};
 use zellij_utils::input::actions::Action;
 use zellij_utils::input::command::{RunCommand, TerminalAction};
@@ -424,6 +424,7 @@ impl MockScreen {
             None,                         // initial_panes
             false,
             should_change_focus_to_new_tab,
+            TabPlacement::Append,
             (self.main_client_id, false),
             None,
         ));
@@ -523,6 +524,7 @@ impl MockScreen {
             None,                         // initial_panes
             false,
             should_change_focus_to_new_tab,
+            TabPlacement::Append,
             (self.main_client_id, false),
             None,
         ));
@@ -562,6 +564,7 @@ impl MockScreen {
             None,                         // initial_panes
             false,
             should_change_focus_to_new_tab,
+            TabPlacement::Append,
             (self.main_client_id, false),
             None,
         ));
@@ -611,6 +614,7 @@ impl MockScreen {
             None,                         // initial_panes
             false,
             should_change_focus_to_new_tab,
+            TabPlacement::Append,
             (self.main_client_id, false),
             None,
         ));
@@ -816,7 +820,13 @@ fn new_tab(screen: &mut Screen, pid: u32, tab_index: usize) {
     let new_terminal_ids = vec![(pid, None)];
     let new_plugin_ids = HashMap::new();
     screen
-        .new_tab(tab_index, (vec![], vec![]), None, Some(client_id))
+        .new_tab(
+            tab_index,
+            (vec![], vec![]),
+            None,
+            Some(client_id),
+            TabPlacement::Append,
+        )
         .expect("TEST");
     screen
         .apply_layout(
@@ -849,6 +859,121 @@ fn open_new_tab() {
         screen.get_active_tab(1).unwrap().position,
         1,
         "Active tab switched to new tab"
+    );
+}
+
+/// Creates a named tab with an explicit placement, mirroring `new_tab` above.
+fn new_named_tab_with_placement(
+    screen: &mut Screen,
+    pid: u32,
+    tab_index: usize,
+    name: &str,
+    placement: TabPlacement,
+) {
+    let client_id = 1;
+    screen
+        .new_tab(
+            tab_index,
+            (vec![], vec![]),
+            Some(name.to_string()),
+            Some(client_id),
+            placement,
+        )
+        .expect("TEST");
+    screen
+        .apply_layout(
+            TiledPaneLayout::default(),
+            vec![],
+            vec![(pid, None)],
+            vec![],
+            HashMap::new(),
+            tab_index,
+            true,
+            (client_id, false),
+            None,
+        )
+        .expect("TEST");
+}
+
+/// Tab names in the order the tab bar renders them (by `position`, not by id).
+fn tab_names_in_display_order(screen: &Screen) -> Vec<String> {
+    let mut tabs: Vec<_> = screen
+        .tabs
+        .values()
+        .map(|t| (t.position, t.name.clone()))
+        .collect();
+    tabs.sort_by_key(|(position, _)| *position);
+    tabs.into_iter().map(|(_, name)| name).collect()
+}
+
+#[test]
+fn new_tab_appends_by_default() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, true, true);
+
+    for (i, name) in ["base", "run-1", "run-2", "run-3"].iter().enumerate() {
+        new_named_tab_with_placement(&mut screen, i as u32 + 1, i, name, TabPlacement::Append);
+    }
+
+    assert_eq!(
+        tab_names_in_display_order(&screen),
+        vec!["base", "run-1", "run-2", "run-3"],
+        "without the flag, tabs append at the end of the bar"
+    );
+}
+
+#[test]
+fn new_tab_after_base_grows_from_the_base_card() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, true, true);
+
+    new_named_tab_with_placement(&mut screen, 1, 0, "base", TabPlacement::Append);
+    for (i, name) in ["run-1", "run-2", "run-3"].iter().enumerate() {
+        let tab_index = i + 1;
+        new_named_tab_with_placement(
+            &mut screen,
+            tab_index as u32 + 1,
+            tab_index,
+            name,
+            TabPlacement::AfterBase,
+        );
+    }
+
+    assert_eq!(
+        tab_names_in_display_order(&screen),
+        vec!["base", "run-3", "run-2", "run-1"],
+        "each new run lands right of the base card, pushing older runs right"
+    );
+}
+
+#[test]
+fn new_tab_after_base_degrades_to_append_when_there_is_no_room() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, true, true);
+
+    // Nothing exists yet: the "new" tab IS the base tab, position 0.
+    new_named_tab_with_placement(&mut screen, 1, 0, "base", TabPlacement::AfterBase);
+    assert_eq!(
+        screen.tabs.values().next().map(|t| t.position),
+        Some(0),
+        "the first tab of a session takes position 0 even with --after-base"
+    );
+
+    // Only the base exists: position 1 is both "after base" and "the end".
+    new_named_tab_with_placement(&mut screen, 2, 1, "run-1", TabPlacement::AfterBase);
+    assert_eq!(
+        tab_names_in_display_order(&screen),
+        vec!["base", "run-1"],
+        "with a single existing tab, after-base and append agree"
     );
 }
 
@@ -3810,6 +3935,7 @@ pub fn send_cli_new_tab_action_default_params() {
         layout_string: None,
         layout_dir: None,
         cwd: None,
+        after_base: false,
         initial_command: vec![],
         initial_plugin: None,
         close_on_exit: Default::default(),
@@ -3857,6 +3983,7 @@ pub fn send_cli_new_tab_action_with_name_and_layout() {
         layout_string: None,
         layout_dir: None,
         cwd: None,
+        after_base: false,
         initial_command: vec![],
         initial_plugin: None,
         close_on_exit: Default::default(),
@@ -7967,6 +8094,7 @@ pub fn send_cli_new_tab_action_with_layout_string() {
         layout_string: Some("layout {\n    pane\n    pane\n    pane\n}\n".into()),
         layout_dir: None,
         cwd: None,
+        after_base: false,
         initial_command: vec![],
         initial_plugin: None,
         close_on_exit: Default::default(),
@@ -8018,6 +8146,7 @@ pub fn send_cli_new_tab_action_with_layout_string_and_name() {
         layout_string: Some("layout {\n    pane\n    pane\n    pane\n}\n".into()),
         layout_dir: None,
         cwd: None,
+        after_base: false,
         initial_command: vec![],
         initial_plugin: None,
         close_on_exit: Default::default(),

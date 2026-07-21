@@ -38,7 +38,7 @@ use zellij_utils::data::{
     OpenTerminalFloatingResponse, OpenTerminalInPlaceOfPluginResponse, OpenTerminalInPlaceResponse,
     OpenTerminalNearPluginResponse, OpenTerminalPaneInPlaceOfPaneIdResponse, OpenTerminalResponse,
     OriginatingPlugin, PaneScrollbackResponse, PermissionStatus, PermissionType, PluginPermission,
-    RegexHighlight, RenameLayoutResponse, SaveLayoutResponse, TabMetadata,
+    RegexHighlight, RenameLayoutResponse, SaveLayoutResponse, TabMetadata, TabPlacement,
 };
 use zellij_utils::home::default_layout_dir;
 use zellij_utils::input::permission::PermissionCache;
@@ -1058,6 +1058,7 @@ fn open_command_pane_in_new_tab(
         cwd: None,
         initial_panes,
         first_pane_unblock_condition: None,
+        placement: TabPlacement::Append,
     };
     let error_msg = || "Failed to open command pane in new tab".to_string();
     let result = apply_action!(action, error_msg, env);
@@ -1112,6 +1113,7 @@ fn open_plugin_pane_in_new_tab(
         cwd: None,
         initial_panes,
         first_pane_unblock_condition: None,
+        placement: TabPlacement::Append,
     };
     let error_msg = || "Failed to open plugin pane in new tab".to_string();
     let result = apply_action!(action, error_msg, env);
@@ -1203,6 +1205,7 @@ fn open_editor_pane_in_new_tab(
         cwd: None,
         initial_panes,
         first_pane_unblock_condition: None,
+        placement: TabPlacement::Append,
     };
     let error_msg = || "Failed to open editor pane in new tab".to_string();
     let result = apply_action!(action, error_msg, env);
@@ -2737,6 +2740,7 @@ fn apply_layout(env: &PluginEnv, layout: Layout) {
             cwd,
             initial_panes: None,
             first_pane_unblock_condition: None,
+            placement: TabPlacement::Append,
         };
         tabs_to_open.push(action);
     } else {
@@ -2757,6 +2761,7 @@ fn apply_layout(env: &PluginEnv, layout: Layout) {
                 cwd: cwd.clone(),
                 initial_panes: None,
                 first_pane_unblock_condition: None,
+                placement: TabPlacement::Append,
             };
             tabs_to_open.push(action);
         }
@@ -2792,6 +2797,7 @@ fn new_tab(env: &PluginEnv, name: Option<String>, cwd: Option<String>) {
         cwd,
         initial_panes: None,
         first_pane_unblock_condition: None,
+        placement: TabPlacement::Append,
     };
     let error_msg = || "Failed to open new tab".to_string();
     let result = apply_action!(action, error_msg, env);

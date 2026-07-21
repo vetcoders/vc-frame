@@ -996,6 +996,7 @@ pub(crate) fn route_action(
             cwd,
             initial_panes,
             first_pane_unblock_condition,
+            placement,
         } => {
             let shell = default_shell.clone();
             let is_web_client = false; // actions cannot be initiated directly from the web
@@ -1022,6 +1023,7 @@ pub(crate) fn route_action(
                     initial_panes,
                     block_on_first_terminal,
                     should_change_focus_to_new_tab,
+                    placement,
                     (client_id, is_web_client),
                     Some(completion_tx),
                 ))

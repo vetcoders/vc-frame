@@ -46,7 +46,7 @@ use zellij_utils::data::{
     HostTerminalThemeMode, KeyWithModifier, LayoutInfo, LayoutWithError, ListPanesResponse,
     ListTabsResponse, NewPanePlacement, PaneContents, PaneInfo, PaneListEntry, PaneManifest,
     PaneRenderReport, PaneScrollbackResponse, PluginPermission, RegexHighlight, Resize,
-    ResizeStrategy, SessionInfo, Styling, TabInfo, WebSharing,
+    ResizeStrategy, SessionInfo, Styling, TabInfo, TabPlacement, WebSharing,
 };
 use zellij_utils::errors::prelude::*;
 use zellij_utils::input::command::RunCommand;
@@ -482,6 +482,7 @@ pub enum ScreenInstruction {
         Option<Vec<CommandOrPlugin>>, // initial_panes
         bool,                         // block_on_first_terminal
         bool,                         // should_change_focus_to_new_tab
+        TabPlacement,                 // where the tab lands in the tab bar
         (ClientId, bool),             // bool -> is_web_client
         Option<NotificationEnd>,      // completion signal
     ),
@@ -2900,6 +2901,30 @@ impl Screen {
         Ok(())
     }
 
+    /// Resolves the display position a tab created with `placement` should take,
+    /// shifting the tabs it displaces to the right.
+    ///
+    /// This runs at creation time rather than as a follow-up move so the tab bar
+    /// never renders the intermediate order — a create-then-move pair would flash
+    /// the tab at the end before snapping it into place.
+    fn claim_tab_position(&mut self, placement: TabPlacement) -> usize {
+        let append_position = self.tabs.len();
+        match placement {
+            TabPlacement::Append => append_position,
+            // With 0 or 1 existing tabs there is nothing to the right of the base
+            // tab, so "after base" and "append" are the same position.
+            TabPlacement::AfterBase if append_position < 2 => append_position,
+            TabPlacement::AfterBase => {
+                for tab in self.tabs.values_mut() {
+                    if tab.position >= 1 {
+                        tab.position += 1;
+                    }
+                }
+                1
+            },
+        }
+    }
+
     /// Creates a new [`Tab`] in this [`Screen`]
     pub fn new_tab(
         &mut self,
@@ -2907,6 +2932,7 @@ impl Screen {
         swap_layouts: (Vec<SwapTiledLayout>, Vec<SwapFloatingLayout>),
         tab_name: Option<String>,
         client_id: Option<ClientId>,
+        placement: TabPlacement,
     ) -> Result<()> {
         let err_context = || format!("failed to create new tab for client {client_id:?}",);
 
@@ -2922,7 +2948,7 @@ impl Screen {
 
         let tab_name = tab_name.unwrap_or_default();
 
-        let position = self.tabs.len();
+        let position = self.claim_tab_position(placement);
         let mut tab = Tab::new(
             tab_id,
             position,
@@ -4157,7 +4183,13 @@ impl Screen {
                 default_layout.swap_tiled_layouts.clone(),
                 default_layout.swap_floating_layouts.clone(),
             );
-            self.new_tab(tab_index, swap_layouts, None, Some(client_id))?;
+            self.new_tab(
+                tab_index,
+                swap_layouts,
+                None,
+                Some(client_id),
+                TabPlacement::Append,
+            )?;
             let tab = self.tabs.get_mut(&tab_index).with_context(err_context)?;
             let (mut tiled_panes_layout, floating_panes_layout) = default_layout.new_tab();
             let without_relayout = true;
@@ -4231,9 +4263,15 @@ impl Screen {
             self.default_layout.swap_floating_layouts.clone(),
         );
         if should_change_focus_to_new_tab {
-            self.new_tab(tab_index, swap_layouts, None, Some(client_id))?;
+            self.new_tab(
+                tab_index,
+                swap_layouts,
+                None,
+                Some(client_id),
+                TabPlacement::Append,
+            )?;
         } else {
-            self.new_tab(tab_index, swap_layouts, None, None)?;
+            self.new_tab(tab_index, swap_layouts, None, None, TabPlacement::Append)?;
         }
         let tab = self.tabs.get_mut(&tab_index).with_context(err_context)?;
         if let Some(new_tab_name) = new_tab_name {
@@ -7058,6 +7096,7 @@ pub(crate) fn screen_thread_main(
                 initial_panes,
                 block_on_first_terminal,
                 should_change_focus_to_new_tab,
+                placement,
                 (client_id, is_web_client),
                 completion_tx,
             ) => {
@@ -7079,6 +7118,7 @@ pub(crate) fn screen_thread_main(
                     resolved_swap_layouts,
                     tab_name.clone(),
                     client_id_for_new_tab,
+                    placement,
                 )?;
                 screen
                     .bus
@@ -7279,6 +7319,7 @@ pub(crate) fn screen_thread_main(
                                 swap_layouts,
                                 Some(tab_name),
                                 Some(client_id),
+                                TabPlacement::Append,
                             )?;
                             screen
                                 .bus
@@ -7831,6 +7872,7 @@ pub(crate) fn screen_thread_main(
                             swap_layouts,
                             tab_result.tab_name.clone(),
                             None,
+                            TabPlacement::Append,
                         ) {
                             log::error!(
                                 "Failed to create new tab {} during override completion: {:?}",

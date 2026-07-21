@@ -58,7 +58,7 @@ use zellij_utils::{
     },
     data::{
         ConnectToSession, InputMode, KeyWithModifier, LayoutInfo, LayoutWithError, Style,
-        WebSharing,
+        TabPlacement, WebSharing,
     },
     errors::{ContextType, ErrorInstruction, FatalError, ServerContext, prelude::*},
     home::{default_layout_dir, get_default_data_dir},
@@ -1012,6 +1012,7 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                             None,  // initial_panes
                             false, // block_on_first_terminal
                             should_focus_tab,
+                            TabPlacement::Append, // startup layout tabs keep source order
                             (client_id, is_web_client),
                             None,
                         ))
