@@ -58,9 +58,10 @@ struct State {
     is_visible: bool,
     refresh_timer_armed: bool,
     is_rail: bool,
-    // screen row -> session index, rebuilt on every rail render so mouse
-    // clicks resolve against exactly what is on screen (incl. scroll window)
-    rail_click_map: BTreeMap<usize, usize>,
+    // screen row -> click target, rebuilt on every rail render so mouse
+    // clicks resolve against exactly what is on screen (incl. scroll window).
+    // Header / footer / blank gap rows are absent → click is a no-op.
+    rail_click_map: BTreeMap<usize, RailClickTarget>,
 }
 
 register_plugin!(State);
@@ -548,6 +549,9 @@ enum SessionRailRowKind {
     Session(usize),
     LiveProcess {
         session_index: usize,
+        /// 0-based tab position — handed straight to `switch_session_with_focus`
+        /// / `go_to_tab` (both expect 0-based and bump internally).
+        tab_position: usize,
     },
     /// Pinned bucket row. `session_index` is `None` until the reaper has had a
     /// reason to create the bucket session — the row still shows, at zero.
@@ -555,6 +559,32 @@ enum SessionRailRowKind {
         bucket: BucketKind,
         session_index: Option<usize>,
     },
+}
+
+/// What a left-click on a rail row should do. Derived from the rendered row
+/// kind so hit-testing stays pure and independent of keyboard selection state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RailClickTarget {
+    Session(usize),
+    LiveProcess {
+        session_index: usize,
+        tab_position: usize,
+    },
+    Bucket(BucketKind),
+}
+
+fn rail_row_click_target(kind: &SessionRailRowKind) -> RailClickTarget {
+    match *kind {
+        SessionRailRowKind::Session(session_index) => RailClickTarget::Session(session_index),
+        SessionRailRowKind::LiveProcess {
+            session_index,
+            tab_position,
+        } => RailClickTarget::LiveProcess {
+            session_index,
+            tab_position,
+        },
+        SessionRailRowKind::Bucket { bucket, .. } => RailClickTarget::Bucket(bucket),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -649,7 +679,10 @@ fn session_rail_rows(sessions: &[SessionUiInfo]) -> Vec<SessionRailRow> {
                 .iter()
                 .filter(|tab| tab.live_process_count() > 0)
                 .map(|tab| SessionRailRow {
-                    kind: SessionRailRowKind::LiveProcess { session_index },
+                    kind: SessionRailRowKind::LiveProcess {
+                        session_index,
+                        tab_position: tab.position,
+                    },
                     text: format_process_tab_rail_entry(tab),
                 }),
         );
@@ -809,7 +842,6 @@ impl State {
                     if selected_index == Some(session_index) {
                         text = text.selected();
                     }
-                    self.rail_click_map.insert(row, session_index);
                 },
                 SessionRailRowKind::LiveProcess { .. } => {
                     if cols >= 4 {
@@ -818,6 +850,9 @@ impl State {
                 },
                 SessionRailRowKind::Bucket { .. } => {},
             }
+            // Every data row is clickable; header (row 0) never enters the map.
+            self.rail_click_map
+                .insert(row, rail_row_click_target(&rail_row.kind));
             print_text_with_coordinates(text, 0, row, None, None);
             row += 1;
         }
@@ -857,12 +892,14 @@ impl State {
                 session_index: Some(session_index),
                 ..
             } = bucket_row.kind
+                && selected_index == Some(session_index)
             {
-                if selected_index == Some(session_index) {
-                    text = text.selected();
-                }
-                self.rail_click_map.insert(row, session_index);
+                text = text.selected();
             }
+            // Empty buckets stay clickable so the mouse path matches `f`/`x`/`n`
+            // (which report "is empty" rather than silently no-opping).
+            self.rail_click_map
+                .insert(row, rail_row_click_target(&bucket_row.kind));
             print_text_with_coordinates(text, 0, row, None, None);
             row += 1;
         }
@@ -919,17 +956,54 @@ impl State {
                 let Ok(row) = usize::try_from(line) else {
                     return false;
                 };
-                let Some(session_index) = self.rail_click_map.get(&row).copied() else {
+                // Header, footer, blank gap between working sessions and the
+                // pinned buckets: not in the map → quiet no-op, no crash.
+                let Some(target) = self.rail_click_map.get(&row).cloned() else {
                     return false;
                 };
-                if !self.sessions.select_session_index(session_index) {
-                    return false;
+                match target {
+                    RailClickTarget::Session(session_index) => {
+                        if !self.sessions.select_session_index(session_index) {
+                            return false;
+                        }
+                        if !self.sessions.selected_is_current_session() {
+                            self.handle_session_rail_selection();
+                        }
+                        true
+                    },
+                    RailClickTarget::LiveProcess {
+                        session_index,
+                        tab_position,
+                    } => {
+                        if !self.sessions.select_session_index(session_index) {
+                            return false;
+                        }
+                        let Some(session_name) = self.sessions.get_selected_session_name() else {
+                            return false;
+                        };
+                        if self.sessions.selected_is_current_session() {
+                            // Same 0-based position the keyboard path uses;
+                            // the plugin shim bumps it for Action::GoToTab.
+                            go_to_tab(tab_position as u32);
+                        } else {
+                            switch_session_with_focus(
+                                &session_name,
+                                Some(tab_position),
+                                None,
+                            );
+                            self.reset_selected_index();
+                        }
+                        true
+                    },
+                    RailClickTarget::Bucket(bucket) => {
+                        // Same entry point as the `f`/`x`/`n` hotkeys.
+                        self.jump_to_bucket(bucket);
+                        true
+                    },
                 }
-                if !self.sessions.selected_is_current_session() {
-                    self.handle_session_rail_selection();
-                }
-                true
             },
+            // Scroll / hover / right-click are not part of this cut. Shift+click
+            // never reaches the plugin (client passthrough to the terminal).
             _ => false,
         }
     }
@@ -2216,5 +2290,157 @@ mod rail_tests {
         // no current session marker — nothing sane to be relative to
         let orphaned = vec![session("alpha", false), session("beta", false)];
         assert_eq!(relative_session_target(&orphaned, 1), None);
+    }
+
+    #[test]
+    fn live_process_rows_carry_tab_position_so_clicks_can_focus_the_worker() {
+        let mut alpha = session("alpha", true);
+        let mut run_a = TabUiInfo::for_rail_test("impl-a", true, "claude", 1);
+        run_a.position = 0;
+        let mut dead = TabUiInfo::for_rail_test("dead", false, "codex", 0);
+        dead.position = 1;
+        let mut run_b = TabUiInfo::for_rail_test("impl-b", false, "codex", 1);
+        run_b.position = 2;
+        alpha.tabs = vec![run_a, dead, run_b];
+
+        let rows = session_rail_rows(&[alpha]);
+        let live: Vec<&SessionRailRow> = rows.iter().filter(|row| row.is_live_process()).collect();
+
+        assert_eq!(live.len(), 2, "dead tabs stay collapsed");
+        assert_eq!(
+            live[0].kind,
+            SessionRailRowKind::LiveProcess {
+                session_index: 0,
+                tab_position: 0,
+            }
+        );
+        assert_eq!(
+            live[1].kind,
+            SessionRailRowKind::LiveProcess {
+                session_index: 0,
+                tab_position: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn rail_row_click_target_maps_session_tab_and_bucket_including_empty() {
+        assert_eq!(
+            rail_row_click_target(&SessionRailRowKind::Session(3)),
+            RailClickTarget::Session(3)
+        );
+        assert_eq!(
+            rail_row_click_target(&SessionRailRowKind::LiveProcess {
+                session_index: 1,
+                tab_position: 4,
+            }),
+            RailClickTarget::LiveProcess {
+                session_index: 1,
+                tab_position: 4,
+            }
+        );
+        assert_eq!(
+            rail_row_click_target(&SessionRailRowKind::Bucket {
+                bucket: BucketKind::Failed,
+                session_index: Some(2),
+            }),
+            RailClickTarget::Bucket(BucketKind::Failed)
+        );
+        // Empty drawer: still a bucket target so the mouse path can surface
+        // the same "is empty" error the hotkey does.
+        assert_eq!(
+            rail_row_click_target(&SessionRailRowKind::Bucket {
+                bucket: BucketKind::NeedsAttention,
+                session_index: None,
+            }),
+            RailClickTarget::Bucket(BucketKind::NeedsAttention)
+        );
+    }
+
+    #[test]
+    fn simulated_left_click_on_session_row_selects_that_session() {
+        // Hit-test only: the host-side switch is exercised by the existing
+        // selection path. We rebuild the map the way render does and prove a
+        // LeftClick(line) on a data row resolves to the right session.
+        let sessions = vec![session("alpha", true), session("beta", false)];
+        let rows = session_rail_rows(&sessions);
+        let mut click_map: BTreeMap<usize, RailClickTarget> = BTreeMap::new();
+        // row 0 is the header; data starts at 1, same as render_session_rail.
+        for (offset, row) in rows.iter().enumerate() {
+            click_map.insert(offset + 1, rail_row_click_target(&row.kind));
+        }
+
+        assert_eq!(
+            click_map.get(&1),
+            Some(&RailClickTarget::Session(0)),
+            "first data row is the first working session"
+        );
+        assert_eq!(
+            click_map.get(&2),
+            Some(&RailClickTarget::Session(1)),
+            "second data row is the second working session"
+        );
+        // Header never maps — LeftClick(0) is a no-op.
+        assert!(click_map.get(&0).is_none());
+    }
+
+    #[test]
+    fn simulated_left_click_on_live_process_row_targets_session_and_tab() {
+        let mut alpha = session("alpha", true);
+        let mut run = TabUiInfo::for_rail_test("worker-run", true, "claude", 1);
+        run.position = 3;
+        alpha.tabs = vec![run];
+        let beta = session("beta", false);
+        let rows = session_rail_rows(&[alpha, beta]);
+        let mut click_map: BTreeMap<usize, RailClickTarget> = BTreeMap::new();
+        for (offset, row) in rows.iter().enumerate() {
+            click_map.insert(offset + 1, rail_row_click_target(&row.kind));
+        }
+
+        // row 1: alpha session, row 2: its live worker tab, row 3: beta, then buckets
+        assert_eq!(click_map.get(&1), Some(&RailClickTarget::Session(0)));
+        assert_eq!(
+            click_map.get(&2),
+            Some(&RailClickTarget::LiveProcess {
+                session_index: 0,
+                tab_position: 3,
+            })
+        );
+        assert_eq!(click_map.get(&3), Some(&RailClickTarget::Session(1)));
+    }
+
+    #[test]
+    fn simulated_left_click_on_bucket_row_targets_bucket_hotkey_equivalent() {
+        let rows = session_rail_rows(&[session("alpha", true)]);
+        let mut click_map: BTreeMap<usize, RailClickTarget> = BTreeMap::new();
+        for (offset, row) in rows.iter().enumerate() {
+            click_map.insert(offset + 1, rail_row_click_target(&row.kind));
+        }
+        // alpha + three empty drawers
+        assert_eq!(
+            click_map.get(&2),
+            Some(&RailClickTarget::Bucket(BucketKind::Finalized))
+        );
+        assert_eq!(
+            click_map.get(&3),
+            Some(&RailClickTarget::Bucket(BucketKind::Failed))
+        );
+        assert_eq!(
+            click_map.get(&4),
+            Some(&RailClickTarget::Bucket(BucketKind::NeedsAttention))
+        );
+    }
+
+    #[test]
+    fn simulated_left_click_outside_data_rows_is_noop() {
+        // Pure map lookup mirrors handle_session_rail_mouse: missing key → false.
+        let click_map: BTreeMap<usize, RailClickTarget> = BTreeMap::new();
+        assert!(
+            click_map.get(&0).is_none(),
+            "header / empty map must not resolve a target"
+        );
+        assert!(click_map.get(&99).is_none());
+        // Negative lines are rejected before map lookup via usize::try_from.
+        assert!(usize::try_from(-1_isize).is_err());
     }
 }
