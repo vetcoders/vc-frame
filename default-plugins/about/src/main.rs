@@ -187,7 +187,7 @@ impl App {
                 let pane_title = self
                     .pane_title
                     .clone()
-                    .unwrap_or_else(|| "Vibecrafted Shell Guide".to_owned());
+                    .unwrap_or_else(|| "Start here — map of this workspace".to_owned());
                 rename_plugin_pane(own_plugin_id, &pane_title);
             } else {
                 let pane_title = self
@@ -264,7 +264,18 @@ impl App {
             reconfigure("show_startup_tips false".to_owned(), save_configuration);
         } else if key.bare_key == BareKey::Esc && key.has_no_modifiers() {
             if self.active_page.is_main_screen {
-                close_self();
+                // Embedded Guide is not a floating about pane — Esc stays put.
+                if self.guide_mode.as_deref() != Some("mission-control") {
+                    close_self();
+                }
+            } else if self.guide_mode.as_deref() == Some("mission-control") {
+                // Sub-topics return to the first-run map, not the generic About menu.
+                self.active_page = Page::new_vibecrafted_mission_control(
+                    self.link_executable.clone(),
+                    self.zellij_version.borrow().clone(),
+                    self.base_mode.clone(),
+                );
+                should_render = true;
             } else {
                 self.active_page = Page::new_main_screen(
                     self.link_executable.clone(),

@@ -301,124 +301,443 @@ impl Page {
                 })
             })
     }
+    /// First-run map for the vibecrafted operator layout (Guide / Start here tab).
+    /// Written for people who have never used a multiplexor — plain labels, no jargon.
     pub fn new_vibecrafted_mission_control(
         link_executable: Rc<RefCell<String>>,
         zellij_version: String,
-        _base_mode: Rc<RefCell<InputMode>>,
+        base_mode: Rc<RefCell<InputMode>>,
     ) -> Self {
         Page::new()
             .main_screen()
-            .with_title(Text::new("Vibecrafted Mission Control").color_range(0, ..))
+            .with_title(Text::new("Start here — map of this workspace").color_range(0, ..))
             .with_paragraph(vec![
-                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("A branded shell-provider surface built on top of native vc-frame control decks."),
-                ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new(format!(
-                        "This guide is wired into vc-frame {} so operators can jump from telemetry into action without leaving the dashboard.",
+                        "vc-frame {} · Vibecrafted operator layout",
                         zellij_version
-                    ))
-                    .color_substring(2, "operators")
-                    .color_substring(3, "dashboard"),
+                    )),
                 ))]),
-            ])
-            .with_bulletin_list(
-                BulletinList::new(Text::new("Open a deck:").color_range(2, ..)).with_items(vec![
-                    ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
-                        "Session Atlas",
-                    )))
-                    .with_hover(TextOrCustomRender::Text(
-                        main_menu_item("Session Atlas").selected(),
-                    ))
-                    .with_left_click_action(ClickAction::new_launch_plugin(
-                        "zellij:session-manager".to_owned(),
-                    )),
-                    ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
-                        "Layout Forge",
-                    )))
-                    .with_hover(TextOrCustomRender::Text(
-                        main_menu_item("Layout Forge").selected(),
-                    ))
-                    .with_left_click_action(ClickAction::new_launch_plugin(
-                        "zellij:layout-manager".to_owned(),
-                    )),
-                    ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
-                        "Control Deck",
-                    )))
-                    .with_hover(TextOrCustomRender::Text(
-                        main_menu_item("Control Deck").selected(),
-                    ))
-                    .with_left_click_action(ClickAction::new_launch_plugin(
-                        "zellij:configuration".to_owned(),
-                    )),
-                    ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
-                        "Plugin Forge",
-                    )))
-                    .with_hover(TextOrCustomRender::Text(
-                        main_menu_item("Plugin Forge").selected(),
-                    ))
-                    .with_left_click_action(ClickAction::new_launch_plugin(
-                        "zellij:plugin-manager".to_owned(),
-                    )),
-                    ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
-                        "Workspace Atlas",
-                    )))
-                    .with_hover(TextOrCustomRender::Text(
-                        main_menu_item("Workspace Atlas").selected(),
-                    ))
-                    .with_left_click_action(ClickAction::new_launch_plugin(
-                        "zellij:strider".to_owned(),
-                    )),
-                    ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
-                        "Share Relay",
-                    )))
-                    .with_hover(TextOrCustomRender::Text(
-                        main_menu_item("Share Relay").selected(),
-                    ))
-                    .with_left_click_action(ClickAction::new_launch_plugin(
-                        "zellij:share".to_owned(),
-                    )),
-                ]),
-            )
-            .with_paragraph(vec![
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("Operator shell: vibecrafted start").color_substring(
-                        3,
-                        "vibecrafted start",
+                    Text::new(
+                        "You are looking at ONE session (this window). It has a fixed chrome:",
                     ),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("Implementation surface: vibecrafted dashboard vc-workflow")
-                        .color_substring(3, "vibecrafted dashboard vc-workflow"),
+                    Text::new(
+                        "  TOP    = tabs of THIS session (Start here · Shell)",
+                    )
+                    .color_substring(3, "TOP")
+                    .color_substring(2, "tabs of THIS session"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("Convergence surface: vibecrafted dashboard vc-marbles")
-                        .color_substring(3, "vibecrafted dashboard vc-marbles"),
+                    Text::new(
+                        "  LEFT   = SESSIONS rail — other sessions / agent rooms (click to jump)",
+                    )
+                    .color_substring(3, "LEFT")
+                    .color_substring(2, "SESSIONS rail"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("Research surface: vibecrafted dashboard vc-research")
-                        .color_substring(3, "vibecrafted dashboard vc-research"),
+                    Text::new(
+                        "  CENTER = this Guide (help). Work happens on the Shell tab.",
+                    )
+                    .color_substring(3, "CENTER")
+                    .color_substring(2, "Shell tab"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  BOTTOM = status bar (modes: Ctrl+t TAB, Ctrl+p PANE, Ctrl+o SESSION)")
+                        .color_substring(3, "BOTTOM")
+                        .color_substring(2, "Ctrl+t")
+                        .color_substring(2, "Ctrl+p")
+                        .color_substring(2, "Ctrl+o"),
                 ))]),
             ])
-            .with_paragraph(vec![ComponentLine::new(vec![
-                ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("Learn more about the native vc-frame surfaces behind this shell: ")
-                        .color_range(2, ..),
-                )),
-                ActiveComponent::new(TextOrCustomRender::Text(Text::new(
-                    "https://zellij.dev/documentation/",
-                )))
-                .with_hover(TextOrCustomRender::Text(
-                    Text::new("https://zellij.dev/documentation/").selected(),
-                ))
-                .with_left_click_action(ClickAction::new_open_link(
-                    "https://zellij.dev/documentation/".to_owned(),
-                    link_executable.clone(),
-                )),
-            ])])
+            .with_paragraph(vec![
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("Do this first (60 seconds):").color_range(2, ..),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        "  1. Open the Shell tab — click \"Shell\" on the top bar, or: Ctrl+t then 2",
+                    )
+                    .color_substring(3, "Shell")
+                    .color_substring(2, "Ctrl+t then 2"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        "  2. Read the banner in the shell, then run:  vibecrafted start",
+                    )
+                    .color_substring(3, "vibecrafted start"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        "  3. Come back here anytime (Ctrl+t then 1) if you get lost.",
+                    )
+                    .color_substring(2, "Ctrl+t then 1"),
+                ))]),
+            ])
+            .with_bulletin_list(
+                BulletinList::new(Text::new("Learn the chrome (click a topic):").color_range(2, ..))
+                    .with_items(vec![
+                        ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
+                            "Left rail = sessions (not tabs)",
+                        )))
+                        .with_hover(TextOrCustomRender::Text(
+                            main_menu_item("Left rail = sessions (not tabs)").selected(),
+                        ))
+                        .with_left_click_action(ClickAction::new_change_page({
+                            let link_executable = link_executable.clone();
+                            let zellij_version = zellij_version.clone();
+                            let base_mode = base_mode.clone();
+                            move || {
+                                Page::new_onboarding_sessions_rail(
+                                    link_executable.clone(),
+                                    zellij_version.clone(),
+                                    base_mode.clone(),
+                                )
+                            }
+                        })),
+                        ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
+                            "Top bar = tabs of this session",
+                        )))
+                        .with_hover(TextOrCustomRender::Text(
+                            main_menu_item("Top bar = tabs of this session").selected(),
+                        ))
+                        .with_left_click_action(ClickAction::new_change_page({
+                            let link_executable = link_executable.clone();
+                            let zellij_version = zellij_version.clone();
+                            let base_mode = base_mode.clone();
+                            move || {
+                                Page::new_onboarding_tabs(
+                                    link_executable.clone(),
+                                    zellij_version.clone(),
+                                    base_mode.clone(),
+                                )
+                            }
+                        })),
+                        ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
+                            "Keyboard + mouse cheat sheet",
+                        )))
+                        .with_hover(TextOrCustomRender::Text(
+                            main_menu_item("Keyboard + mouse cheat sheet").selected(),
+                        ))
+                        .with_left_click_action(ClickAction::new_change_page({
+                            let link_executable = link_executable.clone();
+                            let zellij_version = zellij_version.clone();
+                            let base_mode = base_mode.clone();
+                            move || {
+                                Page::new_onboarding_keyboard(
+                                    link_executable.clone(),
+                                    zellij_version.clone(),
+                                    base_mode.clone(),
+                                )
+                            }
+                        })),
+                        ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
+                            "What to type on the Shell tab",
+                        )))
+                        .with_hover(TextOrCustomRender::Text(
+                            main_menu_item("What to type on the Shell tab").selected(),
+                        ))
+                        .with_left_click_action(ClickAction::new_change_page({
+                            let link_executable = link_executable.clone();
+                            let zellij_version = zellij_version.clone();
+                            let base_mode = base_mode.clone();
+                            move || {
+                                Page::new_onboarding_shell_commands(
+                                    link_executable.clone(),
+                                    zellij_version.clone(),
+                                    base_mode.clone(),
+                                )
+                            }
+                        })),
+                        ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
+                            "Advanced tools (optional)",
+                        )))
+                        .with_hover(TextOrCustomRender::Text(
+                            main_menu_item("Advanced tools (optional)").selected(),
+                        ))
+                        .with_left_click_action(ClickAction::new_change_page({
+                            let link_executable = link_executable.clone();
+                            let zellij_version = zellij_version.clone();
+                            let base_mode = base_mode.clone();
+                            move || {
+                                Page::new_onboarding_advanced_tools(
+                                    link_executable.clone(),
+                                    zellij_version.clone(),
+                                    base_mode.clone(),
+                                )
+                            }
+                        })),
+                    ]),
+            )
             .with_help(Box::new(|hovering_over_link, menu_item_is_selected| {
                 main_screen_help_text(hovering_over_link, menu_item_is_selected)
             }))
+    }
+
+    fn new_onboarding_sessions_rail(
+        link_executable: Rc<RefCell<String>>,
+        zellij_version: String,
+        base_mode: Rc<RefCell<InputMode>>,
+    ) -> Self {
+        Page::new()
+            .with_title(Text::new("Left rail = SESSIONS (other workspaces)").color_range(0, ..))
+            .with_paragraph(vec![
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        "Each row on the left is a full session: its own tabs, panes, and often",
+                    ),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        "its own agents. It is NOT a tab of this window — it is another room.",
+                    )
+                    .color_substring(3, "NOT a tab")
+                    .color_substring(2, "another room"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  · Click a session name  →  switch into that room"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  · Click a live process under a session  →  jump to that tab"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        "  · Keys f / x / n  →  open drawers Finalized / Failed / Needs attention",
+                    )
+                    .color_substring(3, "f / x / n"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        "  · Empty drawer still opens (creates the session) — like opening a folder",
+                    ),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        "  · Hover lights a row when the pointer is over the rail (no focus steal)",
+                    ),
+                ))]),
+            ])
+            .with_paragraph(vec![ComponentLine::new(vec![ActiveComponent::new(
+                TextOrCustomRender::Text(
+                    Text::new("Back: press Esc  ·  or open topic list from Start here").color_range(
+                        2,
+                        ..,
+                    ),
+                ),
+            )])])
+            .with_help(Box::new(|h, m| esc_go_back_plus_link_hover(h, m)))
+            .with_bulletin_list(onboarding_back_bulletin(
+                link_executable,
+                zellij_version,
+                base_mode,
+            ))
+    }
+
+    fn new_onboarding_tabs(
+        link_executable: Rc<RefCell<String>>,
+        zellij_version: String,
+        base_mode: Rc<RefCell<InputMode>>,
+    ) -> Self {
+        Page::new()
+            .with_title(Text::new("Top bar = tabs of THIS session").color_range(0, ..))
+            .with_paragraph(vec![
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("Tabs live only inside the session you are in right now."),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("In this layout you start with two:"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  · Start here  —  this help map (you are here)")
+                        .color_substring(3, "Start here"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  · Shell       —  your terminal to run vibecrafted / agents")
+                        .color_substring(3, "Shell"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("How to switch:"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  · Mouse: click the tab name on the top compact bar"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  · Keyboard: Ctrl+t  (TAB mode), then 1 / 2 or Left/Right, Enter")
+                        .color_substring(2, "Ctrl+t"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  · Ctrl+t then n  —  open a new tab (still this session)")
+                        .color_substring(2, "Ctrl+t then n"),
+                ))]),
+            ])
+            .with_bulletin_list(onboarding_back_bulletin(
+                link_executable,
+                zellij_version,
+                base_mode,
+            ))
+            .with_help(Box::new(|h, m| esc_go_back_plus_link_hover(h, m)))
+    }
+
+    fn new_onboarding_keyboard(
+        link_executable: Rc<RefCell<String>>,
+        zellij_version: String,
+        base_mode: Rc<RefCell<InputMode>>,
+    ) -> Self {
+        Page::new()
+            .with_title(Text::new("Keyboard + mouse (plain Ctrl scheme)").color_range(0, ..))
+            .with_paragraph(vec![
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("Modes (status bar shows labels):").color_range(2, ..),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  Ctrl+t  TAB     switch / create tabs")
+                        .color_substring(3, "Ctrl+t"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  Ctrl+p  PANE    split / close / full-screen panes")
+                        .color_substring(3, "Ctrl+p"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  Ctrl+o  SESSION attach / rename / kill session")
+                        .color_substring(3, "Ctrl+o"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  Ctrl+n  new pane immediately").color_substring(3, "Ctrl+n"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  Ctrl+s  SCROLL  scrollback / copy").color_substring(3, "Ctrl+s"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  Ctrl+g  LOCK    lock input (then Ctrl+arrows to move focus)")
+                        .color_substring(3, "Ctrl+g"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  Ctrl+q  close focused pane (does NOT quit the whole session)")
+                        .color_substring(3, "Ctrl+q"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("Mouse:").color_range(2, ..),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  · Click session / drawer on the left rail"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  · Click tab names on the top bar"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  · Scroll wheel over the rail moves selection"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  · Esc dismisses floating UIs (layout manager, etc.)"),
+                ))]),
+            ])
+            .with_bulletin_list(onboarding_back_bulletin(
+                link_executable,
+                zellij_version,
+                base_mode,
+            ))
+            .with_help(Box::new(|h, m| esc_go_back_plus_link_hover(h, m)))
+    }
+
+    fn new_onboarding_shell_commands(
+        link_executable: Rc<RefCell<String>>,
+        zellij_version: String,
+        base_mode: Rc<RefCell<InputMode>>,
+    ) -> Self {
+        Page::new()
+            .with_title(Text::new("Shell tab — what to type").color_range(0, ..))
+            .with_paragraph(vec![
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        "Open the Shell tab (top bar or Ctrl+t then 2). You land in a real shell",
+                    )
+                    .color_substring(2, "Ctrl+t then 2"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("with a short banner. Useful first commands:"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  vibecrafted start      attach / open your operator flow")
+                        .color_substring(3, "vibecrafted start"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  vibecrafted help       list CLI surfaces")
+                        .color_substring(3, "vibecrafted help"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  vibecrafted dashboard vc-workflow   implementation workspace")
+                        .color_substring(3, "vc-workflow"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  vibecrafted dashboard vc-marbles    convergence surface")
+                        .color_substring(3, "vc-marbles"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        "The left SESSIONS rail still works from the Shell tab — other rooms stay one click away.",
+                    )
+                    .color_substring(2, "SESSIONS"),
+                ))]),
+            ])
+            .with_bulletin_list(onboarding_back_bulletin(
+                link_executable,
+                zellij_version,
+                base_mode,
+            ))
+            .with_help(Box::new(|h, m| esc_go_back_plus_link_hover(h, m)))
+    }
+
+    fn new_onboarding_advanced_tools(
+        link_executable: Rc<RefCell<String>>,
+        zellij_version: String,
+        base_mode: Rc<RefCell<InputMode>>,
+    ) -> Self {
+        Page::new()
+            .with_title(Text::new("Advanced tools (optional)").color_range(0, ..))
+            .with_paragraph(vec![ComponentLine::new(vec![ActiveComponent::new(
+                TextOrCustomRender::Text(Text::new(
+                    "You do not need these on day one. They open floating control decks.",
+                )),
+            )])])
+            .with_bulletin_list(
+                BulletinList::new(Text::new("Open:").color_range(2, ..)).with_items(vec![
+                    ActiveComponent::new(TextOrCustomRender::Text(main_menu_item("Session Atlas")))
+                        .with_hover(TextOrCustomRender::Text(
+                            main_menu_item("Session Atlas").selected(),
+                        ))
+                        .with_left_click_action(ClickAction::new_launch_plugin(
+                            "zellij:session-manager".to_owned(),
+                        )),
+                    ActiveComponent::new(TextOrCustomRender::Text(main_menu_item("Layout Forge")))
+                        .with_hover(TextOrCustomRender::Text(
+                            main_menu_item("Layout Forge").selected(),
+                        ))
+                        .with_left_click_action(ClickAction::new_launch_plugin(
+                            "zellij:layout-manager".to_owned(),
+                        )),
+                    ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
+                        "Back to Start here",
+                    )))
+                    .with_hover(TextOrCustomRender::Text(
+                        main_menu_item("Back to Start here").selected(),
+                    ))
+                    .with_left_click_action(ClickAction::new_change_page({
+                        let link_executable = link_executable.clone();
+                        let zellij_version = zellij_version.clone();
+                        let base_mode = base_mode.clone();
+                        move || {
+                            Page::new_vibecrafted_mission_control(
+                                link_executable.clone(),
+                                zellij_version.clone(),
+                                base_mode.clone(),
+                            )
+                        }
+                    })),
+                ]),
+            )
+            .with_help(Box::new(|h, m| esc_go_back_plus_link_hover(h, m)))
     }
     fn new_windows_support() -> Page {
         Page::new()
@@ -1391,6 +1710,28 @@ impl ComponentLine {
     }
 }
 
+fn onboarding_back_bulletin(
+    link_executable: Rc<RefCell<String>>,
+    zellij_version: String,
+    base_mode: Rc<RefCell<InputMode>>,
+) -> BulletinList {
+    BulletinList::new(Text::new("Navigate:").color_range(2, ..)).with_items(vec![
+        ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
+            "Back to Start here map",
+        )))
+        .with_hover(TextOrCustomRender::Text(
+            main_menu_item("Back to Start here map").selected(),
+        ))
+        .with_left_click_action(ClickAction::new_change_page(move || {
+            Page::new_vibecrafted_mission_control(
+                link_executable.clone(),
+                zellij_version.clone(),
+                base_mode.clone(),
+            )
+        })),
+    ])
+}
+
 #[cfg(test)]
 mod product_identity_tests {
     use super::*;
@@ -1415,5 +1756,37 @@ mod product_identity_tests {
 
         assert!(!source.contains(&upstream_release_owner));
         assert!(!source.contains(&upstream_sponsor));
+    }
+
+    #[test]
+    fn first_run_guide_teaches_chrome_not_jargon() {
+        // Source contract: the mission-control / Start here page must orient
+        // a newcomer to SESSIONS rail, tabs, and how to reach the Shell tab.
+        let source = include_str!("pages.rs");
+        for needle in [
+            "Start here — map of this workspace",
+            "SESSIONS rail",
+            "Ctrl+t then 2",
+            "vibecrafted start",
+            "Left rail = sessions (not tabs)",
+            "Top bar = tabs of this session",
+            "Keyboard + mouse cheat sheet",
+            "What to type on the Shell tab",
+        ] {
+            assert!(
+                source.contains(needle),
+                "first-run guide missing orientation copy: {needle}"
+            );
+        }
+        // Old useless marketing line must stay gone (check production page body).
+        let mission_fn = source
+            .split("pub fn new_vibecrafted_mission_control")
+            .nth(1)
+            .and_then(|s| s.split("fn new_onboarding_sessions_rail").next())
+            .unwrap_or("");
+        assert!(
+            !mission_fn.contains("branded shell-provider surface"),
+            "mission-control page regressed to marketing jargon"
+        );
     }
 }

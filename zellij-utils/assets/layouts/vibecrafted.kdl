@@ -1,8 +1,10 @@
-// vibecrafted — operator entrypoint (built-in default)
-// Captured from the live "Vibecrafted Operator" layout; portable (no host cwds).
+// vibecrafted — operator entrypoint (built-in default_layout)
+//
+// Tabs:
+//   "Start here"  — first-run map (about mission-control): chrome, rail, keys
+//   "Shell"       — work shell with banner + zsh (not a silent suspended pane)
 //
 // Contract: every tab keeps the left Sessions rail (default_tab_template).
-// Swap layouts only rearrange the content children — rail is not optional.
 //
 // 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by VetCoders (c)2024-2026 LibraxisAI
 layout {
@@ -27,19 +29,19 @@ layout {
         }
     }
 
-    tab name="Guide" focus=true {
-        pane name="Vibecrafted Shell Guide" {
+    tab name="Start here" focus=true {
+        pane name="Start here" {
             plugin location="about" {
                 guide_mode "mission-control"
-                pane_title "Vibecrafted Shell Guide"
+                pane_title "Start here — map of this workspace"
             }
         }
     }
 
-    tab name="vibecrafted" hide_floating_panes=true {
-        pane command="/bin/zsh" name="operator" {
-            args "-l"
-            start_suspended true
+    tab name="Shell" hide_floating_panes=true {
+        // Banner then interactive zsh — wakes immediately (no suspended Enter void).
+        pane command="bash" name="Shell" {
+            args "-lc" "printf '\\n'; printf '  ┌────────────────────────────────────────────────────────────┐\\n'; printf '  │  VIBECRAFTED  ·  SHELL TAB                                  │\\n'; printf '  ├────────────────────────────────────────────────────────────┤\\n'; printf '  │  This is your work shell (not the Guide).                  │\\n'; printf '  │                                                            │\\n'; printf '  │  First commands:                                           │\\n'; printf '  │    vibecrafted start     open / attach operator flow       │\\n'; printf '  │    vibecrafted help      list CLI surfaces                 │\\n'; printf '  │                                                            │\\n'; printf '  │  Chrome (always on screen):                                │\\n'; printf '  │    LEFT  SESSIONS = other sessions / agent rooms (click)   │\\n'; printf '  │    TOP   tabs of THIS session: Start here | Shell          │\\n'; printf '  │    Ctrl+t then 1     back to the Guide map                 │\\n'; printf '  │    click a name on the left rail to jump sessions          │\\n'; printf '  └────────────────────────────────────────────────────────────┘\\n'; printf '\\n'; exec zsh -l"
         }
     }
 

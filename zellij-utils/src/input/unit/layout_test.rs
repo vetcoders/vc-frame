@@ -338,8 +338,35 @@ fn vc_dashboard_guide_tab_uses_branded_mission_control_mode() {
         "expected vc-dashboard to configure the about plugin for the mission-control guide"
     );
     assert!(
-        raw_layout.contains("pane_title \"Vibecrafted Shell Guide\""),
-        "expected vc-dashboard guide tab to set a branded pane title"
+        raw_layout.contains("guide_mode \"mission-control\""),
+        "expected vc-dashboard guide tab to use mission-control guide mode"
+    );
+}
+
+#[test]
+fn vibecrafted_layout_has_start_here_and_shell_tabs() {
+    let (_path, raw_layout, _swap) =
+        Layout::stringified_from_default_assets(Path::new("vibecrafted")).unwrap();
+    assert!(
+        raw_layout.contains("tab name=\"Start here\""),
+        "first tab must be Start here (first-run map)"
+    );
+    assert!(
+        raw_layout.contains("tab name=\"Shell\""),
+        "work tab must be named Shell"
+    );
+    assert!(
+        raw_layout.contains("guide_mode \"mission-control\""),
+        "Start here must load mission-control onboarding"
+    );
+    assert!(
+        !raw_layout.contains("start_suspended true")
+            && !raw_layout.contains("start_suspended=true"),
+        "Shell tab must not hide behind suspended Enter void"
+    );
+    assert!(
+        raw_layout.contains("vibecrafted start"),
+        "Shell banner must mention vibecrafted start"
     );
 }
 
