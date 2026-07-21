@@ -62,6 +62,9 @@ struct State {
     // clicks resolve against exactly what is on screen (incl. scroll window).
     // Header / footer / blank gap rows are absent → click is a no-op.
     rail_click_map: BTreeMap<usize, RailClickTarget>,
+    // Hovered rail row (plugin-relative line). Sessions and f/x/n drawers share
+    // the same OS-like highlight so every chrome row feels equally interactive.
+    rail_hover_row: Option<usize>,
 }
 
 register_plugin!(State);
@@ -197,8 +200,10 @@ impl ZellijPlugin for State {
                 if self.error.is_some() {
                     self.error = None;
                     should_render = true;
-                } else {
-                    should_render = self.handle_session_rail_mouse(mouse_event);
+                }
+                // Always process mouse so hover + click stay live even after an error.
+                if self.handle_session_rail_mouse(mouse_event) {
+                    should_render = true;
                 }
             },
             Event::PermissionRequestResult(_result) => {
@@ -602,6 +607,7 @@ impl SessionRailRow {
     }
 }
 
+/// Same rhythm as working-session rows (` 1 * name`): hotkey slot + status + label + count.
 fn format_bucket_rail_entry(bucket: BucketKind, count: usize, is_current_session: bool) -> String {
     let status = if is_current_session { "*" } else { "-" };
     format!(
@@ -850,6 +856,10 @@ impl State {
                 },
                 SessionRailRowKind::Bucket { .. } => {},
             }
+            // OS hover: same highlight language for sessions, live tabs, drawers.
+            if self.rail_hover_row == Some(row) {
+                text = text.selected();
+            }
             // Every data row is clickable; header (row 0) never enters the map.
             self.rail_click_map
                 .insert(row, rail_row_click_target(&rail_row.kind));
@@ -885,8 +895,9 @@ impl State {
 
         for bucket_row in &bucket_rows[bucket_rows.len() - pinned_rows..] {
             let mut text = Text::new(fit_rail_line(&bucket_row.text, cols));
+            // Same hotkey accent as session ordinals (slot at cols 1..4).
             if cols >= 4 {
-                text = text.color_range(3, 3..4);
+                text = text.color_range(1, 1..2);
             }
             if let SessionRailRowKind::Bucket {
                 session_index: Some(session_index),
@@ -896,8 +907,11 @@ impl State {
             {
                 text = text.selected();
             }
-            // Empty buckets stay clickable so the mouse path matches `f`/`x`/`n`
-            // (which report "is empty" rather than silently no-opping).
+            if self.rail_hover_row == Some(row) {
+                text = text.selected();
+            }
+            // Empty drawers stay clickable: mouse + f/x/n open the folder
+            // (create session with fleet layout when missing).
             self.rail_click_map
                 .insert(row, rail_row_click_target(&bucket_row.kind));
             print_text_with_coordinates(text, 0, row, None, None);
@@ -956,6 +970,8 @@ impl State {
                 let Ok(row) = usize::try_from(line) else {
                     return false;
                 };
+                // Keep hover on the row we just activated (OS list selection).
+                self.rail_hover_row = Some(row);
                 // Header, footer, blank gap between working sessions and the
                 // pinned buckets: not in the map → quiet no-op, no crash.
                 let Some(target) = self.rail_click_map.get(&row).cloned() else {
@@ -998,28 +1014,57 @@ impl State {
                     },
                 }
             },
-            // Scroll / hover / right-click are not part of this cut. Shift+click
-            // never reaches the plugin (client passthrough to the terminal).
+            Mouse::Hover(line, _column) => {
+                let row = usize::try_from(line).ok();
+                if self.rail_hover_row != row {
+                    self.rail_hover_row = row;
+                    true
+                } else {
+                    false
+                }
+            },
+            Mouse::ScrollUp(_) => {
+                self.sessions.move_session_selection_up();
+                true
+            },
+            Mouse::ScrollDown(_) => {
+                self.sessions.move_session_selection_down();
+                true
+            },
+            // Right-click / middle not mapped. Shift+click is client passthrough.
             _ => false,
         }
     }
-    /// Hop to a bucket session. An empty bucket has no session behind it yet,
-    /// and conjuring one on a keypress would clutter the rail with sessions the
-    /// operator never asked for — say so instead.
+    /// Open a triage drawer session (Finalized / Failed / Needs attention).
+    ///
+    /// OS-folder contract: every path does something useful.
+    /// - already here → quiet no-op
+    /// - exists elsewhere → switch
+    /// - missing (count 0) → create with fleet `vibecrafted` layout and attach
     fn jump_to_bucket(&mut self, bucket: BucketKind) {
+        let name = bucket.session_name();
         let exists = self
             .sessions
             .session_ui_infos
             .iter()
-            .find(|session| session.name == bucket.session_name());
+            .find(|session| session.name == name);
         match exists {
-            Some(session) if session.is_current_session => self.show_error("Already attached..."),
-            Some(session) => {
-                let name = session.name.clone();
-                switch_session_with_focus(&name, None, None);
+            Some(session) if session.is_current_session => {
+                // Already inside this drawer — no error spam.
+            },
+            Some(_) => {
+                switch_session_with_focus(name, None, None);
                 self.reset_selected_index();
             },
-            None => self.show_error(&format!("{} is empty", bucket.session_name())),
+            None => {
+                // Empty drawer: open the folder with the standard session canvas.
+                switch_session_with_layout(
+                    Some(name),
+                    LayoutInfo::BuiltIn("vibecrafted".to_owned()),
+                    None,
+                );
+                self.reset_selected_index();
+            },
         }
     }
     fn switch_session_relative(&mut self, offset: isize) {
@@ -2342,8 +2387,8 @@ mod rail_tests {
             }),
             RailClickTarget::Bucket(BucketKind::Failed)
         );
-        // Empty drawer: still a bucket target so the mouse path can surface
-        // the same "is empty" error the hotkey does.
+        // Empty drawer: still a bucket target so mouse + f/x/n open the folder
+        // (create-with-layout when missing — not a silent dead zone).
         assert_eq!(
             rail_row_click_target(&SessionRailRowKind::Bucket {
                 bucket: BucketKind::NeedsAttention,
