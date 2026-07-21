@@ -17,7 +17,10 @@
         plugins-parity-self-test binary install run test test-server test-utils \
         test-client test-no-web check clippy precheck semgrep fmt clean doctor \
         doctor-quiet doctor-install-quiet help release-guard \
-        release-guard-self-test package install-test
+        release-guard-self-test package install-test \
+        version version-show version-check version-bump version-patch bump-patch \
+        changelog-close release-notes release-plan release-prepare release-check \
+        release-tag release-push
 
 # ──────────────────────────────────────────────────────────
 # Toolchain resolution.
@@ -66,6 +69,14 @@ C_CYAN   := \033[36m
 C_GREEN  := \033[32m
 C_YELLOW := \033[33m
 C_RESET  := \033[0m
+
+# --- Release versioning (aicx-shaped) ----------------------------------------
+# Single source of truth: [workspace.package].version in Cargo.toml
+# TYPE= is an alias for VERSION= on version / version-bump / release-prepare.
+PACKAGE_NAME := vc-frame
+WS_VERSION := $(shell python3 -c 'import pathlib,tomllib; d=tomllib.loads(pathlib.Path("Cargo.toml").read_text()); print(d["workspace"]["package"]["version"])' 2>/dev/null)
+TAG := v$(WS_VERSION)
+PYTHON := $(shell command -v python3.14 2>/dev/null || command -v python3.13 2>/dev/null || command -v python3.12 2>/dev/null || command -v python3.11 2>/dev/null || command -v python3)
 
 # ──────────────────────────────────────────────────────────
 # Top-level targets
@@ -240,6 +251,127 @@ semgrep:
 	python3 tools/semgrep_inventory.py scan --config p/rust
 
 # ──────────────────────────────────────────────────────────
+# Version + release (aicx-shaped; TYPE= aliases VERSION=)
+# ──────────────────────────────────────────────────────────
+#
+#   make version                              # bare = check (sync surfaces)
+#   make version TYPE=patch|minor|major|x.y.z # bump (also VERSION=)
+#   make release-prepare TYPE=patch           # bump + changelog + precheck
+#   make release-check                        # strict readiness before tag
+#   make release-plan                         # printed operator flow
+#   make release                              # still = cargo release build
+#                                             # (see release-build alias)
+#
+
+## Bare `make version` = check. With TYPE=/VERSION= = bump.
+version:
+ifeq ($(origin VERSION),command line)
+	@$(MAKE) version-bump VERSION=$(VERSION)
+else ifneq ($(TYPE),)
+	@$(MAKE) version-bump VERSION=$(TYPE)
+else
+	@$(MAKE) version-check
+endif
+
+version-show:
+	@printf "package: %s\n" "$(PACKAGE_NAME)"
+	@printf "version: %s\n" "$(WS_VERSION)"
+	@printf "tag: %s\n" "$(TAG)"
+	@if git rev-parse --verify "refs/tags/$(TAG)" >/dev/null 2>&1; then \
+		echo "tag-state: exists"; \
+	else \
+		echo "tag-state: missing"; \
+	fi
+
+version-check:
+	@$(PYTHON) tools/release_sync.py check
+
+version-bump:
+ifeq ($(origin VERSION),command line)
+	@$(PYTHON) tools/release_sync.py bump "$(VERSION)"
+	@echo ""
+	@echo "Workspace version + path-dep pins synced in Cargo.toml."
+	@echo "Cargo.lock is intentionally not touched by version-bump."
+	@echo "To sync lockfile offline:  cargo update --workspace --offline"
+	@echo "Or rely on 'make release-prepare' to sync it for you."
+else ifneq ($(TYPE),)
+	@$(MAKE) version-bump VERSION=$(TYPE)
+else
+	@echo "VERSION (or TYPE) is required. Usage:" >&2
+	@echo "  make version TYPE={patch|minor|major|x.y.z}" >&2
+	@echo "  make version-bump VERSION={patch|minor|major|x.y.z}" >&2
+	@exit 1
+endif
+
+version-patch bump-patch:
+	@$(MAKE) version-bump VERSION=patch
+
+changelog-close:
+	@$(PYTHON) tools/changelog_close.py $(if $(CHANGELOG_GENERATE),--generate-if-empty)
+
+release-notes:
+	@$(PYTHON) tools/release_sync.py notes $(if $(origin VERSION),$(VERSION),) $(if $(OUTPUT),--output $(OUTPUT),)
+
+release-plan:
+	@echo "vc-frame release flow (aicx-shaped)"
+	@echo ""
+	@echo "1. Ensure branch is green (make precheck / make ci)."
+	@echo "2. Prepare:"
+	@echo "     make release-prepare TYPE={patch|minor|major|x.y.z}"
+	@echo "   (or VERSION=… — same thing)"
+	@echo "   → version-bump + changelog-close + notes preview + precheck"
+	@echo "3. Review diff, commit Cargo.toml + Cargo.lock + CHANGELOG.md."
+	@echo "4. make release-check"
+	@echo "5. make release-tag"
+	@echo "6. make release-push          # push annotated tag"
+	@echo "7. Wait for GitHub Actions / draft release from the tag."
+	@echo "8. Optional local archive: make package   # needs clean worktree"
+	@echo ""
+	@echo "Build-only (not a publish): make release   # cargo xtask build --release"
+	@echo "Docs: docs/RELEASE.md"
+
+release-prepare:
+ifeq ($(origin VERSION),command line)
+	@$(MAKE) version-bump VERSION=$(VERSION)
+	@$(MAKE) changelog-close CHANGELOG_GENERATE=1
+	@cargo update --workspace --offline
+	@$(MAKE) version-check
+	@mkdir -p dist
+	@$(PYTHON) tools/release_sync.py notes --output dist/release-notes.md
+	@$(MAKE) precheck
+	@echo ""
+	@echo "=== Release prepared ==="
+	@echo "Next: review diff, commit, then:"
+	@echo "  make release-check"
+	@echo "  make release-tag"
+	@echo "  make release-push"
+	@echo "  cat dist/release-notes.md"
+else ifneq ($(TYPE),)
+	@$(MAKE) release-prepare VERSION=$(TYPE)
+else
+	@echo "VERSION (or TYPE) is required. Usage:" >&2
+	@echo "  make release-prepare TYPE={patch|minor|major|x.y.z}" >&2
+	@exit 1
+endif
+
+release-check:
+	@$(PYTHON) tools/release_sync.py check --require-version-section
+	@$(MAKE) check
+	@echo "Release readiness passed."
+
+release-tag:
+	@if git rev-parse --verify "refs/tags/$(TAG)" >/dev/null 2>&1; then \
+		echo "Tag $(TAG) already exists."; \
+		exit 1; \
+	fi
+	@git tag -a "$(TAG)" -m "Release $(TAG)"
+	@echo "Created annotated tag $(TAG)"
+	@echo "Push with: make release-push"
+
+release-push:
+	git push origin "$(TAG)"
+
+# ──────────────────────────────────────────────────────────
 # Housekeeping
 # ──────────────────────────────────────────────────────────
 
@@ -298,7 +430,7 @@ help:
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "plugins-assets" "Release-build plugins into assets/ + SHA256SUMS"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "plugins-parity" "Verify assets match SHA256SUMS"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "binary" "Build only host binary (plugins must exist)"
-	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "release" "Build everything in release mode"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "release" "Build everything in release mode (cargo; not publish)"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "install" "Release build + install to ~/.cargo/bin + link the vc-frame alias"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "run" "Run the locally built vc-frame"
 	@printf "\n  $(C_YELLOW)QUALITY GATES$(C_RESET)\n"
@@ -308,6 +440,16 @@ help:
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "fmt" "Format code"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "fmt-check" "Check formatting without modifying files"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "check" "Quick workspace typecheck"
+	@printf "\n  $(C_YELLOW)VERSION / RELEASE$(C_RESET)\n"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "version" "Bare = check; TYPE=|VERSION= patch|minor|major|x.y.z = bump"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "version-show" "Print package version + tag state"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "version-check" "Validate Cargo.toml pins + CHANGELOG basics"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "version-bump" "Bump VERSION={patch|minor|major|x.y.z} (TYPE= alias ok)"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "release-plan" "Print operator release flow"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "release-prepare" "Bump + changelog-close + notes + precheck (TYPE= required)"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "release-check" "Strict readiness before tag"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "release-tag" "Annotated tag vX.Y.Z from workspace version"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "release-push" "Push release tag to origin"
 	@printf "\n  $(C_YELLOW)RELEASE PROVENANCE$(C_RESET)\n"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "release-guard" "Refuse to package a dirty worktree"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "package" "Guard + release build + archive + receipt"
@@ -327,4 +469,6 @@ help:
 	@printf "    make plugins-assets # release-build + refresh bundled WASM + SHA256SUMS\n"
 	@printf "    make plugins-parity # verify bundled WASM hashes\n"
 	@printf "    make install        # canonical release install + ~/.local/bin alias\n"
-	@printf "    make run            # run local debug vc-frame\n\n"
+	@printf "    make run            # run local debug vc-frame\n"
+	@printf "    make version        # check version surfaces\n"
+	@printf "    make release-plan   # how to cut a release\n\n"

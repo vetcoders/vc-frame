@@ -71,7 +71,17 @@ package() {
 
   local sha version target
   sha="$(git -C "$REPO" rev-parse HEAD)"
-  version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$REPO/Cargo.toml" | head -n 1)"
+  # Prefer [workspace.package] version (vc-frame is a workspace); fall back to first pin.
+  version="$(
+    python3 -c '
+import pathlib, tomllib, sys
+p = pathlib.Path(sys.argv[1])
+data = tomllib.loads(p.read_text(encoding="utf-8"))
+print(data.get("workspace", {}).get("package", {}).get("version")
+      or data.get("package", {}).get("version")
+      or "")
+' "$REPO/Cargo.toml"
+  )"
   target="$(host_target)"
   [[ -n "$version" ]] || die "could not read version from Cargo.toml"
   [[ -n "$target" ]] || die "could not resolve host target triple"
