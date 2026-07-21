@@ -186,34 +186,64 @@ fn configure_clippy_clean_prost(prost: &mut prost_build::Config) {
     }
 }
 
+/// A module whose name repeats its parent's trips `clippy::module_inception`, so
+/// each one is generated under an `_api` suffix and re-exported under the name
+/// the rest of the tree imports.
+const MODULE_INCEPTION_RENAMES: &[(&str, &str)] = &[
+    ("action", "api.action.rs"),
+    ("event", "api.event.rs"),
+    ("key", "api.key.rs"),
+    ("plugin_command", "api.plugin_command.rs"),
+    ("client_server_contract", "client_server_contract.rs"),
+    ("web_server_contract", "web_server_contract.rs"),
+];
+
+/// Rewrites `pub mod <name> { include!("<file>"); }` to the `_api` + re-export
+/// form, at whatever indentation prost emitted it.
+///
+/// Indentation matters: protos with a nested package (`api.action`) come out
+/// wrapped in `pub mod api { ... }`, so the inner modules are indented while
+/// the flat contracts are not. Matching a fixed indentation silently no-ops on
+/// the nested half and leaves module-inception errors behind for whoever next
+/// regenerates — so match the shape, not the whitespace.
+fn rename_module_for_clippy(contents: &str, module: &str, include_file: &str) -> String {
+    let mut out = String::with_capacity(contents.len());
+    let mut rest = contents;
+    let open = format!("pub mod {module} {{");
+
+    while let Some(offset) = rest.find(&open) {
+        let line_start = rest[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let indent = &rest[line_start..offset];
+        // Only rewrite when the whole block matches, indentation included; a
+        // partial match means prost changed shape and a human should look.
+        let block = format!(
+            "{open}\n{indent}    include!(\"{include_file}\");\n{indent}}}",
+            open = open,
+            indent = indent,
+            include_file = include_file
+        );
+        if rest[offset..].starts_with(&block) {
+            out.push_str(&rest[..offset]);
+            out.push_str(&format!(
+                "pub mod {module}_api {{\n{indent}    include!(\"{include_file}\");\n{indent}}}\n{indent}pub use {module}_api as {module};"
+            ));
+            rest = &rest[offset + block.len()..];
+        } else {
+            out.push_str(&rest[..offset + open.len()]);
+            rest = &rest[offset + open.len()..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn postprocess_prost_for_clippy(out_dir: &Path, include_file: &str) {
     let include_path = out_dir.join(include_file);
     if let Ok(mut include_contents) = std::fs::read_to_string(&include_path) {
-        include_contents = include_contents
-            .replace(
-                "pub mod action {\n    include!(\"api.action.rs\");\n}",
-                "pub mod action_api {\n    include!(\"api.action.rs\");\n}\npub use action_api as action;",
-            )
-            .replace(
-                "pub mod event {\n    include!(\"api.event.rs\");\n}",
-                "pub mod event_api {\n    include!(\"api.event.rs\");\n}\npub use event_api as event;",
-            )
-            .replace(
-                "pub mod key {\n    include!(\"api.key.rs\");\n}",
-                "pub mod key_api {\n    include!(\"api.key.rs\");\n}\npub use key_api as key;",
-            )
-            .replace(
-                "pub mod plugin_command {\n    include!(\"api.plugin_command.rs\");\n}",
-                "pub mod plugin_command_api {\n    include!(\"api.plugin_command.rs\");\n}\npub use plugin_command_api as plugin_command;",
-            )
-            .replace(
-                "pub mod client_server_contract {\n    include!(\"client_server_contract.rs\");\n}",
-                "pub mod client_server_contract_api {\n    include!(\"client_server_contract.rs\");\n}\npub use client_server_contract_api as client_server_contract;",
-            )
-            .replace(
-                "pub mod web_server_contract {\n    include!(\"web_server_contract.rs\");\n}",
-                "pub mod web_server_contract_api {\n    include!(\"web_server_contract.rs\");\n}\npub use web_server_contract_api as web_server_contract;",
-            );
+        for (module, module_include_file) in MODULE_INCEPTION_RENAMES {
+            include_contents =
+                rename_module_for_clippy(&include_contents, module, module_include_file);
+        }
         std::fs::write(include_path, include_contents).unwrap();
     }
 

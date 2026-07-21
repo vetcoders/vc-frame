@@ -936,6 +936,9 @@ pub struct NewTabAction {
     pub initial_panes: ::prost::alloc::vec::Vec<CommandOrPlugin>,
     #[prost(enumeration="UnblockCondition", optional, tag="9")]
     pub first_pane_unblock_condition: ::core::option::Option<i32>,
+    /// UNSPECIFIED/absent == APPEND, so old clients keep the historical behaviour.
+    #[prost(enumeration="TabPlacement", tag="10")]
+    pub placement: i32,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -2449,6 +2452,35 @@ impl Direction {
             "DIRECTION_RIGHT" => Some(Self::Right),
             "DIRECTION_UP" => Some(Self::Up),
             "DIRECTION_DOWN" => Some(Self::Down),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum TabPlacement {
+    Unspecified = 0,
+    Append = 1,
+    AfterBase = 2,
+}
+impl TabPlacement {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            TabPlacement::Unspecified => "TAB_PLACEMENT_UNSPECIFIED",
+            TabPlacement::Append => "TAB_PLACEMENT_APPEND",
+            TabPlacement::AfterBase => "TAB_PLACEMENT_AFTER_BASE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "TAB_PLACEMENT_UNSPECIFIED" => Some(Self::Unspecified),
+            "TAB_PLACEMENT_APPEND" => Some(Self::Append),
+            "TAB_PLACEMENT_AFTER_BASE" => Some(Self::AfterBase),
             _ => None,
         }
     }
