@@ -2278,6 +2278,12 @@ pub enum CliAction {
         #[clap(long, value_parser, default_value("false"), takes_value(false))]
         after_base: bool,
 
+        /// Create the tab without stealing focus — the operator stays on the
+        /// tab they were looking at. Worker spawns use this so run tabs land
+        /// quietly beside the base card instead of yanking the view away.
+        #[clap(long, value_parser, default_value("false"), takes_value(false))]
+        no_focus: bool,
+
         /// Optional initial command to run in the new tab
         #[clap(
             value_parser,

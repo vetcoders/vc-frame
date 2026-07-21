@@ -324,6 +324,7 @@ fn main() {
                 name: None,
                 cwd: options.as_ref().and_then(|o| o.default_cwd.clone()),
                 after_base: false,
+                no_focus: false,
                 initial_command: vec![],
                 initial_plugin: None,
                 close_on_exit: Default::default(),

@@ -1360,6 +1360,7 @@ impl Action {
                 layout_dir,
                 cwd,
                 after_base,
+                no_focus,
                 initial_command,
                 initial_plugin,
                 close_on_exit,
@@ -1376,6 +1377,11 @@ impl Action {
                 } else {
                     TabPlacement::Append
                 };
+                // Focus is the historical default (true). `--no-focus` inverts
+                // it so worker-spawned tabs can land without yanking the
+                // operator's view. Absent/false keeps every pre-existing call
+                // site byte-identical.
+                let force_no_focus = no_focus;
                 let current_dir = get_current_dir();
                 let cwd = cwd
                     .map(|cwd| current_dir.join(cwd))
@@ -1481,7 +1487,9 @@ impl Action {
                             .any(|(_, layout, _)| layout.focus.unwrap_or(false));
                         for (tab_name, layout, floating_panes_layout) in tabs.drain(..) {
                             let name = tab_name.or_else(|| name.clone());
-                            let should_change_focus_to_new_tab =
+                            let should_change_focus_to_new_tab = if force_no_focus {
+                                false
+                            } else {
                                 layout.focus.unwrap_or_else(|| {
                                     if !has_focused_tab {
                                         has_focused_tab = true;
@@ -1489,7 +1497,8 @@ impl Action {
                                     } else {
                                         false
                                     }
-                                });
+                                })
+                            };
                             new_tab_actions.push(Action::NewTab {
                                 tiled_layout: Some(layout),
                                 floating_layouts: floating_panes_layout,
@@ -1508,7 +1517,7 @@ impl Action {
                         let swap_tiled_layouts = Some(layout.swap_tiled_layouts.clone());
                         let swap_floating_layouts = Some(layout.swap_floating_layouts.clone());
                         let (layout, floating_panes_layout) = layout.new_tab();
-                        let should_change_focus_to_new_tab = true;
+                        let should_change_focus_to_new_tab = !force_no_focus;
                         Ok(vec![Action::NewTab {
                             tiled_layout: Some(layout),
                             floating_layouts: floating_panes_layout,
@@ -1599,7 +1608,9 @@ impl Action {
                             .any(|(_, layout, _)| layout.focus.unwrap_or(false));
                         for (tab_name, layout, floating_panes_layout) in tabs.drain(..) {
                             let name = tab_name.or_else(|| name.clone());
-                            let should_change_focus_to_new_tab =
+                            let should_change_focus_to_new_tab = if force_no_focus {
+                                false
+                            } else {
                                 layout.focus.unwrap_or_else(|| {
                                     if !has_focused_tab {
                                         has_focused_tab = true;
@@ -1607,7 +1618,8 @@ impl Action {
                                     } else {
                                         false
                                     }
-                                });
+                                })
+                            };
                             new_tab_actions.push(Action::NewTab {
                                 tiled_layout: Some(layout),
                                 floating_layouts: floating_panes_layout,
@@ -1626,7 +1638,7 @@ impl Action {
                         let swap_tiled_layouts = Some(layout.swap_tiled_layouts.clone());
                         let swap_floating_layouts = Some(layout.swap_floating_layouts.clone());
                         let (layout, floating_panes_layout) = layout.new_tab();
-                        let should_change_focus_to_new_tab = true;
+                        let should_change_focus_to_new_tab = !force_no_focus;
                         Ok(vec![Action::NewTab {
                             tiled_layout: Some(layout),
                             floating_layouts: floating_panes_layout,
@@ -1641,7 +1653,7 @@ impl Action {
                         }])
                     }
                 } else {
-                    let should_change_focus_to_new_tab = true;
+                    let should_change_focus_to_new_tab = !force_no_focus;
                     Ok(vec![Action::NewTab {
                         tiled_layout: None,
                         floating_layouts: vec![],
@@ -3412,6 +3424,7 @@ mod tests {
             layout_dir: None,
             cwd: None,
             after_base: false,
+            no_focus: false,
             initial_command: vec![],
             initial_plugin: None,
             close_on_exit: Default::default(),
@@ -3440,7 +3453,7 @@ mod tests {
         }
     }
 
-    fn new_tab_cli_action(after_base: bool) -> CliAction {
+    fn new_tab_cli_action(after_base: bool, no_focus: bool) -> CliAction {
         CliAction::NewTab {
             name: None,
             layout: None,
@@ -3448,6 +3461,7 @@ mod tests {
             layout_dir: None,
             cwd: None,
             after_base,
+            no_focus,
             initial_command: vec![],
             initial_plugin: None,
             close_on_exit: Default::default(),
@@ -3468,10 +3482,23 @@ mod tests {
         }
     }
 
+    fn focus_of(cli_action: CliAction) -> bool {
+        let actions =
+            Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None)
+                .expect("TEST");
+        match actions.as_slice() {
+            [Action::NewTab {
+                should_change_focus_to_new_tab,
+                ..
+            }] => *should_change_focus_to_new_tab,
+            other => panic!("Expected a single NewTab action, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_new_tab_defaults_to_appending() {
         assert_eq!(
-            placement_of(new_tab_cli_action(false)),
+            placement_of(new_tab_cli_action(false, false)),
             TabPlacement::Append
         );
     }
@@ -3479,9 +3506,43 @@ mod tests {
     #[test]
     fn test_new_tab_after_base_flag_selects_after_base_placement() {
         assert_eq!(
-            placement_of(new_tab_cli_action(true)),
+            placement_of(new_tab_cli_action(true, false)),
             TabPlacement::AfterBase
         );
+    }
+
+    #[test]
+    fn test_new_tab_defaults_to_taking_focus() {
+        assert!(focus_of(new_tab_cli_action(false, false)));
+    }
+
+    #[test]
+    fn test_new_tab_no_focus_flag_keeps_operator_on_current_tab() {
+        assert!(!focus_of(new_tab_cli_action(false, true)));
+    }
+
+    #[test]
+    fn test_new_tab_no_focus_combines_with_after_base() {
+        let actions = Action::actions_from_cli(
+            new_tab_cli_action(true, true),
+            Box::new(|| PathBuf::from("/tmp")),
+            None,
+        )
+        .expect("TEST");
+        match actions.as_slice() {
+            [Action::NewTab {
+                placement,
+                should_change_focus_to_new_tab,
+                ..
+            }] => {
+                assert_eq!(*placement, TabPlacement::AfterBase);
+                assert!(
+                    !*should_change_focus_to_new_tab,
+                    "placement and silence are independent axes"
+                );
+            },
+            other => panic!("Expected a single NewTab action, got {other:?}"),
+        }
     }
 
     #[test]
@@ -3493,6 +3554,7 @@ mod tests {
             layout_dir: None,
             cwd: None,
             after_base: false,
+            no_focus: false,
             initial_command: vec![],
             initial_plugin: None,
             close_on_exit: Default::default(),

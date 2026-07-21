@@ -870,13 +870,33 @@ fn new_named_tab_with_placement(
     name: &str,
     placement: TabPlacement,
 ) {
+    new_named_tab_with_placement_and_focus(screen, pid, tab_index, name, placement, true);
+}
+
+/// Same as `new_named_tab_with_placement`, but `should_change_focus` mirrors
+/// the CLI `--no-focus` axis: false leaves the operator on the tab they had.
+fn new_named_tab_with_placement_and_focus(
+    screen: &mut Screen,
+    pid: u32,
+    tab_index: usize,
+    name: &str,
+    placement: TabPlacement,
+    should_change_focus: bool,
+) {
     let client_id = 1;
+    // Match ScreenInstruction::NewTab: only pass the client into `new_tab`
+    // when focus should move, so the silent path never re-homes the client.
+    let client_for_new_tab = if should_change_focus {
+        Some(client_id)
+    } else {
+        None
+    };
     screen
         .new_tab(
             tab_index,
             (vec![], vec![]),
             Some(name.to_string()),
-            Some(client_id),
+            client_for_new_tab,
             placement,
         )
         .expect("TEST");
@@ -888,7 +908,7 @@ fn new_named_tab_with_placement(
             vec![],
             HashMap::new(),
             tab_index,
-            true,
+            should_change_focus,
             (client_id, false),
             None,
         )
@@ -974,6 +994,94 @@ fn new_tab_after_base_degrades_to_append_when_there_is_no_room() {
         tab_names_in_display_order(&screen),
         vec!["base", "run-1"],
         "with a single existing tab, after-base and append agree"
+    );
+}
+
+#[test]
+fn new_tab_without_focus_leaves_the_active_tab_alone() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, true, true);
+
+    new_named_tab_with_placement_and_focus(
+        &mut screen,
+        1,
+        0,
+        "base",
+        TabPlacement::Append,
+        true,
+    );
+    assert_eq!(
+        screen.get_active_tab(1).unwrap().name,
+        "base",
+        "operator starts on the base card"
+    );
+
+    new_named_tab_with_placement_and_focus(
+        &mut screen,
+        2,
+        1,
+        "worker-run",
+        TabPlacement::Append,
+        false,
+    );
+
+    assert_eq!(
+        tab_names_in_display_order(&screen),
+        vec!["base", "worker-run"],
+        "the silent tab still lands in the bar"
+    );
+    assert_eq!(
+        screen.get_active_tab(1).unwrap().name,
+        "base",
+        "--no-focus must leave the operator on the tab they had"
+    );
+}
+
+#[test]
+fn new_tab_no_focus_with_after_base_places_quietly() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, true, true);
+
+    new_named_tab_with_placement_and_focus(
+        &mut screen,
+        1,
+        0,
+        "base",
+        TabPlacement::Append,
+        true,
+    );
+    new_named_tab_with_placement_and_focus(
+        &mut screen,
+        2,
+        1,
+        "older-run",
+        TabPlacement::AfterBase,
+        false,
+    );
+    new_named_tab_with_placement_and_focus(
+        &mut screen,
+        3,
+        2,
+        "newest-run",
+        TabPlacement::AfterBase,
+        false,
+    );
+
+    assert_eq!(
+        tab_names_in_display_order(&screen),
+        vec!["base", "newest-run", "older-run"],
+        "placement still grows from the base card under --no-focus"
+    );
+    assert_eq!(
+        screen.get_active_tab(1).unwrap().name,
+        "base",
+        "two silent after-base spawns must not steal focus"
     );
 }
 
@@ -3936,6 +4044,7 @@ pub fn send_cli_new_tab_action_default_params() {
         layout_dir: None,
         cwd: None,
         after_base: false,
+        no_focus: false,
         initial_command: vec![],
         initial_plugin: None,
         close_on_exit: Default::default(),
@@ -3984,6 +4093,7 @@ pub fn send_cli_new_tab_action_with_name_and_layout() {
         layout_dir: None,
         cwd: None,
         after_base: false,
+        no_focus: false,
         initial_command: vec![],
         initial_plugin: None,
         close_on_exit: Default::default(),
@@ -8095,6 +8205,7 @@ pub fn send_cli_new_tab_action_with_layout_string() {
         layout_dir: None,
         cwd: None,
         after_base: false,
+        no_focus: false,
         initial_command: vec![],
         initial_plugin: None,
         close_on_exit: Default::default(),
@@ -8147,6 +8258,7 @@ pub fn send_cli_new_tab_action_with_layout_string_and_name() {
         layout_dir: None,
         cwd: None,
         after_base: false,
+        no_focus: false,
         initial_command: vec![],
         initial_plugin: None,
         close_on_exit: Default::default(),
