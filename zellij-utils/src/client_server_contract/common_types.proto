@@ -521,6 +521,8 @@ message NewTabAction {
   optional string cwd = 7;
   repeated CommandOrPlugin initial_panes = 8;
   optional UnblockCondition first_pane_unblock_condition = 9;
+  // UNSPECIFIED/absent == APPEND, so old clients keep the historical behaviour.
+  TabPlacement placement = 10;
 }
 
 message GoToTabAction {
@@ -745,6 +747,12 @@ enum Direction {
   DIRECTION_RIGHT = 2;
   DIRECTION_UP = 3;
   DIRECTION_DOWN = 4;
+}
+
+enum TabPlacement {
+  TAB_PLACEMENT_UNSPECIFIED = 0;
+  TAB_PLACEMENT_APPEND = 1;
+  TAB_PLACEMENT_AFTER_BASE = 2;
 }
 
 enum UnblockCondition {

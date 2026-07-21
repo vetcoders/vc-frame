@@ -3,7 +3,7 @@ use crate::data::{
     BareKey, DEFAULT_STYLES, Direction, FloatingPaneCoordinates, InputMode, KeyWithModifier,
     LayoutInfo, LayoutMetadata, MultiplayerColors, Palette, PaletteColor, PaneId, PaneInfo,
     PaneManifest, PermissionType, Resize, SessionInfo, StyleDeclaration, Styling, TabInfo,
-    WebSharing,
+    TabPlacement, WebSharing,
 };
 use crate::envs::EnvironmentVariables;
 use crate::home::{find_default_config_dir, get_layout_dir};
@@ -783,6 +783,9 @@ impl Action {
                 cwd,
                 initial_panes: _,
                 first_pane_unblock_condition: _,
+                // KDL keybindings always parse to the default placement, so
+                // there is nothing to round-trip here.
+                placement: _,
             } => {
                 let mut node = KdlNode::new("NewTab");
                 let mut children = KdlDocument::new();
@@ -1715,6 +1718,7 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                         cwd: None,
                         initial_panes: None,
                         first_pane_unblock_condition: None,
+                        placement: TabPlacement::default(),
                     });
                 }
 
@@ -1786,6 +1790,7 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                         cwd,
                         initial_panes: None,
                         first_pane_unblock_condition: None,
+                        placement: TabPlacement::default(),
                     })
                 } else {
                     let (layout, floating_panes_layout) = layout.new_tab();
@@ -1801,6 +1806,7 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                         cwd,
                         initial_panes: None,
                         first_pane_unblock_condition: None,
+                        placement: TabPlacement::default(),
                     })
                 }
             },

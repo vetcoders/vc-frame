@@ -8,7 +8,7 @@ use super::layout::{
 use crate::cli::CliAction;
 use crate::data::{
     CommandOrPlugin, Direction, KeyWithModifier, LayoutInfo, NewPanePlacement, OriginatingPlugin,
-    PaneId, Resize, UnblockCondition,
+    PaneId, Resize, TabPlacement, UnblockCondition,
 };
 use crate::data::{FloatingPaneCoordinates, InputMode};
 use crate::envs::{PANE_ID_ENV_KEY, VC_FRAME_PANE_ID_ENV_KEY, get_pane_id};
@@ -322,6 +322,8 @@ pub enum Action {
         cwd: Option<PathBuf>,
         initial_panes: Option<Vec<CommandOrPlugin>>,
         first_pane_unblock_condition: Option<UnblockCondition>,
+        /// Where the tab lands in the bar. Defaults to appending.
+        placement: TabPlacement,
     },
     /// Do nothing.
     #[default]
@@ -1357,6 +1359,7 @@ impl Action {
                 layout_string,
                 layout_dir,
                 cwd,
+                after_base,
                 initial_command,
                 initial_plugin,
                 close_on_exit,
@@ -1365,6 +1368,14 @@ impl Action {
                 block_until_exit_failure,
                 block_until_exit,
             } => {
+                // Placement is decided here, once, and rides the action all the
+                // way to `Screen::new_tab` — there is no create-then-move step
+                // for the tab bar to render in between.
+                let placement = if after_base {
+                    TabPlacement::AfterBase
+                } else {
+                    TabPlacement::Append
+                };
                 let current_dir = get_current_dir();
                 let cwd = cwd
                     .map(|cwd| current_dir.join(cwd))
@@ -1489,6 +1500,7 @@ impl Action {
                                 cwd: None,
                                 initial_panes: initial_panes.clone(),
                                 first_pane_unblock_condition,
+                                placement,
                             });
                         }
                         Ok(new_tab_actions)
@@ -1507,6 +1519,7 @@ impl Action {
                             cwd: None,
                             initial_panes,
                             first_pane_unblock_condition,
+                            placement,
                         }])
                     }
                 } else if let Some(layout_path) = layout {
@@ -1605,6 +1618,7 @@ impl Action {
                                 cwd: None, // the cwd is done through the layout
                                 initial_panes: initial_panes.clone(),
                                 first_pane_unblock_condition,
+                                placement,
                             });
                         }
                         Ok(new_tab_actions)
@@ -1623,6 +1637,7 @@ impl Action {
                             cwd: None, // the cwd is done through the layout
                             initial_panes,
                             first_pane_unblock_condition,
+                            placement,
                         }])
                     }
                 } else {
@@ -1637,6 +1652,7 @@ impl Action {
                         cwd,
                         initial_panes,
                         first_pane_unblock_condition,
+                        placement,
                     }])
                 }
             },
@@ -3395,6 +3411,7 @@ mod tests {
             layout_string: Some("layout {\n    pane\n    pane\n}\n".into()),
             layout_dir: None,
             cwd: None,
+            after_base: false,
             initial_command: vec![],
             initial_plugin: None,
             close_on_exit: Default::default(),
@@ -3423,6 +3440,50 @@ mod tests {
         }
     }
 
+    fn new_tab_cli_action(after_base: bool) -> CliAction {
+        CliAction::NewTab {
+            name: None,
+            layout: None,
+            layout_string: None,
+            layout_dir: None,
+            cwd: None,
+            after_base,
+            initial_command: vec![],
+            initial_plugin: None,
+            close_on_exit: Default::default(),
+            start_suspended: Default::default(),
+            block_until_exit: false,
+            block_until_exit_success: false,
+            block_until_exit_failure: false,
+        }
+    }
+
+    fn placement_of(cli_action: CliAction) -> TabPlacement {
+        let actions =
+            Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None)
+                .expect("TEST");
+        match actions.as_slice() {
+            [Action::NewTab { placement, .. }] => *placement,
+            other => panic!("Expected a single NewTab action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_new_tab_defaults_to_appending() {
+        assert_eq!(
+            placement_of(new_tab_cli_action(false)),
+            TabPlacement::Append
+        );
+    }
+
+    #[test]
+    fn test_new_tab_after_base_flag_selects_after_base_placement() {
+        assert_eq!(
+            placement_of(new_tab_cli_action(true)),
+            TabPlacement::AfterBase
+        );
+    }
+
     #[test]
     fn test_new_tab_with_invalid_layout_string() {
         let cli_action = CliAction::NewTab {
@@ -3431,6 +3492,7 @@ mod tests {
             layout_string: Some("invalid { kdl".into()),
             layout_dir: None,
             cwd: None,
+            after_base: false,
             initial_command: vec![],
             initial_plugin: None,
             close_on_exit: Default::default(),

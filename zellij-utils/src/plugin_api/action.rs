@@ -62,6 +62,7 @@ pub use super::generated_api::api::{
         SwitchToModePayload,
         TabIdAndName,
         TabLayoutInfo as ProtobufTabLayoutInfo,
+        TabPlacement as ProtobufTabPlacement,
         TiledPaneLayout as ProtobufTiledPaneLayout,
         TiledPlacement as ProtobufTiledPlacement,
         UnblockCondition as ProtobufUnblockCondition,
@@ -78,7 +79,7 @@ pub use super::generated_api::api::{
 };
 use crate::data::{
     CommandOrPlugin, Direction, FloatingPaneCoordinates, InputMode, KeyWithModifier,
-    NewPanePlacement, PaneId, PluginTag, ResizeStrategy, UnblockCondition,
+    NewPanePlacement, PaneId, PluginTag, ResizeStrategy, TabPlacement, UnblockCondition,
 };
 use crate::errors::prelude::*;
 use crate::input::actions::Action;
@@ -520,6 +521,14 @@ impl TryFrom<ProtobufAction> for Action {
                             .and_then(ProtobufUnblockCondition::from_i32)
                             .and_then(|uc| uc.try_into().ok());
 
+                        // Absent tag 10 (any plugin built before the flag existed)
+                        // decodes to the default, i.e. append.
+                        let placement = payload
+                            .placement
+                            .and_then(ProtobufTabPlacement::from_i32)
+                            .map(TabPlacement::from)
+                            .unwrap_or_default();
+
                         Ok(Action::NewTab {
                             tiled_layout,
                             floating_layouts,
@@ -530,6 +539,7 @@ impl TryFrom<ProtobufAction> for Action {
                             cwd,
                             initial_panes,
                             first_pane_unblock_condition,
+                            placement,
                         })
                     },
                     None => {
@@ -545,6 +555,7 @@ impl TryFrom<ProtobufAction> for Action {
                             cwd: None,
                             initial_panes: None,
                             first_pane_unblock_condition: None,
+                            placement: TabPlacement::default(),
                         })
                     },
                     _ => Err("Wrong payload for Action::NewTab"),
@@ -1461,6 +1472,7 @@ impl TryFrom<Action> for ProtobufAction {
                 cwd,
                 initial_panes,
                 first_pane_unblock_condition,
+                placement,
             } => {
                 // Always send payload (even if all fields are default)
                 let protobuf_tiled_layout = tiled_layout
@@ -1527,6 +1539,7 @@ impl TryFrom<Action> for ProtobufAction {
                             cwd: cwd_string,
                             initial_panes: protobuf_initial_panes,
                             first_pane_unblock_condition: protobuf_first_pane_unblock_condition,
+                            placement: Some(ProtobufTabPlacement::from(placement) as i32),
                         },
                     ))),
                 })
@@ -2325,6 +2338,26 @@ impl TryFrom<UnblockCondition> for ProtobufUnblockCondition {
             UnblockCondition::OnExitSuccess => Ok(ProtobufUnblockCondition::UnblockOnExitSuccess),
             UnblockCondition::OnExitFailure => Ok(ProtobufUnblockCondition::UnblockOnExitFailure),
             UnblockCondition::OnAnyExit => Ok(ProtobufUnblockCondition::UnblockOnAnyExit),
+        }
+    }
+}
+
+// TabPlacement is total in both directions — every variant maps, so `From`
+// rather than `TryFrom` (unlike UnblockCondition, which has no proto default).
+impl From<ProtobufTabPlacement> for TabPlacement {
+    fn from(protobuf_placement: ProtobufTabPlacement) -> Self {
+        match protobuf_placement {
+            ProtobufTabPlacement::Append => TabPlacement::Append,
+            ProtobufTabPlacement::AfterBase => TabPlacement::AfterBase,
+        }
+    }
+}
+
+impl From<TabPlacement> for ProtobufTabPlacement {
+    fn from(placement: TabPlacement) -> Self {
+        match placement {
+            TabPlacement::Append => ProtobufTabPlacement::Append,
+            TabPlacement::AfterBase => ProtobufTabPlacement::AfterBase,
         }
     }
 }

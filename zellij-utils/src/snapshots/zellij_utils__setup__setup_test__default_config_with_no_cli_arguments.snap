@@ -2157,6 +2157,7 @@ Config {
                     cwd: None,
                     initial_panes: None,
                     first_pane_unblock_condition: None,
+                    placement: Append,
                 },
                 SwitchToMode {
                     input_mode: Normal,
@@ -6504,6 +6505,7 @@ Config {
                     cwd: None,
                     initial_panes: None,
                     first_pane_unblock_condition: None,
+                    placement: Append,
                 },
                 SwitchToMode {
                     input_mode: Normal,

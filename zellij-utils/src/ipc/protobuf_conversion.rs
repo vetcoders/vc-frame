@@ -1276,6 +1276,7 @@ impl From<crate::input::actions::Action>
                 cwd,
                 initial_panes,
                 first_pane_unblock_condition,
+                placement,
             } => ActionType::NewTab(Box::new(NewTabAction {
                 tiled_layout: tiled_layout.map(|l| l.into()),
                 floating_layouts: floating_layouts.into_iter().map(|l| l.into()).collect(),
@@ -1293,6 +1294,7 @@ impl From<crate::input::actions::Action>
                     .unwrap_or_default(),
                 first_pane_unblock_condition: first_pane_unblock_condition
                     .map(unblock_condition_to_proto_i32),
+                placement: tab_placement_to_proto_i32(placement),
             })),
             crate::input::actions::Action::NoOp => ActionType::NoOp(NoOpAction {}),
             crate::input::actions::Action::GoToNextTab => {
@@ -2173,6 +2175,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                         .first_pane_unblock_condition
                         .map(proto_i32_to_unblock_condition)
                         .transpose()?,
+                    placement: proto_i32_to_tab_placement(new_tab_action.placement),
                 })
             },
             ActionType::NoOp(_) => Ok(crate::input::actions::Action::NoOp),
@@ -3124,6 +3127,26 @@ fn unblock_condition_to_proto_i32(condition: crate::data::UnblockCondition) -> i
         crate::data::UnblockCondition::OnExitSuccess => ProtoUnblockCondition::OnExitSuccess as i32,
         crate::data::UnblockCondition::OnExitFailure => ProtoUnblockCondition::OnExitFailure as i32,
         crate::data::UnblockCondition::OnAnyExit => ProtoUnblockCondition::OnAnyExit as i32,
+    }
+}
+
+fn tab_placement_to_proto_i32(placement: crate::data::TabPlacement) -> i32 {
+    use crate::client_server_contract::client_server_contract::TabPlacement as ProtoTabPlacement;
+    match placement {
+        crate::data::TabPlacement::Append => ProtoTabPlacement::Append as i32,
+        crate::data::TabPlacement::AfterBase => ProtoTabPlacement::AfterBase as i32,
+    }
+}
+
+/// Unspecified (tag absent, or a client that predates the field) means append —
+/// the historical behaviour. An unknown value is also treated as append rather
+/// than erroring: tab placement is cosmetic, and refusing to create the tab at
+/// all would be a far worse failure than putting it in the old place.
+fn proto_i32_to_tab_placement(placement: i32) -> crate::data::TabPlacement {
+    use crate::client_server_contract::client_server_contract::TabPlacement as ProtoTabPlacement;
+    match ProtoTabPlacement::from_i32(placement) {
+        Some(ProtoTabPlacement::AfterBase) => crate::data::TabPlacement::AfterBase,
+        _ => crate::data::TabPlacement::Append,
     }
 }
 

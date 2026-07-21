@@ -2273,6 +2273,11 @@ pub enum CliAction {
         #[clap(short, long, value_parser)]
         cwd: Option<PathBuf>,
 
+        /// Insert the new tab directly right of the base (first) tab instead of
+        /// appending it at the end of the tab bar
+        #[clap(long, value_parser, default_value("false"), takes_value(false))]
+        after_base: bool,
+
         /// Optional initial command to run in the new tab
         #[clap(
             value_parser,

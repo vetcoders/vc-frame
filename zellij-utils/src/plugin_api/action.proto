@@ -168,6 +168,8 @@ message NewTabPayload {
   optional string cwd = 7;
   repeated CommandOrPlugin initial_panes = 8;
   optional UnblockCondition first_pane_unblock_condition = 9;
+  // Absent == TAB_PLACEMENT_APPEND, so old peers keep the historical behaviour.
+  optional TabPlacement placement = 10;
 }
 
 message TabLayoutInfo {
@@ -531,6 +533,12 @@ message FloatingPaneCoordinates {
 message SetPaneBorderlessPayload {
   PaneId pane_id = 1;
   bool borderless = 2;
+}
+
+// TabPlacement specifies where a newly created tab lands in the tab bar
+enum TabPlacement {
+  TAB_PLACEMENT_APPEND = 0;
+  TAB_PLACEMENT_AFTER_BASE = 1;
 }
 
 // UnblockCondition specifies when a blocking pane should unblock

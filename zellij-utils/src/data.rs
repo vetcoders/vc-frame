@@ -29,6 +29,24 @@ use crate::vendored::termwiz::{
 
 pub type ClientId = u16; // TODO: merge with crate type?
 
+/// Where a newly created tab lands in the session's tab bar.
+///
+/// The default is [`TabPlacement::Append`] — historical behaviour, the new tab
+/// goes to the end of the bar. [`TabPlacement::AfterBase`] instead inserts it
+/// directly to the right of the tab at position 0, so freshly spawned tabs stay
+/// adjacent to the base card and older ones drift right. That matters once a
+/// session accumulates more tabs than fit on screen: appending buries the newest
+/// run off the right edge, which is exactly backwards for an operator watching
+/// runs land.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TabPlacement {
+    /// Append at the end of the tab bar (default, historical behaviour).
+    #[default]
+    Append,
+    /// Insert at position 1, immediately right of the base (position 0) tab.
+    AfterBase,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UnblockCondition {
     /// Unblock only when exit status is 0 (success)
