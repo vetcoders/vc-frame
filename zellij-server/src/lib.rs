@@ -35,6 +35,7 @@ use std::{
     path::PathBuf,
     sync::{Arc, RwLock, atomic::AtomicBool},
     thread,
+    time::{Duration, Instant},
 };
 use zellij_utils::envs;
 use zellij_utils::pane_size::Size;
@@ -907,6 +908,14 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                 }
             }
         });
+
+    // Field 2026-07-22 (Monika / dragon): abandoned `--server` processes can
+    // spin at high CPU for many hours with zero clients. After daemonize, PPID
+    // is always 1 (launchd) — PPID alone is NOT an orphan detector. Arm:
+    // (1) SIGTERM/SIGINT → KillSession so plain kill works without SIGKILL
+    // (2) idle-exit after N seconds with zero connected clients (default 900;
+    //     VC_FRAME_SERVER_IDLE_EXIT_SECS=0 disables for intentional long detach).
+    install_server_lifecycle_watchdogs(to_server.clone(), session_state.clone());
 
     loop {
         let (instruction, mut err_ctx) = server_receiver.recv().unwrap();
@@ -1845,6 +1854,95 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
     drop(std::fs::remove_file(&socket_path));
 }
 
+/// Default idle exit when no clients are connected (seconds).
+/// Override with `VC_FRAME_SERVER_IDLE_EXIT_SECS` (`0` disables).
+pub const DEFAULT_SERVER_IDLE_EXIT_SECS: u64 = 900;
+
+/// Parse idle-exit seconds from env. `0` or empty invalid → disabled / default.
+pub fn server_idle_exit_secs_from_env(raw: Option<&str>) -> Option<u64> {
+    match raw {
+        None => Some(DEFAULT_SERVER_IDLE_EXIT_SECS),
+        Some(s) => {
+            let s = s.trim();
+            if s.is_empty() {
+                return Some(DEFAULT_SERVER_IDLE_EXIT_SECS);
+            }
+            match s.parse::<u64>() {
+                Ok(0) => None,
+                Ok(n) => Some(n),
+                Err(_) => Some(DEFAULT_SERVER_IDLE_EXIT_SECS),
+            }
+        },
+    }
+}
+
+fn install_server_lifecycle_watchdogs(
+    to_server: SenderWithContext<ServerInstruction>,
+    session_state: Arc<RwLock<SessionState>>,
+) {
+    #[cfg(unix)]
+    {
+        let to_server_signals = to_server.clone();
+        let _ = thread::Builder::new()
+            .name("server_signal_watch".to_string())
+            .spawn(move || {
+                use signal_hook::consts::{SIGINT, SIGTERM};
+                use signal_hook::iterator::Signals;
+                let Ok(mut signals) = Signals::new([SIGINT, SIGTERM]) else {
+                    log::error!("server_signal_watch: failed to register SIGINT/SIGTERM");
+                    return;
+                };
+                for signal in signals.forever() {
+                    log::warn!(
+                        "server received signal {} — requesting KillSession (graceful exit)",
+                        signal
+                    );
+                    let _ = to_server_signals.send(ServerInstruction::KillSession);
+                    // One shot is enough; further signals are best-effort.
+                }
+            });
+    }
+
+    let idle_secs = server_idle_exit_secs_from_env(
+        std::env::var("VC_FRAME_SERVER_IDLE_EXIT_SECS")
+            .ok()
+            .as_deref(),
+    );
+    if let Some(idle_secs) = idle_secs {
+        let to_server_idle = to_server;
+        let session_state_idle = session_state;
+        let _ = thread::Builder::new()
+            .name("server_idle_watch".to_string())
+            .spawn(move || {
+                let idle_limit = Duration::from_secs(idle_secs);
+                let poll = Duration::from_secs(5);
+                let mut empty_since: Option<Instant> = None;
+                loop {
+                    thread::sleep(poll);
+                    let client_count = session_state_idle
+                        .read()
+                        .map(|s| s.client_ids().len() + s.watcher_client_ids().len())
+                        .unwrap_or(0);
+                    if client_count == 0 {
+                        let since = empty_since.get_or_insert_with(Instant::now);
+                        if since.elapsed() >= idle_limit {
+                            log::warn!(
+                                "server idle: zero clients for ≥{}s — requesting KillSession (set VC_FRAME_SERVER_IDLE_EXIT_SECS=0 to disable)",
+                                idle_secs
+                            );
+                            let _ = to_server_idle.send(ServerInstruction::KillSession);
+                            return;
+                        }
+                    } else {
+                        empty_since = None;
+                    }
+                }
+            });
+    } else {
+        log::info!("server idle-exit disabled (VC_FRAME_SERVER_IDLE_EXIT_SECS=0)");
+    }
+}
+
 struct SessionInitParams {
     os_input: Box<dyn ServerOsApi>,
     to_server: SenderWithContext<ServerInstruction>,
@@ -2442,5 +2540,33 @@ mod session_state_tests {
         s.clear_forward_in_flight(42);
         // After clear, removing the client yields no stuck tokens.
         assert!(s.remove_client(1).is_empty());
+    }
+
+    #[test]
+    fn server_idle_exit_secs_default_when_unset() {
+        assert_eq!(
+            server_idle_exit_secs_from_env(None),
+            Some(DEFAULT_SERVER_IDLE_EXIT_SECS)
+        );
+        assert_eq!(
+            server_idle_exit_secs_from_env(Some("")),
+            Some(DEFAULT_SERVER_IDLE_EXIT_SECS)
+        );
+        assert_eq!(
+            server_idle_exit_secs_from_env(Some("not-a-number")),
+            Some(DEFAULT_SERVER_IDLE_EXIT_SECS)
+        );
+    }
+
+    #[test]
+    fn server_idle_exit_secs_zero_disables() {
+        assert_eq!(server_idle_exit_secs_from_env(Some("0")), None);
+        assert_eq!(server_idle_exit_secs_from_env(Some(" 0 ")), None);
+    }
+
+    #[test]
+    fn server_idle_exit_secs_custom() {
+        assert_eq!(server_idle_exit_secs_from_env(Some("60")), Some(60));
+        assert_eq!(server_idle_exit_secs_from_env(Some("900")), Some(900));
     }
 }

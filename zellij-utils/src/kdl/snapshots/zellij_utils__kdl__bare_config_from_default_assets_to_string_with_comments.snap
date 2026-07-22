@@ -296,6 +296,7 @@ plugins {
     status-bar location="vc-frame:status-bar"
     strider location="vc-frame:strider"
     tab-bar location="vc-frame:tab-bar"
+    vc-tab-title location="vc-frame:vc-tab-title"
     welcome-screen location="vc-frame:session-manager" {
         welcome_screen true
     }
@@ -306,6 +307,7 @@ plugins {
 // eg. "https://example.com/my-plugin.wasm"
 load_plugins {
     vc-frame:link
+    vc-frame:vc-tab-title
 }
 web_client {
     font "monospace"

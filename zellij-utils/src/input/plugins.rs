@@ -69,19 +69,16 @@ impl PluginConfig {
                     || tag == "multiple-select"
                     || tag == "layout-manager"
                     || tag == "link"
+                    || tag == "vc-tab-title"
                 {
                     Some(PluginConfig {
                         path: PathBuf::from(&tag),
                         _allow_exec_host_cmd: run_plugin._allow_exec_host_cmd,
                         location: RunPluginLocation::parse(
-                            &format!(
-                                "{}:{}",
-                                crate::input::layout::BUILTIN_PLUGIN_SCHEME,
-                                tag
-                            ),
+                            &format!("{}:{}", crate::input::layout::BUILTIN_PLUGIN_SCHEME, tag),
                             None,
                         )
-                            .ok()?,
+                        .ok()?,
                         initial_userspace_configuration: run_plugin.configuration.clone(),
                         initial_cwd: run_plugin.initial_cwd.clone(),
                     })

@@ -64,6 +64,7 @@ members = [
     "default-plugins/multiple-select",
     "default-plugins/layout-manager",
     "default-plugins/link",
+    "default-plugins/vc-tab-title",
     "zellij-client",
     "zellij-server",
     "zellij-utils",

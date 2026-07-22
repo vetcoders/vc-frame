@@ -41,6 +41,7 @@ PLUGIN_WASMS=(
   status-bar.wasm
   strider.wasm
   tab-bar.wasm
+  vc-tab-title.wasm
 )
 
 # Runtime-embedded plugins (zellij-utils ASSET_MAP) — excludes fixture-only.
@@ -57,6 +58,7 @@ RUNTIME_WASMS=(
   status-bar.wasm
   strider.wasm
   tab-bar.wasm
+  vc-tab-title.wasm
 )
 
 sha_file() {

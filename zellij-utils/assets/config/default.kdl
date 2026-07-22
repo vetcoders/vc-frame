@@ -268,11 +268,13 @@ plugins {
     configuration location="vc-frame:configuration"
     plugin-manager location="vc-frame:plugin-manager"
     about location="vc-frame:about"
+    vc-tab-title location="vc-frame:vc-tab-title"
 }
 
 // Plugins to load in the background when a new session starts
 load_plugins {
     "vc-frame:link"
+    "vc-frame:vc-tab-title"
     // "file:/path/to/my-plugin.wasm"
     // "https://example.com/my-plugin.wasm"
 }
