@@ -279,16 +279,16 @@ FILES
 
 Default user configuration directory location:
 * Linux: _$XDG_CONFIG_HOME/vc-frame /home/alice/.config/vc-frame_
-* macOS: _/Users/Alice/Library/Application Support/io.VetCoders.vc-frame_
+* macOS: _/Users/Alice/Library/Application Support/io.vetcoders.vc-frame_
 
 Default user layout directory location:
 * Subdirectory called `layouts` inside of the configuration directory.
 * Linux: _$XDG_CONFIG_HOME/vc-frame/layouts /home/alice/.config/vc-frame/layouts_
-* macOS: _/Users/Alice/Library/Application Support/io.VetCoders.vc-frame/layouts_
+* macOS: _/Users/Alice/Library/Application Support/io.vetcoders.vc-frame/layouts_
 
 Default plugin directory location:
 * Linux: _$XDG_DATA_HOME/vc-frame/plugins /home/alice/.local/share/vc-frame/plugins_
-* macOS: _/Users/Alice/Library/Application Support/io.VetCoders.vc-frame/plugins_
+* macOS: _/Users/Alice/Library/Application Support/io.vetcoders.vc-frame/plugins_
 
 Legacy Zellij directories are migrated automatically on first run and used
 only as a fallback source:

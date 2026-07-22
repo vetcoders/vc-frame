@@ -28,8 +28,11 @@ pub static ZELLIJ_DEFAULT_THEMES: Dir = include_dir!("$CARGO_MANIFEST_DIR/assets
 pub const CLIENT_SERVER_CONTRACT_VERSION: usize = 1;
 
 const VC_FRAME_PROJECT_QUALIFIER: &str = "io";
-const VC_FRAME_PROJECT_ORGANIZATION: &str = "VetCoders";
+const VC_FRAME_PROJECT_ORGANIZATION: &str = "vetcoders";
 const VC_FRAME_PROJECT_APPLICATION: &str = "vc-frame";
+// Pre-canonicalization organization casing (io.VetCoders.vc-frame) — kept only
+// so existing installs migrate to the lowercase namespace.
+const LEGACY_CASED_PROJECT_ORGANIZATION: &str = "VetCoders";
 const LEGACY_ZELLIJ_PROJECT_QUALIFIER: &str = "org";
 const LEGACY_ZELLIJ_PROJECT_ORGANIZATION: &str = concat!("Zellij ", "Contributors");
 const LEGACY_ZELLIJ_PROJECT_APPLICATION: &str = "Zellij";
@@ -87,7 +90,71 @@ fn legacy_zellij_project_dirs() -> ProjectDirs {
     }
 }
 
+fn legacy_cased_project_dirs() -> ProjectDirs {
+    ProjectDirs::from(
+        VC_FRAME_PROJECT_QUALIFIER,
+        LEGACY_CASED_PROJECT_ORGANIZATION,
+        VC_FRAME_PROJECT_APPLICATION,
+    )
+    .unwrap()
+}
+
+/// Normalize a legacy-cased project dir (io.VetCoders.vc-frame) to the
+/// canonical lowercase one. On case-insensitive filesystems (default APFS,
+/// NTFS) both paths resolve to the same directory, so a direct rename is a
+/// no-op error — go through a temporary sibling to rewrite the on-disk
+/// casing. On case-sensitive filesystems they are distinct directories and
+/// the regular copy-if-absent migration applies.
+fn migrate_cased_path(legacy_path: &Path, vc_frame_path: &Path) {
+    if legacy_path == vc_frame_path {
+        // Platforms that don't embed the organization in the path (Linux XDG).
+        return;
+    }
+    let (Some(parent), Some(legacy_name)) = (legacy_path.parent(), legacy_path.file_name()) else {
+        return;
+    };
+    // Only act when the exact legacy casing is present on disk — Path::exists
+    // can't tell on a case-insensitive filesystem.
+    let exact_legacy_on_disk = std::fs::read_dir(parent).ok().is_some_and(|mut entries| {
+        entries.any(|entry| entry.ok().is_some_and(|e| e.file_name() == legacy_name))
+    });
+    if !exact_legacy_on_disk {
+        return;
+    }
+    let same_directory = match (legacy_path.canonicalize(), vc_frame_path.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    };
+    if same_directory {
+        let tmp = parent.join(format!(
+            "{}.case-migration",
+            vc_frame_path.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        let renamed = std::fs::rename(legacy_path, &tmp)
+            .and_then(|_| std::fs::rename(&tmp, vc_frame_path));
+        if let Err(e) = renamed {
+            log::debug!(
+                "Failed to normalize casing of {:?} to {:?}: {:?}",
+                legacy_path,
+                vc_frame_path,
+                e
+            );
+        }
+    } else {
+        migrate_legacy_path(legacy_path, vc_frame_path);
+    }
+}
+
 fn migrate_legacy_project_dirs() {
+    let cased_dirs = legacy_cased_project_dirs();
+    migrate_cased_path(cased_dirs.config_dir(), ZELLIJ_PROJ_DIR.config_dir());
+    migrate_cased_path(cased_dirs.cache_dir(), ZELLIJ_PROJ_DIR.cache_dir());
+    migrate_cased_path(cased_dirs.data_dir(), ZELLIJ_PROJ_DIR.data_dir());
+    if let (Some(cased_state_dir), Some(vc_frame_state_dir)) =
+        (cased_dirs.state_dir(), ZELLIJ_PROJ_DIR.state_dir())
+    {
+        migrate_cased_path(cased_state_dir, vc_frame_state_dir);
+    }
     let legacy_dirs = legacy_zellij_project_dirs();
     migrate_legacy_path(legacy_dirs.config_dir(), ZELLIJ_PROJ_DIR.config_dir());
     migrate_legacy_path(legacy_dirs.cache_dir(), ZELLIJ_PROJ_DIR.cache_dir());
@@ -700,7 +767,7 @@ mod tests {
         assert!(!cache_dir.contains(LEGACY_ZELLIJ_PROJECT_APPLICATION));
 
         #[cfg(target_os = "macos")]
-        assert!(cache_dir.contains("io.VetCoders.vc-frame"));
+        assert!(cache_dir.contains("io.vetcoders.vc-frame"));
     }
 
     #[test]
