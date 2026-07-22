@@ -532,6 +532,13 @@ impl BucketKind {
             BucketKind::NeedsAttention => "Needs attention",
         }
     }
+    fn rail_label(&self) -> &'static str {
+        match self {
+            BucketKind::Finalized => "Finalized tabs",
+            BucketKind::Failed => "Failed tabs",
+            BucketKind::NeedsAttention => "Needs-attention tabs",
+        }
+    }
     /// Hotkey, deliberately outside the '0'-'9' range the session ordinals use.
     /// `x` rather than the initial `f` for "failed" — `f` is already finalized,
     /// and these three are the only character keys the rail claims.
@@ -622,7 +629,7 @@ fn format_bucket_rail_entry(bucket: BucketKind, count: usize, is_current_session
         " {} {} {} · {}",
         bucket.hotkey(),
         status,
-        bucket.session_name(),
+        bucket.rail_label(),
         count
     )
 }
@@ -2149,9 +2156,9 @@ mod rail_tests {
                 "   · audit-260718-130000-02000 · codex +1",
                 "02 - beta",
                 // the buckets are always pinned to the tail of the rail
-                " f - Finalized runs · 0",
-                " x - Failed runs · 0",
-                " n - Needs attention · 0",
+                " f - Finalized tabs · 0",
+                " x - Failed tabs · 0",
+                " n - Needs-attention tabs · 0",
             ]
         );
         assert_eq!(rows.iter().filter(|row| row.is_live_process()).count(), 2);
@@ -2183,6 +2190,16 @@ mod rail_tests {
     }
 
     #[test]
+    fn bucket_rail_labels_describe_tab_inventory() {
+        assert_eq!(BucketKind::Finalized.rail_label(), "Finalized tabs");
+        assert_eq!(BucketKind::Failed.rail_label(), "Failed tabs");
+        assert_eq!(
+            BucketKind::NeedsAttention.rail_label(),
+            "Needs-attention tabs"
+        );
+    }
+
+    #[test]
     fn buckets_are_pinned_below_the_working_sessions_with_live_counts() {
         let rows = session_rail_rows(&[
             session("alpha", true),
@@ -2199,9 +2216,9 @@ mod rail_tests {
             vec![
                 "01 * alpha",
                 "02 - beta",
-                " f - Finalized runs · 3",
-                " x - Failed runs · 2",
-                " n - Needs attention · 1",
+                " f - Finalized tabs · 3",
+                " x - Failed tabs · 2",
+                " n - Needs-attention tabs · 1",
             ]
         );
     }
@@ -2212,9 +2229,9 @@ mod rail_tests {
         let buckets: Vec<&SessionRailRow> = rows.iter().filter(|row| row.is_bucket()).collect();
 
         assert_eq!(buckets.len(), 3);
-        assert_eq!(buckets[0].text, " f - Finalized runs · 0");
-        assert_eq!(buckets[1].text, " x - Failed runs · 0");
-        assert_eq!(buckets[2].text, " n - Needs attention · 0");
+        assert_eq!(buckets[0].text, " f - Finalized tabs · 0");
+        assert_eq!(buckets[1].text, " x - Failed tabs · 0");
+        assert_eq!(buckets[2].text, " n - Needs-attention tabs · 0");
         assert!(matches!(
             buckets[0].kind,
             SessionRailRowKind::Bucket {
@@ -2522,7 +2539,7 @@ mod rail_tests {
     #[test]
     fn bucket_and_session_status_share_accent_column_index_3() {
         // Session: "01 * alpha" — status `*` at byte index 3.
-        // Bucket:  " f - Finalized runs · 0" — status `-` at byte index 3.
+        // Bucket:  " f - Finalized tabs · 0" — status `-` at byte index 3.
         let session_text = session_rail_rows(&[session("alpha", true)])
             .into_iter()
             .find(|r| matches!(r.kind, SessionRailRowKind::Session(_)))
