@@ -2440,7 +2440,7 @@ pub struct PaneInfo {
     /// If this is a command pane, this will show the stringified version of the command and its
     /// arguments
     pub terminal_command: Option<String>,
-    /// The URL from which this plugin was loaded (eg. `zellij:strider` for the built-in `strider`
+    /// The URL from which this plugin was loaded (eg. `vc-frame:strider` for the built-in `strider`
     /// plugin or `file:/path/to/my/plugin.wasm` for a local plugin)
     pub plugin_url: Option<String>,
     /// Unselectable panes are often used for UI elements that do not have direct user interaction

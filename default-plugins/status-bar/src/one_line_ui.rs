@@ -1578,7 +1578,7 @@ fn session_manager_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWith
 
 fn share_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithModifier> {
     let mut matching = keymap.iter().find_map(|(key, acvec)| {
-        let has_match = acvec.iter().any(|a| a.launches_plugin("zellij:share"));
+        let has_match = acvec.iter().any(|a| a.launches_plugin("vc-frame:share"));
         if has_match { Some(key.clone()) } else { None }
     });
     if let Some(matching) = matching.take() {
@@ -1604,7 +1604,7 @@ fn layout_manager_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithM
     let mut matching = keymap.iter().find_map(|(key, acvec)| {
         let has_match = acvec
             .iter()
-            .any(|a| a.launches_plugin("zellij:layout-manager"));
+            .any(|a| a.launches_plugin("vc-frame:layout-manager"));
         if has_match { Some(key.clone()) } else { None }
     });
     if let Some(matching) = matching.take() {
@@ -1616,7 +1616,7 @@ fn layout_manager_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithM
 
 fn about_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithModifier> {
     let mut matching = keymap.iter().find_map(|(key, acvec)| {
-        let has_match = acvec.iter().any(|a| a.launches_plugin("zellij:about"));
+        let has_match = acvec.iter().any(|a| a.launches_plugin("vc-frame:about"));
         if has_match { Some(key.clone()) } else { None }
     });
     if let Some(matching) = matching.take() {

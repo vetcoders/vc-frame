@@ -2,87 +2,87 @@ layout {
     cwd "/Users/polyversai"
     tab name="Guide" hide_floating_panes=true {
         pane size=1 borderless=true {
-            plugin location="zellij:compact-bar" {
+            plugin location="vc-frame:compact-bar" {
                 brand_text " 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. "
                 brand_text_short " VC. "
             }
         }
         pane split_direction="vertical" {
             pane name="Sessions" size=24 borderless=true {
-                plugin location="zellij:session-manager" {
+                plugin location="vc-frame:session-manager" {
                     pane_title "Sessions"
                     rail "true"
                 }
             }
             pane name="Vibecrafted Shell Guide" {
-                plugin location="zellij:about" {
+                plugin location="vc-frame:about" {
                     guide_mode "mission-control"
                     pane_title "Vibecrafted Shell Guide"
                 }
             }
         }
         pane size=1 borderless=true {
-            plugin location="zellij:status-bar"
+            plugin location="vc-frame:status-bar"
         }
     }
     tab name="Sessions" hide_floating_panes=true {
         pane size=1 borderless=true {
-            plugin location="zellij:compact-bar" {
+            plugin location="vc-frame:compact-bar" {
                 brand_text " 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. "
                 brand_text_short " VC. "
             }
         }
         pane split_direction="vertical" {
             pane name="Sessions" size=24 borderless=true {
-                plugin location="zellij:session-manager" {
+                plugin location="vc-frame:session-manager" {
                     pane_title "Sessions"
                     rail "true"
                 }
             }
             pane name="Vibecrafted Session Atlas" {
-                plugin location="zellij:session-manager" {
+                plugin location="vc-frame:session-manager" {
                     pane_title "Vibecrafted Session Atlas"
                 }
             }
         }
         pane size=1 borderless=true {
-            plugin location="zellij:status-bar"
+            plugin location="vc-frame:status-bar"
         }
     }
     tab name="Layouts" hide_floating_panes=true {
         pane size=1 borderless=true {
-            plugin location="zellij:compact-bar" {
+            plugin location="vc-frame:compact-bar" {
                 brand_text " 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. "
                 brand_text_short " VC. "
             }
         }
         pane split_direction="vertical" {
             pane name="Sessions" size=24 borderless=true {
-                plugin location="zellij:session-manager" {
+                plugin location="vc-frame:session-manager" {
                     pane_title "Sessions"
                     rail "true"
                 }
             }
             pane name="Vibecrafted Layout Forge" {
-                plugin location="zellij:layout-manager" {
+                plugin location="vc-frame:layout-manager" {
                     pane_title "Vibecrafted Layout Forge"
                 }
             }
         }
         pane size=1 borderless=true {
-            plugin location="zellij:status-bar"
+            plugin location="vc-frame:status-bar"
         }
     }
     tab name="Control" hide_floating_panes=true {
         pane size=1 borderless=true {
-            plugin location="zellij:compact-bar" {
+            plugin location="vc-frame:compact-bar" {
                 brand_text " 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. "
                 brand_text_short " VC. "
             }
         }
         pane split_direction="vertical" {
             pane name="Sessions" size=24 borderless=true {
-                plugin location="zellij:session-manager" {
+                plugin location="vc-frame:session-manager" {
                     pane_title "Sessions"
                     rail "true"
                 }
@@ -90,19 +90,19 @@ layout {
             pane contents_file="initial_contents_1"
         }
         pane size=1 borderless=true {
-            plugin location="zellij:status-bar"
+            plugin location="vc-frame:status-bar"
         }
     }
     tab name="Operator" focus=true {
         pane size=1 borderless=true {
-            plugin location="zellij:compact-bar" {
+            plugin location="vc-frame:compact-bar" {
                 brand_text " 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. "
                 brand_text_short " VC. "
             }
         }
         pane split_direction="vertical" {
             pane name="Sessions" size=24 borderless=true {
-                plugin location="zellij:session-manager" {
+                plugin location="vc-frame:session-manager" {
                     pane_title "Sessions"
                     rail "true"
                 }
@@ -113,31 +113,31 @@ layout {
             }
         }
         pane size=1 borderless=true {
-            plugin location="zellij:status-bar"
+            plugin location="vc-frame:status-bar"
         }
     }
     new_tab_template {
         pane size=1 borderless=true {
-            plugin location="zellij:tab-bar"
+            plugin location="vc-frame:tab-bar"
         }
         pane split_direction="vertical" {
             pane size=24 borderless=true {
-                plugin location="zellij:session-manager"
+                plugin location="vc-frame:session-manager"
             }
             pane
         }
         pane size=1 borderless=true {
-            plugin location="zellij:status-bar"
+            plugin location="vc-frame:status-bar"
         }
     }
     swap_tiled_layout name="vertical" {
         tab max_panes=5 {
             pane size=1 borderless=true {
-                plugin location="zellij:tab-bar"
+                plugin location="vc-frame:tab-bar"
             }
             pane split_direction="vertical" {
                 pane size=24 borderless=true {
-                    plugin location="zellij:session-manager"
+                    plugin location="vc-frame:session-manager"
                 }
                 pane {
                     pane {
@@ -151,16 +151,16 @@ layout {
                 }
             }
             pane size=1 borderless=true {
-                plugin location="zellij:status-bar"
+                plugin location="vc-frame:status-bar"
             }
         }
         tab max_panes=8 {
             pane size=1 borderless=true {
-                plugin location="zellij:tab-bar"
+                plugin location="vc-frame:tab-bar"
             }
             pane split_direction="vertical" {
                 pane size=24 borderless=true {
-                    plugin location="zellij:session-manager"
+                    plugin location="vc-frame:session-manager"
                 }
                 pane {
                     pane {
@@ -179,16 +179,16 @@ layout {
                 }
             }
             pane size=1 borderless=true {
-                plugin location="zellij:status-bar"
+                plugin location="vc-frame:status-bar"
             }
         }
         tab max_panes=12 {
             pane size=1 borderless=true {
-                plugin location="zellij:tab-bar"
+                plugin location="vc-frame:tab-bar"
             }
             pane split_direction="vertical" {
                 pane size=24 borderless=true {
-                    plugin location="zellij:session-manager"
+                    plugin location="vc-frame:session-manager"
                 }
                 pane {
                     pane {
@@ -213,18 +213,18 @@ layout {
                 }
             }
             pane size=1 borderless=true {
-                plugin location="zellij:status-bar"
+                plugin location="vc-frame:status-bar"
             }
         }
     }
     swap_tiled_layout name="horizontal" {
         tab max_panes=4 {
             pane size=1 borderless=true {
-                plugin location="zellij:tab-bar"
+                plugin location="vc-frame:tab-bar"
             }
             pane split_direction="vertical" {
                 pane size=24 borderless=true {
-                    plugin location="zellij:session-manager"
+                    plugin location="vc-frame:session-manager"
                 }
                 pane {
                     pane {
@@ -234,16 +234,16 @@ layout {
                 }
             }
             pane size=1 borderless=true {
-                plugin location="zellij:status-bar"
+                plugin location="vc-frame:status-bar"
             }
         }
         tab max_panes=8 {
             pane size=1 borderless=true {
-                plugin location="zellij:tab-bar"
+                plugin location="vc-frame:tab-bar"
             }
             pane split_direction="vertical" {
                 pane size=24 borderless=true {
-                    plugin location="zellij:session-manager"
+                    plugin location="vc-frame:session-manager"
                 }
                 pane {
                     pane {
@@ -262,16 +262,16 @@ layout {
                 }
             }
             pane size=1 borderless=true {
-                plugin location="zellij:status-bar"
+                plugin location="vc-frame:status-bar"
             }
         }
         tab max_panes=12 {
             pane size=1 borderless=true {
-                plugin location="zellij:tab-bar"
+                plugin location="vc-frame:tab-bar"
             }
             pane split_direction="vertical" {
                 pane size=24 borderless=true {
-                    plugin location="zellij:session-manager"
+                    plugin location="vc-frame:session-manager"
                 }
                 pane {
                     pane {
@@ -296,18 +296,18 @@ layout {
                 }
             }
             pane size=1 borderless=true {
-                plugin location="zellij:status-bar"
+                plugin location="vc-frame:status-bar"
             }
         }
     }
     swap_tiled_layout name="stacked" {
         tab min_panes=5 {
             pane size=1 borderless=true {
-                plugin location="zellij:tab-bar"
+                plugin location="vc-frame:tab-bar"
             }
             pane split_direction="vertical" {
                 pane size=24 borderless=true {
-                    plugin location="zellij:session-manager"
+                    plugin location="vc-frame:session-manager"
                 }
                 pane {
                     pane {
@@ -321,7 +321,7 @@ layout {
                 }
             }
             pane size=1 borderless=true {
-                plugin location="zellij:status-bar"
+                plugin location="vc-frame:status-bar"
             }
         }
     }

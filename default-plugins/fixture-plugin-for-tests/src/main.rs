@@ -468,7 +468,7 @@ impl ZellijPlugin for State {
                     let load_in_background = true;
                     let skip_plugin_cache = true;
                     load_new_plugin(
-                        "zellij:OWN_URL",
+                        "vc-frame:OWN_URL",
                         config,
                         load_in_background,
                         skip_plugin_cache,

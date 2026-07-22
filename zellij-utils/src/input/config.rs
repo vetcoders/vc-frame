@@ -1385,50 +1385,50 @@ mod config_test {
     fn can_define_plugin_configuration_in_configfile() {
         let config_contents = r#"
             plugins {
-                tab-bar location="zellij:tab-bar"
-                status-bar location="zellij:status-bar"
-                strider location="zellij:strider"
-                compact-bar location="zellij:compact-bar"
-                session-manager location="zellij:session-manager"
-                welcome-screen location="zellij:session-manager" {
+                tab-bar location="vc-frame:tab-bar"
+                status-bar location="vc-frame:status-bar"
+                strider location="vc-frame:strider"
+                compact-bar location="vc-frame:compact-bar"
+                session-manager location="vc-frame:session-manager"
+                welcome-screen location="vc-frame:session-manager" {
                     welcome_screen true
                 }
-                filepicker location="zellij:strider"
+                filepicker location="vc-frame:strider"
             }
         "#;
         let config = Config::from_kdl(config_contents, None).unwrap();
         let mut expected_plugin_configuration = BTreeMap::new();
         expected_plugin_configuration.insert(
             "tab-bar".to_owned(),
-            RunPlugin::from_url("zellij:tab-bar").unwrap(),
+            RunPlugin::from_url("vc-frame:tab-bar").unwrap(),
         );
         expected_plugin_configuration.insert(
             "status-bar".to_owned(),
-            RunPlugin::from_url("zellij:status-bar").unwrap(),
+            RunPlugin::from_url("vc-frame:status-bar").unwrap(),
         );
         expected_plugin_configuration.insert(
             "strider".to_owned(),
-            RunPlugin::from_url("zellij:strider").unwrap(),
+            RunPlugin::from_url("vc-frame:strider").unwrap(),
         );
         expected_plugin_configuration.insert(
             "compact-bar".to_owned(),
-            RunPlugin::from_url("zellij:compact-bar").unwrap(),
+            RunPlugin::from_url("vc-frame:compact-bar").unwrap(),
         );
         expected_plugin_configuration.insert(
             "session-manager".to_owned(),
-            RunPlugin::from_url("zellij:session-manager").unwrap(),
+            RunPlugin::from_url("vc-frame:session-manager").unwrap(),
         );
         let mut welcome_screen_configuration = BTreeMap::new();
         welcome_screen_configuration.insert("welcome_screen".to_owned(), "true".to_owned());
         expected_plugin_configuration.insert(
             "welcome-screen".to_owned(),
-            RunPlugin::from_url("zellij:session-manager")
+            RunPlugin::from_url("vc-frame:session-manager")
                 .unwrap()
                 .with_configuration(welcome_screen_configuration),
         );
         expected_plugin_configuration.insert(
             "filepicker".to_owned(),
-            RunPlugin::from_url("zellij:strider").unwrap(),
+            RunPlugin::from_url("vc-frame:strider").unwrap(),
         );
         assert_eq!(
             config.plugins,

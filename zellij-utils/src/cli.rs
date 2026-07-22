@@ -1509,7 +1509,7 @@ pub enum Sessions {
     /// Returns: Created pane ID (format: plugin_<id>)
     #[clap(visible_alias = "p")]
     Plugin {
-        /// Plugin URL, can either start with http(s), file: or zellij:
+        /// Plugin URL, can either start with http(s), file: or vc-frame: (legacy zellij:)
         #[clap(last(true), required(true))]
         url: String,
 

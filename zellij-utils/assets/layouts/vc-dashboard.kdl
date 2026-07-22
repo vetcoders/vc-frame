@@ -67,7 +67,7 @@ layout {
 
     tab name="Layouts" {
         pane name="layout forge" focus=true {
-            plugin location="zellij:layout-manager" {
+            plugin location="vc-frame:layout-manager" {
                 pane_title "Vibecrafted Layout Forge"
             }
         }
@@ -75,7 +75,7 @@ layout {
 
     tab name="Control" {
         pane name="control deck" focus=true {
-            plugin location="zellij:configuration" {
+            plugin location="vc-frame:configuration" {
                 pane_title "Vibecrafted Control Deck"
             }
         }
@@ -83,7 +83,7 @@ layout {
 
     tab name="Plugins" {
         pane name="plugin forge" focus=true {
-            plugin location="zellij:plugin-manager" {
+            plugin location="vc-frame:plugin-manager" {
                 pane_title "Vibecrafted Plugin Forge"
             }
         }
@@ -99,7 +99,7 @@ layout {
 
     tab name="Share" {
         pane name="share relay" focus=true {
-            plugin location="zellij:share" {
+            plugin location="vc-frame:share" {
                 pane_title "Vibecrafted Share Relay"
             }
         }

@@ -1,21 +1,21 @@
 ---
 source: zellij-utils/src/kdl/mod.rs
-assertion_line: 5184
+assertion_line: 7014
 expression: serialized.to_string()
 ---
 
 // Plugin aliases - can be used to change the implementation of vc-frame
 // changing these requires a restart to take effect
 plugins {
-    compact-bar location="zellij:compact-bar"
-    filepicker location="zellij:strider" {
+    compact-bar location="vc-frame:compact-bar"
+    filepicker location="vc-frame:strider" {
         cwd "/"
     }
-    session-manager location="zellij:session-manager"
-    status-bar location="zellij:status-bar"
-    strider location="zellij:strider"
-    tab-bar location="zellij:tab-bar"
-    welcome-screen location="zellij:session-manager" {
+    session-manager location="vc-frame:session-manager"
+    status-bar location="vc-frame:status-bar"
+    strider location="vc-frame:strider"
+    tab-bar location="vc-frame:tab-bar"
+    welcome-screen location="vc-frame:session-manager" {
         welcome_screen true
     }
 }

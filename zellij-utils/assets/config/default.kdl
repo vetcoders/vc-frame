@@ -143,21 +143,21 @@ keybinds {
             SwitchToMode "Normal"
         }
         bind "a" {
-            LaunchOrFocusPlugin "zellij:about" {
+            LaunchOrFocusPlugin "vc-frame:about" {
                 floating true
                 move_to_focused_tab true
             };
             SwitchToMode "Normal"
         }
         bind "s" {
-            LaunchOrFocusPlugin "zellij:share" {
+            LaunchOrFocusPlugin "vc-frame:share" {
                 floating true
                 move_to_focused_tab true
             };
             SwitchToMode "Normal"
         }
         bind "l" {
-            LaunchOrFocusPlugin "zellij:layout-manager" {
+            LaunchOrFocusPlugin "vc-frame:layout-manager" {
                 floating true
                 move_to_focused_tab true
             };
@@ -250,29 +250,29 @@ keybinds {
 // Plugin aliases - can be used to change the implementation of Zellij
 // changing these requires a restart to take effect
 plugins {
-    tab-bar location="zellij:tab-bar"
-    status-bar location="zellij:status-bar"
-    strider location="zellij:strider"
-    compact-bar location="zellij:compact-bar"
-    session-manager location="zellij:session-manager"
-    session-rail location="zellij:session-manager" {
+    tab-bar location="vc-frame:tab-bar"
+    status-bar location="vc-frame:status-bar"
+    strider location="vc-frame:strider"
+    compact-bar location="vc-frame:compact-bar"
+    session-manager location="vc-frame:session-manager"
+    session-rail location="vc-frame:session-manager" {
         rail true
         pane_title "Sessions"
     }
-    welcome-screen location="zellij:session-manager" {
+    welcome-screen location="vc-frame:session-manager" {
         welcome_screen true
     }
-    filepicker location="zellij:strider" {
+    filepicker location="vc-frame:strider" {
         cwd "/"
     }
-    configuration location="zellij:configuration"
-    plugin-manager location="zellij:plugin-manager"
-    about location="zellij:about"
+    configuration location="vc-frame:configuration"
+    plugin-manager location="vc-frame:plugin-manager"
+    about location="vc-frame:about"
 }
 
 // Plugins to load in the background when a new session starts
 load_plugins {
-    "zellij:link"
+    "vc-frame:link"
     // "file:/path/to/my-plugin.wasm"
     // "https://example.com/my-plugin.wasm"
 }

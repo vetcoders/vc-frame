@@ -73,7 +73,14 @@ impl PluginConfig {
                     Some(PluginConfig {
                         path: PathBuf::from(&tag),
                         _allow_exec_host_cmd: run_plugin._allow_exec_host_cmd,
-                        location: RunPluginLocation::parse(&format!("zellij:{}", tag), None)
+                        location: RunPluginLocation::parse(
+                            &format!(
+                                "{}:{}",
+                                crate::input::layout::BUILTIN_PLUGIN_SCHEME,
+                                tag
+                            ),
+                            None,
+                        )
                             .ok()?,
                         initial_userspace_configuration: run_plugin.configuration.clone(),
                         initial_cwd: run_plugin.initial_cwd.clone(),
@@ -94,7 +101,7 @@ impl PluginConfig {
     /// Resolve wasm plugin bytes for the plugin path and given plugin directory.
     ///
     /// If zellij was built without the 'disable_automatic_asset_installation' feature, builtin
-    /// plugins (Starting with 'zellij:' in the layout file) are loaded directly from the
+    /// plugins (Starting with 'vc-frame:' / legacy 'zellij:' in the layout file) are loaded from the
     /// binary-internal asset map. Otherwise:
     ///
     /// Attempts to first resolve the plugin path as an absolute path, then adds a ".wasm"
@@ -200,7 +207,7 @@ pub enum PluginsConfigError {
     #[error("Failed to parse url: {0:?}")]
     InvalidUrl(#[from] url::ParseError),
     #[error(
-        "Only 'file:', 'http(s):' and 'zellij:' url schemes are supported for plugin lookup. '{0}' does not match either."
+        "Only 'file:', 'http(s):', 'vc-frame:' and legacy 'zellij:' url schemes are supported for plugin lookup. '{0}' does not match either."
     )]
     InvalidUrlScheme(Url),
     #[error("Could not find plugin at the path: '{0:?}'")]

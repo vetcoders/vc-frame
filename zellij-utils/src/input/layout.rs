@@ -583,6 +583,12 @@ impl Default for RunPluginLocation {
     }
 }
 
+/// Canonical URL scheme for built-in plugins in UI and serialization.
+/// Legacy `zellij:` is still accepted on parse for older layouts/configs.
+pub const BUILTIN_PLUGIN_SCHEME: &str = "vc-frame";
+/// Upstream/legacy scheme — parse-only compatibility.
+pub const LEGACY_BUILTIN_PLUGIN_SCHEME: &str = "zellij";
+
 impl RunPluginLocation {
     pub fn parse(location: &str, cwd: Option<PathBuf>) -> Result<Self, PluginsConfigError> {
         let url = Url::parse(location)?;
@@ -590,7 +596,10 @@ impl RunPluginLocation {
         let decoded_path = percent_encoding::percent_decode_str(url.path()).decode_utf8_lossy();
 
         match url.scheme() {
-            "zellij" => Ok(Self::Zellij(PluginTag::new(decoded_path))),
+            // Built-in plugins: vc-frame:about (canonical) or zellij:about (legacy).
+            s if s == BUILTIN_PLUGIN_SCHEME || s == LEGACY_BUILTIN_PLUGIN_SCHEME => {
+                Ok(Self::Zellij(PluginTag::new(decoded_path)))
+            },
             "file" => {
                 let path = if location.starts_with("file:/") {
                     // Path is absolute, its safe to use URL path.
@@ -627,7 +636,9 @@ impl RunPluginLocation {
     pub fn display(&self) -> String {
         match self {
             RunPluginLocation::File(pathbuf) => format!("file:{}", pathbuf.display()),
-            RunPluginLocation::Zellij(plugin_tag) => format!("zellij:{}", plugin_tag),
+            RunPluginLocation::Zellij(plugin_tag) => {
+                format!("{}:{}", BUILTIN_PLUGIN_SCHEME, plugin_tag)
+            },
             RunPluginLocation::Remote(url) => String::from(url),
         }
     }
@@ -640,7 +651,9 @@ impl From<&RunPluginLocation> for Url {
                 "file:{}",
                 path.clone().into_os_string().into_string().unwrap()
             ),
-            RunPluginLocation::Zellij(tag) => format!("zellij:{}", tag),
+            RunPluginLocation::Zellij(tag) => {
+                format!("{}:{}", BUILTIN_PLUGIN_SCHEME, tag)
+            },
             RunPluginLocation::Remote(url) => String::from(url),
         };
         Self::parse(&url).unwrap()

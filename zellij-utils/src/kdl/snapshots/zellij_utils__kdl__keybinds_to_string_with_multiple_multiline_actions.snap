@@ -1,6 +1,6 @@
 ---
 source: zellij-utils/src/kdl/mod.rs
-assertion_line: 2788
+assertion_line: 6766
 expression: serialized.to_string()
 ---
 keybinds clear-defaults=true {
@@ -8,7 +8,7 @@ keybinds clear-defaults=true {
         bind "Ctrl n" {
             NewPane
             SwitchToMode "locked"
-            MessagePlugin "zellij:session-manager" {
+            MessagePlugin "vc-frame:session-manager" {
                 name "message_name"
                 cwd "/tmp"
                 payload "message_payload"
@@ -22,4 +22,3 @@ keybinds clear-defaults=true {
         }
     }
 }
-

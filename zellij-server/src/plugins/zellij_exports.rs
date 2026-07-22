@@ -806,7 +806,11 @@ fn cli_pipe_output(env: &PluginEnv, pipe_name: String, output: String) -> Result
 }
 
 fn message_to_plugin(env: &PluginEnv, mut message_to_plugin: MessageToPlugin) -> Result<()> {
-    if message_to_plugin.plugin_url.as_deref() == Some("zellij:OWN_URL") {
+    // Built-in self-pipe sentinel: accept canonical and legacy scheme.
+    if matches!(
+        message_to_plugin.plugin_url.as_deref(),
+        Some("vc-frame:OWN_URL" | "zellij:OWN_URL")
+    ) {
         message_to_plugin.plugin_url = Some(env.plugin.location.display());
     }
     if !message_to_plugin.has_cwd() {

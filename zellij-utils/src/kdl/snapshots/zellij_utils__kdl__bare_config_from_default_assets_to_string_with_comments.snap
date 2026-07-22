@@ -1,5 +1,6 @@
 ---
 source: zellij-utils/src/kdl/mod.rs
+assertion_line: 7275
 expression: fake_config_stringified
 ---
 keybinds clear-defaults=true {
@@ -101,7 +102,7 @@ keybinds clear-defaults=true {
     }
     session {
         bind "a" {
-            LaunchOrFocusPlugin "zellij:about" {
+            LaunchOrFocusPlugin "vc-frame:about" {
                 floating true
                 move_to_focused_tab true
             }
@@ -115,7 +116,7 @@ keybinds clear-defaults=true {
             SwitchToMode "normal"
         }
         bind "l" {
-            LaunchOrFocusPlugin "zellij:layout-manager" {
+            LaunchOrFocusPlugin "vc-frame:layout-manager" {
                 floating true
                 move_to_focused_tab true
             }
@@ -136,7 +137,7 @@ keybinds clear-defaults=true {
             SwitchToMode "normal"
         }
         bind "s" {
-            LaunchOrFocusPlugin "zellij:share" {
+            LaunchOrFocusPlugin "vc-frame:share" {
                 floating true
                 move_to_focused_tab true
             }
@@ -280,22 +281,22 @@ keybinds clear-defaults=true {
 // Plugin aliases - can be used to change the implementation of vc-frame
 // changing these requires a restart to take effect
 plugins {
-    about location="zellij:about"
-    compact-bar location="zellij:compact-bar"
-    configuration location="zellij:configuration"
-    filepicker location="zellij:strider" {
+    about location="vc-frame:about"
+    compact-bar location="vc-frame:compact-bar"
+    configuration location="vc-frame:configuration"
+    filepicker location="vc-frame:strider" {
         cwd "/"
     }
-    plugin-manager location="zellij:plugin-manager"
-    session-manager location="zellij:session-manager"
-    session-rail location="zellij:session-manager" {
+    plugin-manager location="vc-frame:plugin-manager"
+    session-manager location="vc-frame:session-manager"
+    session-rail location="vc-frame:session-manager" {
         pane_title "Sessions"
         rail true
     }
-    status-bar location="zellij:status-bar"
-    strider location="zellij:strider"
-    tab-bar location="zellij:tab-bar"
-    welcome-screen location="zellij:session-manager" {
+    status-bar location="vc-frame:status-bar"
+    strider location="vc-frame:strider"
+    tab-bar location="vc-frame:tab-bar"
+    welcome-screen location="vc-frame:session-manager" {
         welcome_screen true
     }
 }
@@ -304,7 +305,7 @@ plugins {
 // eg. "file:/path/to/my-plugin.wasm"
 // eg. "https://example.com/my-plugin.wasm"
 load_plugins {
-    zellij:link
+    vc-frame:link
 }
 web_client {
     font "monospace"

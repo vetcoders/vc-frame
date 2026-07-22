@@ -255,11 +255,11 @@ fn get_keys_and_hints(mi: &ModeInfo) -> Vec<(String, String, Vec<KeyWithModifier
     ]} else if mi.mode == IM::Session { vec![
         (s("Detach"), s("Detach"), action_key(&km, &[Action::Detach])),
         (s("Session Manager"), s("Manager"), plugin_key(&km, "session-manager")),
-        (s("Layout Manager"), s("Layouts"), plugin_key(&km, "zellij:layout-manager")),
+        (s("Layout Manager"), s("Layouts"), plugin_key(&km, "vc-frame:layout-manager")),
         (s("Plugin Manager"), s("Plugins"), plugin_key(&km, "plugin-manager")),
         (s("Configure"), s("Config"), plugin_key(&km, "configuration")),
-        (s("Share"), s("Share"), plugin_key(&km, "zellij:share")),
-        (s("About"), s("About"), plugin_key(&km, "zellij:about")),
+        (s("Share"), s("Share"), plugin_key(&km, "vc-frame:share")),
+        (s("About"), s("About"), plugin_key(&km, "vc-frame:about")),
         (s("Quit"), s("Quit"), action_key(&km, &[Action::Quit])),
         (s("Select pane"), s("Select"), to_normal_key),
     ]} else if mi.mode == IM::Tmux { vec![

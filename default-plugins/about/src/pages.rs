@@ -708,14 +708,14 @@ impl Page {
                             main_menu_item("Session Atlas").selected(),
                         ))
                         .with_left_click_action(ClickAction::new_launch_plugin(
-                            "zellij:session-manager".to_owned(),
+                            "vc-frame:session-manager".to_owned(),
                         )),
                     ActiveComponent::new(TextOrCustomRender::Text(main_menu_item("Layout Forge")))
                         .with_hover(TextOrCustomRender::Text(
                             main_menu_item("Layout Forge").selected(),
                         ))
                         .with_left_click_action(ClickAction::new_launch_plugin(
-                            "zellij:layout-manager".to_owned(),
+                            "vc-frame:layout-manager".to_owned(),
                         )),
                     ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
                         "Back to Start here",
@@ -784,7 +784,7 @@ impl Page {
                                 .selected(),
                         ))
                         .with_left_click_action(ClickAction::new_launch_plugin(
-                            "zellij:share".to_owned(),
+                            "vc-frame:share".to_owned(),
                         )),
                         ActiveComponent::new(TextOrCustomRender::Text(
                             Text::new("From another: vc-frame attach https://<ip>/<session-name>")
@@ -1005,7 +1005,7 @@ impl Page {
                             .selected(),
                     ))
                     .with_left_click_action(ClickAction::new_launch_plugin(
-                        "zellij:layout-manager".to_owned(),
+                        "vc-frame:layout-manager".to_owned(),
                     )),
                     ActiveComponent::new(TextOrCustomRender::Text(Text::new(
                         " allows overriding layouts at runtime.",

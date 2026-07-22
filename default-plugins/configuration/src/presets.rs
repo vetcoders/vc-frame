@@ -142,21 +142,21 @@ keybinds clear-defaults=true {{
             SwitchToMode "Locked"
         }}
         bind "a" {{
-            LaunchOrFocusPlugin "zellij:about" {{
+            LaunchOrFocusPlugin "vc-frame:about" {{
                 floating true
                 move_to_focused_tab true
             }};
             SwitchToMode "Locked"
         }}
         bind "s" {{
-            LaunchOrFocusPlugin "zellij:share" {{
+            LaunchOrFocusPlugin "vc-frame:share" {{
                 floating true
                 move_to_focused_tab true
             }};
             SwitchToMode "Locked"
         }}
         bind "l" {{
-            LaunchOrFocusPlugin "zellij:layout-manager" {{
+            LaunchOrFocusPlugin "vc-frame:layout-manager" {{
                 floating true
                 move_to_focused_tab true
             }};
@@ -365,21 +365,21 @@ keybinds clear-defaults=true {{
             SwitchToMode "Normal"
         }}
         bind "a" {{
-            LaunchOrFocusPlugin "zellij:about" {{
+            LaunchOrFocusPlugin "vc-frame:about" {{
                 floating true
                 move_to_focused_tab true
             }};
             SwitchToMode "Normal"
         }}
         bind "s" {{
-            LaunchOrFocusPlugin "zellij:share" {{
+            LaunchOrFocusPlugin "vc-frame:share" {{
                 floating true
                 move_to_focused_tab true
             }};
             SwitchToMode "Normal"
         }}
         bind "l" {{
-            LaunchOrFocusPlugin "zellij:layout-manager" {{
+            LaunchOrFocusPlugin "vc-frame:layout-manager" {{
                 floating true
                 move_to_focused_tab true
             }};
@@ -588,21 +588,21 @@ keybinds clear-defaults=true {{
             SwitchToMode "Normal"
         }}
         bind "a" {{
-            LaunchOrFocusPlugin "zellij:about" {{
+            LaunchOrFocusPlugin "vc-frame:about" {{
                 floating true
                 move_to_focused_tab true
             }};
             SwitchToMode "Normal"
         }}
         bind "s" {{
-            LaunchOrFocusPlugin "zellij:share" {{
+            LaunchOrFocusPlugin "vc-frame:share" {{
                 floating true
                 move_to_focused_tab true
             }};
             SwitchToMode "Normal"
         }}
         bind "l" {{
-            LaunchOrFocusPlugin "zellij:layout-manager" {{
+            LaunchOrFocusPlugin "vc-frame:layout-manager" {{
                 floating true
                 move_to_focused_tab true
             }};
@@ -792,21 +792,21 @@ keybinds clear-defaults=true {{
             SwitchToMode "Normal"
         }}
         bind "a" {{
-            LaunchOrFocusPlugin "zellij:about" {{
+            LaunchOrFocusPlugin "vc-frame:about" {{
                 floating true
                 move_to_focused_tab true
             }};
             SwitchToMode "Normal"
         }}
         bind "s" {{
-            LaunchOrFocusPlugin "zellij:share" {{
+            LaunchOrFocusPlugin "vc-frame:share" {{
                 floating true
                 move_to_focused_tab true
             }};
             SwitchToMode "Normal"
         }}
         bind "l" {{
-            LaunchOrFocusPlugin "zellij:layout-manager" {{
+            LaunchOrFocusPlugin "vc-frame:layout-manager" {{
                 floating true
                 move_to_focused_tab true
             }};
@@ -995,21 +995,21 @@ keybinds clear-defaults=true {
             SwitchToMode "Normal"
         }
         bind "a" {
-            LaunchOrFocusPlugin "zellij:about" {
+            LaunchOrFocusPlugin "vc-frame:about" {
                 floating true
                 move_to_focused_tab true
             };
             SwitchToMode "Normal"
         }
         bind "s" {
-            LaunchOrFocusPlugin "zellij:share" {
+            LaunchOrFocusPlugin "vc-frame:share" {
                 floating true
                 move_to_focused_tab true
             };
             SwitchToMode "Normal"
         }
         bind "l" {
-            LaunchOrFocusPlugin "zellij:layout-manager" {
+            LaunchOrFocusPlugin "vc-frame:layout-manager" {
                 floating true
                 move_to_focused_tab true
             };
@@ -1194,21 +1194,21 @@ keybinds clear-defaults=true {{
             SwitchToMode "Normal"
         }}
         bind "a" {{
-            LaunchOrFocusPlugin "zellij:about" {{
+            LaunchOrFocusPlugin "vc-frame:about" {{
                 floating true
                 move_to_focused_tab true
             }};
             SwitchToMode "Normal"
         }}
         bind "s" {{
-            LaunchOrFocusPlugin "zellij:share" {{
+            LaunchOrFocusPlugin "vc-frame:share" {{
                 floating true
                 move_to_focused_tab true
             }};
             SwitchToMode "Normal"
         }}
         bind "l" {{
-            LaunchOrFocusPlugin "zellij:layout-manager" {{
+            LaunchOrFocusPlugin "vc-frame:layout-manager" {{
                 floating true
                 move_to_focused_tab true
             }};

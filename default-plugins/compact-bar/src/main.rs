@@ -24,9 +24,10 @@ const CONFIG_TOGGLE_TOOLTIP_KEY: &str = "tooltip";
 const CONFIG_BRAND_TEXT: &str = "brand_text";
 const CONFIG_BRAND_TEXT_SHORT: &str = "brand_text_short";
 const MSG_TOGGLE_TOOLTIP: &str = "toggle_tooltip";
-// the status-bar shows up in the pane manifest as "zellij:status-bar" when
+// the status-bar shows up in the pane manifest as "vc-frame:status-bar" when
 // loaded by url and as "status-bar" when loaded through its config alias
-const STATUS_BAR_PLUGIN_URLS: [&str; 2] = ["zellij:status-bar", "status-bar"];
+const STATUS_BAR_PLUGIN_URLS: [&str; 3] =
+    ["vc-frame:status-bar", "zellij:status-bar", "status-bar"];
 /// How long the clipboard notification ("Text copied...") stays on the bar
 /// before dismissing itself without requiring user input.
 const CLIPBOARD_HINT_TTL_SECONDS: f64 = 2.0;
@@ -390,7 +391,7 @@ impl State {
     fn detect_tooltip_presence(&self, pane_manifest: &PaneManifest) -> bool {
         for panes in pane_manifest.panes.values() {
             for pane in panes {
-                if pane.plugin_url == Some("zellij:compact-bar".to_owned())
+                if (pane.plugin_url.as_deref() == Some("vc-frame:compact-bar") || pane.plugin_url.as_deref() == Some("zellij:compact-bar"))
                     && pane.pane_x != pane.pane_content_x
                 {
                     return true;
@@ -465,7 +466,7 @@ impl State {
         tooltip_config.insert(CONFIG_IS_TOOLTIP.to_string(), "true".to_string());
 
         MessageToPlugin::new(name)
-            .with_plugin_url("zellij:OWN_URL")
+            .with_plugin_url("vc-frame:OWN_URL")
             .with_plugin_config(tooltip_config)
             .with_floating_pane_coordinates(self.calculate_tooltip_coordinates())
             .new_plugin_instance_should_have_pane_title(format!("{:?}", mode))

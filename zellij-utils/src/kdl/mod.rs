@@ -6575,7 +6575,7 @@ fn keybinds_to_string_with_all_actions() {
                 }
                 bind "Alt t" { Detach; }
                 bind "Alt u" {
-                    LaunchOrFocusPlugin "zellij:session-manager"{
+                    LaunchOrFocusPlugin "vc-frame:session-manager"{
                         floating true;
                         move_to_focused_tab true;
                         skip_plugin_cache true;
@@ -6584,7 +6584,7 @@ fn keybinds_to_string_with_all_actions() {
                     };
                 }
                 bind "Alt v" {
-                    LaunchOrFocusPlugin "zellij:session-manager"{
+                    LaunchOrFocusPlugin "vc-frame:session-manager"{
                         in_place true;
                         move_to_focused_tab true;
                         skip_plugin_cache true;
@@ -6593,7 +6593,7 @@ fn keybinds_to_string_with_all_actions() {
                     };
                 }
                 bind "Alt w" {
-                    LaunchPlugin "zellij:session-manager" {
+                    LaunchPlugin "vc-frame:session-manager" {
                         floating true;
                         skip_plugin_cache true;
                         config_key_1 "config_value_1";
@@ -6601,7 +6601,7 @@ fn keybinds_to_string_with_all_actions() {
                     };
                 }
                 bind "Alt x" {
-                    LaunchPlugin "zellij:session-manager"{
+                    LaunchPlugin "vc-frame:session-manager"{
                         in_place true;
                         skip_plugin_cache true;
                         config_key_1 "config_value_1";
@@ -6620,7 +6620,7 @@ fn keybinds_to_string_with_all_actions() {
                 bind "Ctrl Alt i" { BreakPaneLeft; }
                 bind "Ctrl Alt i" { BreakPaneLeft; }
                 bind "Ctrl Alt j" {
-                    MessagePlugin "zellij:session-manager"{
+                    MessagePlugin "vc-frame:session-manager"{
                         name "message_name";
                         payload "message_payload";
                         cwd "/tmp";
@@ -6725,7 +6725,7 @@ fn keybinds_to_string_with_multiple_multiline_actions() {
                 bind "Ctrl n" {
                     NewPane
                     SwitchToMode "Locked"
-                    MessagePlugin "zellij:session-manager"{
+                    MessagePlugin "vc-frame:session-manager"{
                         name "message_name";
                         payload "message_payload";
                         cwd "/tmp";
@@ -6983,15 +6983,15 @@ fn themes_to_string_with_multiple_theme_definitions() {
 fn plugins_to_string() {
     let fake_config = r##"
         plugins {
-            tab-bar location="zellij:tab-bar"
-            status-bar location="zellij:status-bar"
-            strider location="zellij:strider"
-            compact-bar location="zellij:compact-bar"
-            session-manager location="zellij:session-manager"
-            welcome-screen location="zellij:session-manager" {
+            tab-bar location="vc-frame:tab-bar"
+            status-bar location="vc-frame:status-bar"
+            strider location="vc-frame:strider"
+            compact-bar location="vc-frame:compact-bar"
+            session-manager location="vc-frame:session-manager"
+            welcome-screen location="vc-frame:session-manager" {
                 welcome_screen true
             }
-            filepicker location="zellij:strider" {
+            filepicker location="vc-frame:strider" {
                 cwd "/"
             }
         }"##;

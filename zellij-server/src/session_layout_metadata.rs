@@ -169,24 +169,24 @@ impl SessionLayoutMetadata {
     }
     fn should_exclude_from_count(&self, pane: &PaneLayoutMetadata) -> bool {
         if let Some(Run::Plugin(run_plugin)) = &pane.run {
+            // Match by tag only so vc-frame: and legacy zellij: both exclude.
             let location_string = run_plugin.location_string();
-            if location_string == "zellij:about" {
-                return true;
-            }
-            if location_string == "zellij:session-manager" {
-                return true;
-            }
-            if location_string == "zellij:plugin-manager" {
-                return true;
-            }
-            if location_string == "zellij:configuration-manager" {
-                return true;
-            }
-            if location_string == "zellij:share" {
-                return true;
-            }
+            let tag = location_string
+                .rsplit_once(':')
+                .map(|(_, t)| t)
+                .unwrap_or(location_string.as_str());
+            matches!(
+                tag,
+                "about"
+                    | "session-manager"
+                    | "plugin-manager"
+                    | "configuration-manager"
+                    | "configuration"
+                    | "share"
+            )
+        } else {
+            false
         }
-        false
     }
     fn is_default_shell(
         default_shell: Option<&PathBuf>,
