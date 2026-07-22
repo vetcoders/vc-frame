@@ -182,10 +182,16 @@ impl ZellijPlugin for State {
                 let was_visible = self.is_visible;
                 self.is_visible = is_visible;
                 if is_visible && !was_visible {
+                    subscribe(&[EventType::SessionUpdate]);
                     if self.refresh_session_list() {
                         should_render = true;
                     }
                     self.arm_refresh_timer();
+                } else if !is_visible && was_visible {
+                    // Hidden instances drop the subscription entirely so the
+                    // server does not serialize the snapshot into their wasm
+                    // memory every second.
+                    unsubscribe(&[EventType::SessionUpdate]);
                 }
             },
             Event::ModeUpdate(mode_info) => {
@@ -210,6 +216,12 @@ impl ZellijPlugin for State {
                 should_render = true;
             },
             Event::SessionUpdate(session_infos, resurrectable_session_list) => {
+                // Every tab carries its own rail instance; hidden instances must
+                // not pay the full rebuild for each 1s broadcast — the visible
+                // transition refreshes them from scratch instead.
+                if !self.is_visible {
+                    return false;
+                }
                 for session_info in &session_infos {
                     if session_info.is_current_session {
                         self.new_session_info
@@ -2121,6 +2133,34 @@ mod rail_tests {
             is_current_session,
             creation_time: Duration::ZERO,
         }
+    }
+
+    #[test]
+    fn hidden_instance_ignores_session_update_broadcasts() {
+        let mut state = State::default();
+        state.is_visible = false;
+        state
+            .sessions
+            .set_sessions(vec![session("alpha", true)], vec![]);
+        let rendered = state.update(Event::SessionUpdate(vec![], vec![]));
+        assert!(!rendered, "hidden rail must not render on broadcast");
+        assert_eq!(
+            state.sessions.session_ui_infos.len(),
+            1,
+            "hidden rail must keep stale state instead of rebuilding it"
+        );
+    }
+
+    #[test]
+    fn visible_instance_processes_session_update_broadcasts() {
+        let mut state = State::default();
+        state.is_visible = true;
+        state
+            .sessions
+            .set_sessions(vec![session("alpha", true)], vec![]);
+        let rendered = state.update(Event::SessionUpdate(vec![], vec![]));
+        assert!(rendered);
+        assert!(state.sessions.session_ui_infos.is_empty());
     }
 
     #[test]
