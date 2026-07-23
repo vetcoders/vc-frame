@@ -391,7 +391,8 @@ impl State {
     fn detect_tooltip_presence(&self, pane_manifest: &PaneManifest) -> bool {
         for panes in pane_manifest.panes.values() {
             for pane in panes {
-                if (pane.plugin_url.as_deref() == Some("vc-frame:compact-bar") || pane.plugin_url.as_deref() == Some("zellij:compact-bar"))
+                if (pane.plugin_url.as_deref() == Some("vc-frame:compact-bar")
+                    || pane.plugin_url.as_deref() == Some("zellij:compact-bar"))
                     && pane.pane_x != pane.pane_content_x
                 {
                     return true;

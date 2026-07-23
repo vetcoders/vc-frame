@@ -527,7 +527,7 @@ impl Page {
                     ),
                 ),
             )])])
-            .with_help(Box::new(|h, m| esc_go_back_plus_link_hover(h, m)))
+            .with_help(Box::new(esc_go_back_plus_link_hover))
             .with_bulletin_list(onboarding_back_bulletin(
                 link_executable,
                 zellij_version,
@@ -577,7 +577,7 @@ impl Page {
                 zellij_version,
                 base_mode,
             ))
-            .with_help(Box::new(|h, m| esc_go_back_plus_link_hover(h, m)))
+            .with_help(Box::new(esc_go_back_plus_link_hover))
     }
 
     fn new_onboarding_keyboard(
@@ -638,7 +638,7 @@ impl Page {
                 zellij_version,
                 base_mode,
             ))
-            .with_help(Box::new(|h, m| esc_go_back_plus_link_hover(h, m)))
+            .with_help(Box::new(esc_go_back_plus_link_hover))
     }
 
     fn new_onboarding_shell_commands(
@@ -686,7 +686,7 @@ impl Page {
                 zellij_version,
                 base_mode,
             ))
-            .with_help(Box::new(|h, m| esc_go_back_plus_link_hover(h, m)))
+            .with_help(Box::new(esc_go_back_plus_link_hover))
     }
 
     fn new_onboarding_advanced_tools(
@@ -737,7 +737,7 @@ impl Page {
                     })),
                 ]),
             )
-            .with_help(Box::new(|h, m| esc_go_back_plus_link_hover(h, m)))
+            .with_help(Box::new(esc_go_back_plus_link_hover))
     }
     fn new_windows_support() -> Page {
         Page::new()

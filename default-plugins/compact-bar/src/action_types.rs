@@ -139,7 +139,9 @@ impl ActionType {
             Action::Detach => ActionType::Detach,
             Action::Quit => ActionType::Quit,
             action if action.launches_plugin("session-manager") => ActionType::SessionManager,
-            action if action.launches_plugin("vc-frame:layout-manager") => ActionType::LayoutManager,
+            action if action.launches_plugin("vc-frame:layout-manager") => {
+                ActionType::LayoutManager
+            },
             action if action.launches_plugin("configuration") => ActionType::Configuration,
             action if action.launches_plugin("plugin-manager") => ActionType::PluginManager,
             action if action.launches_plugin("vc-frame:share") => ActionType::Share,
