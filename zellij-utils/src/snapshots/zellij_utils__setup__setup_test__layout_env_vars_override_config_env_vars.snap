@@ -1,6 +1,5 @@
 ---
 source: zellij-utils/src/setup.rs
-assertion_line: 845
 expression: "format!(\"{:#?}\", config)"
 ---
 Config {
@@ -1691,7 +1690,28 @@ Config {
                 bare_key: Down,
                 key_modifiers: {},
             }: [
-                GoToNextTab,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
             ],
             KeyWithModifier {
                 bare_key: Down,
@@ -1737,7 +1757,28 @@ Config {
                 bare_key: Up,
                 key_modifiers: {},
             }: [
-                GoToPreviousTab,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
             ],
             KeyWithModifier {
                 bare_key: Up,
@@ -2088,7 +2129,28 @@ Config {
                 ),
                 key_modifiers: {},
             }: [
-                GoToNextTab,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -2108,7 +2170,28 @@ Config {
                 ),
                 key_modifiers: {},
             }: [
-                GoToPreviousTab,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
             ],
             KeyWithModifier {
                 bare_key: Char(

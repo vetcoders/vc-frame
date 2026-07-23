@@ -1,6 +1,5 @@
 ---
 source: zellij-utils/src/kdl/mod.rs
-assertion_line: 7275
 expression: fake_config_stringified
 ---
 keybinds clear-defaults=true {
@@ -31,8 +30,20 @@ keybinds clear-defaults=true {
     }
     tab {
         bind "left" { GoToPreviousTab; }
-        bind "down" { GoToNextTab; }
-        bind "up" { GoToPreviousTab; }
+        bind "down" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "down"
+                floating false
+            }
+        }
+        bind "up" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "up"
+                floating false
+            }
+        }
         bind "right" { GoToNextTab; }
         bind "1" { GoToTab 1; SwitchToMode "normal"; }
         bind "2" { GoToTab 2; SwitchToMode "normal"; }
@@ -47,8 +58,20 @@ keybinds clear-defaults=true {
         bind "]" { BreakPaneRight; SwitchToMode "normal"; }
         bind "b" { BreakPane; SwitchToMode "normal"; }
         bind "h" { GoToPreviousTab; }
-        bind "j" { GoToNextTab; }
-        bind "k" { GoToPreviousTab; }
+        bind "j" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "down"
+                floating false
+            }
+        }
+        bind "k" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "up"
+                floating false
+            }
+        }
         bind "l" { GoToNextTab; }
         bind "n" { NewTab; SwitchToMode "normal"; }
         bind "r" { SwitchToMode "renametab"; TabNameInput 0; }
