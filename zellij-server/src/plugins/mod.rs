@@ -303,7 +303,7 @@ pub(crate) fn plugin_thread_main(
     plugin_aliases: PluginAliases,
     default_mode: InputMode,
     default_keybinds: Keybinds,
-    background_plugins: HashSet<RunPluginOrAlias>,
+    background_plugins: Vec<RunPluginOrAlias>,
     // the client id that started the session,
     // we need it here because the thread's own list of connected clients might not yet be updated
     // on session start when we need to load the background plugins, and so we must have an

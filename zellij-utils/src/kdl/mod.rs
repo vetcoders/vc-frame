@@ -5014,10 +5014,7 @@ impl PluginAliases {
     }
 }
 
-pub fn load_plugins_to_kdl(
-    background_plugins: &HashSet<RunPluginOrAlias>,
-    add_comments: bool,
-) -> KdlNode {
+pub fn load_plugins_to_kdl(background_plugins: &[RunPluginOrAlias], add_comments: bool) -> KdlNode {
     let mut load_plugins = KdlNode::new("load_plugins");
     let mut load_plugins_children = KdlDocument::new();
     for run_plugin_or_alias in background_plugins.iter() {
@@ -5080,10 +5077,8 @@ pub fn load_plugins_to_kdl(
     load_plugins
 }
 
-fn load_plugins_from_kdl(
-    kdl_load_plugins: &KdlNode,
-) -> Result<HashSet<RunPluginOrAlias>, ConfigError> {
-    let mut load_plugins: HashSet<RunPluginOrAlias> = HashSet::new();
+fn load_plugins_from_kdl(kdl_load_plugins: &KdlNode) -> Result<Vec<RunPluginOrAlias>, ConfigError> {
+    let mut load_plugins: Vec<RunPluginOrAlias> = Vec::new();
     if let Some(kdl_load_plugins) = kdl_children_nodes!(kdl_load_plugins) {
         for plugin_block in kdl_load_plugins {
             let url_node = plugin_block.name();
@@ -5105,7 +5100,9 @@ fn load_plugins_from_kdl(
                 )
             })?
             .with_initial_cwd(cwd);
-            load_plugins.insert(run_plugin_or_alias);
+            if !load_plugins.contains(&run_plugin_or_alias) {
+                load_plugins.push(run_plugin_or_alias);
+            }
         }
     }
     Ok(load_plugins)

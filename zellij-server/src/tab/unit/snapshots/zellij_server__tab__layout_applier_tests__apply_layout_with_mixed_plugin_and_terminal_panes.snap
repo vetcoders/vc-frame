@@ -1,5 +1,6 @@
 ---
 source: zellij-server/src/tab/./unit/layout_applier_tests.rs
+assertion_line: 2602
 expression: "take_pane_state_snapshot(&tiled_panes, &floating_panes, &focus_pane_id,\n&viewport, &display_area,)"
 ---
 VIEWPORT: x=0, y=0, cols=200, rows=50
@@ -34,7 +35,9 @@ TILED PANES (4)
   Plugin(103):
     geom: x=160, y=0, cols=40, rows=50
     logical_position: 2
-    run: Plugin(zellij:compact-bar)
+    run: Plugin(vc-frame:compact-bar)
     selectable: true
-    title: zellij:compact-bar
+    title: vc-frame:compact-bar
     borderless: false
+
+

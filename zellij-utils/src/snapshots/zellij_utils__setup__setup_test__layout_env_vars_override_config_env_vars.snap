@@ -1,5 +1,6 @@
 ---
 source: zellij-utils/src/setup.rs
+assertion_line: 845
 expression: "format!(\"{:#?}\", config)"
 ---
 Config {
@@ -7029,6 +7030,18 @@ Config {
                 ),
                 initial_cwd: None,
             },
+            "vc-tab-title": RunPlugin {
+                _allow_exec_host_cmd: false,
+                location: Zellij(
+                    PluginTag(
+                        "vc-tab-title",
+                    ),
+                ),
+                configuration: PluginUserConfiguration(
+                    {},
+                ),
+                initial_cwd: None,
+            },
             "welcome-screen": RunPlugin {
                 _allow_exec_host_cmd: false,
                 location: Zellij(
@@ -7056,7 +7069,7 @@ Config {
         "LAYOUT_ENV_VAR": "make sure I'm also here",
         "MY_ENV_VAR": "from layout",
     },
-    background_plugins: {
+    background_plugins: [
         RunPlugin(
             RunPlugin {
                 _allow_exec_host_cmd: false,
@@ -7071,7 +7084,21 @@ Config {
                 initial_cwd: None,
             },
         ),
-    },
+        RunPlugin(
+            RunPlugin {
+                _allow_exec_host_cmd: false,
+                location: Zellij(
+                    PluginTag(
+                        "vc-tab-title",
+                    ),
+                ),
+                configuration: PluginUserConfiguration(
+                    {},
+                ),
+                initial_cwd: None,
+            },
+        ),
+    ],
     web_client: WebClientConfig {
         font: "monospace",
         theme: None,

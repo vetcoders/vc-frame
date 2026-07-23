@@ -5,7 +5,6 @@ use crate::data::{LayoutInfo, LayoutWithError};
 
 use miette::{Diagnostic, LabeledSpan, NamedSource, SourceCode};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -36,7 +35,9 @@ pub struct Config {
     pub plugins: PluginAliases,
     pub ui: UiConfig,
     pub env: EnvironmentVariables,
-    pub background_plugins: HashSet<RunPluginOrAlias>,
+    /// Plugins loaded in the background on session start, in declaration
+    /// order (deterministic, deduplicated at parse time).
+    pub background_plugins: Vec<RunPluginOrAlias>,
     pub web_client: WebClientConfig,
 }
 
