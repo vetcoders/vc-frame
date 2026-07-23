@@ -51,8 +51,20 @@ keybinds {
     tab {
         bind "Ctrl t" { SwitchToMode "Normal"; }
         bind "r" { SwitchToMode "RenameTab"; TabNameInput 0; }
-        bind "h" "Left" "Up" "k" { GoToPreviousTab; }
-        bind "l" "Right" "Down" "j" { GoToNextTab; }
+        bind "h" "Left" { GoToPreviousTab; }
+        bind "l" "Right" { GoToNextTab; }
+        bind "k" "Up" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "up"
+            };
+        }
+        bind "j" "Down" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "down"
+            };
+        }
         bind "n" { NewTab; SwitchToMode "Normal"; }
         bind "x" { CloseTab; SwitchToMode "Normal"; }
         bind "s" { ToggleActiveSyncTab; SwitchToMode "Normal"; }
