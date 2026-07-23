@@ -59,15 +59,33 @@ impl CliTriageIo {
 /// `start_suspended true` is what makes the rerun a single keypress — the pane
 /// holds the original command without running it until the operator says so.
 fn bucket_tab_layout(scrollback: &Path, meta: &RunMeta) -> String {
-    let mut layout = String::from("layout {\n");
+    // Chrome mirrors `default_tab_template` in assets/layouts/vibecrafted.kdl:
+    // compact-bar on top, the left Sessions rail, status-bar below. The layout
+    // contract ("every tab keeps the left Sessions rail") applies to transferred
+    // bucket tabs too — a fullscreen scrollback that hides the rail strands the
+    // operator inside the bucket with no way back but the keyboard.
+    let mut layout = String::from(
+        "layout {\n\
+         \x20   pane size=1 borderless=true {\n\
+         \x20       plugin location=\"compact-bar\"\n\
+         \x20   }\n\
+         \x20   pane split_direction=\"vertical\" {\n\
+         \x20       pane size=24 borderless=true {\n\
+         \x20           plugin location=\"session-manager\" {\n\
+         \x20               rail true\n\
+         \x20               pane_title \"Sessions\"\n\
+         \x20           }\n\
+         \x20       }\n\
+         \x20       pane {\n",
+    );
     layout.push_str(&format!(
-        "    pane command=\"less\" name=\"scrollback · exit {}\" {{\n        args \"-R\" \"{}\"\n    }}\n",
+        "            pane command=\"less\" name=\"scrollback · exit {}\" {{\n                args \"-R\" \"{}\"\n            }}\n",
         meta.exit_code,
         kdl_escape(&scrollback.to_string_lossy())
     ));
     if let Some((program, args)) = meta.command.split_first() {
         layout.push_str(&format!(
-            "    pane command=\"{}\" name=\"rerun\" start_suspended=true {{\n",
+            "            pane command=\"{}\" name=\"rerun\" start_suspended=true {{\n",
             kdl_escape(program)
         ));
         if !args.is_empty() {
@@ -75,17 +93,24 @@ fn bucket_tab_layout(scrollback: &Path, meta: &RunMeta) -> String {
                 .iter()
                 .map(|arg| format!("\"{}\"", kdl_escape(arg)))
                 .collect();
-            layout.push_str(&format!("        args {}\n", rendered.join(" ")));
+            layout.push_str(&format!("                args {}\n", rendered.join(" ")));
         }
         if let Some(cwd) = meta.cwd.as_ref() {
             layout.push_str(&format!(
-                "        cwd \"{}\"\n",
+                "                cwd \"{}\"\n",
                 kdl_escape(&cwd.to_string_lossy())
             ));
         }
-        layout.push_str("    }\n");
+        layout.push_str("            }\n");
     }
-    layout.push_str("}\n");
+    layout.push_str(
+        "        }\n\
+         \x20   }\n\
+         \x20   pane size=1 borderless=true {\n\
+         \x20       plugin location=\"status-bar\"\n\
+         \x20   }\n\
+         }\n",
+    );
     layout
 }
 

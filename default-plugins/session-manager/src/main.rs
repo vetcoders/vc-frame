@@ -536,6 +536,11 @@ const RAIL_BUCKETS: [BucketKind; 3] = [
     BucketKind::NeedsAttention,
 ];
 
+/// Chrome tabs of the default layout (`vibecrafted.kdl`): present in every
+/// session created without an explicit layout, including bucket sessions. Kept
+/// in lockstep with the layout by `chrome_tab_names_match_the_default_layout`.
+const CHROME_TAB_NAMES: [&str; 2] = ["Start here", "Shell"];
+
 impl BucketKind {
     fn session_name(&self) -> &'static str {
         match self {
@@ -634,15 +639,17 @@ impl SessionRailRow {
     }
 }
 
-/// Same rhythm as working-session rows (` 1 * name`): hotkey slot + status + label + count.
+/// Same rhythm as working-session rows (` 1 * name`): hotkey slot + status + count + label.
+/// Count comes BEFORE the label so the three counters align in one column and
+/// survive a narrow rail — a truncated label loses letters, never the number.
 fn format_bucket_rail_entry(bucket: BucketKind, count: usize, is_current_session: bool) -> String {
     let status = if is_current_session { "*" } else { "-" };
     format!(
-        " {} {} {} · {}",
+        " {} {} {:>2} · {}",
         bucket.hotkey(),
         status,
-        bucket.rail_label(),
-        count
+        count,
+        bucket.rail_label()
     )
 }
 
@@ -735,8 +742,19 @@ fn bucket_rail_rows(sessions: &[SessionUiInfo]) -> Vec<SessionRailRow> {
                 .iter()
                 .position(|session| session.name == bucket.session_name());
             let session = session_index.map(|index| &sessions[index]);
-            // One transferred run is one tab, so the tab count is the bucket count.
-            let count = session.map(|session| session.tabs.len()).unwrap_or(0);
+            // One transferred run is one tab, so the RUN tab count is the bucket
+            // count. A bucket session materialized via `attach --create-background`
+            // also carries the default-layout chrome tabs (CHROME_TAB_NAMES) —
+            // those are furniture, not runs, and must not inflate the drawer.
+            let count = session
+                .map(|session| {
+                    session
+                        .tabs
+                        .iter()
+                        .filter(|tab| !CHROME_TAB_NAMES.contains(&tab.name.as_str()))
+                        .count()
+                })
+                .unwrap_or(0);
             let is_current_session = session.is_some_and(|session| session.is_current_session);
             SessionRailRow {
                 kind: SessionRailRowKind::Bucket {
@@ -2196,9 +2214,9 @@ mod rail_tests {
                 "   · audit-260718-130000-02000 · codex +1",
                 "02 - beta",
                 // the buckets are always pinned to the tail of the rail
-                " f - Finalized tabs · 0",
-                " x - Failed tabs · 0",
-                " n - Needs-attention tabs · 0",
+                " f -  0 · Finalized tabs",
+                " x -  0 · Failed tabs",
+                " n -  0 · Needs-attention tabs",
             ]
         );
         assert_eq!(rows.iter().filter(|row| row.is_live_process()).count(), 2);
@@ -2251,14 +2269,48 @@ mod rail_tests {
         let text: Vec<&str> = rows.iter().map(|row| row.text.as_str()).collect();
 
         // Drawer order is fixed by RAIL_BUCKETS, not by session creation order.
+        // Counts sit in one aligned column BEFORE the label, so a narrow rail
+        // truncates letters, never the number.
         assert_eq!(
             text,
             vec![
                 "01 * alpha",
                 "02 - beta",
-                " f - Finalized tabs · 3",
-                " x - Failed tabs · 2",
-                " n - Needs-attention tabs · 1",
+                " f -  3 · Finalized tabs",
+                " x -  2 · Failed tabs",
+                " n -  1 · Needs-attention tabs",
+            ]
+        );
+    }
+
+    #[test]
+    fn bucket_counts_ignore_default_layout_chrome_tabs() {
+        // A bucket session materialized via `attach --create-background` starts
+        // with the default-layout chrome ("Start here" + "Shell"). Those tabs
+        // are furniture — the drawer must still read zero runs.
+        let mut chrome_only = session("Finalized runs", false);
+        chrome_only.tabs = vec![
+            TabUiInfo::for_rail_test("Start here", false, "", 0),
+            TabUiInfo::for_rail_test("Shell", false, "", 0),
+        ];
+        let mut chrome_plus_run = session("Needs attention", false);
+        chrome_plus_run.tabs = vec![
+            TabUiInfo::for_rail_test("Start here", false, "", 0),
+            TabUiInfo::for_rail_test("Shell", false, "", 0),
+            TabUiInfo::for_rail_test("revi-260723-011839-18000", false, "", 0),
+        ];
+        let rows = session_rail_rows(&[session("alpha", true), chrome_only, chrome_plus_run]);
+        let buckets: Vec<&str> = rows
+            .iter()
+            .filter(|row| row.is_bucket())
+            .map(|row| row.text.as_str())
+            .collect();
+        assert_eq!(
+            buckets,
+            vec![
+                " f -  0 · Finalized tabs",
+                " x -  0 · Failed tabs",
+                " n -  1 · Needs-attention tabs",
             ]
         );
     }
@@ -2269,9 +2321,9 @@ mod rail_tests {
         let buckets: Vec<&SessionRailRow> = rows.iter().filter(|row| row.is_bucket()).collect();
 
         assert_eq!(buckets.len(), 3);
-        assert_eq!(buckets[0].text, " f - Finalized tabs · 0");
-        assert_eq!(buckets[1].text, " x - Failed tabs · 0");
-        assert_eq!(buckets[2].text, " n - Needs-attention tabs · 0");
+        assert_eq!(buckets[0].text, " f -  0 · Finalized tabs");
+        assert_eq!(buckets[1].text, " x -  0 · Failed tabs");
+        assert_eq!(buckets[2].text, " n -  0 · Needs-attention tabs");
         assert!(matches!(
             buckets[0].kind,
             SessionRailRowKind::Bucket {
