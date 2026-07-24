@@ -1,5 +1,9 @@
-#!/usr/bin/env zsh
+#!/usr/bin/env bash
 # release-provenance — vc-frame packaging provenance truth
+#
+# Universal shell: runs identically under bash (3.2+) and zsh. The Makefile
+# invokes it through whichever of the two the machine has (SCRIPT_SHELL);
+# the shebang is only the direct-execution default.
 #
 # Modes:
 #   guard        Refuse to proceed unless the worktree is clean; print identity
@@ -20,14 +24,18 @@ CARGO="${CARGO:-cargo}"
 DIST="$REPO/target/dist"
 BIN_NAME="vc-frame"
 
-die() { print -u2 -- "release-provenance: $*"; exit 1; }
-info() { print -- "  $*"; }
+say() { printf '%s\n' "$*"; }
+errln() { printf '%s\n' "$*" >&2; }
+die() { errln "release-provenance: $*"; exit 1; }
+info() { say "  $*"; }
 
 sha256_of() {
   if command -v shasum >/dev/null 2>&1; then
     shasum -a 256 "$1" | awk '{print $1}'
-  else
+  elif command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$1" | awk '{print $1}'
+  else
+    die "neither shasum nor sha256sum found on PATH (macOS ships shasum; Linux: coreutils sha256sum)"
   fi
 }
 
@@ -45,24 +53,24 @@ worktree_dirty() {
 # (the self-test must survive a deliberate rejection to restore its canary).
 # The dispatcher at the bottom turns a failed guard into a non-zero exit.
 guard() {
-  print -- "== release provenance guard =="
+  say "== release provenance guard =="
   git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 \
     || die "not a git checkout; packaging requires a verifiable source commit"
 
   if worktree_dirty; then
-    print -u2 -- ""
-    print -u2 -- "REFUSING TO PACKAGE: tracked files differ from HEAD."
-    print -u2 -- "A release archive must correspond to an exact published commit."
-    print -u2 -- ""
+    errln ""
+    errln "REFUSING TO PACKAGE: tracked files differ from HEAD."
+    errln "A release archive must correspond to an exact published commit."
+    errln ""
     git -C "$REPO" status --porcelain --untracked-files=no >&2
-    print -u2 -- ""
+    errln ""
     return 1
   fi
 
   local sha; sha="$(git -C "$REPO" rev-parse HEAD)"
   info "commit: $sha"
   info "clean:  yes (tracked files match HEAD)"
-  print -- "== guard passed =="
+  say "== guard passed =="
   return 0
 }
 
@@ -86,8 +94,8 @@ print(data.get("workspace", {}).get("package", {}).get("version")
   [[ -n "$version" ]] || die "could not read version from Cargo.toml"
   [[ -n "$target" ]] || die "could not resolve host target triple"
 
-  print -- ""
-  print -- "== packaging vc-frame $version ($target) =="
+  say ""
+  say "== packaging vc-frame $version ($target) =="
 
   # Pass provenance in explicitly: the build must not depend on the build
   # machine happening to have git, and these are the values we just verified.
@@ -145,51 +153,50 @@ print(data.get("workspace", {}).get("package", {}).get("version")
 }
 RECEIPT
 
-  print -- ""
-  print -- "== package receipt =="
+  say ""
+  say "== package receipt =="
   cat "$DIST/RECEIPT.json"
-  print -- ""
+  say ""
   info "archive: $DIST/$archive"
   info "receipt: $DIST/RECEIPT.json"
 }
 
 # Proves the guard is real: it must reject a dirty tree, not merely warn.
 self_test() {
-  print -- "== release provenance guard self-test =="
+  say "== release provenance guard self-test =="
   if worktree_dirty; then
     die "self-test needs a clean tree to start from (tracked files differ from HEAD)"
   fi
 
-  print -- "[1/3] clean tree must pass"
+  say "[1/3] clean tree must pass"
   guard >/dev/null || die "guard rejected a clean tree"
-  print -- "  PASS"
+  say "  PASS"
 
-  local canary="$REPO/Cargo.toml"
-  # Script-scope, not local: the EXIT trap body is evaluated when it fires,
-  # by which time a function-local would already be out of scope.
-  typeset -g SELFTEST_CANARY="$canary"
-  typeset -g SELFTEST_BACKUP; SELFTEST_BACKUP="$(mktemp)"
-  cp "$canary" "$SELFTEST_BACKUP"
+  # Script-scope globals, not local: the EXIT trap body is evaluated when it
+  # fires, by which time a function-local would already be out of scope.
+  SELFTEST_CANARY="$REPO/Cargo.toml"
+  SELFTEST_BACKUP="$(mktemp)"
+  cp "$SELFTEST_CANARY" "$SELFTEST_BACKUP"
   # Restore the tracked file no matter how we leave this function.
   trap 'cp "$SELFTEST_BACKUP" "$SELFTEST_CANARY"; rm -f "$SELFTEST_BACKUP"' EXIT INT TERM
 
-  print -- "[2/3] dirty tree must be rejected"
-  printf '\n# release-provenance self-test canary\n' >> "$canary"
+  say "[2/3] dirty tree must be rejected"
+  printf '\n# release-provenance self-test canary\n' >> "$SELFTEST_CANARY"
   if guard >/dev/null 2>&1; then
     die "guard ACCEPTED a dirty tree — the packaging gate is not fail-closed"
   fi
-  print -- "  PASS"
+  say "  PASS"
 
-  cp "$SELFTEST_BACKUP" "$canary"; rm -f "$SELFTEST_BACKUP"; trap - EXIT INT TERM
+  cp "$SELFTEST_BACKUP" "$SELFTEST_CANARY"; rm -f "$SELFTEST_BACKUP"; trap - EXIT INT TERM
 
-  print -- "[3/3] restored tree must pass again"
+  say "[3/3] restored tree must pass again"
   if worktree_dirty; then
-    die "self-test failed to restore $canary"
+    die "self-test failed to restore $SELFTEST_CANARY"
   fi
   guard >/dev/null || die "guard rejected the restored tree"
-  print -- "  PASS"
+  say "  PASS"
 
-  print -- "== self-test passed =="
+  say "== self-test passed =="
 }
 
 case "${1:-guard}" in

@@ -12,9 +12,15 @@
 #   - rustup-managed toolchain (recommended over distro/homebrew)
 #   - wasm32-wasip1 target installed
 #   - protobuf compiler (protoc)
+#   - bash (3.2+) or zsh — helper scripts run identically under either
+#   - mandown (make install only; cargo install mandown)
+#
+# `make doctor` shows the full picture; doctor-quiet gates report every
+# missing tool at once with copy-paste install hints — one pass, not a
+# retry loop.
 
 .PHONY: all build plugins plugins-assets plugins-parity plugins-parity-double \
-        plugins-parity-self-test binary install run test test-server test-utils \
+        plugins-parity-self-test script-shell-check binary install run test test-server test-utils \
         test-client test-no-web check clippy precheck semgrep fmt clean doctor \
         doctor-quiet doctor-install-quiet help release-guard \
         release-guard-self-test package install-test \
@@ -60,6 +66,30 @@ else
   CARGO := $(shell command -v cargo 2>/dev/null || echo cargo)
 endif
 
+# ──────────────────────────────────────────────────────────
+# Script shell resolution — universal bash/zsh.
+#
+# The helper scripts (plugins-parity.sh, release-provenance.sh) are written
+# in shell that runs identically under bash (3.2+) and zsh. Run them through
+# whichever this machine has, bash first: bash ships on virtually every
+# Linux/CI image, zsh is the macOS default. Missing both is a soft failure
+# with install hints, raised only when a script target actually runs.
+# ──────────────────────────────────────────────────────────
+SCRIPT_SHELL := $(shell command -v bash 2>/dev/null || command -v zsh 2>/dev/null)
+PLUGINS_PARITY := $(SCRIPT_SHELL) ./scripts/plugins-parity.sh
+RELEASE_PROVENANCE := $(SCRIPT_SHELL) ./scripts/release-provenance.sh
+
+script-shell-check:
+	@test -n "$(SCRIPT_SHELL)" || { \
+		echo "ERROR: neither bash nor zsh found on PATH — helper scripts need one of them."; \
+		echo "  apt:    sudo apt-get install -y bash"; \
+		echo "  dnf:    sudo dnf install -y bash"; \
+		echo "  pacman: sudo pacman -S --noconfirm bash"; \
+		echo "  apk:    apk add bash"; \
+		echo "  brew:   brew install bash   (zsh already ships with macOS)"; \
+		exit 1; \
+	}
+
 # Stack size for tests that build deep plugin trees
 export RUST_MIN_STACK := 8388608
 export CARGO_TERM_COLOR := always
@@ -97,19 +127,23 @@ plugins: doctor-quiet
 ## Canonical product-surface producer: release-build plugins and copy into assets/
 plugins-assets: doctor-quiet
 	$(CARGO) xtask build --release --plugins-only
-	@./scripts/plugins-parity.zsh write-manifest
+	@$(MAKE) --no-print-directory script-shell-check
+	@$(PLUGINS_PARITY) write-manifest
 
 ## CI-fast parity: on-disk assets must match committed SHA256SUMS
 plugins-parity:
-	@./scripts/plugins-parity.zsh check
+	@$(MAKE) --no-print-directory script-shell-check
+	@$(PLUGINS_PARITY) check
 
 ## Two isolated consecutive rebuilds must produce identical hashes (W0-C gate)
 plugins-parity-double: doctor-quiet
-	@./scripts/plugins-parity.zsh double-rebuild
+	@$(MAKE) --no-print-directory script-shell-check
+	@$(PLUGINS_PARITY) double-rebuild
 
 ## Positive + deliberate perturbation negative + restore
 plugins-parity-self-test:
-	@./scripts/plugins-parity.zsh self-test
+	@$(MAKE) --no-print-directory script-shell-check
+	@$(PLUGINS_PARITY) self-test
 
 ## Build only the host binary (assumes plugins are already built)
 binary: doctor-quiet
@@ -228,15 +262,18 @@ ci: precheck test
 
 ## Packaging provenance guard — refuse to package a dirty worktree
 release-guard:
-	@./scripts/release-provenance.zsh guard
+	@$(MAKE) --no-print-directory script-shell-check
+	@$(RELEASE_PROVENANCE) guard
 
 ## Prove the provenance guard rejects a dirty tree (and restores it)
 release-guard-self-test:
-	@./scripts/release-provenance.zsh self-test
+	@$(MAKE) --no-print-directory script-shell-check
+	@$(RELEASE_PROVENANCE) self-test
 
 ## Canonical local package: guard → release build → archive → checksum → receipt
 package:
-	@./scripts/release-provenance.zsh package
+	@$(MAKE) --no-print-directory script-shell-check
+	@$(RELEASE_PROVENANCE) package
 
 ## Installer negative matrix — proves tools/install.sh fails closed
 install-test:
@@ -401,21 +438,47 @@ doctor:
 	@command -v mandown >/dev/null 2>&1 \
 		&& echo "mandown:  $$(command -v mandown)" \
 		|| echo "mandown:  ✗ NOT FOUND (required for install; run: cargo install mandown)"
+	@test -n "$(SCRIPT_SHELL)" \
+		&& echo "shell:    $(SCRIPT_SHELL) (helper scripts run under bash or zsh)" \
+		|| echo "shell:    ✗ neither bash nor zsh found (required for helper scripts)"
 	@echo ""
 	@echo "── OK ──"
 
-## Silent doctor — prerequisite for build targets, fails fast on missing deps
+## Silent doctor — prerequisite for build targets.
+## Grace rule: report EVERY missing tool in one pass with copy-paste install
+## hints, then fail once — never a fix-one-retry-discover-the-next loop.
 doctor-quiet:
-	@command -v $(CARGO) >/dev/null 2>&1 \
-		|| { echo "ERROR: cargo not found at '$(CARGO)'. Install rustup: https://rustup.rs"; exit 1; }
-	@if command -v rustup >/dev/null 2>&1; then \
+	@missing=0; \
+	command -v $(CARGO) >/dev/null 2>&1 \
+		|| { echo "✗ cargo not found at '$(CARGO)'"; \
+		     echo "    fix: install rustup — https://rustup.rs"; missing=1; }; \
+	if command -v rustup >/dev/null 2>&1; then \
 		rustup target list --installed 2>/dev/null | grep -q wasm32-wasip1 \
-			|| { echo "ERROR: wasm32-wasip1 target missing. Run: rustup target add wasm32-wasip1"; exit 1; }; \
+			|| { echo "✗ wasm32-wasip1 target missing"; \
+			     echo "    fix: rustup target add wasm32-wasip1"; missing=1; }; \
+	fi; \
+	command -v protoc >/dev/null 2>&1 \
+		|| { echo "✗ protoc missing (protobuf compiler — required by the build)"; \
+		     echo "    fix: apt: sudo apt-get install -y protobuf-compiler"; \
+		     echo "         dnf: sudo dnf install -y protobuf-compiler"; \
+		     echo "         pacman: sudo pacman -S --noconfirm protobuf"; \
+		     echo "         brew: brew install protobuf"; missing=1; }; \
+	if [ "$$missing" != "0" ]; then \
+		echo ""; \
+		echo "All missing prerequisites are listed above. Install them, then re-run."; \
+		exit 1; \
 	fi
 
 doctor-install-quiet:
-	@command -v mandown >/dev/null 2>&1 \
-		|| { echo "ERROR: mandown missing. Run: cargo install mandown"; exit 1; }
+	@missing=0; \
+	command -v mandown >/dev/null 2>&1 \
+		|| { echo "✗ mandown missing (man page generator — required by make install)"; \
+		     echo "    fix: cargo install mandown"; missing=1; }; \
+	if [ "$$missing" != "0" ]; then \
+		echo ""; \
+		echo "All missing prerequisites are listed above. Install them, then re-run."; \
+		exit 1; \
+	fi
 
 # ──────────────────────────────────────────────────────────
 # Help

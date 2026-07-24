@@ -23,7 +23,7 @@ jobs:
       # Provenance comes first: everything downstream claims to describe an
       # exact commit, so refuse to start if the checkout does not match HEAD.
       - name: Verify build provenance is clean
-        run: ./scripts/release-provenance.zsh guard
+        run: bash ./scripts/release-provenance.sh guard
 
       - name: Verify installer fails closed
         run: sh tools/install_test.sh

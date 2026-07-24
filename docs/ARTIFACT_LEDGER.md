@@ -2,7 +2,7 @@
 
 Owner wave: **W0-C** (Make bundled artifacts truthful).  
 Canonical producer: `make plugins-assets` → `cargo xtask build --release --plugins-only`  
-Parity validator: `make plugins-parity` → `scripts/plugins-parity.zsh`  
+Parity validator: `make plugins-parity` → `scripts/plugins-parity.sh` (universal bash/zsh)  
 Hash receipt: `zellij-utils/assets/plugins/SHA256SUMS`
 
 ## Tracked plugin source → artifact ownership
