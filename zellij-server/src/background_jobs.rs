@@ -161,18 +161,22 @@ pub(crate) fn background_jobs_main(
     let mut flashing_pane_bells: HashMap<PaneId, Arc<AtomicBool>> = HashMap::new();
     let mut flashing_tab_bells: HashMap<usize, Arc<AtomicBool>> = HashMap::new();
 
+    log::info!("background_jobs_main: building http client");
     let http_client = HttpClient::builder()
         // TODO: timeout?
         .redirect_policy(RedirectPolicy::Follow)
         .build()
         .ok();
+    log::info!("background_jobs_main: acquiring tokio runtime");
     // We needn't do anything with the runtime, but it should exist at this point.
     let runtime = crate::global_async_runtime::get_tokio_runtime();
 
+    log::info!("background_jobs_main: bootstrapping session metadata job");
     let _ = bus
         .senders
         .send_to_background_jobs(BackgroundJob::ReadAllSessionInfosOnMachine);
 
+    log::info!("background_jobs_main: entering event loop");
     loop {
         let (event, mut err_ctx) = bus.recv().with_context(err_context)?;
         err_ctx.add_call(ContextType::BackgroundJob((&event).into()));
@@ -251,6 +255,10 @@ pub(crate) fn background_jobs_main(
                 // this job should only be run once and it keeps track of other sessions (as well
                 // as this one's) infos (metadata mostly) and sends it to the screen which in turn
                 // forwards it to plugins and other places it needs to be
+                log::info!(
+                    "ReadAllSessionInfosOnMachine received (already running: {})",
+                    running_jobs.contains_key(&job)
+                );
                 if running_jobs.contains_key(&job) {
                     continue;
                 }
@@ -264,6 +272,10 @@ pub(crate) fn background_jobs_main(
                     let last_serialization_time = last_serialization_time.clone();
                     let has_clients = has_clients.clone();
                     async move {
+                        log::info!(
+                            "session metadata loop started (disable_session_metadata: {})",
+                            disable_session_metadata
+                        );
                         loop {
                             let current_session_name =
                                 current_session_name.lock().unwrap().to_string();
@@ -714,11 +726,18 @@ pub fn write_session_state_to_disk(
     let (current_session_layout, layout_files_to_write) = current_session_layout;
     let new_metadata = current_session_info.to_string();
     if file_content_changed(&metadata_cache_file_name, new_metadata.as_bytes()) {
-        let _wrote_metadata_file = std::fs::create_dir_all(
+        if let Err(e) = std::fs::create_dir_all(
             session_info_folder_for_session(&current_session_name).as_path(),
         )
         .and_then(|_| std::fs::File::create(&metadata_cache_file_name))
-        .and_then(|mut f| write!(f, "{}", new_metadata));
+        .and_then(|mut f| write!(f, "{}", new_metadata))
+        {
+            log::error!(
+                "Failed to write session metadata to {:?}: {}",
+                metadata_cache_file_name,
+                e
+            );
+        }
     }
 
     if !current_session_layout.is_empty() {

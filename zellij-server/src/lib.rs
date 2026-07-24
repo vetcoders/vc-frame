@@ -2174,6 +2174,11 @@ fn init_session(params: SessionInitParams) -> SessionMetaData {
                     to_plugin: Some(to_plugin.clone()),
                     to_server: Some(to_server.clone()),
                     to_pty_writer: Some(to_pty_writer.clone()),
+                    // Self-sender: background_jobs_main bootstraps its own
+                    // session-metadata job via send_to_background_jobs; a
+                    // None here silently drops that event and session_info
+                    // metadata (triage f/x/n) is never written.
+                    to_background_jobs: Some(to_background_jobs.clone()),
                     ..Default::default()
                 },
                 Some(os_input.clone()),
