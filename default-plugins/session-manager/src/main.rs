@@ -553,7 +553,7 @@ impl BucketKind {
         match self {
             BucketKind::Finalized => "Finalized tabs",
             BucketKind::Failed => "Failed tabs",
-            BucketKind::NeedsAttention => "Needs-attention tabs",
+            BucketKind::NeedsAttention => "Needs attention tabs",
         }
     }
     /// Hotkey, deliberately outside the '0'-'9' range the session ordinals use.
@@ -803,6 +803,26 @@ fn fit_rail_line(text: &str, width: usize) -> String {
     fitted
 }
 
+/// Bucket rows lose label letters on a narrow rail, never their " tabs"
+/// suffix: the suffix is re-appended after the cut so the three drawers keep
+/// one aligned "tabs" column at the rail edge instead of clipping to
+/// "Needs attentio".
+fn fit_bucket_rail_line(text: &str, width: usize) -> String {
+    let suffix = " tabs";
+    let suffix_width = suffix.width();
+    if text.width() <= width || width <= suffix_width || !text.ends_with(suffix) {
+        return fit_rail_line(text, width);
+    }
+    let head = &text[..text.len() - suffix.len()];
+    let mut fitted = truncate_to_width(head, width - suffix_width);
+    fitted.push_str(suffix);
+    let fitted_width = fitted.width();
+    if fitted_width < width {
+        fitted.push_str(&" ".repeat(width - fitted_width));
+    }
+    fitted
+}
+
 fn truncate_to_width(text: &str, width: usize) -> String {
     let mut current_width = 0;
     let mut truncated = String::new();
@@ -939,7 +959,7 @@ impl State {
         }
 
         for bucket_row in &bucket_rows[bucket_rows.len() - pinned_rows..] {
-            let mut text = Text::new(fit_rail_line(&bucket_row.text, cols));
+            let mut text = Text::new(fit_bucket_rail_line(&bucket_row.text, cols));
             // Same accent column as session status (`*`/`-` at index 3 in
             // `"01 * name"` / `" f - Finalized…"`) — color_range(1, 3..4).
             if cols >= 4 {
@@ -2216,7 +2236,7 @@ mod rail_tests {
                 // the buckets are always pinned to the tail of the rail
                 " f -  0 · Finalized tabs",
                 " x -  0 · Failed tabs",
-                " n -  0 · Needs-attention tabs",
+                " n -  0 · Needs attention tabs",
             ]
         );
         assert_eq!(rows.iter().filter(|row| row.is_live_process()).count(), 2);
@@ -2253,7 +2273,7 @@ mod rail_tests {
         assert_eq!(BucketKind::Failed.rail_label(), "Failed tabs");
         assert_eq!(
             BucketKind::NeedsAttention.rail_label(),
-            "Needs-attention tabs"
+            "Needs attention tabs"
         );
     }
 
@@ -2278,7 +2298,7 @@ mod rail_tests {
                 "02 - beta",
                 " f -  3 · Finalized tabs",
                 " x -  2 · Failed tabs",
-                " n -  1 · Needs-attention tabs",
+                " n -  1 · Needs attention tabs",
             ]
         );
     }
@@ -2310,7 +2330,7 @@ mod rail_tests {
             vec![
                 " f -  0 · Finalized tabs",
                 " x -  0 · Failed tabs",
-                " n -  1 · Needs-attention tabs",
+                " n -  1 · Needs attention tabs",
             ]
         );
     }
@@ -2323,7 +2343,7 @@ mod rail_tests {
         assert_eq!(buckets.len(), 3);
         assert_eq!(buckets[0].text, " f -  0 · Finalized tabs");
         assert_eq!(buckets[1].text, " x -  0 · Failed tabs");
-        assert_eq!(buckets[2].text, " n -  0 · Needs-attention tabs");
+        assert_eq!(buckets[2].text, " n -  0 · Needs attention tabs");
         assert!(matches!(
             buckets[0].kind,
             SessionRailRowKind::Bucket {
@@ -2422,6 +2442,31 @@ mod rail_tests {
     fn rail_lines_are_clipped_and_padded_to_width() {
         assert_eq!(fit_rail_line("abcdef", 4), "abcd");
         assert_eq!(fit_rail_line("ab", 4), "ab  ");
+    }
+
+    #[test]
+    fn bucket_rail_lines_keep_the_tabs_suffix_when_truncated() {
+        // Wide enough: untouched, padded like any rail line.
+        assert_eq!(
+            fit_bucket_rail_line(" n -  1 · Needs attention tabs", 32),
+            " n -  1 · Needs attention tabs  "
+        );
+        // Narrow: the label loses letters, " tabs" survives at the rail edge —
+        // the three drawers keep one aligned "tabs" column.
+        assert_eq!(
+            fit_bucket_rail_line(" n -  1 · Needs attention tabs", 23),
+            " n -  1 · Needs at tabs"
+        );
+        // Shorter drawers at the same width pad instead of truncating; their
+        // natural end sits left of the edge, only overlong rows get squeezed.
+        assert_eq!(
+            fit_bucket_rail_line(" x -  2 · Failed tabs", 23),
+            " x -  2 · Failed tabs  "
+        );
+        // Degenerate width: falls back to plain clipping, no suffix games.
+        assert_eq!(fit_bucket_rail_line(" n -  1 · Needs attention tabs", 4), " n -");
+        // Non-bucket text is untouched by the suffix rule.
+        assert_eq!(fit_bucket_rail_line("01 * alpha", 6), "01 * a");
     }
 
     #[test]
