@@ -19,18 +19,20 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const UNKNOWN_SHA: &str = "unknown";
+const SOURCE_PROJECT: &str = "vc-frame";
 
 fn main() {
     for var in [
         "VC_FRAME_GIT_SHA",
         "VC_FRAME_GIT_DIRTY",
         "VC_FRAME_BUILD_TIME_UTC",
+        "VC_FRAME_SOURCE_ORIGIN_URL",
     ] {
         println!("cargo:rerun-if-env-changed={var}");
     }
     // Re-resolve provenance when the checked-out commit or the index moves.
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
-    for git_path in [".git/HEAD", ".git/index"] {
+    for git_path in [".git/HEAD", ".git/index", ".git/config"] {
         let path = std::path::Path::new(&manifest_dir)
             .join("..")
             .join(git_path);
@@ -61,6 +63,11 @@ fn main() {
     };
 
     let build_time = std::env::var("VC_FRAME_BUILD_TIME_UTC").unwrap_or_else(|_| rfc3339_now());
+    let source_origin_url = std::env::var("VC_FRAME_SOURCE_ORIGIN_URL")
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+        .or_else(|| git(&manifest_dir, &["remote", "get-url", "origin"]))
+        .unwrap_or_default();
 
     println!("cargo:rustc-env=VC_FRAME_GIT_SHA={sha}");
     println!("cargo:rustc-env=VC_FRAME_GIT_SHA_SHORT={short}");
@@ -71,6 +78,9 @@ fn main() {
     println!("cargo:rustc-env=VC_FRAME_BUILD_TIME_UTC={build_time}");
     println!("cargo:rustc-env=VC_FRAME_BUILD_PROFILE={profile}");
     println!("cargo:rustc-env=VC_FRAME_HUMAN_VERSION={human_version}");
+    println!("cargo:rustc-env=VC_FRAME_SOURCE_MANIFEST_DIR={manifest_dir}");
+    println!("cargo:rustc-env=VC_FRAME_SOURCE_ORIGIN_URL={source_origin_url}");
+    println!("cargo:rustc-env=VC_FRAME_SOURCE_PROJECT={SOURCE_PROJECT}");
 }
 
 /// `(sha, dirty)` — environment override first, then git, then unknown.

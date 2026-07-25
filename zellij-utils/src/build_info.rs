@@ -32,6 +32,12 @@ pub struct BuildInfo {
     pub build_time_utc: &'static str,
     /// Cargo profile the binary was built with, e.g. `release`.
     pub profile: &'static str,
+    /// `CARGO_MANIFEST_DIR` of `zellij-utils` when this binary was built.
+    pub source_manifest_dir: &'static str,
+    /// Build checkout's `origin` URL, or empty when it was unavailable.
+    pub source_origin_url: &'static str,
+    /// Product repository name used to verify checkout identity.
+    pub source_project: &'static str,
 }
 
 const EMBEDDED: BuildInfo = BuildInfo {
@@ -41,6 +47,9 @@ const EMBEDDED: BuildInfo = BuildInfo {
     git_dirty: matches!(env!("VC_FRAME_GIT_DIRTY").as_bytes(), b"1"),
     build_time_utc: env!("VC_FRAME_BUILD_TIME_UTC"),
     profile: env!("VC_FRAME_BUILD_PROFILE"),
+    source_manifest_dir: env!("VC_FRAME_SOURCE_MANIFEST_DIR"),
+    source_origin_url: env!("VC_FRAME_SOURCE_ORIGIN_URL"),
+    source_project: env!("VC_FRAME_SOURCE_PROJECT"),
 };
 
 /// The build identity of this binary.
@@ -104,6 +113,9 @@ impl BuildInfo {
             git_dirty,
             build_time_utc: "2026-07-20T17:00:00Z",
             profile: "release",
+            source_manifest_dir: "/src/vc-frame/zellij-utils",
+            source_origin_url: "https://github.com/vetcoders/vc-frame",
+            source_project: "vc-frame",
         }
     }
 }
@@ -146,6 +158,8 @@ mod tests {
         assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
         assert!(!info.build_time_utc.is_empty());
         assert!(!info.profile.is_empty());
+        assert!(!info.source_manifest_dir.is_empty());
+        assert_eq!(info.source_project, "vc-frame");
     }
 
     #[test]
