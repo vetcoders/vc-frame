@@ -725,19 +725,18 @@ pub fn write_session_state_to_disk(
     let metadata_cache_file_name = session_info_cache_file_name(&current_session_name);
     let (current_session_layout, layout_files_to_write) = current_session_layout;
     let new_metadata = current_session_info.to_string();
-    if file_content_changed(&metadata_cache_file_name, new_metadata.as_bytes()) {
-        if let Err(e) = std::fs::create_dir_all(
+    if file_content_changed(&metadata_cache_file_name, new_metadata.as_bytes())
+        && let Err(e) = std::fs::create_dir_all(
             session_info_folder_for_session(&current_session_name).as_path(),
         )
         .and_then(|_| std::fs::File::create(&metadata_cache_file_name))
         .and_then(|mut f| write!(f, "{}", new_metadata))
-        {
-            log::error!(
-                "Failed to write session metadata to {:?}: {}",
-                metadata_cache_file_name,
-                e
-            );
-        }
+    {
+        log::error!(
+            "Failed to write session metadata to {:?}: {}",
+            metadata_cache_file_name,
+            e
+        );
     }
 
     if !current_session_layout.is_empty() {

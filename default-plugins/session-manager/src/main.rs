@@ -2175,8 +2175,10 @@ mod rail_tests {
 
     #[test]
     fn hidden_instance_ignores_session_update_broadcasts() {
-        let mut state = State::default();
-        state.is_visible = false;
+        let mut state = State {
+            is_visible: false,
+            ..Default::default()
+        };
         state
             .sessions
             .set_sessions(vec![session("alpha", true)], vec![]);
@@ -2191,8 +2193,10 @@ mod rail_tests {
 
     #[test]
     fn visible_instance_processes_session_update_broadcasts() {
-        let mut state = State::default();
-        state.is_visible = true;
+        let mut state = State {
+            is_visible: true,
+            ..Default::default()
+        };
         state
             .sessions
             .set_sessions(vec![session("alpha", true)], vec![]);

@@ -90,6 +90,29 @@ impl BucketKind {
     }
 }
 
+/// Whether the server's idle-exit watchdog is allowed to reap a session by this
+/// name.
+///
+/// The watchdog was armed against abandoned `--server` processes burning CPU
+/// with zero clients, and it reads "no client for N seconds" as "abandoned".
+/// For a triage drawer that inference is exactly backwards: the reaper
+/// materializes the drawer with `attach --create-background` and *nothing ever
+/// attaches* — the operator reads it off the rail without entering it. Arming
+/// idle-exit on a drawer therefore guarantees it is killed N seconds after its
+/// last transfer, and the rail's `f`/`x`/`n` counters — which count the
+/// drawer's tabs — silently fall to zero while the runs themselves are still
+/// durably captured under `finished_runs/`. A blind cockpit is a worse failure
+/// than an idle server, so the drawers are exempt.
+///
+/// `None` (no session name in the environment) stays reapable: an unnamed
+/// server is exactly the abandoned-process case the watchdog exists for.
+pub fn idle_exit_may_reap(session_name: Option<&str>) -> bool {
+    match session_name {
+        Some(name) => BucketKind::from_session_name(name).is_none(),
+        None => true,
+    }
+}
+
 /// Parse an explicit `--bucket` verdict. Rejects anything it does not know
 /// rather than guessing — a typo'd verdict must not silently become a bucket.
 pub fn parse_bucket_verdict(value: &str) -> Result<BucketKind, String> {
@@ -475,6 +498,38 @@ mod tests {
             Some(BucketKind::NeedsAttention)
         );
         assert_eq!(BucketKind::from_session_name("Operator"), None);
+    }
+
+    /// Regression, 2026-07-25: the rail's f/x/n counters went blind during the
+    /// day while `finished_runs/` kept filling up. Cause: the idle-exit
+    /// watchdog reaped every triage drawer 900s after its last transfer,
+    /// because a drawer has zero clients by construction. Once the drawer's
+    /// server is gone it leaves the live `SessionUpdate` list, the rail finds
+    /// no session, and the count renders 0.
+    #[test]
+    fn the_idle_watchdog_never_reaps_a_triage_drawer() {
+        for bucket in [
+            BucketKind::Finalized,
+            BucketKind::Failed,
+            BucketKind::NeedsAttention,
+        ] {
+            assert!(
+                !idle_exit_may_reap(Some(bucket.session_name())),
+                "drawer '{}' must survive idle-exit — it holds the rail's counter",
+                bucket.session_name()
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_and_unnamed_sessions_stay_reapable() {
+        // The watchdog exists for abandoned servers; exempting the drawers must
+        // not quietly disarm it everywhere else.
+        assert!(idle_exit_may_reap(Some("Operator")));
+        assert!(idle_exit_may_reap(Some("vc-frame")));
+        assert!(idle_exit_may_reap(Some("Finalized")));
+        assert!(idle_exit_may_reap(Some("needs attention")));
+        assert!(idle_exit_may_reap(None));
     }
 
     #[test]

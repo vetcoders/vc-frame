@@ -514,6 +514,22 @@ impl Setup {
             crate::build_info::build_info().diagnostic_line()
         )
         .unwrap();
+        // A fix that is in the source but not in the installed binary looks
+        // exactly like a fix that does not work. Say so here rather than let
+        // the operator debug a build that never contained it. Host-only: a wasm
+        // plugin has no checkout to compare itself against.
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let freshness = crate::install_freshness::current(
+                &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            );
+            writeln!(
+                &mut message,
+                "[INSTALL FRESHNESS]: {}",
+                freshness.diagnostic_line()
+            )
+            .unwrap();
+        }
         if let Some(config_dir) = config_dir {
             writeln!(&mut message, "[CONFIG DIR]: \"{}\"", config_dir.display()).unwrap();
         } else {

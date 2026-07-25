@@ -39,6 +39,7 @@ use std::{
 };
 use zellij_utils::envs;
 use zellij_utils::pane_size::Size;
+use zellij_utils::run_triage;
 
 use zellij_utils::input::cli_assets::CliAssets;
 
@@ -915,7 +916,12 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
     // (1) SIGTERM/SIGINT → KillSession so plain kill works without SIGKILL
     // (2) idle-exit after N seconds with zero connected clients (default 900;
     //     VC_FRAME_SERVER_IDLE_EXIT_SECS=0 disables for intentional long detach).
-    install_server_lifecycle_watchdogs(to_server.clone(), session_state.clone());
+    // Triage drawers are exempt from (2) — see `run_triage::idle_exit_may_reap`.
+    install_server_lifecycle_watchdogs(
+        to_server.clone(),
+        session_state.clone(),
+        envs::get_session_name().ok(),
+    );
 
     loop {
         let (instruction, mut err_ctx) = server_receiver.recv().unwrap();
@@ -1879,6 +1885,7 @@ pub fn server_idle_exit_secs_from_env(raw: Option<&str>) -> Option<u64> {
 fn install_server_lifecycle_watchdogs(
     to_server: SenderWithContext<ServerInstruction>,
     session_state: Arc<RwLock<SessionState>>,
+    session_name: Option<String>,
 ) {
     #[cfg(unix)]
     {
@@ -1903,7 +1910,8 @@ fn install_server_lifecycle_watchdogs(
             });
     }
 
-    let idle_secs = server_idle_exit_secs_from_env(
+    let idle_secs = idle_exit_plan(
+        session_name.as_deref(),
         std::env::var("VC_FRAME_SERVER_IDLE_EXIT_SECS")
             .ok()
             .as_deref(),
@@ -1939,8 +1947,26 @@ fn install_server_lifecycle_watchdogs(
                 }
             });
     } else {
-        log::info!("server idle-exit disabled (VC_FRAME_SERVER_IDLE_EXIT_SECS=0)");
+        log::info!(
+            "server idle-exit disabled (triage drawer, or VC_FRAME_SERVER_IDLE_EXIT_SECS=0)"
+        );
     }
+}
+
+/// How long this server may sit client-less before it reaps itself, or `None`
+/// when the idle watchdog must not be armed at all.
+///
+/// Two independent reasons to stay armed-forever: the operator asked for it
+/// (`VC_FRAME_SERVER_IDLE_EXIT_SECS=0`, an intentional long detach), or the
+/// session is a triage drawer, which holds zero clients for its entire life by
+/// construction. Keeping the decision in one pure function is what makes the
+/// second reason testable — the bug it fixes was invisible precisely because
+/// the arming path never looked at which session it was arming.
+fn idle_exit_plan(session_name: Option<&str>, raw_env: Option<&str>) -> Option<u64> {
+    if !run_triage::idle_exit_may_reap(session_name) {
+        return None;
+    }
+    server_idle_exit_secs_from_env(raw_env)
 }
 
 struct SessionInitParams {
@@ -2573,5 +2599,48 @@ mod session_state_tests {
     fn server_idle_exit_secs_custom() {
         assert_eq!(server_idle_exit_secs_from_env(Some("60")), Some(60));
         assert_eq!(server_idle_exit_secs_from_env(Some("900")), Some(900));
+    }
+
+    /// Regression, 2026-07-25 — the rail's f/x/n settlement counters went blind.
+    ///
+    /// The counters are the non-chrome tab counts of the three triage drawer
+    /// sessions. Drawers are materialized by the reaper with
+    /// `attach --create-background` and nothing ever attaches to them, so the
+    /// idle watchdog saw "zero clients for 900s" and killed each drawer a
+    /// quarter of an hour after its last transfer. The runs stayed durably
+    /// captured under `finished_runs/`, but the drawer left the live session
+    /// list and the rail rendered 0 — a blind cockpit over healthy data.
+    ///
+    /// This asserts the arming decision now depends on *which* session it is.
+    /// Before the fix `idle_exit_plan` did not exist and the watchdog was armed
+    /// unconditionally, so every case below returned `Some(900)`.
+    #[test]
+    fn the_idle_watchdog_is_never_armed_for_a_triage_drawer() {
+        for drawer in ["Finalized runs", "Failed runs", "Needs attention"] {
+            assert_eq!(
+                idle_exit_plan(Some(drawer), None),
+                None,
+                "drawer '{drawer}' must not arm idle-exit — it holds the rail's counter"
+            );
+            // Not even an explicit non-zero override may reap a drawer.
+            assert_eq!(idle_exit_plan(Some(drawer), Some("60")), None);
+        }
+    }
+
+    #[test]
+    fn ordinary_sessions_keep_the_idle_watchdog_they_were_given() {
+        // The watchdog exists for abandoned `--server` processes burning CPU;
+        // exempting the drawers must not quietly disarm it everywhere else.
+        assert_eq!(
+            idle_exit_plan(Some("Operator"), None),
+            Some(DEFAULT_SERVER_IDLE_EXIT_SECS)
+        );
+        assert_eq!(idle_exit_plan(Some("vc-frame"), Some("60")), Some(60));
+        assert_eq!(
+            idle_exit_plan(None, None),
+            Some(DEFAULT_SERVER_IDLE_EXIT_SECS)
+        );
+        // The operator's explicit long-detach opt-out still wins.
+        assert_eq!(idle_exit_plan(Some("Operator"), Some("0")), None);
     }
 }
