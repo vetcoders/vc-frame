@@ -16,6 +16,7 @@ jobs:
   verify-release:
     name: verify-release-contract
     runs-on: [self-hosted, ops-linux]
+    environment: release
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -31,6 +32,7 @@ jobs:
       - name: Verify version, security, and signing inputs
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
           GPG_PUBLIC_KEY: ${{ secrets.GPG_PUBLIC_KEY }}
         run: |
           version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
@@ -67,6 +69,24 @@ jobs:
             echo "GPG_PUBLIC_KEY does not match the installer trust root" >&2
             exit 1
           }
+          signing_home="$(mktemp -d)"
+          verify_home="$(mktemp -d)"
+          chmod 700 "$signing_home" "$verify_home"
+          trap 'rm -rf "$signing_home" "$verify_home"' EXIT
+          printf '%s\n' "$GPG_PRIVATE_KEY" |
+            gpg --homedir "$signing_home" --batch --import
+          printf '%s\n' "$GPG_PUBLIC_KEY" |
+            gpg --homedir "$verify_home" --batch --import
+          printf '%s:%s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" > "$RUNNER_TEMP/signing-canary"
+          gpg_args=(--homedir "$signing_home" --batch --yes --pinentry-mode loopback)
+          if [ -n "${GPG_PASSPHRASE:-}" ]; then
+            gpg_args+=(--passphrase "$GPG_PASSPHRASE")
+          fi
+          gpg "${gpg_args[@]}" --detach-sign \
+            --output "$RUNNER_TEMP/signing-canary.sig" \
+            "$RUNNER_TEMP/signing-canary"
+          gpg --homedir "$verify_home" --batch \
+            --verify "$RUNNER_TEMP/signing-canary.sig" "$RUNNER_TEMP/signing-canary"
           make semgrep
           make ci
 
@@ -104,6 +124,7 @@ jobs:
     needs: create-release
     name: build-release-normal
     runs-on: ${{ matrix.runner }}
+    environment: release
     permissions:
       contents: write
       id-token: write
@@ -266,6 +287,10 @@ jobs:
             echo "GPG_PRIVATE_KEY secret not set" >&2
             exit 1
           fi
+          signing_home="$RUNNER_TEMP/vc-frame-gpg"
+          install -d -m 700 "$signing_home"
+          export GNUPGHOME="$signing_home"
+          echo "GNUPGHOME=$signing_home" >> "$GITHUB_ENV"
           printf '%s\n' "$GPG_PRIVATE_KEY" | gpg --batch --import
           echo "signing_enabled=true" >> "$GITHUB_OUTPUT"
 
@@ -386,6 +411,7 @@ jobs:
     needs: create-release
     name: build-release-noweb
     runs-on: ${{ matrix.runner }}
+    environment: release
     permissions:
       contents: write
       id-token: write
@@ -540,6 +566,10 @@ jobs:
             echo "GPG_PRIVATE_KEY secret not set" >&2
             exit 1
           }
+          signing_home="$RUNNER_TEMP/vc-frame-gpg"
+          install -d -m 700 "$signing_home"
+          export GNUPGHOME="$signing_home"
+          echo "GNUPGHOME=$signing_home" >> "$GITHUB_ENV"
           printf '%s\n' "$GPG_PRIVATE_KEY" | gpg --batch --import
           echo "signing_enabled=true" >> "$GITHUB_OUTPUT"
 
@@ -672,6 +702,7 @@ jobs:
     needs: [create-release, build-release-normal, build-release-noweb]
     name: publish-manifest
     runs-on: [self-hosted, ops-linux]
+    environment: release
     permissions:
       contents: write
     steps:
@@ -755,11 +786,13 @@ jobs:
     needs: [build-release-normal, build-release-noweb, publish-manifest]
     name: verify-assets-and-publish
     runs-on: [self-hosted, ops-linux]
+    environment: release
     permissions:
       contents: write
       attestations: read
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GPG_PUBLIC_KEY: ${{ secrets.GPG_PUBLIC_KEY }}
     steps:
       - name: Verify the complete release asset contract
         run: |
@@ -841,6 +874,85 @@ jobs:
           fi
           for subject in "${subjects[@]}"; do
             gh attestation verify "$subject" --repo "$GITHUB_REPOSITORY"
+          done
+
+      - name: Verify release checksums and GPG signatures
+        shell: bash
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            tag="candidate-${GITHUB_RUN_ID}"
+          else
+            tag="${GITHUB_REF#refs/tags/}"
+          fi
+          test -n "${GPG_PUBLIC_KEY:-}" || {
+            echo "GPG_PUBLIC_KEY secret not set" >&2
+            exit 1
+          }
+          verification_dir="$(mktemp -d)"
+          verify_home="$(mktemp -d)"
+          chmod 700 "$verify_home"
+          trap 'rm -rf "$verification_dir" "$verify_home"' EXIT
+          gh release download "$tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$verification_dir" \
+            --pattern 'vc-frame-*.tar.gz' \
+            --pattern 'vc-frame-*.zip' \
+            --pattern 'vc-frame-*.msi' \
+            --pattern 'vc-frame-*.sha256' \
+            --pattern 'vc-frame-*.sha256sum' \
+            --pattern 'vc-frame-*.sig' \
+            --pattern 'vc-frame-signing.asc' \
+            --pattern 'install.sh'
+
+          printf '%s\n' "$GPG_PUBLIC_KEY" |
+            gpg --homedir "$verify_home" --batch --import
+          expected_fingerprint="$(
+            sed -n 's/^DEFAULT_GPG_FINGERPRINT="\([A-Fa-f0-9]*\)"/\1/p' \
+              "$verification_dir/install.sh"
+          )"
+          secret_fingerprint="$(
+            printf '%s\n' "$GPG_PUBLIC_KEY" |
+              gpg --homedir "$verify_home" --batch --with-colons \
+                --import-options show-only --import 2>/dev/null |
+              awk -F: '$1 == "fpr" { print $10; exit }'
+          )"
+          published_fingerprint="$(
+            gpg --homedir "$verify_home" --batch --with-colons \
+              --import-options show-only --import \
+                "$verification_dir/vc-frame-signing.asc" 2>/dev/null |
+              awk -F: '$1 == "fpr" { print $10; exit }'
+          )"
+          test -n "$expected_fingerprint"
+          test "$(printf '%s' "$secret_fingerprint" | tr '[:lower:]' '[:upper:]')" = \
+            "$(printf '%s' "$expected_fingerprint" | tr '[:lower:]' '[:upper:]')"
+          test "$(printf '%s' "$published_fingerprint" | tr '[:lower:]' '[:upper:]')" = \
+            "$(printf '%s' "$expected_fingerprint" | tr '[:lower:]' '[:upper:]')"
+
+          shopt -s nullglob
+          subjects=(
+            "$verification_dir"/*.tar.gz
+            "$verification_dir"/*.zip
+            "$verification_dir"/*.msi
+          )
+          checksums=(
+            "$verification_dir"/*.sha256
+            "$verification_dir"/*.sha256sum
+          )
+          signatures=("$verification_dir"/*.sig)
+          test "${#subjects[@]}" -eq 12
+          test "${#checksums[@]}" -eq 12
+          test "${#signatures[@]}" -eq 8
+          for checksum in "${checksums[@]}"; do
+            (
+              cd "$verification_dir"
+              sha256sum --check "$(basename "$checksum")"
+            )
+          done
+          for signature in "${signatures[@]}"; do
+            subject="${signature%.sig}"
+            test -f "$subject"
+            gpg --homedir "$verify_home" --batch \
+              --verify "$signature" "$subject"
           done
 
       - name: Publish verified draft

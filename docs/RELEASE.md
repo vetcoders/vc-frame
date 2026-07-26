@@ -59,6 +59,9 @@ The workflow accepts three repository secrets:
 - `GPG_PASSPHRASE`: optional passphrase for that key
 - `GPG_PUBLIC_KEY`: ASCII-armored public key published with the release
 
+Store them in a protected GitHub environment named `release` with a required
+reviewer. Every job that reads signing material is bound to that environment.
+
 Candidates and tags fail before building if the private or public key is
 missing. `tools/install.sh` defaults to strict GPG verification and also
 requires a pinned `VCFRAME_GPG_FINGERPRINT`; downloading a key and signature
@@ -94,11 +97,13 @@ Before the first public release:
 Run **Actions → Release → Run workflow**. The workflow:
 
 1. verifies Cargo and installer versions match;
-2. requires signing inputs;
+2. requires signing inputs and proves the private subkey can sign a canary
+   verified by the pinned public key;
 3. runs `make semgrep` and `make ci`;
 4. creates draft `candidate-<run-id>`;
 5. builds, signs, and OIDC-attests the full matrix;
-6. verifies the complete asset list and every attestation;
+6. verifies the complete asset list, all 12 checksums, all 8 Unix signatures,
+   the published key fingerprint, and every attestation;
 7. leaves the candidate as a draft.
 
 Candidate runs never become `latest` and never publish a production release.
