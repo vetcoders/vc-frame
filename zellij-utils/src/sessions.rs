@@ -630,9 +630,48 @@ pub fn generate_unique_session_name() -> Option<String> {
         return None;
     };
 
-    get_name_generator()
-        .take(1000)
-        .find(|name| !sessions.contains(name) && !dead_sessions.contains(name))
+    get_name_generator().take(1000).find(|name| {
+        session_name_fits_socket_path(name)
+            && !sessions.contains(name)
+            && !dead_sessions.contains(name)
+    })
+}
+
+#[cfg(unix)]
+fn session_name_fits_socket_path(session_name: &str) -> bool {
+    socket_path_fits_limit(
+        &ZELLIJ_SOCK_DIR,
+        session_name,
+        crate::consts::ZELLIJ_SOCK_MAX_LENGTH,
+    )
+}
+
+#[cfg(unix)]
+fn socket_path_fits_limit(
+    socket_dir: &std::path::Path,
+    session_name: &str,
+    max_length: usize,
+) -> bool {
+    socket_dir.join(session_name).as_os_str().len() < max_length
+}
+
+#[cfg(not(unix))]
+fn session_name_fits_socket_path(_session_name: &str) -> bool {
+    true
+}
+
+#[cfg(all(test, unix))]
+mod generated_session_name_tests {
+    use super::socket_path_fits_limit;
+    use std::path::PathBuf;
+
+    #[test]
+    fn socket_path_limit_is_exclusive() {
+        let socket_dir = PathBuf::from("x".repeat(80));
+
+        assert!(socket_path_fits_limit(&socket_dir, &"y".repeat(22), 104));
+        assert!(!socket_path_fits_limit(&socket_dir, &"y".repeat(23), 104));
+    }
 }
 
 /// Create a new random name generator

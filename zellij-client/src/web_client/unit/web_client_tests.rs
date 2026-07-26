@@ -33,6 +33,9 @@ mod tests {
 
     use std::time::{Duration, Instant};
 
+    // Delete the shared debug token database only at the start of a serial test.
+    // End-of-test deletion races detached Axum request tasks that are drained when
+    // the per-test Tokio runtime drops, producing SQLITE_IOERR_DELETE_NOENT on macOS.
     async fn wait_for_server(port: u16, timeout: Duration) -> Result<(), String> {
         let start = Instant::now();
         let url = format!("http://127.0.0.1:{}/info/version", port);
@@ -1464,7 +1467,6 @@ mod tests {
         );
 
         server_handle.abort();
-        let _ = delete_db();
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
@@ -1643,7 +1645,6 @@ mod tests {
         let _ = readonly_control_sink.close().await;
         let _ = readonly_terminal_sink.close().await;
         server_handle.abort();
-        let _ = delete_db();
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
@@ -1759,7 +1760,6 @@ mod tests {
         let _ = control_sink.close().await;
         let _ = terminal_sink.close().await;
         server_handle.abort();
-        let _ = delete_db();
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
@@ -1869,7 +1869,6 @@ mod tests {
         );
 
         server_handle.abort();
-        let _ = delete_db();
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
@@ -2596,7 +2595,6 @@ mod tests {
 
         let _ = control_sink.close().await;
         server_handle.abort();
-        let _ = delete_db();
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
@@ -2694,7 +2692,6 @@ mod tests {
 
         let _ = control_sink.close().await;
         server_handle.abort();
-        let _ = delete_db();
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
@@ -2779,7 +2776,6 @@ mod tests {
         }
 
         server_handle.abort();
-        let _ = delete_db();
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
