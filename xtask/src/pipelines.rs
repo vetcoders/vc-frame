@@ -52,35 +52,37 @@ pub fn make(sh: &Shell, flags: flags::Make) -> anyhow::Result<()> {
 ///
 /// Runs the following steps in sequence:
 ///
-/// - [`build`](build::build) (release, plugins only)
+/// - [`build`](build::build) (release, plugins only), unless `--no-plugins`
 /// - [`build`](build::build) (release, without plugins)
 /// - [`manpage`](build::manpage)
 /// - Copy the executable to [target file](flags::Install::destination)
 pub fn install(sh: &Shell, flags: flags::Install) -> anyhow::Result<()> {
     let err_context = || format!("failed to run pipeline 'install' with args {flags:?}");
 
-    // Build and optimize plugins
-    build::build(
-        sh,
-        flags::Build {
-            release: true,
-            no_plugins: false,
-            plugins_only: true,
-            no_web: flags.no_web,
-        },
-    )
-    .and_then(|_| {
-        // Build the main executable
+    if !flags.no_plugins {
+        // Build and optimize plugins
         build::build(
             sh,
             flags::Build {
                 release: true,
-                no_plugins: true,
-                plugins_only: false,
+                no_plugins: false,
+                plugins_only: true,
                 no_web: flags.no_web,
             },
         )
-    })
+        .with_context(err_context)?;
+    }
+
+    // Build the main executable
+    build::build(
+        sh,
+        flags::Build {
+            release: true,
+            no_plugins: true,
+            plugins_only: false,
+            no_web: flags.no_web,
+        },
+    )
     .and_then(|_| {
         // Generate man page
         build::manpage(sh)
@@ -232,6 +234,7 @@ pub fn dist(sh: &Shell, _flags: flags::Dist) -> anyhow::Result<()> {
                 sh,
                 flags::Install {
                     destination: crate::project_root().join("./target/dist/vc-frame"),
+                    no_plugins: false,
                     no_web: false,
                 },
             )

@@ -73,6 +73,8 @@ xflags::xflags! {
         /// Generate a runnable `vc-frame` executable with plugins bundled
         cmd install {
             required destination: PathBuf
+            /// Use the committed plugin assets instead of rebuilding them
+            optional --no-plugins
             /// Compile without web server support
             optional --no-web
         }
@@ -207,6 +209,7 @@ pub struct Make {
 pub struct Install {
     pub destination: PathBuf,
 
+    pub no_plugins: bool,
     pub no_web: bool,
 }
 
