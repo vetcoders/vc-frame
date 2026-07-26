@@ -113,17 +113,21 @@ Candidate runs never become `latest` and never publish a production release.
 Only cut a tag from the reviewed commit on `main`:
 
 ```sh
-version=0.45.4
 git switch main
 git pull --ff-only origin main
-git tag -a "v$version" -m "vc-frame v$version"
-git push origin "v$version"
+make release-check
+make release-tag
+make release-push
 ```
 
-The tag must match `[workspace.package].version` in `Cargo.toml` and the default
-version in `tools/install.sh`. The workflow creates a draft, uploads all assets,
-checks the contract through the GitHub API, and publishes only after all jobs
-succeed.
+`make release-tag` derives `vX.Y.Z` from `[workspace.package].version`, requires
+the full VetCoders primary fingerprint pinned in `tools/install.sh`, locates
+the matching signing-capable secret key under the selected GPG home, creates an
+annotated signed tag, and verifies it locally before `make release-push` may
+publish it. The workflow independently rejects lightweight tags, invalid or
+foreign signatures, tag/commit mismatches, and commits outside `origin/main`.
+It then creates a draft, uploads all assets, checks the contract through the
+GitHub API, and publishes only after all jobs succeed.
 
 The canonical cold install is:
 
@@ -144,13 +148,13 @@ sight.
 
 ```console
 $ vc-frame --version
-vc-frame 0.45.4+gbcd9e175
+vc-frame 0.46.0+gbcd9e175
 
 $ vc-frame --build-info
 {
   "product": "vc-frame",
-  "version": "0.45.4",
-  "human_version": "0.45.4+gbcd9e175",
+  "version": "0.46.0",
+  "human_version": "0.46.0+gbcd9e175",
   "git_sha": "bcd9e175b5267fb0f0bdcbd12d657072db351999",
   "git_sha_short": "bcd9e175",
   "git_dirty": false,

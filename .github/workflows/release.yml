@@ -22,6 +22,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       # Provenance comes first: everything downstream claims to describe an
       # exact commit, so refuse to start if the checkout does not match HEAD.
@@ -91,6 +92,38 @@ jobs:
             gpg --homedir "$signing_home" --batch --import
           printf '%s\n' "$GPG_PUBLIC_KEY" |
             gpg --homedir "$verify_home" --batch --import
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            tag="${GITHUB_REF#refs/tags/}"
+            test "$(git cat-file -t "refs/tags/$tag")" = tag || {
+              echo "release ref $tag is not an annotated tag" >&2
+              exit 1
+            }
+            test "$(git rev-list -n 1 "refs/tags/$tag")" = "$GITHUB_SHA" || {
+              echo "release tag $tag does not resolve to GITHUB_SHA" >&2
+              exit 1
+            }
+            git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main || {
+              echo "release tag $tag does not point to a commit on origin/main" >&2
+              exit 1
+            }
+            tag_verification="$(
+              GNUPGHOME="$verify_home" \
+                git verify-tag --raw "refs/tags/$tag" 2>&1
+            )" || {
+              printf '%s\n' "$tag_verification" >&2
+              echo "release tag $tag has no valid VetCoders signature" >&2
+              exit 1
+            }
+            tag_primary_fingerprint="$(
+              printf '%s\n' "$tag_verification" |
+                awk '$1 == "[GNUPG:]" && $2 == "VALIDSIG" { print toupper($NF); exit }'
+            )"
+            test "$tag_primary_fingerprint" = \
+              "$(printf '%s' "$expected_fingerprint" | tr '[:lower:]' '[:upper:]')" || {
+              echo "release tag signer does not match the pinned VetCoders trust root" >&2
+              exit 1
+            }
+          fi
           printf '%s:%s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" > "$RUNNER_TEMP/signing-canary"
           gpg_args=(--homedir "$signing_home" --batch --yes --pinentry-mode loopback)
           if [ -n "${GPG_PASSPHRASE:-}" ]; then

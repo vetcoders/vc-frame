@@ -57,6 +57,11 @@ class ReleaseContractTests(unittest.TestCase):
             "make plugins-parity",
             "cargo build --bin vc-frame",
             "make triage-runtime-e2e",
+            "fetch-depth: 0",
+            'git cat-file -t "refs/tags/$tag"',
+            'git verify-tag --raw "refs/tags/$tag"',
+            'git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main',
+            "tag_primary_fingerprint",
             "tools/release_sync.py notes --output",
             "releases/tags/$tag",
             "--method DELETE",
@@ -65,6 +70,11 @@ class ReleaseContractTests(unittest.TestCase):
             'sh "$release_dir/install.sh"',
         ):
             self.assertIn(required, workflow)
+
+        release_docs = read("docs/RELEASE.md")
+        self.assertIn("make release-tag", release_docs)
+        self.assertIn("make release-push", release_docs)
+        self.assertNotIn('git tag -a "v$version"', release_docs)
 
     def test_legacy_e2e_runner_uses_vc_frame_binary(self) -> None:
         runner = read("src/tests/e2e/remote_runner.rs")
