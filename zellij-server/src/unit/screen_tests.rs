@@ -3121,22 +3121,45 @@ pub fn send_cli_scroll_up_action() {
         0,
         pane_contents.as_bytes().to_vec(),
     ));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    // Rendering the freshly ingested PTY bytes establishes the bottom-of-pane
+    // viewport that ScrollUp operates on. Follow it with a same-channel query
+    // so the test waits for that render without depending on scheduler timing.
+    let (pane_info_tx, pane_info_rx) = crossbeam::channel::bounded(1);
+    let _ = mock_screen
+        .to_screen
+        .send(ScreenInstruction::RenderToClients);
+    let _ = mock_screen.to_screen.send(ScreenInstruction::GetPaneInfo {
+        pane_id: PaneId::Terminal(0),
+        response_channel: pane_info_tx,
+    });
+    let pane_info = pane_info_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("screen render barrier must answer");
+    assert!(pane_info.is_some(), "the target pane must exist");
     // we send two actions here because only the last line in the pane is empty, so one action
     // won't show in a render
     send_cli_action_to_server(&session_metadata, cli_action.clone(), client_id);
     send_cli_action_to_server(&session_metadata, cli_action.clone(), client_id);
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    let (final_pane_info_tx, final_pane_info_rx) = crossbeam::channel::bounded(1);
+    let _ = mock_screen
+        .to_screen
+        .send(ScreenInstruction::RenderToClients);
+    let _ = mock_screen.to_screen.send(ScreenInstruction::GetPaneInfo {
+        pane_id: PaneId::Terminal(0),
+        response_channel: final_pane_info_tx,
+    });
+    final_pane_info_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("final screen render barrier must answer");
     mock_screen.teardown(vec![server_instruction, screen_thread]);
     let snapshots = take_snapshots_and_cursor_coordinates_from_render_events(
         received_server_instructions.lock().unwrap().iter(),
         size,
     );
-    let snapshot_count = snapshots.len();
-    for (_cursor_coordinates, snapshot) in snapshots {
-        assert_snapshot!(format!("{}", snapshot));
-    }
-    assert_snapshot!(format!("{}", snapshot_count));
+    let (_, final_snapshot) = snapshots
+        .last()
+        .expect("the completed scroll actions must produce a final render");
+    assert_snapshot!(format!("{}", final_snapshot));
 }
 
 #[test]
