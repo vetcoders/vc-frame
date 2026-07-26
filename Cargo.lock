@@ -3141,6 +3141,8 @@ dependencies = [
  "chrono",
  "fuzzy-matcher",
  "humantime",
+ "serde",
+ "serde_json",
  "unicode-width 0.1.10",
  "uuid",
  "zellij-tile",

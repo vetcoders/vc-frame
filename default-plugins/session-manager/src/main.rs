@@ -6,7 +6,8 @@ mod single_screen;
 mod single_screen_data;
 mod single_screen_render;
 mod ui;
-use std::collections::BTreeMap;
+use serde::{Deserialize, Deserializer};
+use std::collections::{BTreeMap, BTreeSet};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use uuid::Uuid;
 use zellij_tile::prelude::*;
@@ -37,6 +38,93 @@ enum ActiveScreen {
     SingleScreen,
 }
 
+const SETTLEMENT_COUNTS_PIPE: &str = "vc_settlement_counts";
+const SETTLEMENT_HISTORY_SCHEMA: &str = "vibecrafted.settlement-history.v1";
+// Guardian republishes at least every five seconds. Three missed refresh
+// windows turn exact counts into lower bounds instead of letting a dead
+// producer leave stale values looking authoritative forever.
+const SETTLEMENT_FEED_STALE_AFTER_TICKS: u8 = 15;
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct SettlementCounts {
+    f: u64,
+    x: u64,
+    n: u64,
+    total: u64,
+}
+
+impl SettlementCounts {
+    fn has_valid_total(&self) -> bool {
+        self.f
+            .checked_add(self.x)
+            .and_then(|total| total.checked_add(self.n))
+            == Some(self.total)
+    }
+
+    fn historical_count(&self, bucket: BucketKind) -> u64 {
+        match bucket {
+            BucketKind::Finalized => self.f,
+            BucketKind::Failed => self.x,
+            BucketKind::NeedsAttention => self.n,
+        }
+    }
+
+    fn is_monotonic_from(&self, previous: &Self) -> bool {
+        self.f >= previous.f
+            && self.x >= previous.x
+            && self.n >= previous.n
+            && self.total >= previous.total
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct SettlementHistory {
+    schema: String,
+    generation: String,
+    sequence: u64,
+    historical_transitions: SettlementCounts,
+    latest_by_run: SettlementCounts,
+    gaps: u64,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    complete_from: Option<u64>,
+}
+
+fn deserialize_required_option<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<u64>::deserialize(deserializer)
+}
+
+impl SettlementHistory {
+    fn parse(payload: &str) -> Option<Self> {
+        let snapshot: Self = serde_json::from_str(payload).ok()?;
+        let generation = Uuid::parse_str(&snapshot.generation).ok()?;
+        let has_canonical_generation = generation.to_string() == snapshot.generation;
+        let has_valid_completeness = matches!(
+            (snapshot.sequence, snapshot.gaps, snapshot.complete_from),
+            (0, 0, None) | (1.., 0, Some(1)) | (_, 1.., None)
+        );
+        (snapshot.schema == SETTLEMENT_HISTORY_SCHEMA
+            && has_canonical_generation
+            && snapshot.historical_transitions.has_valid_total()
+            && snapshot.latest_by_run.has_valid_total()
+            && snapshot.sequence == snapshot.historical_transitions.total
+            && snapshot.latest_by_run.total <= snapshot.historical_transitions.total
+            && snapshot.latest_by_run.f <= snapshot.historical_transitions.f
+            && snapshot.latest_by_run.x <= snapshot.historical_transitions.x
+            && snapshot.latest_by_run.n <= snapshot.historical_transitions.n
+            && has_valid_completeness)
+            .then_some(snapshot)
+    }
+
+    fn is_complete(&self) -> bool {
+        self.gaps == 0
+    }
+}
+
 #[derive(Default)]
 struct State {
     session_name: Option<String>,
@@ -65,6 +153,22 @@ struct State {
     // Hovered rail row (plugin-relative line). Sessions and f/x/n drawers share
     // the same OS-like highlight so every chrome row feels equally interactive.
     rail_hover_row: Option<usize>,
+    // Canonical, append-only settlement truth delivered by Vibecrafted. This
+    // never falls back to bucket viewer tabs: before the first valid payload,
+    // f/x/n render as unavailable.
+    settlement_history: Option<SettlementHistory>,
+    // A rejected payload on the canonical transport means the last accepted
+    // snapshot is only a lower bound until a valid replay confirms it again.
+    // Never leave stale values looking exact after producer corruption,
+    // divergence, or a non-monotonic advancement.
+    settlement_feed_degraded: bool,
+    // The visible session-manager already receives one host timer per second.
+    // Reuse that cadence as a freshness lease without adding another timer or
+    // coupling plugin rendering to Guardian process state.
+    settlement_feed_age_ticks: Option<u8>,
+    // Once a producer generation has been superseded, a delayed payload from
+    // that retired generation must never roll the rail back.
+    retired_settlement_generations: BTreeSet<String>,
 }
 
 register_plugin!(State);
@@ -129,7 +233,19 @@ impl ZellijPlugin for State {
     }
 
     fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
-        if pipe_message.name == "vc_rail_nav" {
+        if pipe_message.name == SETTLEMENT_COUNTS_PIPE {
+            // This is route integrity, not cryptographic authentication:
+            // accept only the public local-CLI broadcast Guardian emits. A
+            // process running as the same OS user can already mutate both
+            // runtimes and therefore remains inside this trust boundary.
+            if !matches!(pipe_message.source, PipeSource::Cli(_)) || pipe_message.is_private {
+                return false;
+            }
+            match pipe_message.payload.as_deref() {
+                Some(payload) => self.accept_settlement_history(payload),
+                None => self.mark_settlement_feed_degraded(),
+            }
+        } else if pipe_message.name == "vc_rail_nav" {
             match pipe_message.payload.as_deref() {
                 Some("up") => self.switch_session_relative(-1),
                 Some("down") => self.switch_session_relative(1),
@@ -167,6 +283,9 @@ impl ZellijPlugin for State {
                 self.refresh_timer_armed = false;
                 if !self.is_visible {
                     return false;
+                }
+                if self.age_settlement_feed() {
+                    should_render = true;
                 }
                 let new_saved_time = current_session_last_saved_time();
                 if new_saved_time != self.current_session_last_saved_time {
@@ -551,9 +670,9 @@ impl BucketKind {
     }
     fn rail_label(&self) -> &'static str {
         match self {
-            BucketKind::Finalized => "Finalized tabs",
-            BucketKind::Failed => "Failed tabs",
-            BucketKind::NeedsAttention => "Needs attention tabs",
+            BucketKind::Finalized => "Finalized",
+            BucketKind::Failed => "Failed",
+            BucketKind::NeedsAttention => "Needs attention",
         }
     }
     /// Hotkey, deliberately outside the '0'-'9' range the session ordinals use.
@@ -639,17 +758,33 @@ impl SessionRailRow {
     }
 }
 
-/// Same rhythm as working-session rows (` 1 * name`): hotkey slot + status + count + label.
-/// Count comes BEFORE the label so the three counters align in one column and
-/// survive a narrow rail — a truncated label loses letters, never the number.
-fn format_bucket_rail_entry(bucket: BucketKind, count: usize, is_current_session: bool) -> String {
+/// Same rhythm as working-session rows (` 1 * name`): hotkey slot + status +
+/// immutable historical count + label. Viewer tabs are deliberately demoted
+/// to the explicit `tN` suffix: they are useful diagnostics, never f/x/n truth.
+fn format_bucket_rail_entry(
+    bucket: BucketKind,
+    historical_count: Option<u64>,
+    history_is_complete: bool,
+    viewer_tabs: usize,
+    is_current_session: bool,
+) -> String {
     let status = if is_current_session { "*" } else { "-" };
+    let historical_count = historical_count
+        .map(|count| {
+            if history_is_complete {
+                count.to_string()
+            } else {
+                format!("≥{count}")
+            }
+        })
+        .unwrap_or_else(|| "?".to_owned());
     format!(
-        " {} {} {:>2} · {}",
+        " {} {} {:>3} · {} · t{}",
         bucket.hotkey(),
         status,
-        count,
-        bucket.rail_label()
+        historical_count,
+        bucket.rail_label(),
+        viewer_tabs,
     )
 }
 
@@ -705,7 +840,11 @@ fn rail_ordinal_target(sessions: &[SessionUiInfo], character: char) -> Option<us
     working_session_indices(sessions).get(ordinal).copied()
 }
 
-fn session_rail_rows(sessions: &[SessionUiInfo]) -> Vec<SessionRailRow> {
+fn session_rail_rows_with_truth(
+    sessions: &[SessionUiInfo],
+    settlement_history: Option<&SettlementHistory>,
+    settlement_feed_degraded: bool,
+) -> Vec<SessionRailRow> {
     let mut rows = vec![];
     for (ordinal, session_index) in working_session_indices(sessions).into_iter().enumerate() {
         let session = &sessions[session_index];
@@ -727,14 +866,27 @@ fn session_rail_rows(sessions: &[SessionUiInfo]) -> Vec<SessionRailRow> {
                 }),
         );
     }
-    rows.extend(bucket_rail_rows(sessions));
+    rows.extend(bucket_rail_rows(
+        sessions,
+        settlement_history,
+        settlement_feed_degraded,
+    ));
     rows
+}
+
+#[cfg(test)]
+fn session_rail_rows(sessions: &[SessionUiInfo]) -> Vec<SessionRailRow> {
+    session_rail_rows_with_truth(sessions, None, false)
 }
 
 /// The pinned tail of the rail. Always all three buckets, whether or not their
 /// sessions exist yet — a permanent entry point beats one that appears only
 /// once something has already failed.
-fn bucket_rail_rows(sessions: &[SessionUiInfo]) -> Vec<SessionRailRow> {
+fn bucket_rail_rows(
+    sessions: &[SessionUiInfo],
+    settlement_history: Option<&SettlementHistory>,
+    settlement_feed_degraded: bool,
+) -> Vec<SessionRailRow> {
     RAIL_BUCKETS
         .into_iter()
         .map(|bucket| {
@@ -742,11 +894,10 @@ fn bucket_rail_rows(sessions: &[SessionUiInfo]) -> Vec<SessionRailRow> {
                 .iter()
                 .position(|session| session.name == bucket.session_name());
             let session = session_index.map(|index| &sessions[index]);
-            // One transferred run is one tab, so the RUN tab count is the bucket
-            // count. A bucket session materialized via `attach --create-background`
-            // also carries the default-layout chrome tabs (CHROME_TAB_NAMES) —
-            // those are furniture, not runs, and must not inflate the drawer.
-            let count = session
+            // The bucket session remains the navigation target. Its non-chrome
+            // tab inventory is shown only as secondary `tN` telemetry: tabs can
+            // disappear, be finalized elsewhere, or represent stale viewers.
+            let viewer_tabs = session
                 .map(|session| {
                     session
                         .tabs
@@ -755,13 +906,23 @@ fn bucket_rail_rows(sessions: &[SessionUiInfo]) -> Vec<SessionRailRow> {
                         .count()
                 })
                 .unwrap_or(0);
+            let historical_count = settlement_history
+                .map(|snapshot| snapshot.historical_transitions.historical_count(bucket));
+            let history_is_complete = !settlement_feed_degraded
+                && settlement_history.is_some_and(SettlementHistory::is_complete);
             let is_current_session = session.is_some_and(|session| session.is_current_session);
             SessionRailRow {
                 kind: SessionRailRowKind::Bucket {
                     bucket,
                     session_index,
                 },
-                text: format_bucket_rail_entry(bucket, count, is_current_session),
+                text: format_bucket_rail_entry(
+                    bucket,
+                    historical_count,
+                    history_is_complete,
+                    viewer_tabs,
+                    is_current_session,
+                ),
             }
         })
         .collect()
@@ -803,18 +964,36 @@ fn fit_rail_line(text: &str, width: usize) -> String {
     fitted
 }
 
-/// Bucket rows lose label letters on a narrow rail, never their " tabs"
-/// suffix: the suffix is re-appended after the cut so the three drawers keep
-/// one aligned "tabs" column at the rail edge instead of clipping to
-/// "Needs attentio".
+/// Bucket rows lose label letters first. A historical count is either rendered
+/// in full or omitted entirely: clipping `18446744073709551615` into a smaller
+/// exact-looking number would corrupt the operator truth.
 fn fit_bucket_rail_line(text: &str, width: usize) -> String {
-    let suffix = " tabs";
+    let Some(head_end) = text.find(" · ") else {
+        return fit_rail_line(text, width);
+    };
+    let Some(suffix_start) = text.rfind(" · t") else {
+        return fit_rail_line(text, width);
+    };
+    let head = &text[..head_end];
+    let suffix = &text[suffix_start..];
+    let head_width = head.width();
     let suffix_width = suffix.width();
-    if text.width() <= width || width <= suffix_width || !text.ends_with(suffix) {
+    if text.width() <= width {
         return fit_rail_line(text, width);
     }
-    let head = &text[..text.len() - suffix.len()];
-    let mut fitted = truncate_to_width(head, width - suffix_width);
+
+    if head_width > width {
+        let bucket_without_count: String = head.chars().take(4).collect();
+        return fit_rail_line(&format!("{bucket_without_count} …"), width);
+    }
+    if head_width + suffix_width > width {
+        return fit_rail_line(head, width);
+    }
+
+    let label = &text[head_end..suffix_start];
+    let label_width = width - head_width - suffix_width;
+    let mut fitted = head.to_owned();
+    fitted.push_str(&truncate_to_width(label, label_width));
     fitted.push_str(suffix);
     let fitted_width = fitted.width();
     if fitted_width < width {
@@ -838,6 +1017,85 @@ fn truncate_to_width(text: &str, width: usize) -> String {
 }
 
 impl State {
+    /// Accept a canonical snapshot iff it advances the sequence without ever
+    /// decreasing append-only historical counts inside one durable producer
+    /// generation. A new canonical generation is an explicit store reset and
+    /// may restart at zero; its completeness marker keeps partial replay honest.
+    /// Exact replay is idempotent, while stale sequence numbers and same-sequence
+    /// divergence are rejected.
+    fn accept_settlement_history(&mut self, payload: &str) -> bool {
+        let Some(incoming) = SettlementHistory::parse(payload) else {
+            return self.mark_settlement_feed_degraded();
+        };
+        if self
+            .retired_settlement_generations
+            .contains(&incoming.generation)
+        {
+            return false;
+        }
+        if let Some(current) = &self.settlement_history {
+            if incoming.generation != current.generation {
+                if incoming.is_complete()
+                    && !incoming
+                        .historical_transitions
+                        .is_monotonic_from(&current.historical_transitions)
+                {
+                    return self.mark_settlement_feed_degraded();
+                }
+                self.retired_settlement_generations
+                    .insert(current.generation.clone());
+                self.settlement_history = Some(incoming);
+                self.mark_settlement_feed_fresh();
+                return true;
+            }
+            if incoming.sequence < current.sequence {
+                return false;
+            }
+            if incoming.sequence == current.sequence {
+                if incoming != *current {
+                    eprintln!(
+                        "rejecting divergent settlement history at sequence {}",
+                        incoming.sequence
+                    );
+                    return self.mark_settlement_feed_degraded();
+                }
+                let should_render = std::mem::take(&mut self.settlement_feed_degraded);
+                self.settlement_feed_age_ticks = Some(0);
+                return should_render;
+            }
+            if !incoming
+                .historical_transitions
+                .is_monotonic_from(&current.historical_transitions)
+            {
+                return self.mark_settlement_feed_degraded();
+            }
+        }
+        self.settlement_history = Some(incoming);
+        self.mark_settlement_feed_fresh();
+        true
+    }
+
+    fn mark_settlement_feed_fresh(&mut self) {
+        self.settlement_feed_degraded = false;
+        self.settlement_feed_age_ticks = Some(0);
+    }
+
+    fn mark_settlement_feed_degraded(&mut self) -> bool {
+        self.settlement_history.is_some()
+            && !std::mem::replace(&mut self.settlement_feed_degraded, true)
+    }
+
+    fn age_settlement_feed(&mut self) -> bool {
+        let Some(age_ticks) = self.settlement_feed_age_ticks.as_mut() else {
+            return false;
+        };
+        *age_ticks = age_ticks.saturating_add(1);
+        if *age_ticks < SETTLEMENT_FEED_STALE_AFTER_TICKS {
+            return false;
+        }
+        self.mark_settlement_feed_degraded()
+    }
+
     fn reset_selected_index(&mut self) {
         self.sessions.reset_selected_index();
     }
@@ -865,7 +1123,11 @@ impl State {
         }
         self.ensure_rail_selection();
 
-        let all_rows = session_rail_rows(&self.sessions.session_ui_infos);
+        let all_rows = session_rail_rows_with_truth(
+            &self.sessions.session_ui_infos,
+            self.settlement_history.as_ref(),
+            self.settlement_feed_degraded,
+        );
         // The buckets are pinned to the bottom of the rail, so only the leading
         // working-session rows take part in scrolling.
         let bucket_row_start = all_rows.iter().position(|row| row.is_bucket()).unwrap_or(0);
@@ -2238,9 +2500,9 @@ mod rail_tests {
                 "   · audit-260718-130000-02000 · codex +1",
                 "02 - beta",
                 // the buckets are always pinned to the tail of the rail
-                " f -  0 · Finalized tabs",
-                " x -  0 · Failed tabs",
-                " n -  0 · Needs attention tabs",
+                " f -   ? · Finalized · t0",
+                " x -   ? · Failed · t0",
+                " n -   ? · Needs attention · t0",
             ]
         );
         assert_eq!(rows.iter().filter(|row| row.is_live_process()).count(), 2);
@@ -2261,6 +2523,432 @@ mod rail_tests {
         bucket
     }
 
+    fn settlement_payload(
+        sequence: u64,
+        historical: (u64, u64, u64),
+        latest: (u64, u64, u64),
+    ) -> String {
+        settlement_payload_for(
+            "00000000-0000-4000-8000-000000000001",
+            sequence,
+            historical,
+            latest,
+            0,
+            (sequence > 0).then_some(1),
+        )
+    }
+
+    fn settlement_payload_for(
+        generation: &str,
+        sequence: u64,
+        historical: (u64, u64, u64),
+        latest: (u64, u64, u64),
+        gaps: u64,
+        complete_from: Option<u64>,
+    ) -> String {
+        serde_json::json!({
+            "schema": SETTLEMENT_HISTORY_SCHEMA,
+            "generation": generation,
+            "sequence": sequence,
+            "historical_transitions": {
+                "f": historical.0,
+                "x": historical.1,
+                "n": historical.2,
+                "total": historical.0 + historical.1 + historical.2,
+            },
+            "latest_by_run": {
+                "f": latest.0,
+                "x": latest.1,
+                "n": latest.2,
+                "total": latest.0 + latest.1 + latest.2,
+            },
+            "gaps": gaps,
+            "complete_from": complete_from,
+        })
+        .to_string()
+    }
+
+    fn settlement_pipe(payload: String) -> PipeMessage {
+        PipeMessage {
+            source: PipeSource::Cli("settlement-history-test".to_owned()),
+            name: SETTLEMENT_COUNTS_PIPE.to_owned(),
+            payload: Some(payload),
+            args: BTreeMap::new(),
+            is_private: false,
+        }
+    }
+
+    #[test]
+    fn canonical_history_drives_exact_97_176_408_primary_counts() {
+        let snapshot =
+            SettlementHistory::parse(&settlement_payload(681, (97, 176, 408), (12, 7, 3)))
+                .expect("valid settlement history");
+        let rows = session_rail_rows_with_truth(&[session("alpha", true)], Some(&snapshot), false);
+        let buckets: Vec<&str> = rows
+            .iter()
+            .filter(|row| row.is_bucket())
+            .map(|row| row.text.as_str())
+            .collect();
+
+        assert_eq!(
+            buckets,
+            vec![
+                " f -  97 · Finalized · t0",
+                " x - 176 · Failed · t0",
+                " n - 408 · Needs attention · t0",
+            ]
+        );
+    }
+
+    #[test]
+    fn incomplete_history_is_an_explicit_lower_bound_never_an_exact_count() {
+        let payload = settlement_payload_for(
+            "00000000-0000-4000-8000-000000000001",
+            681,
+            (97, 176, 408),
+            (12, 7, 3),
+            4,
+            None,
+        );
+        let snapshot = SettlementHistory::parse(&payload).expect("valid partial history");
+        let rows = session_rail_rows_with_truth(&[], Some(&snapshot), false);
+        let buckets: Vec<&str> = rows
+            .iter()
+            .filter(|row| row.is_bucket())
+            .map(|row| row.text.as_str())
+            .collect();
+
+        assert_eq!(
+            buckets,
+            vec![
+                " f - ≥97 · Finalized · t0",
+                " x - ≥176 · Failed · t0",
+                " n - ≥408 · Needs attention · t0",
+            ]
+        );
+        assert!(
+            SettlementHistory::parse(&settlement_payload_for(
+                "00000000-0000-4000-8000-000000000001",
+                681,
+                (97, 176, 408),
+                (12, 7, 3),
+                4,
+                Some(1),
+            ))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn generation_reset_is_partial_and_a_retired_generation_cannot_return() {
+        let mut state = State::default();
+        let first_generation = settlement_payload_for(
+            "00000000-0000-4000-8000-000000000001",
+            u64::MAX,
+            (u64::MAX, 0, 0),
+            (1, 0, 0),
+            1,
+            None,
+        );
+        assert!(state.pipe(settlement_pipe(first_generation)));
+
+        let dishonest_exact_reset = settlement_payload_for(
+            "00000000-0000-4000-8000-000000000002",
+            0,
+            (0, 0, 0),
+            (0, 0, 0),
+            0,
+            None,
+        );
+        assert!(state.pipe(settlement_pipe(dishonest_exact_reset)));
+        assert!(state.settlement_feed_degraded);
+
+        let reset_generation = settlement_payload_for(
+            "00000000-0000-4000-8000-000000000002",
+            0,
+            (0, 0, 0),
+            (0, 0, 0),
+            1,
+            None,
+        );
+        assert!(state.pipe(settlement_pipe(reset_generation)));
+        assert!(!state.settlement_feed_degraded);
+        assert_eq!(
+            state
+                .settlement_history
+                .as_ref()
+                .map(|history| history.sequence),
+            Some(0)
+        );
+
+        let delayed_retired_generation = settlement_payload_for(
+            "00000000-0000-4000-8000-000000000001",
+            u64::MAX,
+            (u64::MAX, 0, 0),
+            (1, 0, 0),
+            1,
+            None,
+        );
+        assert!(!state.pipe(settlement_pipe(delayed_retired_generation)));
+        assert_eq!(
+            state
+                .settlement_history
+                .as_ref()
+                .map(|history| history.generation.as_str()),
+            Some("00000000-0000-4000-8000-000000000002")
+        );
+    }
+
+    #[test]
+    fn settlement_history_accepts_only_cli_transport_and_canonical_generation() {
+        let payload = settlement_payload(1, (1, 0, 0), (1, 0, 0));
+        let mut state = State::default();
+        let mut keybind = settlement_pipe(payload.clone());
+        keybind.source = PipeSource::Keybind;
+        assert!(!state.pipe(keybind));
+        assert!(state.settlement_history.is_none());
+
+        let mut targeted_private_cli = settlement_pipe(payload.clone());
+        targeted_private_cli.is_private = true;
+        assert!(!state.pipe(targeted_private_cli));
+        assert!(state.settlement_history.is_none());
+
+        let malformed_generation = settlement_payload_for(
+            "00000000-0000-4000-8000-00000000000A",
+            1,
+            (1, 0, 0),
+            (1, 0, 0),
+            0,
+            Some(1),
+        );
+        assert!(!state.pipe(settlement_pipe(malformed_generation)));
+        assert!(state.pipe(settlement_pipe(payload.clone())));
+
+        let mut missing_payload = settlement_pipe(payload);
+        missing_payload.payload = None;
+        assert!(state.pipe(missing_payload));
+        assert!(state.settlement_feed_degraded);
+    }
+
+    #[test]
+    fn settlement_feed_silence_degrades_exact_truth_until_replay() {
+        let mut state = State::default();
+        let accepted = settlement_payload(10, (4, 3, 3), (2, 1, 1));
+        assert!(state.pipe(settlement_pipe(accepted.clone())));
+        assert_eq!(state.settlement_feed_age_ticks, Some(0));
+
+        for _ in 1..SETTLEMENT_FEED_STALE_AFTER_TICKS {
+            assert!(!state.age_settlement_feed());
+            assert!(!state.settlement_feed_degraded);
+        }
+        assert!(state.age_settlement_feed());
+        assert!(state.settlement_feed_degraded);
+
+        let degraded_rows = session_rail_rows_with_truth(
+            &[],
+            state.settlement_history.as_ref(),
+            state.settlement_feed_degraded,
+        );
+        assert_eq!(
+            degraded_rows
+                .iter()
+                .filter(|row| row.is_bucket())
+                .map(|row| row.text.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                " f -  ≥4 · Finalized · t0",
+                " x -  ≥3 · Failed · t0",
+                " n -  ≥3 · Needs attention · t0",
+            ]
+        );
+
+        // An exact canonical replay is both an integrity confirmation and a
+        // heartbeat. It restores exact rendering and renews the lease.
+        assert!(state.pipe(settlement_pipe(accepted)));
+        assert!(!state.settlement_feed_degraded);
+        assert_eq!(state.settlement_feed_age_ticks, Some(0));
+    }
+
+    #[test]
+    fn settlement_pipe_rejects_stale_decrease_divergence_and_malformed_truth() {
+        let mut state = State::default();
+        let accepted = settlement_payload(10, (4, 3, 3), (2, 1, 1));
+        assert!(state.pipe(settlement_pipe(accepted.clone())));
+        let baseline = state.settlement_history.clone();
+
+        // Exact replay is idempotent: no render and no state change.
+        assert!(!state.pipe(settlement_pipe(accepted.clone())));
+        assert_eq!(state.settlement_history, baseline);
+        assert!(!state.settlement_feed_degraded);
+
+        // Same sequence with different valid content is divergence. The last
+        // good snapshot remains visible only as a lower bound until replay.
+        assert!(state.pipe(settlement_pipe(settlement_payload(
+            10,
+            (5, 2, 3),
+            (3, 1, 1),
+        ))));
+        assert_eq!(state.settlement_history, baseline);
+        assert!(state.settlement_feed_degraded);
+        let degraded_rows = session_rail_rows_with_truth(
+            &[],
+            state.settlement_history.as_ref(),
+            state.settlement_feed_degraded,
+        );
+        assert_eq!(
+            degraded_rows
+                .iter()
+                .filter(|row| row.is_bucket())
+                .map(|row| row.text.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                " f -  ≥4 · Finalized · t0",
+                " x -  ≥3 · Failed · t0",
+                " n -  ≥3 · Needs attention · t0",
+            ]
+        );
+        assert!(state.pipe(settlement_pipe(accepted.clone())));
+        assert!(!state.settlement_feed_degraded);
+
+        // Older snapshots remain stale even if their counters are larger.
+        assert!(!state.pipe(settlement_pipe(
+            settlement_payload(9, (4, 3, 2), (2, 1, 1),)
+        )));
+        assert_eq!(state.settlement_history, baseline);
+        assert!(!state.settlement_feed_degraded);
+
+        // A new sequence cannot rewrite append-only history downward.
+        assert!(state.pipe(settlement_pipe(settlement_payload(
+            11,
+            (3, 3, 5),
+            (2, 1, 1),
+        ))));
+        assert_eq!(state.settlement_history, baseline);
+        assert!(state.settlement_feed_degraded);
+        assert!(state.pipe(settlement_pipe(accepted.clone())));
+        assert!(!state.settlement_feed_degraded);
+
+        let malformed_total = serde_json::json!({
+            "schema": SETTLEMENT_HISTORY_SCHEMA,
+            "generation": "00000000-0000-4000-8000-000000000001",
+            "sequence": 11,
+            "historical_transitions": {"f": 5, "x": 3, "n": 3, "total": 999},
+            "latest_by_run": {"f": 2, "x": 1, "n": 1, "total": 4},
+            "gaps": 0,
+            "complete_from": 1,
+        })
+        .to_string();
+        assert!(state.pipe(settlement_pipe(malformed_total)));
+        assert!(state.settlement_feed_degraded);
+
+        let missing_complete_from = serde_json::json!({
+            "schema": SETTLEMENT_HISTORY_SCHEMA,
+            "generation": "00000000-0000-4000-8000-000000000001",
+            "sequence": 11,
+            "historical_transitions": {"f": 5, "x": 3, "n": 3, "total": 11},
+            "latest_by_run": {"f": 2, "x": 1, "n": 1, "total": 4},
+            "gaps": 1,
+        })
+        .to_string();
+        assert!(!state.pipe(settlement_pipe(missing_complete_from)));
+
+        let impossible_latest_bucket = serde_json::json!({
+            "schema": SETTLEMENT_HISTORY_SCHEMA,
+            "generation": "00000000-0000-4000-8000-000000000001",
+            "sequence": 11,
+            "historical_transitions": {"f": 0, "x": 8, "n": 3, "total": 11},
+            "latest_by_run": {"f": 4, "x": 0, "n": 0, "total": 4},
+            "gaps": 0,
+            "complete_from": 1,
+        })
+        .to_string();
+        assert!(!state.pipe(settlement_pipe(impossible_latest_bucket)));
+
+        let wrong_schema = serde_json::json!({
+            "schema": "vibecrafted.settlement-history.v0",
+            "generation": "00000000-0000-4000-8000-000000000001",
+            "sequence": 11,
+            "historical_transitions": {"f": 5, "x": 3, "n": 3, "total": 11},
+            "latest_by_run": {"f": 2, "x": 1, "n": 1, "total": 4},
+            "gaps": 0,
+            "complete_from": 1,
+        })
+        .to_string();
+        assert!(!state.pipe(settlement_pipe(wrong_schema)));
+
+        let unknown_field = serde_json::json!({
+            "schema": SETTLEMENT_HISTORY_SCHEMA,
+            "generation": "00000000-0000-4000-8000-000000000001",
+            "sequence": 11,
+            "historical_transitions": {"f": 5, "x": 3, "n": 3, "total": 11},
+            "latest_by_run": {"f": 2, "x": 1, "n": 1, "total": 4},
+            "gaps": 0,
+            "complete_from": 1,
+            "viewer_tabs": 999,
+        })
+        .to_string();
+        assert!(!state.pipe(settlement_pipe(unknown_field)));
+        assert_eq!(state.settlement_history, baseline);
+        assert!(state.settlement_feed_degraded);
+
+        // A canonical replay proves that the accepted lower bound is current
+        // again and restores exact rendering.
+        assert!(state.pipe(settlement_pipe(accepted)));
+        assert!(!state.settlement_feed_degraded);
+    }
+
+    #[test]
+    fn needs_attention_viewer_tab_and_finalized_latest_do_not_change_history_count() {
+        let snapshot =
+            SettlementHistory::parse(&settlement_payload(681, (97, 176, 408), (1, 0, 0)))
+                .expect("valid settlement history");
+        let rows = session_rail_rows_with_truth(
+            &[session("alpha", true), bucket_session("Needs attention", 1)],
+            Some(&snapshot),
+            false,
+        );
+        let needs_attention = rows
+            .iter()
+            .find(|row| {
+                matches!(
+                    row.kind,
+                    SessionRailRowKind::Bucket {
+                        bucket: BucketKind::NeedsAttention,
+                        ..
+                    }
+                )
+            })
+            .expect("needs-attention bucket");
+
+        assert_eq!(
+            needs_attention.text, " n - 408 · Needs attention · t1",
+            "historical n=408 is primary; finalized latest and one viewer tab are not"
+        );
+    }
+
+    #[test]
+    fn viewer_inventory_is_secondary_while_truth_is_unavailable() {
+        let rows = session_rail_rows(&[bucket_session("Finalized runs", 2)]);
+        let finalized = rows
+            .iter()
+            .find(|row| {
+                matches!(
+                    row.kind,
+                    SessionRailRowKind::Bucket {
+                        bucket: BucketKind::Finalized,
+                        ..
+                    }
+                )
+            })
+            .expect("finalized bucket");
+
+        assert_eq!(finalized.text, " f -   ? · Finalized · t2");
+        assert!(
+            !finalized.text.contains(" f -   2 "),
+            "viewer inventory must never masquerade as settlement truth"
+        );
+    }
+
     #[test]
     fn bucket_names_match_the_triage_contract() {
         // Pinned against zellij-utils/src/run_triage.rs — the reaper creates
@@ -2272,17 +2960,14 @@ mod rail_tests {
     }
 
     #[test]
-    fn bucket_rail_labels_describe_tab_inventory() {
-        assert_eq!(BucketKind::Finalized.rail_label(), "Finalized tabs");
-        assert_eq!(BucketKind::Failed.rail_label(), "Failed tabs");
-        assert_eq!(
-            BucketKind::NeedsAttention.rail_label(),
-            "Needs attention tabs"
-        );
+    fn bucket_rail_labels_describe_settlement_outcomes() {
+        assert_eq!(BucketKind::Finalized.rail_label(), "Finalized");
+        assert_eq!(BucketKind::Failed.rail_label(), "Failed");
+        assert_eq!(BucketKind::NeedsAttention.rail_label(), "Needs attention");
     }
 
     #[test]
-    fn buckets_are_pinned_below_the_working_sessions_with_live_counts() {
+    fn buckets_are_pinned_below_working_sessions_with_secondary_viewer_inventory() {
         let rows = session_rail_rows(&[
             session("alpha", true),
             bucket_session("Finalized runs", 3),
@@ -2293,22 +2978,22 @@ mod rail_tests {
         let text: Vec<&str> = rows.iter().map(|row| row.text.as_str()).collect();
 
         // Drawer order is fixed by RAIL_BUCKETS, not by session creation order.
-        // Counts sit in one aligned column BEFORE the label, so a narrow rail
-        // truncates letters, never the number.
+        // Without canonical truth the primary count is unavailable; mutable
+        // viewer inventory survives only in the explicit tN suffix.
         assert_eq!(
             text,
             vec![
                 "01 * alpha",
                 "02 - beta",
-                " f -  3 · Finalized tabs",
-                " x -  2 · Failed tabs",
-                " n -  1 · Needs attention tabs",
+                " f -   ? · Finalized · t3",
+                " x -   ? · Failed · t2",
+                " n -   ? · Needs attention · t1",
             ]
         );
     }
 
     #[test]
-    fn bucket_counts_ignore_default_layout_chrome_tabs() {
+    fn secondary_viewer_inventory_ignores_default_layout_chrome_tabs() {
         // A bucket session materialized via `attach --create-background` starts
         // with the default-layout chrome ("Start here" + "Shell"). Those tabs
         // are furniture — the drawer must still read zero runs.
@@ -2332,9 +3017,9 @@ mod rail_tests {
         assert_eq!(
             buckets,
             vec![
-                " f -  0 · Finalized tabs",
-                " x -  0 · Failed tabs",
-                " n -  1 · Needs attention tabs",
+                " f -   ? · Finalized · t0",
+                " x -   ? · Failed · t0",
+                " n -   ? · Needs attention · t1",
             ]
         );
     }
@@ -2345,9 +3030,9 @@ mod rail_tests {
         let buckets: Vec<&SessionRailRow> = rows.iter().filter(|row| row.is_bucket()).collect();
 
         assert_eq!(buckets.len(), 3);
-        assert_eq!(buckets[0].text, " f -  0 · Finalized tabs");
-        assert_eq!(buckets[1].text, " x -  0 · Failed tabs");
-        assert_eq!(buckets[2].text, " n -  0 · Needs attention tabs");
+        assert_eq!(buckets[0].text, " f -   ? · Finalized · t0");
+        assert_eq!(buckets[1].text, " x -   ? · Failed · t0");
+        assert_eq!(buckets[2].text, " n -   ? · Needs attention · t0");
         assert!(matches!(
             buckets[0].kind,
             SessionRailRowKind::Bucket {
@@ -2449,28 +3134,32 @@ mod rail_tests {
     }
 
     #[test]
-    fn bucket_rail_lines_keep_the_tabs_suffix_when_truncated() {
+    fn bucket_rail_lines_keep_secondary_viewer_suffix_when_truncated() {
         // Wide enough: untouched, padded like any rail line.
         assert_eq!(
-            fit_bucket_rail_line(" n -  1 · Needs attention tabs", 32),
-            " n -  1 · Needs attention tabs  "
+            fit_bucket_rail_line(" n - 408 · Needs attention · t12", 34),
+            " n - 408 · Needs attention · t12  "
         );
-        // Narrow: the label loses letters, " tabs" survives at the rail edge —
-        // the three drawers keep one aligned "tabs" column.
+        // Narrow: the label loses letters, explicit viewer telemetry survives.
         assert_eq!(
-            fit_bucket_rail_line(" n -  1 · Needs attention tabs", 23),
-            " n -  1 · Needs at tabs"
+            fit_bucket_rail_line(" n - 408 · Needs attention · t12", 24),
+            " n - 408 · Needs a · t12"
         );
-        // Shorter drawers at the same width pad instead of truncating; their
-        // natural end sits left of the edge, only overlong rows get squeezed.
+        // Shorter drawers at the same width pad instead of truncating.
         assert_eq!(
-            fit_bucket_rail_line(" x -  2 · Failed tabs", 23),
-            " x -  2 · Failed tabs  "
+            fit_bucket_rail_line(" x - 176 · Failed · t2", 24),
+            " x - 176 · Failed · t2  "
         );
         // Degenerate width: falls back to plain clipping, no suffix games.
         assert_eq!(
-            fit_bucket_rail_line(" n -  1 · Needs attention tabs", 4),
+            fit_bucket_rail_line(" n - 408 · Needs attention · t12", 4),
             " n -"
+        );
+        let huge = fit_bucket_rail_line(" f - 18446744073709551615 · Finalized · t0", 24);
+        assert_eq!(huge.trim_end(), " f - …");
+        assert!(
+            !huge.chars().any(|character| character.is_ascii_digit()),
+            "an overflowing count must be omitted, never clipped into a smaller exact number"
         );
         // Non-bucket text is untouched by the suffix rule.
         assert_eq!(fit_bucket_rail_line("01 * alpha", 6), "01 * a");
@@ -2683,13 +3372,13 @@ mod rail_tests {
     #[test]
     fn bucket_and_session_status_share_accent_column_index_3() {
         // Session: "01 * alpha" — status `*` at byte index 3.
-        // Bucket:  " f - Finalized tabs · 0" — status `-` at byte index 3.
+        // Bucket:  " f -  97 · Finalized · t0" — status `-` at byte index 3.
         let session_text = session_rail_rows(&[session("alpha", true)])
             .into_iter()
             .find(|r| matches!(r.kind, SessionRailRowKind::Session(_)))
             .unwrap()
             .text;
-        let bucket_text = format_bucket_rail_entry(BucketKind::Finalized, 0, false);
+        let bucket_text = format_bucket_rail_entry(BucketKind::Finalized, Some(97), true, 0, false);
         assert_eq!(
             session_text.as_bytes().get(3),
             Some(&b'*'),

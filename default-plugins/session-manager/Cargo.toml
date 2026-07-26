@@ -12,3 +12,5 @@ fuzzy-matcher = "0.3.7"
 unicode-width = "0.1.10"
 humantime = "2.1.0"
 uuid = { version = "1.7.0", features = ["v4"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
