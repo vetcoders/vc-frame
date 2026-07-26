@@ -26,6 +26,7 @@ const ZELLIJ_CONFIG_PATH: &str = "/usr/src/zellij/fixtures/configs";
 const ZELLIJ_CONFIG_DIRS_PATH: &str = "/usr/src/zellij/fixtures/config-dirs";
 const ZELLIJ_DATA_DIR: &str = "/usr/src/zellij/e2e-data";
 const ZELLIJ_FIXTURE_PATH: &str = "/usr/src/zellij/fixtures";
+const E2E_DEFAULT_LAYOUT: &str = "/usr/src/zellij/fixtures/e2e-default.kdl";
 const CONNECTION_STRING: &str = "127.0.0.1:2222";
 const CONNECTION_USERNAME: &str = "test";
 const CONNECTION_PASSWORD: &str = "test";
@@ -105,8 +106,12 @@ fn start_zellij(channel: &mut ssh2::Channel) {
     channel
         .write_all(
             format!(
-                "{} {} --session {} --data-dir {} options --show-release-notes false --show-startup-tips false\n",
-                SET_ENV_VARIABLES, ZELLIJ_EXECUTABLE_LOCATION, SESSION_NAME, ZELLIJ_DATA_DIR
+                "{} {} --session {} --data-dir {} --new-session-with-layout {} options --show-release-notes false --show-startup-tips false\n",
+                SET_ENV_VARIABLES,
+                ZELLIJ_EXECUTABLE_LOCATION,
+                SESSION_NAME,
+                ZELLIJ_DATA_DIR,
+                E2E_DEFAULT_LAYOUT
             )
             .as_bytes(),
         )
@@ -1096,5 +1101,18 @@ mod cleanup_contract_tests {
         assert_eq!(E2E_RUNTIME_ROOT, "/tmp/vc-frame-e2e");
         assert!(E2E_SOCKET_DIR.starts_with(&format!("{E2E_RUNTIME_ROOT}/")));
         assert!(E2E_CACHE_DIR.starts_with(&format!("{E2E_RUNTIME_ROOT}/")));
+    }
+
+    #[test]
+    fn default_runner_pins_the_legacy_e2e_layout() {
+        let layout = include_str!("../fixtures/e2e-default.kdl");
+
+        assert_eq!(
+            E2E_DEFAULT_LAYOUT,
+            "/usr/src/zellij/fixtures/e2e-default.kdl"
+        );
+        assert!(layout.contains("plugin location=\"tab-bar\""));
+        assert!(layout.contains("plugin location=\"status-bar\""));
+        assert!(!layout.contains("session-manager"));
     }
 }

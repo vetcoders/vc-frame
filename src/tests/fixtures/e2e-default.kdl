@@ -1,0 +1,11 @@
+// The legacy E2E snapshots and cursor predicates assume one full-width terminal pane.
+// Keep this fixture stable when the product's default layout evolves.
+layout {
+    pane size=1 borderless=true {
+        plugin location="tab-bar"
+    }
+    pane
+    pane size=1 borderless=true {
+        plugin location="status-bar"
+    }
+}
