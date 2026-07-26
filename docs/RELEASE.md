@@ -17,7 +17,7 @@ critical path.
 | Ownership | One source repo and one GitHub Release | Suite orchestrates crates, thin repos, npm, bundles and taps | One source repo and one GitHub Release |
 | Trigger | Version tag or manual draft | Several manual/tag workflows and downstream releases | Version tag or manual candidate draft |
 | Platform builds | One normal/no-web matrix | Several matrices across binary, package and bundle channels | One normal/no-web matrix |
-| Trust | Checksums; limited signing policy | GPG sidecars, Apple signing/notarization, cross-channel gates | SHA256 plus mandatory GPG for Unix archives; no unsigned publish |
+| Trust | Checksums; limited signing policy | GPG sidecars, Apple signing/notarization, cross-channel gates | SHA256, mandatory GPG for Unix archives, and GitHub OIDC provenance for every archive/MSI |
 | Atomicity | Release is assembled directly | Cascade is powerful but has more partial-failure boundaries | Draft first, publish only after every required asset exists |
 | Installer | Release assets are primary | Multiple package/install channels | Versionless `install.sh` asset points to the tagged assets |
 | Complexity | Low | High, justified by a product suite | Low until vc-frame has real downstream channels |
@@ -35,6 +35,7 @@ Every supported target publishes a full build and a `no-web` build:
 - an archive-level `.sha256` sidecar
 - a detached `.sig` for every Unix archive
 - Windows MSI installers and checksum sidecars
+- a GitHub OIDC build attestation for every archive and MSI
 
 The release also contains:
 
@@ -44,6 +45,11 @@ The release also contains:
 
 Supported targets are x86_64/aarch64 Linux musl, x86_64/aarch64 macOS, and
 x86_64 Windows MSVC.
+
+Attestations live in GitHub's attestation store rather than as mutable release
+sidecars. The final workflow downloads every publishable archive/MSI and runs
+`gh attestation verify` against `vetcoders/vc-frame` before a tag-triggered
+draft can become public.
 
 ## Trust root
 
@@ -58,6 +64,11 @@ missing. `tools/install.sh` defaults to strict GPG verification and also
 requires a pinned `VCFRAME_GPG_FINGERPRINT`; downloading a key and signature
 from the same untrusted location is not treated as proof of identity.
 
+GPG and OIDC have different jobs. GPG gives users a stable, offline-compatible
+VetCoders trust root. GitHub OIDC gives each CI build a short-lived identity
+bound to this repository and workflow, with no long-lived attestation token.
+Both are required by the release workflow.
+
 The operator vault's `vibecrafted-signing.key/.pub` pair is RSA/PEM, not GPG,
 so it cannot be dropped into this contract without changing the signature
 format and installer. Loctree's release path can use a GPG identity already in
@@ -71,7 +82,8 @@ Before the first public release:
 1. Configure the three repository secrets.
 2. Record the selected public key fingerprint as the installer's default or
    require callers to pass `VCFRAME_GPG_FINGERPRINT`.
-3. Run the candidate workflow and prove the signed installer path.
+3. Run the candidate workflow and prove both the signed installer path and all
+   12 GitHub attestations.
 
 ## Candidate release
 
@@ -81,8 +93,8 @@ Run **Actions → Release → Run workflow**. The workflow:
 2. requires signing inputs;
 3. runs `make semgrep` and `make ci`;
 4. creates draft `candidate-<run-id>`;
-5. builds and signs the full matrix;
-6. verifies the complete asset list;
+5. builds, signs, and OIDC-attests the full matrix;
+6. verifies the complete asset list and every attestation;
 7. leaves the candidate as a draft.
 
 Candidate runs never become `latest` and never publish a production release.
@@ -195,7 +207,13 @@ guessed name can only agree with the release by luck, and luck is not
 provenance.
 
 The candidate and final release must additionally prove strict GPG
-verification against the selected pinned fingerprint.
+verification against the selected pinned fingerprint. A downloaded subject can
+also be checked independently with:
+
+```sh
+gh attestation verify vc-frame-<target>.tar.gz \
+  --repo vetcoders/vc-frame
+```
 
 ## Rollback
 

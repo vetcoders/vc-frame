@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -73,6 +73,8 @@ jobs:
   create-release:
     needs: verify-release
     runs-on: [self-hosted, ops-linux]
+    permissions:
+      contents: write
     outputs:
       upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
@@ -102,6 +104,10 @@ jobs:
     needs: create-release
     name: build-release-normal
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     env:
       RUST_BACKTRACE: 1
       # Immutable provenance from the outer layer: every matrix runner embeds
@@ -140,6 +146,7 @@ jobs:
     steps:
       - name: Set release tag (Unix)
         if: runner.os != 'Windows'
+        shell: bash
         run: |
           if [ "$GITHUB_EVENT_NAME" == 'workflow_dispatch' ]; then
             echo "RELEASE_TAG=candidate-${GITHUB_RUN_ID}" >> "$GITHUB_ENV"
@@ -149,6 +156,7 @@ jobs:
 
       - name: Set release tag (Windows)
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
           if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
             echo "RELEASE_TAG=candidate-$env:GITHUB_RUN_ID" >> $env:GITHUB_ENV
@@ -172,6 +180,7 @@ jobs:
 
       - name: Install musl-tools
         if: contains(matrix.runner, 'ops-linux')
+        shell: bash
         run: sudo apt-get install -y --no-install-recommends musl-tools
 
       - name: Install Rust
@@ -187,10 +196,12 @@ jobs:
 
       - name: Build release binary (cross-compiled)
         if: matrix.build != 'windows x64'
+        shell: bash
         run: cargo xtask ci cross ${{ matrix.target }}
 
       - name: Build release binary (Windows native)
         if: matrix.build == 'windows x64'
+        shell: pwsh
         env:
           RUSTFLAGS: "-C target-feature=+crt-static"
         run: cargo xtask ci build-release
@@ -198,6 +209,7 @@ jobs:
       - name: Create artifact (Unix)
         if: runner.os != 'Windows'
         id: make-artifact-unix
+        shell: bash
         run: |
           asset_name="vc-frame-${{ matrix.target }}.tar.gz"
           tar cvzf "${asset_name}" -C "target/${{ matrix.target }}/release" vc-frame
@@ -206,6 +218,7 @@ jobs:
       - name: Create artifact (Windows)
         if: runner.os == 'Windows'
         id: make-artifact-windows
+        shell: pwsh
         run: |
           $asset_name = "vc-frame-${{ matrix.target }}.zip"
           Compress-Archive -Path "target/release/vc-frame.exe" -DestinationPath $asset_name
@@ -216,6 +229,7 @@ jobs:
       - name: Create checksum (Unix)
         if: runner.os != 'Windows'
         id: make-checksum-unix
+        shell: bash
         run: |
           asset_name="${{ steps.make-artifact-unix.outputs.asset_name }}"
           checksum_name="${asset_name}.sha256"
@@ -229,6 +243,7 @@ jobs:
       - name: Create checksum (Windows)
         if: runner.os == 'Windows'
         id: make-checksum-windows
+        shell: pwsh
         run: |
           $asset_name = "${{ steps.make-artifact-windows.outputs.asset_name }}"
           $checksum_name = "$asset_name.sha256"
@@ -243,6 +258,7 @@ jobs:
       - name: Import GPG signing key
         id: gpg
         if: runner.os != 'Windows'
+        shell: bash
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
         run: |
@@ -256,14 +272,23 @@ jobs:
       - name: Sign artifact (Unix)
         id: sign-unix
         if: runner.os != 'Windows' && steps.gpg.outputs.signing_enabled == 'true'
+        shell: bash
         env:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           asset_name="${{ steps.make-artifact-unix.outputs.asset_name }}"
-          gpg --batch --yes --pinentry-mode loopback \
-            ${GPG_PASSPHRASE:+--passphrase "$GPG_PASSPHRASE"} \
+          gpg_args=(--batch --yes --pinentry-mode loopback)
+          if [ -n "${GPG_PASSPHRASE:-}" ]; then
+            gpg_args+=(--passphrase "$GPG_PASSPHRASE")
+          fi
+          gpg "${gpg_args[@]}" \
             --detach-sign --output "${asset_name}.sig" "${asset_name}"
           echo "sig_name=${asset_name}.sig" >> "$GITHUB_OUTPUT"
+
+      - name: Attest release archive
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-path: ${{ steps.make-artifact-unix.outputs.asset_name || steps.make-artifact-windows.outputs.asset_name }}
 
       - name: Upload release archive
         uses: actions/upload-release-asset@e8f9f06c4b078e705bd2ea027f0926603fc9b4d5 # v1.0.2
@@ -299,14 +324,17 @@ jobs:
       # ===== Windows MSI installer =====
       - name: Install WiX v6
         if: runner.os == 'Windows'
+        shell: pwsh
         run: dotnet tool install --global wix --version 6.0.2
 
       - name: Add WiX UI extension
         if: runner.os == 'Windows'
+        shell: pwsh
         run: wix extension add WixToolset.UI.wixext/6.0.2
 
       - name: Build MSI installer
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
           $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
           New-Item -ItemType Directory -Force -Path target\wix
@@ -319,11 +347,18 @@ jobs:
       - name: Create MSI checksum
         if: runner.os == 'Windows'
         id: make-checksum-msi
+        shell: pwsh
         run: |
           $checksum_name = "vc-frame-${{ matrix.target }}-installer.msi.sha256"
           $hash = (Get-FileHash "target\wix\vc-frame-${{ matrix.target }}-installer.msi" -Algorithm SHA256).Hash.ToLower()
           "$hash  vc-frame-${{ matrix.target }}-installer.msi" | Out-File -Encoding ascii $checksum_name
           echo "checksum_name=$checksum_name" >> $env:GITHUB_OUTPUT
+
+      - name: Attest MSI installer
+        if: runner.os == 'Windows'
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-path: target\wix\vc-frame-${{ matrix.target }}-installer.msi
 
       - name: Upload MSI installer
         if: runner.os == 'Windows'
@@ -351,6 +386,10 @@ jobs:
     needs: create-release
     name: build-release-noweb
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     env:
       RUST_BACKTRACE: 1
       VC_FRAME_GIT_SHA: ${{ github.sha }}
@@ -387,6 +426,7 @@ jobs:
     steps:
       - name: Set release tag (Unix)
         if: runner.os != 'Windows'
+        shell: bash
         run: |
           if [ "$GITHUB_EVENT_NAME" == 'workflow_dispatch' ]; then
             echo "RELEASE_TAG=candidate-${GITHUB_RUN_ID}" >> "$GITHUB_ENV"
@@ -396,6 +436,7 @@ jobs:
 
       - name: Set release tag (Windows)
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
           if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
             echo "RELEASE_TAG=candidate-$env:GITHUB_RUN_ID" >> $env:GITHUB_ENV
@@ -419,6 +460,7 @@ jobs:
 
       - name: Install musl-tools
         if: contains(matrix.runner, 'ops-linux')
+        shell: bash
         run: sudo apt-get install -y --no-install-recommends musl-tools
 
       - name: Install Rust
@@ -434,10 +476,12 @@ jobs:
 
       - name: Build release binary (cross-compiled, no-web)
         if: matrix.build != 'windows x64'
+        shell: bash
         run: cargo xtask ci cross ${{ matrix.target }} --no-web
 
       - name: Build release binary (Windows native, no-web)
         if: matrix.build == 'windows x64'
+        shell: pwsh
         env:
           RUSTFLAGS: "-C target-feature=+crt-static"
         run: cargo xtask ci build-release --no-web
@@ -445,6 +489,7 @@ jobs:
       - name: Create artifact (Unix)
         if: runner.os != 'Windows'
         id: make-artifact-unix
+        shell: bash
         run: |
           asset_name="vc-frame-no-web-${{ matrix.target }}.tar.gz"
           tar cvzf "${asset_name}" -C "target/${{ matrix.target }}/release" vc-frame
@@ -453,6 +498,7 @@ jobs:
       - name: Create artifact (Windows)
         if: runner.os == 'Windows'
         id: make-artifact-windows
+        shell: pwsh
         run: |
           $asset_name = "vc-frame-no-web-${{ matrix.target }}.zip"
           Compress-Archive -Path "target/release/vc-frame.exe" -DestinationPath $asset_name
@@ -461,6 +507,7 @@ jobs:
       - name: Create checksum (Unix)
         if: runner.os != 'Windows'
         id: make-checksum-unix
+        shell: bash
         run: |
           asset_name="${{ steps.make-artifact-unix.outputs.asset_name }}"
           checksum_name="${asset_name}.sha256"
@@ -474,6 +521,7 @@ jobs:
       - name: Create checksum (Windows)
         if: runner.os == 'Windows'
         id: make-checksum-windows
+        shell: pwsh
         run: |
           $asset_name = "${{ steps.make-artifact-windows.outputs.asset_name }}"
           $checksum_name = "$asset_name.sha256"
@@ -484,6 +532,7 @@ jobs:
       - name: Import GPG signing key
         id: gpg
         if: runner.os != 'Windows'
+        shell: bash
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
         run: |
@@ -497,14 +546,23 @@ jobs:
       - name: Sign artifact (Unix)
         id: sign-unix
         if: runner.os != 'Windows'
+        shell: bash
         env:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           asset_name="${{ steps.make-artifact-unix.outputs.asset_name }}"
-          gpg --batch --yes --pinentry-mode loopback \
-            ${GPG_PASSPHRASE:+--passphrase "$GPG_PASSPHRASE"} \
+          gpg_args=(--batch --yes --pinentry-mode loopback)
+          if [ -n "${GPG_PASSPHRASE:-}" ]; then
+            gpg_args+=(--passphrase "$GPG_PASSPHRASE")
+          fi
+          gpg "${gpg_args[@]}" \
             --detach-sign --output "${asset_name}.sig" "${asset_name}"
           echo "sig_name=${asset_name}.sig" >> "$GITHUB_OUTPUT"
+
+      - name: Attest release archive
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-path: ${{ steps.make-artifact-unix.outputs.asset_name || steps.make-artifact-windows.outputs.asset_name }}
 
       - name: Upload release archive
         uses: actions/upload-release-asset@e8f9f06c4b078e705bd2ea027f0926603fc9b4d5 # v1.0.2
@@ -540,14 +598,17 @@ jobs:
       # ===== Windows MSI installer (no-web) =====
       - name: Install WiX v6
         if: runner.os == 'Windows'
+        shell: pwsh
         run: dotnet tool install --global wix --version 6.0.2
 
       - name: Add WiX UI extension
         if: runner.os == 'Windows'
+        shell: pwsh
         run: wix extension add WixToolset.UI.wixext/6.0.2
 
       - name: Build MSI installer (no-web)
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
           $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
           New-Item -ItemType Directory -Force -Path target\wix
@@ -560,11 +621,18 @@ jobs:
       - name: Create MSI checksum (no-web)
         if: runner.os == 'Windows'
         id: make-checksum-msi
+        shell: pwsh
         run: |
           $checksum_name = "vc-frame-no-web-${{ matrix.target }}-installer.sha256sum"
           $hash = (Get-FileHash "target\wix\vc-frame-no-web-${{ matrix.target }}-installer.msi" -Algorithm SHA256).Hash.ToLower()
           "$hash  vc-frame-no-web-${{ matrix.target }}-installer.msi" | Out-File -Encoding ascii $checksum_name
           echo "checksum_name=$checksum_name" >> $env:GITHUB_OUTPUT
+
+      - name: Attest MSI installer (no-web)
+        if: runner.os == 'Windows'
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-path: target\wix\vc-frame-no-web-${{ matrix.target }}-installer.msi
 
       - name: Upload MSI installer (no-web)
         if: runner.os == 'Windows'
@@ -604,6 +672,8 @@ jobs:
     needs: [create-release, build-release-normal, build-release-noweb]
     name: publish-manifest
     runs-on: [self-hosted, ops-linux]
+    permissions:
+      contents: write
     steps:
       - name: Set release tag
         run: |
@@ -685,6 +755,9 @@ jobs:
     needs: [build-release-normal, build-release-noweb, publish-manifest]
     name: verify-assets-and-publish
     runs-on: [self-hosted, ops-linux]
+    permissions:
+      contents: write
+      attestations: read
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -740,8 +813,39 @@ jobs:
             }
           done
 
+      - name: Verify GitHub OIDC attestations
+        shell: bash
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            tag="candidate-${GITHUB_RUN_ID}"
+          else
+            tag="${GITHUB_REF#refs/tags/}"
+          fi
+          attestation_dir="$(mktemp -d)"
+          trap 'rm -rf "$attestation_dir"' EXIT
+          gh release download "$tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$attestation_dir" \
+            --pattern 'vc-frame-*.tar.gz' \
+            --pattern 'vc-frame-*.zip' \
+            --pattern 'vc-frame-*.msi'
+          shopt -s nullglob
+          subjects=(
+            "$attestation_dir"/*.tar.gz
+            "$attestation_dir"/*.zip
+            "$attestation_dir"/*.msi
+          )
+          if [ "${#subjects[@]}" -ne 12 ]; then
+            echo "expected 12 attested release subjects, found ${#subjects[@]}" >&2
+            exit 1
+          fi
+          for subject in "${subjects[@]}"; do
+            gh attestation verify "$subject" --repo "$GITHUB_REPOSITORY"
+          done
+
       - name: Publish verified draft
         if: github.event_name == 'push'
+        shell: bash
         run: |
           tag="${GITHUB_REF#refs/tags/}"
           gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest

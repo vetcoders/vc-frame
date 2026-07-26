@@ -1,0 +1,9 @@
+self-hosted-runner:
+  labels:
+    - ops-linux
+    - dragon-macos
+
+paths:
+  .github/workflows/release.yml:
+    ignore:
+      - 'shellcheck reported issue in this script: SC2016:'
