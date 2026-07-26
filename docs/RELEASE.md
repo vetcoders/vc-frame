@@ -107,6 +107,10 @@ Run **Actions → Release → Run workflow**. The workflow:
 7. leaves the candidate as a draft.
 
 Candidate runs never become `latest` and never publish a production release.
+They deliberately do **not** call the local `release-preflight`: a manual
+`workflow_dispatch` candidate runs from GitHub's selected checkout and remains
+valid without a local `main` branch. The workflow owns the equivalent
+candidate-safe provenance and quality checks.
 
 ## Real release
 
@@ -115,19 +119,42 @@ Only cut a tag from the reviewed commit on `main`:
 ```sh
 git switch main
 git pull --ff-only origin main
-make release-check
+make release-preflight
 make release-tag
 make release-push
 ```
 
-`make release-tag` derives `vX.Y.Z` from `[workspace.package].version`, requires
-the full VetCoders primary fingerprint pinned in `tools/install.sh`, locates
-the matching signing-capable secret key under the selected GPG home, creates an
-annotated signed tag, and verifies it locally before `make release-push` may
-publish it. The workflow independently rejects lightweight tags, invalid or
-foreign signatures, tag/commit mismatches, and commits outside `origin/main`.
-It then creates a draft, uploads all assets, checks the contract through the
-GitHub API, and publishes only after all jobs succeed.
+`make release-preflight` is the canonical local production gate;
+`make release-check` is an exact alias. It fails before expensive work unless
+the complete checkout is clean, the current branch is `main`, and `HEAD`
+exactly equals freshly fetched `origin/main`. It then verifies version,
+installer, changelog, release-contract and bundled-plugin parity, runs Semgrep,
+`make ci`, the real triage runtime E2E, and the installer rejection matrix,
+then repeats the clean-main provenance check after the quality cone.
+
+`make release-tag` has the PHONY preflight as a hard prerequisite, so it always
+reruns that complete gate. It derives `vX.Y.Z` from
+`[workspace.package].version`, requires the full VetCoders primary fingerprint
+pinned in `tools/install.sh`, locates the matching signing-capable secret key
+under the selected GPG home, creates an annotated OpenPGP tag, and verifies its
+exact object, direct `HEAD` target, embedded tag name, signature, and primary
+fingerprint.
+
+`make release-push` trusts neither the prior command nor a mutable local tag
+name. Immediately before its only network write it re-fetches and requires a
+clean `main == origin/main`, re-verifies the expected annotated tag, direct
+current-`HEAD` target, and pinned primary fingerprint, and refuses any tag
+already present on `origin`. It then pushes the exact verified tag object ID
+without force. Lightweight, foreign-signed, stale-target, renamed, rewritten,
+and already-published tags all fail closed.
+
+`make release-contract-test` falsifies those bypasses in an isolated temporary
+repository with a local bare `origin` and disposable real GPG keys. It never
+creates or pushes a public tag.
+
+The workflow independently repeats tag trust checks. It then creates a draft,
+uploads all assets, checks the contract through the GitHub API, and publishes
+only after all jobs succeed.
 
 The canonical cold install is:
 

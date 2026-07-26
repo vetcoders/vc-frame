@@ -21,7 +21,7 @@
         triage-runtime-e2e-static triage-runtime-e2e \
         version version-show version-check version-bump version-patch bump-patch \
         changelog-close release-notes release-plan release-prepare release-check \
-        release-tag release-push
+        release-preflight release-tag release-push
 
 # ──────────────────────────────────────────────────────────
 # Toolchain resolution.
@@ -283,7 +283,8 @@ semgrep:
 #   make version                              # bare = check (sync surfaces)
 #   make version TYPE=patch|minor|major|x.y.z # bump (also VERSION=)
 #   make release-prepare TYPE=patch           # bump + changelog + precheck
-#   make release-check                        # strict readiness before tag
+#   make release-preflight                    # canonical production tag gate
+#   make release-check                        # alias of release-preflight
 #   make release-plan                         # printed operator flow
 #   make release                              # still = cargo release build
 #                                             # (see release-build alias)
@@ -347,9 +348,10 @@ release-plan:
 	@echo "   (or VERSION=… — same thing)"
 	@echo "   → version-bump + changelog-close + notes preview + precheck"
 	@echo "3. Review diff, commit Cargo.toml + Cargo.lock + tools/install.sh + CHANGELOG.md."
-	@echo "4. make release-check"
-	@echo "5. make release-tag           # requires pinned release GPG key"
-	@echo "6. make release-push          # push verified signed tag"
+	@echo "4. make release-preflight     # canonical fail-closed production gate"
+	@echo "   (make release-check is an exact alias)"
+	@echo "5. make release-tag           # reruns preflight; requires pinned GPG key"
+	@echo "6. make release-push          # re-verifies ref, signature, target, remote"
 	@echo "7. Wait for GitHub Actions / draft release from the tag."
 	@echo "8. Optional local archive: make package   # needs clean worktree"
 	@echo ""
@@ -362,16 +364,16 @@ ifeq ($(origin VERSION),command line)
 	@$(MAKE) changelog-close CHANGELOG_GENERATE=1
 	@cargo update --workspace --offline
 	@$(MAKE) version-check
-	@mkdir -p dist
-	@$(PYTHON) tools/release_sync.py notes --output dist/release-notes.md
+	@mkdir -p target/dist
+	@$(PYTHON) tools/release_sync.py notes --output target/dist/release-notes.md
 	@$(MAKE) precheck
 	@echo ""
 	@echo "=== Release prepared ==="
 	@echo "Next: review diff, commit, then:"
-	@echo "  make release-check"
+	@echo "  make release-preflight"
 	@echo "  make release-tag"
 	@echo "  make release-push"
-	@echo "  cat dist/release-notes.md"
+	@echo "  cat target/dist/release-notes.md"
 else ifneq ($(TYPE),)
 	@$(MAKE) release-prepare VERSION=$(TYPE)
 else
@@ -380,86 +382,34 @@ else
 	@exit 1
 endif
 
-release-check:
+# Canonical local production release gate. Keep the ref/provenance checks both
+# before and after the quality cone so a gate cannot silently dirty the source
+# represented by the tag. The manual candidate workflow deliberately owns its
+# own GitHub checkout verification and does not require a local main branch.
+release-preflight:
+	@./scripts/release-provenance.zsh preflight
 	@$(PYTHON) tools/release_sync.py check --require-version-section
 	@$(MAKE) release-contract-test
 	@$(MAKE) plugins-parity
-	@$(MAKE) check
-	@echo "Release readiness passed."
+	@$(MAKE) semgrep
+	@$(MAKE) ci
+	@$(CARGO) build --bin vc-frame
+	@$(MAKE) triage-runtime-e2e
+	@$(MAKE) install-test
+	@./scripts/release-provenance.zsh preflight
+	@echo "Canonical release preflight passed."
 
-release-tag:
-	@set -eu; \
-	if git rev-parse --verify "refs/tags/$(TAG)" >/dev/null 2>&1; then \
-		echo "Tag $(TAG) already exists."; \
-		exit 1; \
-	fi; \
-	command -v gpg >/dev/null 2>&1 || { \
-		echo "ERROR: gpg is required to create release tags" >&2; \
-		exit 1; \
-	}; \
-	pinned_fingerprint="$$(sed -n 's/^DEFAULT_GPG_FINGERPRINT="\([A-Fa-f0-9]*\)"/\1/p' tools/install.sh)"; \
-	fingerprint="$$(printf '%s' "$$pinned_fingerprint" | tr '[:lower:]' '[:upper:]')"; \
-	test -n "$$fingerprint" || { \
-		echo "ERROR: tools/install.sh has no pinned DEFAULT_GPG_FINGERPRINT" >&2; \
-		echo "Provision the VetCoders release key, pin its full fingerprint, then retry." >&2; \
-		exit 1; \
-	}; \
-	case "$$fingerprint" in *[!A-F0-9]*) \
-		echo "ERROR: pinned release fingerprint is not hexadecimal" >&2; exit 1 ;; \
-	esac; \
-	case "$${#fingerprint}" in 40|64) ;; *) \
-		echo "ERROR: pinned release fingerprint must be a full 40- or 64-hex fingerprint" >&2; exit 1 ;; \
-	esac; \
-	gpg_home="$${VCFRAME_GPG_HOMEDIR:-}"; \
-	if [ -z "$$gpg_home" ]; then \
-		for candidate in \
-			"$(RELEASE_KEYS_DIR)/vc-frame-gnupg" \
-			"$(RELEASE_KEYS_DIR)/vetcoders-gnupg"; do \
-			if [ -d "$$candidate" ]; then \
-				test -z "$$gpg_home" || { \
-					echo "ERROR: multiple release GPG homes found under $(RELEASE_KEYS_DIR)" >&2; \
-					exit 1; \
-				}; \
-				gpg_home="$$candidate"; \
-			fi; \
-		done; \
-	fi; \
-	if [ -n "$$gpg_home" ]; then \
-		test -d "$$gpg_home" || { echo "ERROR: VCFRAME_GPG_HOMEDIR is not a directory" >&2; exit 1; }; \
-		key_listing="$$(GNUPGHOME="$$gpg_home" gpg --batch --with-colons --list-secret-keys "$$fingerprint" 2>/dev/null || true)"; \
-	else \
-		key_listing="$$(gpg --batch --with-colons --list-secret-keys "$$fingerprint" 2>/dev/null || true)"; \
-	fi; \
-	actual_fingerprint="$$(printf '%s\n' "$$key_listing" | awk -F: '$$1 == "sec" {want=1; next} want && $$1 == "fpr" {print toupper($$10); exit}')"; \
-	capabilities="$$(printf '%s\n' "$$key_listing" | awk -F: '$$1 == "sec" || $$1 == "ssb" {caps = caps $$12} END {print caps}')"; \
-	test "$$actual_fingerprint" = "$$fingerprint" || { \
-		echo "ERROR: secret key for the pinned release fingerprint is unavailable" >&2; \
-		echo "Checked the selected GPG home and $(RELEASE_KEYS_DIR)/{vc-frame,vetcoders}-gnupg." >&2; \
-		exit 1; \
-	}; \
-	case "$$capabilities" in *s*|*S*) ;; *) \
-		echo "ERROR: pinned secret key is not signing-capable" >&2; exit 1 ;; \
-	esac; \
-	if [ -n "$$gpg_home" ]; then \
-		GNUPGHOME="$$gpg_home" git tag -s -u "$$fingerprint" "$(TAG)" -m "Release $(TAG)"; \
-		GNUPGHOME="$$gpg_home" git verify-tag "$(TAG)" >/dev/null 2>&1 || { \
-			git tag -d "$(TAG)" >/dev/null; \
-			echo "ERROR: signed tag verification failed" >&2; \
-			exit 1; \
-		}; \
-	else \
-		git tag -s -u "$$fingerprint" "$(TAG)" -m "Release $(TAG)"; \
-		git verify-tag "$(TAG)" >/dev/null 2>&1 || { \
-			git tag -d "$(TAG)" >/dev/null; \
-			echo "ERROR: signed tag verification failed" >&2; \
-			exit 1; \
-		}; \
-	fi; \
-	echo "Created and verified signed tag $(TAG)"; \
-	echo "Push with: make release-push"
+release-check: release-preflight
+
+# The prerequisite is intentionally PHONY: tag creation always reruns the full
+# gate, even if an operator already invoked release-check in the same checkout.
+release-tag: release-preflight
+	@RELEASE_KEYS_DIR="$(RELEASE_KEYS_DIR)" \
+		./scripts/release-provenance.zsh create-tag "$(TAG)"
 
 release-push:
-	git push origin "$(TAG)"
+	@RELEASE_KEYS_DIR="$(RELEASE_KEYS_DIR)" \
+		./scripts/release-provenance.zsh push-tag "$(TAG)"
 
 # ──────────────────────────────────────────────────────────
 # Housekeeping
@@ -539,9 +489,10 @@ help:
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "version-bump" "Bump VERSION={patch|minor|major|x.y.z} (TYPE= alias ok)"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "release-plan" "Print operator release flow"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "release-prepare" "Bump + changelog-close + notes + precheck (TYPE= required)"
-	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "release-check" "Strict readiness before tag"
-	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "release-tag" "Create + verify GPG-signed tag vX.Y.Z"
-	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "release-push" "Push release tag to origin"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "release-preflight" "Canonical clean-main + full production gate"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "release-check" "Exact alias of release-preflight"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "release-tag" "Rerun preflight; create + verify pinned GPG tag"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "release-push" "Re-verify immutable signed tag, then push exact object"
 	@printf "\n  $(C_YELLOW)RELEASE PROVENANCE$(C_RESET)\n"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "release-guard" "Refuse to package a dirty worktree"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "package" "Guard + release build + archive + receipt"
