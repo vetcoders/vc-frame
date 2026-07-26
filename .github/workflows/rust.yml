@@ -35,10 +35,8 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Install Protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install pinned Protoc
+        uses: ./.github/actions/setup-protoc
 
       - name: Setup toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
@@ -69,10 +67,8 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Install Protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install pinned Protoc
+        uses: ./.github/actions/setup-protoc
 
       - name: Setup toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
@@ -170,10 +166,8 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Install Protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install pinned Protoc
+        uses: ./.github/actions/setup-protoc
 
       - name: Setup toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
@@ -202,10 +196,8 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Install Protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install pinned Protoc
+        uses: ./.github/actions/setup-protoc
 
       - name: Setup toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
@@ -234,10 +226,8 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Install Protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install pinned Protoc
+        uses: ./.github/actions/setup-protoc
 
       - name: Setup toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1

@@ -645,6 +645,38 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn("./scripts/release-provenance.zsh guard", workflow)
         self.assertNotIn("release-preflight", workflow)
 
+    def test_workflows_use_pinned_protoc_without_release_api_discovery(self) -> None:
+        workflows = "\n".join(
+            read(path)
+            for path in (
+                ".github/workflows/e2e.yml",
+                ".github/workflows/release.yml",
+                ".github/workflows/rust.yml",
+            )
+        )
+        action = read(".github/actions/setup-protoc/action.yml")
+
+        self.assertNotIn("arduino/setup-protoc", workflows)
+        self.assertEqual(
+            workflows.count("uses: ./.github/actions/setup-protoc"),
+            8,
+            "every build and test lane must use the same pinned Protoc installer",
+        )
+        self.assertNotIn("api.github.com", action)
+        self.assertNotIn("releases?page=", action)
+        self.assertIn('asset="protoc-${version}-linux-x86_64.zip"', action)
+        self.assertIn('asset="protoc-${version}-osx-aarch_64.zip"', action)
+        self.assertIn("protoc-$Version-win64.zip", action)
+        self.assertIn("--retry 5", action)
+        self.assertEqual(
+            len(re.findall(r'expected_sha256="[0-9a-f]{64}"', action)),
+            4,
+        )
+        self.assertEqual(
+            len(re.findall(r'\$ExpectedSha256 = "[0-9a-f]{64}"', action)),
+            1,
+        )
+
     def test_legacy_e2e_runner_uses_vc_frame_binary(self) -> None:
         runner = read("src/tests/e2e/remote_runner.rs")
         self.assertIn("unknown-linux-musl/release/vc-frame", runner)

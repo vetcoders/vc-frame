@@ -274,10 +274,8 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Install Protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install pinned Protoc
+        uses: ./.github/actions/setup-protoc
 
       - name: Install musl-tools
         if: contains(matrix.runner, 'ops-linux')
@@ -553,10 +551,8 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Install Protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install pinned Protoc
+        uses: ./.github/actions/setup-protoc
 
       - name: Install musl-tools
         if: contains(matrix.runner, 'ops-linux')
