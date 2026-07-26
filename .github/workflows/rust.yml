@@ -135,9 +135,9 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or -not $msysPerlLib) {
             throw "Could not translate $perlLib for MSYS Perl"
           }
-          $env:PERL5LIB = $msysPerlLib
-          & $perl -MLocale::Maketext::Simple -MIPC::Cmd -MPod::Usage -e `
-            'IPC::Cmd::can_run($^X) or die qq(cannot resolve perl\n); print qq(modules=ok\n)'
+          $env:PERL5OPT = "-I$msysPerlLib"
+          & $perl -MLocale::Maketext::Simple -MIPC::Cmd -MPod::Usage `
+            -MExtUtils::MakeMaker -e 'print qq(modules=ok\n)'
           if ($LASTEXITCODE -ne 0) {
             throw "MSYS Perl cannot load the OpenSSL configure modules"
           }
@@ -145,7 +145,7 @@ jobs:
           $buildTools | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "OPENSSL_SRC_PERL=$perl" |
             Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "PERL5LIB=$msysPerlLib" |
+          "PERL5OPT=-I$msysPerlLib" |
             Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Build
