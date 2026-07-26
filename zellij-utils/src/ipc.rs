@@ -483,20 +483,31 @@ pub fn recv_protobuf_server_to_client(
 }
 
 /// Asynchronously send `ClientToServerMsg::KillSession` to the peer at `path`
-/// and wait until the peer's existing shutdown path replies (or its socket
-/// closes). Either of those outcomes confirms the kill landed; the caller
-/// wraps this in `tokio::time::timeout` to bound the wait against a wedged
-/// peer.
+/// and require the exact `Exit { Normal }` acknowledgement. EOF is not an
+/// acknowledgement: a process can accept and close a socket without ever
+/// dispatching the kill.
 ///
-/// On Unix the local socket is bidirectional, so the same async stream is
-/// used for both send and receive. On Windows the named pipe is half-duplex
-/// and the existing sync `ipc_connect` / `ipc_connect_reply` flow is
-/// dispatched onto a blocking task.
+/// On Unix the local socket is bidirectional. On Windows the named pipe is
+/// half-duplex, so its blocking reply read runs on a bounded helper thread.
+fn validate_kill_session_ack(message: ServerToClientMsg) -> io::Result<()> {
+    match message {
+        ServerToClientMsg::Exit {
+            exit_reason: ExitReason::Normal,
+        } => Ok(()),
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unexpected kill-session acknowledgement: {other:?}"),
+        )),
+    }
+}
+
 #[cfg(unix)]
 pub async fn async_send_kill_and_await(path: &std::path::Path) -> io::Result<()> {
     use interprocess::local_socket::traits::tokio::Stream as _;
     use interprocess::local_socket::{GenericFilePath, prelude::*};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const MAX_KILL_ACK_BYTES: usize = 64 * 1024;
 
     let fs_name = path.to_fs_name::<GenericFilePath>()?;
     let mut stream: interprocess::local_socket::tokio::Stream =
@@ -508,37 +519,70 @@ pub async fn async_send_kill_and_await(path: &std::path::Path) -> io::Result<()>
 
     stream.write_all(&len_bytes).await?;
     stream.write_all(&encoded).await?;
-    // Best-effort flush; failing here doesn't mean the kill failed.
-    let _ = stream.flush().await;
+    stream.flush().await?;
 
-    // The peer's shutdown path sends `ServerToClientMsg::Exit { Normal }`
-    // (zellij-server/src/lib.rs ServerInstruction::KillSession) over this
-    // same socket before exiting; if it dies without ACKing, the stream
-    // closes. Either outcome -- a successful 4-byte length-prefix read or a
-    // read error/EOF -- confirms the kill is no longer in flight.
     let mut len_buf = [0u8; 4];
-    let _ = stream.read_exact(&mut len_buf).await;
-    Ok(())
+    stream.read_exact(&mut len_buf).await?;
+    let len = u32::from_le_bytes(len_buf) as usize;
+    if len > MAX_KILL_ACK_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("kill-session acknowledgement is too large: {len} bytes"),
+        ));
+    }
+    let mut encoded_ack = vec![0u8; len];
+    stream.read_exact(&mut encoded_ack).await?;
+    let proto_ack = ProtoServerToClientMsg::decode(encoded_ack.as_slice())
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+    let ack = proto_ack.try_into().map_err(|error: anyhow::Error| {
+        io::Error::new(io::ErrorKind::InvalidData, error.to_string())
+    })?;
+    validate_kill_session_ack(ack)
 }
 
 #[cfg(windows)]
 pub async fn async_send_kill_and_await(path: &std::path::Path) -> io::Result<()> {
+    const WINDOWS_KILL_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
     let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        use crate::consts::{ipc_connect, ipc_connect_reply};
-        let stream = ipc_connect(&path)?;
-        let reply = ipc_connect_reply(&path);
-        let mut sender = IpcSenderWithContext::<ClientToServerMsg>::new(stream);
-        sender
-            .send_client_msg(ClientToServerMsg::KillSession)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-        if let Ok(reply_stream) = reply {
-            let mut receiver: IpcReceiverWithContext<ServerToClientMsg> =
-                IpcReceiverWithContext::new(reply_stream);
-            let _ = receiver.recv_server_msg();
-        }
-        Ok::<(), io::Error>(())
-    })
-    .await
-    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("kill_session_ack".to_owned())
+        .spawn(move || {
+            let result = (|| {
+                use crate::consts::{ipc_connect, ipc_connect_reply};
+                let stream = ipc_connect(&path)?;
+                let reply_stream = ipc_connect_reply(&path)?;
+                let mut sender = IpcSenderWithContext::<ClientToServerMsg>::new(stream);
+                sender
+                    .send_client_msg(ClientToServerMsg::KillSession)
+                    .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?;
+                let mut receiver: IpcReceiverWithContext<ServerToClientMsg> =
+                    IpcReceiverWithContext::new(reply_stream);
+                let (ack, _) = receiver.recv_server_msg().ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "kill-session reply pipe closed without acknowledgement",
+                    )
+                })?;
+                validate_kill_session_ack(ack)
+            })();
+            let _ = result_tx.send(result);
+        })
+        .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?;
+
+    match tokio::time::timeout(WINDOWS_KILL_ACK_TIMEOUT, result_rx).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "kill-session acknowledgement worker exited without a result",
+        )),
+        Err(_) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "kill-session reply pipe was silent for {:.1}s",
+                WINDOWS_KILL_ACK_TIMEOUT.as_secs_f64()
+            ),
+        )),
+    }
 }

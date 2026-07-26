@@ -144,10 +144,8 @@ pub fn get_sessions_sorted_by_mtime() -> anyhow::Result<Vec<String>> {
 /// On Windows, reads the server PID from the marker file and checks process liveness.
 #[cfg(unix)]
 const SESSION_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
-#[cfg(unix)]
 const KILL_SESSION_ACK_TIMEOUT: Duration = Duration::from_secs(6);
 
-#[cfg(unix)]
 async fn await_kill_session_ack(
     path: &std::path::Path,
 ) -> Result<io::Result<()>, tokio::time::error::Elapsed> {
@@ -381,64 +379,33 @@ pub fn get_active_session() -> ActiveSession {
 }
 
 pub fn kill_session(name: &str) {
-    #[cfg(windows)]
-    use crate::consts::ipc_connect;
     let path = &*ZELLIJ_SOCK_DIR.join(name);
-    #[cfg(unix)]
-    {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_io()
-            .enable_time()
-            .build()
-            .unwrap_or_else(|error| {
-                eprintln!("Cannot create shutdown runtime: {error}");
-                process::exit(1);
-            });
-        // Poll the async helper from inside the runtime. Constructing
-        // `tokio::time::timeout` before `block_on` panics because no reactor is
-        // entered yet.
-        let shutdown_result = runtime.block_on(await_kill_session_ack(path));
-        match shutdown_result {
-            Ok(Ok(())) => {},
-            Ok(Err(error)) => {
-                eprintln!("Failed to kill session {name}: {error}");
-                process::exit(1);
-            },
-            Err(_) => {
-                eprintln!(
-                    "Session {name} did not acknowledge shutdown within {:.1}s",
-                    KILL_SESSION_ACK_TIMEOUT.as_secs_f64()
-                );
-                process::exit(1);
-            },
-        }
-    }
-    #[cfg(windows)]
-    match ipc_connect(path) {
-        Ok(stream) => {
-            // On Windows, the server uses a dual-pipe architecture: the main pipe
-            // for client→server and a reply pipe for server→client. We must:
-            // 1. Connect to the reply pipe (so the server unblocks from
-            //    reply_listener.accept() and spawns the route thread)
-            // 2. Send KillSession on the main pipe
-            // 3. Wait for the Exit response on the reply pipe (so we don't
-            //    disconnect before the server processes the message)
-            {
-                let reply = crate::consts::ipc_connect_reply(path);
-                let _ = IpcSenderWithContext::<ClientToServerMsg>::new(stream)
-                    .send_client_msg(ClientToServerMsg::KillSession);
-                if let Ok(reply_stream) = reply {
-                    let mut receiver: IpcReceiverWithContext<ServerToClientMsg> =
-                        IpcReceiverWithContext::new(reply_stream);
-                    let _ = receiver.recv_server_msg();
-                }
-            }
-        },
-        Err(e) => {
-            eprintln!("Error occurred: {:?}", e);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .unwrap_or_else(|error| {
+            eprintln!("Cannot create shutdown runtime: {error}");
+            process::exit(1);
+        });
+    // Poll the async helper from inside the runtime. Constructing
+    // `tokio::time::timeout` before `block_on` panics because no reactor is
+    // entered yet.
+    let shutdown_result = runtime.block_on(await_kill_session_ack(path));
+    match shutdown_result {
+        Ok(Ok(())) => {},
+        Ok(Err(error)) => {
+            eprintln!("Failed to kill session {name}: {error}");
             process::exit(1);
         },
-    };
+        Err(_) => {
+            eprintln!(
+                "Session {name} did not acknowledge shutdown within {:.1}s",
+                KILL_SESSION_ACK_TIMEOUT.as_secs_f64()
+            );
+            process::exit(1);
+        },
+    }
 }
 
 pub fn delete_session(name: &str, force: bool) {

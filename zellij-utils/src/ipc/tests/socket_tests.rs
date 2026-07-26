@@ -1,5 +1,5 @@
 use crate::ipc::{
-    ClientToServerMsg, IpcReceiverWithContext, IpcSenderWithContext, ServerToClientMsg,
+    ClientToServerMsg, ExitReason, IpcReceiverWithContext, IpcSenderWithContext, ServerToClientMsg,
 };
 use crate::pane_size::Size;
 use interprocess::local_socket::{ListenerOptions, prelude::*};
@@ -192,6 +192,118 @@ fn server_to_client_message_over_socket() {
         msg
     );
 
+    server.join().expect("server thread panicked");
+}
+
+#[cfg(unix)]
+#[test]
+fn async_kill_session_requires_normal_exit_ack() {
+    let (_guard, name) = new_ipc();
+    let listener = bind_listener(&name);
+    let server = std::thread::spawn(move || {
+        let stream = listener.incoming().next().unwrap().expect("accept failed");
+        let mut receiver: IpcReceiverWithContext<ClientToServerMsg> =
+            IpcReceiverWithContext::new(stream);
+        let mut sender: IpcSenderWithContext<ServerToClientMsg> = receiver.get_sender();
+        let (message, _) = receiver.recv_client_msg().expect("kill request");
+        assert!(matches!(message, ClientToServerMsg::KillSession));
+        sender
+            .send_server_msg(ServerToClientMsg::Exit {
+                exit_reason: ExitReason::Normal,
+            })
+            .expect("send kill acknowledgement");
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .expect("runtime");
+
+    runtime
+        .block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                super::super::async_send_kill_and_await(&name),
+            )
+            .await
+        })
+        .expect("kill acknowledgement timeout")
+        .expect("valid kill acknowledgement");
+    server.join().expect("server thread panicked");
+}
+
+#[cfg(unix)]
+#[test]
+fn async_kill_session_rejects_accept_then_close_without_ack() {
+    let (_guard, name) = new_ipc();
+    let listener = bind_listener(&name);
+    let server = std::thread::spawn(move || {
+        let stream = listener.incoming().next().unwrap().expect("accept failed");
+        let mut receiver: IpcReceiverWithContext<ClientToServerMsg> =
+            IpcReceiverWithContext::new(stream);
+        let (message, _) = receiver.recv_client_msg().expect("kill request");
+        assert!(matches!(message, ClientToServerMsg::KillSession));
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .expect("runtime");
+
+    let error = runtime
+        .block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                super::super::async_send_kill_and_await(&name),
+            )
+            .await
+        })
+        .expect("transport should close promptly")
+        .expect_err("EOF is not a kill acknowledgement");
+
+    assert!(
+        matches!(
+            error.kind(),
+            io::ErrorKind::UnexpectedEof
+                | io::ErrorKind::ConnectionReset
+                | io::ErrorKind::BrokenPipe
+        ),
+        "unexpected close error: {error:?}"
+    );
+    server.join().expect("server thread panicked");
+}
+
+#[cfg(unix)]
+#[test]
+fn async_kill_session_silent_peer_is_bounded_by_caller() {
+    let (_guard, name) = new_ipc();
+    let listener = bind_listener(&name);
+    let server = std::thread::spawn(move || {
+        let stream = listener.incoming().next().unwrap().expect("accept failed");
+        let mut receiver: IpcReceiverWithContext<ClientToServerMsg> =
+            IpcReceiverWithContext::new(stream);
+        let (message, _) = receiver.recv_client_msg().expect("kill request");
+        assert!(matches!(message, ClientToServerMsg::KillSession));
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .expect("runtime");
+
+    let result = runtime.block_on(async {
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            super::super::async_send_kill_and_await(&name),
+        )
+        .await
+    });
+
+    assert!(
+        result.is_err(),
+        "a silent peer must hit the caller deadline"
+    );
     server.join().expect("server thread panicked");
 }
 
