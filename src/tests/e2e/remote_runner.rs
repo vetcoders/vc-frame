@@ -19,6 +19,9 @@ use std::rc::Rc;
 
 const ZELLIJ_EXECUTABLE_LOCATION: &str = "/usr/src/zellij/zellij";
 const SET_ENV_VARIABLES: &str = "EDITOR=/usr/bin/vi";
+const E2E_RUNTIME_ROOT: &str = "/tmp/vc-frame-e2e";
+const E2E_SOCKET_DIR: &str = "/tmp/vc-frame-e2e/sockets";
+const E2E_CACHE_DIR: &str = "/tmp/vc-frame-e2e/cache";
 const ZELLIJ_CONFIG_PATH: &str = "/usr/src/zellij/fixtures/configs";
 const ZELLIJ_CONFIG_DIRS_PATH: &str = "/usr/src/zellij/fixtures/config-dirs";
 const ZELLIJ_DATA_DIR: &str = "/usr/src/zellij/e2e-data";
@@ -57,31 +60,43 @@ fn setup_remote_environment(channel: &mut ssh2::Channel, win_size: Size) {
         .unwrap();
     channel.shell().unwrap();
     channel.write_all(b"export PS1=\"$ \"\n").unwrap();
+    channel
+        .write_all(
+            format!(
+                "export VC_FRAME_SOCKET_DIR={E2E_SOCKET_DIR}\n\
+                 export XDG_CACHE_HOME={E2E_CACHE_DIR}\n\
+                 mkdir -p \"$VC_FRAME_SOCKET_DIR\" \"$XDG_CACHE_HOME\"\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
     channel.flush().unwrap();
 }
 
+fn cleanup_remote_runtime_command() -> String {
+    format!(
+        r#"if [ -x {ZELLIJ_EXECUTABLE_LOCATION} ]; then
+  {ZELLIJ_EXECUTABLE_LOCATION} kill-all-sessions --yes >/dev/null 2>&1 || true
+fi
+cleanup_attempt=0
+while ps -eo args= | grep -Eq '([v]c-frame|[z]ellij) --server .*/vc-frame-e2e/sockets/' && [ "$cleanup_attempt" -lt 100 ]; do
+  sleep 0.1
+  cleanup_attempt=$((cleanup_attempt + 1))
+done
+if ps -eo args= | grep -Eq '([v]c-frame|[z]ellij) --server .*/vc-frame-e2e/sockets/'; then
+  printf 'vc-frame e2e cleanup failed: an isolated server did not stop gracefully\n' >&2
+  exit 1
+fi
+rm -rf {E2E_SOCKET_DIR} {E2E_CACHE_DIR}
+mkdir -p {E2E_SOCKET_DIR} {E2E_CACHE_DIR}
+ln -sf /usr/src/zellij/$(uname -m)-unknown-linux-musl/release/vc-frame {ZELLIJ_EXECUTABLE_LOCATION}
+"#
+    )
+}
+
 fn stop_zellij(channel: &mut ssh2::Channel) {
-    // here we remove the status-bar-tips cache to make sure only the quicknav tip is loaded
     channel
-        .write_all(b"find /tmp | grep status-bar-tips | xargs rm\n")
-        .unwrap();
-    channel.write_all(b"killall -KILL zellij\n").unwrap();
-    channel.write_all(b"rm -rf /tmp/*\n").unwrap(); // remove temporary artifacts from previous
-    // tests
-    channel.write_all(b"rm -rf /tmp/*\n").unwrap(); // remove temporary artifacts from previous
-    channel.write_all(b"rm -rf /tmp/*\n").unwrap(); // remove temporary artifacts from previous
-    channel
-        .write_all(b"rm -rf ~/.cache/zellij/*/session_info\n")
-        .unwrap();
-    channel
-        .write_all(b"rm -rf ~/.cache/zellij/permissions.kdl\n")
-        .unwrap();
-    // create an arch-independent symlink so the binary path in snapshots is stable across
-    // x86_64 (CI) and aarch64 (Apple Silicon local dev)
-    channel
-        .write_all(
-            b"ln -sf /usr/src/zellij/$(uname -m)-unknown-linux-musl/release/vc-frame /usr/src/zellij/zellij\n",
-        )
+        .write_all(cleanup_remote_runtime_command().as_bytes())
         .unwrap();
 }
 
@@ -258,7 +273,7 @@ fn wait_for_startup(last_snapshot: &Arc<Mutex<String>>) {
     }
 }
 
-fn wait_for_shell_output(channel: &mut ssh2::Channel, needle: &str) {
+fn wait_for_shell_output(channel: &mut ssh2::Channel, needle: &str) -> bool {
     let start = std::time::Instant::now();
     let timeout = std::time::Duration::from_secs(10);
     let mut output = String::new();
@@ -276,6 +291,7 @@ fn wait_for_shell_output(channel: &mut ssh2::Channel, needle: &str) {
             Err(_) => break,
         }
     }
+    output.contains(needle)
 }
 
 fn read_from_channel(
@@ -766,7 +782,10 @@ impl RemoteRunner {
             .unwrap();
         channel.flush().unwrap();
         sess.set_blocking(false);
-        wait_for_shell_output(&mut channel, CLEANUP_DONE_MARKER);
+        assert!(
+            wait_for_shell_output(&mut channel, CLEANUP_DONE_MARKER),
+            "remote E2E cleanup did not reach its completion marker"
+        );
     }
     pub fn new_with_session_name(win_size: Size, session_name: &str, mirrored: bool) -> Self {
         // notice that this method does not have a timeout, so use with caution!
@@ -1052,5 +1071,30 @@ impl Drop for RemoteRunner {
         let _ = self.channel.lock().unwrap().close();
         let reader_thread_running = &mut self.reader_thread.0;
         reader_thread_running.store(false, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod cleanup_contract_tests {
+    use super::*;
+
+    #[test]
+    fn cleanup_is_scoped_graceful_and_waits_for_server_exit() {
+        let command = cleanup_remote_runtime_command();
+
+        assert!(command.contains("kill-all-sessions --yes"));
+        assert!(command.contains("cleanup_attempt"));
+        assert!(command.contains(E2E_SOCKET_DIR));
+        assert!(command.contains(E2E_CACHE_DIR));
+        assert!(!command.contains("killall"));
+        assert!(!command.contains("-KILL"));
+        assert!(!command.contains("rm -rf /tmp/*"));
+    }
+
+    #[test]
+    fn runtime_root_is_an_explicit_non_global_tmp_subdirectory() {
+        assert_eq!(E2E_RUNTIME_ROOT, "/tmp/vc-frame-e2e");
+        assert!(E2E_SOCKET_DIR.starts_with(&format!("{E2E_RUNTIME_ROOT}/")));
+        assert!(E2E_CACHE_DIR.starts_with(&format!("{E2E_RUNTIME_ROOT}/")));
     }
 }
