@@ -29,7 +29,14 @@ jobs:
       - name: Verify installer fails closed
         run: sh tools/install_test.sh
 
-      - name: Verify version, security, and signing inputs
+      - name: Run release quality gates
+        run: |
+          make semgrep
+          make ci
+
+      # Keep repository code outside the only step that receives the private
+      # signing subkey. The step below performs data-only checks and a canary.
+      - name: Verify version and signing inputs
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
@@ -87,8 +94,6 @@ jobs:
             "$RUNNER_TEMP/signing-canary"
           gpg --homedir "$verify_home" --batch \
             --verify "$RUNNER_TEMP/signing-canary.sig" "$RUNNER_TEMP/signing-canary"
-          make semgrep
-          make ci
 
   create-release:
     needs: verify-release
@@ -276,33 +281,25 @@ jobs:
       # by the operator/runner at release time via secrets — never embedded here.
       # Signing is mandatory for candidates and tags. Missing key material is a
       # release blocker, never a reason to publish an unsigned archive.
-      - name: Import GPG signing key
-        id: gpg
+      - name: Sign artifact (Unix)
+        id: sign-unix
         if: runner.os != 'Windows'
         shell: bash
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
-        run: |
-          if [ -z "${GPG_PRIVATE_KEY:-}" ]; then
-            echo "GPG_PRIVATE_KEY secret not set" >&2
-            exit 1
-          fi
-          signing_home="$RUNNER_TEMP/vc-frame-gpg"
-          install -d -m 700 "$signing_home"
-          export GNUPGHOME="$signing_home"
-          echo "GNUPGHOME=$signing_home" >> "$GITHUB_ENV"
-          printf '%s\n' "$GPG_PRIVATE_KEY" | gpg --batch --import
-          echo "signing_enabled=true" >> "$GITHUB_OUTPUT"
-
-      - name: Sign artifact (Unix)
-        id: sign-unix
-        if: runner.os != 'Windows' && steps.gpg.outputs.signing_enabled == 'true'
-        shell: bash
-        env:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
+          test -n "${GPG_PRIVATE_KEY:-}" || {
+            echo "GPG_PRIVATE_KEY secret not set" >&2
+            exit 1
+          }
           asset_name="${{ steps.make-artifact-unix.outputs.asset_name }}"
-          gpg_args=(--batch --yes --pinentry-mode loopback)
+          signing_home="$(mktemp -d)"
+          chmod 700 "$signing_home"
+          trap 'gpgconf --homedir "$signing_home" --kill all 2>/dev/null || true; rm -rf "$signing_home"' EXIT
+          printf '%s\n' "$GPG_PRIVATE_KEY" |
+            gpg --homedir "$signing_home" --batch --import
+          gpg_args=(--homedir "$signing_home" --batch --yes --pinentry-mode loopback)
           if [ -n "${GPG_PASSPHRASE:-}" ]; then
             gpg_args+=(--passphrase "$GPG_PASSPHRASE")
           fi
@@ -336,7 +333,7 @@ jobs:
           asset_content_type: text/plain
 
       - name: Upload signature
-        if: runner.os != 'Windows' && steps.gpg.outputs.signing_enabled == 'true'
+        if: runner.os != 'Windows'
         uses: actions/upload-release-asset@e8f9f06c4b078e705bd2ea027f0926603fc9b4d5 # v1.0.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -555,33 +552,25 @@ jobs:
           "$hash  $asset_name" | Out-File -Encoding ascii $checksum_name
           echo "checksum_name=$checksum_name" >> $env:GITHUB_OUTPUT
 
-      - name: Import GPG signing key
-        id: gpg
-        if: runner.os != 'Windows'
-        shell: bash
-        env:
-          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
-        run: |
-          test -n "${GPG_PRIVATE_KEY:-}" || {
-            echo "GPG_PRIVATE_KEY secret not set" >&2
-            exit 1
-          }
-          signing_home="$RUNNER_TEMP/vc-frame-gpg"
-          install -d -m 700 "$signing_home"
-          export GNUPGHOME="$signing_home"
-          echo "GNUPGHOME=$signing_home" >> "$GITHUB_ENV"
-          printf '%s\n' "$GPG_PRIVATE_KEY" | gpg --batch --import
-          echo "signing_enabled=true" >> "$GITHUB_OUTPUT"
-
       - name: Sign artifact (Unix)
         id: sign-unix
         if: runner.os != 'Windows'
         shell: bash
         env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
+          test -n "${GPG_PRIVATE_KEY:-}" || {
+            echo "GPG_PRIVATE_KEY secret not set" >&2
+            exit 1
+          }
           asset_name="${{ steps.make-artifact-unix.outputs.asset_name }}"
-          gpg_args=(--batch --yes --pinentry-mode loopback)
+          signing_home="$(mktemp -d)"
+          chmod 700 "$signing_home"
+          trap 'gpgconf --homedir "$signing_home" --kill all 2>/dev/null || true; rm -rf "$signing_home"' EXIT
+          printf '%s\n' "$GPG_PRIVATE_KEY" |
+            gpg --homedir "$signing_home" --batch --import
+          gpg_args=(--homedir "$signing_home" --batch --yes --pinentry-mode loopback)
           if [ -n "${GPG_PASSPHRASE:-}" ]; then
             gpg_args+=(--passphrase "$GPG_PASSPHRASE")
           fi
