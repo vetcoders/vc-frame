@@ -1703,6 +1703,41 @@ impl Screen {
         self.tabs.get_mut(&id)
     }
 
+    fn reusable_tab_id_for_instance(
+        &self,
+        instance_id: &str,
+        requested_name: &str,
+    ) -> Result<Option<usize>, String> {
+        let tab_ids = self
+            .tabs
+            .values()
+            .filter(|tab| tab.instance_id.eq_ignore_ascii_case(instance_id))
+            .map(|tab| tab.id)
+            .collect::<Vec<_>>();
+        match tab_ids.as_slice() {
+            [] => Ok(None),
+            [tab_id] => {
+                let existing_name = self
+                    .tabs
+                    .get(tab_id)
+                    .map(|tab| tab.name.as_str())
+                    .unwrap_or_default();
+                if existing_name == requested_name {
+                    Ok(Some(*tab_id))
+                } else {
+                    Err(format!(
+                        "durable tab instance {} already belongs to tab '{}' instead of '{}'",
+                        instance_id, existing_name, requested_name
+                    ))
+                }
+            },
+            duplicate_tab_ids => Err(format!(
+                "durable tab instance {} is ambiguous across tabs {:?}",
+                instance_id, duplicate_tab_ids
+            )),
+        }
+    }
+
     /// Gets a mutable tab by its display position (0-based).
     fn get_tab_by_position_mut(&mut self, position: usize) -> Option<&mut Tab> {
         self.tabs.values_mut().find(|t| t.position == position)
@@ -7271,7 +7306,7 @@ pub(crate) fn screen_thread_main(
                 should_change_focus_to_new_tab,
                 placement,
                 (client_id, is_web_client),
-                completion_tx,
+                mut completion_tx,
             ) => {
                 let restored_tab_instance_id = layout
                     .as_ref()
@@ -7281,46 +7316,78 @@ pub(crate) fn screen_thread_main(
                             && instance_id.bytes().all(|byte| byte.is_ascii_hexdigit())
                     })
                     .map(str::to_ascii_lowercase);
-                let tab_index = screen.get_new_tab_id();
-                pending_tab_ids.insert(tab_index);
-                let client_id_for_new_tab = if should_change_focus_to_new_tab {
-                    Some(client_id)
-                } else {
-                    None
-                };
-                let resolved_swap_layouts = (
-                    swap_tiled_layouts
-                        .unwrap_or_else(|| screen.default_layout.swap_tiled_layouts.clone()),
-                    swap_floating_layouts
-                        .unwrap_or_else(|| screen.default_layout.swap_floating_layouts.clone()),
-                );
-                screen.new_tab(
-                    tab_index,
-                    resolved_swap_layouts,
-                    tab_name.clone(),
-                    client_id_for_new_tab,
-                    placement,
-                )?;
-                if let Some(restored_tab_instance_id) = restored_tab_instance_id
-                    && let Some(tab) = screen.tabs.get_mut(&tab_index)
-                {
-                    tab.instance_id = restored_tab_instance_id;
+                let reusable_tab_id = restored_tab_instance_id
+                    .as_deref()
+                    .map(|instance_id| {
+                        screen.reusable_tab_id_for_instance(
+                            instance_id,
+                            tab_name.as_deref().unwrap_or_default(),
+                        )
+                    })
+                    .unwrap_or(Ok(None));
+                match reusable_tab_id {
+                    Ok(Some(existing_tab_id)) => {
+                        if let Some(completion) = completion_tx.as_mut() {
+                            completion.set_affected_tab_id(existing_tab_id);
+                        }
+                        log::info!(
+                            "NewTab: reused tab {} for durable instance {}",
+                            existing_tab_id,
+                            restored_tab_instance_id.as_deref().unwrap_or_default()
+                        );
+                    },
+                    Ok(None) => {
+                        let tab_index = screen.get_new_tab_id();
+                        pending_tab_ids.insert(tab_index);
+                        let client_id_for_new_tab = if should_change_focus_to_new_tab {
+                            Some(client_id)
+                        } else {
+                            None
+                        };
+                        let resolved_swap_layouts = (
+                            swap_tiled_layouts.unwrap_or_else(|| {
+                                screen.default_layout.swap_tiled_layouts.clone()
+                            }),
+                            swap_floating_layouts.unwrap_or_else(|| {
+                                screen.default_layout.swap_floating_layouts.clone()
+                            }),
+                        );
+                        screen.new_tab(
+                            tab_index,
+                            resolved_swap_layouts,
+                            tab_name.clone(),
+                            client_id_for_new_tab,
+                            placement,
+                        )?;
+                        if let Some(restored_tab_instance_id) = restored_tab_instance_id
+                            && let Some(tab) = screen.tabs.get_mut(&tab_index)
+                        {
+                            tab.instance_id = restored_tab_instance_id;
+                        }
+                        screen
+                            .bus
+                            .senders
+                            .send_to_plugin(PluginInstruction::NewTab(
+                                cwd,
+                                default_shell,
+                                layout,
+                                floating_panes_layout,
+                                tab_index,
+                                initial_panes,
+                                block_on_first_terminal,
+                                should_change_focus_to_new_tab,
+                                (client_id, is_web_client),
+                                completion_tx,
+                            ))?;
+                    },
+                    Err(message) => {
+                        log::error!("{}", message);
+                        if let Some(completion) = completion_tx.as_mut() {
+                            completion.set_exit_status(1);
+                            completion.set_error_message(message);
+                        }
+                    },
                 }
-                screen
-                    .bus
-                    .senders
-                    .send_to_plugin(PluginInstruction::NewTab(
-                        cwd,
-                        default_shell,
-                        layout,
-                        floating_panes_layout,
-                        tab_index,
-                        initial_panes,
-                        block_on_first_terminal,
-                        should_change_focus_to_new_tab,
-                        (client_id, is_web_client),
-                        completion_tx,
-                    ))?;
             },
             ScreenInstruction::ApplyLayout(
                 layout,

@@ -5758,6 +5758,48 @@ pub fn close_tab_by_id_if_name_fails_closed_on_identity_mismatch() {
 }
 
 #[test]
+pub fn durable_tab_instance_reuse_requires_one_same_named_owner() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, true, true);
+    new_tab(&mut screen, 1, 0);
+    new_tab(&mut screen, 2, 1);
+    let instance_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    screen.get_tab_by_id_mut(1).unwrap().instance_id = instance_id.to_ascii_uppercase();
+    screen.get_tab_by_id_mut(1).unwrap().name = "Finalized runs".to_owned();
+    assert_eq!(
+        screen
+            .reusable_tab_id_for_instance(instance_id, "Finalized runs")
+            .unwrap(),
+        Some(1)
+    );
+    assert!(
+        screen
+            .reusable_tab_id_for_instance(instance_id, "Needs attention")
+            .unwrap_err()
+            .contains("already belongs")
+    );
+    assert_eq!(
+        screen
+            .reusable_tab_id_for_instance("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "Finalized runs")
+            .unwrap(),
+        None
+    );
+
+    screen.get_tab_by_id_mut(0).unwrap().instance_id = instance_id.to_owned();
+    assert!(
+        screen
+            .reusable_tab_id_for_instance(instance_id, "Finalized runs")
+            .unwrap_err()
+            .contains("ambiguous across tabs"),
+        "a corrupted duplicate must fail closed"
+    );
+}
+
+#[test]
 pub fn gc_safe_close_accepts_an_inactive_start_suspended_terminal() {
     let size = Size {
         cols: 121,

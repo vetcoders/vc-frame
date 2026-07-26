@@ -34,9 +34,10 @@ use zellij_utils::{
 use crate::ClientId;
 
 const ACTION_COMPLETION_TIMEOUT: Duration = Duration::from_secs(1);
-// `CliTriageIo` kills child CLI commands after 10 seconds. Critical actions
-// must fail explicitly before that outer boundary instead of blocking the
-// route thread forever.
+// Most `CliTriageIo` child commands have a 10-second outer budget; NewTab gets
+// extra process-start headroom and reconciles its durable tab identity after an
+// ambiguous ACK. The route still must resolve critical actions explicitly
+// instead of blocking forever.
 const CRITICAL_ACTION_COMPLETION_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Debug, Clone)]

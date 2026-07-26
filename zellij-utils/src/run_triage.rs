@@ -583,6 +583,13 @@ pub trait TriageIo {
         tab: &str,
         expected: Option<&OriginTabIdentity>,
     ) -> Result<Option<OriginTabIdentity>, String>;
+    /// Prove the reserved viewer has materialized its runtime layout, not only
+    /// its empty preallocated tab identity.
+    fn bucket_tab_ready(
+        &mut self,
+        session: &str,
+        identity: &OriginTabIdentity,
+    ) -> Result<bool, String>;
     /// Re-resolve a captured tab through its durable tab incarnation. A server
     /// restart may change both the server incarnation and numeric tab ID.
     fn rebind_origin_tab_identity(
@@ -1096,6 +1103,32 @@ pub fn transfer_finished_run<Io: TriageIo>(
             }
         },
     };
+    match io.bucket_tab_ready(bucket.session_name(), &confirmed_viewer_identity) {
+        Ok(true) => {},
+        Ok(false) => {
+            return Err(fail_transfer(
+                io,
+                &receipt_dest,
+                &mut receipt,
+                TransferStep::ConfirmBucketTab,
+                format!(
+                    "viewer tab '{}' exists but its runtime layout is not ready",
+                    viewer_tab_name
+                ),
+                current_origin_tab_state,
+            ));
+        },
+        Err(message) => {
+            return Err(fail_transfer(
+                io,
+                &receipt_dest,
+                &mut receipt,
+                TransferStep::ConfirmBucketTab,
+                message,
+                current_origin_tab_state,
+            ));
+        },
+    }
     receipt.viewer_tab_identity = Some(confirmed_viewer_identity);
     receipt.viewer_creation_pending = false;
     receipt.viewer_confirmed = true;
@@ -1420,6 +1453,7 @@ mod tests {
         closed_tab_instances: HashSet<String>,
         resurrect_on_ensure: Option<OriginTabIdentity>,
         receipt: Option<TransferReceipt>,
+        viewer_ready: Option<bool>,
     }
 
     impl FakeIo {
@@ -1576,6 +1610,13 @@ mod tests {
                 ));
             }
             Ok(candidate)
+        }
+        fn bucket_tab_ready(
+            &mut self,
+            _session: &str,
+            _identity: &OriginTabIdentity,
+        ) -> Result<bool, String> {
+            Ok(self.viewer_ready.unwrap_or(self.tab_appears))
         }
         fn rebind_origin_tab_identity(
             &mut self,
@@ -1871,6 +1912,36 @@ mod tests {
         assert!(!receipt.viewer_creation_pending);
         assert!(receipt.viewer_confirmed);
         assert!(!second_process.calls.contains(&"open"));
+    }
+
+    #[test]
+    fn a_pending_receipt_never_adopts_an_empty_preallocated_viewer() {
+        let root = tempfile::tempdir().unwrap();
+        let run = finished(0);
+        let mut first_process = FakeIo::failing_at(TransferStep::OpenBucketTab);
+        transfer_finished_run(&mut first_process, &run, root.path(), 1).unwrap_err();
+        let receipt = first_process.receipt.unwrap();
+        let viewer_tab_name = receipt.viewer_tab_name();
+        let viewer_token = receipt.viewer_token.clone();
+
+        let mut second_process = FakeIo {
+            receipt: Some(receipt),
+            tab_appears: true,
+            visible_tab_name: Some(viewer_tab_name),
+            opened_tab_instance_id: Some(viewer_token),
+            viewer_ready: Some(false),
+            ..Default::default()
+        };
+        let error = transfer_finished_run(&mut second_process, &run, root.path(), 2).unwrap_err();
+
+        assert_eq!(error.step, TransferStep::ConfirmBucketTab);
+        assert_eq!(error.origin_tab_state, OriginTabState::Preserved);
+        assert!(error.message.contains("runtime layout is not ready"));
+        assert!(!second_process.calls.contains(&"open"));
+        assert!(!second_process.calls.contains(&"close"));
+        let retained = second_process.receipt.unwrap();
+        assert!(retained.viewer_creation_pending);
+        assert!(!retained.viewer_confirmed);
     }
 
     #[test]

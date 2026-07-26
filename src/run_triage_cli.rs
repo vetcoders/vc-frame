@@ -192,6 +192,10 @@ struct CliTriageIo {
     root: PathBuf,
 }
 
+const CLI_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+const NEW_TAB_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+const VIEWER_CREATION_RECONCILIATION_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn run_command_with_timeout(
     executable: &Path,
     args: &[&str],
@@ -311,6 +315,24 @@ where
     }
 }
 
+fn is_ambiguous_new_tab_failure(error: &str) -> bool {
+    error.contains("did not acknowledge completion")
+        || error.contains("completion channel closed before acknowledgement")
+        || error.contains("timed out after")
+}
+
+fn viewer_layout_is_applied(
+    pane_inventory: &str,
+    viewer_identity: &OriginTabIdentity,
+) -> Result<bool, String> {
+    let panes = serde_json::from_str::<Vec<serde_json::Value>>(pane_inventory)
+        .map_err(|error| format!("cannot parse viewer pane inventory: {}", error))?;
+    Ok(panes.iter().any(|pane| {
+        pane.get("tab_id").and_then(serde_json::Value::as_u64) == Some(viewer_identity.id)
+            && pane.get("is_plugin").and_then(serde_json::Value::as_bool) == Some(false)
+    }))
+}
+
 impl CliTriageIo {
     fn new(root: PathBuf) -> Result<Self, String> {
         let executable = std::env::current_exe()
@@ -319,7 +341,11 @@ impl CliTriageIo {
     }
 
     fn run(&self, args: &[&str]) -> Result<String, String> {
-        let output = run_command_with_timeout(&self.executable, args, Duration::from_secs(10))?;
+        self.run_with_timeout(args, CLI_COMMAND_TIMEOUT)
+    }
+
+    fn run_with_timeout(&self, args: &[&str], timeout: Duration) -> Result<String, String> {
+        let output = run_command_with_timeout(&self.executable, args, timeout)?;
         if !output.status.success() {
             return Err(format!(
                 "`vc-frame {}` failed ({}): {}",
@@ -329,6 +355,50 @@ impl CliTriageIo {
             ));
         }
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    fn reconcile_reserved_bucket_tab(
+        &mut self,
+        session: &str,
+        tab: &str,
+        tab_instance_id: &str,
+        timeout: Duration,
+    ) -> Result<OriginTabIdentity, String> {
+        let expected = OriginTabIdentity {
+            session: session.to_owned(),
+            name: tab.to_owned(),
+            id: 0,
+            session_incarnation: String::new(),
+            tab_instance_id: tab_instance_id.to_owned(),
+        };
+        let deadline = Instant::now() + timeout;
+        loop {
+            let observation = match TriageIo::bucket_tab_identity(
+                self,
+                session,
+                tab,
+                Some(&expected),
+            ) {
+                Ok(Some(identity)) => match TriageIo::bucket_tab_ready(self, session, &identity) {
+                    Ok(true) => return Ok(identity),
+                    Ok(false) => format!(
+                        "reserved viewer tab {} exists but its layout has no terminal pane yet",
+                        identity.id
+                    ),
+                    Err(error) => error,
+                },
+                Ok(None) => "reserved viewer tab is not visible yet".to_owned(),
+                Err(error) => error,
+            };
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "reserved viewer did not become ready within {:.1}s: {}",
+                    timeout.as_secs_f64(),
+                    observation
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     fn tab_inventory(&self, session: &str) -> Result<String, String> {
@@ -1595,16 +1665,47 @@ impl TriageIo for CliTriageIo {
     ) -> Result<(), String> {
         let scrollback = zellij_utils::run_triage::scrollback_path(&self.root, &meta.run);
         let layout = bucket_tab_layout(&scrollback, tab_instance_id, meta);
-        self.run(&[
-            "-s",
-            session,
-            "action",
-            "new-tab",
-            "--name",
-            tab,
-            "--layout-string",
-            &layout,
-        ])?;
+        let open_result = self.run_with_timeout(
+            &[
+                "-s",
+                session,
+                "action",
+                "new-tab",
+                "--name",
+                tab,
+                "--layout-string",
+                &layout,
+            ],
+            NEW_TAB_COMMAND_TIMEOUT,
+        );
+        let ambiguous_open_error = match open_result {
+            Ok(_) => None,
+            Err(error) if is_ambiguous_new_tab_failure(&error) => Some(error),
+            Err(error) => return Err(error),
+        };
+        let viewer = self
+            .reconcile_reserved_bucket_tab(
+                session,
+                tab,
+                tab_instance_id,
+                VIEWER_CREATION_RECONCILIATION_TIMEOUT,
+            )
+            .map_err(|reconciliation_error| match ambiguous_open_error.as_ref() {
+                Some(open_error) => format!(
+                    "{}; reserved viewer reconciliation failed: {}",
+                    open_error, reconciliation_error
+                ),
+                None => format!(
+                    "new-tab acknowledged before the reserved viewer became ready: {}",
+                    reconciliation_error
+                ),
+            })?;
+        if ambiguous_open_error.is_some() {
+            log::warn!(
+                "new-tab acknowledgement was ambiguous; adopted ready reserved viewer tab {}",
+                viewer.id
+            );
+        }
         Ok(())
     }
 
@@ -1682,6 +1783,15 @@ impl TriageIo for CliTriageIo {
                 matches.len()
             )),
         }
+    }
+
+    fn bucket_tab_ready(
+        &mut self,
+        session: &str,
+        identity: &OriginTabIdentity,
+    ) -> Result<bool, String> {
+        let panes = self.pane_inventory(session)?;
+        viewer_layout_is_applied(&panes, identity)
     }
 
     fn rebind_origin_tab_identity(
@@ -1917,6 +2027,148 @@ mod tests {
             .unwrap_err();
 
         assert!(error.contains("cannot parse test inventory"));
+    }
+
+    #[test]
+    fn only_ambiguous_new_tab_failures_are_reconciled() {
+        assert!(is_ambiguous_new_tab_failure(
+            "action 'NewTab' did not acknowledge completion within 8s"
+        ));
+        assert!(is_ambiguous_new_tab_failure(
+            "completion channel closed before acknowledgement"
+        ));
+        assert!(is_ambiguous_new_tab_failure(
+            "`vc-frame action new-tab` timed out after 10.0s"
+        ));
+        assert!(!is_ambiguous_new_tab_failure("layout could not be parsed"));
+    }
+
+    #[test]
+    fn viewer_readiness_requires_a_terminal_pane_in_the_reserved_tab() {
+        let identity = OriginTabIdentity {
+            session: "Finalized runs".to_owned(),
+            name: "run-1 [vc:0123456789abcdef0123456789abcdef]".to_owned(),
+            id: 7,
+            session_incarnation: "incarnation".to_owned(),
+            tab_instance_id: "0123456789abcdef0123456789abcdef".to_owned(),
+        };
+
+        assert!(!viewer_layout_is_applied("[]", &identity).unwrap());
+        assert!(
+            !viewer_layout_is_applied(
+                r#"[{"tab_id":7,"is_plugin":true},{"tab_id":8,"is_plugin":false}]"#,
+                &identity,
+            )
+            .unwrap()
+        );
+        assert!(
+            viewer_layout_is_applied(
+                r#"[{"tab_id":7,"is_plugin":true},{"tab_id":7,"is_plugin":false}]"#,
+                &identity,
+            )
+            .unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    fn assert_delayed_viewer_reconciliation(ambiguous_ack: bool) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("fake-vc-frame");
+        std::fs::write(directory.path().join("new-tab-count"), "0\n").unwrap();
+        std::fs::write(directory.path().join("pane-count"), "0\n").unwrap();
+        let tab_instance_id = "0123456789abcdef0123456789abcdef";
+        let tab = format!("run-1 [vc:{}]", tab_instance_id);
+        let tabs = serde_json::json!([{
+            "name": tab,
+            "tab_id": 7,
+            "session_incarnation": "viewer-incarnation",
+            "tab_instance_id": tab_instance_id,
+        }])
+        .to_string();
+        let pending_panes = serde_json::json!([{
+            "tab_id": 7,
+            "is_plugin": true,
+        }])
+        .to_string();
+        let ready_panes = serde_json::json!([{
+            "tab_id": 7,
+            "is_plugin": false,
+        }])
+        .to_string();
+        let new_tab_result = if ambiguous_ack {
+            "echo \"action 'NewTab' did not acknowledge completion within 8s\" >&2\nexit 2"
+        } else {
+            "exit 0"
+        };
+        let state_dir = directory.path().to_string_lossy().replace('\'', "'\\''");
+        let script = format!(
+            "#!/bin/sh\n\
+             state_dir='{}'\n\
+             case \"$4\" in\n\
+             new-tab)\n\
+             count=0\n\
+             test ! -f \"$state_dir/new-tab-count\" || count=$(cat \"$state_dir/new-tab-count\")\n\
+             count=$((count + 1))\n\
+             printf '%s\\n' \"$count\" > \"$state_dir/new-tab-count\"\n\
+             {}\n\
+             ;;\n\
+             list-tabs)\n\
+             printf '%s\\n' '{}'\n\
+             ;;\n\
+             list-panes)\n\
+             count=0\n\
+             test ! -f \"$state_dir/pane-count\" || count=$(cat \"$state_dir/pane-count\")\n\
+             count=$((count + 1))\n\
+             printf '%s\\n' \"$count\" > \"$state_dir/pane-count\"\n\
+             if test \"$count\" -lt 3; then\n\
+                 printf '%s\\n' '{}'\n\
+             else\n\
+                 printf '%s\\n' '{}'\n\
+             fi\n\
+             ;;\n\
+             *)\n\
+             exit 3\n\
+             ;;\n\
+             esac\n",
+            state_dir, new_tab_result, tabs, pending_panes, ready_panes
+        );
+        std::fs::write(&executable, script).unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+        let mut io = CliTriageIo {
+            executable,
+            root: directory.path().join("control-plane"),
+        };
+
+        io.open_bucket_tab("Finalized runs", &tab, tab_instance_id, &meta(vec![]))
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("new-tab-count"))
+                .unwrap()
+                .trim(),
+            "1"
+        );
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("pane-count"))
+                .unwrap()
+                .trim(),
+            "3"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ambiguous_new_tab_ack_adopts_only_the_ready_reserved_viewer() {
+        assert_delayed_viewer_reconciliation(true);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn successful_new_tab_ack_still_waits_for_the_ready_reserved_viewer() {
+        assert_delayed_viewer_reconciliation(false);
     }
 
     #[cfg(unix)]
