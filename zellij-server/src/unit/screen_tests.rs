@@ -8055,9 +8055,34 @@ pub fn send_cli_dump_screen_action_without_ansi_strips_codes() {
 #[test]
 pub fn copy_pane_scrollback_action_pipes_focused_pane_full_scrollback_to_copy_command() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let copy_script_path = temp_dir.path().join("copy-current-pane.sh");
     let copied_text_path = temp_dir.path().join("copied-pane.txt");
-    std::fs::write(&copy_script_path, "cat > \"$1\"\n").unwrap();
+    #[cfg(not(windows))]
+    let copy_command = {
+        let copy_script_path = temp_dir.path().join("copy-current-pane.sh");
+        std::fs::write(&copy_script_path, "cat > \"$1\"\n").unwrap();
+        format!(
+            "/bin/sh {} {}",
+            copy_script_path.display(),
+            copied_text_path.display()
+        )
+    };
+    #[cfg(windows)]
+    let copy_command = {
+        let output_path = copied_text_path.to_string_lossy().replace('\'', "''");
+        let script = format!(
+            "[System.IO.File]::WriteAllText('{}', [Console]::In.ReadToEnd(), \
+             [System.Text.UTF8Encoding]::new($false))",
+            output_path
+        );
+        let encoded_script = script
+            .encode_utf16()
+            .flat_map(|code_unit| code_unit.to_le_bytes())
+            .collect::<Vec<_>>();
+        format!(
+            "powershell.exe -NoProfile -NonInteractive -EncodedCommand {}",
+            base64::encode(encoded_script)
+        )
+    };
 
     let size = Size { cols: 80, rows: 5 };
     let client_id = 10;
@@ -8068,11 +8093,7 @@ pub fn copy_pane_scrollback_action_pipes_focused_pane_full_scrollback_to_copy_co
     };
 
     let mut mock_screen = MockScreen::new(size);
-    mock_screen.config.options.copy_command = Some(format!(
-        "/bin/sh {} {}",
-        copy_script_path.display(),
-        copied_text_path.display()
-    ));
+    mock_screen.config.options.copy_command = Some(copy_command);
     let session_metadata = mock_screen.clone_session_metadata();
     let screen_thread = mock_screen.run(Some(initial_layout), vec![]);
     let received_server_instructions = Arc::new(Mutex::new(vec![]));
