@@ -202,6 +202,10 @@ impl Drop for NotificationEnd {
     }
 }
 
+fn complete_action_immediately(sender: oneshot::Sender<ActionCompletionResult>) {
+    drop(NotificationEnd::new(sender));
+}
+
 // `route_action` must not borrow from the `session_data` read guard.
 // otherwise blocking-CLI actions
 // (`critical_completion=true`) park this function while still holding the guard,
@@ -1285,7 +1289,7 @@ pub(crate) fn route_action(
                     .with_context(err_context)?;
                 should_break = true;
             } else {
-                drop(completion_tx); // no need to wait, this is a no-op
+                complete_action_immediately(completion_tx);
             }
         },
         Action::MouseEvent { event } => {
@@ -1305,27 +1309,24 @@ pub(crate) fn route_action(
                 ))
                 .with_context(err_context)?;
         },
-        Action::Confirm => {
+        Action::Confirm | Action::Deny => {
             // no-op, these are deprecated and should be removed when we upgrade the server/client
             // contract
-        },
-        Action::Deny => {
-            // no-op, these are deprecated and should be removed when we upgrade the server/client
-            // contract
+            complete_action_immediately(completion_tx);
         },
         #[allow(clippy::single_match)]
         Action::SkipConfirm { action } => match *action {
             Action::Quit => {
-                drop(completion_tx);
+                complete_action_immediately(completion_tx);
                 senders
                     .send_to_server(ServerInstruction::ClientExit(client_id, None))
                     .with_context(err_context)?;
                 should_break = true;
             },
-            _ => {},
+            _ => complete_action_immediately(completion_tx),
         },
         Action::NoOp => {
-            drop(completion_tx);
+            complete_action_immediately(completion_tx);
         },
         Action::SearchInput { input } => {
             senders
@@ -1365,7 +1366,7 @@ pub(crate) fn route_action(
                 .send_to_screen(instruction)
                 .with_context(err_context)?;
         },
-        Action::ToggleMouseMode => {}, // Handled client side
+        Action::ToggleMouseMode => complete_action_immediately(completion_tx), // Handled client side
         Action::PreviousSwapLayout => {
             senders
                 .send_to_screen(ScreenInstruction::PreviousSwapLayout(
@@ -1673,8 +1674,10 @@ pub(crate) fn route_action(
             pane_title,
             ..
         } => {
-            drop(completion_tx); // releasing pipes is handled by the plugins, so we don't want
-            // this to block additionallu
+            // Route-level dispatch is complete immediately. The CLI client
+            // remains blocked independently until a destination plugin sends
+            // UnblockCliPipeInput for this pipe id.
+            complete_action_immediately(completion_tx);
             if let Some(seen_cli_pipes) = seen_cli_pipes.as_mut()
                 && !seen_cli_pipes.contains(&pipe_id)
             {
@@ -3294,6 +3297,17 @@ mod tests {
                 .as_deref()
                 .is_some_and(|message| message.contains("closed before acknowledgement"))
         );
+    }
+
+    #[test]
+    fn immediate_action_completion_is_an_acknowledged_success() {
+        let (tx, rx) = oneshot::channel();
+        complete_action_immediately(tx);
+
+        let result = wait_for_action_completion(rx, "CliPipe", false);
+
+        assert_eq!(result.exit_status, None);
+        assert_eq!(result.error_message, None);
     }
 
     #[test]
