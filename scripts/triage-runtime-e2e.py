@@ -2022,6 +2022,7 @@ def cleanup_namespace(
     owned_targets: set[str],
     *,
     timeout: float = 15,
+    stable_empty_for: float = 0.5,
 ) -> dict[str, object]:
     """Kill exact owned targets, then prove empty inventory and process table."""
     initial = session_inventory(binary, env)
@@ -2045,42 +2046,44 @@ def cleanup_namespace(
         killed.append(session)
 
     deleted: list[str] = []
-    deadline = time.monotonic() + timeout
-    post_kill_inventory: dict[str, Literal["live", "exited"]] = {}
-    while time.monotonic() < deadline:
-        post_kill_inventory = session_inventory(binary, env)
-        if not any(state == "live" for state in post_kill_inventory.values()):
-            break
-        time.sleep(0.1)
-    require(
-        not any(state == "live" for state in post_kill_inventory.values()),
-        "isolated namespace retained live sessions after cleanup: "
-        + ", ".join(
-            sorted(
-                name for name, state in post_kill_inventory.items() if state == "live"
-            )
-        ),
-    )
-    unexpected_after_kill = set(post_kill_inventory) - owned_targets
-    require(
-        not unexpected_after_kill,
-        "unexpected session appeared during isolated cleanup: "
-        + ", ".join(sorted(unexpected_after_kill)),
-    )
-    for session in sorted(post_kill_inventory):
-        command(binary, env, "delete-session", session, "--force")
-        deleted.append(session)
-
     final_inventory: dict[str, Literal["live", "exited"]] = {}
     deadline = time.monotonic() + timeout
+    empty_since: float | None = None
+    stable_empty = False
     while time.monotonic() < deadline:
         final_inventory = session_inventory(binary, env)
-        if not final_inventory:
-            break
-        time.sleep(0.1)
+        unexpected_after_kill = set(final_inventory) - owned_targets
+        require(
+            not unexpected_after_kill,
+            "unexpected session appeared during isolated cleanup: "
+            + ", ".join(sorted(unexpected_after_kill)),
+        )
+        live_sessions = sorted(
+            name for name, state in final_inventory.items() if state == "live"
+        )
+        exited_sessions = sorted(
+            name for name, state in final_inventory.items() if state == "exited"
+        )
+        if exited_sessions:
+            empty_since = None
+            for session in exited_sessions:
+                command(binary, env, "delete-session", session, "--force")
+                if session not in deleted:
+                    deleted.append(session)
+        elif live_sessions:
+            empty_since = None
+        else:
+            now = time.monotonic()
+            if empty_since is None:
+                empty_since = now
+            elif now - empty_since >= stable_empty_for:
+                stable_empty = True
+                break
+        if stable_empty_for > 0:
+            time.sleep(0.1)
     require(
-        not final_inventory,
-        f"isolated namespace retained session inventory after cleanup: "
+        stable_empty,
+        "isolated namespace retained session inventory after cleanup: "
         f"{final_inventory!r}",
     )
     socket_root = pathlib.Path(env["VC_FRAME_SOCKET_DIR"]).resolve()

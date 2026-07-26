@@ -828,6 +828,7 @@ class EvidenceAndCleanupTests(unittest.TestCase):
             {"owned": "live"},
             {"owned": "exited"},
             {},
+            {},
         ]
         query.return_value = MODULE.SessionQuery(
             state="live",
@@ -842,6 +843,53 @@ class EvidenceAndCleanupTests(unittest.TestCase):
             {"VC_FRAME_SOCKET_DIR": "/tmp/proof/sockets"},
             {"owned"},
             timeout=0.01,
+            stable_empty_for=0,
+        )
+        self.assertEqual(receipt["final_session_inventory"], {})
+        self.assertEqual(receipt["killed_sessions"], ["owned"])
+        self.assertEqual(receipt["deleted_sessions"], ["owned"])
+        self.assertEqual(
+            [call.args[2:] for call in command.call_args_list],
+            [
+                ("kill-session", "owned"),
+                ("delete-session", "owned", "--force"),
+            ],
+        )
+
+    @mock.patch.object(MODULE, "wait_for_no_server_processes", return_value=[])
+    @mock.patch.object(MODULE, "wait_for_session_gone")
+    @mock.patch.object(MODULE, "query_session")
+    @mock.patch.object(MODULE, "command")
+    @mock.patch.object(MODULE, "session_inventory")
+    def test_cleanup_deletes_exited_session_that_appears_after_transient_empty_inventory(
+        self,
+        inventory: mock.Mock,
+        command: mock.Mock,
+        query: mock.Mock,
+        _wait_gone: mock.Mock,
+        _wait_processes: mock.Mock,
+    ) -> None:
+        inventory.side_effect = [
+            {"owned": "live"},
+            {},
+            {"owned": "exited"},
+            {},
+            {},
+        ]
+        query.return_value = MODULE.SessionQuery(
+            state="live",
+            tabs=[],
+            list_tabs_exit=0,
+            list_tabs_stderr="",
+            inventory_state="live",
+        )
+        command.return_value = completed(0)
+        receipt = MODULE.cleanup_namespace(
+            pathlib.Path("vc-frame"),
+            {"VC_FRAME_SOCKET_DIR": "/tmp/proof/sockets"},
+            {"owned"},
+            timeout=0.01,
+            stable_empty_for=0,
         )
         self.assertEqual(receipt["final_session_inventory"], {})
         self.assertEqual(receipt["killed_sessions"], ["owned"])
