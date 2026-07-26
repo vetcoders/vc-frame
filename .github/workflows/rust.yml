@@ -97,18 +97,23 @@ jobs:
           }
           $strawberryLib = 'C:\Strawberry\perl\lib'
           $simpleModule = Join-Path $strawberryLib 'Locale\Maketext\Simple.pm'
-          $extUtils = Join-Path $strawberryLib 'ExtUtils'
-          foreach ($requiredPath in @($simpleModule, $extUtils)) {
+          $moduleRoots = @(
+            (Join-Path $strawberryLib 'ExtUtils')
+            (Join-Path $strawberryLib 'Pod')
+          )
+          $requiredPaths = @($simpleModule) + $moduleRoots
+          foreach ($requiredPath in $requiredPaths) {
             if (-not (Test-Path $requiredPath)) {
               throw "Required pure-Perl module source is missing at $requiredPath"
             }
           }
           $perlLib = Join-Path $env:RUNNER_TEMP 'vc-frame-perl-lib'
-          $moduleFiles = @(
-            Get-Item -LiteralPath $simpleModule
-          ) + @(
-            Get-ChildItem -LiteralPath $extUtils -Recurse -File -Filter '*.pm'
-          )
+          $moduleFiles = @(Get-Item -LiteralPath $simpleModule)
+          foreach ($moduleRoot in $moduleRoots) {
+            $moduleFiles += @(
+              Get-ChildItem -LiteralPath $moduleRoot -Recurse -File -Filter '*.pm'
+            )
+          }
           foreach ($moduleFile in $moduleFiles) {
             $relativePath = $moduleFile.FullName.Substring($strawberryLib.Length + 1)
             $destination = Join-Path $perlLib $relativePath
@@ -122,7 +127,7 @@ jobs:
             throw "Could not translate $perlLib for MSYS Perl"
           }
           $env:PERL5LIB = $msysPerlLib
-          & $perl -MLocale::Maketext::Simple -MIPC::Cmd -e `
+          & $perl -MLocale::Maketext::Simple -MIPC::Cmd -MPod::Usage -e `
             'IPC::Cmd::can_run($^X) or die qq(cannot resolve perl\n); print qq(modules=ok\n)'
           if ($LASTEXITCODE -ne 0) {
             throw "MSYS Perl cannot load the OpenSSL configure modules"
