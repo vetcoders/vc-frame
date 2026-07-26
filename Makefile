@@ -18,6 +18,7 @@
         test-client test-no-web check clippy precheck semgrep fmt clean doctor \
         doctor-quiet doctor-install-quiet help release-guard \
         release-guard-self-test package install-test \
+        triage-runtime-e2e-static triage-runtime-e2e \
         version version-show version-check version-bump version-patch bump-patch \
         changelog-close release-notes release-plan release-prepare release-check \
         release-tag release-push
@@ -77,6 +78,10 @@ PACKAGE_NAME := vc-frame
 WS_VERSION := $(shell python3 -c 'import pathlib,tomllib; d=tomllib.loads(pathlib.Path("Cargo.toml").read_text()); print(d["workspace"]["package"]["version"])' 2>/dev/null)
 TAG := v$(WS_VERSION)
 PYTHON := $(shell command -v python3.14 2>/dev/null || command -v python3.13 2>/dev/null || command -v python3.12 2>/dev/null || command -v python3.11 2>/dev/null || command -v python3)
+TRIAGE_RUNTIME_E2E_BINARY ?= target/debug/vc-frame
+TRIAGE_RUNTIME_E2E_PROFILE ?= debug
+TRIAGE_RUNTIME_E2E_ARTIFACT_ROOT ?= /tmp/vc-frame-triage-runtime-e2e
+PYTHON_CACHE_ROOT ?= $(CURDIR)/target/python-cache
 
 # ──────────────────────────────────────────────────────────
 # Top-level targets
@@ -219,8 +224,24 @@ precheck:
 	@echo "  ✓ All precheck gates passed"
 	@echo "══════════════════════════════════════"
 
-## Full validation: precheck + test suite
-ci: precheck test
+## Static/unit gate for the isolated triage process-boundary harness
+triage-runtime-e2e-static:
+	@PYTHONPYCACHEPREFIX="$(PYTHON_CACHE_ROOT)" $(PYTHON) -m py_compile \
+		scripts/triage-runtime-e2e.py tools/triage_runtime_e2e_test.py
+	@PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tools/triage_runtime_e2e_test.py
+
+## Real isolated process-boundary regression against the exact clean checkout build
+triage-runtime-e2e:
+	@test -x "$(TRIAGE_RUNTIME_E2E_BINARY)" \
+		|| { echo "ERROR: missing executable $(TRIAGE_RUNTIME_E2E_BINARY); run 'make binary' first"; exit 1; }
+	@VC_FRAME_E2E_ARTIFACT_ROOT="$(TRIAGE_RUNTIME_E2E_ARTIFACT_ROOT)" \
+		$(PYTHON) scripts/triage-runtime-e2e.py \
+		"$(TRIAGE_RUNTIME_E2E_BINARY)" \
+		--expect-current-checkout-sha \
+		--expected-profile "$(TRIAGE_RUNTIME_E2E_PROFILE)"
+
+## Full validation: precheck + test suite + triage harness contract tests
+ci: precheck test triage-runtime-e2e-static
 	@echo ""
 	@echo "══════════════════════════════════════"
 	@echo "  ✓ CI-equivalent gates passed"
@@ -440,6 +461,8 @@ help:
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "fmt" "Format code"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "fmt-check" "Check formatting without modifying files"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "check" "Quick workspace typecheck"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "triage-runtime-e2e-static" "Harness syntax + unit contract tests"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "triage-runtime-e2e" "Isolated triage process-boundary regression"
 	@printf "\n  $(C_YELLOW)VERSION / RELEASE$(C_RESET)\n"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "version" "Bare = check; TYPE=|VERSION= patch|minor|major|x.y.z = bump"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "version-show" "Print package version + tag state"
