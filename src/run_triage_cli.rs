@@ -274,6 +274,43 @@ fn run_command_with_timeout(
     })
 }
 
+fn retry_json_array_output<F>(
+    label: &str,
+    timeout: Duration,
+    mut attempt: F,
+) -> Result<String, String>
+where
+    F: FnMut() -> Result<String, String>,
+{
+    let deadline = Instant::now() + timeout;
+    let mut last_error;
+    loop {
+        match attempt() {
+            Ok(output) => match serde_json::from_str::<serde_json::Value>(&output) {
+                Ok(serde_json::Value::Array(_)) => return Ok(output),
+                Ok(_) => {
+                    last_error = format!("{} is not an array", label);
+                },
+                Err(error) => {
+                    last_error = format!("cannot parse {}: {}", label, error);
+                },
+            },
+            Err(error) => {
+                last_error = error;
+            },
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "{} remained unavailable after {:.1}s: {}",
+                label,
+                timeout.as_secs_f64(),
+                last_error
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 impl CliTriageIo {
     fn new(root: PathBuf) -> Result<Self, String> {
         let executable = std::env::current_exe()
@@ -294,23 +331,33 @@ impl CliTriageIo {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
+    fn tab_inventory(&self, session: &str) -> Result<String, String> {
+        retry_json_array_output("vc-frame tab inventory", Duration::from_secs(2), || {
+            self.run(&["-s", session, "action", "list-tabs", "--json"])
+        })
+    }
+
+    fn pane_inventory(&self, session: &str) -> Result<String, String> {
+        retry_json_array_output("vc-frame pane inventory", Duration::from_secs(2), || {
+            self.run(&[
+                "-s",
+                session,
+                "action",
+                "list-panes",
+                "--json",
+                "--all",
+                "--tab",
+                "--state",
+            ])
+        })
+    }
+
     fn wait_for_session_ready(&self, session: &str) -> Result<(), String> {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             let readiness = self
-                .run(&["-s", session, "action", "list-tabs", "--json"])
-                .and_then(|_| {
-                    self.run(&[
-                        "-s",
-                        session,
-                        "action",
-                        "list-panes",
-                        "--json",
-                        "--all",
-                        "--tab",
-                        "--state",
-                    ])
-                })
+                .tab_inventory(session)
+                .and_then(|_| self.pane_inventory(session))
                 .and_then(|panes| {
                     serde_json::from_str::<Vec<serde_json::Value>>(&panes)
                         .map_err(|error| format!("cannot parse pane inventory: {}", error))
@@ -1387,7 +1434,7 @@ impl TriageIo for CliTriageIo {
         // has disappeared, so identity resolution is part of the terminal
         // attempt rather than a global precondition.
         let origin_tab_identity = (|| {
-            let tab_list = self.run(&["-s", session, "action", "list-tabs", "--json"])?;
+            let tab_list = self.tab_inventory(session)?;
             tab_identity_for_name(&tab_list, session, origin_tab)
         })();
 
@@ -1403,16 +1450,7 @@ impl TriageIo for CliTriageIo {
                 .and_then(|origin_tab_identity| {
                     let temporary = unique_staging_path(dest, "terminal-scrollback")?;
                     let origin_tab_id = origin_tab_identity.id;
-                    let pane_list = self.run(&[
-                        "-s",
-                        session,
-                        "action",
-                        "list-panes",
-                        "--json",
-                        "--all",
-                        "--tab",
-                        "--state",
-                    ])?;
+                    let pane_list = self.pane_inventory(session)?;
                     let terminal_pane_id =
                         terminal_pane_id_for_tab(&pane_list, origin_tab_id, origin_tab, pane_id)?
                             .to_string();
@@ -1576,7 +1614,7 @@ impl TriageIo for CliTriageIo {
         tab: &str,
         expected: Option<&OriginTabIdentity>,
     ) -> Result<Option<OriginTabIdentity>, String> {
-        let mut inventory = self.run(&["-s", session, "action", "list-tabs", "--json"])?;
+        let mut inventory = self.tab_inventory(session)?;
         let mut matches = tab_identities_for_name(&inventory, session, tab)?;
         if matches.len() > 1 {
             if !is_owned_viewer_tab_name(tab) {
@@ -1624,7 +1662,7 @@ impl TriageIo for CliTriageIo {
                     &duplicate.tab_instance_id,
                 ])?;
             }
-            inventory = self.run(&["-s", session, "action", "list-tabs", "--json"])?;
+            inventory = self.tab_inventory(session)?;
             matches = tab_identities_for_name(&inventory, session, tab)?;
         }
         match matches.as_slice() {
@@ -1656,7 +1694,7 @@ impl TriageIo for CliTriageIo {
             message,
             origin_tab_state: OriginTabState::Preserved,
         };
-        let tab_list_result = self.run(&["-s", session, "action", "list-tabs", "--json"]);
+        let tab_list_result = self.tab_inventory(session);
         let session_exists_result = session_exists(session)
             .map_err(|error| format!("cannot check session '{}': {:?}", session, error));
         let Some(tab_list) =
@@ -1696,7 +1734,7 @@ impl TriageIo for CliTriageIo {
         // same ID captured before any durable side effect. A changed ID could
         // be a resurrected or replacement tab; preserving it is safer than
         // guessing which incarnation owns the name.
-        let tab_list_result = self.run(&["-s", session, "action", "list-tabs", "--json"]);
+        let tab_list_result = self.tab_inventory(session);
         let session_exists_result = session_exists(session)
             .map_err(|error| format!("cannot check session '{}': {:?}", session, error));
         let Some(tabs) = verified_tab_list_before_close(tab_list_result, session_exists_result)?
@@ -1736,7 +1774,7 @@ impl TriageIo for CliTriageIo {
             "--expected-tab-instance-id",
             &captured.tab_instance_id,
         ]);
-        let tab_list_result = self.run(&["-s", session, "action", "list-tabs", "--json"]);
+        let tab_list_result = self.tab_inventory(session);
         let session_exists_result = session_exists(session)
             .map_err(|error| format!("cannot check session '{}': {:?}", session, error));
         verify_origin_close(
@@ -1854,6 +1892,31 @@ mod tests {
         .unwrap();
         assert!(output.status.success());
         assert_eq!(output.stdout, b"ready");
+    }
+
+    #[test]
+    fn transient_empty_json_inventory_is_retried() {
+        let mut attempts = 0;
+        let output = retry_json_array_output("test inventory", Duration::from_millis(100), || {
+            attempts += 1;
+            if attempts == 1 {
+                Ok(String::new())
+            } else {
+                Ok("[]".to_owned())
+            }
+        })
+        .unwrap();
+
+        assert_eq!(output, "[]");
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn persistently_malformed_json_inventory_fails_closed() {
+        let error = retry_json_array_output("test inventory", Duration::ZERO, || Ok(String::new()))
+            .unwrap_err();
+
+        assert!(error.contains("cannot parse test inventory"));
     }
 
     #[cfg(unix)]

@@ -809,6 +809,8 @@ fn file_content_changed(path: &std::path::Path, new_content: &[u8]) -> bool {
 }
 
 fn sync_parent_directory(path: &Path) -> Result<(), String> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         let parent = path

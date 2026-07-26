@@ -69,8 +69,8 @@ impl ServerOsApi for MockOsApi {
         _: Option<PathBuf>,
     ) -> anyhow::Result<(u32, Box<dyn AsyncReader>, Option<u32>)> {
         if self.fail_spawn_terminal.load(Ordering::Relaxed) {
-            return Err(anyhow::Error::new(io::Error::from_raw_os_error(
-                libc::EMFILE,
+            return Err(anyhow::Error::new(io::Error::other(
+                "injected EMFILE-like spawn failure",
             )));
         }
         unimplemented!()
