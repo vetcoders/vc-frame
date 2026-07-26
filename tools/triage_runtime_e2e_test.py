@@ -822,8 +822,9 @@ class EvidenceAndCleanupTests(unittest.TestCase):
         command: mock.Mock,
         query: mock.Mock,
         _wait_gone: mock.Mock,
-        _wait_processes: mock.Mock,
+        wait_processes: mock.Mock,
     ) -> None:
+        events: list[str] = []
         inventory.side_effect = [
             {"owned": "live"},
             {"owned": "exited"},
@@ -837,7 +838,19 @@ class EvidenceAndCleanupTests(unittest.TestCase):
             list_tabs_stderr="",
             inventory_state="live",
         )
-        command.return_value = completed(0)
+
+        def record_command(*args: object, **_kwargs: object) -> subprocess.CompletedProcess:
+            events.append(str(args[2]))
+            return completed(0)
+
+        def record_process_barrier(
+            *_args: object, **_kwargs: object
+        ) -> list[dict[str, object]]:
+            events.append("wait-processes")
+            return []
+
+        command.side_effect = record_command
+        wait_processes.side_effect = record_process_barrier
         receipt = MODULE.cleanup_namespace(
             pathlib.Path("vc-frame"),
             {"VC_FRAME_SOCKET_DIR": "/tmp/proof/sockets"},
@@ -853,6 +866,15 @@ class EvidenceAndCleanupTests(unittest.TestCase):
             [
                 ("kill-session", "owned"),
                 ("delete-session", "owned", "--force"),
+            ],
+        )
+        self.assertEqual(
+            events,
+            [
+                "kill-session",
+                "wait-processes",
+                "delete-session",
+                "wait-processes",
             ],
         )
 
