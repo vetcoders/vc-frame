@@ -108,6 +108,14 @@ class SemgrepInventoryTests(unittest.TestCase):
                 with self.subTest(path=path, line=line):
                     MODULE.adjudicate(self.finding(rule, path, line))
 
+    def test_live_transfer_lock_unsafe_is_explicitly_allowed(self) -> None:
+        path = MODULE.TRANSFER_LOCK_PATH
+        lines = self.live_lines(path, r"\bunsafe\s*\{")
+        self.assertEqual(len(lines), 1)
+        MODULE.adjudicate(self.finding(
+            "rust.lang.security.unsafe-usage.unsafe-usage", path, lines[0]
+        ))
+
     def test_temp_dir_in_production_part_of_allowed_file_fails(self) -> None:
         path = "default-plugins/link/src/main.rs"
         with self.assertRaisesRegex(MODULE.InventoryError, "outside terminal"):
@@ -140,6 +148,24 @@ class SemgrepInventoryTests(unittest.TestCase):
                     ),
                     root=root,
                 )
+
+    def test_run_triage_current_exe_outside_reviewed_shapes_fails(self) -> None:
+        path = MODULE.TRANSFER_LOCK_PATH
+        lines = [
+            "fn main() {",
+            "let executable = std::env::current_exe().unwrap();",
+            "}",
+        ]
+        with self.assertRaisesRegex(MODULE.InventoryError, "terminal"):
+            MODULE.require_current_exe_policy(path, lines, 2)
+
+    def test_changed_transfer_lock_unsafe_shape_fails(self) -> None:
+        with self.assertRaisesRegex(MODULE.InventoryError, "source shape"):
+            MODULE.require_transfer_lock_fd_policy(
+                MODULE.TRANSFER_LOCK_PATH,
+                ["let file = unsafe { std::fs::File::from_raw_fd(other_fd) };"],
+                1,
+            )
 
     def test_noncanonical_result_path_fails(self) -> None:
         with self.assertRaisesRegex(MODULE.InventoryError, "not canonical"):

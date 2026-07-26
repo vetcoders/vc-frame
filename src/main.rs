@@ -213,6 +213,8 @@ fn main() {
             runtime_transcript,
             cwd,
             dry_run,
+            transfer_lock_fd,
+            settlement_revision,
             command,
         })) = opts.command
         {
@@ -226,6 +228,8 @@ fn main() {
                 runtime_transcript,
                 cwd,
                 dry_run,
+                transfer_lock_fd,
+                settlement_revision,
                 command,
             ) {
                 Ok(report) => {

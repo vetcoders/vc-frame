@@ -15,24 +15,17 @@ use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use zellij_utils::consts::session_layout_cache_file_name;
 use zellij_utils::run_triage::{
     BucketKind, CaptureEvidence, CaptureSource, CloseOriginError, FinishedRun, OriginTabIdentity,
     OriginTabState, RunMeta, TransferReceipt, TransferReport, TriageIo, capture_sha256,
     control_plane_root, transfer_finished_run, transfer_receipt_path,
+    verify_saved_layout_excludes_viewer,
 };
 use zellij_utils::sessions::session_exists;
 
 struct RunTransferLock {
-    file: std::fs::File,
-}
-
-#[cfg(unix)]
-impl Drop for RunTransferLock {
-    fn drop(&mut self) {
-        use std::os::fd::AsRawFd;
-
-        let _ = nix::fcntl::flock(self.file.as_raw_fd(), nix::fcntl::FlockArg::Unlock);
-    }
+    _file: std::fs::File,
 }
 
 impl RunTransferLock {
@@ -62,7 +55,81 @@ impl RunTransferLock {
                 error
             )
         })?;
-        Ok(Self { file })
+        Ok(Self { _file: file })
+    }
+
+    #[cfg(unix)]
+    fn acquire_inherited(path: &Path, inherited_fd: i32) -> Result<Self, String> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::fs::MetadataExt;
+
+        if inherited_fd < 3 {
+            return Err(format!(
+                "inherited transfer lock descriptor is not a private fd: {}",
+                inherited_fd
+            ));
+        }
+        nix::fcntl::fcntl(inherited_fd, nix::fcntl::FcntlArg::F_GETFD).map_err(|error| {
+            format!(
+                "cannot inspect inherited transfer lock descriptor {}: {}",
+                inherited_fd, error
+            )
+        })?;
+        nix::fcntl::fcntl(
+            inherited_fd,
+            nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
+        )
+        .map_err(|error| {
+            format!(
+                "cannot make inherited transfer lock descriptor {} close-on-exec: {}",
+                inherited_fd, error
+            )
+        })?;
+        // SAFETY: pass_fds gives this exec its own valid descriptor table
+        // entry. The parent lives in another process; adopting this entry
+        // therefore creates exactly one Rust owner and closes it with the
+        // guard. FD_CLOEXEC prevents any session/server child from extending
+        // the lock lifetime.
+        let file = unsafe { std::fs::File::from_raw_fd(inherited_fd) };
+        let path_metadata = std::fs::symlink_metadata(path)
+            .map_err(|error| format!("cannot stat transfer lock {}: {}", path.display(), error))?;
+        let file_metadata = file.metadata().map_err(|error| {
+            format!(
+                "cannot inspect inherited transfer lock {}: {}",
+                path.display(),
+                error
+            )
+        })?;
+        let canonical_path = std::fs::canonicalize(path).map_err(|error| {
+            format!(
+                "cannot canonicalize transfer lock {}: {}",
+                path.display(),
+                error
+            )
+        })?;
+        if path_metadata.file_type().is_symlink()
+            || !path_metadata.is_file()
+            || canonical_path != path
+            || path_metadata.dev() != file_metadata.dev()
+            || path_metadata.ino() != file_metadata.ino()
+        {
+            return Err(format!(
+                "inherited transfer lock does not bind the canonical file {}",
+                path.display()
+            ));
+        }
+        nix::fcntl::flock(
+            file.as_raw_fd(),
+            nix::fcntl::FlockArg::LockExclusiveNonblock,
+        )
+        .map_err(|error| {
+            format!(
+                "inherited descriptor does not own transfer lock {}: {}",
+                path.display(),
+                error
+            )
+        })?;
+        Ok(Self { _file: file })
     }
 
     #[cfg(windows)]
@@ -83,13 +150,29 @@ impl RunTransferLock {
             .map_err(|error| {
                 format!("cannot acquire transfer lock {}: {}", path.display(), error)
             })?;
-        Ok(Self { file })
+        Ok(Self { _file: file })
+    }
+
+    #[cfg(windows)]
+    fn acquire_inherited(path: &Path, _inherited_fd: i32) -> Result<Self, String> {
+        Err(format!(
+            "inherited run transfer locking is unsupported on Windows ({})",
+            path.display()
+        ))
     }
 
     #[cfg(not(any(unix, windows)))]
     fn acquire(path: &Path) -> Result<Self, String> {
         Err(format!(
             "run transfer locking is unsupported on this platform ({})",
+            path.display()
+        ))
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn acquire_inherited(path: &Path, _inherited_fd: i32) -> Result<Self, String> {
+        Err(format!(
+            "inherited run transfer locking is unsupported on this platform ({})",
             path.display()
         ))
     }
@@ -253,15 +336,18 @@ impl CliTriageIo {
 ///
 /// `start_suspended true` is what makes the rerun a single keypress — the pane
 /// holds the original command without running it until the operator says so.
-fn bucket_tab_layout(scrollback: &Path, meta: &RunMeta) -> String {
+fn bucket_tab_layout(scrollback: &Path, tab_instance_id: &str, meta: &RunMeta) -> String {
     // Chrome mirrors `default_tab_template` in assets/layouts/vibecrafted.kdl:
     // compact-bar on top, the left Sessions rail, status-bar below. The layout
     // contract ("every tab keeps the left Sessions rail") applies to transferred
     // bucket tabs too — a fullscreen scrollback that hides the rail strands the
     // operator inside the bucket with no way back but the keyboard.
-    let mut layout = String::from(
-        "layout {\n\
-         \x20   pane size=1 borderless=true {\n\
+    let mut layout = format!(
+        "layout vc_tab_instance_id=\"{}\" {{\n",
+        kdl_escape(tab_instance_id)
+    );
+    layout.push_str(
+        "    pane size=1 borderless=true {\n\
          \x20       plugin location=\"compact-bar\"\n\
          \x20   }\n\
          \x20   pane split_direction=\"vertical\" {\n\
@@ -1416,9 +1502,56 @@ impl TriageIo for CliTriageIo {
         }
     }
 
-    fn open_bucket_tab(&mut self, session: &str, tab: &str, meta: &RunMeta) -> Result<(), String> {
+    fn save_bucket_session(
+        &mut self,
+        session: &str,
+        retired_viewer: &OriginTabIdentity,
+    ) -> Result<(), String> {
+        self.run(&["-s", session, "action", "save-session"])?;
+        let layout_path = session_layout_cache_file_name(session);
+        let metadata = std::fs::symlink_metadata(&layout_path).map_err(|error| {
+            format!(
+                "cannot inspect saved resurrection layout {}: {}",
+                layout_path.display(),
+                error
+            )
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(format!(
+                "saved resurrection layout is not a regular file: {}",
+                layout_path.display()
+            ));
+        }
+        let contents = std::fs::read_to_string(&layout_path).map_err(|error| {
+            format!(
+                "cannot read saved resurrection layout {}: {}",
+                layout_path.display(),
+                error
+            )
+        })?;
+        verify_saved_layout_excludes_viewer(
+            &contents,
+            &layout_path.display().to_string(),
+            retired_viewer,
+        )
+        .map_err(|error| {
+            format!(
+                "saved resurrection layout {} is unsafe: {}",
+                layout_path.display(),
+                error
+            )
+        })
+    }
+
+    fn open_bucket_tab(
+        &mut self,
+        session: &str,
+        tab: &str,
+        tab_instance_id: &str,
+        meta: &RunMeta,
+    ) -> Result<(), String> {
         let scrollback = zellij_utils::run_triage::scrollback_path(&self.root, &meta.run);
-        let layout = bucket_tab_layout(&scrollback, meta);
+        let layout = bucket_tab_layout(&scrollback, tab_instance_id, meta);
         self.run(&[
             "-s",
             session,
@@ -1448,15 +1581,24 @@ impl TriageIo for CliTriageIo {
                     matches.len()
                 ));
             }
-            let keeper = expected
-                .and_then(|expected| {
-                    matches
-                        .iter()
-                        .find(|candidate| candidate.is_same_durable_tab(expected))
-                })
-                .cloned()
-                .or_else(|| matches.iter().min_by_key(|identity| identity.id).cloned())
-                .ok_or_else(|| format!("cannot select a keeper for viewer tab '{}'", tab))?;
+            let keeper = if let Some(expected) = expected {
+                matches
+                    .iter()
+                    .find(|candidate| candidate.is_same_durable_tab(expected))
+                    .cloned()
+                    .ok_or_else(|| {
+                        format!(
+                            "viewer tab '{}' has no instance matching the durable reservation",
+                            tab
+                        )
+                    })?
+            } else {
+                matches
+                    .iter()
+                    .min_by_key(|identity| identity.id)
+                    .cloned()
+                    .ok_or_else(|| format!("cannot select a keeper for viewer tab '{}'", tab))?
+            };
             for duplicate in matches
                 .iter()
                 .filter(|identity| identity.tab_instance_id != keeper.tab_instance_id)
@@ -1482,6 +1624,14 @@ impl TriageIo for CliTriageIo {
         }
         match matches.as_slice() {
             [] => Ok(None),
+            [identity]
+                if expected.is_some_and(|expected| !identity.is_same_durable_tab(expected)) =>
+            {
+                Err(format!(
+                    "viewer tab '{}' does not match the durable reservation",
+                    tab
+                ))
+            },
             [identity] => Ok(Some(identity.clone())),
             _ => Err(format!(
                 "viewer tab '{}' is still ambiguous across {} tabs after reconciliation",
@@ -1607,6 +1757,8 @@ pub(crate) fn triage_run(
     runtime_transcript: Option<PathBuf>,
     cwd: Option<PathBuf>,
     dry_run: bool,
+    transfer_lock_fd: Option<i32>,
+    settlement_revision: u64,
     command: Vec<String>,
 ) -> Result<TransferReport, String> {
     let origin_session = origin_session
@@ -1627,6 +1779,7 @@ pub(crate) fn triage_run(
         command,
         cwd,
         bucket_verdict,
+        settlement_revision,
     };
     let root = control_plane_root()
         .ok_or_else(|| "cannot resolve the control plane root (set VIBECRAFTED_HOME)".to_owned())?;
@@ -1656,7 +1809,10 @@ pub(crate) fn triage_run(
     }
 
     let lock_path = transfer_receipt_path(&root, &finished.run).with_file_name("transfer.lock");
-    let _transfer_lock = RunTransferLock::acquire(&lock_path)?;
+    let _transfer_lock = match transfer_lock_fd {
+        Some(inherited_fd) => RunTransferLock::acquire_inherited(&lock_path, inherited_fd)?,
+        None => RunTransferLock::acquire(&lock_path)?,
+    };
     let mut io = CliTriageIo::new(root.clone())?;
     transfer_finished_run(&mut io, &finished, &root, captured_at).map_err(|error| {
         format!(
@@ -1707,6 +1863,129 @@ mod tests {
         RunTransferLock::acquire(&path).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn inherited_transfer_lock_survives_the_parent_guard() {
+        use std::os::fd::AsRawFd;
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().canonicalize().unwrap().join("transfer.lock");
+        let parent = std::mem::ManuallyDrop::new(RunTransferLock::acquire(&path).unwrap());
+        let child_fd = nix::unistd::dup(parent._file.as_raw_fd()).unwrap();
+        let inherited = RunTransferLock::acquire_inherited(&path, child_fd).unwrap();
+
+        // Model abrupt parent death: the kernel closes the parent's descriptor
+        // without running a userspace LOCK_UN guard. The duplicated open-file
+        // description owned by the child must keep the lock alive.
+        nix::unistd::close(parent._file.as_raw_fd()).unwrap();
+        let locked_probe = Command::new(std::env::current_exe().unwrap())
+            .arg("inherited_transfer_lock_probe_child")
+            .env("VC_FRAME_TEST_TRANSFER_LOCK", &path)
+            .env("VC_FRAME_TEST_EXPECT_LOCKED", "1")
+            .output()
+            .unwrap();
+        assert!(
+            locked_probe.status.success(),
+            "stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&locked_probe.stdout),
+            String::from_utf8_lossy(&locked_probe.stderr),
+        );
+
+        drop(inherited);
+        let available_probe = Command::new(std::env::current_exe().unwrap())
+            .arg("inherited_transfer_lock_probe_child")
+            .env("VC_FRAME_TEST_TRANSFER_LOCK", &path)
+            .env("VC_FRAME_TEST_EXPECT_LOCKED", "0")
+            .output()
+            .unwrap();
+        assert!(
+            available_probe.status.success(),
+            "stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&available_probe.stdout),
+            String::from_utf8_lossy(&available_probe.stderr),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_child_guard_does_not_unlock_the_live_parent_descriptor() {
+        use std::os::fd::AsRawFd;
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().canonicalize().unwrap().join("transfer.lock");
+        let parent = RunTransferLock::acquire(&path).unwrap();
+        let child_fd = nix::unistd::dup(parent._file.as_raw_fd()).unwrap();
+        let inherited = RunTransferLock::acquire_inherited(&path, child_fd).unwrap();
+
+        drop(inherited);
+        let locked_probe = Command::new(std::env::current_exe().unwrap())
+            .arg("inherited_transfer_lock_probe_child")
+            .env("VC_FRAME_TEST_TRANSFER_LOCK", &path)
+            .env("VC_FRAME_TEST_EXPECT_LOCKED", "1")
+            .output()
+            .unwrap();
+        assert!(
+            locked_probe.status.success(),
+            "stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&locked_probe.stdout),
+            String::from_utf8_lossy(&locked_probe.stderr),
+        );
+
+        drop(parent);
+        let available_probe = Command::new(std::env::current_exe().unwrap())
+            .arg("inherited_transfer_lock_probe_child")
+            .env("VC_FRAME_TEST_TRANSFER_LOCK", &path)
+            .env("VC_FRAME_TEST_EXPECT_LOCKED", "0")
+            .output()
+            .unwrap();
+        assert!(
+            available_probe.status.success(),
+            "stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&available_probe.stdout),
+            String::from_utf8_lossy(&available_probe.stderr),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inherited_transfer_lock_probe_child() {
+        let Some(path) = std::env::var_os("VC_FRAME_TEST_TRANSFER_LOCK").map(PathBuf::from) else {
+            return;
+        };
+        let expect_locked = std::env::var_os("VC_FRAME_TEST_EXPECT_LOCKED").as_deref()
+            == Some(std::ffi::OsStr::new("1"));
+        let acquired = RunTransferLock::acquire(&path);
+        if expect_locked {
+            let error = acquired.err().expect("inherited lock was not held");
+            assert!(error.contains("refusing to wait"), "{error}");
+        } else {
+            acquired.expect("inherited lock survived after its final owner exited");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inherited_transfer_lock_does_not_leak_through_exec() {
+        use std::os::fd::AsRawFd;
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().canonicalize().unwrap().join("transfer.lock");
+        let parent = RunTransferLock::acquire(&path).unwrap();
+        let child_fd = nix::unistd::dup(parent._file.as_raw_fd()).unwrap();
+        let inherited = RunTransferLock::acquire_inherited(&path, child_fd).unwrap();
+        drop(parent);
+
+        let mut sleeping_child = Command::new("/bin/sh")
+            .args(["-c", "sleep 30"])
+            .spawn()
+            .unwrap();
+        drop(inherited);
+
+        RunTransferLock::acquire(&path).unwrap();
+        sleeping_child.kill().unwrap();
+        sleeping_child.wait().unwrap();
+    }
+
     fn meta(command: Vec<&str>) -> RunMeta {
         RunMeta {
             run: "impl-260720-120000-01000".to_owned(),
@@ -1726,11 +2005,14 @@ mod tests {
 
     #[test]
     fn bucket_tab_shows_the_scrollback_and_a_suspended_rerun() {
+        let tab_instance_id = "0123456789abcdef0123456789abcdef";
         let layout = bucket_tab_layout(
             Path::new("/cp/finished_runs/impl-260720-120000-01000/scrollback.txt"),
+            tab_instance_id,
             &meta(vec!["claude", "--resume"]),
         );
 
+        assert!(layout.contains(&format!("vc_tab_instance_id=\"{}\"", tab_instance_id)));
         assert!(layout.contains("/cp/finished_runs/impl-260720-120000-01000/scrollback.txt"));
         assert!(layout.contains("command=\"claude\""));
         assert!(layout.contains("args \"--resume\""));
@@ -1741,7 +2023,11 @@ mod tests {
 
     #[test]
     fn a_run_without_a_command_still_gets_a_viewer() {
-        let layout = bucket_tab_layout(Path::new("/cp/s.txt"), &meta(vec![]));
+        let layout = bucket_tab_layout(
+            Path::new("/cp/s.txt"),
+            "0123456789abcdef0123456789abcdef",
+            &meta(vec![]),
+        );
         assert!(layout.contains("/cp/s.txt"));
         assert!(!layout.contains("start_suspended"));
     }
@@ -1750,6 +2036,7 @@ mod tests {
     fn quotes_and_backslashes_cannot_break_out_of_the_layout() {
         let layout = bucket_tab_layout(
             Path::new("/cp/s.txt"),
+            "0123456789abcdef0123456789abcdef",
             &meta(vec!["sh", "-c", "echo \"hi\""]),
         );
         assert!(layout.contains(r#"args "-c" "echo \"hi\"""#));

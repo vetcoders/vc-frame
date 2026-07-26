@@ -118,9 +118,11 @@ fn serialize_tab(
             serialized_tab
                 .entries_mut()
                 .push(KdlEntry::new_prop("name", tab_name));
-            serialized_tab
-                .entries_mut()
-                .push(KdlEntry::new_prop("vc_tab_instance_id", tab_instance_id));
+            if !tab_instance_id.is_empty() {
+                serialized_tab
+                    .entries_mut()
+                    .push(KdlEntry::new_prop("vc_tab_instance_id", tab_instance_id));
+            }
             if is_focused {
                 serialized_tab
                     .entries_mut()
@@ -1383,6 +1385,29 @@ mod tests {
         };
         let kdl = serialize_session_layout(global_layout_manifest).unwrap();
         assert_snapshot!(kdl.0);
+    }
+
+    #[test]
+    fn serializes_only_assigned_tab_instance_identity() {
+        let assigned = GlobalLayoutManifest {
+            tabs: vec![(
+                "owned".to_owned(),
+                TabLayoutManifest {
+                    tab_instance_id: "33333333333333333333333333333333".to_owned(),
+                    ..Default::default()
+                },
+            )],
+            ..Default::default()
+        };
+        let assigned_kdl = serialize_session_layout(assigned).unwrap().0;
+        assert!(assigned_kdl.contains("vc_tab_instance_id=\"33333333333333333333333333333333\""));
+
+        let fresh = GlobalLayoutManifest {
+            tabs: vec![("fresh".to_owned(), TabLayoutManifest::default())],
+            ..Default::default()
+        };
+        let fresh_kdl = serialize_session_layout(fresh).unwrap().0;
+        assert!(!fresh_kdl.contains("vc_tab_instance_id"));
     }
     #[test]
     fn can_serialize_tab_focus() {

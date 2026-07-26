@@ -15,9 +15,12 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use kdl::KdlDocument;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+
+use crate::input::layout::Layout;
 
 /// Canonical bucket session for runs that finished cleanly.
 pub const FINALIZED_RUNS_SESSION: &str = "Finalized runs";
@@ -152,6 +155,12 @@ pub struct FinishedRun {
     /// The caller's verdict, when it has one. `None` means "I only know the
     /// exit code" and hands the decision to [`BucketKind::for_exit_code`].
     pub bucket_verdict: Option<BucketKind>,
+    /// Monotonic runtime settlement revision. Zero is the legacy/manual path.
+    ///
+    /// A newer non-zero revision may supersede an already completed drawer
+    /// transfer for the same immutable run identity. Older or equal revisions
+    /// can only resume the exact same bucket/exit classification.
+    pub settlement_revision: u64,
 }
 
 impl FinishedRun {
@@ -199,6 +208,84 @@ impl OriginTabIdentity {
             && !self.tab_instance_id.is_empty()
             && self.tab_instance_id == other.tab_instance_id
     }
+}
+
+fn matches_viewer_reservation(
+    identity: &OriginTabIdentity,
+    session: &str,
+    tab: &str,
+    token: &str,
+) -> bool {
+    identity.is_typed()
+        && identity.session == session
+        && identity.name == tab
+        && identity.tab_instance_id == token
+}
+
+fn is_viewer_reservation(identity: &OriginTabIdentity) -> bool {
+    !identity.session.is_empty()
+        && !identity.name.is_empty()
+        && identity.tab_instance_id.len() == 32
+        && identity
+            .tab_instance_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Prove that a saved resurrection layout cannot recreate `viewer`.
+///
+/// Both the stable tab instance and the owned tab name are checked. Older
+/// layouts may not contain `vc_tab_instance_id`; accepting a same-name legacy
+/// tab would therefore recreate the very viewer this tombstone protects.
+pub fn verify_saved_layout_excludes_viewer(
+    contents: &str,
+    source_name: &str,
+    viewer: &OriginTabIdentity,
+) -> Result<(), String> {
+    if !is_viewer_reservation(viewer) {
+        return Err(format!(
+            "cannot verify an invalid viewer reservation for '{}'",
+            viewer.name
+        ));
+    }
+    let document = contents
+        .parse::<KdlDocument>()
+        .map_err(|error| format!("cannot parse saved resurrection layout: {}", error))?;
+    let parsed_layout = Layout::from_kdl(contents, Some(source_name.to_owned()), None, None)
+        .map_err(|error| format!("saved resurrection layout is not loadable: {}", error))?;
+    if parsed_layout.tabs.iter().any(|(name, tiled, _floating)| {
+        name.as_deref() == Some(viewer.name.as_str())
+            || tiled.tab_instance_id.as_deref() == Some(viewer.tab_instance_id.as_str())
+    }) {
+        return Err(format!(
+            "saved resurrection layout still contains superseded viewer '{}'",
+            viewer.name
+        ));
+    }
+
+    fn contains_viewer(document: &KdlDocument, viewer: &OriginTabIdentity) -> bool {
+        document.nodes().iter().any(|node| {
+            let is_protected_tab = node.name().value() == "tab"
+                && (node
+                    .get("vc_tab_instance_id")
+                    .and_then(|entry| entry.value().as_string())
+                    == Some(viewer.tab_instance_id.as_str())
+                    || node.get("name").and_then(|entry| entry.value().as_string())
+                        == Some(viewer.name.as_str()));
+            is_protected_tab
+                || node
+                    .children()
+                    .is_some_and(|children| contains_viewer(children, viewer))
+        })
+    }
+
+    if contains_viewer(&document, viewer) {
+        return Err(format!(
+            "saved resurrection layout still contains superseded viewer '{}'",
+            viewer.name
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,6 +399,8 @@ pub enum TransferStep {
     EnsureBucketSession,
     OpenBucketTab,
     ConfirmBucketTab,
+    CloseSupersededViewer,
+    SaveBucketSession,
     CloseOriginTab,
 }
 
@@ -386,6 +475,8 @@ pub struct TransferReceipt {
     pub pane_id: Option<String>,
     #[serde(default)]
     pub runtime_transcript: Option<PathBuf>,
+    #[serde(default)]
+    pub settlement_revision: u64,
     pub capture: Option<CaptureEvidence>,
     pub capture_committed: bool,
     pub metadata_committed: bool,
@@ -396,9 +487,23 @@ pub struct TransferReceipt {
     pub viewer_creation_pending: bool,
     #[serde(default)]
     pub viewer_token: String,
+    #[serde(default)]
+    pub superseded_viewers: Vec<SupersededViewer>,
     pub origin_tab_state: OriginTabState,
     pub fault: Option<String>,
     pub updated_at: u64,
+}
+
+/// Exact old viewer retained while a newer settlement is being materialized.
+///
+/// The new drawer is confirmed first. Only then may this typed incarnation be
+/// closed, which keeps every crash point recoverable without double-counting
+/// forever or guessing at a same-name replacement tab.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SupersededViewer {
+    pub bucket: BucketKind,
+    pub tab: String,
+    pub identity: OriginTabIdentity,
 }
 
 impl TransferReceipt {
@@ -414,6 +519,7 @@ impl TransferReceipt {
             cwd: run.cwd.clone(),
             pane_id: run.pane_id.clone(),
             runtime_transcript: run.runtime_transcript.clone(),
+            settlement_revision: run.settlement_revision,
             capture: None,
             capture_committed: false,
             metadata_committed: false,
@@ -421,6 +527,7 @@ impl TransferReceipt {
             viewer_tab_identity: None,
             viewer_creation_pending: false,
             viewer_token: Uuid::new_v4().simple().to_string(),
+            superseded_viewers: Vec::new(),
             origin_tab_state: OriginTabState::Preserved,
             fault: None,
             updated_at: captured_at,
@@ -452,9 +559,22 @@ pub trait TriageIo {
     fn write_meta(&mut self, dest: &Path, meta: &RunMeta) -> Result<(), String>;
     /// Create the bucket session if it does not exist yet. Idempotent.
     fn ensure_bucket_session(&mut self, session: &str) -> Result<(), String>;
+    /// Flush the current bucket layout and prove the retired viewer cannot be
+    /// resurrected from the saved cache.
+    fn save_bucket_session(
+        &mut self,
+        session: &str,
+        retired_viewer: &OriginTabIdentity,
+    ) -> Result<(), String>;
     /// Open a tab named `tab` in `session`, showing the dump and offering a
     /// suspended rerun of the original command.
-    fn open_bucket_tab(&mut self, session: &str, tab: &str, meta: &RunMeta) -> Result<(), String>;
+    fn open_bucket_tab(
+        &mut self,
+        session: &str,
+        tab: &str,
+        tab_instance_id: &str,
+        meta: &RunMeta,
+    ) -> Result<(), String>;
     /// Read back the target session and return the unique durable identity of
     /// `tab`, including the server incarnation that owns its stable ID.
     fn bucket_tab_identity(
@@ -589,26 +709,34 @@ pub fn transfer_finished_run<Io: TriageIo>(
         })?
         .unwrap_or_else(|| TransferReceipt::new(run, captured_at));
 
-    if receipt.version != 4
-        || receipt.run != run.run
-        || receipt.bucket != bucket
-        || receipt.exit_code != run.exit_code
-        || receipt.origin_session != run.origin_session
-        || receipt.origin_tab != run.origin_tab
-        || receipt.command != run.command
-        || receipt.cwd != run.cwd
-        || receipt.pane_id != run.pane_id
-        || receipt.runtime_transcript != run.runtime_transcript
-        || receipt.viewer_token.is_empty()
-    {
+    let immutable_identity_matches = receipt.version == 4
+        && receipt.run == run.run
+        && receipt.origin_session == run.origin_session
+        && receipt.origin_tab == run.origin_tab
+        && receipt.command == run.command
+        && receipt.cwd == run.cwd
+        && receipt.pane_id == run.pane_id
+        && receipt.runtime_transcript == run.runtime_transcript
+        && receipt.viewer_token.len() == 32
+        && receipt
+            .viewer_token
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit());
+    let classification_changed = receipt.bucket != bucket || receipt.exit_code != run.exit_code;
+    let stale_revision = receipt.settlement_revision > run.settlement_revision;
+    let unversioned_reclassification = classification_changed
+        && (run.settlement_revision == 0 || run.settlement_revision <= receipt.settlement_revision);
+    if !immutable_identity_matches || stale_revision || unversioned_reclassification {
         let message = format!(
-            "receipt identity mismatch: stored v{} run '{}' in {:?} at {}/{}, requested v4 '{}' in {:?} at {}/{}",
+            "receipt identity mismatch: stored v{} run '{}' revision {} in {:?} at {}/{}, requested v4 '{}' revision {} in {:?} at {}/{}",
             receipt.version,
             receipt.run,
+            receipt.settlement_revision,
             receipt.bucket,
             receipt.origin_session,
             receipt.origin_tab,
             run.run,
+            run.settlement_revision,
             bucket,
             run.origin_session,
             run.origin_tab
@@ -619,6 +747,106 @@ pub fn transfer_finished_run<Io: TriageIo>(
             origin_tab_state: OriginTabState::Unknown,
             capture_is_durable: receipt.capture_committed && receipt.metadata_committed,
         });
+    }
+
+    if run.settlement_revision > receipt.settlement_revision {
+        if classification_changed {
+            let old_viewer_tab = receipt.viewer_tab_name();
+            let old_viewer_identity = match receipt.viewer_tab_identity.clone() {
+                Some(identity) => Some(identity),
+                None if receipt.viewer_creation_pending => {
+                    let old_session = receipt.bucket.session_name();
+                    let expected_old_viewer = OriginTabIdentity {
+                        session: old_session.to_owned(),
+                        name: old_viewer_tab.clone(),
+                        id: 0,
+                        session_incarnation: String::new(),
+                        tab_instance_id: receipt.viewer_token.clone(),
+                    };
+                    io.ensure_bucket_session(old_session)
+                        .map_err(|message| TransferError {
+                            step: TransferStep::ConfirmBucketTab,
+                            message: format!(
+                                "cannot resurrect pending drawer '{}' before reclassification: {}",
+                                old_session, message
+                            ),
+                            origin_tab_state: receipt.origin_tab_state,
+                            capture_is_durable: receipt.capture_committed
+                                && receipt.metadata_committed,
+                        })?;
+                    let pending_identity = io
+                        .bucket_tab_identity(
+                            old_session,
+                            &old_viewer_tab,
+                            Some(&expected_old_viewer),
+                        )
+                        .map_err(|message| TransferError {
+                            step: TransferStep::ConfirmBucketTab,
+                            message,
+                            origin_tab_state: receipt.origin_tab_state,
+                            capture_is_durable: receipt.capture_committed
+                                && receipt.metadata_committed,
+                        })?;
+                    if pending_identity.is_none() {
+                        // Live state can be clean while its delayed
+                        // resurrection cache still contains this pending
+                        // viewer. Flush and prove the cache clean before the
+                        // receipt rotates its only durable reservation token.
+                        io.save_bucket_session(old_session, &expected_old_viewer)
+                            .map_err(|message| TransferError {
+                                step: TransferStep::SaveBucketSession,
+                                message: format!(
+                                    "cannot retire absent pending viewer '{}' from drawer '{}': {}",
+                                    old_viewer_tab, old_session, message
+                                ),
+                                origin_tab_state: receipt.origin_tab_state,
+                                capture_is_durable: receipt.capture_committed
+                                    && receipt.metadata_committed,
+                            })?;
+                    }
+                    pending_identity
+                },
+                None => None,
+            };
+            if let Some(identity) = old_viewer_identity {
+                if !matches_viewer_reservation(
+                    &identity,
+                    receipt.bucket.session_name(),
+                    &old_viewer_tab,
+                    &receipt.viewer_token,
+                ) {
+                    return Err(TransferError {
+                        step: TransferStep::ConfirmBucketTab,
+                        message: format!(
+                            "cannot supersede viewer '{}' because its durable instance does not match the receipt reservation",
+                            old_viewer_tab,
+                        ),
+                        origin_tab_state: receipt.origin_tab_state,
+                        capture_is_durable: receipt.capture_committed && receipt.metadata_committed,
+                    });
+                }
+                if !receipt
+                    .superseded_viewers
+                    .iter()
+                    .any(|viewer| viewer.identity.is_same_durable_tab(&identity))
+                {
+                    receipt.superseded_viewers.push(SupersededViewer {
+                        bucket: receipt.bucket,
+                        tab: old_viewer_tab,
+                        identity,
+                    });
+                }
+            }
+            receipt.bucket = bucket;
+            receipt.exit_code = run.exit_code;
+            receipt.metadata_committed = false;
+            receipt.viewer_confirmed = false;
+            receipt.viewer_tab_identity = None;
+            receipt.viewer_creation_pending = false;
+            receipt.viewer_token = Uuid::new_v4().simple().to_string();
+        }
+        receipt.settlement_revision = run.settlement_revision;
+        persist_receipt(io, &receipt_dest, &mut receipt)?;
     }
 
     if receipt.capture_committed
@@ -702,10 +930,22 @@ pub fn transfer_finished_run<Io: TriageIo>(
         ));
     }
     let viewer_tab_name = receipt.viewer_tab_name();
+    let reserved_viewer_identity = OriginTabIdentity {
+        session: bucket.session_name().to_owned(),
+        name: viewer_tab_name.clone(),
+        id: 0,
+        session_incarnation: String::new(),
+        tab_instance_id: receipt.viewer_token.clone(),
+    };
+    let expected_viewer_identity = receipt.viewer_tab_identity.as_ref().or_else(|| {
+        receipt
+            .viewer_creation_pending
+            .then_some(&reserved_viewer_identity)
+    });
     let current_viewer_identity = match io.bucket_tab_identity(
         bucket.session_name(),
         &viewer_tab_name,
-        receipt.viewer_tab_identity.as_ref(),
+        expected_viewer_identity,
     ) {
         Ok(current_viewer_identity) => current_viewer_identity,
         Err(message) => {
@@ -719,95 +959,277 @@ pub fn transfer_finished_run<Io: TriageIo>(
             ));
         },
     };
-    let confirmed_viewer_identity =
-        match (current_viewer_identity, receipt.viewer_tab_identity.clone()) {
-            (Some(current), Some(expected)) if current.is_same_durable_tab(&expected) => current,
-            (Some(current), Some(expected)) => {
+    let confirmed_viewer_identity = match (
+        current_viewer_identity,
+        receipt.viewer_tab_identity.clone(),
+    ) {
+        (Some(current), Some(expected)) if current.is_same_durable_tab(&expected) => current,
+        (Some(current), Some(expected)) => {
+            return Err(fail_transfer(
+                io,
+                &receipt_dest,
+                &mut receipt,
+                TransferStep::ConfirmBucketTab,
+                format!(
+                    "viewer tab '{}' changed identity: expected {:?}, current {:?}",
+                    viewer_tab_name, expected, current
+                ),
+                current_origin_tab_state,
+            ));
+        },
+        (Some(current), None)
+            if receipt.viewer_creation_pending
+                && matches_viewer_reservation(
+                    &current,
+                    bucket.session_name(),
+                    &viewer_tab_name,
+                    &receipt.viewer_token,
+                ) =>
+        {
+            current
+        },
+        (Some(current), None) if receipt.viewer_creation_pending => {
+            return Err(fail_transfer(
+                io,
+                &receipt_dest,
+                &mut receipt,
+                TransferStep::ConfirmBucketTab,
+                format!(
+                    "pending viewer tab '{}' does not match reserved durable instance '{}': {:?}",
+                    viewer_tab_name, reserved_viewer_identity.tab_instance_id, current
+                ),
+                current_origin_tab_state,
+            ));
+        },
+        (Some(current), None) => {
+            return Err(fail_transfer(
+                io,
+                &receipt_dest,
+                &mut receipt,
+                TransferStep::ConfirmBucketTab,
+                format!(
+                    "unowned viewer tab '{}' ({:?}) already exists in session '{}'",
+                    viewer_tab_name,
+                    current,
+                    bucket.session_name()
+                ),
+                current_origin_tab_state,
+            ));
+        },
+        (None, _) => {
+            // Persist the creation reservation before opening. If the process
+            // dies after `new-tab`, a retry may adopt exactly one matching tab;
+            // an unrelated pre-existing tab is never accepted without this
+            // durable pending marker.
+            receipt.viewer_tab_identity = None;
+            receipt.viewer_creation_pending = true;
+            persist_receipt(io, &receipt_dest, &mut receipt)?;
+            if let Err(message) = io.open_bucket_tab(
+                bucket.session_name(),
+                &viewer_tab_name,
+                &receipt.viewer_token,
+                &meta,
+            ) {
                 return Err(fail_transfer(
                     io,
                     &receipt_dest,
                     &mut receipt,
-                    TransferStep::ConfirmBucketTab,
-                    format!(
-                        "viewer tab '{}' changed identity: expected {:?}, current {:?}",
-                        viewer_tab_name, expected, current
-                    ),
+                    TransferStep::OpenBucketTab,
+                    message,
                     current_origin_tab_state,
                 ));
-            },
-            (Some(current), None) if receipt.viewer_creation_pending => current,
-            (Some(current), None) => {
-                return Err(fail_transfer(
-                    io,
-                    &receipt_dest,
-                    &mut receipt,
-                    TransferStep::ConfirmBucketTab,
-                    format!(
-                        "unowned viewer tab '{}' ({:?}) already exists in session '{}'",
-                        viewer_tab_name,
-                        current,
-                        bucket.session_name()
-                    ),
-                    current_origin_tab_state,
-                ));
-            },
-            (None, _) => {
-                // Persist the creation reservation before opening. If the process
-                // dies after `new-tab`, a retry may adopt exactly one matching tab;
-                // an unrelated pre-existing tab is never accepted without this
-                // durable pending marker.
-                receipt.viewer_tab_identity = None;
-                receipt.viewer_creation_pending = true;
-                persist_receipt(io, &receipt_dest, &mut receipt)?;
-                if let Err(message) =
-                    io.open_bucket_tab(bucket.session_name(), &viewer_tab_name, &meta)
+            }
+            match io.bucket_tab_identity(
+                bucket.session_name(),
+                &viewer_tab_name,
+                Some(&reserved_viewer_identity),
+            ) {
+                Ok(Some(viewer_identity))
+                    if matches_viewer_reservation(
+                        &viewer_identity,
+                        bucket.session_name(),
+                        &viewer_tab_name,
+                        &receipt.viewer_token,
+                    ) =>
                 {
+                    viewer_identity
+                },
+                Ok(Some(viewer_identity)) => {
                     return Err(fail_transfer(
                         io,
                         &receipt_dest,
                         &mut receipt,
-                        TransferStep::OpenBucketTab,
+                        TransferStep::ConfirmBucketTab,
+                        format!(
+                            "created viewer tab '{}' does not carry reserved durable instance '{}': {:?}",
+                            viewer_tab_name,
+                            reserved_viewer_identity.tab_instance_id,
+                            viewer_identity
+                        ),
+                        current_origin_tab_state,
+                    ));
+                },
+                Ok(None) => {
+                    return Err(fail_transfer(
+                        io,
+                        &receipt_dest,
+                        &mut receipt,
+                        TransferStep::ConfirmBucketTab,
+                        format!(
+                            "tab '{}' did not appear in session '{}'",
+                            viewer_tab_name,
+                            bucket.session_name()
+                        ),
+                        current_origin_tab_state,
+                    ));
+                },
+                Err(message) => {
+                    return Err(fail_transfer(
+                        io,
+                        &receipt_dest,
+                        &mut receipt,
+                        TransferStep::ConfirmBucketTab,
                         message,
                         current_origin_tab_state,
                     ));
-                }
-                match io.bucket_tab_identity(
-                    bucket.session_name(),
-                    &viewer_tab_name,
-                    receipt.viewer_tab_identity.as_ref(),
-                ) {
-                    Ok(Some(viewer_identity)) => viewer_identity,
-                    Ok(None) => {
-                        return Err(fail_transfer(
-                            io,
-                            &receipt_dest,
-                            &mut receipt,
-                            TransferStep::ConfirmBucketTab,
-                            format!(
-                                "tab '{}' did not appear in session '{}'",
-                                viewer_tab_name,
-                                bucket.session_name()
-                            ),
-                            current_origin_tab_state,
-                        ));
-                    },
-                    Err(message) => {
-                        return Err(fail_transfer(
-                            io,
-                            &receipt_dest,
-                            &mut receipt,
-                            TransferStep::ConfirmBucketTab,
-                            message,
-                            current_origin_tab_state,
-                        ));
-                    },
-                }
-            },
-        };
+                },
+            }
+        },
+    };
     receipt.viewer_tab_identity = Some(confirmed_viewer_identity);
     receipt.viewer_creation_pending = false;
     receipt.viewer_confirmed = true;
     persist_receipt(io, &receipt_dest, &mut receipt)?;
+
+    // A newer settlement may have changed the destination after an earlier
+    // viewer was already durable. Keep every old typed incarnation until the
+    // replacement is confirmed, then retire them one by one with a receipt
+    // commit after each close. A crash anywhere resumes this exact list.
+    while let Some(superseded) = receipt.superseded_viewers.first().cloned() {
+        let old_session = superseded.bucket.session_name();
+        if let Err(message) = io.ensure_bucket_session(old_session) {
+            let origin_tab_state = receipt.origin_tab_state;
+            return Err(fail_transfer(
+                io,
+                &receipt_dest,
+                &mut receipt,
+                TransferStep::CloseSupersededViewer,
+                format!(
+                    "cannot resurrect superseded drawer '{}' before close: {}",
+                    old_session, message
+                ),
+                origin_tab_state,
+            ));
+        }
+        let current = match io.bucket_tab_identity(
+            old_session,
+            &superseded.tab,
+            Some(&superseded.identity),
+        ) {
+            Ok(current) => current,
+            Err(message) => {
+                let origin_tab_state = receipt.origin_tab_state;
+                return Err(fail_transfer(
+                    io,
+                    &receipt_dest,
+                    &mut receipt,
+                    TransferStep::CloseSupersededViewer,
+                    message,
+                    origin_tab_state,
+                ));
+            },
+        };
+        if let Some(identity) = current.as_ref() {
+            if !identity.is_same_durable_tab(&superseded.identity) {
+                let origin_tab_state = receipt.origin_tab_state;
+                return Err(fail_transfer(
+                    io,
+                    &receipt_dest,
+                    &mut receipt,
+                    TransferStep::CloseSupersededViewer,
+                    format!(
+                        "superseded viewer '{}' changed durable identity",
+                        superseded.tab
+                    ),
+                    origin_tab_state,
+                ));
+            }
+            if let Err(error) = io.close_origin_tab(old_session, &superseded.tab, Some(identity)) {
+                let origin_tab_state = receipt.origin_tab_state;
+                return Err(fail_transfer(
+                    io,
+                    &receipt_dest,
+                    &mut receipt,
+                    TransferStep::CloseSupersededViewer,
+                    error.message,
+                    origin_tab_state,
+                ));
+            }
+        }
+
+        // close-tab updates live state, while resurrection layouts normally
+        // serialize on a timer. Flush synchronously before deleting the only
+        // durable pointer to the old viewer, then prove its exact name absent
+        // from that saved live state.
+        if let Err(message) = io.save_bucket_session(old_session, &superseded.identity) {
+            let origin_tab_state = receipt.origin_tab_state;
+            return Err(fail_transfer(
+                io,
+                &receipt_dest,
+                &mut receipt,
+                TransferStep::SaveBucketSession,
+                format!(
+                    "cannot save superseded drawer '{}' after close: {}",
+                    old_session, message
+                ),
+                origin_tab_state,
+            ));
+        }
+        match io.bucket_tab_identity(old_session, &superseded.tab, Some(&superseded.identity)) {
+            Ok(None) => {},
+            Ok(Some(identity)) if identity.is_same_durable_tab(&superseded.identity) => {
+                let origin_tab_state = receipt.origin_tab_state;
+                return Err(fail_transfer(
+                    io,
+                    &receipt_dest,
+                    &mut receipt,
+                    TransferStep::CloseSupersededViewer,
+                    format!(
+                        "superseded viewer '{}' remained after saved close",
+                        superseded.tab
+                    ),
+                    origin_tab_state,
+                ));
+            },
+            Ok(Some(_)) => {
+                let origin_tab_state = receipt.origin_tab_state;
+                return Err(fail_transfer(
+                    io,
+                    &receipt_dest,
+                    &mut receipt,
+                    TransferStep::CloseSupersededViewer,
+                    format!(
+                        "superseded viewer '{}' was replaced during close proof",
+                        superseded.tab
+                    ),
+                    origin_tab_state,
+                ));
+            },
+            Err(message) => {
+                let origin_tab_state = receipt.origin_tab_state;
+                return Err(fail_transfer(
+                    io,
+                    &receipt_dest,
+                    &mut receipt,
+                    TransferStep::CloseSupersededViewer,
+                    message,
+                    origin_tab_state,
+                ));
+            },
+        }
+        receipt.superseded_viewers.remove(0);
+        persist_receipt(io, &receipt_dest, &mut receipt)?;
+    }
 
     // Revalidate even after a prior receipt said Closed. A server can restore
     // serialized tabs after a crash; a stale Closed bit must never turn that
@@ -872,6 +1294,8 @@ pub fn transfer_finished_run<Io: TriageIo>(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
     fn finished(exit_code: i32) -> FinishedRun {
@@ -885,6 +1309,7 @@ mod tests {
             command: vec!["claude".to_owned(), "--resume".to_owned()],
             cwd: Some(PathBuf::from("/repo")),
             bucket_verdict: None,
+            settlement_revision: 0,
         }
     }
 
@@ -895,16 +1320,105 @@ mod tests {
         }
     }
 
+    fn typed_viewer(name: &str) -> OriginTabIdentity {
+        OriginTabIdentity {
+            session: FINALIZED_RUNS_SESSION.to_owned(),
+            name: name.to_owned(),
+            id: 7,
+            session_incarnation: "drawer-incarnation".to_owned(),
+            tab_instance_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+        }
+    }
+
+    #[test]
+    fn saved_layout_proof_rejects_exact_or_legacy_same_name_viewers() {
+        let viewer = typed_viewer("run--rev-1");
+        let exact = format!(
+            r#"layout {{
+    tab name="renamed" vc_tab_instance_id="{}" {{}}
+}}"#,
+            viewer.tab_instance_id
+        );
+        assert!(verify_saved_layout_excludes_viewer(&exact, "test-layout.kdl", &viewer).is_err());
+
+        let legacy_same_name = format!(
+            r#"layout {{
+    tab name="{}" {{}}
+}}"#,
+            viewer.name
+        );
+        assert!(
+            verify_saved_layout_excludes_viewer(&legacy_same_name, "test-layout.kdl", &viewer)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn saved_layout_proof_accepts_only_a_parseable_layout_without_the_viewer() {
+        let viewer = typed_viewer("run--rev-1");
+        let clean = r#"layout {
+    tab name="another-run" vc_tab_instance_id="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {}
+}"#;
+        verify_saved_layout_excludes_viewer(clean, "test-layout.kdl", &viewer).unwrap();
+        assert!(
+            verify_saved_layout_excludes_viewer("layout {", "test-layout.kdl", &viewer).is_err()
+        );
+        assert!(verify_saved_layout_excludes_viewer("foo {}", "test-layout.kdl", &viewer).is_err());
+        let root_named_viewer = format!(
+            r#"layout name="{}" {{
+    pane
+}}"#,
+            viewer.name
+        );
+        assert!(
+            verify_saved_layout_excludes_viewer(&root_named_viewer, "test-layout.kdl", &viewer)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn saved_layout_proof_accepts_a_preallocated_viewer_reservation() {
+        let reservation = OriginTabIdentity {
+            session: FINALIZED_RUNS_SESSION.to_owned(),
+            name: "run-1 [vc:0123456789abcdef0123456789abcdef]".to_owned(),
+            id: 0,
+            session_incarnation: String::new(),
+            tab_instance_id: "0123456789abcdef0123456789abcdef".to_owned(),
+        };
+        let clean = r#"layout {
+    tab name="operator" {
+        pane
+    }
+}"#;
+        verify_saved_layout_excludes_viewer(clean, "test-layout.kdl", &reservation).unwrap();
+
+        let stale = format!(
+            r#"layout {{
+    tab name="{}" vc_tab_instance_id="{}" {{
+        pane
+    }}
+}}"#,
+            reservation.name, reservation.tab_instance_id
+        );
+        assert!(
+            verify_saved_layout_excludes_viewer(&stale, "test-layout.kdl", &reservation).is_err()
+        );
+    }
+
     #[derive(Default)]
     struct FakeIo {
         calls: Vec<&'static str>,
         fail_at: Option<TransferStep>,
+        offline_sessions: HashSet<String>,
+        opened_tab_instance_id: Option<String>,
         tab_appears: bool,
         visible_tab_name: Option<String>,
         open_materializes_tab: bool,
         captured_tab: Option<String>,
         close_error_state: OriginTabState,
         closed_identity: Option<OriginTabIdentity>,
+        closed_tab_instances: HashSet<String>,
+        resurrect_on_ensure: Option<OriginTabIdentity>,
         receipt: Option<TransferReceipt>,
     }
 
@@ -983,19 +1497,38 @@ mod tests {
         fn write_meta(&mut self, _dest: &Path, _meta: &RunMeta) -> Result<(), String> {
             self.guard(TransferStep::WriteMeta, "meta")
         }
-        fn ensure_bucket_session(&mut self, _session: &str) -> Result<(), String> {
-            self.guard(TransferStep::EnsureBucketSession, "ensure")
+        fn ensure_bucket_session(&mut self, session: &str) -> Result<(), String> {
+            self.guard(TransferStep::EnsureBucketSession, "ensure")?;
+            self.offline_sessions.remove(session);
+            if let Some(identity) = self.resurrect_on_ensure.as_ref()
+                && identity.session == session
+                && !self
+                    .closed_tab_instances
+                    .contains(&identity.tab_instance_id)
+            {
+                self.tab_appears = true;
+            }
+            Ok(())
+        }
+        fn save_bucket_session(
+            &mut self,
+            _session: &str,
+            _retired_viewer: &OriginTabIdentity,
+        ) -> Result<(), String> {
+            self.guard(TransferStep::SaveBucketSession, "save")
         }
         fn open_bucket_tab(
             &mut self,
             _session: &str,
             tab: &str,
+            tab_instance_id: &str,
             _meta: &RunMeta,
         ) -> Result<(), String> {
             self.guard(TransferStep::OpenBucketTab, "open")?;
             if self.open_materializes_tab {
                 self.tab_appears = true;
                 self.visible_tab_name = Some(tab.to_owned());
+                self.opened_tab_instance_id = Some(tab_instance_id.to_owned());
             }
             Ok(())
         }
@@ -1003,23 +1536,46 @@ mod tests {
             &mut self,
             session: &str,
             tab: &str,
-            _expected: Option<&OriginTabIdentity>,
+            expected: Option<&OriginTabIdentity>,
         ) -> Result<Option<OriginTabIdentity>, String> {
             self.guard(TransferStep::ConfirmBucketTab, "confirm")?;
-            let name_matches = self
-                .visible_tab_name
-                .as_deref()
-                .map(|visible| visible == tab)
-                .unwrap_or(true);
-            Ok(
+            if self.offline_sessions.contains(session) {
+                return Err(format!("session '{}' is offline", session));
+            }
+            let candidate = if let Some(identity) = self.resurrect_on_ensure.as_ref()
+                && identity.session == session
+                && identity.name == tab
+                && !self
+                    .closed_tab_instances
+                    .contains(&identity.tab_instance_id)
+            {
+                Some(identity.clone())
+            } else {
+                let name_matches = self
+                    .visible_tab_name
+                    .as_deref()
+                    .map(|visible| visible == tab)
+                    .unwrap_or(true);
                 (self.tab_appears && name_matches).then(|| OriginTabIdentity {
                     session: session.to_owned(),
                     name: tab.to_owned(),
                     id: 11,
                     session_incarnation: "viewer-incarnation".to_owned(),
-                    tab_instance_id: "22222222222222222222222222222222".to_owned(),
-                }),
-            )
+                    tab_instance_id: self
+                        .opened_tab_instance_id
+                        .clone()
+                        .unwrap_or_else(|| "22222222222222222222222222222222".to_owned()),
+                })
+            };
+            if let (Some(candidate), Some(expected)) = (candidate.as_ref(), expected)
+                && !candidate.is_same_durable_tab(expected)
+            {
+                return Err(format!(
+                    "viewer tab '{}' does not match expected durable instance",
+                    tab
+                ));
+            }
+            Ok(candidate)
         }
         fn rebind_origin_tab_identity(
             &mut self,
@@ -1031,17 +1587,29 @@ mod tests {
         }
         fn close_origin_tab(
             &mut self,
-            _session: &str,
+            session: &str,
             _tab: &str,
             identity: Option<&OriginTabIdentity>,
         ) -> Result<(), CloseOriginError> {
             self.calls.push("close");
             self.closed_identity = identity.cloned();
+            if self.fail_at == Some(TransferStep::CloseSupersededViewer)
+                && BucketKind::from_session_name(session).is_some()
+            {
+                return Err(CloseOriginError {
+                    message: "injected fault at CloseSupersededViewer".to_owned(),
+                    origin_tab_state: OriginTabState::Preserved,
+                });
+            }
             if self.fail_at == Some(TransferStep::CloseOriginTab) {
                 return Err(CloseOriginError {
                     message: "injected fault at CloseOriginTab".to_owned(),
                     origin_tab_state: self.close_error_state,
                 });
+            }
+            if let Some(identity) = identity {
+                self.closed_tab_instances
+                    .insert(identity.tab_instance_id.clone());
             }
             Ok(())
         }
@@ -1277,11 +1845,13 @@ mod tests {
                 .viewer_creation_pending
         );
         let viewer_tab_name = first_process.receipt.as_ref().unwrap().viewer_tab_name();
+        let viewer_token = first_process.receipt.as_ref().unwrap().viewer_token.clone();
 
         let mut second_process = FakeIo {
             receipt: first_process.receipt,
             tab_appears: true,
             visible_tab_name: Some(viewer_tab_name.clone()),
+            opened_tab_instance_id: Some(viewer_token.clone()),
             open_materializes_tab: true,
             ..Default::default()
         };
@@ -1295,12 +1865,73 @@ mod tests {
                 name: viewer_tab_name,
                 id: 11,
                 session_incarnation: "viewer-incarnation".to_owned(),
-                tab_instance_id: "22222222222222222222222222222222".to_owned(),
+                tab_instance_id: viewer_token,
             })
         );
         assert!(!receipt.viewer_creation_pending);
         assert!(receipt.viewer_confirmed);
         assert!(!second_process.calls.contains(&"open"));
+    }
+
+    #[test]
+    fn a_pending_receipt_rejects_a_same_name_foreign_tab_instance() {
+        let root = tempfile::tempdir().unwrap();
+        let run = finished(0);
+        let mut first_process = FakeIo::failing_at(TransferStep::OpenBucketTab);
+        transfer_finished_run(&mut first_process, &run, root.path(), 1).unwrap_err();
+        let receipt = first_process.receipt.unwrap();
+        let viewer_tab_name = receipt.viewer_tab_name();
+
+        let mut second_process = FakeIo {
+            receipt: Some(receipt),
+            tab_appears: true,
+            visible_tab_name: Some(viewer_tab_name),
+            opened_tab_instance_id: Some("ffffffffffffffffffffffffffffffff".to_owned()),
+            open_materializes_tab: true,
+            ..Default::default()
+        };
+        let error = transfer_finished_run(&mut second_process, &run, root.path(), 2).unwrap_err();
+
+        assert_eq!(error.step, TransferStep::ConfirmBucketTab);
+        assert_eq!(error.origin_tab_state, OriginTabState::Preserved);
+        assert!(!second_process.calls.contains(&"close"));
+        assert!(!second_process.calls.contains(&"open"));
+        assert!(
+            second_process
+                .receipt
+                .as_ref()
+                .unwrap()
+                .viewer_creation_pending
+        );
+    }
+
+    #[test]
+    fn reclassification_cannot_drop_an_absent_pending_viewer_before_cache_proof() {
+        let root = tempfile::tempdir().unwrap();
+        let mut first_run = with_verdict(0, BucketKind::Finalized);
+        first_run.settlement_revision = 1;
+        let mut first_process = FakeIo::failing_at(TransferStep::OpenBucketTab);
+        transfer_finished_run(&mut first_process, &first_run, root.path(), 1).unwrap_err();
+        let pending_receipt = first_process.receipt.unwrap();
+        let original_token = pending_receipt.viewer_token.clone();
+        assert!(pending_receipt.viewer_creation_pending);
+
+        let mut revised_run = with_verdict(9, BucketKind::Failed);
+        revised_run.settlement_revision = 2;
+        let mut second_process = FakeIo {
+            receipt: Some(pending_receipt),
+            fail_at: Some(TransferStep::SaveBucketSession),
+            ..FakeIo::healthy()
+        };
+        let error =
+            transfer_finished_run(&mut second_process, &revised_run, root.path(), 2).unwrap_err();
+
+        assert_eq!(error.step, TransferStep::SaveBucketSession);
+        let retained = second_process.receipt.unwrap();
+        assert_eq!(retained.viewer_token, original_token);
+        assert_eq!(retained.bucket, BucketKind::Finalized);
+        assert_eq!(retained.settlement_revision, 1);
+        assert!(retained.viewer_creation_pending);
     }
 
     #[test]
@@ -1431,6 +2062,191 @@ mod tests {
         assert!(error.message.contains("receipt identity mismatch"));
         assert_eq!(second_process.calls, vec!["load"]);
         assert_eq!(second_process.receipt, Some(original_foreign_receipt));
+    }
+
+    #[test]
+    fn a_newer_settlement_rebuckets_and_retires_the_exact_old_viewer() {
+        let root = tempfile::tempdir().unwrap();
+        let mut first_run = with_verdict(0, BucketKind::Finalized);
+        first_run.settlement_revision = 1;
+        let mut io = FakeIo::healthy();
+        transfer_finished_run(&mut io, &first_run, root.path(), 1).unwrap();
+        let old_viewer = io
+            .receipt
+            .as_ref()
+            .unwrap()
+            .viewer_tab_identity
+            .clone()
+            .unwrap();
+        io.resurrect_on_ensure = Some(old_viewer.clone());
+
+        let mut revised_run = with_verdict(9, BucketKind::Failed);
+        revised_run.settlement_revision = 2;
+        transfer_finished_run(&mut io, &revised_run, root.path(), 2).unwrap();
+
+        let receipt = io.receipt.unwrap();
+        assert_eq!(receipt.bucket, BucketKind::Failed);
+        assert_eq!(receipt.exit_code, 9);
+        assert_eq!(receipt.settlement_revision, 2);
+        assert!(receipt.viewer_confirmed);
+        assert!(receipt.superseded_viewers.is_empty());
+        assert_eq!(
+            receipt.viewer_tab_identity.as_ref().unwrap().session,
+            FAILED_RUNS_SESSION
+        );
+        assert_ne!(
+            receipt.viewer_tab_identity.as_ref().unwrap().name,
+            old_viewer.name,
+            "each revision gets a distinct viewer ownership token"
+        );
+        assert!(
+            io.calls.iter().filter(|call| **call == "close").count() >= 3,
+            "old origin, superseded viewer, and idempotent origin close all run"
+        );
+        assert!(
+            io.closed_tab_instances
+                .contains(&old_viewer.tab_instance_id),
+            "a serialized old drawer must be resurrected and closed exactly"
+        );
+        assert!(io.calls.contains(&"save"));
+    }
+
+    #[test]
+    fn reclassification_resurrects_an_offline_pending_drawer_before_identity_recovery() {
+        let root = tempfile::tempdir().unwrap();
+        let mut first_run = with_verdict(0, BucketKind::Finalized);
+        first_run.settlement_revision = 1;
+        let mut first_process = FakeIo::failing_at(TransferStep::OpenBucketTab);
+        transfer_finished_run(&mut first_process, &first_run, root.path(), 1).unwrap_err();
+        let pending_receipt = first_process.receipt.unwrap();
+        assert!(pending_receipt.viewer_creation_pending);
+        assert!(pending_receipt.viewer_tab_identity.is_none());
+        let reserved_instance_id = pending_receipt.viewer_token.clone();
+        let old_viewer = OriginTabIdentity {
+            session: FINALIZED_RUNS_SESSION.to_owned(),
+            name: pending_receipt.viewer_tab_name(),
+            id: 11,
+            session_incarnation: "resurrected-drawer".to_owned(),
+            tab_instance_id: reserved_instance_id,
+        };
+
+        let mut revised_run = with_verdict(9, BucketKind::Failed);
+        revised_run.settlement_revision = 2;
+        let mut retry = FakeIo {
+            receipt: Some(pending_receipt),
+            offline_sessions: HashSet::from([FINALIZED_RUNS_SESSION.to_owned()]),
+            visible_tab_name: Some(old_viewer.name.clone()),
+            resurrect_on_ensure: Some(old_viewer.clone()),
+            open_materializes_tab: true,
+            ..Default::default()
+        };
+
+        transfer_finished_run(&mut retry, &revised_run, root.path(), 2).unwrap();
+
+        let first_ensure = retry
+            .calls
+            .iter()
+            .position(|call| *call == "ensure")
+            .unwrap();
+        let first_confirm = retry
+            .calls
+            .iter()
+            .position(|call| *call == "confirm")
+            .unwrap();
+        assert!(
+            first_ensure < first_confirm,
+            "the offline pending drawer must be resurrected before its identity is queried"
+        );
+        let receipt = retry.receipt.unwrap();
+        assert_eq!(receipt.bucket, BucketKind::Failed);
+        assert_eq!(receipt.settlement_revision, 2);
+        assert!(receipt.superseded_viewers.is_empty());
+        assert!(
+            retry
+                .closed_tab_instances
+                .contains(&old_viewer.tab_instance_id)
+        );
+    }
+
+    #[test]
+    fn an_equal_or_older_settlement_cannot_reclassify_a_receipt() {
+        let root = tempfile::tempdir().unwrap();
+        let mut first_run = with_verdict(0, BucketKind::Finalized);
+        first_run.settlement_revision = 4;
+        let mut first_process = FakeIo::healthy();
+        transfer_finished_run(&mut first_process, &first_run, root.path(), 1).unwrap();
+        let original_receipt = first_process.receipt.clone().unwrap();
+
+        for revision in [3, 4] {
+            let mut stale_run = with_verdict(9, BucketKind::Failed);
+            stale_run.settlement_revision = revision;
+            let mut stale_process = FakeIo {
+                receipt: Some(original_receipt.clone()),
+                ..FakeIo::healthy()
+            };
+            let error =
+                transfer_finished_run(&mut stale_process, &stale_run, root.path(), 2).unwrap_err();
+            assert_eq!(error.step, TransferStep::LoadReceipt);
+            assert!(error.message.contains("receipt identity mismatch"));
+            assert_eq!(stale_process.calls, vec!["load"]);
+            assert_eq!(stale_process.receipt, Some(original_receipt.clone()));
+        }
+    }
+
+    #[test]
+    fn a_failed_old_viewer_close_resumes_without_losing_the_new_viewer() {
+        let root = tempfile::tempdir().unwrap();
+        let mut first_run = with_verdict(0, BucketKind::Finalized);
+        first_run.settlement_revision = 1;
+        let mut io = FakeIo::healthy();
+        transfer_finished_run(&mut io, &first_run, root.path(), 1).unwrap();
+        io.resurrect_on_ensure = io
+            .receipt
+            .as_ref()
+            .and_then(|receipt| receipt.viewer_tab_identity.clone());
+
+        let mut revised_run = with_verdict(9, BucketKind::Failed);
+        revised_run.settlement_revision = 2;
+        io.fail_at = Some(TransferStep::CloseSupersededViewer);
+        let error = transfer_finished_run(&mut io, &revised_run, root.path(), 2).unwrap_err();
+        assert_eq!(error.step, TransferStep::CloseSupersededViewer);
+        let interrupted = io.receipt.as_ref().unwrap();
+        assert_eq!(interrupted.bucket, BucketKind::Failed);
+        assert_eq!(interrupted.settlement_revision, 2);
+        assert!(interrupted.viewer_confirmed);
+        assert_eq!(interrupted.superseded_viewers.len(), 1);
+
+        io.fail_at = None;
+        transfer_finished_run(&mut io, &revised_run, root.path(), 3).unwrap();
+        let completed = io.receipt.unwrap();
+        assert_eq!(completed.bucket, BucketKind::Failed);
+        assert!(completed.viewer_confirmed);
+        assert!(completed.superseded_viewers.is_empty());
+        assert!(completed.fault.is_none());
+    }
+
+    #[test]
+    fn a_failed_resurrection_save_keeps_the_old_viewer_tombstone() {
+        let root = tempfile::tempdir().unwrap();
+        let mut first_run = with_verdict(0, BucketKind::Finalized);
+        first_run.settlement_revision = 1;
+        let mut io = FakeIo::healthy();
+        transfer_finished_run(&mut io, &first_run, root.path(), 1).unwrap();
+        io.resurrect_on_ensure = io
+            .receipt
+            .as_ref()
+            .and_then(|receipt| receipt.viewer_tab_identity.clone());
+
+        let mut revised_run = with_verdict(9, BucketKind::Failed);
+        revised_run.settlement_revision = 2;
+        io.fail_at = Some(TransferStep::SaveBucketSession);
+        let error = transfer_finished_run(&mut io, &revised_run, root.path(), 2).unwrap_err();
+        assert_eq!(error.step, TransferStep::SaveBucketSession);
+        assert_eq!(io.receipt.as_ref().unwrap().superseded_viewers.len(), 1);
+
+        io.fail_at = None;
+        transfer_finished_run(&mut io, &revised_run, root.path(), 3).unwrap();
+        assert!(io.receipt.unwrap().superseded_viewers.is_empty());
     }
 
     #[test]

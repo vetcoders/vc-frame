@@ -3,9 +3,16 @@ use crate::input::config::Config;
 use insta::assert_snapshot;
 use std::path::{Path, PathBuf};
 
+fn strip_unassigned_tab_instance_ids(s: String) -> String {
+    s.lines()
+        .filter(|line| line.trim() != "tab_instance_id: None,")
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(not(windows))]
 fn normalize_layout_debug(s: String) -> String {
-    s
+    strip_unassigned_tab_instance_ids(s)
 }
 
 #[cfg(windows)]
@@ -13,7 +20,7 @@ fn normalize_layout_debug(s: String) -> String {
     // On Windows, PathBuf's Debug output uses `\\` (escaped backslash).
     // Replace `\\\\` (two escaped backslashes in Debug repr) with `/`
     // so that snapshots match Unix-recorded baselines.
-    s.replace("\\\\", "/")
+    strip_unassigned_tab_instance_ids(s.replace("\\\\", "/"))
 }
 
 #[test]
@@ -46,6 +53,33 @@ fn layout_with_one_pane() {
         ..Default::default()
     };
     assert_eq!(layout, expected_layout);
+}
+
+#[test]
+fn root_tab_instance_reservation_survives_single_tab_layout_parsing() {
+    let tab_instance_id = "0123456789abcdef0123456789abcdef";
+    let kdl_layout = format!(
+        r#"
+        layout vc_tab_instance_id="{tab_instance_id}" {{
+            pane
+        }}
+    "#
+    );
+    let layout =
+        Layout::from_kdl(&kdl_layout, Some("layout_file_name".into()), None, None).unwrap();
+
+    assert_eq!(layout.tabs.len(), 1);
+    assert_eq!(
+        layout.tabs[0].1.tab_instance_id.as_deref(),
+        Some(tab_instance_id)
+    );
+    assert_eq!(
+        layout
+            .template
+            .as_ref()
+            .and_then(|(template, _)| template.tab_instance_id.as_deref()),
+        Some(tab_instance_id)
+    );
 }
 
 #[test]

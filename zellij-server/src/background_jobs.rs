@@ -26,7 +26,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
 use zellij_utils::consts::is_ipc_socket;
@@ -41,11 +41,11 @@ use crate::{ClientId, ServerInstruction};
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub enum BackgroundJob {
     DisplayPaneError(Vec<PaneId>, String),
-    AnimatePluginLoading(u32),                            // u32 - plugin_id
-    StopPluginLoadingAnimation(u32),                      // u32 - plugin_id
-    ReportSessionInfo(String, SessionInfo),               // String - session name
-    ReportPluginList(BTreeMap<PluginId, RunPlugin>),      // String - session name
-    ReportLayoutInfo((String, BTreeMap<String, String>)), // BTreeMap<file_name, pane_contents>
+    AnimatePluginLoading(u32),                       // u32 - plugin_id
+    StopPluginLoadingAnimation(u32),                 // u32 - plugin_id
+    ReportSessionInfo(String, SessionInfo),          // String - session name
+    ReportPluginList(BTreeMap<PluginId, RunPlugin>), // String - session name
+    ReportLayoutInfo(SessionLayoutSnapshot),
     ReadAllSessionInfosOnMachine,
     RunCommand(
         PluginId,
@@ -76,6 +76,78 @@ pub enum BackgroundJob {
     FlashTabBell(usize),     // usize = tab_id
     StopFlashTabBell(usize), // usize = tab_id
     Exit,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub struct SessionLayoutSnapshot {
+    pub session_name: String,
+    pub generation: u64,
+    pub layout: (String, BTreeMap<String, String>),
+}
+
+#[derive(Default)]
+struct SessionStatePersistenceCoordinator {
+    next_generation: AtomicU64,
+    latest_generations: Mutex<HashMap<String, u64>>,
+}
+
+impl SessionStatePersistenceCoordinator {
+    fn reserve(&self, session_name: &str) -> Result<u64, String> {
+        let previous = self
+            .next_generation
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                current.checked_add(1)
+            })
+            .map_err(|_| "session persistence generation space is exhausted".to_owned())?;
+        let generation = previous + 1;
+        let mut latest_generations = self.latest_generations.lock().map_err(|_| {
+            format!(
+                "session persistence coordinator is poisoned for '{}'",
+                session_name
+            )
+        })?;
+        latest_generations
+            .entry(session_name.to_owned())
+            .and_modify(|latest| *latest = (*latest).max(generation))
+            .or_insert(generation);
+        Ok(generation)
+    }
+
+    fn commit_if_current<F>(
+        &self,
+        session_name: &str,
+        generation: u64,
+        persist: F,
+    ) -> Result<bool, String>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        let latest_generations = self.latest_generations.lock().map_err(|_| {
+            format!(
+                "session persistence coordinator is poisoned for '{}'",
+                session_name
+            )
+        })?;
+        if latest_generations
+            .get(session_name)
+            .is_some_and(|latest| generation < *latest)
+        {
+            return Ok(false);
+        }
+        persist()?;
+        Ok(true)
+    }
+}
+
+static SESSION_STATE_PERSISTENCE: std::sync::OnceLock<SessionStatePersistenceCoordinator> =
+    std::sync::OnceLock::new();
+
+fn session_state_persistence() -> &'static SessionStatePersistenceCoordinator {
+    SESSION_STATE_PERSISTENCE.get_or_init(SessionStatePersistenceCoordinator::default)
+}
+
+pub fn reserve_session_state_generation(session_name: &str) -> Result<u64, String> {
+    session_state_persistence().reserve(session_name)
 }
 
 impl From<&BackgroundJob> for BackgroundJobContext {
@@ -145,7 +217,8 @@ pub(crate) fn background_jobs_main(
     let current_session_info = Arc::new(Mutex::new(SessionInfo::default()));
     let current_session_plugin_list: Arc<Mutex<BTreeMap<PluginId, RunPlugin>>> =
         Arc::new(Mutex::new(BTreeMap::new()));
-    let current_session_layout = Arc::new(Mutex::new((String::new(), BTreeMap::new())));
+    let current_session_layout: Arc<Mutex<Option<SessionLayoutSnapshot>>> =
+        Arc::new(Mutex::new(None));
 
     let _ = SESSION_SCAN_STATE.set(SessionScanState {
         current_session_name: current_session_name.clone(),
@@ -240,16 +313,16 @@ pub(crate) fn background_jobs_main(
                 *current_session_plugin_list.lock().unwrap() = plugin_list;
             },
             BackgroundJob::ReportLayoutInfo(session_layout) => {
-                *current_session_layout.lock().unwrap() = session_layout;
-
-                // Update session save time for plugin query
-                let timestamp_millis = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
-                let _ = bus
-                    .senders
-                    .send_to_plugin(PluginInstruction::UpdateSessionSaveTime(timestamp_millis));
+                let current_name = current_session_name.lock().unwrap().clone();
+                let mut cached_layout = current_session_layout.lock().unwrap();
+                let is_current_session =
+                    current_name.is_empty() || session_layout.session_name == current_name;
+                let is_newest_generation = cached_layout
+                    .as_ref()
+                    .is_none_or(|cached| session_layout.generation >= cached.generation);
+                if is_current_session && is_newest_generation {
+                    *cached_layout = Some(session_layout);
+                }
             },
             BackgroundJob::ReadAllSessionInfosOnMachine => {
                 // this job should only be run once and it keeps track of other sessions (as well
@@ -283,21 +356,39 @@ pub(crate) fn background_jobs_main(
                             let current_session_layout =
                                 current_session_layout.lock().unwrap().clone();
                             if !disable_session_metadata {
-                                write_session_state_to_disk(
+                                let (generation, layout) = current_session_layout
+                                    .filter(|snapshot| {
+                                        snapshot.session_name == current_session_name
+                                    })
+                                    .map(|snapshot| (snapshot.generation, snapshot.layout))
+                                    .unwrap_or_else(|| (0, (String::new(), BTreeMap::new())));
+                                match write_session_state_to_disk(
+                                    generation,
                                     current_session_name.clone(),
                                     current_session_info.clone(),
-                                    current_session_layout,
-                                );
-
-                                // Send SavedCurrentSession instruction to plugin thread
-                                let timestamp_millis = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_millis()
-                                    as u64;
-                                let _ = senders.send_to_plugin(
-                                    PluginInstruction::UpdateSessionSaveTime(timestamp_millis),
-                                );
+                                    layout,
+                                ) {
+                                    Err(error) => log::error!(
+                                        "Failed to durably save session '{}': {}",
+                                        current_session_name,
+                                        error
+                                    ),
+                                    Ok(false) => {},
+                                    Ok(true) => {
+                                        // Send SavedCurrentSession instruction to plugin thread only
+                                        // after every cache file reached durable storage.
+                                        let timestamp_millis = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_millis()
+                                            as u64;
+                                        let _ = senders.send_to_plugin(
+                                            PluginInstruction::UpdateSessionSaveTime(
+                                                timestamp_millis,
+                                            ),
+                                        );
+                                    },
+                                }
                             }
                             let mut session_infos_on_machine = read_other_live_session_states(
                                 &current_session_name,
@@ -717,49 +808,108 @@ fn file_content_changed(path: &std::path::Path, new_content: &[u8]) -> bool {
     }
 }
 
+fn sync_parent_directory(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let parent = path
+            .parent()
+            .ok_or_else(|| format!("cache path has no parent: {}", path.display()))?;
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| {
+                format!(
+                    "cannot sync cache directory {}: {}",
+                    parent.display(),
+                    error
+                )
+            })?;
+    }
+    Ok(())
+}
+
+fn write_file_durably(path: &Path, contents: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("cache path has no parent: {}", path.display()))?;
+    std::fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "cannot create cache directory {}: {}",
+            parent.display(),
+            error
+        )
+    })?;
+
+    if !file_content_changed(path, contents) {
+        std::fs::File::open(path)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| format!("cannot sync cache file {}: {}", path.display(), error))?;
+        return sync_parent_directory(path);
+    }
+
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|error| {
+        format!(
+            "cannot create temporary cache file in {}: {}",
+            parent.display(),
+            error
+        )
+    })?;
+    temporary.write_all(contents).map_err(|error| {
+        format!(
+            "cannot write temporary cache file for {}: {}",
+            path.display(),
+            error
+        )
+    })?;
+    temporary.as_file_mut().sync_all().map_err(|error| {
+        format!(
+            "cannot sync temporary cache file for {}: {}",
+            path.display(),
+            error
+        )
+    })?;
+    temporary.persist(path).map_err(|error| {
+        format!(
+            "cannot atomically replace cache file {}: {}",
+            path.display(),
+            error.error
+        )
+    })?;
+    sync_parent_directory(path)
+}
+
 pub fn write_session_state_to_disk(
+    generation: u64,
     current_session_name: String,
     current_session_info: SessionInfo,
     current_session_layout: (String, BTreeMap<String, String>),
-) {
-    let metadata_cache_file_name = session_info_cache_file_name(&current_session_name);
-    let (current_session_layout, layout_files_to_write) = current_session_layout;
-    let new_metadata = current_session_info.to_string();
-    if file_content_changed(&metadata_cache_file_name, new_metadata.as_bytes())
-        && let Err(e) = std::fs::create_dir_all(
-            session_info_folder_for_session(&current_session_name).as_path(),
-        )
-        .and_then(|_| std::fs::File::create(&metadata_cache_file_name))
-        .and_then(|mut f| write!(f, "{}", new_metadata))
-    {
-        log::error!(
-            "Failed to write session metadata to {:?}: {}",
-            metadata_cache_file_name,
-            e
-        );
-    }
-
-    if !current_session_layout.is_empty() {
-        let layout_cache_file_name = session_layout_cache_file_name(&current_session_name);
-        if file_content_changed(&layout_cache_file_name, current_session_layout.as_bytes()) {
-            let _wrote_layout_file = std::fs::create_dir_all(
-                session_info_folder_for_session(&current_session_name).as_path(),
-            )
-            .and_then(|_| std::fs::File::create(&layout_cache_file_name))
-            .and_then(|mut f| write!(f, "{}", current_session_layout));
-        }
+) -> Result<bool, String> {
+    session_state_persistence().commit_if_current(&current_session_name, generation, || {
         let session_info_folder = session_info_folder_for_session(&current_session_name);
-        for (external_file_name, external_file_contents) in layout_files_to_write {
-            let external_file_path = session_info_folder.join(&external_file_name);
-            if file_content_changed(&external_file_path, external_file_contents.as_bytes()) {
-                std::fs::File::create(&external_file_path)
-                    .and_then(|mut f| write!(f, "{}", external_file_contents))
-                    .unwrap_or_else(|e| {
-                        log::error!("Failed to write layout metadata file: {:?}", e);
-                    });
+        std::fs::create_dir_all(&session_info_folder).map_err(|error| {
+            format!(
+                "cannot create session cache directory {}: {}",
+                session_info_folder.display(),
+                error
+            )
+        })?;
+
+        let metadata_cache_file_name = session_info_cache_file_name(&current_session_name);
+        let (current_session_layout, layout_files_to_write) = current_session_layout;
+        let new_metadata = current_session_info.to_string();
+        write_file_durably(&metadata_cache_file_name, new_metadata.as_bytes())?;
+
+        if !current_session_layout.is_empty() {
+            for (external_file_name, external_file_contents) in layout_files_to_write {
+                let external_file_path = session_info_folder.join(&external_file_name);
+                write_file_durably(&external_file_path, external_file_contents.as_bytes())?;
             }
+            // The layout is the resurrection commit point. Publish it only after
+            // every referenced external pane-content file is durable.
+            let layout_cache_file_name = session_layout_cache_file_name(&current_session_name);
+            write_file_durably(&layout_cache_file_name, current_session_layout.as_bytes())?;
         }
-    }
+        Ok(())
+    })
 }
 
 pub fn scan_session_list(
@@ -961,6 +1111,80 @@ mod tests {
         let folder = info_dir.join(session);
         std::fs::create_dir_all(&folder).unwrap();
         std::fs::write(folder.join("session-layout.kdl"), "layout { }").unwrap();
+    }
+
+    #[test]
+    fn durable_cache_write_atomically_replaces_existing_contents() {
+        let root = tempdir().unwrap();
+        let target = root.path().join("session-layout.kdl");
+        std::fs::write(&target, "old layout").unwrap();
+
+        write_file_durably(&target, b"new durable layout").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "new durable layout"
+        );
+    }
+
+    #[test]
+    fn durable_cache_write_reports_failure_without_destroying_the_target() {
+        let root = tempdir().unwrap();
+        let target = root.path().join("session-layout.kdl");
+        std::fs::create_dir(&target).unwrap();
+        let marker = target.join("old-cache-marker");
+        std::fs::write(&marker, "still here").unwrap();
+
+        let error = write_file_durably(&target, b"replacement").unwrap_err();
+
+        assert!(error.contains("cannot atomically replace cache file"));
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "still here");
+    }
+
+    #[test]
+    fn newer_session_generation_fences_a_delayed_older_snapshot() {
+        let persistence = SessionStatePersistenceCoordinator::default();
+        let writes = Mutex::new(Vec::new());
+        let older = persistence.reserve("drawer").unwrap();
+        let newer = persistence.reserve("drawer").unwrap();
+
+        assert!(
+            persistence
+                .commit_if_current("drawer", newer, || {
+                    writes.lock().unwrap().push("new");
+                    Ok(())
+                })
+                .unwrap()
+        );
+        assert!(
+            !persistence
+                .commit_if_current("drawer", older, || {
+                    writes.lock().unwrap().push("stale");
+                    Ok(())
+                })
+                .unwrap()
+        );
+        assert_eq!(*writes.lock().unwrap(), vec!["new"]);
+    }
+
+    #[test]
+    fn reserved_session_generation_fences_older_writes_even_if_it_fails() {
+        let persistence = SessionStatePersistenceCoordinator::default();
+        let older = persistence.reserve("drawer").unwrap();
+        let newer = persistence.reserve("drawer").unwrap();
+        let failed = persistence.commit_if_current("drawer", newer, || Err("disk full".to_owned()));
+        assert_eq!(failed.unwrap_err(), "disk full");
+
+        let mut older_wrote = false;
+        assert!(
+            !persistence
+                .commit_if_current("drawer", older, || {
+                    older_wrote = true;
+                    Ok(())
+                })
+                .unwrap()
+        );
+        assert!(!older_wrote);
     }
 
     #[test]

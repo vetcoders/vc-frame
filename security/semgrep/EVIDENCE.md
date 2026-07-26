@@ -1,8 +1,8 @@
 # Semgrep adjudication evidence
 
 Receiver baseline: Semgrep 1.164.0, explicit registry pack `p/rust`, 60 resolved
-rules, 57 rules executed over 353 targets, 310 blocking findings and zero scan
-errors at `db31b176`. Raw JSON is preserved beside the W0-B delivery report;
+rules, 57 rules executed over 373 targets, 318 blocking findings and zero scan
+errors at `9f8a67b0`. Raw JSON is preserved beside the W0-B delivery report;
 `findings.jsonl` is the checked-in machine-verifiable verdict surface.
 The gate also hashes Semgrep's normalized resolved rule representation, so a
 registry rule-body change fails even when rule IDs stay the same. Scanner
@@ -41,6 +41,15 @@ boundaries. They operate only at startup or on locally discovered session PIDs.
 Environment mutation is limited to initialization, synchronous host-command
 handling, or test cleanup. It is not a concurrent shared-state API.
 
+## Transfer lock descriptor
+
+The triage child inherits one already-held transfer-lock descriptor from its
+parent. Before adopting it as `File`, the child proves the descriptor is open,
+sets `FD_CLOEXEC`, canonicalizes the expected lock path, matches device and
+inode, and verifies that the inherited open-file description still owns the
+non-blocking flock. The `from_raw_fd` call then creates exactly one Rust owner
+in the child process; the parent owns a separate descriptor-table entry.
+
 ## Test-only unsafe
 
 Unsafe environment changes in Rust tests restore prior values and are not
@@ -66,6 +75,8 @@ current user's terminal dump; no fixed authority filename is used.
 
 `current_exe` starts another internal mode of the already running vc-frame
 binary. It establishes no identity, trust, privilege or update provenance.
+The triage transfer-lock tests additionally re-enter the same test executable
+under a fixed test name with only the lock path and expected lock state.
 
 ## CLI arguments
 

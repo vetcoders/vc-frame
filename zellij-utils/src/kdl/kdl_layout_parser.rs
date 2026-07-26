@@ -45,6 +45,7 @@ pub struct KdlLayoutParser<'a> {
 
 struct SingleTabLayoutOptions {
     tab_name: Option<String>,
+    tab_instance_id: Option<String>,
     split_direction: SplitDirection,
     hide_floating_panes: bool,
     tab_cwd: Option<PathBuf>,
@@ -2185,11 +2186,13 @@ impl<'a> KdlLayoutParser<'a> {
     ) -> Result<Layout, ConfigError> {
         let SingleTabLayoutOptions {
             tab_name,
+            tab_instance_id,
             split_direction,
             hide_floating_panes,
             tab_cwd,
         } = options;
         let mut main_tab_layout = TiledPaneLayout {
+            tab_instance_id: tab_instance_id.clone(),
             children: panes,
             children_split_direction: split_direction,
             hide_floating_panes,
@@ -2205,6 +2208,7 @@ impl<'a> KdlLayoutParser<'a> {
         let default_template = self.default_template()?;
         // Check if any tab properties are specified that would require creating an explicit tab
         let has_tab_properties = tab_name.is_some()
+            || tab_instance_id.is_some()
             || split_direction != SplitDirection::default()
             || hide_floating_panes
             || tab_cwd.is_some();
@@ -2217,10 +2221,15 @@ impl<'a> KdlLayoutParser<'a> {
             } else {
                 vec![(tab_name, main_tab_layout.clone(), floating_panes.clone())]
             };
-        let template = default_template
+        let mut template = default_template
             .map(|tiled_panes_template| (tiled_panes_template, floating_panes.clone()))
             .or_else(|| self.new_tab_template.clone())
             .unwrap_or_else(|| (main_tab_layout.clone(), floating_panes.clone()));
+        // A root-level reservation belongs to the tab opened from this layout,
+        // regardless of whether a default/new-tab template supplied its shape.
+        // Keep the explicit tab and the fallback template bound to the same
+        // durable identity so callers cannot observe a freshly generated ID.
+        template.0.tab_instance_id = tab_instance_id;
         // create a layout with one tab that has these child panes
         Ok(Layout {
             tabs,
@@ -2239,12 +2248,13 @@ impl<'a> KdlLayoutParser<'a> {
     ) -> Result<Layout, ConfigError> {
         let SingleTabLayoutOptions {
             tab_name,
+            tab_instance_id,
             split_direction,
             hide_floating_panes,
             tab_cwd,
         } = options;
         let mut child_floating_panes = child_floating_panes;
-        let template = if let Some(new_tab_template) = &self.new_tab_template {
+        let mut template = if let Some(new_tab_template) = &self.new_tab_template {
             Some(new_tab_template.clone())
         } else {
             let mut default_tab_tiled_panes_template = self
@@ -2253,6 +2263,7 @@ impl<'a> KdlLayoutParser<'a> {
 
             default_tab_tiled_panes_template.children_split_direction = split_direction;
             default_tab_tiled_panes_template.hide_floating_panes = hide_floating_panes;
+            default_tab_tiled_panes_template.tab_instance_id = tab_instance_id.clone();
 
             if let Some(cwd_prefix) = self.cwd_prefix(tab_cwd.as_ref())? {
                 default_tab_tiled_panes_template.add_cwd_to_layout(&cwd_prefix);
@@ -2266,8 +2277,12 @@ impl<'a> KdlLayoutParser<'a> {
                 child_floating_panes.clone(),
             ))
         };
+        if let Some((tiled_layout, _)) = template.as_mut() {
+            tiled_layout.tab_instance_id = tab_instance_id.clone();
+        }
         // Check if any tab properties are specified that would require creating an explicit tab
         let has_tab_properties = tab_name.is_some()
+            || tab_instance_id.is_some()
             || split_direction != SplitDirection::default()
             || hide_floating_panes
             || tab_cwd.is_some();
@@ -2542,6 +2557,9 @@ impl<'a> KdlLayoutParser<'a> {
                     .is_some();
             let layout_has_hide_floating =
                 kdl_get_bool_property_or_child_value!(layout_node, "hide_floating_panes").is_some();
+            let layout_has_tab_instance_id =
+                kdl_get_string_property_or_child_value!(layout_node, "vc_tab_instance_id")
+                    .is_some();
 
             if layout_has_tab_name {
                 return Err(ConfigError::new_layout_kdl_error(
@@ -2560,6 +2578,13 @@ impl<'a> KdlLayoutParser<'a> {
             if layout_has_hide_floating {
                 return Err(ConfigError::new_layout_kdl_error(
                     "The 'hide_floating_panes' property on the layout node is treated as a tab property and cannot be used when there are explicit tab nodes. To hide floating panes, place it on individual tab nodes: tab hide_floating_panes=true { ... }".into(),
+                    layout_node.span().offset(),
+                    layout_node.span().len(),
+                ));
+            }
+            if layout_has_tab_instance_id {
+                return Err(ConfigError::new_layout_kdl_error(
+                    "The 'vc_tab_instance_id' property on the layout node is treated as a tab property and cannot be used when there are explicit tab nodes".into(),
                     layout_node.span().offset(),
                     layout_node.span().len(),
                 ));
@@ -2599,6 +2624,9 @@ impl<'a> KdlLayoutParser<'a> {
             // Extract tab properties from layout_node
             let tab_name =
                 kdl_get_string_property_or_child_value!(layout_node, "name").map(|s| s.to_string());
+            let tab_instance_id =
+                kdl_get_string_property_or_child_value!(layout_node, "vc_tab_instance_id")
+                    .map(str::to_owned);
             let split_direction = self.parse_split_direction(layout_node)?;
             let hide_floating_panes =
                 kdl_get_bool_property_or_child_value!(layout_node, "hide_floating_panes")
@@ -2612,6 +2640,7 @@ impl<'a> KdlLayoutParser<'a> {
                 swap_floating_layouts,
                 SingleTabLayoutOptions {
                     tab_name,
+                    tab_instance_id,
                     split_direction,
                     hide_floating_panes,
                     tab_cwd,
@@ -2621,6 +2650,9 @@ impl<'a> KdlLayoutParser<'a> {
             // Extract tab properties for layout_with_one_pane case
             let tab_name =
                 kdl_get_string_property_or_child_value!(layout_node, "name").map(|s| s.to_string());
+            let tab_instance_id =
+                kdl_get_string_property_or_child_value!(layout_node, "vc_tab_instance_id")
+                    .map(str::to_owned);
             let split_direction = self.parse_split_direction(layout_node)?;
             let hide_floating_panes =
                 kdl_get_bool_property_or_child_value!(layout_node, "hide_floating_panes")
@@ -2633,6 +2665,7 @@ impl<'a> KdlLayoutParser<'a> {
                 swap_floating_layouts,
                 SingleTabLayoutOptions {
                     tab_name,
+                    tab_instance_id,
                     split_direction,
                     hide_floating_panes,
                     tab_cwd,

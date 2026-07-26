@@ -1744,6 +1744,21 @@ tail -f /tmp/my-live-logfile | vc-frame pipe --name logs --plugin https://exampl
         #[clap(long, value_parser, default_value("false"), takes_value(false))]
         dry_run: bool,
 
+        /// Inherited descriptor already holding this run's transfer.lock.
+        ///
+        /// Vibecrafted acquires the lock before spawning vc-frame so ownership
+        /// survives if the caller is killed while this process is starting.
+        #[clap(long, value_parser)]
+        transfer_lock_fd: Option<i32>,
+
+        /// Monotonic Vibecrafted settlement revision for safe rebucketing.
+        ///
+        /// Zero is the legacy/manual path and cannot change an existing
+        /// receipt's bucket or exit code. A strictly newer non-zero revision
+        /// may replace the prior viewer without losing durable capture.
+        #[clap(long, value_parser, default_value("0"))]
+        settlement_revision: u64,
+
         /// The original command line, preserved so the bucket tab can rerun it
         #[clap(last(true), value_parser)]
         command: Vec<String>,
@@ -2978,6 +2993,10 @@ mod tests {
                     "-15",
                     "--origin-session",
                     "fixture",
+                    "--transfer-lock-fd",
+                    "9",
+                    "--settlement-revision",
+                    "4",
                     "--runtime-transcript",
                     "/tmp/work-123.log",
                 ])
@@ -2986,6 +3005,8 @@ mod tests {
                     cli.command,
                     Some(Command::Sessions(Sessions::TriageRun {
                         exit_code: -15,
+                        transfer_lock_fd: Some(9),
+                        settlement_revision: 4,
                         runtime_transcript: Some(ref transcript),
                         ..
                     })) if transcript == std::path::Path::new("/tmp/work-123.log")

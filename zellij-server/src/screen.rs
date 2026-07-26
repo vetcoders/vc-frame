@@ -69,7 +69,7 @@ use zellij_utils::{
     position::Position,
 };
 
-use crate::background_jobs::BackgroundJob;
+use crate::background_jobs::{BackgroundJob, reserve_session_state_generation};
 use crate::os_input_output::ResizeCache;
 use crate::pane_groups::PaneGroups;
 use crate::panes::alacritty_functions::xparse_color;
@@ -3682,9 +3682,15 @@ impl Screen {
         let err_context = || "Failed to log and report session state".to_string();
         let session_layout_metadata =
             self.get_layout_metadata(Some(self.default_shell.clone()), None);
+        let generation =
+            reserve_session_state_generation(&self.session_name).map_err(anyhow::Error::msg)?;
         self.bus
             .senders
-            .send_to_plugin(PluginInstruction::LogLayoutToHd(session_layout_metadata))
+            .send_to_plugin(PluginInstruction::LogLayoutToHd {
+                session_name: self.session_name.clone(),
+                generation,
+                session_layout_metadata,
+            })
             .with_context(err_context)?;
 
         Ok(())
@@ -9040,6 +9046,8 @@ pub(crate) fn screen_thread_main(
                     // Create empty metadata if serialization is disabled
                     SessionLayoutMetadata::new(screen.default_layout.clone())
                 };
+                let generation = reserve_session_state_generation(&screen.session_name)
+                    .map_err(anyhow::Error::msg)?;
 
                 screen
                     .bus
@@ -9048,6 +9056,7 @@ pub(crate) fn screen_thread_main(
                         session_name: screen.session_name.clone(),
                         session_info,
                         session_layout_metadata,
+                        generation,
                         completion_tx,
                     })
                     .with_context(err_context)?;

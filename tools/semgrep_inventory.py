@@ -38,6 +38,7 @@ CURRENT_EXE_PATHS = {
     "zellij-client/src/lib.rs",
     "zellij-client/src/web_client/mod.rs",
 }
+TRANSFER_LOCK_PATH = "src/run_triage_cli.rs"
 
 
 class InventoryError(RuntimeError):
@@ -92,7 +93,9 @@ def require_temp_dir_call(path: str, lines: list[str], line: int) -> None:
         )
 
 
-def require_terminal_cfg_test(path: str, lines: list[str], line: int) -> None:
+def require_terminal_cfg_test_location(
+    path: str, lines: list[str], line: int, finding_kind: str
+) -> None:
     module_starts = [
         index
         for index in range(len(lines) - 1)
@@ -117,8 +120,13 @@ def require_terminal_cfg_test(path: str, lines: list[str], line: int) -> None:
     finding_index = line - 1
     if not module_start + 1 < finding_index < module_end:
         raise InventoryError(
-            f"temp-dir finding is outside terminal #[cfg(test)] mod tests at {path}:{line}"
+            f"{finding_kind} finding is outside terminal #[cfg(test)] mod tests "
+            f"at {path}:{line}"
         )
+
+
+def require_terminal_cfg_test(path: str, lines: list[str], line: int) -> None:
+    require_terminal_cfg_test_location(path, lines, line, "temp-dir")
     require_temp_dir_call(path, lines, line)
 
 
@@ -178,22 +186,36 @@ def require_current_exe_policy(path: str, lines: list[str], line: int) -> None:
     source_line = lines[line - 1].strip()
     if path == "src/run_triage_cli.rs":
         nearby = [candidate.strip() for candidate in lines[line - 1:line + 8]]
-        if (
-            nearby[:3]
-            != [
-                "let executable = std::env::current_exe()",
-                '.map_err(|e| format!("cannot resolve the vc-frame executable: {}", e))?;',
-                "Ok(CliTriageIo { executable, root })",
-            ]
-            or not any(
-                candidate.startswith(
-                    "let output = run_command_with_timeout(&self.executable, args,"
-                )
-                for candidate in nearby
+        if nearby[:3] == [
+            "let executable = std::env::current_exe()",
+            '.map_err(|e| format!("cannot resolve the vc-frame executable: {}", e))?;',
+            "Ok(CliTriageIo { executable, root })",
+        ] and any(
+            candidate.startswith(
+                "let output = run_command_with_timeout(&self.executable, args,"
             )
+            for candidate in nearby
+        ):
+            return
+        require_terminal_cfg_test_location(path, lines, line, "current-exe")
+        if (
+            not re.fullmatch(
+                r"let (?:locked|available)_probe = "
+                r"Command::new\(std::env::current_exe\(\)\.unwrap\(\)\)",
+                source_line,
+            )
+            or nearby[1] != '.arg("inherited_transfer_lock_probe_child")'
+            or nearby[2] != '.env("VC_FRAME_TEST_TRANSFER_LOCK", &path)'
+            or nearby[3]
+            not in {
+                '.env("VC_FRAME_TEST_EXPECT_LOCKED", "0")',
+                '.env("VC_FRAME_TEST_EXPECT_LOCKED", "1")',
+            }
+            or nearby[4] != ".output()"
+            or nearby[5] != ".unwrap();"
         ):
             raise InventoryError(
-                f"current-exe source shape changed at {path}:{line}"
+                f"current-exe test probe source shape changed at {path}:{line}"
             )
         return
     if path == "zellij-client/src/lib.rs":
@@ -221,6 +243,32 @@ def require_current_exe_policy(path: str, lines: list[str], line: int) -> None:
             )
         return
     raise InventoryError(f"current-exe finding has no source policy: {path}:{line}")
+
+
+def require_transfer_lock_fd_policy(path: str, lines: list[str], line: int) -> None:
+    source_line = lines[line - 1].strip()
+    previous = [candidate.strip() for candidate in lines[max(0, line - 7):line - 1]]
+    following = [candidate.strip() for candidate in lines[line:line + 4]]
+    if (
+        path != TRANSFER_LOCK_PATH
+        or source_line
+        != "let file = unsafe { std::fs::File::from_raw_fd(inherited_fd) };"
+        or not any(
+            candidate.startswith("// SAFETY: pass_fds gives this exec")
+            for candidate in previous
+        )
+        or not following
+        or not following[0].startswith(
+            "let path_metadata = std::fs::symlink_metadata(path)"
+        )
+        or not any(
+            candidate.startswith("let file_metadata = file.metadata()")
+            for candidate in following
+        )
+    ):
+        raise InventoryError(
+            f"transfer-lock unsafe source shape changed at {path}:{line}"
+        )
 
 
 def read_json(path: Path) -> Any:
@@ -421,6 +469,11 @@ def unsafe_policy(path: str) -> tuple[str, str, list[str]]:
             "Unix daemonization is isolated to startup before threaded work and every fork outcome is handled.",
             ["security/semgrep/EVIDENCE.md#process-probes", "zellij-server/src/lib.rs"],
         ),
+        TRANSFER_LOCK_PATH: (
+            "Triage transfer lock",
+            "The inherited descriptor is validated as open, marked close-on-exec, matched to the canonical lock path by device and inode, and adopted by exactly one Rust owner.",
+            ["security/semgrep/EVIDENCE.md#transfer-lock-descriptor", TRANSFER_LOCK_PATH],
+        ),
     }
     if path in policies:
         return policies[path]
@@ -451,6 +504,8 @@ def adjudicate(
     path, _source_path, lines, line = validated_source_location(result, root)
     rule = result["check_id"]
     if rule == "rust.lang.security.unsafe-usage.unsafe-usage":
+        if path == TRANSFER_LOCK_PATH:
+            require_transfer_lock_fd_policy(path, lines, line)
         owner, invariant, evidence = unsafe_policy(path)
         return (
             "accepted_unsafe_boundary",

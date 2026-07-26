@@ -1,5 +1,4 @@
-use crate::background_jobs::BackgroundJob;
-use crate::background_jobs::write_session_state_to_disk;
+use crate::background_jobs::{BackgroundJob, SessionLayoutSnapshot, write_session_state_to_disk};
 use crate::global_async_runtime::get_tokio_runtime as async_runtime;
 use crate::os_input_output::{AsyncReader, NullAsyncReader};
 use crate::route::NotificationEnd;
@@ -108,11 +107,16 @@ pub enum PtyInstruction {
         plugin_id: PluginId,
         response_channel: crossbeam::channel::Sender<DumpSessionLayoutResponse>,
     },
-    LogLayoutToHd(SessionLayoutMetadata),
+    LogLayoutToHd {
+        session_name: String,
+        generation: u64,
+        session_layout_metadata: SessionLayoutMetadata,
+    },
     SaveSessionToDisk {
         session_name: String,
         session_info: SessionInfo,
         session_layout_metadata: SessionLayoutMetadata,
+        generation: u64,
         completion_tx: Option<NotificationEnd>,
     },
     FillPluginCwd(
@@ -174,7 +178,7 @@ impl From<&PtyInstruction> for PtyContext {
             PtyInstruction::SpawnInPlaceTerminal(..) => PtyContext::SpawnInPlaceTerminal,
             PtyInstruction::DumpLayout(..) => PtyContext::DumpLayout,
             PtyInstruction::DumpLayoutToPlugin { .. } => PtyContext::DumpLayoutToPlugin,
-            PtyInstruction::LogLayoutToHd(..) => PtyContext::LogLayoutToHd,
+            PtyInstruction::LogLayoutToHd { .. } => PtyContext::LogLayoutToHd,
             PtyInstruction::SaveSessionToDisk { .. } => PtyContext::SaveSessionToDisk,
             PtyInstruction::FillPluginCwd(..) => PtyContext::FillPluginCwd,
             PtyInstruction::ListClientsMetadata(..) => PtyContext::ListClientsMetadata,
@@ -770,7 +774,11 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
             PtyInstruction::ReportPluginCwd(plugin_id, cwd) => {
                 pty.plugin_cwds.insert(plugin_id, cwd);
             },
-            PtyInstruction::LogLayoutToHd(mut session_layout_metadata) => {
+            PtyInstruction::LogLayoutToHd {
+                session_name,
+                generation,
+                mut session_layout_metadata,
+            } => {
                 let err_context = || "Failed to dump layout".to_string();
                 pty.populate_session_layout_metadata(&mut session_layout_metadata);
                 if session_layout_metadata.is_dirty() {
@@ -781,7 +789,11 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
                             pty.bus
                                 .senders
                                 .send_to_background_jobs(BackgroundJob::ReportLayoutInfo(
-                                    kdl_layout_and_pane_contents,
+                                    SessionLayoutSnapshot {
+                                        session_name,
+                                        generation,
+                                        layout: kdl_layout_and_pane_contents,
+                                    },
                                 ))
                                 .with_context(err_context)?;
                         },
@@ -795,34 +807,67 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
                 session_name,
                 session_info,
                 mut session_layout_metadata,
-                completion_tx: _completion_tx, // Dropped at end to signal completion
+                generation,
+                mut completion_tx,
             } => {
                 pty.populate_session_layout_metadata(&mut session_layout_metadata);
                 match session_serialization::serialize_session_layout(
                     session_layout_metadata.into(),
                 ) {
                     Ok(kdl_and_files) => {
-                        write_session_state_to_disk(
-                            session_name,
+                        match write_session_state_to_disk(
+                            generation,
+                            session_name.clone(),
                             session_info,
                             kdl_and_files.clone(),
-                        );
+                        ) {
+                            Err(error) => {
+                                log::error!("Failed to save session to durable storage: {}", error);
+                                if let Some(completion_tx) = completion_tx.as_mut() {
+                                    completion_tx.set_exit_status(1);
+                                    completion_tx.set_error_message(error);
+                                }
+                            },
+                            Ok(false) => {
+                                let error = format!(
+                                    "session save generation {} for '{}' was superseded before commit; retry the save",
+                                    generation, session_name
+                                );
+                                log::error!("{}", error);
+                                if let Some(completion_tx) = completion_tx.as_mut() {
+                                    completion_tx.set_exit_status(1);
+                                    completion_tx.set_error_message(error);
+                                }
+                            },
+                            Ok(true) => {
+                                // Update session save time for plugin query only after
+                                // all resurrection files reached durable storage.
+                                let timestamp_millis = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis()
+                                    as u64;
+                                let _ = pty.bus.senders.send_to_plugin(
+                                    PluginInstruction::UpdateSessionSaveTime(timestamp_millis),
+                                );
 
-                        // Update session save time for plugin query
-                        let timestamp_millis = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis() as u64;
-                        let _ = pty.bus.senders.send_to_plugin(
-                            PluginInstruction::UpdateSessionSaveTime(timestamp_millis),
-                        );
-
-                        let _ = pty.bus.senders.send_to_background_jobs(
-                            BackgroundJob::ReportLayoutInfo(kdl_and_files),
-                        );
+                                let _ = pty.bus.senders.send_to_background_jobs(
+                                    BackgroundJob::ReportLayoutInfo(SessionLayoutSnapshot {
+                                        session_name,
+                                        generation,
+                                        layout: kdl_and_files,
+                                    }),
+                                );
+                            },
+                        }
                     },
                     Err(e) => {
                         log::error!("Failed to serialize layout: {}", e);
+                        if let Some(completion_tx) = completion_tx.as_mut() {
+                            completion_tx.set_exit_status(1);
+                            completion_tx
+                                .set_error_message(format!("Failed to serialize layout: {}", e));
+                        }
                     },
                 };
             },

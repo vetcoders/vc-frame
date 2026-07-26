@@ -144,7 +144,11 @@ pub enum PluginInstruction {
         plugin_id: PluginId,
         response_channel: crossbeam::channel::Sender<DumpSessionLayoutResponse>,
     },
-    LogLayoutToHd(SessionLayoutMetadata),
+    LogLayoutToHd {
+        session_name: String,
+        generation: u64,
+        session_layout_metadata: SessionLayoutMetadata,
+    },
     CliPipe {
         pipe_id: String,
         name: String,
@@ -254,7 +258,7 @@ impl From<&PluginInstruction> for PluginContext {
             },
             PluginInstruction::DumpLayout(..) => PluginContext::DumpLayout,
             PluginInstruction::ListClientsMetadata(..) => PluginContext::ListClientsMetadata,
-            PluginInstruction::LogLayoutToHd(..) => PluginContext::LogLayoutToHd,
+            PluginInstruction::LogLayoutToHd { .. } => PluginContext::LogLayoutToHd,
             PluginInstruction::CliPipe { .. } => PluginContext::CliPipe,
             PluginInstruction::CachePluginEvents { .. } => PluginContext::CachePluginEvents,
             PluginInstruction::MessageFromPlugin { .. } => PluginContext::MessageFromPlugin,
@@ -905,17 +909,22 @@ pub(crate) fn plugin_thread_main(
                 )];
                 wasm_bridge.update_plugins(updates, shutdown_send.clone())?;
             },
-            PluginInstruction::LogLayoutToHd(mut session_layout_metadata) => {
+            PluginInstruction::LogLayoutToHd {
+                session_name,
+                generation,
+                mut session_layout_metadata,
+            } => {
                 populate_session_layout_metadata(
                     &mut session_layout_metadata,
                     &wasm_bridge,
                     &plugin_aliases,
                     None,
                 );
-                drop(
-                    bus.senders
-                        .send_to_pty(PtyInstruction::LogLayoutToHd(session_layout_metadata)),
-                );
+                drop(bus.senders.send_to_pty(PtyInstruction::LogLayoutToHd {
+                    session_name,
+                    generation,
+                    session_layout_metadata,
+                }));
             },
             PluginInstruction::CliPipe {
                 pipe_id,
