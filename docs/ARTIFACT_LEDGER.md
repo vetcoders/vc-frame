@@ -22,9 +22,13 @@ Hash receipt: `zellij-utils/assets/plugins/SHA256SUMS`
 | `default-plugins/status-bar` | `…/status-bar.wasm` | yes |
 | `default-plugins/strider` | `…/strider.wasm` | yes |
 | `default-plugins/tab-bar` | `…/tab-bar.wasm` | yes |
+| `default-plugins/vc-tab-title` | `…/vc-tab-title.wasm` | yes |
 
 Copy path is owned by `xtask/src/build.rs` (`move_plugin_to_assets`, release-only).  
 Runtime identity is owned by `zellij-utils/src/consts.rs` (`ASSET_MAP` + `include_bytes!`).
+`scripts/plugins-parity.zsh receipt-json` is the release-facing inventory: it
+binds all 14 artifact hashes and sizes while recording the 13 runtime-embedded
+plugins separately from the single test-only fixture.
 
 ## Residue decisions (W0-C)
 
@@ -51,6 +55,7 @@ Runtime identity is owned by `zellij-utils/src/consts.rs` (`ASSET_MAP` + `includ
 make plugins-parity            # assets == SHA256SUMS
 make plugins-parity-self-test  # perturb fails, restore passes
 make plugins-parity-double     # two isolated rebuilds, identical hashes
+scripts/plugins-parity.zsh receipt-json
 cargo test -p zellij-utils asset_map_matches_bundled_plugin_files -- --nocapture
 ```
 

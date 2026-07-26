@@ -8,6 +8,7 @@
 # Modes:
 #   check            Verify assets match SHA256SUMS (CI-fast; default)
 #   write-manifest   Hash current assets into SHA256SUMS
+#   receipt-json     Emit machine-readable artifact/runtime inventory
 #   rebuild-once     Release-build plugins into assets/
 #   double-rebuild   Two isolated rebuilds; hashes must match exactly
 #   self-test        Deliberate perturbation fails check; restore passes
@@ -23,6 +24,7 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 ASSETS="$REPO/zellij-utils/assets/plugins"
 MANIFEST="$ASSETS/SHA256SUMS"
 TARGET_WASM="$REPO/target/wasm32-wasip1/release"
+ASSET_MAP_SOURCE="$REPO/zellij-utils/src/consts.rs"
 CARGO="${CARGO:-cargo}"
 
 # Plugin crates whose release .wasm is copied into assets/ (xtask workspace list).
@@ -61,8 +63,77 @@ RUNTIME_WASMS=(
   vc-tab-title.wasm
 )
 
+TEST_ONLY_WASMS=(
+  fixture-plugin-for-tests.wasm
+)
+
 sha_file() {
   /usr/bin/shasum -a 256 "$1" | /usr/bin/awk '{print $1}'
+}
+
+array_contains() {
+  local needle="$1"
+  shift
+  local item
+  for item in "$@"; do
+    [[ "$item" == "$needle" ]] && return 0
+  done
+  return 1
+}
+
+check_runtime_partition() {
+  local name
+  for name in "${RUNTIME_WASMS[@]}"; do
+    array_contains "$name" "${PLUGIN_WASMS[@]}" || {
+      print -u2 "ERROR: runtime plugin is absent from build inventory: $name"
+      return 1
+    }
+    array_contains "$name" "${TEST_ONLY_WASMS[@]}" && {
+      print -u2 "ERROR: plugin cannot be both runtime and test-only: $name"
+      return 1
+    }
+  done
+  for name in "${TEST_ONLY_WASMS[@]}"; do
+    array_contains "$name" "${PLUGIN_WASMS[@]}" || {
+      print -u2 "ERROR: test-only plugin is absent from build inventory: $name"
+      return 1
+    }
+  done
+  for name in "${PLUGIN_WASMS[@]}"; do
+    array_contains "$name" "${RUNTIME_WASMS[@]}" \
+      || array_contains "$name" "${TEST_ONLY_WASMS[@]}" || {
+        print -u2 "ERROR: built plugin has no runtime/test-only ownership: $name"
+        return 1
+      }
+  done
+
+  # RUNTIME_WASMS is release metadata, while ASSET_MAP is executable truth.
+  # Fail closed if those two surfaces ever drift.
+  RUNTIME_WASM_LIST="$(printf '%s\n' "${RUNTIME_WASMS[@]}")" \
+    python3 - "$ASSET_MAP_SOURCE" <<'PY'
+import os
+import pathlib
+import re
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+match = re.search(
+    r"pub static ref ASSET_MAP:.*?=\s*\{(?P<body>.*?)^\s+assets\s*$",
+    source,
+    flags=re.MULTILINE | re.DOTALL,
+)
+if match is None:
+    raise SystemExit("ERROR: could not resolve ASSET_MAP plugin inventory")
+asset_map = set(
+    re.findall(r'add_plugin!\(\s*assets\s*,\s*"([^"]+)"\s*\)', match["body"])
+)
+declared = set(os.environ["RUNTIME_WASM_LIST"].splitlines())
+if asset_map != declared:
+    raise SystemExit(
+        "ERROR: RUNTIME_WASMS != ASSET_MAP: "
+        f"missing={sorted(asset_map - declared)}, extra={sorted(declared - asset_map)}"
+    )
+PY
 }
 
 hash_dir_receipt() {
@@ -85,6 +156,7 @@ write_manifest_from_assets() {
 }
 
 check_manifest() {
+  check_runtime_partition
   if [[ ! -f "$MANIFEST" ]]; then
     print -u2 "ERROR: missing $MANIFEST — run: $0 write-manifest"
     return 1
@@ -101,6 +173,53 @@ check_manifest() {
     return 1
   fi
   print "✓ assets match SHA256SUMS ($(print -r -- "$actual" | /usr/bin/wc -l | tr -d ' ') plugins)"
+}
+
+receipt_json() {
+  check_manifest >/dev/null
+  RUNTIME_WASM_LIST="$(printf '%s\n' "${RUNTIME_WASMS[@]}")" \
+  TEST_ONLY_WASM_LIST="$(printf '%s\n' "${TEST_ONLY_WASMS[@]}")" \
+    python3 - "$MANIFEST" "$ASSETS" <<'PY'
+import hashlib
+import json
+import os
+import pathlib
+import sys
+
+manifest = pathlib.Path(sys.argv[1])
+assets = pathlib.Path(sys.argv[2])
+runtime = set(os.environ["RUNTIME_WASM_LIST"].splitlines())
+test_only = set(os.environ["TEST_ONLY_WASM_LIST"].splitlines())
+artifacts = []
+
+for raw_line in manifest.read_text(encoding="utf-8").splitlines():
+    expected_sha256, name = raw_line.split(maxsplit=1)
+    artifact = assets / name
+    contents = artifact.read_bytes()
+    actual_sha256 = hashlib.sha256(contents).hexdigest()
+    if actual_sha256 != expected_sha256:
+        raise SystemExit(f"artifact drift while producing receipt: {name}")
+    artifacts.append(
+        {
+            "name": name,
+            "sha256": actual_sha256,
+            "bytes": len(contents),
+            "runtime_embedded": name in runtime,
+            "test_only": name in test_only,
+        }
+    )
+
+payload = {
+    "manifest": "zellij-utils/assets/plugins/SHA256SUMS",
+    "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+    "count": len(artifacts),
+    "runtime_embedded_count": sum(item["runtime_embedded"] for item in artifacts),
+    "test_only_count": sum(item["test_only"] for item in artifacts),
+    "artifacts": sorted(artifacts, key=lambda item: item["name"]),
+}
+json.dump(payload, sys.stdout, indent=2, sort_keys=True)
+sys.stdout.write("\n")
+PY
 }
 
 rebuild_once() {
@@ -180,6 +299,24 @@ self_test() {
   print "══ self-test: positive check ══"
   check_manifest
 
+  print "══ self-test: release receipt inventory ══"
+  receipt_json | python3 -c '
+import json, sys
+receipt = json.load(sys.stdin)
+assert receipt["count"] == 14, receipt
+assert receipt["runtime_embedded_count"] == 13, receipt
+assert receipt["test_only_count"] == 1, receipt
+assert len(receipt["artifacts"]) == receipt["count"], receipt
+assert {
+    item["name"] for item in receipt["artifacts"] if item["test_only"]
+} == {"fixture-plugin-for-tests.wasm"}, receipt
+assert all(
+    item["runtime_embedded"] != item["test_only"]
+    for item in receipt["artifacts"]
+), receipt
+'
+  print "✓ release receipt names 14 artifacts (13 runtime, 1 test-only)"
+
   local victim="$ASSETS/about.wasm"
   local backup
   backup="$(mktemp "${TMPDIR:-/tmp}/about.wasm.bak.XXXXXX")"
@@ -206,10 +343,11 @@ self_test() {
 
 usage() {
   cat <<EOF
-Usage: $0 <check|write-manifest|rebuild-once|double-rebuild|self-test>
+Usage: $0 <check|write-manifest|receipt-json|rebuild-once|double-rebuild|self-test>
 
   check            Verify assets == SHA256SUMS (default)
   write-manifest   Write SHA256SUMS from current assets
+  receipt-json     Emit hashes, sizes, and runtime/test-only ownership as JSON
   rebuild-once     cargo xtask build --release --plugins-only
   double-rebuild   Two isolated rebuilds; require identical hashes
   self-test        Positive + negative (perturb) + restore
@@ -224,6 +362,7 @@ mode="${1:-check}"
 case "$mode" in
   check) check_manifest ;;
   write-manifest) write_manifest_from_assets ;;
+  receipt-json) receipt_json ;;
   rebuild-once) rebuild_once ;;
   double-rebuild) double_rebuild ;;
   self-test) self_test ;;

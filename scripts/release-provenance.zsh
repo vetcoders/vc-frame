@@ -86,6 +86,13 @@ print(data.get("workspace", {}).get("package", {}).get("version")
   [[ -n "$version" ]] || die "could not read version from Cargo.toml"
   [[ -n "$target" ]] || die "could not resolve host target triple"
 
+  # Fail before the expensive host build if committed plugin bytes drifted.
+  # This inventory is embedded into the final receipt so every bundled WASM
+  # remains attributable even though distribution ships one host binary.
+  local plugin_inventory
+  plugin_inventory="$("$REPO/scripts/plugins-parity.zsh" receipt-json)" \
+    || die "bundled plugin inventory is not release-ready"
+
   print -- ""
   print -- "== packaging vc-frame $version ($target) =="
 
@@ -141,6 +148,7 @@ print(data.get("workspace", {}).get("package", {}).get("version")
     "sha256": "$archive_sha",
     "bytes": $(file_size "$DIST/$archive")
   },
+  "bundled_plugins": $plugin_inventory,
   "binary_self_reported_build_info": $("$built" --build-info | sed 's/^/  /')
 }
 RECEIPT
