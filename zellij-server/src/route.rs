@@ -1180,6 +1180,23 @@ pub(crate) fn route_action(
                 ))
                 .with_context(err_context)?;
         },
+        Action::CloseTabByIdIfNameIfQuiescent {
+            id,
+            expected_name,
+            expected_session_incarnation,
+            expected_tab_instance_id,
+        } => {
+            critical_completion = true;
+            senders
+                .send_to_screen(ScreenInstruction::CloseTabWithIdIfNameIfQuiescent(
+                    id as usize,
+                    expected_name,
+                    expected_session_incarnation,
+                    expected_tab_instance_id,
+                    Some(NotificationEnd::new(completion_tx)),
+                ))
+                .with_context(err_context)?;
+        },
         Action::RenameTabById { id, name } => {
             senders
                 .send_to_screen(ScreenInstruction::RenameTabWithId(

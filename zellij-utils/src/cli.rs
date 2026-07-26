@@ -2260,6 +2260,15 @@ pub enum CliAction {
             requires("expected-session-incarnation")
         )]
         expected_tab_instance_id: Option<String>,
+        /// Garbage-collect the exact tab only if it is atomically proven inactive and quiescent
+        #[clap(
+            long,
+            requires("tab-id"),
+            requires("expected-name"),
+            requires("expected-session-incarnation"),
+            requires("expected-tab-instance-id")
+        )]
+        gc_if_quiescent: bool,
     },
     /// Go to tab with index [index]
     GoToTab {
@@ -2880,6 +2889,68 @@ mod tests {
                                 expected_name: Some(expected_name),
                                 expected_session_incarnation: Some(incarnation),
                                 expected_tab_instance_id: Some(tab_instance_id),
+                                gc_if_quiescent: false,
+                            } if expected_name == "work-123"
+                                && incarnation == "server-abc"
+                                && tab_instance_id == "11111111111111111111111111111111"
+                        )
+                )
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(parsed);
+    }
+
+    #[test]
+    fn close_tab_gc_if_quiescent_requires_and_parses_complete_identity() {
+        let rejected = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                CliArgs::try_parse_from([
+                    "vc-frame",
+                    "action",
+                    "close-tab",
+                    "--tab-id",
+                    "7",
+                    "--gc-if-quiescent",
+                ])
+                .is_err()
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(rejected);
+
+        let parsed = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let cli = CliArgs::try_parse_from([
+                    "vc-frame",
+                    "action",
+                    "close-tab",
+                    "--tab-id",
+                    "7",
+                    "--expected-name",
+                    "work-123",
+                    "--expected-session-incarnation",
+                    "server-abc",
+                    "--expected-tab-instance-id",
+                    "11111111111111111111111111111111",
+                    "--gc-if-quiescent",
+                ])
+                .unwrap();
+                matches!(
+                    cli.command,
+                    Some(Command::Action(action))
+                        if matches!(
+                            action.as_ref(),
+                            CliAction::CloseTab {
+                                tab_id: Some(7),
+                                expected_name: Some(expected_name),
+                                expected_session_incarnation: Some(incarnation),
+                                expected_tab_instance_id: Some(tab_instance_id),
+                                gc_if_quiescent: true,
                             } if expected_name == "work-123"
                                 && incarnation == "server-abc"
                                 && tab_instance_id == "11111111111111111111111111111111"

@@ -118,6 +118,10 @@ impl FromStr for SearchOption {
 )]
 #[strum(ascii_case_insensitive)]
 #[derive(Default)]
+// Layout-bearing actions intentionally keep their payloads inline. Boxing the
+// largest variants would change this public action contract across every
+// client, plugin and IPC conversion for no GC-safety benefit.
+#[allow(clippy::large_enum_variant)]
 pub enum Action {
     /// Quit Zellij.
     Quit,
@@ -500,6 +504,12 @@ pub enum Action {
         id: u64,
     },
     CloseTabByIdIfName {
+        id: u64,
+        expected_name: String,
+        expected_session_incarnation: String,
+        expected_tab_instance_id: String,
+    },
+    CloseTabByIdIfNameIfQuiescent {
         id: u64,
         expected_name: String,
         expected_session_incarnation: String,
@@ -1380,17 +1390,32 @@ impl Action {
                 expected_name,
                 expected_session_incarnation,
                 expected_tab_instance_id,
+                gc_if_quiescent,
             } => match (
                 tab_id,
                 expected_name,
                 expected_session_incarnation,
                 expected_tab_instance_id,
+                gc_if_quiescent,
             ) {
                 (
                     Some(id),
                     Some(expected_name),
                     Some(expected_session_incarnation),
                     Some(expected_tab_instance_id),
+                    true,
+                ) => Ok(vec![Action::CloseTabByIdIfNameIfQuiescent {
+                    id: id as u64,
+                    expected_name,
+                    expected_session_incarnation,
+                    expected_tab_instance_id,
+                }]),
+                (
+                    Some(id),
+                    Some(expected_name),
+                    Some(expected_session_incarnation),
+                    Some(expected_tab_instance_id),
+                    false,
                 ) => {
                     Ok(vec![Action::CloseTabByIdIfName {
                         id: id as u64,
@@ -1399,10 +1424,12 @@ impl Action {
                         expected_tab_instance_id,
                     }])
                 },
-                (Some(id), None, None, None) => Ok(vec![Action::CloseTabById { id: id as u64 }]),
-                (None, None, None, None) => Ok(vec![Action::CloseTab]),
+                (Some(id), None, None, None, false) => {
+                    Ok(vec![Action::CloseTabById { id: id as u64 }])
+                },
+                (None, None, None, None, false) => Ok(vec![Action::CloseTab]),
                 _ => Err(
-                    "--expected-name, --expected-session-incarnation and --expected-tab-instance-id require each other and --tab-id when closing a tab"
+                    "--gc-if-quiescent requires --tab-id and the complete --expected-name, --expected-session-incarnation and --expected-tab-instance-id identity; the identity flags require each other"
                         .to_owned(),
                 ),
             },
@@ -3095,6 +3122,7 @@ mod tests {
             expected_name: None,
             expected_session_incarnation: None,
             expected_tab_instance_id: None,
+            gc_if_quiescent: false,
         };
         let result = Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None);
         assert!(result.is_ok());
@@ -3115,6 +3143,7 @@ mod tests {
             expected_name: None,
             expected_session_incarnation: None,
             expected_tab_instance_id: None,
+            gc_if_quiescent: false,
         };
         let result = Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None);
         assert!(result.is_ok());
@@ -3130,6 +3159,7 @@ mod tests {
             expected_name: Some("work-123".to_owned()),
             expected_session_incarnation: Some("server-abc".to_owned()),
             expected_tab_instance_id: Some("11111111111111111111111111111111".to_owned()),
+            gc_if_quiescent: false,
         };
         let actions =
             Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None).unwrap();
@@ -3149,9 +3179,33 @@ mod tests {
             expected_name: Some("work-123".to_owned()),
             expected_session_incarnation: Some("server-abc".to_owned()),
             expected_tab_instance_id: Some("11111111111111111111111111111111".to_owned()),
+            gc_if_quiescent: false,
         };
         assert!(
             Action::actions_from_cli(invalid, Box::new(|| PathBuf::from("/tmp")), None).is_err()
+        );
+    }
+
+    #[test]
+    fn test_close_tab_gc_if_quiescent_uses_dedicated_action() {
+        let cli_action = CliAction::CloseTab {
+            tab_id: Some(5),
+            expected_name: Some("work-123".to_owned()),
+            expected_session_incarnation: Some("server-abc".to_owned()),
+            expected_tab_instance_id: Some("11111111111111111111111111111111".to_owned()),
+            gc_if_quiescent: true,
+        };
+        let actions =
+            Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None).unwrap();
+
+        assert_eq!(
+            actions,
+            vec![Action::CloseTabByIdIfNameIfQuiescent {
+                id: 5,
+                expected_name: "work-123".to_owned(),
+                expected_session_incarnation: "server-abc".to_owned(),
+                expected_tab_instance_id: "11111111111111111111111111111111".to_owned(),
+            }]
         );
     }
 

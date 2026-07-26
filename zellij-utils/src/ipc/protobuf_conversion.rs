@@ -852,6 +852,7 @@ impl From<crate::input::actions::Action>
             CloseTabAction,
             CloseTabByIdAction,
             CloseTabByIdIfNameAction,
+            CloseTabByIdIfNameIfQuiescentAction,
             CloseTerminalPaneAction,
             ConfirmAction,
             CopyAction,
@@ -1556,6 +1557,17 @@ impl From<crate::input::actions::Action>
                 expected_session_incarnation,
                 expected_tab_instance_id,
             } => ActionType::CloseTabByIdIfName(CloseTabByIdIfNameAction {
+                id,
+                expected_name,
+                expected_session_incarnation,
+                expected_tab_instance_id,
+            }),
+            crate::input::actions::Action::CloseTabByIdIfNameIfQuiescent {
+                id,
+                expected_name,
+                expected_session_incarnation,
+                expected_tab_instance_id,
+            } => ActionType::CloseTabByIdIfNameIfQuiescent(CloseTabByIdIfNameIfQuiescentAction {
                 id,
                 expected_name,
                 expected_session_incarnation,
@@ -2461,6 +2473,14 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                         .expected_tab_instance_id,
                 })
             },
+            ActionType::CloseTabByIdIfNameIfQuiescent(close_action) => Ok(
+                crate::input::actions::Action::CloseTabByIdIfNameIfQuiescent {
+                    id: close_action.id,
+                    expected_name: close_action.expected_name,
+                    expected_session_incarnation: close_action.expected_session_incarnation,
+                    expected_tab_instance_id: close_action.expected_tab_instance_id,
+                },
+            ),
             ActionType::RenameTabById(rename_tab_by_id_action) => {
                 Ok(crate::input::actions::Action::RenameTabById {
                     id: rename_tab_by_id_action.id,

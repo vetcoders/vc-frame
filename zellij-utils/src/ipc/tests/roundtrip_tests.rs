@@ -2243,6 +2243,17 @@ fn test_client_messages() {
         is_cli_client: true,
     });
     test_client_roundtrip!(ClientToServerMsg::Action {
+        action: Action::CloseTabByIdIfNameIfQuiescent {
+            id: 7,
+            expected_name: "work-123".to_owned(),
+            expected_session_incarnation: "server-abc".to_owned(),
+            expected_tab_instance_id: "11111111111111111111111111111111".to_owned(),
+        },
+        terminal_id: Some(1),
+        client_id: Some(100),
+        is_cli_client: true,
+    });
+    test_client_roundtrip!(ClientToServerMsg::Action {
         action: Action::GoToTab { index: 0 },
         terminal_id: Some(1),
         client_id: Some(100),

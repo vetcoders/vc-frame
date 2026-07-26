@@ -143,6 +143,14 @@ pub const MIN_TERMINAL_HEIGHT: usize = 5;
 pub const MIN_TERMINAL_WIDTH: usize = 5;
 
 const MAX_PENDING_VTE_EVENTS: usize = 7000;
+const VIEWER_GC_PLUGIN_SURFACES: &[&str] = &[
+    "compact-bar",
+    "session-manager",
+    "status-bar",
+    "vc-frame:compact-bar",
+    "vc-frame:session-manager",
+    "vc-frame:status-bar",
+];
 
 type HoldForCommand = Option<RunCommand>;
 pub type SuppressedPanes = HashMap<PaneId, (bool, Box<dyn Pane>)>; // bool => is scrollback editor
@@ -3449,6 +3457,67 @@ impl Tab {
     ) -> impl Iterator<Item = (&PaneId, &(bool, Box<dyn Pane>))> {
         // bool => is_scrollback_editor
         self.suppressed_panes.iter()
+    }
+    pub(crate) fn ensure_viewer_gc_quiescent(&self) -> Result<()> {
+        let tiled_and_floating = self
+            .get_tiled_panes()
+            .chain(self.get_floating_panes())
+            .map(|(pane_id, pane)| (pane_id, pane.as_ref()));
+        let suppressed = self
+            .get_suppressed_panes()
+            .map(|(pane_id, (_, pane))| (pane_id, pane.as_ref()));
+        let mut terminal_count = 0;
+
+        for (pane_id, pane) in tiled_and_floating.chain(suppressed) {
+            match pane_id {
+                PaneId::Terminal(_) => {
+                    terminal_count += 1;
+                    if !pane.is_held() {
+                        return Err(anyhow!(
+                            "GC-safe close refused for tab ID {}: terminal pane {:?} is running (not held)",
+                            self.id,
+                            pane_id
+                        ));
+                    }
+                },
+                PaneId::Plugin(_) => {
+                    let location = match pane.invoked_with() {
+                        Some(Run::Plugin(plugin)) => plugin.location_string(),
+                        Some(other) => {
+                            return Err(anyhow!(
+                                "GC-safe close refused for tab ID {}: plugin pane {:?} has unexpected invocation {:?}",
+                                self.id,
+                                pane_id,
+                                other
+                            ));
+                        },
+                        None => {
+                            return Err(anyhow!(
+                                "GC-safe close refused for tab ID {}: plugin pane {:?} has no invocation identity",
+                                self.id,
+                                pane_id
+                            ));
+                        },
+                    };
+                    if !VIEWER_GC_PLUGIN_SURFACES.contains(&location.as_str()) {
+                        return Err(anyhow!(
+                            "GC-safe close refused for tab ID {}: unexpected plugin surface {:?} in pane {:?}",
+                            self.id,
+                            location,
+                            pane_id
+                        ));
+                    }
+                },
+            }
+        }
+
+        if terminal_count == 0 {
+            return Err(anyhow!(
+                "GC-safe close refused for tab ID {}: viewer has no terminal panes",
+                self.id
+            ));
+        }
+        Ok(())
     }
     fn get_selectable_tiled_panes(&self) -> impl Iterator<Item = (&PaneId, &Box<dyn Pane>)> {
         self.get_tiled_panes().filter(|(_, p)| p.selectable())

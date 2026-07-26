@@ -4410,6 +4410,7 @@ pub fn send_cli_close_tab_action() {
         expected_name: None,
         expected_session_incarnation: None,
         expected_tab_instance_id: None,
+        gc_if_quiescent: false,
     };
     send_cli_action_to_server(&session_metadata, close_tab, client_id);
     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -5724,6 +5725,218 @@ pub fn close_tab_by_id_if_name_fails_closed_on_identity_mismatch() {
             .close_tab_by_id_if_name(99, "work-123", &incarnation, &successor_instance_id)
             .is_err()
     );
+}
+
+#[test]
+pub fn gc_safe_close_accepts_an_inactive_start_suspended_terminal() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, true, true);
+    new_tab(&mut screen, 1, 0);
+    new_tab(&mut screen, 2, 1);
+    screen.get_tab_by_id_mut(1).unwrap().name = "viewer".to_owned();
+    screen.get_tab_by_id_mut(1).unwrap().hold_pane(
+        PaneId::Terminal(2),
+        None,
+        true,
+        RunCommand::default(),
+    );
+    screen
+        .go_to_tab(1, 1)
+        .expect("client should leave the viewer tab");
+    let incarnation = screen.session_incarnation.clone();
+    let tab_instance_id = screen.get_tab_by_id(1).unwrap().instance_id.clone();
+
+    screen
+        .close_tab_by_id_if_name_if_quiescent(1, "viewer", &incarnation, &tab_instance_id)
+        .expect("inactive start_suspended viewer should be GC-safe");
+    assert!(screen.get_tab_by_id(1).is_none());
+    assert!(screen.get_tab_by_id(0).is_some());
+}
+
+#[test]
+pub fn gc_safe_close_accepts_all_runtime_viewer_plugin_locations() {
+    for plugin_name in ["compact-bar", "session-manager", "status-bar"] {
+        for location in [plugin_name.to_owned(), format!("vc-frame:{plugin_name}")] {
+            let size = Size {
+                cols: 121,
+                rows: 20,
+            };
+            let mut screen = create_new_screen(size, true, true);
+            let (to_plugin, _plugin_receiver): ChannelWithContext<PluginInstruction> =
+                channels::unbounded();
+            screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+            new_tab(&mut screen, 1, 0);
+            new_tab(&mut screen, 2, 1);
+            let plugin = RunPluginOrAlias::from_url(&location, &None, None, None)
+                .expect("valid viewer plugin location");
+            assert_eq!(
+                plugin.location_string(),
+                location,
+                "fixture must preserve the exact runtime location checked by viewer GC"
+            );
+            screen
+                .get_tab_by_id_mut(1)
+                .unwrap()
+                .new_tiled_pane(
+                    PaneId::Plugin(90),
+                    Some(plugin.location_string()),
+                    Some(Run::Plugin(plugin)),
+                    false,
+                    false,
+                    None,
+                    None,
+                    Some(false),
+                )
+                .expect("viewer plugin pane should use the runtime creation path");
+            screen.get_tab_by_id_mut(1).unwrap().name = "viewer".to_owned();
+            screen.get_tab_by_id_mut(1).unwrap().hold_pane(
+                PaneId::Terminal(2),
+                None,
+                true,
+                RunCommand::default(),
+            );
+            screen
+                .go_to_tab(1, 1)
+                .expect("client should leave the viewer tab");
+            let incarnation = screen.session_incarnation.clone();
+            let tab_instance_id = screen.get_tab_by_id(1).unwrap().instance_id.clone();
+
+            screen
+                .close_tab_by_id_if_name_if_quiescent(1, "viewer", &incarnation, &tab_instance_id)
+                .unwrap_or_else(|error| {
+                    panic!("viewer plugin location {location:?} should be GC-safe: {error}")
+                });
+            assert!(screen.get_tab_by_id(1).is_none());
+        }
+    }
+}
+
+#[test]
+pub fn gc_safe_close_refuses_a_started_rerun() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, true, true);
+    new_tab(&mut screen, 1, 0);
+    new_tab(&mut screen, 2, 1);
+    screen.get_tab_by_id_mut(1).unwrap().name = "viewer".to_owned();
+    screen.get_tab_by_id_mut(1).unwrap().hold_pane(
+        PaneId::Terminal(2),
+        None,
+        true,
+        RunCommand::default(),
+    );
+    screen
+        .go_to_tab(1, 1)
+        .expect("client should leave the viewer tab");
+    let incarnation = screen.session_incarnation.clone();
+    let tab_instance_id = screen.get_tab_by_id(1).unwrap().instance_id.clone();
+    screen
+        .get_tab_by_id_mut(1)
+        .unwrap()
+        .rerun_terminal_pane_with_id(2, None);
+
+    let error = screen
+        .close_tab_by_id_if_name_if_quiescent(1, "viewer", &incarnation, &tab_instance_id)
+        .expect_err("a rerun that left held state must survive viewer GC");
+    assert!(error.to_string().contains("is running (not held)"));
+    assert!(screen.get_tab_by_id(1).is_some());
+}
+
+#[test]
+pub fn gc_safe_close_refuses_focus_changed_after_identity_inventory() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, true, true);
+    new_tab(&mut screen, 1, 0);
+    new_tab(&mut screen, 2, 1);
+    screen.get_tab_by_id_mut(1).unwrap().name = "viewer".to_owned();
+    screen.get_tab_by_id_mut(1).unwrap().hold_pane(
+        PaneId::Terminal(2),
+        None,
+        true,
+        RunCommand::default(),
+    );
+    screen
+        .go_to_tab(1, 1)
+        .expect("client should initially leave the viewer tab");
+
+    // This is the stale inventory snapshot. Focus changes before the atomic
+    // server mutation, so the server must decide from current state instead.
+    let incarnation = screen.session_incarnation.clone();
+    let tab_instance_id = screen.get_tab_by_id(1).unwrap().instance_id.clone();
+    screen
+        .go_to_tab(2, 1)
+        .expect("client should focus the inventoried viewer tab");
+
+    let error = screen
+        .close_tab_by_id_if_name_if_quiescent(1, "viewer", &incarnation, &tab_instance_id)
+        .expect_err("a newly focused viewer must survive stale GC inventory");
+    assert!(error.to_string().contains("tab is active for client 1"));
+    assert!(screen.get_tab_by_id(1).is_some());
+}
+
+#[test]
+pub fn gc_safe_close_refuses_an_unexpected_plugin_surface() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, true, true);
+    let (to_plugin, _plugin_receiver): ChannelWithContext<PluginInstruction> =
+        channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    new_tab(&mut screen, 1, 0);
+    let plugin = RunPluginOrAlias::from_url("file:/unexpected/plugin.wasm", &None, None, None)
+        .expect("valid fixture plugin URL");
+    new_tab(&mut screen, 2, 1);
+    screen
+        .get_tab_by_id_mut(1)
+        .unwrap()
+        .new_tiled_pane(
+            PaneId::Plugin(90),
+            Some(plugin.location_string()),
+            Some(Run::Plugin(plugin)),
+            false,
+            false,
+            None,
+            None,
+            Some(false),
+        )
+        .expect("fixture plugin pane should use the runtime creation path");
+    screen.get_tab_by_id_mut(1).unwrap().name = "viewer".to_owned();
+    screen.get_tab_by_id_mut(1).unwrap().hold_pane(
+        PaneId::Terminal(2),
+        None,
+        true,
+        RunCommand::default(),
+    );
+    assert!(
+        screen.get_tab_by_id(1).unwrap().has_plugin(90),
+        "fixture must install the unexpected plugin surface; panes: {:?}",
+        screen.get_tab_by_id(1).unwrap().get_all_pane_ids()
+    );
+    screen
+        .go_to_tab(1, 1)
+        .expect("client should leave the viewer tab");
+    let incarnation = screen.session_incarnation.clone();
+    let tab_instance_id = screen.get_tab_by_id(1).unwrap().instance_id.clone();
+
+    let error = screen
+        .close_tab_by_id_if_name_if_quiescent(1, "viewer", &incarnation, &tab_instance_id)
+        .expect_err("unexpected plugin work must survive viewer GC");
+    assert!(
+        error
+            .to_string()
+            .contains("unexpected plugin surface \"file:/unexpected/plugin.wasm\"")
+    );
+    assert!(screen.get_tab_by_id(1).is_some());
 }
 
 #[test]
@@ -7494,6 +7707,7 @@ pub fn send_cli_close_tab_with_tab_id() {
         expected_name: None,
         expected_session_incarnation: None,
         expected_tab_instance_id: None,
+        gc_if_quiescent: false,
     };
     send_cli_action_to_server(&session_metadata, cli_action, client_id);
     std::thread::sleep(std::time::Duration::from_millis(100));

@@ -536,6 +536,7 @@ pub enum ScreenInstruction {
     GoToTabWithId(usize, Option<ClientId>, Option<NotificationEnd>),
     CloseTabWithId(usize, Option<NotificationEnd>),
     CloseTabWithIdIfName(usize, String, String, String, Option<NotificationEnd>),
+    CloseTabWithIdIfNameIfQuiescent(usize, String, String, String, Option<NotificationEnd>),
     RenameTabWithId(usize, Vec<u8>, Option<NotificationEnd>),
     BreakPanesToTabWithId {
         pane_ids: Vec<PaneId>,
@@ -999,6 +1000,9 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::GoToTabWithId(..) => ScreenContext::GoToTabWithId,
             ScreenInstruction::CloseTabWithId(..) => ScreenContext::CloseTabWithId,
             ScreenInstruction::CloseTabWithIdIfName(..) => ScreenContext::CloseTabWithIdIfName,
+            ScreenInstruction::CloseTabWithIdIfNameIfQuiescent(..) => {
+                ScreenContext::CloseTabWithIdIfName
+            },
             ScreenInstruction::RenameTabWithId(..) => ScreenContext::RenameTabWithId,
             ScreenInstruction::BreakPanesToTabWithId { .. } => ScreenContext::BreakPanesToTabWithId,
             ScreenInstruction::TerminalResize(..) => ScreenContext::TerminalResize,
@@ -2089,13 +2093,13 @@ impl Screen {
         }
     }
 
-    fn close_tab_by_id_if_name(
-        &mut self,
+    fn tab_by_expected_identity(
+        &self,
         tab_id: usize,
         expected_name: &str,
         expected_session_incarnation: &str,
         expected_tab_instance_id: &str,
-    ) -> Result<()> {
+    ) -> Result<&Tab> {
         if self.session_incarnation != expected_session_incarnation {
             return Err(anyhow!(
                 "refusing to close tab ID {}: expected session incarnation {:?}, current {:?}",
@@ -2122,6 +2126,54 @@ impl Screen {
                 expected_name,
                 tab.name
             ));
+        }
+        Ok(tab)
+    }
+
+    fn close_tab_by_id_if_name(
+        &mut self,
+        tab_id: usize,
+        expected_name: &str,
+        expected_session_incarnation: &str,
+        expected_tab_instance_id: &str,
+    ) -> Result<()> {
+        self.tab_by_expected_identity(
+            tab_id,
+            expected_name,
+            expected_session_incarnation,
+            expected_tab_instance_id,
+        )?;
+        self.close_tab_by_id(tab_id)
+    }
+
+    fn close_tab_by_id_if_name_if_quiescent(
+        &mut self,
+        tab_id: usize,
+        expected_name: &str,
+        expected_session_incarnation: &str,
+        expected_tab_instance_id: &str,
+    ) -> Result<()> {
+        {
+            let tab = self.tab_by_expected_identity(
+                tab_id,
+                expected_name,
+                expected_session_incarnation,
+                expected_tab_instance_id,
+            )?;
+            if let Some(client_id) =
+                self.active_tab_ids
+                    .iter()
+                    .find_map(|(client_id, active_tab_id)| {
+                        (*active_tab_id == tab_id).then_some(*client_id)
+                    })
+            {
+                return Err(anyhow!(
+                    "GC-safe close refused for tab ID {}: tab is active for client {}",
+                    tab_id,
+                    client_id
+                ));
+            }
+            tab.ensure_viewer_gc_quiescent()?;
         }
         self.close_tab_by_id(tab_id)
     }
@@ -7860,16 +7912,16 @@ pub(crate) fn screen_thread_main(
                 // Layouts identify tabs by display position. Convert those
                 // positions to stable IDs before comparing, mutating or
                 // creating tabs so a retired ID is never resurrected.
-                if !apply_only_to_focused_tab {
-                    if let Err(error) = screen.assign_stable_tab_ids_to_layout(&mut tab_layouts) {
-                        log::error!("Failed to validate override layout: {}", error);
-                        if let Some(completion) = completion_tx.as_mut() {
-                            completion.set_exit_status(1);
-                            completion.set_error_message(error.to_string());
-                        }
-                        drop(completion_tx);
-                        continue;
+                if !apply_only_to_focused_tab
+                    && let Err(error) = screen.assign_stable_tab_ids_to_layout(&mut tab_layouts)
+                {
+                    log::error!("Failed to validate override layout: {}", error);
+                    if let Some(completion) = completion_tx.as_mut() {
+                        completion.set_exit_status(1);
+                        completion.set_error_message(error.to_string());
                     }
+                    drop(completion_tx);
+                    continue;
                 }
 
                 // 1. Determine which tabs to close (exist but not in layout)
@@ -8789,6 +8841,31 @@ pub(crate) fn screen_thread_main(
                 ) {
                     log::error!(
                         "Failed to close tab with ID {} and expected name {:?}: {}",
+                        tab_id,
+                        expected_name,
+                        error
+                    );
+                    if let Some(ref mut completion_tx) = completion_tx {
+                        completion_tx.set_exit_status(1);
+                        completion_tx.set_error_message(error.to_string());
+                    }
+                }
+            },
+            ScreenInstruction::CloseTabWithIdIfNameIfQuiescent(
+                tab_id,
+                expected_name,
+                expected_session_incarnation,
+                expected_tab_instance_id,
+                mut completion_tx,
+            ) => {
+                if let Err(error) = screen.close_tab_by_id_if_name_if_quiescent(
+                    tab_id,
+                    &expected_name,
+                    &expected_session_incarnation,
+                    &expected_tab_instance_id,
+                ) {
+                    log::error!(
+                        "GC-safe close refused for tab ID {} and expected name {:?}: {}",
                         tab_id,
                         expected_name,
                         error

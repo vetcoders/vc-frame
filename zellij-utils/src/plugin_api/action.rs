@@ -1126,6 +1126,7 @@ impl TryFrom<Action> for ProtobufAction {
             | Action::GoToTabById { .. }
             | Action::CloseTabById { .. }
             | Action::CloseTabByIdIfName { .. }
+            | Action::CloseTabByIdIfNameIfQuiescent { .. }
             | Action::RenameTabById { .. }
             | Action::ScrollUpByPaneId { .. }
             | Action::ScrollDownByPaneId { .. }

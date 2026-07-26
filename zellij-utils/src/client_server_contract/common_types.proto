@@ -279,6 +279,7 @@ message Action {
     ToggleThemeAction toggle_theme = 139;
     CopyPaneScrollbackAction copy_pane_scrollback = 140;
     CloseTabByIdIfNameAction close_tab_by_id_if_name = 141;
+    CloseTabByIdIfNameIfQuiescentAction close_tab_by_id_if_name_if_quiescent = 142;
   }
 }
 
@@ -665,6 +666,13 @@ message CloseTabByIdAction {
 }
 
 message CloseTabByIdIfNameAction {
+  uint64 id = 1;
+  string expected_name = 2;
+  string expected_session_incarnation = 3;
+  string expected_tab_instance_id = 4;
+}
+
+message CloseTabByIdIfNameIfQuiescentAction {
   uint64 id = 1;
   string expected_name = 2;
   string expected_session_incarnation = 3;
