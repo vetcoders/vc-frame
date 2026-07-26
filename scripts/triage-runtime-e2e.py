@@ -390,6 +390,32 @@ def guarded_snapshot_diff(
 ) -> dict[str, object]:
     """Return a bounded path-level difference without embedding full snapshots."""
 
+    changes = guarded_snapshot_changes(before, after)
+
+    def labels(kind: str) -> list[dict[str, str]]:
+        return [
+            {"root": change["root"], "path": change["path"]}
+            for change in changes
+            if change["kind"] == kind
+        ][:sample_limit]
+
+    return {
+        "added_count": sum(change["kind"] == "added" for change in changes),
+        "removed_count": sum(change["kind"] == "removed" for change in changes),
+        "changed_count": sum(change["kind"] == "changed" for change in changes),
+        "sample_limit": sample_limit,
+        "added": labels("added"),
+        "removed": labels("removed"),
+        "changed": labels("changed"),
+    }
+
+
+def guarded_snapshot_changes(
+    before: dict[str, object],
+    after: dict[str, object],
+) -> list[dict[str, str]]:
+    """Return every changed path so attribution is never based on a sample."""
+
     def indexed(
         snapshot: dict[str, object],
     ) -> dict[tuple[str, str], dict[str, object]]:
@@ -418,18 +444,88 @@ def guarded_snapshot_diff(
         for key in before_keys & after_keys
         if before_entries[key] != after_entries[key]
     )
+    return [
+        *[
+            {"kind": "added", "root": root, "path": path}
+            for root, path in added
+        ],
+        *[
+            {"kind": "removed", "root": root, "path": path}
+            for root, path in removed
+        ],
+        *[
+            {"kind": "changed", "root": root, "path": path}
+            for root, path in changed
+        ],
+    ]
 
-    def labels(keys: list[tuple[str, str]]) -> list[dict[str, str]]:
-        return [{"root": root, "path": path} for root, path in keys[:sample_limit]]
+
+def operator_guard_fixture_markers(
+    fixture_id: str,
+    evidence: dict[str, object],
+) -> set[str]:
+    """Collect durable fixture identities that would expose namespace leakage."""
+    markers = {fixture_id}
+    identity_keys = {"session_incarnation", "tab_instance_id", "viewer_token"}
+
+    def visit(value: object, key: str | None = None) -> None:
+        if isinstance(value, dict):
+            for nested_key, nested_value in value.items():
+                visit(nested_value, str(nested_key))
+        elif isinstance(value, list):
+            for nested_value in value:
+                visit(nested_value, key)
+        elif key in identity_keys and isinstance(value, str) and value:
+            markers.add(value)
+
+    visit(evidence)
+    return markers
+
+
+def operator_guard_allows_concurrent_runtime_drift(root: str) -> bool:
+    """Runtime cache/socket roots are shared; config and durable data are not."""
+    normalized = pathlib.Path(root).as_posix()
+    sensitive_suffixes = (
+        "/.config/vc-frame",
+        "/.local/share/vc-frame",
+        "/Library/Application Support/io.vetcoders.vc-frame",
+    )
+    return not normalized.endswith(sensitive_suffixes)
+
+
+def attribute_operator_guard_changes(
+    before: dict[str, object],
+    after: dict[str, object],
+    fixture_markers: set[str],
+    *,
+    sample_limit: int = 50,
+) -> dict[str, object]:
+    """Separate fixture leakage from unrelated activity on a shared runner."""
+    fixture_attributed: list[dict[str, str]] = []
+    concurrent_runtime: list[dict[str, str]] = []
+    unattributed_sensitive: list[dict[str, str]] = []
+    for change in guarded_snapshot_changes(before, after):
+        identity = f"{change['root']}/{change['path']}"
+        if any(marker in identity for marker in fixture_markers):
+            fixture_attributed.append(change)
+        elif operator_guard_allows_concurrent_runtime_drift(change["root"]):
+            concurrent_runtime.append(change)
+        else:
+            unattributed_sensitive.append(change)
+
+    def summary(changes: list[dict[str, str]]) -> dict[str, object]:
+        return {
+            "count": len(changes),
+            "sample_limit": sample_limit,
+            "paths": changes[:sample_limit],
+        }
 
     return {
-        "added_count": len(added),
-        "removed_count": len(removed),
-        "changed_count": len(changed),
-        "sample_limit": sample_limit,
-        "added": labels(added),
-        "removed": labels(removed),
-        "changed": labels(changed),
+        "safe": not fixture_attributed and not unattributed_sensitive,
+        "fixture_marker_count": len(fixture_markers),
+        "fixture_attributed": summary(fixture_attributed),
+        "concurrent_runtime_drift": summary(concurrent_runtime),
+        "unattributed_sensitive": summary(unattributed_sensitive),
     }
 
 
@@ -3173,6 +3269,14 @@ def main() -> int:
         volatile_files=guarded_volatile_paths,
     )
     operator_guard_unchanged = operator_guard_after == operator_guard_before
+    operator_guard_attribution = attribute_operator_guard_changes(
+        operator_guard_before,
+        operator_guard_after,
+        operator_guard_fixture_markers(unique, recorder.data),
+    )
+    operator_guard_safe = operator_guard_unchanged or bool(
+        operator_guard_attribution["safe"]
+    )
     operator_guard_receipt: dict[str, object] = {
         "paths": [str(path) for path in guarded_operator_paths],
         "volatile_identity_only": [
@@ -3181,19 +3285,21 @@ def main() -> int:
         "before": guarded_snapshot_summary(operator_guard_before),
         "after": guarded_snapshot_summary(operator_guard_after),
         "unchanged": operator_guard_unchanged,
+        "safe": operator_guard_safe,
     }
     if not operator_guard_unchanged:
         operator_guard_receipt["diff"] = guarded_snapshot_diff(
             operator_guard_before,
             operator_guard_after,
         )
+        operator_guard_receipt["attribution"] = operator_guard_attribution
     recorder.set(
         "operator_guard",
         operator_guard_receipt,
     )
-    if caught is None and not operator_guard_unchanged:
+    if caught is None and not operator_guard_safe:
         caught = AssertionError(
-            "operator vc-frame socket/state roots changed during isolated E2E"
+            "isolated E2E touched operator vc-frame roots or durable operator state changed"
         )
 
     if caught is None and cleanup_errors:

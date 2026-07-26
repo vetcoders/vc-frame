@@ -358,6 +358,97 @@ class EvidenceAndCleanupTests(unittest.TestCase):
             self.assertNotIn("before", difference)
             self.assertNotIn("after", difference)
 
+    def test_operator_guard_attributes_shared_runtime_drift_without_global_quiescence(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            runtime_root = (
+                root / "Library" / "Caches" / "io.vetcoders.vc-frame"
+            )
+            runtime_root.mkdir(parents=True)
+            before = MODULE.guarded_tree_snapshot([runtime_root])
+            foreign = runtime_root / "foreign-incarnation" / "plugin-cache"
+            foreign.parent.mkdir()
+            foreign.write_text("foreign", encoding="utf-8")
+            after = MODULE.guarded_tree_snapshot([runtime_root])
+
+            attribution = MODULE.attribute_operator_guard_changes(
+                before,
+                after,
+                {"fixture-123"},
+            )
+
+            self.assertTrue(attribution["safe"])
+            self.assertEqual(
+                attribution["concurrent_runtime_drift"]["count"],
+                2,
+            )
+            self.assertEqual(attribution["fixture_attributed"]["count"], 0)
+
+    def test_operator_guard_rejects_fixture_identity_in_shared_runtime_root(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            runtime_root = (
+                root / "Library" / "Caches" / "io.vetcoders.vc-frame"
+            )
+            runtime_root.mkdir(parents=True)
+            before = MODULE.guarded_tree_snapshot([runtime_root])
+            leaked = runtime_root / "fixture-incarnation" / "plugin-cache"
+            leaked.parent.mkdir()
+            leaked.write_text("fixture", encoding="utf-8")
+            after = MODULE.guarded_tree_snapshot([runtime_root])
+
+            attribution = MODULE.attribute_operator_guard_changes(
+                before,
+                after,
+                {"fixture-incarnation"},
+            )
+
+            self.assertFalse(attribution["safe"])
+            self.assertEqual(attribution["fixture_attributed"]["count"], 2)
+
+    def test_operator_guard_rejects_unattributed_durable_state_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            durable_root = root / ".config" / "vc-frame"
+            durable_root.mkdir(parents=True)
+            before = MODULE.guarded_tree_snapshot([durable_root])
+            (durable_root / "config.kdl").write_text("changed", encoding="utf-8")
+            after = MODULE.guarded_tree_snapshot([durable_root])
+
+            attribution = MODULE.attribute_operator_guard_changes(
+                before,
+                after,
+                {"fixture-123"},
+            )
+
+            self.assertFalse(attribution["safe"])
+            self.assertEqual(
+                attribution["unattributed_sensitive"]["count"],
+                1,
+            )
+
+    def test_operator_guard_collects_fixture_runtime_identities(self) -> None:
+        markers = MODULE.operator_guard_fixture_markers(
+            "fixture-123",
+            {
+                "receipt": {
+                    "session_incarnation": "incarnation-456",
+                    "viewer_tab_identity": {
+                        "tab_instance_id": "instance-789",
+                    },
+                }
+            },
+        )
+
+        self.assertEqual(
+            markers,
+            {"fixture-123", "incarnation-456", "instance-789"},
+        )
+
     def test_evidence_recorder_persists_every_transition(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = pathlib.Path(temporary) / "evidence.json"

@@ -83,6 +83,20 @@ jobs:
       - name: Install NASM
         uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1
 
+      - name: Use MSYS Perl for vendored OpenSSL
+        shell: pwsh
+        run: |
+          $gitPerl = Join-Path $env:ProgramFiles 'Git\usr\bin'
+          $perl = Join-Path $gitPerl 'perl.exe'
+          if (-not (Test-Path $perl)) {
+            throw "MSYS Perl is required at $perl for OpenSSL's mingw build"
+          }
+          $platform = & $perl -e 'print $^O'
+          if ($platform -ne 'msys') {
+            throw "Expected MSYS Perl, got $platform"
+          }
+          $gitPerl | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
       - name: Build
         run: cargo xtask build
 
