@@ -32,7 +32,6 @@ const CONNECTION_USERNAME: &str = "test";
 const CONNECTION_PASSWORD: &str = "test";
 const SESSION_NAME: &str = "e2e-test";
 const RETRIES: usize = 10;
-const CLEANUP_DONE_MARKER: &str = "__ZELLIJ_CLEANUP_DONE__";
 
 fn ssh_connect() -> ssh2::Session {
     let tcp = TcpStream::connect(CONNECTION_STRING).unwrap();
@@ -76,7 +75,11 @@ fn setup_remote_environment(channel: &mut ssh2::Channel, win_size: Size) {
 
 fn cleanup_remote_runtime_command() -> String {
     format!(
-        r#"if [ -x {ZELLIJ_EXECUTABLE_LOCATION} ]; then
+        r#"export VC_FRAME_SOCKET_DIR={E2E_SOCKET_DIR}
+export ZELLIJ_SOCKET_DIR="$VC_FRAME_SOCKET_DIR"
+export XDG_CACHE_HOME={E2E_CACHE_DIR}
+mkdir -p "$VC_FRAME_SOCKET_DIR" "$XDG_CACHE_HOME"
+if [ -x {ZELLIJ_EXECUTABLE_LOCATION} ]; then
   {ZELLIJ_EXECUTABLE_LOCATION} kill-all-sessions --yes >/dev/null 2>&1 || true
 fi
 cleanup_attempt=0
@@ -95,14 +98,40 @@ ln -sf /usr/src/zellij/$(uname -m)-unknown-linux-musl/release/vc-frame {ZELLIJ_E
     )
 }
 
-fn stop_zellij(channel: &mut ssh2::Channel) {
+fn cleanup_remote_runtime(sess: &ssh2::Session) -> Result<(), String> {
+    let mut channel = sess
+        .channel_session()
+        .map_err(|error| format!("failed to open remote cleanup channel: {error}"))?;
     channel
-        .write_all(cleanup_remote_runtime_command().as_bytes())
-        .unwrap();
+        .exec(&cleanup_remote_runtime_command())
+        .map_err(|error| format!("failed to execute remote cleanup: {error}"))?;
+
+    let mut stdout = String::new();
+    channel
+        .read_to_string(&mut stdout)
+        .map_err(|error| format!("failed to read remote cleanup stdout: {error}"))?;
+    let mut stderr = String::new();
+    channel
+        .stderr()
+        .read_to_string(&mut stderr)
+        .map_err(|error| format!("failed to read remote cleanup stderr: {error}"))?;
+    channel
+        .wait_close()
+        .map_err(|error| format!("failed to close remote cleanup channel: {error}"))?;
+    let exit_status = channel
+        .exit_status()
+        .map_err(|error| format!("failed to read remote cleanup exit status: {error}"))?;
+
+    if exit_status == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "remote cleanup exited with status {exit_status}; stdout={stdout:?}; stderr={stderr:?}"
+        ))
+    }
 }
 
 fn start_zellij(channel: &mut ssh2::Channel) {
-    stop_zellij(channel);
     channel
         .write_all(
             format!(
@@ -120,7 +149,6 @@ fn start_zellij(channel: &mut ssh2::Channel) {
 }
 
 fn start_zellij_with_config_dir(channel: &mut ssh2::Channel, config_dir: &str) {
-    stop_zellij(channel);
     channel
         .write_all(
             format!(
@@ -134,7 +162,6 @@ fn start_zellij_with_config_dir(channel: &mut ssh2::Channel, config_dir: &str) {
 }
 
 fn start_zellij_mirrored_session(channel: &mut ssh2::Channel) {
-    stop_zellij(channel);
     channel
         .write_all(
             format!(
@@ -148,7 +175,6 @@ fn start_zellij_mirrored_session(channel: &mut ssh2::Channel) {
 }
 
 fn start_zellij_mirrored_session_with_layout(channel: &mut ssh2::Channel, layout_file_name: &str) {
-    stop_zellij(channel);
     channel
         .write_all(
             format!(
@@ -170,7 +196,6 @@ fn start_zellij_mirrored_session_with_layout_and_viewport_serialization(
     channel: &mut ssh2::Channel,
     layout_file_name: &str,
 ) {
-    stop_zellij(channel);
     channel
         .write_all(
             format!(
@@ -189,7 +214,6 @@ fn start_zellij_mirrored_session_with_layout_and_viewport_serialization(
 }
 
 fn start_zellij_in_session(channel: &mut ssh2::Channel, session_name: &str, mirrored: bool) {
-    stop_zellij(channel);
     channel
         .write_all(
             format!(
@@ -233,7 +257,6 @@ fn watch_existing_session(channel: &mut ssh2::Channel, session_name: &str) {
 }
 
 fn start_zellij_without_frames(channel: &mut ssh2::Channel) {
-    stop_zellij(channel);
     channel
         .write_all(
             format!(
@@ -247,7 +270,6 @@ fn start_zellij_without_frames(channel: &mut ssh2::Channel) {
 }
 
 fn start_zellij_with_config(channel: &mut ssh2::Channel, config_path: &str) {
-    stop_zellij(channel);
     channel
         .write_all(
             format!(
@@ -276,27 +298,6 @@ fn wait_for_startup(last_snapshot: &Arc<Mutex<String>>) {
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-}
-
-fn wait_for_shell_output(channel: &mut ssh2::Channel, needle: &str) -> bool {
-    let start = std::time::Instant::now();
-    let timeout = std::time::Duration::from_secs(10);
-    let mut output = String::new();
-    let mut buf = [0u8; 4096];
-    loop {
-        if output.contains(needle) || start.elapsed() > timeout {
-            break;
-        }
-        match channel.read(&mut buf) {
-            Ok(0) => std::thread::sleep(std::time::Duration::from_millis(50)),
-            Ok(count) => output.push_str(&String::from_utf8_lossy(&buf[..count])),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            },
-            Err(_) => break,
-        }
-    }
-    output.contains(needle)
 }
 
 fn read_from_channel(
@@ -777,20 +778,10 @@ impl RemoteRunner {
             reader_thread,
         }
     }
-    pub fn kill_running_sessions(win_size: Size) {
+    pub fn kill_running_sessions(_win_size: Size) {
         let sess = ssh_connect();
-        let mut channel = sess.channel_session().unwrap();
-        setup_remote_environment(&mut channel, win_size);
-        stop_zellij(&mut channel);
-        channel
-            .write_all(format!("printf '{}\\n'\n", CLEANUP_DONE_MARKER).as_bytes())
-            .unwrap();
-        channel.flush().unwrap();
-        sess.set_blocking(false);
-        assert!(
-            wait_for_shell_output(&mut channel, CLEANUP_DONE_MARKER),
-            "remote E2E cleanup did not reach its completion marker"
-        );
+        cleanup_remote_runtime(&sess)
+            .unwrap_or_else(|error| panic!("remote E2E cleanup failed: {error}"));
     }
     pub fn new_with_session_name(win_size: Size, session_name: &str, mirrored: bool) -> Self {
         // notice that this method does not have a timeout, so use with caution!
@@ -1073,9 +1064,13 @@ impl RemoteRunner {
 
 impl Drop for RemoteRunner {
     fn drop(&mut self) {
-        let _ = self.channel.lock().unwrap().close();
         let reader_thread_running = &mut self.reader_thread.0;
         reader_thread_running.store(false, Ordering::SeqCst);
+        let mut channel = match self.channel.lock() {
+            Ok(channel) => channel,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let _ = channel.close();
     }
 }
 
@@ -1091,6 +1086,8 @@ mod cleanup_contract_tests {
         assert!(command.contains("cleanup_attempt"));
         assert!(command.contains(E2E_SOCKET_DIR));
         assert!(command.contains(E2E_CACHE_DIR));
+        assert!(command.contains("export VC_FRAME_SOCKET_DIR="));
+        assert!(command.contains("export ZELLIJ_SOCKET_DIR=\"$VC_FRAME_SOCKET_DIR\""));
         assert!(!command.contains("killall"));
         assert!(!command.contains("-KILL"));
         assert!(!command.contains("rm -rf /tmp/*"));
@@ -1114,5 +1111,25 @@ mod cleanup_contract_tests {
         assert!(layout.contains("plugin location=\"tab-bar\""));
         assert!(layout.contains("plugin location=\"status-bar\""));
         assert!(!layout.contains("session-manager"));
+    }
+
+    #[test]
+    fn insta_snapshots_follow_the_current_binary_crate_name() {
+        let snapshot_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tests/e2e/snapshots");
+        let expected_prefix = format!("{}__", env!("CARGO_PKG_NAME").replace('-', "_"));
+        let snapshot_names: Vec<_> = std::fs::read_dir(snapshot_dir)
+            .expect("E2E snapshot directory must exist")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".snap"))
+            .collect();
+
+        assert!(!snapshot_names.is_empty(), "E2E snapshots must be tracked");
+        assert!(
+            snapshot_names
+                .iter()
+                .all(|name| name.starts_with(&expected_prefix)),
+            "E2E snapshots must start with {expected_prefix:?}; found {snapshot_names:?}"
+        );
     }
 }
