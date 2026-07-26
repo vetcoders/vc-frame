@@ -140,8 +140,6 @@ jobs:
     runs-on: [self-hosted, ops-linux]
     permissions:
       contents: write
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -194,10 +192,6 @@ jobs:
               -F draft=true \
               -F prerelease=false)"
           fi
-          upload_url="$(printf '%s' "$response" | jq -r '.upload_url')"
-          test -n "$upload_url" && test "$upload_url" != null
-          echo "upload_url=$upload_url" >> "$GITHUB_OUTPUT"
-
   build-release-normal:
     needs: create-release
     name: build-release-normal
@@ -209,6 +203,7 @@ jobs:
       attestations: write
     env:
       RUST_BACKTRACE: 1
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && format('candidate-{0}', github.run_id) || github.ref_name }}
       # Immutable provenance from the outer layer: every matrix runner embeds
       # the same commit, regardless of local git availability or checkout depth.
       VC_FRAME_GIT_SHA: ${{ github.sha }}
@@ -243,27 +238,6 @@ jobs:
             runner: [self-hosted, windows]
             target: x86_64-pc-windows-msvc
     steps:
-      - name: Set release tag (Unix)
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          if [ "$GITHUB_EVENT_NAME" == 'workflow_dispatch' ]; then
-            echo "RELEASE_TAG=candidate-${GITHUB_RUN_ID}" >> "$GITHUB_ENV"
-          else
-            echo "RELEASE_TAG=${GITHUB_REF#refs/tags/}"  >> "$GITHUB_ENV"
-          fi
-
-      - name: Set release tag (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
-            echo "RELEASE_TAG=candidate-$env:GITHUB_RUN_ID" >> $env:GITHUB_ENV
-          } else {
-            $tag = $env:GITHUB_REF -replace '^refs/tags/', ''
-            echo "RELEASE_TAG=$tag" >> $env:GITHUB_ENV
-          }
-
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -386,35 +360,20 @@ jobs:
           subject-path: ${{ steps.make-artifact-unix.outputs.asset_name || steps.make-artifact-windows.outputs.asset_name }}
 
       - name: Upload release archive
-        uses: actions/upload-release-asset@e8f9f06c4b078e705bd2ea027f0926603fc9b4d5 # v1.0.2
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ${{ steps.make-artifact-unix.outputs.asset_name || steps.make-artifact-windows.outputs.asset_name }}
-          asset_name: ${{ runner.os == 'Windows' && format('vc-frame-{0}.zip', matrix.target) || format('vc-frame-{0}.tar.gz', matrix.target) }}
-          asset_content_type: application/octet-stream
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ env.RELEASE_TAG }}" "${{ steps.make-artifact-unix.outputs.asset_name || steps.make-artifact-windows.outputs.asset_name }}" --repo "${{ github.repository }}"
 
       - name: Upload checksum
-        uses: actions/upload-release-asset@e8f9f06c4b078e705bd2ea027f0926603fc9b4d5 # v1.0.2
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ${{ steps.make-checksum-unix.outputs.checksum_name || steps.make-checksum-windows.outputs.checksum_name }}
-          asset_name: ${{ runner.os == 'Windows' && format('vc-frame-{0}.zip.sha256', matrix.target) || format('vc-frame-{0}.tar.gz.sha256', matrix.target) }}
-          asset_content_type: text/plain
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ env.RELEASE_TAG }}" "${{ steps.make-checksum-unix.outputs.checksum_name || steps.make-checksum-windows.outputs.checksum_name }}" --repo "${{ github.repository }}"
 
       - name: Upload signature
         if: runner.os != 'Windows'
-        uses: actions/upload-release-asset@e8f9f06c4b078e705bd2ea027f0926603fc9b4d5 # v1.0.2
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ${{ steps.sign-unix.outputs.sig_name }}
-          asset_name: ${{ format('vc-frame-{0}.tar.gz.sig', matrix.target) }}
-          asset_content_type: application/pgp-signature
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ env.RELEASE_TAG }}" "${{ steps.sign-unix.outputs.sig_name }}" --repo "${{ github.repository }}"
 
       # ===== Windows MSI installer =====
       - name: Install WiX v6
@@ -457,25 +416,15 @@ jobs:
 
       - name: Upload MSI installer
         if: runner.os == 'Windows'
-        uses: actions/upload-release-asset@e8f9f06c4b078e705bd2ea027f0926603fc9b4d5 # v1.0.2
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: target\wix\vc-frame-${{ matrix.target }}-installer.msi
-          asset_name: vc-frame-${{ matrix.target }}-installer.msi
-          asset_content_type: application/octet-stream
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ env.RELEASE_TAG }}" "target\wix\vc-frame-${{ matrix.target }}-installer.msi" --repo "${{ github.repository }}"
 
       - name: Upload MSI checksum
         if: runner.os == 'Windows'
-        uses: actions/upload-release-asset@e8f9f06c4b078e705bd2ea027f0926603fc9b4d5 # v1.0.2
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ${{ steps.make-checksum-msi.outputs.checksum_name }}
-          asset_name: vc-frame-${{ matrix.target }}-installer.msi.sha256
-          asset_content_type: text/plain
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ env.RELEASE_TAG }}" "${{ steps.make-checksum-msi.outputs.checksum_name }}" --repo "${{ github.repository }}"
 
   build-release-noweb:
     needs: create-release
@@ -488,6 +437,7 @@ jobs:
       attestations: write
     env:
       RUST_BACKTRACE: 1
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && format('candidate-{0}', github.run_id) || github.ref_name }}
       VC_FRAME_GIT_SHA: ${{ github.sha }}
       VC_FRAME_GIT_DIRTY: "0"
     strategy:
@@ -520,27 +470,6 @@ jobs:
             runner: [self-hosted, windows]
             target: x86_64-pc-windows-msvc
     steps:
-      - name: Set release tag (Unix)
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          if [ "$GITHUB_EVENT_NAME" == 'workflow_dispatch' ]; then
-            echo "RELEASE_TAG=candidate-${GITHUB_RUN_ID}" >> "$GITHUB_ENV"
-          else
-            echo "RELEASE_TAG=${GITHUB_REF#refs/tags/}"  >> "$GITHUB_ENV"
-          fi
-
-      - name: Set release tag (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
-            echo "RELEASE_TAG=candidate-$env:GITHUB_RUN_ID" >> $env:GITHUB_ENV
-          } else {
-            $tag = $env:GITHUB_REF -replace '^refs/tags/', ''
-            echo "RELEASE_TAG=$tag" >> $env:GITHUB_ENV
-          }
-
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -657,35 +586,20 @@ jobs:
           subject-path: ${{ steps.make-artifact-unix.outputs.asset_name || steps.make-artifact-windows.outputs.asset_name }}
 
       - name: Upload release archive
-        uses: actions/upload-release-asset@e8f9f06c4b078e705bd2ea027f0926603fc9b4d5 # v1.0.2
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ${{ steps.make-artifact-unix.outputs.asset_name || steps.make-artifact-windows.outputs.asset_name }}
-          asset_name: ${{ runner.os == 'Windows' && format('vc-frame-no-web-{0}.zip', matrix.target) || format('vc-frame-no-web-{0}.tar.gz', matrix.target) }}
-          asset_content_type: application/octet-stream
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ env.RELEASE_TAG }}" "${{ steps.make-artifact-unix.outputs.asset_name || steps.make-artifact-windows.outputs.asset_name }}" --repo "${{ github.repository }}"
 
       - name: Upload checksum
-        uses: actions/upload-release-asset@e8f9f06c4b078e705bd2ea027f0926603fc9b4d5 # v1.0.2
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ${{ steps.make-checksum-unix.outputs.checksum_name || steps.make-checksum-windows.outputs.checksum_name }}
-          asset_name: ${{ runner.os == 'Windows' && format('vc-frame-no-web-{0}.zip.sha256', matrix.target) || format('vc-frame-no-web-{0}.tar.gz.sha256', matrix.target) }}
-          asset_content_type: text/plain
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ env.RELEASE_TAG }}" "${{ steps.make-checksum-unix.outputs.checksum_name || steps.make-checksum-windows.outputs.checksum_name }}" --repo "${{ github.repository }}"
 
       - name: Upload signature
         if: runner.os != 'Windows'
-        uses: actions/upload-release-asset@e8f9f06c4b078e705bd2ea027f0926603fc9b4d5 # v1.0.2
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ${{ steps.sign-unix.outputs.sig_name }}
-          asset_name: ${{ format('vc-frame-no-web-{0}.tar.gz.sig', matrix.target) }}
-          asset_content_type: application/pgp-signature
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ env.RELEASE_TAG }}" "${{ steps.sign-unix.outputs.sig_name }}" --repo "${{ github.repository }}"
 
       # ===== Windows MSI installer (no-web) =====
       - name: Install WiX v6
@@ -728,25 +642,15 @@ jobs:
 
       - name: Upload MSI installer (no-web)
         if: runner.os == 'Windows'
-        uses: actions/upload-release-asset@e8f9f06c4b078e705bd2ea027f0926603fc9b4d5 # v1.0.2
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: target\wix\vc-frame-no-web-${{ matrix.target }}-installer.msi
-          asset_name: vc-frame-no-web-${{ matrix.target }}-installer.msi
-          asset_content_type: application/octet-stream
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ env.RELEASE_TAG }}" "target\wix\vc-frame-no-web-${{ matrix.target }}-installer.msi" --repo "${{ github.repository }}"
 
       - name: Upload MSI checksum (no-web)
         if: runner.os == 'Windows'
-        uses: actions/upload-release-asset@e8f9f06c4b078e705bd2ea027f0926603fc9b4d5 # v1.0.2
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ${{ steps.make-checksum-msi.outputs.checksum_name }}
-          asset_name: vc-frame-no-web-${{ matrix.target }}-installer.sha256sum
-          asset_content_type: text/plain
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ env.RELEASE_TAG }}" "${{ steps.make-checksum-msi.outputs.checksum_name }}" --repo "${{ github.repository }}"
 
   # ===========================================================================
   # Finalize: publish the release manifest + the GPG public key.
@@ -767,15 +671,9 @@ jobs:
     environment: release
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && format('candidate-{0}', github.run_id) || github.ref_name }}
     steps:
-      - name: Set release tag
-        run: |
-          if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ]; then
-            echo "RELEASE_TAG=candidate-${GITHUB_RUN_ID}" >> "$GITHUB_ENV"
-          else
-            echo "RELEASE_TAG=${GITHUB_REF#refs/tags/}" >> "$GITHUB_ENV"
-          fi
-
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -804,7 +702,6 @@ jobs:
           cat manifest.json
 
       - name: Write GPG public key
-        id: pubkey
         env:
           GPG_PUBLIC_KEY: ${{ secrets.GPG_PUBLIC_KEY }}
         run: |
@@ -813,38 +710,11 @@ jobs:
             exit 1
           fi
           printf '%s\n' "$GPG_PUBLIC_KEY" > vc-frame-signing.asc
-          echo "have_key=true" >> "$GITHUB_OUTPUT"
 
-      - name: Upload manifest.json
-        uses: actions/upload-release-asset@e8f9f06c4b078e705bd2ea027f0926603fc9b4d5 # v1.0.2
+      - name: Upload manifest, public key, and installer
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: manifest.json
-          asset_name: manifest.json
-          asset_content_type: application/json
-
-      - name: Upload GPG public key
-        if: steps.pubkey.outputs.have_key == 'true'
-        uses: actions/upload-release-asset@e8f9f06c4b078e705bd2ea027f0926603fc9b4d5 # v1.0.2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: vc-frame-signing.asc
-          asset_name: vc-frame-signing.asc
-          asset_content_type: text/plain
-
-      - name: Upload canonical installer
-        uses: actions/upload-release-asset@e8f9f06c4b078e705bd2ea027f0926603fc9b4d5 # v1.0.2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: tools/install.sh
-          asset_name: install.sh
-          asset_content_type: text/plain
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ env.RELEASE_TAG }}" manifest.json vc-frame-signing.asc tools/install.sh --repo "${{ github.repository }}"
 
   verify-and-publish:
     needs: [build-release-normal, build-release-noweb, publish-manifest]

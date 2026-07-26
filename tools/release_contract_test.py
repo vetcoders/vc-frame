@@ -617,6 +617,14 @@ class ReleaseContractTests(unittest.TestCase):
             self.assertRegex(action, r"@[0-9a-f]{40}$")
         checkout_count = workflow.count("uses: actions/checkout@")
         self.assertEqual(workflow.count("persist-credentials: false"), checkout_count)
+        self.assertNotIn("actions/upload-release-asset@", workflow)
+        self.assertNotIn("needs.create-release.outputs.upload_url", workflow)
+        self.assertNotIn("--clobber", workflow)
+        self.assertEqual(
+            workflow.count("gh release upload"),
+            11,
+            "every release asset class must use the maintained GitHub CLI path",
+        )
         for required in (
             "make release-contract-test",
             "make plugins-parity",
@@ -630,6 +638,8 @@ class ReleaseContractTests(unittest.TestCase):
             "tools/release_sync.py notes --output",
             "releases/tags/$tag",
             "--method DELETE",
+            "GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
+            'gh release upload "${{ env.RELEASE_TAG }}"',
             "Cold-install exact downloaded release",
             "env -u GH_TOKEN -u GITHUB_TOKEN",
             'sh "$release_dir/install.sh"',

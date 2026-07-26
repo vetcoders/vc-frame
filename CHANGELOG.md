@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 * feat: allow tabs to have different sizes if clients aren't focused on the same one (https://github.com/zellij-org/zellij/pull/5133)
 * feat: PWA support for the web client (manifest + icons + iOS meta tags) so the page can be installed as a standalone app (https://github.com/zellij-org/zellij/pull/5184)
 
+## [0.47.0] - 2026-07-26
+* fix(runtime): acknowledge durable settlement pipes and immediate CLI completion without conflating transport success with redraws
+* fix(safety): stop E2E through the vc-frame protocol, scope cleanup to its isolated runtime, and never signal reused process groups
+* fix(e2e): pin legacy snapshot tests to their own full-width layout instead of the product's session-rail default
+* fix(ci): make the nine required Linux, macOS, Windows, no-web, formatting, and real E2E lanes deterministic
+* fix(security): remove all reported RustSec vulnerability and unsoundness findings while documenting four remaining maintenance warnings
+* fix(release): replace the archived Node 12 asset uploader with fail-closed GitHub CLI uploads to a verified draft release
+
 ## [0.46.0] - 2026-07-26
 * fix(triage): make finished-run transfer and settlement crash-durable, revision-safe, and explicit about exact tab/pane ownership
 * fix(runtime): fence resurrected session state against stale saves and preserve durable f/x/n outcome truth across restarts
