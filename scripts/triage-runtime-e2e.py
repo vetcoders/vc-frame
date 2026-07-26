@@ -2025,6 +2025,7 @@ def cleanup_namespace(
     stable_empty_for: float = 0.5,
 ) -> dict[str, object]:
     """Kill exact owned targets, quiesce servers, then delete durable metadata."""
+    socket_root = pathlib.Path(env["VC_FRAME_SOCKET_DIR"]).resolve()
     initial = session_inventory(binary, env)
     unexpected = set(initial) - owned_targets
     require(
@@ -2032,20 +2033,26 @@ def cleanup_namespace(
         "refusing broad cleanup of unexpected isolated sessions: "
         + ", ".join(sorted(unexpected)),
     )
+    live_process_sessions = {
+        path.resolve().name
+        for process in server_processes_for_socket_root(socket_root)
+        for path in server_argument_paths(str(process["command"]))
+        if path.resolve().is_relative_to(socket_root)
+    }
     killed: list[str] = []
     for session, state in sorted(initial.items()):
-        if state == "exited":
+        if state == "exited" and session not in live_process_sessions:
             continue
-        query = query_session(binary, env, session)
-        require(
-            query.state == "live",
-            f"cleanup inventory said {session!r} was active but exact query said absent",
-        )
+        if state == "live":
+            query = query_session(binary, env, session)
+            require(
+                query.state == "live",
+                f"cleanup inventory said {session!r} was active but exact query said absent",
+            )
         command(binary, env, "kill-session", session)
         wait_for_session_gone(binary, env, session, timeout=timeout)
         killed.append(session)
 
-    socket_root = pathlib.Path(env["VC_FRAME_SOCKET_DIR"]).resolve()
     shutdown_process_residue = wait_for_no_server_processes(
         socket_root, timeout=timeout
     )

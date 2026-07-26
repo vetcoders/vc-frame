@@ -144,6 +144,8 @@ pub fn get_sessions_sorted_by_mtime() -> anyhow::Result<Vec<String>> {
 /// On Windows, reads the server PID from the marker file and checks process liveness.
 #[cfg(unix)]
 const SESSION_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
+#[cfg(unix)]
+const KILL_SESSION_ACK_TIMEOUT: Duration = Duration::from_secs(6);
 
 #[cfg(unix)]
 fn probe_socket_stream(stream: interprocess::local_socket::Stream, timeout: Duration) -> bool {
@@ -350,8 +352,37 @@ pub fn get_active_session() -> ActiveSession {
 }
 
 pub fn kill_session(name: &str) {
+    #[cfg(windows)]
     use crate::consts::ipc_connect;
     let path = &*ZELLIJ_SOCK_DIR.join(name);
+    #[cfg(unix)]
+    {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .unwrap_or_else(|error| {
+                eprintln!("Cannot create shutdown runtime: {error}");
+                process::exit(1);
+            });
+        match runtime.block_on(tokio::time::timeout(
+            KILL_SESSION_ACK_TIMEOUT,
+            crate::ipc::async_send_kill_and_await(path),
+        )) {
+            Ok(Ok(())) => {},
+            Ok(Err(error)) => {
+                eprintln!("Failed to kill session {name}: {error}");
+                process::exit(1);
+            },
+            Err(_) => {
+                eprintln!(
+                    "Session {name} did not acknowledge shutdown within {:.1}s",
+                    KILL_SESSION_ACK_TIMEOUT.as_secs_f64()
+                );
+                process::exit(1);
+            },
+        }
+    }
+    #[cfg(windows)]
     match ipc_connect(path) {
         Ok(stream) => {
             // On Windows, the server uses a dual-pipe architecture: the main pipe
@@ -361,7 +392,6 @@ pub fn kill_session(name: &str) {
             // 2. Send KillSession on the main pipe
             // 3. Wait for the Exit response on the reply pipe (so we don't
             //    disconnect before the server processes the message)
-            #[cfg(windows)]
             {
                 let reply = crate::consts::ipc_connect_reply(path);
                 let _ = IpcSenderWithContext::<ClientToServerMsg>::new(stream)
@@ -371,11 +401,6 @@ pub fn kill_session(name: &str) {
                         IpcReceiverWithContext::new(reply_stream);
                     let _ = receiver.recv_server_msg();
                 }
-            }
-            #[cfg(not(windows))]
-            {
-                let _ = IpcSenderWithContext::<ClientToServerMsg>::new(stream)
-                    .send_client_msg(ClientToServerMsg::KillSession);
             }
         },
         Err(e) => {

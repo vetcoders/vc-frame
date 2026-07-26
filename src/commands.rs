@@ -15,7 +15,7 @@ use zellij_client::{
 };
 
 use zellij_utils::sessions::{
-    ActiveSession, SessionNameMatch, assert_dead_session, assert_session, assert_session_ne,
+    ActiveSession, SessionNameMatch, assert_dead_session, assert_session_ne,
     delete_session as delete_session_impl, generate_unique_session_name, get_active_session,
     get_resurrectable_sessions, get_sessions, get_sessions_sorted_by_mtime,
     kill_session as kill_session_impl, match_session_name, print_sessions,
@@ -129,7 +129,8 @@ pub(crate) fn delete_all_sessions(yes: bool, force: bool) {
 pub(crate) fn kill_session(target_session: &Option<String>) {
     match target_session {
         Some(target_session) => {
-            assert_session(target_session);
+            // A live server can miss the short inventory probe while busy.
+            // Let the exact socket transport decide whether shutdown can land.
             kill_session_impl(target_session);
             process::exit(0);
         },

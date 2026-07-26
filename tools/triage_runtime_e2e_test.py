@@ -880,6 +880,45 @@ class EvidenceAndCleanupTests(unittest.TestCase):
 
     @mock.patch.object(MODULE, "wait_for_no_server_processes", return_value=[])
     @mock.patch.object(MODULE, "wait_for_session_gone")
+    @mock.patch.object(MODULE, "command")
+    @mock.patch.object(MODULE, "session_inventory")
+    @mock.patch.object(MODULE, "server_processes_for_socket_root")
+    def test_cleanup_kills_an_exited_inventory_entry_with_a_live_server_pid(
+        self,
+        processes: mock.Mock,
+        inventory: mock.Mock,
+        command: mock.Mock,
+        _wait_gone: mock.Mock,
+        _wait_processes: mock.Mock,
+    ) -> None:
+        processes.return_value = [
+            {
+                "pid": 42,
+                "command": (
+                    "vc-frame --server "
+                    "/tmp/proof/sockets/contract_version_1/owned"
+                ),
+            }
+        ]
+        inventory.side_effect = [{"owned": "exited"}, {}, {}]
+        command.return_value = completed(0)
+
+        receipt = MODULE.cleanup_namespace(
+            pathlib.Path("vc-frame"),
+            {"VC_FRAME_SOCKET_DIR": "/tmp/proof/sockets"},
+            {"owned"},
+            timeout=0.01,
+            stable_empty_for=0,
+        )
+
+        self.assertEqual(receipt["killed_sessions"], ["owned"])
+        self.assertEqual(
+            [call.args[2:] for call in command.call_args_list],
+            [("kill-session", "owned")],
+        )
+
+    @mock.patch.object(MODULE, "wait_for_no_server_processes", return_value=[])
+    @mock.patch.object(MODULE, "wait_for_session_gone")
     @mock.patch.object(MODULE, "query_session")
     @mock.patch.object(MODULE, "command")
     @mock.patch.object(MODULE, "session_inventory")

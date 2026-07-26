@@ -339,6 +339,31 @@ pub(crate) struct SessionMetaData {
     config_file_path: Option<PathBuf>,
 }
 
+const SESSION_THREAD_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn join_session_thread_until(
+    name: &str,
+    handle: Option<thread::JoinHandle<()>>,
+    deadline: Instant,
+) -> bool {
+    let Some(handle) = handle else {
+        return true;
+    };
+    while !handle.is_finished() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    if !handle.is_finished() {
+        log::error!(
+            "session shutdown timed out waiting for {name}; detaching the thread so the server process can exit"
+        );
+        return false;
+    }
+    if handle.join().is_err() {
+        log::error!("session shutdown thread '{name}' panicked");
+    }
+    true
+}
+
 impl SessionMetaData {
     pub fn get_client_keybinds_and_mode(
         &self,
@@ -481,21 +506,16 @@ impl Drop for SessionMetaData {
         let _ = self.senders.send_to_plugin(PluginInstruction::Exit);
         let _ = self.senders.send_to_pty_writer(PtyWriteInstruction::Exit);
         let _ = self.senders.send_to_background_jobs(BackgroundJob::Exit);
-        if let Some(screen_thread) = self.screen_thread.take() {
-            let _ = screen_thread.join();
-        }
-        if let Some(pty_thread) = self.pty_thread.take() {
-            let _ = pty_thread.join();
-        }
-        if let Some(plugin_thread) = self.plugin_thread.take() {
-            let _ = plugin_thread.join();
-        }
-        if let Some(pty_writer_thread) = self.pty_writer_thread.take() {
-            let _ = pty_writer_thread.join();
-        }
-        if let Some(background_jobs_thread) = self.background_jobs_thread.take() {
-            let _ = background_jobs_thread.join();
-        }
+        let deadline = Instant::now() + SESSION_THREAD_JOIN_TIMEOUT;
+        join_session_thread_until("screen", self.screen_thread.take(), deadline);
+        join_session_thread_until("pty", self.pty_thread.take(), deadline);
+        join_session_thread_until("plugin", self.plugin_thread.take(), deadline);
+        join_session_thread_until("pty-writer", self.pty_writer_thread.take(), deadline);
+        join_session_thread_until(
+            "background-jobs",
+            self.background_jobs_thread.take(),
+            deadline,
+        );
     }
 }
 
@@ -1854,8 +1874,11 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
         }
     }
 
-    // Drop cached session data before exit.
-    *session_data.write().unwrap() = None;
+    // Release the metadata lock before Drop joins subsystem threads. Holding
+    // the write guard across teardown can deadlock any late route that needs
+    // session metadata while the server is already committed to exiting.
+    let cached_session = session_data.write().unwrap().take();
+    drop(cached_session);
 
     drop(std::fs::remove_file(&socket_path));
 }
@@ -2612,5 +2635,32 @@ mod session_state_tests {
         assert_eq!(idle_exit_plan(Some("vc-frame"), Some("60")), Some(60));
         assert_eq!(idle_exit_plan(None, Some("900")), Some(900));
         assert_eq!(idle_exit_plan(Some("Operator"), Some("0")), None);
+    }
+
+    #[test]
+    fn session_thread_join_returns_before_a_stalled_subsystem() {
+        let handle = thread::spawn(|| thread::sleep(Duration::from_secs(2)));
+        let started = Instant::now();
+
+        assert!(!join_session_thread_until(
+            "stalled-test",
+            Some(handle),
+            Instant::now() + Duration::from_millis(20),
+        ));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "a stalled subsystem must not trap server shutdown"
+        );
+    }
+
+    #[test]
+    fn session_thread_join_reaps_a_completed_subsystem() {
+        let handle = thread::spawn(|| {});
+
+        assert!(join_session_thread_until(
+            "completed-test",
+            Some(handle),
+            Instant::now() + Duration::from_secs(1),
+        ));
     }
 }
