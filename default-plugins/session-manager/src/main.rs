@@ -45,6 +45,35 @@ const SETTLEMENT_HISTORY_SCHEMA: &str = "vibecrafted.settlement-history.v1";
 // producer leave stale values looking authoritative forever.
 const SETTLEMENT_FEED_STALE_AFTER_TICKS: u8 = 15;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SettlementPipeOutcome {
+    acknowledged: bool,
+    should_render: bool,
+}
+
+impl SettlementPipeOutcome {
+    fn accepted(should_render: bool) -> Self {
+        Self {
+            acknowledged: true,
+            should_render,
+        }
+    }
+
+    fn rejected(should_render: bool) -> Self {
+        Self {
+            acknowledged: false,
+            should_render,
+        }
+    }
+}
+
+fn acknowledge_cli_pipe(pipe_id: &str) {
+    #[cfg(target_arch = "wasm32")]
+    unblock_cli_pipe_input(pipe_id);
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = pipe_id;
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct SettlementCounts {
@@ -238,13 +267,20 @@ impl ZellijPlugin for State {
             // accept only the public local-CLI broadcast Guardian emits. A
             // process running as the same OS user can already mutate both
             // runtimes and therefore remains inside this trust boundary.
-            if !matches!(pipe_message.source, PipeSource::Cli(_)) || pipe_message.is_private {
+            let PipeSource::Cli(pipe_id) = &pipe_message.source else {
+                return false;
+            };
+            if pipe_message.is_private {
                 return false;
             }
-            match pipe_message.payload.as_deref() {
-                Some(payload) => self.accept_settlement_history(payload),
-                None => self.mark_settlement_feed_degraded(),
+            let outcome = match pipe_message.payload.as_deref() {
+                Some(payload) => self.apply_settlement_history(payload),
+                None => SettlementPipeOutcome::rejected(self.mark_settlement_feed_degraded()),
+            };
+            if outcome.acknowledged {
+                acknowledge_cli_pipe(pipe_id);
             }
+            outcome.should_render
         } else if pipe_message.name == "vc_rail_nav" {
             match pipe_message.payload.as_deref() {
                 Some("up") => self.switch_session_relative(-1),
@@ -1023,15 +1059,15 @@ impl State {
     /// may restart at zero; its completeness marker keeps partial replay honest.
     /// Exact replay is idempotent, while stale sequence numbers and same-sequence
     /// divergence are rejected.
-    fn accept_settlement_history(&mut self, payload: &str) -> bool {
+    fn apply_settlement_history(&mut self, payload: &str) -> SettlementPipeOutcome {
         let Some(incoming) = SettlementHistory::parse(payload) else {
-            return self.mark_settlement_feed_degraded();
+            return SettlementPipeOutcome::rejected(self.mark_settlement_feed_degraded());
         };
         if self
             .retired_settlement_generations
             .contains(&incoming.generation)
         {
-            return false;
+            return SettlementPipeOutcome::rejected(false);
         }
         if let Some(current) = &self.settlement_history {
             if incoming.generation != current.generation {
@@ -1040,16 +1076,16 @@ impl State {
                         .historical_transitions
                         .is_monotonic_from(&current.historical_transitions)
                 {
-                    return self.mark_settlement_feed_degraded();
+                    return SettlementPipeOutcome::rejected(self.mark_settlement_feed_degraded());
                 }
                 self.retired_settlement_generations
                     .insert(current.generation.clone());
                 self.settlement_history = Some(incoming);
                 self.mark_settlement_feed_fresh();
-                return true;
+                return SettlementPipeOutcome::accepted(true);
             }
             if incoming.sequence < current.sequence {
-                return false;
+                return SettlementPipeOutcome::rejected(false);
             }
             if incoming.sequence == current.sequence {
                 if incoming != *current {
@@ -1057,22 +1093,22 @@ impl State {
                         "rejecting divergent settlement history at sequence {}",
                         incoming.sequence
                     );
-                    return self.mark_settlement_feed_degraded();
+                    return SettlementPipeOutcome::rejected(self.mark_settlement_feed_degraded());
                 }
                 let should_render = std::mem::take(&mut self.settlement_feed_degraded);
                 self.settlement_feed_age_ticks = Some(0);
-                return should_render;
+                return SettlementPipeOutcome::accepted(should_render);
             }
             if !incoming
                 .historical_transitions
                 .is_monotonic_from(&current.historical_transitions)
             {
-                return self.mark_settlement_feed_degraded();
+                return SettlementPipeOutcome::rejected(self.mark_settlement_feed_degraded());
             }
         }
         self.settlement_history = Some(incoming);
         self.mark_settlement_feed_fresh();
-        true
+        SettlementPipeOutcome::accepted(true)
     }
 
     fn mark_settlement_feed_fresh(&mut self) {
@@ -2576,6 +2612,37 @@ mod rail_tests {
             args: BTreeMap::new(),
             is_private: false,
         }
+    }
+
+    #[test]
+    fn canonical_pipe_acknowledgement_is_independent_from_rendering() {
+        let mut state = State::default();
+        let canonical = settlement_payload(10, (4, 3, 3), (2, 1, 1));
+
+        assert_eq!(
+            state.apply_settlement_history(&canonical),
+            SettlementPipeOutcome::accepted(true)
+        );
+        assert_eq!(
+            state.apply_settlement_history(&canonical),
+            SettlementPipeOutcome::accepted(false)
+        );
+
+        let divergent = settlement_payload(10, (5, 2, 3), (3, 1, 1));
+        assert_eq!(
+            state.apply_settlement_history(&divergent),
+            SettlementPipeOutcome::rejected(true)
+        );
+        assert_eq!(
+            state.apply_settlement_history(&canonical),
+            SettlementPipeOutcome::accepted(true)
+        );
+
+        let stale = settlement_payload(9, (4, 3, 2), (2, 1, 1));
+        assert_eq!(
+            state.apply_settlement_history(&stale),
+            SettlementPipeOutcome::rejected(false)
+        );
     }
 
     #[test]
