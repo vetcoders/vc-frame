@@ -23,6 +23,18 @@ BIN_NAME="vc-frame"
 die() { print -u2 -- "release-provenance: $*"; exit 1; }
 info() { print -- "  $*"; }
 
+resolve_python() {
+  local candidate
+  for candidate in "${PYTHON:-}" python3.14 python3.13 python3.12 python3.11 python3; do
+    [[ -n "$candidate" ]] || continue
+    command -v "$candidate" >/dev/null 2>&1 || continue
+    "$candidate" -c 'import tomllib' >/dev/null 2>&1 || continue
+    command -v "$candidate"
+    return 0
+  done
+  die "Python 3.11+ with tomllib is required for release metadata"
+}
+
 sha256_of() {
   if command -v shasum >/dev/null 2>&1; then
     shasum -a 256 "$1" | awk '{print $1}'
@@ -69,11 +81,12 @@ guard() {
 package() {
   guard || exit 1
 
-  local sha version target
+  local sha version target python_bin
   sha="$(git -C "$REPO" rev-parse HEAD)"
+  python_bin="$(resolve_python)"
   # Prefer [workspace.package] version (vc-frame is a workspace); fall back to first pin.
   version="$(
-    python3 -c '
+    "$python_bin" -c '
 import pathlib, tomllib, sys
 p = pathlib.Path(sys.argv[1])
 data = tomllib.loads(p.read_text(encoding="utf-8"))
@@ -168,7 +181,13 @@ self_test() {
     die "self-test needs a clean tree to start from (tracked files differ from HEAD)"
   fi
 
-  print -- "[1/3] clean tree must pass"
+  print -- "[1/4] release Python must provide tomllib"
+  local python_bin; python_bin="$(resolve_python)"
+  "$python_bin" -c 'import tomllib' \
+    || die "resolved release Python cannot import tomllib: $python_bin"
+  print -- "  PASS ($python_bin)"
+
+  print -- "[2/4] clean tree must pass"
   guard >/dev/null || die "guard rejected a clean tree"
   print -- "  PASS"
 
@@ -181,7 +200,7 @@ self_test() {
   # Restore the tracked file no matter how we leave this function.
   trap 'cp "$SELFTEST_BACKUP" "$SELFTEST_CANARY"; rm -f "$SELFTEST_BACKUP"' EXIT INT TERM
 
-  print -- "[2/3] dirty tree must be rejected"
+  print -- "[3/4] dirty tree must be rejected"
   printf '\n# release-provenance self-test canary\n' >> "$canary"
   if guard >/dev/null 2>&1; then
     die "guard ACCEPTED a dirty tree — the packaging gate is not fail-closed"
@@ -190,7 +209,7 @@ self_test() {
 
   cp "$SELFTEST_BACKUP" "$canary"; rm -f "$SELFTEST_BACKUP"; trap - EXIT INT TERM
 
-  print -- "[3/3] restored tree must pass again"
+  print -- "[4/4] restored tree must pass again"
   if worktree_dirty; then
     die "self-test failed to restore $canary"
   fi
