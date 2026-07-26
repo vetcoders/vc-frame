@@ -32,6 +32,7 @@ impl RunTransferLock {
     #[cfg(unix)]
     fn acquire(path: &Path) -> Result<Self, String> {
         use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
 
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -42,6 +43,10 @@ impl RunTransferLock {
             .read(true)
             .write(true)
             .truncate(false)
+            // This must be atomic with open. A later F_SETFD leaves a window
+            // where another thread can spawn a child that keeps the flock
+            // alive after this guard is dropped.
+            .custom_flags(nix::fcntl::OFlag::O_CLOEXEC.bits())
             .open(path)
             .map_err(|error| format!("cannot open transfer lock {}: {}", path.display(), error))?;
         nix::fcntl::flock(
@@ -1852,11 +1857,41 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn assert_close_on_exec(fd: i32) {
+        let raw_flags = nix::fcntl::fcntl(fd, nix::fcntl::FcntlArg::F_GETFD).unwrap();
+        let flags = nix::fcntl::FdFlag::from_bits_truncate(raw_flags);
+        assert!(flags.contains(nix::fcntl::FdFlag::FD_CLOEXEC));
+    }
+
+    #[cfg(unix)]
+    fn run_isolated_transfer_lock_scenario(case: &str) {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .arg("isolated_transfer_lock_scenario_child")
+            .env("VC_FRAME_TEST_TRANSFER_LOCK_SCENARIO", case)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "scenario={case}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    #[cfg(unix)]
     #[test]
     fn a_second_transfer_lock_fails_fast_and_recovers_after_release() {
+        run_isolated_transfer_lock_scenario("exclusive");
+    }
+
+    #[cfg(unix)]
+    fn exclusive_transfer_lock_scenario() {
+        use std::os::fd::AsRawFd;
+
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("transfer.lock");
         let first = RunTransferLock::acquire(&path).unwrap();
+        assert_close_on_exec(first._file.as_raw_fd());
         let error = RunTransferLock::acquire(&path).err().unwrap();
         assert!(error.contains("refusing to wait"), "{error}");
         drop(first);
@@ -1864,15 +1899,26 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn duplicate_close_on_exec(fd: i32) -> i32 {
+        nix::fcntl::fcntl(fd, nix::fcntl::FcntlArg::F_DUPFD_CLOEXEC(3)).unwrap()
+    }
+
+    #[cfg(unix)]
     #[test]
     fn inherited_transfer_lock_survives_the_parent_guard() {
+        run_isolated_transfer_lock_scenario("parent-death");
+    }
+
+    #[cfg(unix)]
+    fn parent_death_transfer_lock_scenario() {
         use std::os::fd::AsRawFd;
 
         let root = tempfile::tempdir().unwrap();
         let path = root.path().canonicalize().unwrap().join("transfer.lock");
         let parent = std::mem::ManuallyDrop::new(RunTransferLock::acquire(&path).unwrap());
-        let child_fd = nix::unistd::dup(parent._file.as_raw_fd()).unwrap();
+        let child_fd = duplicate_close_on_exec(parent._file.as_raw_fd());
         let inherited = RunTransferLock::acquire_inherited(&path, child_fd).unwrap();
+        assert_close_on_exec(inherited._file.as_raw_fd());
 
         // Model abrupt parent death: the kernel closes the parent's descriptor
         // without running a userspace LOCK_UN guard. The duplicated open-file
@@ -1909,12 +1955,17 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn dropping_child_guard_does_not_unlock_the_live_parent_descriptor() {
+        run_isolated_transfer_lock_scenario("child-drop");
+    }
+
+    #[cfg(unix)]
+    fn child_drop_transfer_lock_scenario() {
         use std::os::fd::AsRawFd;
 
         let root = tempfile::tempdir().unwrap();
         let path = root.path().canonicalize().unwrap().join("transfer.lock");
         let parent = RunTransferLock::acquire(&path).unwrap();
-        let child_fd = nix::unistd::dup(parent._file.as_raw_fd()).unwrap();
+        let child_fd = duplicate_close_on_exec(parent._file.as_raw_fd());
         let inherited = RunTransferLock::acquire_inherited(&path, child_fd).unwrap();
 
         drop(inherited);
@@ -1966,6 +2017,26 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn inherited_transfer_lock_does_not_leak_through_exec() {
+        run_isolated_transfer_lock_scenario("exec");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn isolated_transfer_lock_scenario_child() {
+        let Some(case) = std::env::var_os("VC_FRAME_TEST_TRANSFER_LOCK_SCENARIO") else {
+            return;
+        };
+        match case.to_string_lossy().as_ref() {
+            "exclusive" => exclusive_transfer_lock_scenario(),
+            "parent-death" => parent_death_transfer_lock_scenario(),
+            "child-drop" => child_drop_transfer_lock_scenario(),
+            "exec" => inherited_transfer_lock_exec_scenario(),
+            other => panic!("unknown isolated transfer-lock scenario: {other}"),
+        }
+    }
+
+    #[cfg(unix)]
+    fn inherited_transfer_lock_exec_scenario() {
         use std::os::fd::AsRawFd;
 
         let root = tempfile::tempdir().unwrap();

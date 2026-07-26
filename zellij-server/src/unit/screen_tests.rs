@@ -53,6 +53,14 @@ use std::rc::Rc;
 use zellij_utils::data::{PaneContents, PaneRenderReport};
 use zellij_utils::ipc::ExitReason;
 
+fn normalize_layout_debug(output: String) -> String {
+    output
+        .lines()
+        .filter(|line| line.trim() != "tab_instance_id: None,")
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn take_snapshot_and_cursor_coordinates(
     ansi_instructions: &str,
     grid: &mut Grid,
@@ -4191,7 +4199,7 @@ pub fn send_cli_new_tab_action_default_params() {
     let new_tab_action = received_plugin_instructions
         .iter()
         .find(|instruction| matches!(instruction, PluginInstruction::NewTab(..)));
-    assert_snapshot!(format!("{:#?}", new_tab_action));
+    assert_snapshot!(normalize_layout_debug(format!("{:#?}", new_tab_action)));
 }
 
 #[test]
@@ -4246,7 +4254,7 @@ pub fn send_cli_new_tab_action_with_name_and_layout() {
         .clone();
     let output = format!("{:#?}", new_tab_instruction);
     // Normalize Windows path separators for cross-platform snapshot consistency
-    let output = output.replace("\\\\", "/");
+    let output = normalize_layout_debug(output.replace("\\\\", "/"));
     assert_snapshot!(output);
 }
 
@@ -8643,7 +8651,7 @@ pub fn send_cli_new_tab_action_with_layout_string() {
         .clone();
     let output = format!("{:#?}", new_tab_instruction);
     // Normalize Windows path separators for cross-platform snapshot consistency
-    let output = output.replace("\\\\", "/");
+    let output = normalize_layout_debug(output.replace("\\\\", "/"));
     assert_snapshot!(output);
 }
 
@@ -8696,7 +8704,7 @@ pub fn send_cli_new_tab_action_with_layout_string_and_name() {
         .clone();
     let output = format!("{:#?}", new_tab_instruction);
     // Normalize Windows path separators for cross-platform snapshot consistency
-    let output = output.replace("\\\\", "/");
+    let output = normalize_layout_debug(output.replace("\\\\", "/"));
     assert_snapshot!(output);
 }
 

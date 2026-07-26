@@ -6524,6 +6524,7 @@ pub(crate) fn screen_thread_main(
                 target_identity,
             ) => {
                 let dump_result: Result<Option<String>> = (|| {
+                    let mut dump_client_id = client_id;
                     let tab = if let Some(target) = target_identity.as_ref() {
                         if screen.session_incarnation != target.session_incarnation {
                             return Err(anyhow!(
@@ -6568,7 +6569,17 @@ pub(crate) fn screen_thread_main(
                             .find(|tab| tab.has_pane_with_pid(&pane_id))
                             .ok_or_else(|| anyhow!("Pane with id {:?} not found", pane_id))?
                     } else {
-                        screen.get_active_tab_mut(client_id)?
+                        // CLI actions can arrive under an ephemeral client ID
+                        // that is not part of the interactive screen state.
+                        // Preserve the historical behavior: resolve the first
+                        // connected client rather than silently turning a
+                        // valid untyped dump into an empty failure.
+                        if screen.get_active_tab_mut(client_id).is_err() {
+                            dump_client_id = screen
+                                .get_first_client_id()
+                                .ok_or_else(|| anyhow!("No connected clients to dump"))?;
+                        }
+                        screen.get_active_tab_mut(dump_client_id)?
                     };
 
                     if let Some(file_path) = file.as_ref() {
@@ -6583,12 +6594,12 @@ pub(crate) fn screen_thread_main(
                             },
                             None if ansi => tab.dump_with_ansi_active_terminal_screen(
                                 Some(file_path.clone()),
-                                client_id,
+                                dump_client_id,
                                 full,
                             )?,
                             None => tab.dump_active_terminal_screen(
                                 Some(file_path.clone()),
-                                client_id,
+                                dump_client_id,
                                 full,
                             )?,
                         }
@@ -6606,9 +6617,9 @@ pub(crate) fn screen_thread_main(
                                 })?
                             },
                             None if ansi => {
-                                tab.get_dump_with_ansi_active_terminal_screen(client_id, full)
+                                tab.get_dump_with_ansi_active_terminal_screen(dump_client_id, full)
                             },
-                            None => tab.get_dump_active_terminal_screen(client_id, full),
+                            None => tab.get_dump_active_terminal_screen(dump_client_id, full),
                         };
                         Ok(Some(dump))
                     }
