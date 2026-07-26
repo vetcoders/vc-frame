@@ -38,6 +38,46 @@ def completed(
 
 
 class ProvenanceTests(unittest.TestCase):
+    def test_makefile_preserves_ci_artifact_root_and_explicit_override(self) -> None:
+        repo_root = MODULE_PATH.parents[1]
+        makefile = repo_root / "Makefile"
+        probe = (
+            f"include {makefile}\n"
+            "print-triage-artifact-root:\n"
+            "\t@printf '%s' '$(TRIAGE_RUNTIME_E2E_ARTIFACT_ROOT)'\n"
+        )
+        base_env = os.environ.copy()
+        base_env.pop("VC_FRAME_E2E_ARTIFACT_ROOT", None)
+        base_env.pop("TRIAGE_RUNTIME_E2E_ARTIFACT_ROOT", None)
+
+        def resolve(**overrides: str) -> str:
+            env = base_env | overrides
+            result = subprocess.run(
+                ["make", "-s", "-f", "-", "print-triage-artifact-root"],
+                input=probe,
+                cwd=repo_root,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout
+
+        self.assertEqual(resolve(), "/tmp/vc-frame-triage-runtime-e2e")
+        self.assertEqual(
+            resolve(VC_FRAME_E2E_ARTIFACT_ROOT="/runner/evidence"),
+            "/runner/evidence",
+        )
+        self.assertEqual(
+            resolve(
+                VC_FRAME_E2E_ARTIFACT_ROOT="/runner/evidence",
+                TRIAGE_RUNTIME_E2E_ARTIFACT_ROOT="/operator/evidence",
+            ),
+            "/operator/evidence",
+        )
+
     def test_exact_clean_profile_matched_build_is_accepted(self) -> None:
         MODULE.validate_build_info(
             {
@@ -171,6 +211,28 @@ class SessionTruthTests(unittest.TestCase):
         self.assertEqual(result.state, "live")
         self.assertEqual(result.inventory_state, "live")
         self.assertEqual(result.tabs[0]["tab_id"], 2)
+
+    @mock.patch.object(MODULE, "command")
+    def test_query_session_treats_successful_empty_inventory_as_ambiguity(
+        self, command: mock.Mock
+    ) -> None:
+        command.return_value = completed(0, stdout="", stderr="")
+        with self.assertRaisesRegex(
+            MODULE.AmbiguousSessionError,
+            "successful but invalid list-tabs inventory",
+        ):
+            MODULE.query_session(pathlib.Path("vc-frame"), {}, "starting")
+
+    @mock.patch.object(MODULE, "command")
+    def test_query_session_treats_successful_malformed_inventory_as_ambiguity(
+        self, command: mock.Mock
+    ) -> None:
+        command.return_value = completed(0, stdout="{not-json", stderr="noise")
+        with self.assertRaisesRegex(
+            MODULE.AmbiguousSessionError,
+            "successful but invalid list-tabs inventory",
+        ):
+            MODULE.query_session(pathlib.Path("vc-frame"), {}, "starting")
 
     @mock.patch.object(MODULE.time, "sleep")
     @mock.patch.object(MODULE, "session_tabs")

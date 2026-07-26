@@ -229,13 +229,6 @@ fn individual_messages_client(
     action: Action,
     pane_id: Option<u32>,
 ) {
-    let is_blocking = matches!(
-        &action,
-        Action::NewBlockingPane {
-            unblock_condition: Some(_),
-            ..
-        }
-    );
     let msg = ClientToServerMsg::Action {
         action,
         terminal_id: pane_id,
@@ -244,19 +237,18 @@ fn individual_messages_client(
     };
     os_input.send_to_server(msg);
     loop {
-        match os_input.recv_from_server() {
-            Some((ServerToClientMsg::UnblockInputThread, _)) if !is_blocking => {
-                break;
-            },
-            Some((ServerToClientMsg::Log { lines: log_lines }, _)) => {
+        let message = os_input.recv_from_server().map(|(message, _)| message);
+        match classify_cli_action_response(message) {
+            CliActionResponse::Wait => {},
+            CliActionResponse::Success(log_lines) => {
                 log_lines.iter().for_each(|line| println!("{line}"));
                 break;
             },
-            Some((ServerToClientMsg::LogError { lines: log_lines }, _)) => {
+            CliActionResponse::Error(log_lines) => {
                 log_lines.iter().for_each(|line| eprintln!("{line}"));
                 process::exit(2);
             },
-            Some((ServerToClientMsg::Exit { exit_reason }, _)) => match exit_reason {
+            CliActionResponse::Exit(exit_reason) => match exit_reason {
                 ExitReason::Error(e) => {
                     eprintln!("{}", e);
                     process::exit(2);
@@ -268,8 +260,34 @@ fn individual_messages_client(
                     break;
                 },
             },
-            _ => {},
+            CliActionResponse::Disconnected => {
+                eprintln!("server disconnected before acknowledging the CLI action");
+                process::exit(2);
+            },
         }
+    }
+}
+
+#[derive(Debug)]
+enum CliActionResponse {
+    Wait,
+    Success(Vec<String>),
+    Error(Vec<String>),
+    Exit(ExitReason),
+    Disconnected,
+}
+
+fn classify_cli_action_response(message: Option<ServerToClientMsg>) -> CliActionResponse {
+    match message {
+        // This signal is intentionally session-wide and can belong to an
+        // unrelated interactive client. CLI actions finish only on their
+        // targeted Log/LogError/Exit acknowledgement.
+        Some(ServerToClientMsg::UnblockInputThread) => CliActionResponse::Wait,
+        Some(ServerToClientMsg::Log { lines }) => CliActionResponse::Success(lines),
+        Some(ServerToClientMsg::LogError { lines }) => CliActionResponse::Error(lines),
+        Some(ServerToClientMsg::Exit { exit_reason }) => CliActionResponse::Exit(exit_reason),
+        Some(_) => CliActionResponse::Wait,
+        None => CliActionResponse::Disconnected,
     }
 }
 
@@ -378,4 +396,33 @@ pub fn start_subscribe_client(
     }
 
     os_input.send_to_server(ClientToServerMsg::ClientExited);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generic_unblock_does_not_complete_a_cli_action() {
+        assert!(matches!(
+            classify_cli_action_response(Some(ServerToClientMsg::UnblockInputThread)),
+            CliActionResponse::Wait
+        ));
+    }
+
+    #[test]
+    fn targeted_empty_log_is_an_explicit_success_ack() {
+        assert!(matches!(
+            classify_cli_action_response(Some(ServerToClientMsg::Log { lines: vec![] })),
+            CliActionResponse::Success(lines) if lines.is_empty()
+        ));
+    }
+
+    #[test]
+    fn disconnect_before_acknowledgement_fails_closed() {
+        assert!(matches!(
+            classify_cli_action_response(None),
+            CliActionResponse::Disconnected
+        ));
+    }
 }

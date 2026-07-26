@@ -219,7 +219,6 @@ pub(crate) fn route_action(
     default_shell: Option<TerminalAction>,
     mut seen_cli_pipes: Option<&mut HashSet<String>>,
     default_mode: InputMode,
-    os_input: Option<Box<dyn ServerOsApi>>,
 ) -> Result<(bool, Option<ActionCompletionResult>)> {
     let mut should_break = false;
     let err_context = || format!("failed to route action for client {client_id}");
@@ -1785,6 +1784,7 @@ pub(crate) fn route_action(
             show_all,
             output_json,
         } => {
+            let mut completion = NotificationEnd::new(completion_tx);
             let maybe_panes =
                 request_panes_from_screen(&senders, show_all).with_context(err_context)?;
 
@@ -1806,11 +1806,12 @@ pub(crate) fn route_action(
                     )
                 };
 
-                send_output_to_client(cli_client_id, os_input.as_deref(), output_lines);
+                completion.set_stdout_message(output_lines.join("\n"));
             } else {
-                send_error_to_client(cli_client_id, os_input.as_deref(), "Timeout listing panes");
+                completion.set_exit_status(1);
+                completion.set_error_message("Timeout listing panes".to_string());
             }
-            drop(NotificationEnd::new(completion_tx));
+            drop(completion);
         },
         Action::ListTabs {
             show_state,
@@ -1820,6 +1821,7 @@ pub(crate) fn route_action(
             show_all,
             output_json,
         } => {
+            let mut completion = NotificationEnd::new(completion_tx);
             let maybe_tabs =
                 request_tabs_from_screen(&senders, client_id).with_context(err_context)?;
 
@@ -1836,13 +1838,15 @@ pub(crate) fn route_action(
                     )
                 };
 
-                send_output_to_client(cli_client_id, os_input.as_deref(), output_lines);
+                completion.set_stdout_message(output_lines.join("\n"));
             } else {
-                send_error_to_client(cli_client_id, os_input.as_deref(), "Timeout listing tabs");
+                completion.set_exit_status(1);
+                completion.set_error_message("Timeout listing tabs".to_string());
             }
-            drop(NotificationEnd::new(completion_tx));
+            drop(completion);
         },
         Action::CurrentTabInfo { output_json } => {
+            let mut completion = NotificationEnd::new(completion_tx);
             let maybe_tab_info = request_current_tab_info_from_screen(&senders, client_id)
                 .with_context(err_context)?;
 
@@ -1853,17 +1857,15 @@ pub(crate) fn route_action(
                     } else {
                         format_current_tab_info_plain(&tab_info)
                     };
-                    send_output_to_client(cli_client_id, os_input.as_deref(), output_lines);
+                    completion.set_stdout_message(output_lines.join("\n"));
                 },
                 None => {
-                    send_error_to_client(
-                        cli_client_id,
-                        os_input.as_deref(),
-                        "No active tab found for current client",
-                    );
+                    completion.set_exit_status(1);
+                    completion
+                        .set_error_message("No active tab found for current client".to_string());
                 },
             }
-            drop(NotificationEnd::new(completion_tx));
+            drop(completion);
         },
         Action::TogglePanePinned => {
             senders
@@ -2181,63 +2183,6 @@ pub(crate) fn route_action(
         },
     }
     let result = wait_for_action_completion(completion_rx, &action_name, critical_completion);
-    if let Some(error_message) = &result.error_message {
-        if let Some(cli_client_id) = cli_client_id
-            && let Some(ref os_input) = os_input
-        {
-            let _ = os_input.send_to_client(
-                cli_client_id,
-                ServerToClientMsg::LogError {
-                    lines: vec![error_message.clone()],
-                },
-            );
-        }
-    } else if let Some(stdout_message) = &result.stdout_message {
-        if let Some(cli_client_id) = cli_client_id
-            && let Some(ref os_input) = os_input
-        {
-            let _ = os_input.send_to_client(
-                cli_client_id,
-                ServerToClientMsg::Log {
-                    lines: vec![stdout_message.clone()],
-                },
-            );
-        }
-    } else if let Some(exit_status) = result.exit_status
-        && let Some(cli_client_id) = cli_client_id
-        && let Some(ref os_input) = os_input
-    {
-        let _ = os_input.send_to_client(
-            cli_client_id,
-            ServerToClientMsg::Exit {
-                exit_reason: ExitReason::CustomExitStatus(exit_status),
-            },
-        );
-    }
-    // Return tab ID to CLI clients as plain text
-    if let Some(tab_id) = result.affected_tab_id
-        && let Some(cli_client_id) = cli_client_id
-        && let Some(ref os_input) = os_input
-    {
-        let _ = os_input.send_to_client(
-            cli_client_id,
-            ServerToClientMsg::Log {
-                lines: vec![tab_id.to_string()],
-            },
-        );
-    }
-    // Return pane ID to CLI clients as plain text
-    if let Some(pane_id) = result.affected_pane_id
-        && let Some(cli_client_id) = cli_client_id
-        && let Some(ref os_input) = os_input
-    {
-        let _ = os_input.send_to_client(
-            cli_client_id,
-            ServerToClientMsg::Log {
-                lines: vec![pane_id.to_string()],
-            },
-        );
-    }
     Ok((should_break, Some(result)))
 }
 
@@ -2385,7 +2330,6 @@ pub(crate) fn route_thread_main(
                                         default_shell.clone(),
                                         Some(&mut seen_cli_pipes),
                                         client_input_mode,
-                                        Some(os_input.clone()),
                                     ) {
                                         Ok(route_action_should_break) => {
                                             if route_action_should_break.0 {
@@ -2452,6 +2396,9 @@ pub(crate) fn route_thread_main(
                             if let Some((senders, default_shell, client_input_mode)) =
                                 session_data_assets
                             {
+                                let completion_client_id = (is_cli_client
+                                    && !cli_action_has_dedicated_response(&action))
+                                .then_some(cli_client_id);
                                 match route_action(
                                     action,
                                     client_id,
@@ -2461,17 +2408,49 @@ pub(crate) fn route_thread_main(
                                     default_shell,
                                     Some(&mut seen_cli_pipes),
                                     client_input_mode,
-                                    Some(os_input.clone()),
                                 ) {
-                                    Ok(route_action_should_break) => {
-                                        if route_action_should_break.0 {
+                                    Ok((route_action_should_break, completion)) => {
+                                        if route_action_should_break {
                                             should_break = true;
+                                        }
+                                        if let Some(cli_client_id) = completion_client_id {
+                                            let message =
+                                                cli_action_completion_message(completion.as_ref());
+                                            if let Err(error) =
+                                                os_input.send_to_client(cli_client_id, message)
+                                            {
+                                                log::error!(
+                                                    "failed to send CLI action completion to client {}: {}",
+                                                    cli_client_id,
+                                                    error
+                                                );
+                                            }
                                         }
                                     },
                                     Err(e) => {
                                         log::error!("{}", e);
+                                        if is_cli_client {
+                                            let _ = os_input.send_to_client(
+                                                cli_client_id,
+                                                ServerToClientMsg::LogError {
+                                                    lines: vec![format!(
+                                                        "failed to route CLI action: {e}"
+                                                    )],
+                                                },
+                                            );
+                                        }
                                     },
                                 }
+                            } else if is_cli_client {
+                                let _ = os_input.send_to_client(
+                                    cli_client_id,
+                                    ServerToClientMsg::LogError {
+                                        lines: vec![
+                                            "session runtime is not ready for CLI actions"
+                                                .to_string(),
+                                        ],
+                                    },
+                                );
                             }
                         },
                         ClientToServerMsg::TerminalResize { new_size } => {
@@ -3208,37 +3187,49 @@ fn format_current_tab_info_plain(tab_info: &TabInfo) -> Vec<String> {
     ]
 }
 
-fn send_error_to_client(
-    cli_client_id: Option<ClientId>,
-    os_input: Option<&dyn ServerOsApi>,
-    error_message: &str,
-) {
-    if let Some(cli_client_id) = cli_client_id
-        && let Some(os_input) = os_input
-    {
-        let _ = os_input.send_to_client(
-            cli_client_id,
-            ServerToClientMsg::LogError {
-                lines: vec![error_message.to_string()],
-            },
-        );
+fn cli_action_completion_message(result: Option<&ActionCompletionResult>) -> ServerToClientMsg {
+    let Some(result) = result else {
+        return ServerToClientMsg::LogError {
+            lines: vec!["CLI action ended without a completion result".to_string()],
+        };
+    };
+
+    if let Some(error_message) = &result.error_message {
+        ServerToClientMsg::LogError {
+            lines: vec![error_message.clone()],
+        }
+    } else if let Some(stdout_message) = &result.stdout_message {
+        ServerToClientMsg::Log {
+            lines: vec![stdout_message.clone()],
+        }
+    } else if let Some(exit_status) = result.exit_status {
+        ServerToClientMsg::Exit {
+            exit_reason: ExitReason::CustomExitStatus(exit_status),
+        }
+    } else if let Some(tab_id) = result.affected_tab_id {
+        ServerToClientMsg::Log {
+            lines: vec![tab_id.to_string()],
+        }
+    } else if let Some(pane_id) = result.affected_pane_id {
+        ServerToClientMsg::Log {
+            lines: vec![pane_id.to_string()],
+        }
+    } else {
+        // Generic input unblocks are session-wide and can race an unrelated CLI
+        // request. A targeted empty Log is the explicit success acknowledgement
+        // for an action that has no stdout payload.
+        ServerToClientMsg::Log { lines: vec![] }
     }
 }
 
-fn send_output_to_client(
-    cli_client_id: Option<ClientId>,
-    os_input: Option<&dyn ServerOsApi>,
-    output_lines: Vec<String>,
-) {
-    if let Some(cli_client_id) = cli_client_id
-        && let Some(os_input) = os_input
-    {
-        let _ = os_input.send_to_client(
-            cli_client_id,
-            ServerToClientMsg::Log {
-                lines: output_lines,
-            },
-        );
+fn cli_action_has_dedicated_response(action: &Action) -> bool {
+    match action {
+        Action::CliPipe { .. }
+        | Action::DumpLayout
+        | Action::ListClients
+        | Action::QueryTabNames => true,
+        Action::DumpScreen { file_path, .. } => file_path.is_none(),
+        _ => false,
     }
 }
 
@@ -3281,6 +3272,132 @@ mod tests {
         };
 
         assert_eq!(result.affected_tab_id, Some(123));
+    }
+
+    #[test]
+    fn cli_completion_without_payload_gets_targeted_success_ack() {
+        let result = ActionCompletionResult {
+            exit_status: None,
+            affected_pane_id: None,
+            affected_tab_id: None,
+            error_message: None,
+            stdout_message: None,
+        };
+
+        assert!(matches!(
+            cli_action_completion_message(Some(&result)),
+            ServerToClientMsg::Log { lines } if lines.is_empty()
+        ));
+    }
+
+    #[test]
+    fn cli_completion_carries_stdout_instead_of_generic_unblock() {
+        let result = ActionCompletionResult {
+            exit_status: None,
+            affected_pane_id: None,
+            affected_tab_id: None,
+            error_message: None,
+            stdout_message: Some("[{\"tab_id\":1}]".to_string()),
+        };
+
+        assert!(matches!(
+            cli_action_completion_message(Some(&result)),
+            ServerToClientMsg::Log { lines }
+                if lines == vec!["[{\"tab_id\":1}]".to_string()]
+        ));
+    }
+
+    #[test]
+    fn missing_cli_completion_is_an_explicit_error() {
+        assert!(matches!(
+            cli_action_completion_message(None),
+            ServerToClientMsg::LogError { lines }
+                if lines == vec!["CLI action ended without a completion result".to_string()]
+        ));
+    }
+
+    #[test]
+    fn existing_cli_response_protocols_do_not_get_a_second_ack() {
+        let cli_pipe = Action::CliPipe {
+            pipe_id: "pipe".to_string(),
+            name: Some("test".to_string()),
+            payload: None,
+            args: None,
+            plugin: None,
+            configuration: None,
+            launch_new: false,
+            skip_cache: false,
+            floating: None,
+            in_place: None,
+            cwd: None,
+            pane_title: None,
+        };
+
+        assert!(cli_action_has_dedicated_response(&cli_pipe));
+        assert!(cli_action_has_dedicated_response(&Action::DumpLayout));
+        assert!(cli_action_has_dedicated_response(&Action::ListClients));
+        assert!(cli_action_has_dedicated_response(&Action::QueryTabNames));
+        let dump_to_stdout = Action::DumpScreen {
+            file_path: None,
+            include_scrollback: false,
+            pane_id: None,
+            ansi: false,
+            expected_tab_id: None,
+            expected_tab_name: None,
+            expected_session_incarnation: None,
+            expected_tab_instance_id: None,
+        };
+        let dump_to_file = Action::DumpScreen {
+            file_path: Some("dump".into()),
+            include_scrollback: false,
+            pane_id: None,
+            ansi: false,
+            expected_tab_id: None,
+            expected_tab_name: None,
+            expected_session_incarnation: None,
+            expected_tab_instance_id: None,
+        };
+        assert!(cli_action_has_dedicated_response(&dump_to_stdout));
+        assert!(!cli_action_has_dedicated_response(&dump_to_file));
+        assert!(!cli_action_has_dedicated_response(&Action::NoOp));
+    }
+
+    #[test]
+    fn cli_completion_precedence_is_error_stdout_exit_tab_then_pane() {
+        let mut result = ActionCompletionResult {
+            exit_status: Some(7),
+            affected_pane_id: Some(PaneId::Terminal(9)),
+            affected_tab_id: Some(8),
+            error_message: Some("error".to_string()),
+            stdout_message: Some("stdout".to_string()),
+        };
+
+        assert!(matches!(
+            cli_action_completion_message(Some(&result)),
+            ServerToClientMsg::LogError { lines } if lines == vec!["error".to_string()]
+        ));
+        result.error_message = None;
+        assert!(matches!(
+            cli_action_completion_message(Some(&result)),
+            ServerToClientMsg::Log { lines } if lines == vec!["stdout".to_string()]
+        ));
+        result.stdout_message = None;
+        assert!(matches!(
+            cli_action_completion_message(Some(&result)),
+            ServerToClientMsg::Exit {
+                exit_reason: ExitReason::CustomExitStatus(7)
+            }
+        ));
+        result.exit_status = None;
+        assert!(matches!(
+            cli_action_completion_message(Some(&result)),
+            ServerToClientMsg::Log { lines } if lines == vec!["8".to_string()]
+        ));
+        result.affected_tab_id = None;
+        assert!(matches!(
+            cli_action_completion_message(Some(&result)),
+            ServerToClientMsg::Log { lines } if lines == vec!["terminal_9".to_string()]
+        ));
     }
 
     #[test]

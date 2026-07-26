@@ -95,7 +95,7 @@ class SessionQuery:
 
 
 class AmbiguousSessionError(AssertionError):
-    """The namespace says live while the exact session query cannot prove it."""
+    """The exact session query cannot yet prove a valid live/absent state."""
 
 
 @dataclass(frozen=True)
@@ -896,9 +896,21 @@ def query_session(
         expect_success=None,
     )
     if result.returncode == 0:
+        try:
+            tabs = parse_json_array(
+                result.stdout,
+                f"tab inventory for {session!r}",
+            )
+        except AssertionError as error:
+            raise AmbiguousSessionError(
+                f"session {session!r} returned a successful but invalid "
+                f"list-tabs inventory; refusing to treat transient empty or "
+                f"malformed output as runtime truth: stdout={result.stdout!r}, "
+                f"stderr={result.stderr!r}"
+            ) from error
         return SessionQuery(
             state="live",
-            tabs=parse_json_array(result.stdout, f"tab inventory for {session!r}"),
+            tabs=tabs,
             list_tabs_exit=0,
             list_tabs_stderr=result.stderr,
             inventory_state="live",

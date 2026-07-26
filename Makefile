@@ -80,7 +80,8 @@ TAG := v$(WS_VERSION)
 PYTHON := $(shell command -v python3.14 2>/dev/null || command -v python3.13 2>/dev/null || command -v python3.12 2>/dev/null || command -v python3.11 2>/dev/null || command -v python3)
 TRIAGE_RUNTIME_E2E_BINARY ?= target/debug/vc-frame
 TRIAGE_RUNTIME_E2E_PROFILE ?= debug
-TRIAGE_RUNTIME_E2E_ARTIFACT_ROOT ?= /tmp/vc-frame-triage-runtime-e2e
+VC_FRAME_E2E_ARTIFACT_ROOT ?= /tmp/vc-frame-triage-runtime-e2e
+TRIAGE_RUNTIME_E2E_ARTIFACT_ROOT ?= $(VC_FRAME_E2E_ARTIFACT_ROOT)
 PYTHON_CACHE_ROOT ?= $(CURDIR)/target/python-cache
 RELEASE_KEYS_DIR ?= $(HOME)/.keys
 

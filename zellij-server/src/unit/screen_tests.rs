@@ -151,7 +151,6 @@ fn send_cli_action_to_server(
             default_shell.clone(),
             None,
             default_mode,
-            None,
         )
         .unwrap();
     }
@@ -8121,7 +8120,6 @@ pub fn copy_pane_scrollback_action_pipes_focused_pane_full_scrollback_to_copy_co
         None,
         None,
         InputMode::Normal,
-        None,
     )
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(300));

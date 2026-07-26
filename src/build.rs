@@ -3,8 +3,17 @@ fn main() {
     // produces a >1 MB stack frame in debug mode, overflowing the Windows
     // default 1 MB main-thread stack.  Increase it to 8 MB to match Linux.
     // Release builds optimize the frame down, so this is only needed for non-release profiles.
-    if cfg!(target_os = "windows") && std::env::var("PROFILE").unwrap_or_default() != "release" {
-        println!("cargo:rustc-link-arg=/STACK:8388608");
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    if target_os == "windows" && std::env::var("PROFILE").unwrap_or_default() != "release" {
+        match target_env.as_str() {
+            "msvc" => println!("cargo:rustc-link-arg=/STACK:8388608"),
+            "gnu" => println!("cargo:rustc-link-arg=-Wl,--stack,8388608"),
+            _ => println!(
+                "cargo:warning=unsupported Windows linker environment {target_env:?}; \
+                 debug stack size was not overridden"
+            ),
+        }
     }
 
     // Embed the application icon into the Windows executable.
