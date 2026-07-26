@@ -252,13 +252,13 @@ where
 {
     env_lookup("VIBECRAFTED_HOME")
         .map(PathBuf::from)
-        .map(|home| home.join("artifacts"))
-        .filter(|path| is_existing_dir(path))
+        .map(|home| Platform::normalize(&home).join("artifacts"))
         .or_else(|| {
-            env_lookup("HOME")
-                .map(PathBuf::from)
-                .map(|home| home.join(".vibecrafted").join("artifacts"))
-                .filter(|path| is_existing_dir(path))
+            env_lookup("HOME").map(PathBuf::from).map(|home| {
+                Platform::normalize(&home)
+                    .join(".vibecrafted")
+                    .join("artifacts")
+            })
         })
 }
 
@@ -307,6 +307,24 @@ mod tests {
 
         assert_eq!(resolved, artifacts_dir);
         let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn fallback_does_not_stat_a_host_path_before_the_wasi_remount() {
+        let resolved = resolve_configured_cwd(
+            PathBuf::from("${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/artifacts"),
+            false,
+            |name| match name {
+                "VIBECRAFTED_HOME" => Some("C:\\Users\\operator\\.vibecrafted".to_owned()),
+                "HOME" => None,
+                _ => None,
+            },
+        );
+
+        assert_eq!(
+            resolved,
+            PathBuf::from("C:/Users/operator/.vibecrafted/artifacts")
+        );
     }
 
     #[test]
