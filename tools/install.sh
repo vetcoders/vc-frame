@@ -6,7 +6,7 @@
 #     sh -c "$(curl -fsSL https://github.com/vetcoders/vc-frame/releases/latest/download/install.sh)"
 #
 # Env overrides:
-#   VCFRAME_VERSION        release version (default: 0.45.4)
+#   VCFRAME_VERSION        release version (default: 0.46.0)
 #   INSTALL_DIR            where the `vc-frame` binary is placed (default: ~/.local/bin)
 #   VCFRAME_BASE_URL       release base URL (default: GitHub Releases download root)
 #                          Per-version artifacts live under $BASE_URL/v$VERSION/.
@@ -42,7 +42,7 @@
 set -eu
 umask 022
 
-VERSION="${VCFRAME_VERSION:-0.45.4}"
+VERSION="${VCFRAME_VERSION:-0.46.0}"
 INSTALL_DIR="${INSTALL_DIR:-"$HOME/.local/bin"}"
 BASE_URL="${VCFRAME_BASE_URL:-https://github.com/vetcoders/vc-frame/releases/download}"
 REQUIRE_GPG="${VCFRAME_REQUIRE_GPG:-1}"

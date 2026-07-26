@@ -80,7 +80,7 @@ fn stop_zellij(channel: &mut ssh2::Channel) {
     // x86_64 (CI) and aarch64 (Apple Silicon local dev)
     channel
         .write_all(
-            b"ln -sf /usr/src/zellij/$(uname -m)-unknown-linux-musl/release/zellij /usr/src/zellij/zellij\n",
+            b"ln -sf /usr/src/zellij/$(uname -m)-unknown-linux-musl/release/vc-frame /usr/src/zellij/zellij\n",
         )
         .unwrap();
 }

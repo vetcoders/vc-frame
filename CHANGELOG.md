@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 * feat: allow tabs to have different sizes if clients aren't focused on the same one (https://github.com/zellij-org/zellij/pull/5133)
 * feat: PWA support for the web client (manifest + icons + iOS meta tags) so the page can be installed as a standalone app (https://github.com/zellij-org/zellij/pull/5184)
 
+## [0.46.0] - 2026-07-26
+* fix(triage): make finished-run transfer and settlement crash-durable, revision-safe, and explicit about exact tab/pane ownership
+* fix(runtime): fence resurrected session state against stale saves and preserve durable f/x/n outcome truth across restarts
+* release: require installer/version parity, committed WASM parity, real triage e2e, signed assets, attestations, and a cold install before publication
+
 ## [0.45.1] - 2026-05-13
 * fix: skip render pipeline work and reduce polling when all clients are detached
 * fix: use macOS FSEvents for file watching instead of the kqueue backend

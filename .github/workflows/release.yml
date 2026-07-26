@@ -20,6 +20,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       # Provenance comes first: everything downstream claims to describe an
       # exact commit, so refuse to start if the checkout does not match HEAD.
@@ -32,7 +34,12 @@ jobs:
       - name: Run release quality gates
         run: |
           make semgrep
+          make version-check
+          make release-contract-test
+          make plugins-parity
           make ci
+          cargo build --bin vc-frame
+          make triage-runtime-e2e
 
       # Keep repository code outside the only step that receives the private
       # signing subkey. The step below performs data-only checks and a canary.
@@ -103,7 +110,12 @@ jobs:
     outputs:
       upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
-      - name: Create draft release
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Create or refresh draft release
         id: create_release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -115,12 +127,40 @@ jobs:
             tag="${GITHUB_REF#refs/tags/}"
             name="vc-frame $tag"
           fi
-          response="$(gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
-            -f tag_name="$tag" \
-            -f name="$name" \
-            -f target_commitish="$GITHUB_SHA" \
-            -F draft=true \
-            -F prerelease=false)"
+          python3 tools/release_sync.py notes --output "$RUNNER_TEMP/release-notes.md"
+          body="$(cat "$RUNNER_TEMP/release-notes.md")"
+          if response="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" 2>/dev/null)"; then
+            release_id="$(printf '%s' "$response" | jq -r '.id')"
+            draft="$(printf '%s' "$response" | jq -r '.draft')"
+            test "$draft" = true || {
+              echo "release $tag already exists and is published; refusing replacement" >&2
+              exit 1
+            }
+            while IFS= read -r asset_id; do
+              test -z "$asset_id" || gh api --method DELETE \
+                "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
+            done < <(
+              gh api --paginate \
+                "repos/$GITHUB_REPOSITORY/releases/$release_id/assets" \
+                --jq '.[].id'
+            )
+            response="$(gh api --method PATCH \
+              "repos/$GITHUB_REPOSITORY/releases/$release_id" \
+              -f tag_name="$tag" \
+              -f name="$name" \
+              -f target_commitish="$GITHUB_SHA" \
+              -f body="$body" \
+              -F draft=true \
+              -F prerelease=false)"
+          else
+            response="$(gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
+              -f tag_name="$tag" \
+              -f name="$name" \
+              -f target_commitish="$GITHUB_SHA" \
+              -f body="$body" \
+              -F draft=true \
+              -F prerelease=false)"
+          fi
           upload_url="$(printf '%s' "$response" | jq -r '.upload_url')"
           test -n "$upload_url" && test "$upload_url" != null
           echo "upload_url=$upload_url" >> "$GITHUB_OUTPUT"
@@ -193,6 +233,8 @@ jobs:
 
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -470,6 +512,8 @@ jobs:
 
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -705,6 +749,8 @@ jobs:
 
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Generate manifest.json
         run: |
@@ -783,6 +829,11 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GPG_PUBLIC_KEY: ${{ secrets.GPG_PUBLIC_KEY }}
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
       - name: Verify the complete release asset contract
         run: |
           if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
@@ -943,6 +994,77 @@ jobs:
             gpg --homedir "$verify_home" --batch \
               --verify "$signature" "$subject"
           done
+
+      - name: Cold-install exact downloaded release
+        shell: bash
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            tag="candidate-${GITHUB_RUN_ID}"
+          else
+            tag="${GITHUB_REF#refs/tags/}"
+          fi
+          version="$(printf '%s' "$tag" | sed -n 's/^v//p')"
+          if [ -z "$version" ]; then
+            version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          fi
+          case "$(uname -m)" in
+            x86_64|amd64) target=x86_64-unknown-linux-musl ;;
+            aarch64|arm64) target=aarch64-unknown-linux-musl ;;
+            *) echo "unsupported cold-install host architecture" >&2; exit 1 ;;
+          esac
+          cold_root="$(mktemp -d)"
+          release_dir="$cold_root/v$version"
+          install_dir="$cold_root/install"
+          port_file="$cold_root/http.port"
+          mkdir -p "$release_dir" "$install_dir"
+          gh release download "$tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$release_dir" \
+            --pattern manifest.json \
+            --pattern vc-frame-signing.asc \
+            --pattern install.sh \
+            --pattern "vc-frame-$target.tar.gz" \
+            --pattern "vc-frame-$target.tar.gz.sha256" \
+            --pattern "vc-frame-$target.tar.gz.sig"
+          python3 - "$cold_root" "$port_file" <<'PY' &
+          import functools
+          import http.server
+          import pathlib
+          import sys
+
+          root, port_file = sys.argv[1:]
+          handler = functools.partial(
+              http.server.SimpleHTTPRequestHandler, directory=root
+          )
+          server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+          pathlib.Path(port_file).write_text(
+              str(server.server_address[1]), encoding="utf-8"
+          )
+          server.serve_forever()
+          PY
+          server_pid=$!
+          cleanup() {
+            kill "$server_pid" 2>/dev/null || true
+            rm -rf "$cold_root"
+          }
+          trap cleanup EXIT
+          for _ in $(seq 1 100); do
+            test -s "$port_file" && break
+            kill -0 "$server_pid" 2>/dev/null || {
+              echo "cold-install HTTP server exited" >&2
+              exit 1
+            }
+            sleep 0.1
+          done
+          test -s "$port_file"
+          base_url="http://127.0.0.1:$(cat "$port_file")"
+          env -u GH_TOKEN -u GITHUB_TOKEN \
+            VCFRAME_VERSION="$version" \
+            VCFRAME_BASE_URL="$base_url" \
+            INSTALL_DIR="$install_dir" \
+            VCFRAME_NO_PROFILE_UPDATE=1 \
+            sh "$release_dir/install.sh"
+          "$install_dir/vc-frame" --version | grep -F "$version"
 
       - name: Publish verified draft
         if: github.event_name == 'push'

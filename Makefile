@@ -17,7 +17,7 @@
         plugins-parity-self-test binary install run test test-server test-utils \
         test-client test-no-web check clippy precheck semgrep fmt clean doctor \
         doctor-quiet doctor-install-quiet help release-guard \
-        release-guard-self-test package install-test \
+        release-guard-self-test package install-test release-contract-test \
         triage-runtime-e2e-static triage-runtime-e2e \
         version version-show version-check version-bump version-patch bump-patch \
         changelog-close release-notes release-plan release-prepare release-check \
@@ -82,6 +82,7 @@ TRIAGE_RUNTIME_E2E_BINARY ?= target/debug/vc-frame
 TRIAGE_RUNTIME_E2E_PROFILE ?= debug
 TRIAGE_RUNTIME_E2E_ARTIFACT_ROOT ?= /tmp/vc-frame-triage-runtime-e2e
 PYTHON_CACHE_ROOT ?= $(CURDIR)/target/python-cache
+RELEASE_KEYS_DIR ?= $(HOME)/.keys
 
 # ──────────────────────────────────────────────────────────
 # Top-level targets
@@ -263,6 +264,10 @@ package:
 install-test:
 	@sh tools/install_test.sh
 
+## Static release contract — version/signing/workflow/cold-install invariants
+release-contract-test:
+	@PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tools/release_contract_test.py
+
 ## Release security gate — fail on unexplained Semgrep findings or baseline drift
 semgrep:
 	@command -v semgrep >/dev/null 2>&1 || { \
@@ -311,7 +316,7 @@ version-bump:
 ifeq ($(origin VERSION),command line)
 	@$(PYTHON) tools/release_sync.py bump "$(VERSION)"
 	@echo ""
-	@echo "Workspace version + path-dep pins synced in Cargo.toml."
+	@echo "Workspace version, path-dep pins, and installer default synced."
 	@echo "Cargo.lock is intentionally not touched by version-bump."
 	@echo "To sync lockfile offline:  cargo update --workspace --offline"
 	@echo "Or rely on 'make release-prepare' to sync it for you."
@@ -341,10 +346,10 @@ release-plan:
 	@echo "     make release-prepare TYPE={patch|minor|major|x.y.z}"
 	@echo "   (or VERSION=… — same thing)"
 	@echo "   → version-bump + changelog-close + notes preview + precheck"
-	@echo "3. Review diff, commit Cargo.toml + Cargo.lock + CHANGELOG.md."
+	@echo "3. Review diff, commit Cargo.toml + Cargo.lock + tools/install.sh + CHANGELOG.md."
 	@echo "4. make release-check"
-	@echo "5. make release-tag"
-	@echo "6. make release-push          # push annotated tag"
+	@echo "5. make release-tag           # requires pinned release GPG key"
+	@echo "6. make release-push          # push verified signed tag"
 	@echo "7. Wait for GitHub Actions / draft release from the tag."
 	@echo "8. Optional local archive: make package   # needs clean worktree"
 	@echo ""
@@ -377,17 +382,81 @@ endif
 
 release-check:
 	@$(PYTHON) tools/release_sync.py check --require-version-section
+	@$(MAKE) release-contract-test
+	@$(MAKE) plugins-parity
 	@$(MAKE) check
 	@echo "Release readiness passed."
 
 release-tag:
-	@if git rev-parse --verify "refs/tags/$(TAG)" >/dev/null 2>&1; then \
+	@set -eu; \
+	if git rev-parse --verify "refs/tags/$(TAG)" >/dev/null 2>&1; then \
 		echo "Tag $(TAG) already exists."; \
 		exit 1; \
-	fi
-	@git tag -a "$(TAG)" -m "Release $(TAG)"
-	@echo "Created annotated tag $(TAG)"
-	@echo "Push with: make release-push"
+	fi; \
+	command -v gpg >/dev/null 2>&1 || { \
+		echo "ERROR: gpg is required to create release tags" >&2; \
+		exit 1; \
+	}; \
+	pinned_fingerprint="$$(sed -n 's/^DEFAULT_GPG_FINGERPRINT="\([A-Fa-f0-9]*\)"/\1/p' tools/install.sh)"; \
+	fingerprint="$$(printf '%s' "$$pinned_fingerprint" | tr '[:lower:]' '[:upper:]')"; \
+	test -n "$$fingerprint" || { \
+		echo "ERROR: tools/install.sh has no pinned DEFAULT_GPG_FINGERPRINT" >&2; \
+		echo "Provision the VetCoders release key, pin its full fingerprint, then retry." >&2; \
+		exit 1; \
+	}; \
+	case "$$fingerprint" in *[!A-F0-9]*) \
+		echo "ERROR: pinned release fingerprint is not hexadecimal" >&2; exit 1 ;; \
+	esac; \
+	case "$${#fingerprint}" in 40|64) ;; *) \
+		echo "ERROR: pinned release fingerprint must be a full 40- or 64-hex fingerprint" >&2; exit 1 ;; \
+	esac; \
+	gpg_home="$${VCFRAME_GPG_HOMEDIR:-}"; \
+	if [ -z "$$gpg_home" ]; then \
+		for candidate in \
+			"$(RELEASE_KEYS_DIR)/vc-frame-gnupg" \
+			"$(RELEASE_KEYS_DIR)/vetcoders-gnupg"; do \
+			if [ -d "$$candidate" ]; then \
+				test -z "$$gpg_home" || { \
+					echo "ERROR: multiple release GPG homes found under $(RELEASE_KEYS_DIR)" >&2; \
+					exit 1; \
+				}; \
+				gpg_home="$$candidate"; \
+			fi; \
+		done; \
+	fi; \
+	if [ -n "$$gpg_home" ]; then \
+		test -d "$$gpg_home" || { echo "ERROR: VCFRAME_GPG_HOMEDIR is not a directory" >&2; exit 1; }; \
+		key_listing="$$(GNUPGHOME="$$gpg_home" gpg --batch --with-colons --list-secret-keys "$$fingerprint" 2>/dev/null || true)"; \
+	else \
+		key_listing="$$(gpg --batch --with-colons --list-secret-keys "$$fingerprint" 2>/dev/null || true)"; \
+	fi; \
+	actual_fingerprint="$$(printf '%s\n' "$$key_listing" | awk -F: '$$1 == "sec" {want=1; next} want && $$1 == "fpr" {print toupper($$10); exit}')"; \
+	capabilities="$$(printf '%s\n' "$$key_listing" | awk -F: '$$1 == "sec" || $$1 == "ssb" {caps = caps $$12} END {print caps}')"; \
+	test "$$actual_fingerprint" = "$$fingerprint" || { \
+		echo "ERROR: secret key for the pinned release fingerprint is unavailable" >&2; \
+		echo "Checked the selected GPG home and $(RELEASE_KEYS_DIR)/{vc-frame,vetcoders}-gnupg." >&2; \
+		exit 1; \
+	}; \
+	case "$$capabilities" in *s*|*S*) ;; *) \
+		echo "ERROR: pinned secret key is not signing-capable" >&2; exit 1 ;; \
+	esac; \
+	if [ -n "$$gpg_home" ]; then \
+		GNUPGHOME="$$gpg_home" git tag -s -u "$$fingerprint" "$(TAG)" -m "Release $(TAG)"; \
+		GNUPGHOME="$$gpg_home" git verify-tag "$(TAG)" >/dev/null 2>&1 || { \
+			git tag -d "$(TAG)" >/dev/null; \
+			echo "ERROR: signed tag verification failed" >&2; \
+			exit 1; \
+		}; \
+	else \
+		git tag -s -u "$$fingerprint" "$(TAG)" -m "Release $(TAG)"; \
+		git verify-tag "$(TAG)" >/dev/null 2>&1 || { \
+			git tag -d "$(TAG)" >/dev/null; \
+			echo "ERROR: signed tag verification failed" >&2; \
+			exit 1; \
+		}; \
+	fi; \
+	echo "Created and verified signed tag $(TAG)"; \
+	echo "Push with: make release-push"
 
 release-push:
 	git push origin "$(TAG)"
@@ -466,12 +535,12 @@ help:
 	@printf "\n  $(C_YELLOW)VERSION / RELEASE$(C_RESET)\n"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "version" "Bare = check; TYPE=|VERSION= patch|minor|major|x.y.z = bump"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "version-show" "Print package version + tag state"
-	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "version-check" "Validate Cargo.toml pins + CHANGELOG basics"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "version-check" "Validate Cargo pins + installer version + CHANGELOG basics"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "version-bump" "Bump VERSION={patch|minor|major|x.y.z} (TYPE= alias ok)"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "release-plan" "Print operator release flow"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "release-prepare" "Bump + changelog-close + notes + precheck (TYPE= required)"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "release-check" "Strict readiness before tag"
-	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "release-tag" "Annotated tag vX.Y.Z from workspace version"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "release-tag" "Create + verify GPG-signed tag vX.Y.Z"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "release-push" "Push release tag to origin"
 	@printf "\n  $(C_YELLOW)RELEASE PROVENANCE$(C_RESET)\n"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "release-guard" "Refuse to package a dirty worktree"

@@ -5,6 +5,7 @@ Single source of truth: workspace.package.version in the root Cargo.toml.
 
 Also keeps path-dependency pins in sync:
   zellij-client / zellij-server / zellij-utils = { path = "...", version = "X.Y.Z" }
+and the default version advertised and installed by tools/install.sh.
 
 Usage:
     python3 tools/release_sync.py bump patch
@@ -26,6 +27,7 @@ import tomllib
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CARGO_TOML = ROOT / "Cargo.toml"
 CHANGELOG = ROOT / "CHANGELOG.md"
+INSTALLER = ROOT / "tools" / "install.sh"
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 VERSION_HEADER_RE = re.compile(
     r"^## \[(?P<version>v?\d+\.\d+\.\d+)](?: - .+)?$", re.MULTILINE
@@ -39,6 +41,15 @@ PATH_DEP_VERSION_RE = re.compile(
 )
 WORKSPACE_PACKAGE_VERSION_RE = re.compile(
     r'(^\[workspace\.package\]\s*(?:\n(?!\[)[^\n]*)*\nversion\s*=\s*")[^"]*(")',
+    re.MULTILINE,
+)
+INSTALLER_DEFAULT_RE = re.compile(
+    r'^(?P<pre>VERSION="\$\{VCFRAME_VERSION:-)[^}]*(?P<post>\}")$',
+    re.MULTILINE,
+)
+INSTALLER_COMMENT_RE = re.compile(
+    r"^(?P<pre>#\s+VCFRAME_VERSION\s+release version \(default: )"
+    r"\d+\.\d+\.\d+(?P<post>\))$",
     re.MULTILINE,
 )
 
@@ -92,19 +103,41 @@ def transform_root_cargo(text: str, version: str) -> str:
         )
 
     def _path_dep(m: re.Match[str]) -> str:
-        return f'{m.group("pre")}{version}{m.group("post")}'
+        return f"{m.group('pre')}{version}{m.group('post')}"
 
     return PATH_DEP_VERSION_RE.sub(_path_dep, new_text)
 
 
+def transform_installer(text: str, version: str) -> str:
+    def _replace(m: re.Match[str]) -> str:
+        return f"{m.group('pre')}{version}{m.group('post')}"
+
+    updated, default_count = INSTALLER_DEFAULT_RE.subn(_replace, text, count=1)
+    if default_count != 1:
+        raise SystemExit(
+            "Could not find VERSION=${VCFRAME_VERSION:-...} in tools/install.sh"
+        )
+    updated, comment_count = INSTALLER_COMMENT_RE.subn(_replace, updated, count=1)
+    if comment_count != 1:
+        raise SystemExit(
+            "Could not find the VCFRAME_VERSION default comment in tools/install.sh"
+        )
+    return updated
+
+
 def sync_versions(version: str, *, write: bool) -> list[str]:
     changed: list[str] = []
-    original = CARGO_TOML.read_text(encoding="utf-8")
-    updated = transform_root_cargo(original, version)
-    if original != updated:
-        changed.append(root_relative(CARGO_TOML))
-        if write:
-            CARGO_TOML.write_text(updated, encoding="utf-8")
+    surfaces = (
+        (CARGO_TOML, transform_root_cargo),
+        (INSTALLER, transform_installer),
+    )
+    for path, transform in surfaces:
+        original = path.read_text(encoding="utf-8")
+        updated = transform(original, version)
+        if original != updated:
+            changed.append(root_relative(path))
+            if write:
+                path.write_text(updated, encoding="utf-8")
     return changed
 
 
@@ -160,14 +193,11 @@ def command_check(args: argparse.Namespace) -> int:
             args.require_version_section
             and version_header_regex(expected).search(changelog_text) is None
         ):
-            errors.append(
-                f"CHANGELOG.md is missing dedicated section for {expected}"
-            )
+            errors.append(f"CHANGELOG.md is missing dedicated section for {expected}")
 
     if changed:
         errors.append(
-            "Release surfaces are out of sync for "
-            f"{expected}: {', '.join(changed)}"
+            f"Release surfaces are out of sync for {expected}: {', '.join(changed)}"
         )
 
     if errors:
