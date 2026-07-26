@@ -460,11 +460,50 @@ def operator_guard_paths() -> list[pathlib.Path]:
     return sorted(paths)
 
 
+def server_argument_paths(command_line: str) -> list[pathlib.Path]:
+    """Extract exact ``--server`` arguments from one process command line."""
+    try:
+        arguments = shlex.split(command_line)
+    except ValueError:
+        return []
+    paths: list[pathlib.Path] = []
+    for index, argument in enumerate(arguments):
+        if argument == "--server" and index + 1 < len(arguments):
+            paths.append(pathlib.Path(arguments[index + 1]))
+        elif argument.startswith("--server="):
+            paths.append(pathlib.Path(argument.partition("=")[2]))
+    return paths
+
+
 def operator_guard_volatile_paths() -> set[pathlib.Path]:
-    """Known append-only operator logs whose inode, not byte count, is guarded."""
+    """Operator-owned heartbeat files whose identity, not bytes, is guarded."""
     temporary_value = os.environ.get("TMPDIR", "/tmp")
-    runtime_root = pathlib.Path(temporary_value) / f"vc-frame-{os.getuid()}"
-    return {runtime_root / "vc-frame-log" / "zellij.log"}
+    runtime_root = (pathlib.Path(temporary_value) / f"vc-frame-{os.getuid()}").resolve()
+    volatile = {runtime_root / "vc-frame-log" / "zellij.log"}
+
+    home_value = os.environ.get("HOME")
+    if not home_value:
+        return volatile
+    metadata_root = (
+        pathlib.Path(home_value).expanduser()
+        / "Library"
+        / "Caches"
+        / "io.vetcoders.vc-frame"
+        / SOCKET_CONTRACT_DIRECTORY
+        / "session_info"
+    )
+    # Any pre-existing session can be started or resurrected concurrently while
+    # this long fixture runs, at which point vc-frame rewrites its metadata on a
+    # heartbeat. Guard the exact pre-existing inode instead of attributing those
+    # bytes to the fixture. New sessions, deleted files, replaced inodes, and
+    # every other operator-state mutation still fail the guard.
+    if metadata_root.is_dir():
+        volatile.update(
+            path
+            for path in metadata_root.glob("*/session-metadata.kdl")
+            if path.is_file()
+        )
+    return volatile
 
 
 def socket_path_budget(
@@ -643,18 +682,9 @@ def server_processes_from_ps(
         pid_text, separator, command_line = stripped.partition(" ")
         if not separator or not pid_text.isdigit():
             continue
-        try:
-            arguments = shlex.split(command_line)
-        except ValueError:
-            continue
-        server_paths: list[str] = []
-        for index, argument in enumerate(arguments):
-            if argument == "--server" and index + 1 < len(arguments):
-                server_paths.append(arguments[index + 1])
-            elif argument.startswith("--server="):
-                server_paths.append(argument.partition("=")[2])
         if any(
-            pathlib.Path(path).resolve().is_relative_to(root) for path in server_paths
+            path.resolve().is_relative_to(root)
+            for path in server_argument_paths(command_line)
         ):
             processes.append({"pid": int(pid_text), "command": command_line.strip()})
     return processes
@@ -1489,7 +1519,7 @@ def process_state(pid: int) -> str | None:
 
 
 def wait_for_process_stop(
-    pid: int,
+    process: subprocess.Popen[bytes],
     *,
     timeout: float = 5,
     reassert_stop: bool = False,
@@ -1497,27 +1527,30 @@ def wait_for_process_stop(
     deadline = time.monotonic() + timeout
     last_state: str | None = None
     while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise AssertionError(
+                f"killpoint process {process.pid} exited before SIGSTOP"
+            )
         if reassert_stop:
             try:
-                process_group = os.getpgid(pid)
-                os.killpg(process_group, signal.SIGSTOP)
-                # Reassert on the exact leader as well: a just-delivered
-                # SIGCONT can otherwise win a very short CONT/STOP pulse on
-                # macOS after the wrapper execs the target binary.
-                os.kill(pid, signal.SIGSTOP)
+                # Signal only the still-owned, unreaped Popen child. A process
+                # group keyed by a dead PID can later identify unrelated work.
+                process.send_signal(signal.SIGSTOP)
             except ProcessLookupError as error:
                 raise AssertionError(
-                    f"killpoint process {pid} exited before SIGSTOP"
+                    f"killpoint process {process.pid} exited before SIGSTOP"
                 ) from error
-        state = process_state(pid)
+        state = process_state(process.pid)
         if state is None:
-            raise AssertionError(f"killpoint process {pid} exited before SIGSTOP")
+            raise AssertionError(
+                f"killpoint process {process.pid} exited before SIGSTOP"
+            )
         last_state = state
         if "T" in state:
             return
         time.sleep(0.001)
     raise AssertionError(
-        f"killpoint process {pid} did not enter stopped state "
+        f"killpoint process {process.pid} did not enter stopped state "
         f"(last state: {last_state!r})"
     )
 
@@ -1557,16 +1590,18 @@ def interrupt_process_at_state(
             start_new_session=True,
         )
         try:
-            wait_for_process_stop(process.pid)
+            wait_for_process_stop(process)
             for slices in range(1, max_slices + 1):
-                os.killpg(process.pid, signal.SIGCONT)
+                process.send_signal(signal.SIGCONT)
                 time.sleep(slice_seconds)
                 if process.poll() is not None:
                     break
-                wait_for_process_stop(process.pid, reassert_stop=True)
+                wait_for_process_stop(process, reassert_stop=True)
                 observed = observe()
                 if observed is not None:
-                    os.killpg(process.pid, signal.SIGKILL)
+                    if process.poll() is not None:
+                        break
+                    process.kill()
                     break
             else:
                 raise AssertionError(
@@ -1581,7 +1616,7 @@ def interrupt_process_at_state(
         finally:
             if process.poll() is None:
                 try:
-                    os.killpg(process.pid, signal.SIGKILL)
+                    process.kill()
                 except ProcessLookupError:
                     pass
                 process.wait(timeout=5)

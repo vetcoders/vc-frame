@@ -305,6 +305,42 @@ class EvidenceAndCleanupTests(unittest.TestCase):
             self.assertNotIn("sha256", log_entry)
             self.assertNotIn("bytes", log_entry)
 
+    def test_operator_guard_marks_preexisting_session_metadata_volatile(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            home = root / "home"
+            runtime_root = root / "tmp" / f"vc-frame-{os.getuid()}"
+            live_metadata = (
+                home
+                / "Library"
+                / "Caches"
+                / "io.vetcoders.vc-frame"
+                / MODULE.SOCKET_CONTRACT_DIRECTORY
+                / "session_info"
+                / "live session"
+                / "session-metadata.kdl"
+            )
+            stale_metadata = live_metadata.parents[1] / "stale" / live_metadata.name
+            live_metadata.parent.mkdir(parents=True)
+            stale_metadata.parent.mkdir(parents=True)
+            live_metadata.write_text("heartbeat=1", encoding="utf-8")
+            stale_metadata.write_text("stale", encoding="utf-8")
+            with mock.patch.dict(
+                os.environ,
+                {"HOME": str(home), "TMPDIR": str(root / "tmp")},
+                clear=False,
+            ):
+                volatile = MODULE.operator_guard_volatile_paths()
+
+            self.assertIn(live_metadata, volatile)
+            self.assertIn(stale_metadata, volatile)
+            self.assertIn(
+                runtime_root.resolve() / "vc-frame-log" / "zellij.log",
+                volatile,
+            )
+
     def test_operator_guard_diff_reports_only_changed_path_summary(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
@@ -405,7 +441,6 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                 MODULE.viewer_confirmation_killpoint_state(control_plane, "run-1")
             )
 
-    @unittest.skipUnless(hasattr(os, "killpg"), "requires Unix process groups")
     def test_controlled_interruption_kills_only_after_observed_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
@@ -418,18 +453,46 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                 contents = marker.read_text(encoding="utf-8")
                 return {"marker": contents} if contents == "ready" else None
 
-            result = MODULE.interrupt_process_at_state(
-                pathlib.Path("/bin/sh"),
-                dict(os.environ),
-                ["-c", script],
-                scenario="unit-killpoint",
-                artifact_root=root,
-                observe=observe,
-                slice_seconds=0.001,
-                max_slices=1_000,
-            )
+            with mock.patch.object(
+                MODULE.os,
+                "killpg",
+                side_effect=AssertionError("must not signal a process group"),
+            ):
+                result = MODULE.interrupt_process_at_state(
+                    pathlib.Path("/bin/sh"),
+                    dict(os.environ),
+                    ["-c", script],
+                    scenario="unit-killpoint",
+                    artifact_root=root,
+                    observe=observe,
+                    slice_seconds=0.001,
+                    max_slices=1_000,
+                )
             self.assertEqual(result.returncode, -signal.SIGKILL)
             self.assertEqual(result.observed_state, {"marker": "ready"})
+
+    def test_early_exit_never_signals_process_group(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            with mock.patch.object(
+                MODULE.os,
+                "killpg",
+                side_effect=AssertionError("must not signal a process group"),
+            ):
+                with self.assertRaisesRegex(
+                    AssertionError,
+                    "exited before (?:SIGSTOP|its killpoint)",
+                ):
+                    MODULE.interrupt_process_at_state(
+                        pathlib.Path("/usr/bin/true"),
+                        dict(os.environ),
+                        [],
+                        scenario="unit-early-exit",
+                        artifact_root=root,
+                        observe=lambda: None,
+                        slice_seconds=0.001,
+                        max_slices=10,
+                    )
 
     def test_process_inventory_matches_exact_server_path_boundary(self) -> None:
         root = pathlib.Path("/tmp/vc-frame-proof/sockets")
