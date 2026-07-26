@@ -69,6 +69,10 @@ VetCoders trust root. GitHub OIDC gives each CI build a short-lived identity
 bound to this repository and workflow, with no long-lived attestation token.
 Both are required by the release workflow.
 
+The beginner-oriented organization ceremony, backup, rotation, protected-CI,
+and clean-machine verification procedure lives in
+[`VETCODERS_GPG_RUNBOOK.md`](VETCODERS_GPG_RUNBOOK.md).
+
 The operator vault's `vibecrafted-signing.key/.pub` pair is RSA/PEM, not GPG,
 so it cannot be dropped into this contract without changing the signature
 format and installer. Loctree's release path can use a GPG identity already in
