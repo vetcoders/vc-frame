@@ -83,7 +83,7 @@ jobs:
       - name: Install NASM
         uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1
 
-      - name: Configure MSYS Perl for vendored OpenSSL
+      - name: Configure Windows tools for vendored OpenSSL
         shell: pwsh
         run: |
           $gitPerl = Join-Path $env:ProgramFiles 'Git\usr\bin'
@@ -101,13 +101,22 @@ jobs:
             (Join-Path $strawberryLib 'ExtUtils')
             (Join-Path $strawberryLib 'Pod')
           )
-          $requiredPaths = @($simpleModule) + $moduleRoots
+          $gmake = 'C:\Strawberry\c\bin\gmake.exe'
+          $requiredPaths = @($simpleModule, $gmake) + $moduleRoots
           foreach ($requiredPath in $requiredPaths) {
             if (-not (Test-Path $requiredPath)) {
-              throw "Required pure-Perl module source is missing at $requiredPath"
+              throw "Required OpenSSL build tool is missing at $requiredPath"
             }
           }
           $perlLib = Join-Path $env:RUNNER_TEMP 'vc-frame-perl-lib'
+          $buildTools = Join-Path $env:RUNNER_TEMP 'vc-frame-build-tools'
+          New-Item -ItemType Directory -Force -Path $buildTools | Out-Null
+          $make = Join-Path $buildTools 'make.exe'
+          Copy-Item -LiteralPath $gmake -Destination $make -Force
+          $makeVersion = @(& $make --version)
+          if ($LASTEXITCODE -ne 0 -or $makeVersion[0] -notmatch '^GNU Make ') {
+            throw "GNU make preflight failed at $make"
+          }
           $moduleFiles = @(Get-Item -LiteralPath $simpleModule)
           foreach ($moduleRoot in $moduleRoots) {
             $moduleFiles += @(
@@ -133,6 +142,7 @@ jobs:
             throw "MSYS Perl cannot load the OpenSSL configure modules"
           }
           $gitPerl | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $buildTools | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "OPENSSL_SRC_PERL=$perl" |
             Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "PERL5LIB=$msysPerlLib" |
