@@ -148,6 +148,17 @@ const SESSION_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 const KILL_SESSION_ACK_TIMEOUT: Duration = Duration::from_secs(6);
 
 #[cfg(unix)]
+async fn await_kill_session_ack(
+    path: &std::path::Path,
+) -> Result<io::Result<()>, tokio::time::error::Elapsed> {
+    tokio::time::timeout(
+        KILL_SESSION_ACK_TIMEOUT,
+        crate::ipc::async_send_kill_and_await(path),
+    )
+    .await
+}
+
+#[cfg(unix)]
 fn probe_socket_stream(stream: interprocess::local_socket::Stream, timeout: Duration) -> bool {
     use interprocess::local_socket::traits::Stream as _;
 
@@ -268,6 +279,24 @@ mod session_probe_timeout_tests {
         );
         server.join().expect("silent server thread");
     }
+
+    #[test]
+    fn kill_ack_timer_is_entered_inside_its_runtime() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let missing_socket = dir.path().join("missing-session.sock");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .expect("shutdown runtime");
+
+        let result = runtime.block_on(await_kill_session_ack(&missing_socket));
+
+        assert!(
+            matches!(result, Ok(Err(_))),
+            "a missing socket should return its transport error without panicking outside Tokio"
+        );
+    }
 }
 
 pub fn print_sessions(
@@ -359,15 +388,17 @@ pub fn kill_session(name: &str) {
     {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_io()
+            .enable_time()
             .build()
             .unwrap_or_else(|error| {
                 eprintln!("Cannot create shutdown runtime: {error}");
                 process::exit(1);
             });
-        match runtime.block_on(tokio::time::timeout(
-            KILL_SESSION_ACK_TIMEOUT,
-            crate::ipc::async_send_kill_and_await(path),
-        )) {
+        // Poll the async helper from inside the runtime. Constructing
+        // `tokio::time::timeout` before `block_on` panics because no reactor is
+        // entered yet.
+        let shutdown_result = runtime.block_on(await_kill_session_ack(path));
+        match shutdown_result {
             Ok(Ok(())) => {},
             Ok(Err(error)) => {
                 eprintln!("Failed to kill session {name}: {error}");
