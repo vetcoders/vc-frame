@@ -184,6 +184,10 @@ pub enum Action {
         include_scrollback: bool,
         pane_id: Option<PaneId>,
         ansi: bool,
+        expected_tab_id: Option<u64>,
+        expected_tab_name: Option<String>,
+        expected_session_incarnation: Option<String>,
+        expected_tab_instance_id: Option<String>,
     },
     /// Copy the focused pane with full scrollback to the configured clipboard target.
     CopyPaneScrollback,
@@ -499,6 +503,7 @@ pub enum Action {
         id: u64,
         expected_name: String,
         expected_session_incarnation: String,
+        expected_tab_instance_id: String,
     },
     RenameTabById {
         id: u64,
@@ -857,7 +862,37 @@ impl Action {
                 full,
                 pane_id,
                 ansi,
-            } => match pane_id {
+                expected_tab_id,
+                expected_tab_name,
+                expected_session_incarnation,
+                expected_tab_instance_id,
+            } => {
+                let typed_selector = match (
+                    expected_tab_id,
+                    expected_tab_name,
+                    expected_session_incarnation,
+                    expected_tab_instance_id,
+                ) {
+                    (None, None, None, None) => (None, None, None, None),
+                    (
+                        Some(tab_id),
+                        Some(tab_name),
+                        Some(session_incarnation),
+                        Some(tab_instance_id),
+                    ) if pane_id.is_some() && path.is_some() => (
+                        Some(tab_id as u64),
+                        Some(tab_name),
+                        Some(session_incarnation),
+                        Some(tab_instance_id),
+                    ),
+                    _ => {
+                        return Err(
+                            "typed dump requires --path, --pane-id, --expected-tab-id, --expected-tab-name, --expected-session-incarnation and --expected-tab-instance-id together"
+                                .to_owned(),
+                        );
+                    },
+                };
+                match pane_id {
                 Some(pane_id_str) => {
                     let parsed_pane_id = PaneId::from_str(&pane_id_str);
                     match parsed_pane_id {
@@ -866,6 +901,10 @@ impl Action {
                             include_scrollback: full,
                             pane_id: Some(parsed_pane_id),
                             ansi,
+                            expected_tab_id: typed_selector.0,
+                            expected_tab_name: typed_selector.1,
+                            expected_session_incarnation: typed_selector.2,
+                            expected_tab_instance_id: typed_selector.3,
                         }]),
                         Err(_e) => Err(format!(
                             "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
@@ -878,7 +917,12 @@ impl Action {
                     include_scrollback: full,
                     pane_id: None,
                     ansi,
+                    expected_tab_id: typed_selector.0,
+                    expected_tab_name: typed_selector.1,
+                    expected_session_incarnation: typed_selector.2,
+                    expected_tab_instance_id: typed_selector.3,
                 }]),
+                }
             },
             CliAction::DumpLayout => Ok(vec![Action::DumpLayout]),
             CliAction::SaveSession => Ok(vec![Action::SaveSession]),
@@ -1335,18 +1379,30 @@ impl Action {
                 tab_id,
                 expected_name,
                 expected_session_incarnation,
-            } => match (tab_id, expected_name, expected_session_incarnation) {
-                (Some(id), Some(expected_name), Some(expected_session_incarnation)) => {
+                expected_tab_instance_id,
+            } => match (
+                tab_id,
+                expected_name,
+                expected_session_incarnation,
+                expected_tab_instance_id,
+            ) {
+                (
+                    Some(id),
+                    Some(expected_name),
+                    Some(expected_session_incarnation),
+                    Some(expected_tab_instance_id),
+                ) => {
                     Ok(vec![Action::CloseTabByIdIfName {
-                    id: id as u64,
-                    expected_name,
+                        id: id as u64,
+                        expected_name,
                         expected_session_incarnation,
+                        expected_tab_instance_id,
                     }])
                 },
-                (Some(id), None, None) => Ok(vec![Action::CloseTabById { id: id as u64 }]),
-                (None, None, None) => Ok(vec![Action::CloseTab]),
+                (Some(id), None, None, None) => Ok(vec![Action::CloseTabById { id: id as u64 }]),
+                (None, None, None, None) => Ok(vec![Action::CloseTab]),
                 _ => Err(
-                    "--expected-name and --expected-session-incarnation require each other and --tab-id when closing a tab"
+                    "--expected-name, --expected-session-incarnation and --expected-tab-instance-id require each other and --tab-id when closing a tab"
                         .to_owned(),
                 ),
             },
@@ -3038,6 +3094,7 @@ mod tests {
             tab_id: Some(5),
             expected_name: None,
             expected_session_incarnation: None,
+            expected_tab_instance_id: None,
         };
         let result = Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None);
         assert!(result.is_ok());
@@ -3057,6 +3114,7 @@ mod tests {
             tab_id: None,
             expected_name: None,
             expected_session_incarnation: None,
+            expected_tab_instance_id: None,
         };
         let result = Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None);
         assert!(result.is_ok());
@@ -3071,6 +3129,7 @@ mod tests {
             tab_id: Some(5),
             expected_name: Some("work-123".to_owned()),
             expected_session_incarnation: Some("server-abc".to_owned()),
+            expected_tab_instance_id: Some("11111111111111111111111111111111".to_owned()),
         };
         let actions =
             Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None).unwrap();
@@ -3081,6 +3140,7 @@ mod tests {
                 id: 5,
                 expected_name: "work-123".to_owned(),
                 expected_session_incarnation: "server-abc".to_owned(),
+                expected_tab_instance_id: "11111111111111111111111111111111".to_owned(),
             }]
         );
 
@@ -3088,6 +3148,7 @@ mod tests {
             tab_id: None,
             expected_name: Some("work-123".to_owned()),
             expected_session_incarnation: Some("server-abc".to_owned()),
+            expected_tab_instance_id: Some("11111111111111111111111111111111".to_owned()),
         };
         assert!(
             Action::actions_from_cli(invalid, Box::new(|| PathBuf::from("/tmp")), None).is_err()
@@ -3373,6 +3434,10 @@ mod tests {
             full: true,
             pane_id: None,
             ansi: true,
+            expected_tab_id: None,
+            expected_tab_name: None,
+            expected_session_incarnation: None,
+            expected_tab_instance_id: None,
         };
         let result = Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None);
         assert!(result.is_ok());
@@ -3398,6 +3463,10 @@ mod tests {
             full: false,
             pane_id: Some("terminal_5".to_string()),
             ansi: true,
+            expected_tab_id: None,
+            expected_tab_name: None,
+            expected_session_incarnation: None,
+            expected_tab_instance_id: None,
         };
         let result = Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None);
         assert!(result.is_ok());

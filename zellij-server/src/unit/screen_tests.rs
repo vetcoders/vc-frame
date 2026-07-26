@@ -3008,6 +3008,10 @@ pub fn send_cli_dump_screen_action() {
         full: true,
         pane_id: None,
         ansi: false,
+        expected_tab_id: None,
+        expected_tab_name: None,
+        expected_session_incarnation: None,
+        expected_tab_instance_id: None,
     };
     let _ = mock_screen.to_screen.send(ScreenInstruction::PtyBytes(
         0,
@@ -4405,6 +4409,7 @@ pub fn send_cli_close_tab_action() {
         tab_id: None,
         expected_name: None,
         expected_session_incarnation: None,
+        expected_tab_instance_id: None,
     };
     send_cli_action_to_server(&session_metadata, close_tab, client_id);
     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -5680,8 +5685,9 @@ pub fn close_tab_by_id_if_name_fails_closed_on_identity_mismatch() {
     new_tab(&mut screen, 2, 1);
     screen.get_tab_by_id_mut(1).unwrap().name = "work-123".to_owned();
     let incarnation = screen.session_incarnation.clone();
+    let tab_instance_id = screen.get_tab_by_id(1).unwrap().instance_id.clone();
 
-    let mismatch = screen.close_tab_by_id_if_name(1, "work-456", &incarnation);
+    let mismatch = screen.close_tab_by_id_if_name(1, "work-456", &incarnation, &tab_instance_id);
     assert!(mismatch.is_err());
     assert!(
         screen.get_tab_by_id(1).is_some(),
@@ -5693,19 +5699,29 @@ pub fn close_tab_by_id_if_name_fails_closed_on_identity_mismatch() {
     );
 
     let incarnation_mismatch =
-        screen.close_tab_by_id_if_name(1, "work-123", "another-server-lifetime");
+        screen.close_tab_by_id_if_name(1, "work-123", "another-server-lifetime", &tab_instance_id);
     assert!(incarnation_mismatch.is_err());
     assert!(screen.get_tab_by_id(1).is_some());
 
+    let successor_instance_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned();
+    screen.get_tab_by_id_mut(1).unwrap().instance_id = successor_instance_id.clone();
+    let aba_mismatch =
+        screen.close_tab_by_id_if_name(1, "work-123", &incarnation, &tab_instance_id);
+    assert!(aba_mismatch.is_err());
+    assert!(
+        screen.get_tab_by_id(1).is_some(),
+        "a foreign successor reusing the tab ID and name must survive"
+    );
+
     screen
-        .close_tab_by_id_if_name(1, "work-123", &incarnation)
+        .close_tab_by_id_if_name(1, "work-123", &incarnation, &successor_instance_id)
         .expect("matching tab identity should close");
     assert!(screen.get_tab_by_id(1).is_none());
     assert!(screen.get_tab_by_id(0).is_some());
 
     assert!(
         screen
-            .close_tab_by_id_if_name(99, "work-123", &incarnation)
+            .close_tab_by_id_if_name(99, "work-123", &incarnation, &successor_instance_id)
             .is_err()
     );
 }
@@ -7477,6 +7493,7 @@ pub fn send_cli_close_tab_with_tab_id() {
         tab_id: Some(1),
         expected_name: None,
         expected_session_incarnation: None,
+        expected_tab_instance_id: None,
     };
     send_cli_action_to_server(&session_metadata, cli_action, client_id);
     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -7721,6 +7738,10 @@ pub fn send_cli_dump_screen_action_with_ansi() {
         full: true,
         pane_id: None,
         ansi: true,
+        expected_tab_id: None,
+        expected_tab_name: None,
+        expected_session_incarnation: None,
+        expected_tab_instance_id: None,
     };
     let _ = mock_screen.to_screen.send(ScreenInstruction::PtyBytes(
         0,
@@ -7764,6 +7785,10 @@ pub fn send_cli_dump_screen_action_without_ansi_strips_codes() {
         full: true,
         pane_id: None,
         ansi: false,
+        expected_tab_id: None,
+        expected_tab_name: None,
+        expected_session_incarnation: None,
+        expected_tab_instance_id: None,
     };
     let _ = mock_screen.to_screen.send(ScreenInstruction::PtyBytes(
         0,
@@ -8922,6 +8947,10 @@ pub fn pty_bytes_and_hold_pane_buffered_before_new_pane() {
         full: true,
         pane_id: None,
         ansi: false,
+        expected_tab_id: None,
+        expected_tab_name: None,
+        expected_session_incarnation: None,
+        expected_tab_instance_id: None,
     };
     send_cli_action_to_server(&session_metadata, cli_action, client_id);
     std::thread::sleep(std::time::Duration::from_millis(100));

@@ -1731,7 +1731,8 @@ tail -f /tmp/my-live-logfile | vc-frame pipe --name logs --plugin https://exampl
         pane_id: Option<String>,
 
         /// Real runtime transcript to use only when terminal scrollback cannot
-        /// be captured. The file must already exist and be non-empty.
+        /// be captured. Requires an adjacent `<path>.manifest.json` binding the
+        /// file digest, byte count, run id and ownership root.
         #[clap(long, value_parser)]
         runtime_transcript: Option<PathBuf>,
 
@@ -1845,6 +1846,22 @@ pub enum CliAction {
         /// Preserve ANSI styling in the dump output
         #[clap(short, long, value_parser, default_value("false"), takes_value(false))]
         ansi: bool,
+
+        /// Internal safety selector: dump only from this stable tab ID
+        #[clap(long, value_parser)]
+        expected_tab_id: Option<usize>,
+
+        /// Internal safety selector: dump only while the tab name still matches
+        #[clap(long, value_parser)]
+        expected_tab_name: Option<String>,
+
+        /// Internal safety selector: dump only from this server incarnation
+        #[clap(long, value_parser)]
+        expected_session_incarnation: Option<String>,
+
+        /// Internal safety selector: dump only from this durable tab incarnation
+        #[clap(long, value_parser)]
+        expected_tab_instance_id: Option<String>,
     },
     /// Dump current layout to stdout
     DumpLayout,
@@ -2226,8 +2243,23 @@ pub enum CliAction {
         )]
         expected_name: Option<String>,
         /// Close only inside the exact server lifetime that exposed the tab ID
-        #[clap(long, value_parser, requires("tab-id"), requires("expected-name"))]
+        #[clap(
+            long,
+            value_parser,
+            requires("tab-id"),
+            requires("expected-name"),
+            requires("expected-tab-instance-id")
+        )]
         expected_session_incarnation: Option<String>,
+        /// Close only if the durable tab incarnation still matches
+        #[clap(
+            long,
+            value_parser,
+            requires("tab-id"),
+            requires("expected-name"),
+            requires("expected-session-incarnation")
+        )]
+        expected_tab_instance_id: Option<String>,
     },
     /// Go to tab with index [index]
     GoToTab {
@@ -2808,6 +2840,8 @@ mod tests {
                     "work-123",
                     "--expected-session-incarnation",
                     "server-abc",
+                    "--expected-tab-instance-id",
+                    "11111111111111111111111111111111",
                 ])
                 .is_err()
             })
@@ -2843,7 +2877,10 @@ mod tests {
                                 tab_id: Some(7),
                                 expected_name: Some(expected_name),
                                 expected_session_incarnation: Some(incarnation),
-                            } if expected_name == "work-123" && incarnation == "server-abc"
+                                expected_tab_instance_id: Some(tab_instance_id),
+                            } if expected_name == "work-123"
+                                && incarnation == "server-abc"
+                                && tab_instance_id == "11111111111111111111111111111111"
                         )
                 )
             })

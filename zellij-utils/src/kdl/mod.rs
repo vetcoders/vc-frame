@@ -544,6 +544,10 @@ impl Action {
                 include_scrollback: false,
                 pane_id: None,
                 ansi: false,
+                expected_tab_id: None,
+                expected_tab_name: None,
+                expected_session_incarnation: None,
+                expected_tab_instance_id: None,
             }),
             "CopyPaneScrollback" => Ok(Action::CopyPaneScrollback),
             "DumpLayout" => Ok(Action::DumpLayout),
@@ -699,6 +703,7 @@ impl Action {
                 include_scrollback: _,
                 pane_id: _,
                 ansi: _,
+                ..
             } => {
                 let mut node = KdlNode::new("DumpScreen");
                 node.push(file.clone());

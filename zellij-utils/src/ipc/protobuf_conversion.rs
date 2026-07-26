@@ -1069,6 +1069,10 @@ impl From<crate::input::actions::Action>
                 include_scrollback,
                 pane_id,
                 ansi,
+                expected_tab_id,
+                expected_tab_name,
+                expected_session_incarnation,
+                expected_tab_instance_id,
             } => {
                 let dump_to_stdout = file_path.is_none();
                 ActionType::DumpScreen(DumpScreenAction {
@@ -1077,6 +1081,10 @@ impl From<crate::input::actions::Action>
                     pane_id: pane_id.map(|p| p.into()),
                     dump_to_stdout,
                     ansi,
+                    expected_tab_id,
+                    expected_tab_name,
+                    expected_session_incarnation,
+                    expected_tab_instance_id,
                 })
             },
             crate::input::actions::Action::CopyPaneScrollback => {
@@ -1546,10 +1554,12 @@ impl From<crate::input::actions::Action>
                 id,
                 expected_name,
                 expected_session_incarnation,
+                expected_tab_instance_id,
             } => ActionType::CloseTabByIdIfName(CloseTabByIdIfNameAction {
                 id,
                 expected_name,
                 expected_session_incarnation,
+                expected_tab_instance_id,
             }),
             crate::input::actions::Action::RenameTabById { id, name } => {
                 ActionType::RenameTabById(RenameTabByIdAction { id, name })
@@ -1954,6 +1964,10 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                     include_scrollback: dump_screen_action.include_scrollback,
                     pane_id: dump_screen_action.pane_id.and_then(|p| p.try_into().ok()),
                     ansi: dump_screen_action.ansi,
+                    expected_tab_id: dump_screen_action.expected_tab_id,
+                    expected_tab_name: dump_screen_action.expected_tab_name,
+                    expected_session_incarnation: dump_screen_action.expected_session_incarnation,
+                    expected_tab_instance_id: dump_screen_action.expected_tab_instance_id,
                 })
             },
             ActionType::CopyPaneScrollback(_) => {
@@ -2443,6 +2457,8 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                     expected_name: close_tab_by_id_if_name_action.expected_name,
                     expected_session_incarnation: close_tab_by_id_if_name_action
                         .expected_session_incarnation,
+                    expected_tab_instance_id: close_tab_by_id_if_name_action
+                        .expected_tab_instance_id,
                 })
             },
             ActionType::RenameTabById(rename_tab_by_id_action) => {
@@ -3872,6 +3888,7 @@ impl From<crate::input::layout::TiledPaneLayout>
             pane_initial_contents: layout.pane_initial_contents,
             default_fg: layout.default_fg,
             default_bg: layout.default_bg,
+            tab_instance_id: layout.tab_instance_id,
         }
     }
 }
@@ -4305,6 +4322,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::TiledPaneLay
             pane_initial_contents: layout.pane_initial_contents,
             default_fg: layout.default_fg,
             default_bg: layout.default_bg,
+            tab_instance_id: layout.tab_instance_id,
         })
     }
 }

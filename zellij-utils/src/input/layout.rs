@@ -853,6 +853,10 @@ impl From<&TiledPaneLayout> for FloatingPaneLayout {
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
 pub struct TiledPaneLayout {
+    /// Internal durable tab identity carried by serialized resurrection
+    /// layouts. Fresh tabs leave this unset and receive a new UUID server-side.
+    #[serde(default)]
+    pub tab_instance_id: Option<String>,
     pub children_split_direction: SplitDirection,
     pub name: Option<String>,
     pub children: Vec<TiledPaneLayout>,

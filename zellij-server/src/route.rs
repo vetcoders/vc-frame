@@ -10,7 +10,7 @@ use crate::{
     panes::PaneId,
     plugins::PluginInstruction,
     pty::{ClientTabIndexOrPaneId, PtyInstruction},
-    screen::ScreenInstruction,
+    screen::{DumpScreenTargetIdentity, ScreenInstruction},
 };
 use std::thread;
 use std::time::Duration;
@@ -57,10 +57,13 @@ pub fn wait_for_action_completion(
                 Err(e) => {
                     log::error!("Failed to wait for action {}: {}", action_name, e);
                     ActionCompletionResult {
-                        exit_status: None,
+                        exit_status: Some(1),
                         affected_pane_id: None,
                         affected_tab_id: None,
-                        error_message: None,
+                        error_message: Some(format!(
+                            "action '{}' completion channel closed before acknowledgement: {}",
+                            action_name, e
+                        )),
                         stdout_message: None,
                     }
                 },
@@ -78,10 +81,13 @@ pub fn wait_for_action_completion(
                     ACTION_COMPLETION_TIMEOUT
                 );
                 ActionCompletionResult {
-                    exit_status: None,
+                    exit_status: Some(1),
                     affected_pane_id: None,
                     affected_tab_id: None,
-                    error_message: None,
+                    error_message: Some(format!(
+                        "action '{}' did not acknowledge completion within {:?}",
+                        action_name, ACTION_COMPLETION_TIMEOUT
+                    )),
                     stdout_message: None,
                 }
             },
@@ -452,7 +458,36 @@ pub(crate) fn route_action(
             include_scrollback,
             pane_id,
             ansi,
+            expected_tab_id,
+            expected_tab_name,
+            expected_session_incarnation,
+            expected_tab_instance_id,
         } => {
+            let target_identity = match (
+                expected_tab_id,
+                expected_tab_name,
+                expected_session_incarnation,
+                expected_tab_instance_id,
+            ) {
+                (None, None, None, None) => None,
+                (
+                    Some(tab_id),
+                    Some(tab_name),
+                    Some(session_incarnation),
+                    Some(tab_instance_id),
+                ) => Some(DumpScreenTargetIdentity {
+                    tab_id: tab_id as usize,
+                    tab_name,
+                    session_incarnation,
+                    tab_instance_id,
+                }),
+                _ => {
+                    return Err(anyhow!(
+                        "typed dump requires a complete tab identity selector"
+                    ));
+                },
+            };
+            wait_forever = true;
             senders
                 .send_to_screen(ScreenInstruction::DumpScreen(
                     file_path,
@@ -462,6 +497,7 @@ pub(crate) fn route_action(
                     Some(NotificationEnd::new(completion_tx)),
                     cli_client_id,
                     ansi,
+                    target_identity,
                 ))
                 .with_context(err_context)?;
         },
@@ -998,6 +1034,10 @@ pub(crate) fn route_action(
             first_pane_unblock_condition,
             placement,
         } => {
+            // New-tab completion is the commit acknowledgement. Returning after
+            // the generic one-second timeout lets a late server writer create a
+            // duplicate tab after the caller has already retried.
+            wait_forever = true;
             let shell = default_shell.clone();
             let is_web_client = false; // actions cannot be initiated directly from the web
 
@@ -1120,12 +1160,15 @@ pub(crate) fn route_action(
             id,
             expected_name,
             expected_session_incarnation,
+            expected_tab_instance_id,
         } => {
+            wait_forever = true;
             senders
                 .send_to_screen(ScreenInstruction::CloseTabWithIdIfName(
                     id as usize,
                     expected_name,
                     expected_session_incarnation,
+                    expected_tab_instance_id,
                     Some(NotificationEnd::new(completion_tx)),
                 ))
                 .with_context(err_context)?;
@@ -2989,10 +3032,19 @@ fn format_tabs_as_json(response: &ListTabsResponse) -> Vec<String> {
         .filter_map(|tab| serde_json::to_value(tab).ok())
         .map(|mut tab| {
             if let Some(tab) = tab.as_object_mut() {
+                let tab_id = tab.get("tab_id").and_then(serde_json::Value::as_u64);
                 tab.insert(
                     "session_incarnation".to_owned(),
                     serde_json::Value::String(response.session_incarnation.clone()),
                 );
+                if let Some(tab_instance_id) =
+                    tab_id.and_then(|tab_id| response.tab_instance_ids.get(&(tab_id as usize)))
+                {
+                    tab.insert(
+                        "tab_instance_id".to_owned(),
+                        serde_json::Value::String(tab_instance_id.clone()),
+                    );
+                }
             }
             tab
         })
@@ -3202,6 +3254,37 @@ mod tests {
         };
 
         assert_eq!(result.affected_tab_id, Some(123));
+    }
+
+    #[test]
+    fn closed_action_completion_channel_is_an_explicit_failure() {
+        let (tx, rx) = oneshot::channel();
+        drop(tx);
+
+        let result = wait_for_action_completion(rx, "dump-screen", true);
+
+        assert_eq!(result.exit_status, Some(1));
+        assert!(
+            result
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("closed before acknowledgement"))
+        );
+    }
+
+    #[test]
+    fn action_completion_timeout_is_an_explicit_failure() {
+        let (_tx, rx) = oneshot::channel();
+
+        let result = wait_for_action_completion(rx, "legacy-action", false);
+
+        assert_eq!(result.exit_status, Some(1));
+        assert!(
+            result
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("did not acknowledge completion"))
+        );
     }
 
     #[test]

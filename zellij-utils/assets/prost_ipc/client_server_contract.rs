@@ -790,6 +790,14 @@ pub struct DumpScreenAction {
     pub dump_to_stdout: bool,
     #[prost(bool, tag="5")]
     pub ansi: bool,
+    #[prost(uint64, optional, tag="6")]
+    pub expected_tab_id: ::core::option::Option<u64>,
+    #[prost(string, optional, tag="7")]
+    pub expected_tab_name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="8")]
+    pub expected_session_incarnation: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="9")]
+    pub expected_tab_instance_id: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1169,6 +1177,8 @@ pub struct CloseTabByIdIfNameAction {
     pub expected_name: ::prost::alloc::string::String,
     #[prost(string, tag="3")]
     pub expected_session_incarnation: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub expected_tab_instance_id: ::prost::alloc::string::String,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1566,9 +1576,11 @@ pub struct TiledPaneLayout {
     pub pane_initial_contents: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, optional, tag="14")]
     pub default_fg: ::core::option::Option<::prost::alloc::string::String>,
-    /// NOTE: run_instructions_to_ignore is not represented here because it's a field used only inside the server itself and not part of the server/client contract
     #[prost(string, optional, tag="15")]
     pub default_bg: ::core::option::Option<::prost::alloc::string::String>,
+    /// NOTE: run_instructions_to_ignore is not represented here because it's a field used only inside the server itself and not part of the server/client contract
+    #[prost(string, optional, tag="16")]
+    pub tab_instance_id: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use zellij_utils::run_triage::{
     BucketKind, CaptureEvidence, CaptureSource, CloseOriginError, FinishedRun, OriginTabIdentity,
     OriginTabState, RunMeta, TransferReceipt, TransferReport, TriageIo, capture_sha256,
@@ -392,12 +393,29 @@ fn tab_identity_for_name(
     session: &str,
     tab_name: &str,
 ) -> Result<OriginTabIdentity, String> {
+    let candidates = tab_identities_for_name(tab_list, session, tab_name)?;
+    match candidates.as_slice() {
+        [identity] => Ok(identity.clone()),
+        [] => Err(format!("origin tab '{}' no longer exists", tab_name)),
+        _ => Err(format!(
+            "origin tab name '{}' is ambiguous across {} tab ids",
+            tab_name,
+            candidates.len()
+        )),
+    }
+}
+
+fn tab_identities_for_name(
+    tab_list: &str,
+    session: &str,
+    tab_name: &str,
+) -> Result<Vec<OriginTabIdentity>, String> {
     let tabs: serde_json::Value = serde_json::from_str(tab_list)
         .map_err(|error| format!("cannot parse vc-frame tab inventory: {}", error))?;
     let tabs = tabs
         .as_array()
         .ok_or_else(|| "vc-frame tab inventory is not an array".to_owned())?;
-    let candidates = tabs
+    tabs
         .iter()
         .filter(|tab| tab.get("name").and_then(serde_json::Value::as_str) == Some(tab_name))
         .map(|tab| {
@@ -415,23 +433,38 @@ fn tab_identity_for_name(
                         tab_name
                     )
                 })?;
+            let tab_instance_id = tab
+                .get("tab_instance_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|instance_id| {
+                    instance_id.len() == 32
+                        && instance_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "tab '{}' has no durable tab_instance_id; the server must be upgraded before safe triage",
+                        tab_name
+                    )
+                })?;
             Ok(OriginTabIdentity {
                 session: session.to_owned(),
                 name: tab_name.to_owned(),
                 id,
                 session_incarnation: session_incarnation.to_owned(),
+                tab_instance_id: tab_instance_id.to_ascii_lowercase(),
             })
         })
-        .collect::<Result<Vec<_>, String>>()?;
-    match candidates.as_slice() {
-        [identity] => Ok(identity.clone()),
-        [] => Err(format!("origin tab '{}' no longer exists", tab_name)),
-        _ => Err(format!(
-            "origin tab name '{}' is ambiguous across {} tab ids",
-            tab_name,
-            candidates.len()
-        )),
-    }
+        .collect::<Result<Vec<_>, String>>()
+}
+
+fn is_owned_viewer_tab_name(tab_name: &str) -> bool {
+    let Some(token) = tab_name
+        .strip_suffix(']')
+        .and_then(|name| name.rsplit_once(" [vc:").map(|(_, token)| token))
+    else {
+        return false;
+    };
+    token.len() == 32 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn validated_origin_tab_id(
@@ -446,9 +479,9 @@ fn validated_origin_tab_id(
             captured.session, captured.name, session, expected_name
         ));
     }
-    if captured.session_incarnation.is_empty() {
+    if !captured.is_typed() {
         return Err(
-            "transfer receipt lacks a server session incarnation; refusing to guess".to_owned(),
+            "transfer receipt lacks a complete durable tab identity; refusing to guess".to_owned(),
         );
     }
 
@@ -457,23 +490,36 @@ fn validated_origin_tab_id(
     let tabs = tabs
         .as_array()
         .ok_or_else(|| "vc-frame tab inventory is not an array".to_owned())?;
-    let by_id = tabs
+    let by_instance = tabs
         .iter()
-        .filter(|tab| tab.get("tab_id").and_then(serde_json::Value::as_u64) == Some(captured.id))
+        .filter(|tab| {
+            tab.get("tab_instance_id")
+                .and_then(serde_json::Value::as_str)
+                == Some(captured.tab_instance_id.as_str())
+        })
         .collect::<Vec<_>>();
-    if by_id.len() > 1 {
+    if by_instance.len() > 1 {
         return Err(format!(
-            "origin tab id {} appears {} times in the current inventory",
-            captured.id,
-            by_id.len()
+            "origin tab instance {} appears {} times in the current inventory",
+            captured.tab_instance_id,
+            by_instance.len()
         ));
     }
 
-    if let Some(current) = by_id.first() {
+    if let Some(current) = by_instance.first() {
+        let current_id = current
+            .get("tab_id")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                format!(
+                    "origin tab instance {} has no stable tab_id",
+                    captured.tab_instance_id
+                )
+            })?;
         let current_name = current
             .get("name")
             .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| format!("origin tab id {} has no name", captured.id))?;
+            .ok_or_else(|| format!("origin tab id {} has no name", current_id))?;
         let current_incarnation = current
             .get("session_incarnation")
             .and_then(serde_json::Value::as_str)
@@ -482,37 +528,32 @@ fn validated_origin_tab_id(
                 "current server exposes no session incarnation; safe close is unavailable"
                     .to_owned()
             })?;
-        if current_incarnation != captured.session_incarnation {
-            return Err(format!(
-                "origin session incarnation changed before close: captured {}, current {}; refusing to close",
-                captured.session_incarnation, current_incarnation
-            ));
-        }
         if current_name != expected_name {
             return Err(format!(
                 "origin tab id {} was renamed from {:?} to {:?}; refusing to mark it closed",
-                captured.id, expected_name, current_name
+                current_id, expected_name, current_name
             ));
         }
         let same_name_ids = tab_ids_for_name(tab_list, expected_name)?;
-        if same_name_ids != [captured.id] {
+        if same_name_ids != [current_id] {
             return Err(format!(
-                "origin tab name '{}' no longer resolves uniquely to captured id {}",
-                expected_name, captured.id
+                "origin tab name '{}' no longer resolves uniquely to durable instance {} at current id {}",
+                expected_name, captured.tab_instance_id, current_id
             ));
         }
-        return Ok(Some(captured.id));
+        if current_incarnation.is_empty() {
+            return Err(
+                "current server exposes no session incarnation; safe close is unavailable"
+                    .to_owned(),
+            );
+        }
+        return Ok(Some(current_id));
     }
 
-    let same_name_ids = tab_ids_for_name(tab_list, expected_name)?;
-    if same_name_ids.is_empty() {
-        Ok(None)
-    } else {
-        Err(format!(
-            "origin tab id {} disappeared but name '{}' now belongs to id(s) {:?}; refusing to close a successor",
-            captured.id, expected_name, same_name_ids
-        ))
-    }
+    // The durable instance disappeared. A same-name tab with a different
+    // instance is a foreign successor: it must be left alone, while the
+    // captured origin is correctly treated as absent.
+    Ok(None)
 }
 
 fn sync_parent(path: &Path) -> Result<(), String> {
@@ -524,7 +565,151 @@ fn sync_parent(path: &Path) -> Result<(), String> {
         .map_err(|error| format!("cannot sync directory {}: {}", parent.display(), error))
 }
 
-fn commit_scrollback_capture(temporary: &Path, dest: &Path) -> Result<u64, String> {
+fn unique_staging_path(dest: &Path, label: &str) -> Result<PathBuf, String> {
+    let parent = dest
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", dest.display()))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("cannot create {}: {}", parent.display(), error))?;
+    let staged = tempfile::Builder::new()
+        .prefix(&format!(".{}.", label))
+        .suffix(".staging")
+        .tempfile_in(parent)
+        .map_err(|error| {
+            format!(
+                "cannot reserve unique {} staging file in {}: {}",
+                label,
+                parent.display(),
+                error
+            )
+        })?;
+    let (file, path) = staged
+        .keep()
+        .map_err(|error| format!("cannot retain {} staging file: {}", label, error.error))?;
+    drop(file);
+    Ok(path)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CaptureCommitManifest {
+    version: u8,
+    run_id: String,
+    session: String,
+    origin_tab: String,
+    pane_id: Option<String>,
+    runtime_transcript: Option<String>,
+    staging_file: String,
+    evidence: CaptureEvidence,
+}
+
+fn capture_manifest_path(dest: &Path) -> PathBuf {
+    dest.with_file_name("capture.manifest.json")
+}
+
+fn capture_request_transcript(runtime_transcript: Option<&Path>) -> Option<String> {
+    runtime_transcript.map(|path| path.to_string_lossy().into_owned())
+}
+
+fn file_name_only(path: &Path) -> Result<String, String> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| format!("{} has no safe staging filename", path.display()))
+}
+
+fn committed_capture_matches(path: &Path, evidence: &CaptureEvidence) -> bool {
+    std::fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.len() == evidence.bytes)
+        .unwrap_or(false)
+        && evidence.bytes > 0
+        && !evidence.sha256.is_empty()
+        && capture_sha256(path).as_deref() == Ok(evidence.sha256.as_str())
+}
+
+fn adopt_capture_commit(
+    run_id: &str,
+    session: &str,
+    origin_tab: &str,
+    pane_id: Option<&str>,
+    runtime_transcript: Option<&Path>,
+    dest: &Path,
+) -> Result<Option<CaptureEvidence>, String> {
+    let manifest_path = capture_manifest_path(dest);
+    let serialized = match std::fs::read(&manifest_path) {
+        Ok(serialized) => serialized,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "cannot read capture commit manifest {}: {}",
+                manifest_path.display(),
+                error
+            ));
+        },
+    };
+    let manifest: CaptureCommitManifest = serde_json::from_slice(&serialized).map_err(|error| {
+        format!(
+            "cannot parse capture commit manifest {}: {}",
+            manifest_path.display(),
+            error
+        )
+    })?;
+    let request_matches = manifest.version == 1
+        && manifest.run_id == run_id
+        && manifest.session == session
+        && manifest.origin_tab == origin_tab
+        && manifest.pane_id.as_deref() == pane_id
+        && manifest.runtime_transcript == capture_request_transcript(runtime_transcript);
+    if !request_matches {
+        return Err(format!(
+            "capture commit manifest {} belongs to a different transfer; refusing to overwrite it",
+            manifest_path.display()
+        ));
+    }
+    if manifest.evidence.capture_source == CaptureSource::TerminalScrollback
+        && !manifest
+            .evidence
+            .origin_tab_identity
+            .as_ref()
+            .map(OriginTabIdentity::is_typed)
+            .unwrap_or(false)
+    {
+        return Err(format!(
+            "capture commit manifest {} lacks typed terminal identity",
+            manifest_path.display()
+        ));
+    }
+    if committed_capture_matches(dest, &manifest.evidence) {
+        return Ok(Some(manifest.evidence));
+    }
+    let parent = dest
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", dest.display()))?;
+    let staging = parent.join(&manifest.staging_file);
+    if staging.parent() != Some(parent) || !committed_capture_matches(&staging, &manifest.evidence)
+    {
+        return Err(format!(
+            "capture commit manifest {} has neither a matching destination nor staging file",
+            manifest_path.display()
+        ));
+    }
+    std::fs::rename(&staging, dest).map_err(|error| {
+        format!(
+            "cannot adopt staged capture {} -> {}: {}",
+            staging.display(),
+            dest.display(),
+            error
+        )
+    })?;
+    sync_parent(dest)?;
+    Ok(Some(manifest.evidence))
+}
+
+fn commit_scrollback_capture(
+    temporary: &Path,
+    dest: &Path,
+    manifest: &mut CaptureCommitManifest,
+) -> Result<CaptureEvidence, String> {
     match std::fs::metadata(temporary) {
         Ok(metadata) if metadata.len() > 0 => {},
         Ok(_) => {
@@ -551,6 +736,17 @@ fn commit_scrollback_capture(temporary: &Path, dest: &Path) -> Result<u64, Strin
                 error
             )
         })?;
+    let bytes = std::fs::metadata(temporary)
+        .map(|metadata| metadata.len())
+        .map_err(|error| format!("cannot stat {}: {}", temporary.display(), error))?;
+    manifest.evidence.bytes = bytes;
+    manifest.evidence.sha256 = capture_sha256(temporary)?;
+    manifest.staging_file = file_name_only(temporary)?;
+    atomic_write_json(
+        &capture_manifest_path(dest),
+        serde_json::to_vec_pretty(manifest),
+        "capture commit manifest",
+    )?;
     std::fs::rename(temporary, dest).map_err(|error| {
         format!(
             "cannot atomically commit scrollback {} -> {}: {}",
@@ -560,61 +756,235 @@ fn commit_scrollback_capture(temporary: &Path, dest: &Path) -> Result<u64, Strin
         )
     })?;
     sync_parent(dest)?;
-    std::fs::metadata(dest)
-        .map(|metadata| metadata.len())
+    if !committed_capture_matches(dest, &manifest.evidence) {
+        return Err(format!(
+            "committed scrollback {} does not match its durable manifest",
+            dest.display()
+        ));
+    }
+    Ok(manifest.evidence.clone())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct RuntimeTranscriptManifest {
+    version: u8,
+    run_id: String,
+    transcript: PathBuf,
+    root: PathBuf,
+    bytes: u64,
+    sha256: String,
+}
+
+fn runtime_transcript_manifest_path(transcript: &Path) -> PathBuf {
+    let mut manifest = transcript.as_os_str().to_os_string();
+    manifest.push(".manifest.json");
+    PathBuf::from(manifest)
+}
+
+fn open_read_only_no_follow(path: &Path) -> Result<std::fs::File, String> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(nix::libc::O_NOFOLLOW);
+    }
+    #[cfg(not(unix))]
+    {
+        let metadata = std::fs::symlink_metadata(path)
+            .map_err(|error| format!("cannot inspect {}: {}", path.display(), error))?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!(
+                "refusing symlinked transcript input {}",
+                path.display()
+            ));
+        }
+    }
+    options.open(path).map_err(|error| {
+        format!(
+            "cannot open {} without following links: {}",
+            path.display(),
+            error
+        )
+    })
+}
+
+fn load_runtime_transcript_manifest(
+    run_id: &str,
+    transcript: &Path,
+) -> Result<(RuntimeTranscriptManifest, PathBuf, std::fs::File), String> {
+    const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
+    let manifest_path = runtime_transcript_manifest_path(transcript);
+    let mut manifest_file = open_read_only_no_follow(&manifest_path)?;
+    let mut serialized = Vec::new();
+    std::io::Read::take(&mut manifest_file, MAX_MANIFEST_BYTES + 1)
+        .read_to_end(&mut serialized)
         .map_err(|error| {
             format!(
-                "cannot stat committed scrollback {}: {}",
-                dest.display(),
+                "cannot read runtime transcript manifest {}: {}",
+                manifest_path.display(),
                 error
             )
-        })
+        })?;
+    if serialized.len() as u64 > MAX_MANIFEST_BYTES {
+        return Err(format!(
+            "runtime transcript manifest {} exceeds {} bytes",
+            manifest_path.display(),
+            MAX_MANIFEST_BYTES
+        ));
+    }
+    let manifest: RuntimeTranscriptManifest =
+        serde_json::from_slice(&serialized).map_err(|error| {
+            format!(
+                "cannot parse runtime transcript manifest {}: {}",
+                manifest_path.display(),
+                error
+            )
+        })?;
+    if manifest.version != 1 || manifest.run_id != run_id {
+        return Err(format!(
+            "runtime transcript manifest {} does not own run '{}'",
+            manifest_path.display(),
+            run_id
+        ));
+    }
+    if manifest.bytes == 0 || manifest.sha256.len() != 64 {
+        return Err(format!(
+            "runtime transcript manifest {} lacks non-empty digest evidence",
+            manifest_path.display()
+        ));
+    }
+    let canonical_root = std::fs::canonicalize(&manifest.root).map_err(|error| {
+        format!(
+            "cannot resolve transcript ownership root {}: {}",
+            manifest.root.display(),
+            error
+        )
+    })?;
+    let canonical_transcript = std::fs::canonicalize(transcript).map_err(|error| {
+        format!(
+            "cannot resolve runtime transcript {}: {}",
+            transcript.display(),
+            error
+        )
+    })?;
+    let declared_transcript = std::fs::canonicalize(&manifest.transcript).map_err(|error| {
+        format!(
+            "cannot resolve declared runtime transcript {}: {}",
+            manifest.transcript.display(),
+            error
+        )
+    })?;
+    let canonical_manifest = std::fs::canonicalize(&manifest_path).map_err(|error| {
+        format!(
+            "cannot resolve runtime transcript manifest {}: {}",
+            manifest_path.display(),
+            error
+        )
+    })?;
+    if canonical_transcript != declared_transcript
+        || !canonical_transcript.starts_with(&canonical_root)
+        || !canonical_manifest.starts_with(&canonical_root)
+    {
+        return Err(format!(
+            "runtime transcript {} is not owned by declared run root {}",
+            canonical_transcript.display(),
+            canonical_root.display()
+        ));
+    }
+    let transcript_file = open_read_only_no_follow(&canonical_transcript)?;
+    let metadata = transcript_file.metadata().map_err(|error| {
+        format!(
+            "cannot inspect opened runtime transcript {}: {}",
+            canonical_transcript.display(),
+            error
+        )
+    })?;
+    if !metadata.is_file() || metadata.len() != manifest.bytes {
+        return Err(format!(
+            "runtime transcript {} size does not match its manifest",
+            canonical_transcript.display()
+        ));
+    }
+    Ok((manifest, canonical_transcript, transcript_file))
 }
 
 fn capture_runtime_transcript(
+    run_id: &str,
+    session: &str,
+    origin_tab: &str,
+    pane_id: Option<&str>,
     transcript: &Path,
-    temporary: &Path,
     dest: &Path,
     terminal_error: &str,
     origin_tab_identity: Option<OriginTabIdentity>,
 ) -> Result<CaptureEvidence, String> {
-    let transcript_metadata = std::fs::metadata(transcript).map_err(|error| {
-        format!(
-            "{}; runtime transcript {} is unavailable: {}",
-            terminal_error,
-            transcript.display(),
-            error
-        )
-    })?;
-    if !transcript_metadata.is_file() || transcript_metadata.len() == 0 {
-        return Err(format!(
-            "{}; runtime transcript {} is not a non-empty file",
-            terminal_error,
-            transcript.display()
-        ));
-    }
-    std::fs::copy(transcript, temporary).map_err(|error| {
+    let (transcript_manifest, canonical_transcript, mut transcript_file) =
+        load_runtime_transcript_manifest(run_id, transcript)
+            .map_err(|error| format!("{}; {}", terminal_error, error))?;
+    let temporary = unique_staging_path(dest, "runtime-transcript")?;
+    let mut temporary_file = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&temporary)
+        .map_err(|error| format!("cannot open {}: {}", temporary.display(), error))?;
+    std::io::copy(&mut transcript_file, &mut temporary_file).map_err(|error| {
         format!(
             "{}; cannot copy runtime transcript {} to {}: {}",
             terminal_error,
-            transcript.display(),
+            canonical_transcript.display(),
             temporary.display(),
             error
         )
     })?;
-    let bytes = commit_scrollback_capture(temporary, dest)?;
-    let sha256 = capture_sha256(dest)?;
-    let source_identity = std::fs::canonicalize(transcript)
-        .unwrap_or_else(|_| transcript.to_path_buf())
-        .display()
-        .to_string();
-    Ok(CaptureEvidence {
-        capture_source: CaptureSource::RuntimeTranscript,
-        source_identity,
-        bytes,
-        sha256,
-        origin_tab_identity,
-    })
+    temporary_file
+        .sync_all()
+        .map_err(|error| format!("cannot sync {}: {}", temporary.display(), error))?;
+    let copied_bytes = temporary_file
+        .metadata()
+        .map_err(|error| format!("cannot inspect {}: {}", temporary.display(), error))?
+        .len();
+    if copied_bytes != transcript_manifest.bytes
+        || capture_sha256(&temporary)? != transcript_manifest.sha256
+    {
+        return Err(format!(
+            "{}; runtime transcript {} changed or failed digest verification while being copied",
+            terminal_error,
+            canonical_transcript.display()
+        ));
+    }
+    let after = transcript_file.metadata().map_err(|error| {
+        format!(
+            "cannot re-inspect opened runtime transcript {}: {}",
+            canonical_transcript.display(),
+            error
+        )
+    })?;
+    if after.len() != transcript_manifest.bytes {
+        return Err(format!(
+            "{}; runtime transcript {} changed during capture",
+            terminal_error,
+            canonical_transcript.display()
+        ));
+    }
+    let source_identity = canonical_transcript.display().to_string();
+    let mut manifest = CaptureCommitManifest {
+        version: 1,
+        run_id: run_id.to_owned(),
+        session: session.to_owned(),
+        origin_tab: origin_tab.to_owned(),
+        pane_id: pane_id.map(str::to_owned),
+        runtime_transcript: capture_request_transcript(Some(transcript)),
+        staging_file: String::new(),
+        evidence: CaptureEvidence {
+            capture_source: CaptureSource::RuntimeTranscript,
+            source_identity,
+            bytes: 0,
+            sha256: String::new(),
+            origin_tab_identity,
+        },
+    };
+    commit_scrollback_capture(&temporary, dest, &mut manifest)
 }
 
 fn atomic_write_json(
@@ -628,9 +998,12 @@ fn atomic_write_json(
     }
     let serialized =
         serialized.map_err(|error| format!("cannot serialize {}: {}", label, error))?;
-    let temporary = dest.with_extension("json.tmp");
-    let mut file = std::fs::File::create(&temporary)
-        .map_err(|error| format!("cannot create {}: {}", temporary.display(), error))?;
+    let temporary = unique_staging_path(dest, "json")?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&temporary)
+        .map_err(|error| format!("cannot open {}: {}", temporary.display(), error))?;
     file.write_all(&serialized)
         .and_then(|_| file.sync_all())
         .map_err(|error| format!("cannot write {}: {}", temporary.display(), error))?;
@@ -669,18 +1042,24 @@ fn verify_origin_close(
     tab_id: u64,
     tab_name: &str,
     expected_session_incarnation: &str,
+    expected_tab_instance_id: &str,
     close_result: Result<String, String>,
     tab_list_result: Result<String, String>,
     session_exists_result: Result<bool, String>,
 ) -> Result<(), CloseOriginError> {
-    let session_confirmed_absent = matches!(&session_exists_result, Ok(false));
     let (origin_tab_state, verification_error) = match tab_list_result {
         Ok(tab_list) => match serde_json::from_str::<serde_json::Value>(&tab_list) {
             Ok(serde_json::Value::Array(tabs)) => {
-                let current_by_id = tabs.iter().find(|tab| {
-                    tab.get("tab_id").and_then(serde_json::Value::as_u64) == Some(tab_id)
+                let current_origin = tabs.iter().find(|tab| {
+                    tab.get("tab_instance_id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(expected_tab_instance_id)
                 });
-                if let Some(current) = current_by_id {
+                if let Some(current) = current_origin {
+                    let current_id = current
+                        .get("tab_id")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(tab_id);
                     let current_name = current
                         .get("name")
                         .and_then(serde_json::Value::as_str)
@@ -694,7 +1073,7 @@ fn verify_origin_close(
                             (current_name != tab_name).then(|| {
                                 format!(
                                     "origin tab id {} survived under renamed identity {:?}",
-                                    tab_id, current_name
+                                    current_id, current_name
                                 )
                             }),
                         ),
@@ -702,7 +1081,7 @@ fn verify_origin_close(
                             OriginTabState::Unknown,
                             Some(format!(
                                 "tab id {} now belongs to session incarnation {} instead of {}",
-                                tab_id, incarnation, expected_session_incarnation
+                                current_id, incarnation, expected_session_incarnation
                             )),
                         ),
                         None => (
@@ -711,29 +1090,10 @@ fn verify_origin_close(
                         ),
                     }
                 } else {
-                    match tab_ids_for_name(&tab_list, tab_name) {
-                        Ok(candidates) if candidates.is_empty() => {
-                            if close_result.is_ok() || session_confirmed_absent {
-                                (OriginTabState::Closed, None)
-                            } else {
-                                (
-                                    OriginTabState::Unknown,
-                                    Some(
-                                        "close failed and the origin identity disappeared from the inventory"
-                                            .to_owned(),
-                                    ),
-                                )
-                            }
-                        },
-                        Ok(candidates) => (
-                            OriginTabState::Unknown,
-                            Some(format!(
-                                "origin name '{}' survived at successor id(s) {:?}",
-                                tab_name, candidates
-                            )),
-                        ),
-                        Err(error) => (OriginTabState::Unknown, Some(error)),
-                    }
+                    // The durable instance is absent. Same-name tabs are
+                    // successors with different identities and are deliberately
+                    // ignored.
+                    (OriginTabState::Closed, None)
                 }
             },
             Ok(_) => (
@@ -762,7 +1122,9 @@ fn verify_origin_close(
 
     // A server-side close can remove the tab and then fail during downstream
     // cleanup. Preserve the real nonzero result and attach the observed state.
-    if let Err(close_error) = close_result {
+    if let Err(close_error) = close_result
+        && origin_tab_state != OriginTabState::Closed
+    {
         let message = verification_error
             .map(|error| format!("{}; post-close verification: {}", close_error, error))
             .unwrap_or(close_error);
@@ -792,12 +1154,23 @@ fn verify_origin_close(
 impl TriageIo for CliTriageIo {
     fn capture_scrollback(
         &mut self,
+        run_id: &str,
         session: &str,
         origin_tab: &str,
         pane_id: Option<&str>,
         runtime_transcript: Option<&Path>,
         dest: &Path,
     ) -> Result<CaptureEvidence, String> {
+        if let Some(capture) = adopt_capture_commit(
+            run_id,
+            session,
+            origin_tab,
+            pane_id,
+            runtime_transcript,
+            dest,
+        )? {
+            return Ok(capture);
+        }
         // Terminal capture requires a live, uniquely named tab. A real runtime
         // transcript remains valid recovery evidence even after that session
         // has disappeared, so identity resolution is part of the terminal
@@ -812,24 +1185,12 @@ impl TriageIo for CliTriageIo {
                 .map_err(|e| format!("cannot create {}: {}", parent.display(), e))?;
         }
 
-        // Capture next to the destination, validate and sync it, then atomically
-        // replace the old capture. A failed retry must never destroy the last
-        // known-good scrollback.
-        let temporary = dest.with_extension("tmp");
-        if let Err(error) = std::fs::remove_file(&temporary)
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            return Err(format!(
-                "cannot clear stale temporary scrollback at {}: {}",
-                temporary.display(),
-                error
-            ));
-        }
         let terminal_capture =
             origin_tab_identity
                 .as_ref()
                 .map_err(Clone::clone)
                 .and_then(|origin_tab_identity| {
+                    let temporary = unique_staging_path(dest, "terminal-scrollback")?;
                     let origin_tab_id = origin_tab_identity.id;
                     let pane_list = self.run(&[
                         "-s",
@@ -841,10 +1202,11 @@ impl TriageIo for CliTriageIo {
                         "--tab",
                         "--state",
                     ])?;
-                    let pane_id =
+                    let terminal_pane_id =
                         terminal_pane_id_for_tab(&pane_list, origin_tab_id, origin_tab, pane_id)?
                             .to_string();
                     let temporary_arg = temporary.to_string_lossy().into_owned();
+                    let origin_tab_id_arg = origin_tab_id.to_string();
                     self.run(&[
                         "-s",
                         session,
@@ -854,20 +1216,39 @@ impl TriageIo for CliTriageIo {
                         "--path",
                         &temporary_arg,
                         "--pane-id",
-                        &pane_id,
+                        &terminal_pane_id,
+                        "--expected-tab-id",
+                        &origin_tab_id_arg,
+                        "--expected-tab-name",
+                        origin_tab,
+                        "--expected-session-incarnation",
+                        &origin_tab_identity.session_incarnation,
+                        "--expected-tab-instance-id",
+                        &origin_tab_identity.tab_instance_id,
                     ])?;
-                    let bytes = commit_scrollback_capture(&temporary, dest)?;
-                    let sha256 = capture_sha256(dest)?;
-                    Ok::<CaptureEvidence, String>(CaptureEvidence {
-                        capture_source: CaptureSource::TerminalScrollback,
-                        source_identity: format!(
-                            "session={};tab_id={};pane_id=terminal_{}",
-                            session, origin_tab_id, pane_id
-                        ),
-                        bytes,
-                        sha256,
-                        origin_tab_identity: Some(origin_tab_identity.clone()),
-                    })
+                    let mut manifest = CaptureCommitManifest {
+                        version: 1,
+                        run_id: run_id.to_owned(),
+                        session: session.to_owned(),
+                        origin_tab: origin_tab.to_owned(),
+                        pane_id: pane_id.map(str::to_owned),
+                        runtime_transcript: capture_request_transcript(runtime_transcript),
+                        staging_file: String::new(),
+                        evidence: CaptureEvidence {
+                            capture_source: CaptureSource::TerminalScrollback,
+                            source_identity: format!(
+                                "session={};tab_id={};tab_instance_id={};pane_id=terminal_{}",
+                                session,
+                                origin_tab_id,
+                                origin_tab_identity.tab_instance_id,
+                                terminal_pane_id
+                            ),
+                            bytes: 0,
+                            sha256: String::new(),
+                            origin_tab_identity: Some(origin_tab_identity.clone()),
+                        },
+                    };
+                    commit_scrollback_capture(&temporary, dest, &mut manifest)
                 });
         let terminal_error = match terminal_capture {
             Ok(capture) => return Ok(capture),
@@ -875,8 +1256,11 @@ impl TriageIo for CliTriageIo {
         };
         let transcript = runtime_transcript.ok_or_else(|| terminal_error.clone())?;
         capture_runtime_transcript(
+            run_id,
+            session,
+            origin_tab,
+            pane_id,
             transcript,
-            &temporary,
             dest,
             &terminal_error,
             origin_tab_identity.ok(),
@@ -932,50 +1316,95 @@ impl TriageIo for CliTriageIo {
         &mut self,
         session: &str,
         tab: &str,
+        expected: Option<&OriginTabIdentity>,
     ) -> Result<Option<OriginTabIdentity>, String> {
-        let tabs = self.run(&["-s", session, "action", "list-tabs", "--json"])?;
-        let tabs: serde_json::Value = serde_json::from_str(&tabs)
-            .map_err(|error| format!("cannot parse bucket tab inventory: {}", error))?;
-        let tabs = tabs
-            .as_array()
-            .ok_or_else(|| "bucket tab inventory is not an array".to_owned())?;
-        let matches = tabs
-            .iter()
-            .filter(|candidate| {
-                candidate.get("name").and_then(serde_json::Value::as_str) == Some(tab)
-            })
-            .map(|candidate| {
-                let id = candidate
-                    .get("tab_id")
-                    .and_then(serde_json::Value::as_u64)
-                    .ok_or_else(|| format!("viewer tab '{}' has no stable tab_id", tab))?;
-                let session_incarnation = candidate
-                    .get("session_incarnation")
-                    .and_then(serde_json::Value::as_str)
-                    .filter(|incarnation| !incarnation.is_empty())
-                    .ok_or_else(|| {
-                        format!(
-                            "viewer tab '{}' has no session incarnation; the server must be upgraded before safe triage",
-                            tab
-                        )
-                    })?;
-                Ok(OriginTabIdentity {
-                    session: session.to_owned(),
-                    name: tab.to_owned(),
-                    id,
-                    session_incarnation: session_incarnation.to_owned(),
+        let mut inventory = self.run(&["-s", session, "action", "list-tabs", "--json"])?;
+        let mut matches = tab_identities_for_name(&inventory, session, tab)?;
+        if matches.len() > 1 {
+            if !is_owned_viewer_tab_name(tab) {
+                return Err(format!(
+                    "bucket tab name '{}' is ambiguous across {} unowned tabs",
+                    tab,
+                    matches.len()
+                ));
+            }
+            let keeper = expected
+                .and_then(|expected| {
+                    matches
+                        .iter()
+                        .find(|candidate| candidate.is_same_durable_tab(expected))
                 })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
+                .cloned()
+                .or_else(|| matches.iter().min_by_key(|identity| identity.id).cloned())
+                .ok_or_else(|| format!("cannot select a keeper for viewer tab '{}'", tab))?;
+            for duplicate in matches
+                .iter()
+                .filter(|identity| identity.tab_instance_id != keeper.tab_instance_id)
+            {
+                let id = duplicate.id.to_string();
+                self.run(&[
+                    "-s",
+                    session,
+                    "action",
+                    "close-tab",
+                    "--tab-id",
+                    &id,
+                    "--expected-name",
+                    tab,
+                    "--expected-session-incarnation",
+                    &duplicate.session_incarnation,
+                    "--expected-tab-instance-id",
+                    &duplicate.tab_instance_id,
+                ])?;
+            }
+            inventory = self.run(&["-s", session, "action", "list-tabs", "--json"])?;
+            matches = tab_identities_for_name(&inventory, session, tab)?;
+        }
         match matches.as_slice() {
             [] => Ok(None),
             [identity] => Ok(Some(identity.clone())),
             _ => Err(format!(
-                "bucket tab name '{}' is ambiguous across {} tabs",
+                "viewer tab '{}' is still ambiguous across {} tabs after reconciliation",
                 tab,
                 matches.len()
             )),
         }
+    }
+
+    fn rebind_origin_tab_identity(
+        &mut self,
+        session: &str,
+        tab: &str,
+        captured: &OriginTabIdentity,
+    ) -> Result<Option<OriginTabIdentity>, CloseOriginError> {
+        let preserved = |message: String| CloseOriginError {
+            message,
+            origin_tab_state: OriginTabState::Preserved,
+        };
+        let tab_list_result = self.run(&["-s", session, "action", "list-tabs", "--json"]);
+        let session_exists_result = session_exists(session)
+            .map_err(|error| format!("cannot check session '{}': {:?}", session, error));
+        let Some(tab_list) =
+            verified_tab_list_before_close(tab_list_result, session_exists_result)?
+        else {
+            return Ok(None);
+        };
+        let Some(current_id) =
+            validated_origin_tab_id(captured, session, tab, &tab_list).map_err(preserved)?
+        else {
+            return Ok(None);
+        };
+        let current = tab_identities_for_name(&tab_list, session, tab)
+            .map_err(preserved)?
+            .into_iter()
+            .find(|identity| identity.id == current_id)
+            .ok_or_else(|| {
+                preserved(format!(
+                    "durable origin instance {} vanished during rebind",
+                    captured.tab_instance_id
+                ))
+            })?;
+        Ok(Some(current))
     }
 
     fn close_origin_tab(
@@ -1029,6 +1458,8 @@ impl TriageIo for CliTriageIo {
             tab,
             "--expected-session-incarnation",
             &captured.session_incarnation,
+            "--expected-tab-instance-id",
+            &captured.tab_instance_id,
         ]);
         let tab_list_result = self.run(&["-s", session, "action", "list-tabs", "--json"]);
         let session_exists_result = session_exists(session)
@@ -1037,6 +1468,7 @@ impl TriageIo for CliTriageIo {
             current_tab_id,
             tab,
             &captured.session_incarnation,
+            &captured.tab_instance_id,
             close_result,
             tab_list_result,
             session_exists_result,
@@ -1295,31 +1727,35 @@ mod tests {
     }
 
     #[test]
-    fn origin_identity_requires_the_same_server_lifetime() {
+    fn origin_identity_rebinds_across_server_lifetimes() {
         let tabs = r#"[
-            {"tab_id": 0, "name": "operator", "session_incarnation": "inc-2"},
-            {"tab_id": 7, "name": "run-1", "session_incarnation": "inc-2"}
+            {"tab_id": 0, "name": "operator", "session_incarnation": "inc-2", "tab_instance_id":"00000000000000000000000000000000"},
+            {"tab_id": 9, "name": "run-1", "session_incarnation": "inc-2", "tab_instance_id":"11111111111111111111111111111111"}
         ]"#;
         let captured = OriginTabIdentity {
             session: "workers".to_owned(),
             name: "run-1".to_owned(),
             id: 7,
             session_incarnation: "inc-1".to_owned(),
+            tab_instance_id: "11111111111111111111111111111111".to_owned(),
         };
-        let error = validated_origin_tab_id(&captured, "workers", "run-1", tabs).unwrap_err();
-        assert!(error.contains("session incarnation changed"));
+        assert_eq!(
+            validated_origin_tab_id(&captured, "workers", "run-1", tabs).unwrap(),
+            Some(9)
+        );
     }
 
     #[test]
     fn captured_id_renamed_is_preserved_instead_of_marked_closed() {
         let tabs = r#"[
-            {"tab_id": 7, "name": "renamed", "session_incarnation": "inc-1"}
+            {"tab_id": 7, "name": "renamed", "session_incarnation": "inc-1", "tab_instance_id":"11111111111111111111111111111111"}
         ]"#;
         let captured = OriginTabIdentity {
             session: "workers".to_owned(),
             name: "run-1".to_owned(),
             id: 7,
             session_incarnation: "inc-1".to_owned(),
+            tab_instance_id: "11111111111111111111111111111111".to_owned(),
         };
         let error = validated_origin_tab_id(&captured, "workers", "run-1", tabs).unwrap_err();
         assert!(error.contains("was renamed"));
@@ -1332,12 +1768,15 @@ mod tests {
             name: "run-1".to_owned(),
             id: 7,
             session_incarnation: "inc-1".to_owned(),
+            tab_instance_id: "11111111111111111111111111111111".to_owned(),
         };
         let successor = r#"[
-            {"tab_id": 8, "name": "run-1", "session_incarnation": "inc-1"}
+            {"tab_id": 8, "name": "run-1", "session_incarnation": "inc-1", "tab_instance_id":"22222222222222222222222222222222"}
         ]"#;
-        let error = validated_origin_tab_id(&captured, "workers", "run-1", successor).unwrap_err();
-        assert!(error.contains("refusing to close a successor"));
+        assert_eq!(
+            validated_origin_tab_id(&captured, "workers", "run-1", successor).unwrap(),
+            None
+        );
 
         let absent = r#"[
             {"tab_id": 8, "name": "another", "session_incarnation": "inc-1"}
@@ -1361,13 +1800,29 @@ mod tests {
         ));
         std::fs::create_dir_all(&directory).unwrap();
         let transcript = directory.join("runtime.log");
-        let temporary = directory.join("scrollback.tmp");
         let dest = directory.join("scrollback.txt");
         std::fs::write(&transcript, b"real runtime evidence").unwrap();
+        let transcript_manifest = runtime_transcript_manifest_path(&transcript);
+        std::fs::write(
+            &transcript_manifest,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "version": 1,
+                "run_id": "run-1",
+                "transcript": transcript.clone(),
+                "root": directory.clone(),
+                "bytes": 21,
+                "sha256": capture_sha256(&transcript).unwrap(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
 
         let capture = capture_runtime_transcript(
+            "run-1",
+            "workers",
+            "run-1",
+            None,
             &transcript,
-            &temporary,
             &dest,
             "origin session not found",
             None,
@@ -1397,29 +1852,96 @@ mod tests {
         std::fs::write(&dest, b"last-good").unwrap();
         std::fs::write(&temporary, b"").unwrap();
 
-        assert!(commit_scrollback_capture(&temporary, &dest).is_err());
+        let mut manifest = CaptureCommitManifest {
+            version: 1,
+            run_id: "run-1".to_owned(),
+            session: "workers".to_owned(),
+            origin_tab: "run-1".to_owned(),
+            pane_id: Some("terminal_7".to_owned()),
+            runtime_transcript: None,
+            staging_file: String::new(),
+            evidence: CaptureEvidence {
+                capture_source: CaptureSource::TerminalScrollback,
+                source_identity: "typed-test".to_owned(),
+                bytes: 0,
+                sha256: String::new(),
+                origin_tab_identity: Some(OriginTabIdentity {
+                    session: "workers".to_owned(),
+                    name: "run-1".to_owned(),
+                    id: 7,
+                    session_incarnation: "inc-1".to_owned(),
+                    tab_instance_id: "11111111111111111111111111111111".to_owned(),
+                }),
+            },
+        };
+        assert!(commit_scrollback_capture(&temporary, &dest, &mut manifest).is_err());
         assert_eq!(std::fs::read(&dest).unwrap(), b"last-good");
 
         std::fs::write(&temporary, b"replacement").unwrap();
-        commit_scrollback_capture(&temporary, &dest).unwrap();
+        commit_scrollback_capture(&temporary, &dest, &mut manifest).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"replacement");
         std::fs::remove_dir_all(&directory).unwrap();
     }
 
     #[test]
-    fn close_failure_is_not_hidden_when_the_tab_id_is_absent() {
+    fn committed_capture_is_adopted_after_crash_before_transfer_receipt() {
+        let directory = tempfile::tempdir().unwrap();
+        let dest = directory.path().join("scrollback.txt");
+        let temporary = unique_staging_path(&dest, "terminal-capture").unwrap();
+        std::fs::write(&temporary, b"durable terminal evidence").unwrap();
+
+        let origin_tab_identity = OriginTabIdentity {
+            session: "workers".to_owned(),
+            name: "run-1".to_owned(),
+            id: 7,
+            session_incarnation: "inc-1".to_owned(),
+            tab_instance_id: "11111111111111111111111111111111".to_owned(),
+        };
+        let mut manifest = CaptureCommitManifest {
+            version: 1,
+            run_id: "run-1".to_owned(),
+            session: "workers".to_owned(),
+            origin_tab: "run-1".to_owned(),
+            pane_id: Some("terminal_7".to_owned()),
+            runtime_transcript: None,
+            staging_file: String::new(),
+            evidence: CaptureEvidence {
+                capture_source: CaptureSource::TerminalScrollback,
+                source_identity: "typed-test".to_owned(),
+                bytes: 0,
+                sha256: String::new(),
+                origin_tab_identity: Some(origin_tab_identity),
+            },
+        };
+
+        // This is the killpoint: the evidence and its manifest are durable, but
+        // no transfer receipt has been written yet.
+        let committed = commit_scrollback_capture(&temporary, &dest, &mut manifest).unwrap();
+        assert!(dest.is_file());
+        assert!(capture_manifest_path(&dest).is_file());
+
+        let adopted =
+            adopt_capture_commit("run-1", "workers", "run-1", Some("terminal_7"), None, &dest)
+                .unwrap()
+                .expect("restart should adopt the already committed capture");
+
+        assert_eq!(adopted, committed);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"durable terminal evidence");
+    }
+
+    #[test]
+    fn absent_durable_instance_wins_over_a_stale_close_error() {
         let result = verify_origin_close(
             7,
             "run-1",
             "inc-1",
+            "11111111111111111111111111111111",
             Err("server cleanup failed".to_owned()),
             Ok("[]".to_owned()),
             Ok(false),
         );
 
-        let error = result.unwrap_err();
-        assert_eq!(error.message, "server cleanup failed");
-        assert_eq!(error.origin_tab_state, OriginTabState::Closed);
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -1446,13 +1968,13 @@ mod tests {
             7,
             "run-1",
             "inc-1",
+            "11111111111111111111111111111111",
             Err("stale id".to_owned()),
-            Ok(r#"[{"tab_id":2,"name":"run-1","session_incarnation":"inc-1"}]"#.to_owned()),
+            Ok(r#"[{"tab_id":2,"name":"run-1","session_incarnation":"inc-1","tab_instance_id":"22222222222222222222222222222222"}]"#.to_owned()),
             Ok(true),
         );
 
-        let error = result.unwrap_err();
-        assert_eq!(error.origin_tab_state, OriginTabState::Unknown);
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -1461,6 +1983,7 @@ mod tests {
             7,
             "run-1",
             "inc-1",
+            "11111111111111111111111111111111",
             Ok(String::new()),
             Err("session not found".to_owned()),
             Ok(false),
@@ -1475,6 +1998,7 @@ mod tests {
             7,
             "run-1",
             "inc-1",
+            "11111111111111111111111111111111",
             Ok(String::new()),
             Err("list-tabs timed out".to_owned()),
             Ok(true),
@@ -1491,8 +2015,9 @@ mod tests {
             7,
             "run-1",
             "inc-1",
+            "11111111111111111111111111111111",
             Err("expected name mismatch".to_owned()),
-            Ok(r#"[{"tab_id":7,"name":"renamed","session_incarnation":"inc-1"}]"#.to_owned()),
+            Ok(r#"[{"tab_id":7,"name":"renamed","session_incarnation":"inc-1","tab_instance_id":"11111111111111111111111111111111"}]"#.to_owned()),
             Ok(true),
         );
 

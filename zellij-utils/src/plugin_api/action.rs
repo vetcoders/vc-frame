@@ -225,6 +225,10 @@ impl TryFrom<ProtobufAction> for Action {
                         include_scrollback,
                         pane_id,
                         ansi: payload.ansi,
+                        expected_tab_id: None,
+                        expected_tab_name: None,
+                        expected_session_incarnation: None,
+                        expected_tab_instance_id: None,
                     })
                 },
                 _ => Err("Wrong payload for Action::DumpScreen"),
@@ -1237,6 +1241,7 @@ impl TryFrom<Action> for ProtobufAction {
                 include_scrollback,
                 pane_id,
                 ansi,
+                ..
             } => {
                 let dump_to_stdout = file_path.is_none();
                 Ok(ProtobufAction {
@@ -3051,6 +3056,7 @@ impl TryFrom<ProtobufTiledPaneLayout> for TiledPaneLayout {
         });
         let run_instructions_to_ignore = vec![]; // Not serialized in protobuf
         Ok(TiledPaneLayout {
+            tab_instance_id: None,
             children_split_direction,
             name: protobuf.name,
             children,

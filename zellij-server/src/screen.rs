@@ -344,6 +344,14 @@ pub struct ReconfigureParams {
     pub mouse_click_through: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct DumpScreenTargetIdentity {
+    pub tab_id: usize,
+    pub tab_name: String,
+    pub session_incarnation: String,
+    pub tab_instance_id: String,
+}
+
 /// Instructions that can be sent to the [`Screen`].
 #[derive(Debug, Clone)]
 pub enum ScreenInstruction {
@@ -414,6 +422,7 @@ pub enum ScreenInstruction {
         Option<NotificationEnd>,
         Option<ClientId>, // cli_client_id - used to send output to the CLI client's STDOUT
         bool,             // ansi - preserve ANSI styling in the dump output
+        Option<DumpScreenTargetIdentity>,
     ),
     CopyPaneScrollback(ClientId, Option<NotificationEnd>),
     DumpLayout(Option<PathBuf>, ClientId, Option<NotificationEnd>), // PathBuf is the default configured
@@ -522,7 +531,7 @@ pub enum ScreenInstruction {
     MoveTabRight(ClientId, Option<NotificationEnd>),
     GoToTabWithId(usize, Option<ClientId>, Option<NotificationEnd>),
     CloseTabWithId(usize, Option<NotificationEnd>),
-    CloseTabWithIdIfName(usize, String, String, Option<NotificationEnd>),
+    CloseTabWithIdIfName(usize, String, String, String, Option<NotificationEnd>),
     RenameTabWithId(usize, Vec<u8>, Option<NotificationEnd>),
     BreakPanesToTabWithId {
         pane_ids: Vec<PaneId>,
@@ -2081,6 +2090,7 @@ impl Screen {
         tab_id: usize,
         expected_name: &str,
         expected_session_incarnation: &str,
+        expected_tab_instance_id: &str,
     ) -> Result<()> {
         if self.session_incarnation != expected_session_incarnation {
             return Err(anyhow!(
@@ -2090,16 +2100,23 @@ impl Screen {
                 self.session_incarnation
             ));
         }
-        let actual_name = self
+        let tab = self
             .get_tab_by_id(tab_id)
-            .map(|tab| tab.name.clone())
             .ok_or_else(|| anyhow!("failed to find tab with ID: {}", tab_id))?;
-        if actual_name != expected_name {
+        if tab.instance_id != expected_tab_instance_id {
+            return Err(anyhow!(
+                "refusing to close tab ID {}: expected tab instance {:?}, found {:?}",
+                tab_id,
+                expected_tab_instance_id,
+                tab.instance_id
+            ));
+        }
+        if tab.name != expected_name {
             return Err(anyhow!(
                 "refusing to close tab ID {}: expected name {:?}, found {:?}",
                 tab_id,
                 expected_name,
-                actual_name
+                tab.name
             ));
         }
         self.close_tab_by_id(tab_id)
@@ -3485,9 +3502,11 @@ impl Screen {
 
     fn collect_tab_list(&self, _client_id: ClientId) -> Result<ListTabsResponse> {
         let mut tab_infos = Vec::new();
+        let mut tab_instance_ids = BTreeMap::new();
 
         for tab in self.tabs.values() {
             if let Some(tab_info) = self.get_tab_info(tab.id) {
+                tab_instance_ids.insert(tab.id, tab.instance_id.clone());
                 tab_infos.push(tab_info);
             }
         }
@@ -3497,6 +3516,7 @@ impl Screen {
 
         Ok(ListTabsResponse {
             session_incarnation: self.session_incarnation.clone(),
+            tab_instance_ids,
             tabs: tab_infos,
         })
     }
@@ -5247,6 +5267,7 @@ impl Screen {
                 .collect();
             session_layout_metadata.add_tab(
                 tab.name.clone(),
+                tab.instance_id.clone(),
                 tab_is_focused,
                 hide_floating_panes,
                 tiled_panes,
@@ -6438,145 +6459,120 @@ pub(crate) fn screen_thread_main(
                 mut completion_tx,
                 cli_client_id,
                 ansi,
+                target_identity,
             ) => {
-                match file {
-                    Some(file_path) => {
-                        // Write dump to file (existing behavior)
-                        match pane_id {
-                            Some(pane_id) => {
-                                let mut target_found = false;
-                                let mut dump_error = None;
-                                for tab in screen.get_tabs_mut().values_mut() {
-                                    if tab.has_pane_with_pid(&pane_id) {
-                                        target_found = true;
-                                        let result = if ansi {
-                                            tab.dump_with_ansi_terminal_screen(
-                                                Some(file_path.clone()),
-                                                pane_id,
-                                                full,
-                                            )
-                                        } else {
-                                            tab.dump_terminal_screen(
-                                                Some(file_path.clone()),
-                                                pane_id,
-                                                full,
-                                            )
-                                        };
-                                        if let Err(error) = result {
-                                            dump_error = Some(error.to_string());
-                                        }
-                                        break;
-                                    }
-                                }
-                                if !target_found {
-                                    dump_error =
-                                        Some(format!("Pane with id {:?} not found", pane_id));
-                                }
-                                if let Some(error) = dump_error {
-                                    log::error!("Failed to dump screen: {}", error);
-                                    if let Some(completion) = completion_tx.as_mut() {
-                                        completion.set_exit_status(1);
-                                        completion.set_error_message(error);
-                                    }
-                                    drop(completion_tx);
-                                    continue;
-                                }
-                            },
-                            None => {
-                                if ansi {
-                                    active_tab_and_connected_client_id!(
-                                        screen,
-                                        client_id,
-                                        |tab: &mut Tab, client_id: ClientId| tab.dump_with_ansi_active_terminal_screen(
-                                            Some(file_path.to_string()),
-                                            client_id,
-                                            full
-                                        ),
-                                        ?
-                                    );
-                                } else {
-                                    active_tab_and_connected_client_id!(
-                                        screen,
-                                        client_id,
-                                        |tab: &mut Tab, client_id: ClientId| tab.dump_active_terminal_screen(
-                                            Some(file_path.to_string()),
-                                            client_id,
-                                            full
-                                        ),
-                                        ?
-                                    );
-                                }
-                            },
+                let dump_result: Result<Option<String>> = (|| {
+                    let tab = if let Some(target) = target_identity.as_ref() {
+                        if screen.session_incarnation != target.session_incarnation {
+                            return Err(anyhow!(
+                                "refusing dump: expected session incarnation {:?}, current {:?}",
+                                target.session_incarnation,
+                                screen.session_incarnation
+                            ));
                         }
-                        screen.render(None)?;
-                        drop(completion_tx);
-                    },
-                    None => {
-                        // Dump to STDOUT via Log
-                        let dump = match pane_id {
+                        let tab = screen.tabs.get_mut(&target.tab_id).ok_or_else(|| {
+                            anyhow!("refusing dump: tab ID {} no longer exists", target.tab_id)
+                        })?;
+                        if tab.instance_id != target.tab_instance_id {
+                            return Err(anyhow!(
+                                "refusing dump: tab ID {} instance changed from {:?} to {:?}",
+                                target.tab_id,
+                                target.tab_instance_id,
+                                tab.instance_id
+                            ));
+                        }
+                        if tab.name != target.tab_name {
+                            return Err(anyhow!(
+                                "refusing dump: tab ID {} name changed from {:?} to {:?}",
+                                target.tab_id,
+                                target.tab_name,
+                                tab.name
+                            ));
+                        }
+                        let pane_id = pane_id
+                            .ok_or_else(|| anyhow!("typed dump requires an explicit pane ID"))?;
+                        if !tab.has_pane_with_pid(&pane_id) {
+                            return Err(anyhow!(
+                                "refusing dump: pane {:?} does not belong to tab ID {}",
+                                pane_id,
+                                target.tab_id
+                            ));
+                        }
+                        tab
+                    } else if let Some(pane_id) = pane_id {
+                        screen
+                            .tabs
+                            .values_mut()
+                            .find(|tab| tab.has_pane_with_pid(&pane_id))
+                            .ok_or_else(|| anyhow!("Pane with id {:?} not found", pane_id))?
+                    } else {
+                        screen.get_active_tab_mut(client_id)?
+                    };
+
+                    if let Some(file_path) = file.as_ref() {
+                        match pane_id {
+                            Some(pane_id) if ansi => tab.dump_with_ansi_terminal_screen(
+                                Some(file_path.clone()),
+                                pane_id,
+                                full,
+                            )?,
                             Some(pane_id) => {
-                                let mut result = String::new();
-                                let mut target_found = false;
-                                for tab in screen.get_tabs_mut().values_mut() {
-                                    if tab.has_pane_with_pid(&pane_id) {
-                                        target_found = true;
-                                        if ansi {
-                                            if let Some(dump) = tab
-                                                .get_dump_with_ansi_terminal_screen(pane_id, full)
-                                            {
-                                                result = dump;
-                                            }
-                                        } else if let Some(dump) =
-                                            tab.get_dump_terminal_screen(pane_id, full)
-                                        {
-                                            result = dump;
-                                        }
-                                        break;
-                                    }
-                                }
-                                if !target_found {
-                                    let error = format!("Pane with id {:?} not found", pane_id);
-                                    log::error!("Failed to dump screen: {}", error);
-                                    if let Some(completion) = completion_tx.as_mut() {
-                                        completion.set_exit_status(1);
-                                        completion.set_error_message(error);
-                                    }
-                                    drop(completion_tx);
-                                    continue;
-                                }
-                                result
+                                tab.dump_terminal_screen(Some(file_path.clone()), pane_id, full)?
                             },
-                            None => {
-                                let mut result = String::new();
-                                if ansi {
-                                    active_tab_and_connected_client_id!(
-                                        screen,
-                                        client_id,
-                                        |tab: &mut Tab, client_id: ClientId| {
-                                            result = tab.get_dump_with_ansi_active_terminal_screen(client_id, full);
-                                            Ok::<(), anyhow::Error>(())
-                                        },
-                                        ?
-                                    );
-                                } else {
-                                    active_tab_and_connected_client_id!(
-                                        screen,
-                                        client_id,
-                                        |tab: &mut Tab, client_id: ClientId| {
-                                            result = tab.get_dump_active_terminal_screen(client_id, full);
-                                            Ok::<(), anyhow::Error>(())
-                                        },
-                                        ?
-                                    );
-                                }
-                                result
+                            None if ansi => tab.dump_with_ansi_active_terminal_screen(
+                                Some(file_path.clone()),
+                                client_id,
+                                full,
+                            )?,
+                            None => tab.dump_active_terminal_screen(
+                                Some(file_path.clone()),
+                                client_id,
+                                full,
+                            )?,
+                        }
+                        Ok(None)
+                    } else {
+                        let dump = match pane_id {
+                            Some(pane_id) if ansi => tab
+                                .get_dump_with_ansi_terminal_screen(pane_id, full)
+                                .ok_or_else(|| {
+                                    anyhow!("pane {:?} has no dumpable terminal screen", pane_id)
+                                })?,
+                            Some(pane_id) => {
+                                tab.get_dump_terminal_screen(pane_id, full).ok_or_else(|| {
+                                    anyhow!("pane {:?} has no dumpable terminal screen", pane_id)
+                                })?
                             },
+                            None if ansi => {
+                                tab.get_dump_with_ansi_active_terminal_screen(client_id, full)
+                            },
+                            None => tab.get_dump_active_terminal_screen(client_id, full),
                         };
-                        screen.bus.senders.send_to_server(ServerInstruction::Log(
-                            vec![dump],
-                            cli_client_id.unwrap_or(client_id),
-                            completion_tx,
-                        ))?;
+                        Ok(Some(dump))
+                    }
+                })();
+
+                match dump_result {
+                    Ok(Some(dump)) => {
+                        if let Err(error) =
+                            screen.bus.senders.send_to_server(ServerInstruction::Log(
+                                vec![dump],
+                                cli_client_id.unwrap_or(client_id),
+                                completion_tx,
+                            ))
+                        {
+                            log::error!("Failed to return screen dump: {}", error);
+                        }
+                    },
+                    Ok(None) => drop(completion_tx),
+                    Err(error) => {
+                        let error = error.to_string();
+                        log::error!("Failed to dump screen: {}", error);
+                        if let Some(completion) = completion_tx.as_mut() {
+                            completion.set_exit_status(1);
+                            completion.set_error_message(error);
+                        }
+                        drop(completion_tx);
                     },
                 }
             },
@@ -7204,6 +7200,14 @@ pub(crate) fn screen_thread_main(
                 (client_id, is_web_client),
                 completion_tx,
             ) => {
+                let restored_tab_instance_id = layout
+                    .as_ref()
+                    .and_then(|layout| layout.tab_instance_id.as_deref())
+                    .filter(|instance_id| {
+                        instance_id.len() == 32
+                            && instance_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+                    .map(str::to_ascii_lowercase);
                 let tab_index = screen.get_new_tab_id();
                 pending_tab_ids.insert(tab_index);
                 let client_id_for_new_tab = if should_change_focus_to_new_tab {
@@ -7224,6 +7228,11 @@ pub(crate) fn screen_thread_main(
                     client_id_for_new_tab,
                     placement,
                 )?;
+                if let Some(restored_tab_instance_id) = restored_tab_instance_id
+                    && let Some(tab) = screen.tabs.get_mut(&tab_index)
+                {
+                    tab.instance_id = restored_tab_instance_id;
+                }
                 screen
                     .bus
                     .senders
@@ -7842,13 +7851,21 @@ pub(crate) fn screen_thread_main(
                 retain_existing_plugin_panes,
                 apply_only_to_focused_tab,
                 client_id,
-                completion_tx,
+                mut completion_tx,
             ) => {
                 // Layouts identify tabs by display position. Convert those
                 // positions to stable IDs before comparing, mutating or
                 // creating tabs so a retired ID is never resurrected.
                 if !apply_only_to_focused_tab {
-                    screen.assign_stable_tab_ids_to_layout(&mut tab_layouts)?;
+                    if let Err(error) = screen.assign_stable_tab_ids_to_layout(&mut tab_layouts) {
+                        log::error!("Failed to validate override layout: {}", error);
+                        if let Some(completion) = completion_tx.as_mut() {
+                            completion.set_exit_status(1);
+                            completion.set_error_message(error.to_string());
+                        }
+                        drop(completion_tx);
+                        continue;
+                    }
                 }
 
                 // 1. Determine which tabs to close (exist but not in layout)
@@ -7974,6 +7991,15 @@ pub(crate) fn screen_thread_main(
             ) => {
                 // Process each tab result
                 for tab_result in tab_results {
+                    let restored_tab_instance_id = tab_result
+                        .tiled_layout
+                        .tab_instance_id
+                        .as_deref()
+                        .filter(|instance_id| {
+                            instance_id.len() == 32
+                                && instance_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        })
+                        .map(str::to_ascii_lowercase);
                     if let Some(tab) = screen.tabs.get_mut(&tab_result.tab_index) {
                         if let Err(e) = tab.override_layout(
                             tab_result.tiled_layout,
@@ -8013,6 +8039,11 @@ pub(crate) fn screen_thread_main(
                                 e
                             );
                             continue;
+                        }
+                        if let Some(restored_tab_instance_id) = restored_tab_instance_id
+                            && let Some(tab) = screen.tabs.get_mut(&tab_result.tab_index)
+                        {
+                            tab.instance_id = restored_tab_instance_id;
                         }
 
                         // Now override the newly created tab's layout
@@ -8743,12 +8774,14 @@ pub(crate) fn screen_thread_main(
                 tab_id,
                 expected_name,
                 expected_session_incarnation,
+                expected_tab_instance_id,
                 mut completion_tx,
             ) => {
                 if let Err(error) = screen.close_tab_by_id_if_name(
                     tab_id,
                     &expected_name,
                     &expected_session_incarnation,
+                    &expected_tab_instance_id,
                 ) {
                     log::error!(
                         "Failed to close tab with ID {} and expected name {:?}: {}",

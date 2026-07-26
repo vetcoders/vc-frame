@@ -206,6 +206,7 @@ impl SessionLayoutMetadata {
     pub fn add_tab(
         &mut self,
         name: String,
+        tab_instance_id: String,
         is_focused: bool,
         hide_floating_panes: bool,
         tiled_panes: Vec<PaneLayoutMetadata>,
@@ -213,6 +214,7 @@ impl SessionLayoutMetadata {
     ) {
         self.tabs.push(TabLayoutMetadata {
             name: Some(name),
+            tab_instance_id,
             is_focused,
             hide_floating_panes,
             tiled_panes,
@@ -491,6 +493,7 @@ impl From<SessionLayoutMetadata> for GlobalLayoutManifest {
 impl From<TabLayoutMetadata> for TabLayoutManifest {
     fn from(val: TabLayoutMetadata) -> Self {
         TabLayoutManifest {
+            tab_instance_id: val.tab_instance_id,
             tiled_panes: val.tiled_panes.into_iter().map(|t| t.into()).collect(),
             floating_panes: val.floating_panes.into_iter().map(|t| t.into()).collect(),
             is_focused: val.is_focused,
@@ -539,6 +542,7 @@ impl From<PaneLayoutMetadata> for PaneLayoutManifest {
 #[derive(Default, Debug, Clone)]
 pub struct TabLayoutMetadata {
     name: Option<String>,
+    tab_instance_id: String,
     tiled_panes: Vec<PaneLayoutMetadata>,
     floating_panes: Vec<PaneLayoutMetadata>,
     is_focused: bool,
@@ -698,7 +702,14 @@ mod tests {
             default_editor: Some(PathBuf::from(editor)),
             ..Default::default()
         };
-        meta.add_tab("tab1".to_string(), true, false, panes, vec![]);
+        meta.add_tab(
+            "tab1".to_string(),
+            "11111111111111111111111111111111".to_string(),
+            true,
+            false,
+            panes,
+            vec![],
+        );
         meta
     }
 

@@ -21,6 +21,7 @@ pub struct GlobalLayoutManifest {
 
 #[derive(Default, Debug, Clone)]
 pub struct TabLayoutManifest {
+    pub tab_instance_id: String,
     pub tiled_panes: Vec<PaneLayoutManifest>,
     pub floating_panes: Vec<PaneLayoutManifest>,
     pub is_focused: bool,
@@ -94,6 +95,7 @@ pub fn serialize_session_layout(
 
 fn serialize_tab(
     tab_name: String,
+    tab_instance_id: String,
     is_focused: bool,
     hide_floating_panes: bool,
     tiled_panes: &[PaneLayoutManifest],
@@ -116,6 +118,9 @@ fn serialize_tab(
             serialized_tab
                 .entries_mut()
                 .push(KdlEntry::new_prop("name", tab_name));
+            serialized_tab
+                .entries_mut()
+                .push(KdlEntry::new_prop("vc_tab_instance_id", tab_instance_id));
             if is_focused {
                 serialized_tab
                     .entries_mut()
@@ -645,6 +650,7 @@ fn serialize_multiple_tabs(
         let hide_floating_panes = tab_layout_manifest.hide_floating_panes;
         let serialized = serialize_tab(
             tab_name.clone(),
+            tab_layout_manifest.tab_instance_id,
             tab_layout_manifest.is_focused,
             hide_floating_panes,
             &tiled_panes,

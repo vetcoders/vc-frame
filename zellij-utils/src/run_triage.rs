@@ -177,6 +177,28 @@ pub struct OriginTabIdentity {
     pub id: u64,
     #[serde(default)]
     pub session_incarnation: String,
+    #[serde(default)]
+    pub tab_instance_id: String,
+}
+
+impl OriginTabIdentity {
+    pub fn is_typed(&self) -> bool {
+        !self.session.is_empty()
+            && !self.name.is_empty()
+            && !self.session_incarnation.is_empty()
+            && self.tab_instance_id.len() == 32
+            && self
+                .tab_instance_id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+    }
+
+    pub fn is_same_durable_tab(&self, other: &Self) -> bool {
+        self.session == other.session
+            && self.name == other.name
+            && !self.tab_instance_id.is_empty()
+            && self.tab_instance_id == other.tab_instance_id
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -382,7 +404,7 @@ pub struct TransferReceipt {
 impl TransferReceipt {
     fn new(run: &FinishedRun, captured_at: u64) -> Self {
         Self {
-            version: 3,
+            version: 4,
             run: run.run.clone(),
             bucket: run.bucket(),
             exit_code: run.exit_code,
@@ -418,6 +440,7 @@ pub trait TriageIo {
     /// `pane_id` is absent or no longer resolves to a live pane.
     fn capture_scrollback(
         &mut self,
+        run_id: &str,
         session: &str,
         origin_tab: &str,
         pane_id: Option<&str>,
@@ -438,7 +461,16 @@ pub trait TriageIo {
         &mut self,
         session: &str,
         tab: &str,
+        expected: Option<&OriginTabIdentity>,
     ) -> Result<Option<OriginTabIdentity>, String>;
+    /// Re-resolve a captured tab through its durable tab incarnation. A server
+    /// restart may change both the server incarnation and numeric tab ID.
+    fn rebind_origin_tab_identity(
+        &mut self,
+        session: &str,
+        tab: &str,
+        captured: &OriginTabIdentity,
+    ) -> Result<Option<OriginTabIdentity>, CloseOriginError>;
     fn close_origin_tab(
         &mut self,
         session: &str,
@@ -476,7 +508,10 @@ fn fail_transfer<Io: TriageIo>(
     origin_tab_state: OriginTabState,
 ) -> TransferError {
     receipt.origin_tab_state = origin_tab_state;
-    receipt.fault = Some(format!("{:?}: {}", step, message));
+    receipt.fault = Some(sanitize_persisted_fault(&format!(
+        "{:?}: {}",
+        step, message
+    )));
     let message = match io.write_receipt(receipt_path, receipt) {
         Ok(()) => message,
         Err(receipt_error) => format!(
@@ -492,6 +527,26 @@ fn fail_transfer<Io: TriageIo>(
         origin_tab_state,
         capture_is_durable: receipt.capture_committed && receipt.metadata_committed,
     }
+}
+
+fn sanitize_persisted_fault(message: &str) -> String {
+    const MAX_FAULT_CHARS: usize = 2048;
+    let mut sanitized = message
+        .chars()
+        .map(|character| {
+            if character.is_control() && character != '\n' && character != '\t' {
+                '�'
+            } else {
+                character
+            }
+        })
+        .take(MAX_FAULT_CHARS + 1)
+        .collect::<String>();
+    if sanitized.chars().count() > MAX_FAULT_CHARS {
+        sanitized = sanitized.chars().take(MAX_FAULT_CHARS).collect();
+        sanitized.push_str("…[truncated]");
+    }
+    sanitized
 }
 
 fn persist_receipt<Io: TriageIo>(
@@ -534,7 +589,7 @@ pub fn transfer_finished_run<Io: TriageIo>(
         })?
         .unwrap_or_else(|| TransferReceipt::new(run, captured_at));
 
-    if receipt.version != 3
+    if receipt.version != 4
         || receipt.run != run.run
         || receipt.bucket != bucket
         || receipt.exit_code != run.exit_code
@@ -547,7 +602,7 @@ pub fn transfer_finished_run<Io: TriageIo>(
         || receipt.viewer_token.is_empty()
     {
         let message = format!(
-            "receipt identity mismatch: stored v{} run '{}' in {:?} at {}/{}, requested v3 '{}' in {:?} at {}/{}",
+            "receipt identity mismatch: stored v{} run '{}' in {:?} at {}/{}, requested v4 '{}' in {:?} at {}/{}",
             receipt.version,
             receipt.run,
             receipt.bucket,
@@ -580,6 +635,7 @@ pub fn transfer_finished_run<Io: TriageIo>(
 
     if !receipt.capture_committed {
         let capture = match io.capture_scrollback(
+            &run.run,
             &run.origin_session,
             &run.origin_tab,
             run.pane_id.as_deref(),
@@ -646,23 +702,26 @@ pub fn transfer_finished_run<Io: TriageIo>(
         ));
     }
     let viewer_tab_name = receipt.viewer_tab_name();
-    let current_viewer_identity =
-        match io.bucket_tab_identity(bucket.session_name(), &viewer_tab_name) {
-            Ok(current_viewer_identity) => current_viewer_identity,
-            Err(message) => {
-                return Err(fail_transfer(
-                    io,
-                    &receipt_dest,
-                    &mut receipt,
-                    TransferStep::ConfirmBucketTab,
-                    message,
-                    current_origin_tab_state,
-                ));
-            },
-        };
+    let current_viewer_identity = match io.bucket_tab_identity(
+        bucket.session_name(),
+        &viewer_tab_name,
+        receipt.viewer_tab_identity.as_ref(),
+    ) {
+        Ok(current_viewer_identity) => current_viewer_identity,
+        Err(message) => {
+            return Err(fail_transfer(
+                io,
+                &receipt_dest,
+                &mut receipt,
+                TransferStep::ConfirmBucketTab,
+                message,
+                current_origin_tab_state,
+            ));
+        },
+    };
     let confirmed_viewer_identity =
         match (current_viewer_identity, receipt.viewer_tab_identity.clone()) {
-            (Some(current), Some(expected)) if current == expected => current,
+            (Some(current), Some(expected)) if current.is_same_durable_tab(&expected) => current,
             (Some(current), Some(expected)) => {
                 return Err(fail_transfer(
                     io,
@@ -712,7 +771,11 @@ pub fn transfer_finished_run<Io: TriageIo>(
                         current_origin_tab_state,
                     ));
                 }
-                match io.bucket_tab_identity(bucket.session_name(), &viewer_tab_name) {
+                match io.bucket_tab_identity(
+                    bucket.session_name(),
+                    &viewer_tab_name,
+                    receipt.viewer_tab_identity.as_ref(),
+                ) {
                     Ok(Some(viewer_identity)) => viewer_identity,
                     Ok(None) => {
                         return Err(fail_transfer(
@@ -749,10 +812,39 @@ pub fn transfer_finished_run<Io: TriageIo>(
     // Revalidate even after a prior receipt said Closed. A server can restore
     // serialized tabs after a crash; a stale Closed bit must never turn that
     // resurrection into a false-success.
-    let identity = receipt
+    let captured_identity = receipt
         .capture
         .as_ref()
-        .and_then(|capture| capture.origin_tab_identity.as_ref());
+        .and_then(|capture| capture.origin_tab_identity.clone());
+    let rebound_identity = match captured_identity.as_ref() {
+        Some(captured) => {
+            match io.rebind_origin_tab_identity(&run.origin_session, &run.origin_tab, captured) {
+                Ok(identity) => identity,
+                Err(error) => {
+                    return Err(fail_transfer(
+                        io,
+                        &receipt_dest,
+                        &mut receipt,
+                        TransferStep::CloseOriginTab,
+                        error.message,
+                        error.origin_tab_state,
+                    ));
+                },
+            }
+        },
+        None => None,
+    };
+    if let Some(rebound_identity) = rebound_identity.as_ref()
+        && captured_identity.as_ref() != Some(rebound_identity)
+    {
+        if let Some(capture) = receipt.capture.as_mut() {
+            capture.origin_tab_identity = Some(rebound_identity.clone());
+        }
+        // Commit the rebind before close. A crash after the close must never
+        // make a retry target a same-name successor through stale numeric IDs.
+        persist_receipt(io, &receipt_dest, &mut receipt)?;
+    }
+    let identity = rebound_identity.as_ref().or(captured_identity.as_ref());
     match io.close_origin_tab(&run.origin_session, &run.origin_tab, identity) {
         Ok(()) => receipt.origin_tab_state = OriginTabState::Closed,
         Err(error) => {
@@ -850,6 +942,7 @@ mod tests {
     impl TriageIo for FakeIo {
         fn capture_scrollback(
             &mut self,
+            _run_id: &str,
             _session: &str,
             origin_tab: &str,
             _pane_id: Option<&str>,
@@ -868,6 +961,7 @@ mod tests {
                     name: origin_tab.to_owned(),
                     id: 7,
                     session_incarnation: "origin-incarnation".to_owned(),
+                    tab_instance_id: "11111111111111111111111111111111".to_owned(),
                 }),
             })
         }
@@ -909,6 +1003,7 @@ mod tests {
             &mut self,
             session: &str,
             tab: &str,
+            _expected: Option<&OriginTabIdentity>,
         ) -> Result<Option<OriginTabIdentity>, String> {
             self.guard(TransferStep::ConfirmBucketTab, "confirm")?;
             let name_matches = self
@@ -922,8 +1017,17 @@ mod tests {
                     name: tab.to_owned(),
                     id: 11,
                     session_incarnation: "viewer-incarnation".to_owned(),
+                    tab_instance_id: "22222222222222222222222222222222".to_owned(),
                 }),
             )
+        }
+        fn rebind_origin_tab_identity(
+            &mut self,
+            _session: &str,
+            _tab: &str,
+            captured: &OriginTabIdentity,
+        ) -> Result<Option<OriginTabIdentity>, CloseOriginError> {
+            Ok(Some(captured.clone()))
         }
         fn close_origin_tab(
             &mut self,
@@ -1191,6 +1295,7 @@ mod tests {
                 name: viewer_tab_name,
                 id: 11,
                 session_incarnation: "viewer-incarnation".to_owned(),
+                tab_instance_id: "22222222222222222222222222222222".to_owned(),
             })
         );
         assert!(!receipt.viewer_creation_pending);
@@ -1300,6 +1405,7 @@ mod tests {
                 name: run.origin_tab,
                 id: 7,
                 session_incarnation: "origin-incarnation".to_owned(),
+                tab_instance_id: "11111111111111111111111111111111".to_owned(),
             })
         );
     }

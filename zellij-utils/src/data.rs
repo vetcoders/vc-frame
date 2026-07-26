@@ -2472,6 +2472,7 @@ pub type ListPanesResponse = Vec<PaneListEntry>;
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ListTabsResponse {
     pub session_incarnation: String,
+    pub tab_instance_ids: BTreeMap<usize, String>,
     pub tabs: Vec<TabInfo>,
 }
 

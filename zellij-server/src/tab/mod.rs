@@ -155,6 +155,9 @@ enum BufferedTabInstruction {
 
 pub(crate) struct Tab {
     pub id: usize,
+    /// Durable identity of this exact tab incarnation. Unlike `id`, this
+    /// survives server resurrection and is never reused by a successor tab.
+    pub instance_id: String,
     pub position: usize,
     pub name: String,
     pub prev_name: String,
@@ -816,6 +819,7 @@ impl Tab {
 
         Tab {
             id,
+            instance_id: Uuid::new_v4().simple().to_string(),
             position,
             tiled_panes,
             floating_panes,
