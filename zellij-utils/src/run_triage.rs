@@ -251,10 +251,13 @@ pub struct TransferReport {
 /// The side-effecting surface of a transfer. Split out so the ordering
 /// invariant can be tested with a fault injected at any step.
 pub trait TriageIo {
-    /// Dump the pane's viewport + full scrollback to `dest`.
+    /// Dump the run's scrollback to `dest`. `origin_tab` is the run's own tab
+    /// — the durable address of the scrollback, and the fallback target when
+    /// `pane_id` is absent or no longer resolves to a live pane.
     fn capture_scrollback(
         &mut self,
         session: &str,
+        origin_tab: &str,
         pane_id: Option<&str>,
         dest: &Path,
     ) -> Result<(), String>;
@@ -294,8 +297,13 @@ pub fn transfer_finished_run<Io: TriageIo>(
         capture_is_durable,
     };
 
-    io.capture_scrollback(&run.origin_session, run.pane_id.as_deref(), &scrollback)
-        .map_err(|e| fail(TransferStep::Capture, e, false))?;
+    io.capture_scrollback(
+        &run.origin_session,
+        &run.origin_tab,
+        run.pane_id.as_deref(),
+        &scrollback,
+    )
+    .map_err(|e| fail(TransferStep::Capture, e, false))?;
     io.write_meta(&meta_dest, &meta)
         .map_err(|e| fail(TransferStep::WriteMeta, e, false))?;
 
@@ -370,6 +378,7 @@ mod tests {
         calls: Vec<&'static str>,
         fail_at: Option<TransferStep>,
         tab_appears: bool,
+        captured_tab: Option<String>,
     }
 
     impl FakeIo {
@@ -399,9 +408,11 @@ mod tests {
         fn capture_scrollback(
             &mut self,
             _session: &str,
+            origin_tab: &str,
             _pane_id: Option<&str>,
             _dest: &Path,
         ) -> Result<(), String> {
+            self.captured_tab = Some(origin_tab.to_owned());
             self.guard(TransferStep::Capture, "capture")
         }
         fn write_meta(&mut self, _dest: &Path, _meta: &RunMeta) -> Result<(), String> {
@@ -634,6 +645,17 @@ mod tests {
         let mut io = FakeIo::failing_at(TransferStep::EnsureBucketSession);
         let error = transfer_finished_run(&mut io, &finished(0), Path::new("/cp"), 0).unwrap_err();
         assert!(error.capture_is_durable);
+    }
+
+    /// Regression, 2026-07-25: dispatched runs carried a foreign pane id ("1",
+    /// the operator's pane), the dump aimed at it found nothing, and the tabs
+    /// never reached their buckets. The tab name is the durable address of the
+    /// run's scrollback, so capture must always receive it for the fallback.
+    #[test]
+    fn capture_is_aimed_at_the_runs_own_tab() {
+        let mut io = FakeIo::healthy();
+        transfer_finished_run(&mut io, &finished(0), Path::new("/cp"), 0).unwrap();
+        assert_eq!(io.captured_tab.as_deref(), Some("impl-260720-120000-01000"));
     }
 
     #[test]

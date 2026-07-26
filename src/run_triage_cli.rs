@@ -118,10 +118,15 @@ fn kdl_escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+fn file_has_bytes(path: &str) -> bool {
+    std::fs::metadata(path).map(|m| m.len() > 0).unwrap_or(false)
+}
+
 impl TriageIo for CliTriageIo {
     fn capture_scrollback(
         &mut self,
         session: &str,
+        origin_tab: &str,
         pane_id: Option<&str>,
         dest: &Path,
     ) -> Result<(), String> {
@@ -130,21 +135,35 @@ impl TriageIo for CliTriageIo {
                 .map_err(|e| format!("cannot create {}: {}", parent.display(), e))?;
         }
         let dest = dest.to_string_lossy().into_owned();
-        let mut args = vec![
-            "-s",
-            session,
-            "action",
-            "dump-screen",
-            "--full",
-            "--path",
-            &dest,
-        ];
+        // First shot: the recorded pane, wherever it lives. The id can be stale
+        // (the pane died with the run) or foreign (a dispatcher stamped its own
+        // pane), and dump-screen reports success even when the pane matches no
+        // tab — so the dump is only believed once a non-empty file is on disk.
         if let Some(pane_id) = pane_id {
-            args.extend_from_slice(&["--pane-id", pane_id]);
+            let args = vec![
+                "-s",
+                session,
+                "action",
+                "dump-screen",
+                "--full",
+                "--path",
+                &dest,
+                "--pane-id",
+                pane_id,
+            ];
+            if self.run(&args).is_ok() && file_has_bytes(&dest) {
+                return Ok(());
+            }
         }
-        self.run(&args)?;
-        // dump-screen reports success even when the pane is gone; an empty file
-        // is not a capture, and closing the origin tab on one would lose the run.
+        // The pane-less path and the fallback: focus the run's own tab, then
+        // dump its focused pane — the same two-invocation dance
+        // `close_origin_tab` already relies on. A tab that cannot be focused is
+        // a failure worth reporting, not a licence to dump whatever tab happens
+        // to be active.
+        self.run(&["-s", session, "action", "go-to-tab-name", origin_tab])?;
+        self.run(&["-s", session, "action", "dump-screen", "--full", "--path", &dest])?;
+        // An empty file is not a capture, and closing the origin tab on one
+        // would lose the run.
         match std::fs::metadata(&dest) {
             Ok(metadata) if metadata.len() > 0 => Ok(()),
             Ok(_) => Err(format!("scrollback dump at {} is empty", dest)),

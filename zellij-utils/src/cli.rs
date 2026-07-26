@@ -1702,7 +1702,10 @@ tail -f /tmp/my-live-logfile | vc-frame pipe --name logs --plugin https://exampl
         run: String,
 
         /// Exit code of the finished run; picks the bucket when --bucket is absent
-        #[clap(long, value_parser)]
+        ///
+        /// Hyphen values are legal: a killed run arrives as a negative code, and
+        /// rejecting "-1" as a stray flag used to abort the whole triage.
+        #[clap(long, value_parser, allow_hyphen_values(true))]
         exit_code: i32,
 
         /// Bucket verdict from the caller: finalized, failed or needs-attention.
