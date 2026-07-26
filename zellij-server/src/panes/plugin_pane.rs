@@ -38,7 +38,7 @@ use zellij_utils::{
 macro_rules! style {
     ($fg:expr) => {
         ansi_term::Style::new().fg(match $fg {
-            PaletteColor::Rgb((r, g, b)) => ansi_term::Color::RGB(r, g, b),
+            PaletteColor::Rgb((r, g, b)) => ansi_term::Color::Rgb(r, g, b),
             PaletteColor::EightBit(color) => ansi_term::Color::Fixed(color),
         })
     };

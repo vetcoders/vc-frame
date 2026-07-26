@@ -1,13 +1,13 @@
-use ansi_term::{ANSIString, ANSIStrings, Style, unstyled_len};
+use ansi_term::{AnsiString, AnsiStrings, Style, unstyled_len};
 
 use crate::{LinePart, action_key, action_key_group, style_key_with_modifier};
 use zellij_tile::prelude::{actions::Action, *};
 
 macro_rules! strings {
-    ($ANSIStrings:expr) => {{
-        let strings: &[ANSIString] = $ANSIStrings;
+    ($AnsiStrings:expr) => {{
+        let strings: &[AnsiString] = $AnsiStrings;
 
-        let ansi_strings = ANSIStrings(strings);
+        let ansi_strings = AnsiStrings(strings);
 
         LinePart {
             part: format!("{}", ansi_strings),
@@ -55,9 +55,9 @@ pub fn quicknav_short(help: &ModeInfo) -> LinePart {
 }
 
 struct Keygroups<'a> {
-    new_pane: Vec<ANSIString<'a>>,
-    move_focus: Vec<ANSIString<'a>>,
-    resize: Vec<ANSIString<'a>>,
+    new_pane: Vec<AnsiString<'a>>,
+    move_focus: Vec<AnsiString<'a>>,
+    resize: Vec<AnsiString<'a>>,
 }
 
 fn add_keybinds<'a>(help: &'a ModeInfo) -> Keygroups<'a> {

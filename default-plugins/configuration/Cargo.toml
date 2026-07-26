@@ -6,6 +6,6 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-ansi_term = "0.12.1"
+ansi_term = { package = "nu-ansi-term", version = "0.50.3", default-features = false }
 zellij-tile = { path = "../../zellij-tile" }
 chrono = "0.4.0"

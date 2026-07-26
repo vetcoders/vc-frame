@@ -3,7 +3,7 @@ use zellij_utils::pane_size::{Offset, Viewport};
 use crate::output::CharacterChunk;
 use crate::panes::terminal_character::{EMPTY_TERMINAL_CHARACTER, RESET_STYLES, TerminalCharacter};
 use crate::tab::Pane;
-use ansi_term::Colour::{Fixed, RGB};
+use ansi_term::Color::{Fixed, Rgb};
 use std::collections::HashMap;
 use zellij_utils::errors::prelude::*;
 use zellij_utils::{data::PaletteColor, shared::colors};
@@ -81,7 +81,7 @@ impl Display for BoundarySymbol {
             false => match self.color {
                 Some(color) => match color.0 {
                     PaletteColor::Rgb((r, g, b)) => {
-                        write!(f, "{}", RGB(r, g, b).paint(self.boundary_type))
+                        write!(f, "{}", Rgb(r, g, b).paint(self.boundary_type))
                     },
                     PaletteColor::EightBit(color) => {
                         write!(f, "{}", Fixed(color).paint(self.boundary_type))

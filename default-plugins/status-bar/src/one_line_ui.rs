@@ -1,6 +1,6 @@
-use ansi_term::{ANSIString, ANSIStrings};
+use ansi_term::{AnsiString, AnsiStrings};
 use ansi_term::{
-    Color::{Fixed, RGB},
+    Color::{Fixed, Rgb},
     Style,
 };
 use std::collections::HashMap;
@@ -732,7 +732,7 @@ fn render_secondary_info(
     let mut padding = String::new();
     let mut padding_len = 0;
     for _ in 0..remaining_space {
-        padding.push_str(&ANSIStrings(&[colored_elements.superkey_prefix.paint(" ")]).to_string());
+        padding.push_str(&AnsiStrings(&[colored_elements.superkey_prefix.paint(" ")]).to_string());
         padding_len += 1;
     }
     secondary_info.part = format!("{}{}", padding, secondary_info.part);
@@ -1256,7 +1256,7 @@ fn add_keygroup_separator(help: &ModeInfo, max_len: usize) -> Option<LinePart> {
 
     let separator_color = palette_match!(palette.text_unselected.emphasis_0);
     let bg_color = palette_match!(palette.ribbon_selected.base);
-    let mut bits: Vec<ANSIString> = vec![];
+    let mut bits: Vec<AnsiString> = vec![];
     let mode_help_text = match help.mode {
         InputMode::RenamePane => Some("RENAMING PANE"),
         InputMode::RenameTab => Some("RENAMING TAB"),
@@ -1295,7 +1295,7 @@ fn add_keygroup_separator(help: &ModeInfo, max_len: usize) -> Option<LinePart> {
             .bold()
             .paint(separator.to_string()),
     );
-    ret.part = format!("{}{}", ret.part, ANSIStrings(&bits));
+    ret.part = format!("{}{}", ret.part, AnsiStrings(&bits));
     ret.len += 3; // padding and arrow fonts
 
     if ret.len <= max_len { Some(ret) } else { None }

@@ -1,5 +1,5 @@
 use crate::{LinePart, line::tab_separator};
-use ansi_term::{ANSIString, ANSIStrings};
+use ansi_term::{AnsiString, AnsiStrings};
 use unicode_width::UnicodeWidthStr;
 use zellij_tile::prelude::*;
 use zellij_tile_utils::style;
@@ -7,7 +7,7 @@ use zellij_tile_utils::style;
 fn cursors<'a>(
     focused_clients: &'a [ClientId],
     multiplayer_colors: MultiplayerColors,
-) -> (Vec<ANSIString<'a>>, usize) {
+) -> (Vec<AnsiString<'a>>, usize) {
     // cursor section, text length
     let mut len = 0;
     let mut cursors = vec![];
@@ -71,7 +71,7 @@ pub fn render_tab(
             .bold()
             .paint("[")
             .to_string();
-        let cursor_section = ANSIStrings(&cursor_section).to_string();
+        let cursor_section = AnsiStrings(&cursor_section).to_string();
         let cursor_end = style!(foreground_color, background_color)
             .bold()
             .paint("]")
@@ -84,7 +84,7 @@ pub fn render_tab(
         s.push_str(&right_separator.to_string());
         s
     } else {
-        ANSIStrings(&[left_separator, tab_styled_text, right_separator]).to_string()
+        AnsiStrings(&[left_separator, tab_styled_text, right_separator]).to_string()
     };
 
     LinePart {

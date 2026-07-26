@@ -835,14 +835,11 @@ mod not_wasm {
         ));
 
         error!(
-            "{}",
-            format!(
-                "Panic occured:
+            "Panic occured:
              thread: {}
              location: {}
              message: {}",
-                thread, location_string, msg
-            )
+            thread, location_string, msg
         );
 
         match sender {

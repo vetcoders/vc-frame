@@ -1,6 +1,6 @@
 use crate::platform::Platform;
 use crate::shared::{calculate_list_bounds, refresh_directory, render_list_tip};
-use pretty_bytes::converter::convert as pretty_bytes;
+use bytesize::ByteSize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -148,7 +148,7 @@ impl FileListView {
                 let mut file_or_folder_name = entry.name();
                 let size = entry
                     .size()
-                    .map(|s| pretty_bytes(s as f64))
+                    .map(|s| ByteSize(s).display().si().to_string())
                     .unwrap_or("".to_owned());
                 if entry.is_folder() {
                     file_or_folder_name.push(self.platform.separator());

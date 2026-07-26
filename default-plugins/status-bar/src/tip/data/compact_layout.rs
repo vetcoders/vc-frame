@@ -1,6 +1,6 @@
 use ansi_term::{
-    ANSIString, ANSIStrings,
-    Color::{Fixed, RGB},
+    AnsiString, AnsiStrings,
+    Color::{Fixed, Rgb},
     Style, unstyled_len,
 };
 
@@ -10,10 +10,10 @@ use zellij_tile::prelude::{actions::Action, *};
 use zellij_tile_utils::palette_match;
 
 macro_rules! strings {
-    ($ANSIStrings:expr) => {{
-        let strings: &[ANSIString] = $ANSIStrings;
+    ($AnsiStrings:expr) => {{
+        let strings: &[AnsiString] = $AnsiStrings;
 
-        let ansi_strings = ANSIStrings(strings);
+        let ansi_strings = AnsiStrings(strings);
 
         LinePart {
             part: format!("{}", ansi_strings),
@@ -75,7 +75,7 @@ pub fn compact_layout_short(help: &ModeInfo) -> LinePart {
     strings!(&bits)
 }
 
-fn add_keybinds<'a>(help: &'a ModeInfo) -> Vec<ANSIString<'a>> {
+fn add_keybinds<'a>(help: &'a ModeInfo) -> Vec<AnsiString<'a>> {
     let to_pane = action_key(
         &help.get_mode_keybinds(),
         &[Action::SwitchToMode {

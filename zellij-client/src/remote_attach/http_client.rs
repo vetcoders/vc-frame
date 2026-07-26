@@ -1,5 +1,6 @@
 use super::config::connection_timeout;
 use isahc::prelude::*;
+use isahc::tls::{TlsConfig, TrustStore};
 use isahc::{AsyncBody, HttpClient, Request, Response, config::RedirectPolicy};
 use std::collections::HashMap;
 use std::path::Path;
@@ -13,16 +14,26 @@ pub fn create_http_client(
         .redirect_policy(RedirectPolicy::Follow)
         .timeout(connection_timeout());
 
-    if insecure {
+    let tls_config = if insecure {
         eprintln!(
             "WARNING: TLS certificate validation is disabled. This connection is NOT secure."
         );
-        builder = builder.ssl_options(
-            isahc::config::SslOption::DANGER_ACCEPT_INVALID_CERTS
-                | isahc::config::SslOption::DANGER_ACCEPT_INVALID_HOSTS,
-        );
-    } else if let Some(ca_path) = ca_cert {
-        builder = builder.ssl_ca_certificate(isahc::config::CaCertificate::file(ca_path));
+        Some(
+            TlsConfig::builder()
+                .danger_accept_invalid_certs(true)
+                .danger_accept_invalid_hosts(true)
+                .build(),
+        )
+    } else {
+        ca_cert.map(|ca_path| {
+            TlsConfig::builder()
+                .trust_store(TrustStore::from_file(ca_path))
+                .build()
+        })
+    };
+
+    if let Some(tls_config) = tls_config {
+        builder = builder.tls_config(tls_config);
     }
 
     builder.build()

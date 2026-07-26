@@ -1,13 +1,13 @@
-use ansi_term::{ANSIString, ANSIStrings, Style, unstyled_len};
+use ansi_term::{AnsiString, AnsiStrings, Style, unstyled_len};
 
 use crate::{LinePart, action_key_group, style_key_with_modifier};
 use zellij_tile::prelude::{actions::Action, *};
 
 macro_rules! strings {
-    ($ANSIStrings:expr) => {{
-        let strings: &[ANSIString] = $ANSIStrings;
+    ($AnsiStrings:expr) => {{
+        let strings: &[AnsiString] = $AnsiStrings;
 
-        let ansi_strings = ANSIStrings(strings);
+        let ansi_strings = AnsiStrings(strings);
 
         LinePart {
             part: format!("{}", ansi_strings),
@@ -45,7 +45,7 @@ pub fn move_focus_hjkl_tab_switch_short(help: &ModeInfo) -> LinePart {
     strings!(&bits)
 }
 
-fn add_keybinds<'a>(help: &'a ModeInfo) -> Vec<ANSIString<'a>> {
+fn add_keybinds<'a>(help: &'a ModeInfo) -> Vec<AnsiString<'a>> {
     let pane_keymap = help.get_keybinds_for_mode(InputMode::Pane);
     let move_focus_keys = action_key_group(
         &pane_keymap,

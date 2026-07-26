@@ -4,8 +4,8 @@ mod second_line;
 mod tip;
 
 use ansi_term::{
-    ANSIString,
-    Colour::{Fixed, RGB},
+    AnsiString,
+    Color::{Fixed, Rgb},
     Style,
 };
 
@@ -469,13 +469,13 @@ pub fn action_key_group(
 /// - "←→"
 /// - "↓↑"
 ///
-/// The returned Vector of [`ANSIString`] is suitable for transformation into an [`ANSIStrings`]
+/// The returned Vector of [`AnsiString`] is suitable for transformation into an [`AnsiStrings`]
 /// type.
 pub fn style_key_with_modifier(
     keyvec: &[KeyWithModifier],
     palette: &Styling,
     background: Option<PaletteColor>,
-) -> Vec<ANSIString<'static>> {
+) -> Vec<AnsiString<'static>> {
     if keyvec.is_empty() {
         return vec![];
     }
@@ -603,7 +603,7 @@ pub fn style_key_with_modifier(
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use ansi_term::ANSIStrings;
+    use ansi_term::AnsiStrings;
     use ansi_term::unstyle;
 
     fn big_keymap() -> Vec<(KeyWithModifier, Vec<Action>)> {
@@ -751,7 +751,7 @@ pub mod tests {
         let palette = Styling::default();
 
         let ret = style_key_with_modifier(&keyvec, &palette, None);
-        let ret = unstyle(&ANSIStrings(&ret));
+        let ret = unstyle(&AnsiStrings(&ret));
 
         assert_eq!(ret, "<a|b|c>".to_string())
     }
@@ -767,7 +767,7 @@ pub mod tests {
         let palette = Styling::default();
 
         let ret = style_key_with_modifier(&keyvec, &palette, None);
-        let ret = unstyle(&ANSIStrings(&ret));
+        let ret = unstyle(&AnsiStrings(&ret));
 
         assert_eq!(ret, "<hjkl>".to_string())
     }
@@ -783,7 +783,7 @@ pub mod tests {
         let palette = Styling::default();
 
         let ret = style_key_with_modifier(&keyvec, &palette, None);
-        let ret = unstyle(&ANSIStrings(&ret));
+        let ret = unstyle(&AnsiStrings(&ret));
 
         assert_eq!(ret, "<←↓↑→>".to_string())
     }
@@ -797,7 +797,7 @@ pub mod tests {
         let palette = Styling::default();
 
         let ret = style_key_with_modifier(&keyvec, &palette, None);
-        let ret = unstyle(&ANSIStrings(&ret));
+        let ret = unstyle(&AnsiStrings(&ret));
 
         assert_eq!(ret, "<←→>".to_string())
     }
@@ -811,7 +811,7 @@ pub mod tests {
         let palette = Styling::default();
 
         let ret = style_key_with_modifier(&keyvec, &palette, None);
-        let ret = unstyle(&ANSIStrings(&ret));
+        let ret = unstyle(&AnsiStrings(&ret));
 
         assert_eq!(ret, "<↓↑>".to_string())
     }
@@ -827,7 +827,7 @@ pub mod tests {
         let palette = Styling::default();
 
         let ret = style_key_with_modifier(&keyvec, &palette, None);
-        let ret = unstyle(&ANSIStrings(&ret));
+        let ret = unstyle(&AnsiStrings(&ret));
 
         assert_eq!(ret, "Ctrl + <a|b|c|d>".to_string())
     }
@@ -843,7 +843,7 @@ pub mod tests {
         let palette = Styling::default();
 
         let ret = style_key_with_modifier(&keyvec, &palette, None);
-        let ret = unstyle(&ANSIStrings(&ret));
+        let ret = unstyle(&AnsiStrings(&ret));
 
         assert_eq!(ret, "Alt + <a|b|c|d>".to_string())
     }
@@ -859,7 +859,7 @@ pub mod tests {
         let palette = Styling::default();
 
         let ret = style_key_with_modifier(&keyvec, &palette, None);
-        let ret = unstyle(&ANSIStrings(&ret));
+        let ret = unstyle(&AnsiStrings(&ret));
 
         assert_eq!(ret, "Alt + <←↓↑→>".to_string())
     }
@@ -874,7 +874,7 @@ pub mod tests {
         let palette = Styling::default();
 
         let ret = style_key_with_modifier(&keyvec, &palette, None);
-        let ret = unstyle(&ANSIStrings(&ret));
+        let ret = unstyle(&AnsiStrings(&ret));
 
         assert_eq!(ret, "<Alt a|Ctrl b|c>".to_string())
     }
@@ -897,7 +897,7 @@ pub mod tests {
         let palette = Styling::default();
 
         let ret = style_key_with_modifier(&keyvec, &palette, None);
-        let ret = unstyle(&ANSIStrings(&ret));
+        let ret = unstyle(&AnsiStrings(&ret));
 
         assert_eq!(
             ret,
@@ -915,7 +915,7 @@ pub mod tests {
         let palette = Styling::default();
 
         let ret = style_key_with_modifier(&keyvec, &palette, None);
-        let ret = unstyle(&ANSIStrings(&ret));
+        let ret = unstyle(&AnsiStrings(&ret));
 
         assert_eq!(ret, "Ctrl + <ENTER|SPACE|TAB>".to_string())
     }
@@ -930,7 +930,7 @@ pub mod tests {
         let palette = Styling::default();
 
         let ret = style_key_with_modifier(&keyvec, &palette, None);
-        let ret = unstyle(&ANSIStrings(&ret));
+        let ret = unstyle(&AnsiStrings(&ret));
 
         assert_eq!(ret, "Alt + <ENTER|SPACE|TAB>".to_string())
     }

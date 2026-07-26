@@ -9,10 +9,10 @@ use crate::{
 };
 use anyhow;
 use humantime::format_duration;
+use lev_distance::find_best_match_for_name;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 use std::{fs, io, process};
-use suggest::Suggest;
 
 pub fn get_sessions() -> Result<Vec<(String, Duration)>, io::ErrorKind> {
     match fs::read_dir(&*ZELLIJ_SOCK_DIR) {
@@ -533,13 +533,12 @@ pub fn assert_session(name: &str) {
                 return;
             } else {
                 println!("No session named {:?} found.", name);
-                if let Some(sugg) = get_sessions()
+                let session_names = get_sessions()
                     .unwrap()
-                    .iter()
-                    .map(|s| s.0.clone())
-                    .collect::<Vec<_>>()
-                    .suggest(name)
-                {
+                    .into_iter()
+                    .map(|session| session.0)
+                    .collect::<Vec<_>>();
+                if let Some(sugg) = find_best_match_for_name(session_names.iter(), name, None) {
                     println!("  help: Did you mean `{}`?", sugg);
                 }
             }

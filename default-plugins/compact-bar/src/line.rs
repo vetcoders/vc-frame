@@ -1,4 +1,4 @@
-use ansi_term::ANSIStrings;
+use ansi_term::AnsiStrings;
 use unicode_width::UnicodeWidthStr;
 
 use crate::{ARROW_SEPARATOR, LinePart, TabRenderData};
@@ -231,7 +231,7 @@ impl TabLinePopulator {
         ];
 
         LinePart {
-            part: ANSIStrings(&styled_parts).to_string(),
+            part: AnsiStrings(&styled_parts).to_string(),
             len: text_len,
             tab_index: Some(tab_index),
         }
@@ -348,7 +348,7 @@ impl TabLinePrefixBuilder {
                     .paint(prefix_text.clone()),
                 style!(colors.background, self.palette.text_unselected.background).paint(separator),
             ];
-            ANSIStrings(&styled_parts).to_string()
+            AnsiStrings(&styled_parts).to_string()
         };
 
         LinePart {

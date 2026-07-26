@@ -15,7 +15,7 @@ backtrace = { version = "0.3.55", default-features = false, features = ["std"] }
 bitflags = { version = "2.5.0", default-features = false }
 clap = { workspace = true }
 clap_complete = { version = "3.2.1", default-features = false }
-colored = { version = "2.0.0", default-features = false }
+colored = { version = "3.1.1", default-features = false }
 colorsys = { version = "0.6.5", default-features = false, features = ["std"] }
 crossbeam = { version = "0.8.1", default-features = false, features = ["alloc", "std"] }
 directories = { version = "5.0", default-features = false }
@@ -51,7 +51,7 @@ openssl-sys = { version = "0.9.93", default-features = false, features = ["vendo
 isahc = { workspace = true }
 curl-sys = { version = "0.4", default-features = false, features = ["force-system-lib-on-osx", "ssl"], optional = true }
 humantime = { workspace = true }
-suggest = { workspace = true }
+lev_distance = { workspace = true }
 names = { workspace = true }
 rusqlite = { version = "0.30", default-features = false, features = ["bundled"], optional = true }
 notify = { workspace = true }
@@ -68,7 +68,7 @@ windows-sys = { workspace = true, features = [
 winapi = { version = "0.3.9", default-features = false }
 
 [dev-dependencies]
-insta = { version = "1.6.0", features = ["backtrace"] }
+insta = "1.48.0"
 expect-test = "1.4.1"
 
 [features]

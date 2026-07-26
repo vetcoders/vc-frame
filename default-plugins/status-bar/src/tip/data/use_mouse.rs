@@ -1,6 +1,6 @@
 use ansi_term::{
-    ANSIString, ANSIStrings,
-    Color::{Fixed, RGB},
+    AnsiString, AnsiStrings,
+    Color::{Fixed, Rgb},
     Style, unstyled_len,
 };
 
@@ -9,10 +9,10 @@ use zellij_tile::prelude::*;
 use zellij_tile_utils::palette_match;
 
 macro_rules! strings {
-    ($ANSIStrings:expr) => {{
-        let strings: &[ANSIString] = $ANSIStrings;
+    ($AnsiStrings:expr) => {{
+        let strings: &[AnsiString] = $AnsiStrings;
 
-        let ansi_strings = ANSIStrings(strings);
+        let ansi_strings = AnsiStrings(strings);
 
         LinePart {
             part: format!("{}", ansi_strings),

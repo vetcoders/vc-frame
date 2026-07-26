@@ -1,4 +1,4 @@
-use ansi_term::ANSIStrings;
+use ansi_term::AnsiStrings;
 use unicode_width::UnicodeWidthStr;
 
 use crate::{ARROW_SEPARATOR, LinePart};
@@ -134,7 +134,7 @@ fn left_more_message(
         .paint(more_text);
     let right_separator = style!(palette.ribbon_unselected.background, sep_color).paint(separator);
     let more_styled_text =
-        ANSIStrings(&[left_separator, more_styled_text, right_separator]).to_string();
+        AnsiStrings(&[left_separator, more_styled_text, right_separator]).to_string();
     LinePart {
         part: more_styled_text,
         len: more_text_len,
@@ -168,7 +168,7 @@ fn right_more_message(
         .paint(more_text);
     let right_separator = style!(palette.ribbon_unselected.background, sep_color).paint(separator);
     let more_styled_text =
-        ANSIStrings(&[left_separator, more_styled_text, right_separator]).to_string();
+        AnsiStrings(&[left_separator, more_styled_text, right_separator]).to_string();
     LinePart {
         part: more_styled_text,
         len: more_text_len,

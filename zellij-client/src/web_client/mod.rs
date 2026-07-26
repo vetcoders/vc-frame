@@ -181,6 +181,10 @@ pub async fn serve_web_client(
     web_server_ip: IpAddr,
     web_server_port: u16,
 ) {
+    if let Err(error) = listener.set_nonblocking(true) {
+        log::error!("Failed to configure web server listener as non-blocking: {error}");
+        return;
+    }
     let Some(config_file_path) = config_file_path.or_else(Config::default_config_file_path) else {
         log::error!("Failed to find default config file path");
         return;
@@ -260,17 +264,27 @@ pub async fn serve_web_client(
         }));
 
     match rustls_config {
-        Some(rustls_config) => {
-            let _ = axum_server::from_tcp_rustls(listener, rustls_config)
-                .handle(server_handle)
-                .serve(app.into_make_service())
-                .await;
+        Some(rustls_config) => match axum_server::from_tcp_rustls(listener, rustls_config) {
+            Ok(server) => {
+                let _ = server
+                    .handle(server_handle)
+                    .serve(app.into_make_service())
+                    .await;
+            },
+            Err(error) => {
+                log::error!("Failed to prepare HTTPS web server listener: {error}");
+            },
         },
-        None => {
-            let _ = axum_server::from_tcp(listener)
-                .handle(server_handle)
-                .serve(app.into_make_service())
-                .await;
+        None => match axum_server::from_tcp(listener) {
+            Ok(server) => {
+                let _ = server
+                    .handle(server_handle)
+                    .serve(app.into_make_service())
+                    .await;
+            },
+            Err(error) => {
+                log::error!("Failed to prepare HTTP web server listener: {error}");
+            },
         },
     }
 }

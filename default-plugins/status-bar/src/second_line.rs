@@ -1,6 +1,6 @@
 use ansi_term::{
-    ANSIString, ANSIStrings,
-    Color::{Fixed, RGB},
+    AnsiString, AnsiStrings,
+    Color::{Fixed, Rgb},
     Style, unstyled_len,
 };
 use zellij_tile::prelude::actions::Action;
@@ -25,7 +25,7 @@ fn full_length_shortcut(
     let text_color = palette_match!(palette.text_unselected.base);
 
     let separator = if is_first_shortcut { " " } else { " / " };
-    let mut bits: Vec<ANSIString> = vec![Style::new().fg(text_color).paint(separator)];
+    let mut bits: Vec<AnsiString> = vec![Style::new().fg(text_color).paint(separator)];
     bits.extend(style_key_with_modifier(&key, &palette, None));
     bits.push(
         Style::new()
@@ -33,7 +33,7 @@ fn full_length_shortcut(
             .bold()
             .paint(format!(" {}", action)),
     );
-    let part = ANSIStrings(&bits);
+    let part = AnsiStrings(&bits);
 
     LinePart {
         part: part.to_string(),

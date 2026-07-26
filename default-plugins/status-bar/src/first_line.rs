@@ -1,4 +1,4 @@
-use ansi_term::{ANSIStrings, unstyled_len};
+use ansi_term::{AnsiStrings, unstyled_len};
 use zellij_tile::prelude::actions::Action;
 use zellij_tile::prelude::*;
 
@@ -165,7 +165,7 @@ fn long_mode_shortcut(
     let styled_text = colors.styled_text.paint(format!("{} ", key_hint));
     let suffix_separator = colors.suffix_separator.paint(separator);
     LinePart {
-        part: ANSIStrings(&[
+        part: AnsiStrings(&[
             prefix_separator,
             char_left_separator,
             char_shortcut,
@@ -217,7 +217,7 @@ fn shortened_modifier_shortcut(
     let styled_text = colors.styled_text.paint(format!("{} ", key_hint));
     let suffix_separator = colors.suffix_separator.paint(separator);
     LinePart {
-        part: ANSIStrings(&[
+        part: AnsiStrings(&[
             prefix_separator,
             char_left_separator,
             char_shortcut,
@@ -283,7 +283,7 @@ fn short_mode_shortcut(
     let char_shortcut = colors.char_shortcut.paint(format!(" {} ", key_binding));
     let suffix_separator = colors.suffix_separator.paint(separator);
     LinePart {
-        part: ANSIStrings(&[prefix_separator, char_shortcut, suffix_separator]).to_string(),
+        part: AnsiStrings(&[prefix_separator, char_shortcut, suffix_separator]).to_string(),
         len: separator.chars().count()      // Separator
             + 1                             // " "
             + key_binding.chars().count()   // Key binding
@@ -352,7 +352,7 @@ fn swap_layout_keycode(mode_info: &ModeInfo) -> LinePart {
         &mode_info.style.colors,
         Some(mode_info.style.colors.text_unselected.background),
     );
-    let keycode = ANSIStrings(&prev_next_keys_indicator);
+    let keycode = AnsiStrings(&prev_next_keys_indicator);
     let len = unstyled_len(&keycode);
     let part = keycode.to_string();
     LinePart { part, len }
@@ -538,7 +538,7 @@ pub fn superkey(
     (
         common_modifiers,
         LinePart {
-            part: ANSIStrings(&[prefix, suffix_separator]).to_string(),
+            part: AnsiStrings(&[prefix, suffix_separator]).to_string(),
             len: prefix_text.chars().count() + separator.chars().count(),
         },
     )
@@ -726,7 +726,7 @@ pub fn first_line(
             remaining_space -= swap_layout_status.len;
             for _ in 0..remaining_space {
                 key_indicators.part.push_str(
-                    &ANSIStrings(&[colored_elements.superkey_prefix.paint(" ")]).to_string(),
+                    &AnsiStrings(&[colored_elements.superkey_prefix.paint(" ")]).to_string(),
                 );
                 key_indicators.len += 1;
             }
