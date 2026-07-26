@@ -278,10 +278,11 @@ message Action {
     SetLightThemeAction set_light_theme = 138;
     ToggleThemeAction toggle_theme = 139;
     CopyPaneScrollbackAction copy_pane_scrollback = 140;
+    CloseTabByIdIfNameAction close_tab_by_id_if_name = 141;
   }
 }
 
-// Action message definitions (all 92 variants)
+// Action message definitions
 
 // Simple action types (no data)
 message QuitAction {}
@@ -657,6 +658,12 @@ message GoToTabByIdAction {
 
 message CloseTabByIdAction {
   uint64 id = 1;
+}
+
+message CloseTabByIdIfNameAction {
+  uint64 id = 1;
+  string expected_name = 2;
+  string expected_session_incarnation = 3;
 }
 
 message RenameTabByIdAction {

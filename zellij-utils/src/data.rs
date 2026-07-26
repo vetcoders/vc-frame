@@ -2469,7 +2469,11 @@ pub struct PaneListEntry {
 }
 
 pub type ListPanesResponse = Vec<PaneListEntry>;
-pub type ListTabsResponse = Vec<TabInfo>;
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ListTabsResponse {
+    pub session_incarnation: String,
+    pub tabs: Vec<TabInfo>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ClientInfo {

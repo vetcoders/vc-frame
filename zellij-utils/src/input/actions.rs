@@ -495,6 +495,11 @@ pub enum Action {
     CloseTabById {
         id: u64,
     },
+    CloseTabByIdIfName {
+        id: u64,
+        expected_name: String,
+        expected_session_incarnation: String,
+    },
     RenameTabById {
         id: u64,
         name: String,
@@ -1326,9 +1331,24 @@ impl Action {
             },
             CliAction::GoToNextTab => Ok(vec![Action::GoToNextTab]),
             CliAction::GoToPreviousTab => Ok(vec![Action::GoToPreviousTab]),
-            CliAction::CloseTab { tab_id } => match tab_id {
-                Some(id) => Ok(vec![Action::CloseTabById { id: id as u64 }]),
-                None => Ok(vec![Action::CloseTab]),
+            CliAction::CloseTab {
+                tab_id,
+                expected_name,
+                expected_session_incarnation,
+            } => match (tab_id, expected_name, expected_session_incarnation) {
+                (Some(id), Some(expected_name), Some(expected_session_incarnation)) => {
+                    Ok(vec![Action::CloseTabByIdIfName {
+                    id: id as u64,
+                    expected_name,
+                        expected_session_incarnation,
+                    }])
+                },
+                (Some(id), None, None) => Ok(vec![Action::CloseTabById { id: id as u64 }]),
+                (None, None, None) => Ok(vec![Action::CloseTab]),
+                _ => Err(
+                    "--expected-name and --expected-session-incarnation require each other and --tab-id when closing a tab"
+                        .to_owned(),
+                ),
             },
             CliAction::GoToTab { index } => Ok(vec![Action::GoToTab { index }]),
             CliAction::GoToTabName { name, create } => {
@@ -3014,7 +3034,11 @@ mod tests {
     // 20. CloseTab
     #[test]
     fn test_close_tab_with_tab_id() {
-        let cli_action = CliAction::CloseTab { tab_id: Some(5) };
+        let cli_action = CliAction::CloseTab {
+            tab_id: Some(5),
+            expected_name: None,
+            expected_session_incarnation: None,
+        };
         let result = Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None);
         assert!(result.is_ok());
         let actions = result.unwrap();
@@ -3029,12 +3053,45 @@ mod tests {
 
     #[test]
     fn test_close_tab_without_tab_id() {
-        let cli_action = CliAction::CloseTab { tab_id: None };
+        let cli_action = CliAction::CloseTab {
+            tab_id: None,
+            expected_name: None,
+            expected_session_incarnation: None,
+        };
         let result = Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None);
         assert!(result.is_ok());
         let actions = result.unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::CloseTab));
+    }
+
+    #[test]
+    fn test_close_tab_with_expected_name_requires_and_binds_tab_id() {
+        let cli_action = CliAction::CloseTab {
+            tab_id: Some(5),
+            expected_name: Some("work-123".to_owned()),
+            expected_session_incarnation: Some("server-abc".to_owned()),
+        };
+        let actions =
+            Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None).unwrap();
+
+        assert_eq!(
+            actions,
+            vec![Action::CloseTabByIdIfName {
+                id: 5,
+                expected_name: "work-123".to_owned(),
+                expected_session_incarnation: "server-abc".to_owned(),
+            }]
+        );
+
+        let invalid = CliAction::CloseTab {
+            tab_id: None,
+            expected_name: Some("work-123".to_owned()),
+            expected_session_incarnation: Some("server-abc".to_owned()),
+        };
+        assert!(
+            Action::actions_from_cli(invalid, Box::new(|| PathBuf::from("/tmp")), None).is_err()
+        );
     }
 
     #[test]

@@ -1116,6 +1116,20 @@ pub(crate) fn route_action(
                 ))
                 .with_context(err_context)?;
         },
+        Action::CloseTabByIdIfName {
+            id,
+            expected_name,
+            expected_session_incarnation,
+        } => {
+            senders
+                .send_to_screen(ScreenInstruction::CloseTabWithIdIfName(
+                    id as usize,
+                    expected_name,
+                    expected_session_incarnation,
+                    Some(NotificationEnd::new(completion_tx)),
+                ))
+                .with_context(err_context)?;
+        },
         Action::RenameTabById { id, name } => {
             senders
                 .send_to_screen(ScreenInstruction::RenameTabWithId(
@@ -1744,7 +1758,7 @@ pub(crate) fn route_action(
                     format_tabs_as_json(&tab_infos)
                 } else {
                     format_tabs_table(
-                        &tab_infos,
+                        &tab_infos.tabs,
                         show_state || show_all,
                         show_dimensions || show_all,
                         show_panes || show_all,
@@ -2968,8 +2982,22 @@ fn extract_cwd(entry: &PaneListEntry) -> String {
     entry.pane_cwd.as_deref().unwrap_or("-").to_string()
 }
 
-fn format_tabs_as_json(tab_infos: &[TabInfo]) -> Vec<String> {
-    vec![serde_json::to_string_pretty(tab_infos).unwrap_or_else(|_| "[]".to_string())]
+fn format_tabs_as_json(response: &ListTabsResponse) -> Vec<String> {
+    let tab_infos = response
+        .tabs
+        .iter()
+        .filter_map(|tab| serde_json::to_value(tab).ok())
+        .map(|mut tab| {
+            if let Some(tab) = tab.as_object_mut() {
+                tab.insert(
+                    "session_incarnation".to_owned(),
+                    serde_json::Value::String(response.session_incarnation.clone()),
+                );
+            }
+            tab
+        })
+        .collect::<Vec<_>>();
+    vec![serde_json::to_string_pretty(&tab_infos).unwrap_or_else(|_| "[]".to_string())]
 }
 
 fn format_tabs_table(

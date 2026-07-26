@@ -15,7 +15,7 @@ use zellij_utils::input::command::{RunCommand, TerminalAction};
 use zellij_utils::input::config::Config;
 use zellij_utils::input::layout::{
     FloatingPaneLayout, PercentOrFixed, PluginAlias, PluginUserConfiguration, Run, RunPlugin,
-    RunPluginLocation, RunPluginOrAlias, SplitDirection, TiledPaneLayout,
+    RunPluginLocation, RunPluginOrAlias, SplitDirection, TabLayoutInfo, TiledPaneLayout,
 };
 use zellij_utils::input::mouse::MouseEvent;
 use zellij_utils::input::options::Options;
@@ -225,6 +225,9 @@ impl ServerOsApi for FakeInputOutput {
     }
     fn write_to_file(&mut self, contents: String, filename: Option<String>) -> Result<()> {
         if let Some(filename) = filename {
+            if filename == "__vc_frame_injected_write_failure__" {
+                return Err(anyhow!("injected dump write failure"));
+            }
             self.fake_filesystem
                 .lock()
                 .unwrap()
@@ -322,6 +325,144 @@ fn create_new_screen(
         web_server_port,
         Arc::new(AtomicBool::new(false)),
     )
+}
+
+#[test]
+fn stable_tab_ids_are_monotonic_after_the_latest_tab_is_removed() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, false, false);
+    let swap_layouts = (vec![], vec![]);
+
+    // Explicit IDs can arrive while restoring/applying a session. They must
+    // advance the allocator too.
+    screen
+        .new_tab(
+            41,
+            swap_layouts.clone(),
+            Some("restored".to_owned()),
+            None,
+            TabPlacement::Append,
+        )
+        .unwrap();
+    let newest_id = screen.get_new_tab_id();
+    assert_eq!(newest_id, 42);
+    screen
+        .new_tab(
+            newest_id,
+            swap_layouts,
+            Some("latest".to_owned()),
+            None,
+            TabPlacement::Append,
+        )
+        .unwrap();
+
+    // Removing the current maximum used to make max+1 return the same ID.
+    screen.tabs.remove(&newest_id);
+    assert_eq!(screen.get_new_tab_id(), 43);
+}
+
+#[test]
+fn override_layout_positions_resolve_to_live_or_fresh_stable_tab_ids() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, false, false);
+    let swap_layouts = (vec![], vec![]);
+
+    screen
+        .new_tab(
+            41,
+            swap_layouts.clone(),
+            Some("retired".to_owned()),
+            None,
+            TabPlacement::Append,
+        )
+        .unwrap();
+    screen
+        .new_tab(
+            42,
+            swap_layouts,
+            Some("survivor".to_owned()),
+            None,
+            TabPlacement::Append,
+        )
+        .unwrap();
+    screen.tabs.remove(&41);
+    screen.get_tab_by_id_mut(42).unwrap().position = 0;
+
+    let make_layout = |tab_index| TabLayoutInfo {
+        tab_index,
+        tab_name: None,
+        tiled_layout: TiledPaneLayout::default(),
+        floating_layouts: vec![],
+        swap_tiled_layouts: None,
+        swap_floating_layouts: None,
+    };
+    let mut layouts = vec![make_layout(0), make_layout(1)];
+
+    screen
+        .assign_stable_tab_ids_to_layout(&mut layouts)
+        .unwrap();
+
+    assert_eq!(layouts[0].tab_index, 42);
+    assert_eq!(layouts[1].tab_index, 43);
+    assert_ne!(layouts[1].tab_index, 41, "retired IDs must not be reused");
+    assert_eq!(screen.get_new_tab_id(), 44);
+}
+
+#[test]
+fn explicit_pane_dump_reports_missing_targets_and_write_failures() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, false, false);
+    new_tab(&mut screen, 7, 0);
+    let tab = screen.get_tab_by_id_mut(0).unwrap();
+
+    let missing = tab.dump_terminal_screen(
+        Some("/tmp/should-not-exist".to_owned()),
+        PaneId::Terminal(999),
+        true,
+    );
+    assert!(missing.is_err(), "a missing explicit pane must fail");
+
+    let write_failure = tab.dump_terminal_screen(
+        Some("__vc_frame_injected_write_failure__".to_owned()),
+        PaneId::Terminal(7),
+        true,
+    );
+    assert!(
+        write_failure.is_err(),
+        "an explicit-pane write error must reach the action boundary"
+    );
+}
+
+#[test]
+fn missing_tab_name_preserves_focus_and_reports_absence() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, false, false);
+    new_tab(&mut screen, 7, 0);
+    new_tab(&mut screen, 8, 1);
+    let active_before = screen.active_tab_ids.get(&1).copied();
+
+    let found = screen
+        .go_to_tab_name("definitely-missing".to_owned(), 1)
+        .unwrap();
+
+    assert!(!found);
+    assert_eq!(
+        screen.active_tab_ids.get(&1).copied(),
+        active_before,
+        "missing tab selection must not move focus to another tab"
+    );
 }
 
 struct MockScreen {
@@ -4260,7 +4401,11 @@ pub fn send_cli_close_tab_action() {
         ServerInstruction::KillSession,
         server_receiver
     );
-    let close_tab = CliAction::CloseTab { tab_id: None };
+    let close_tab = CliAction::CloseTab {
+        tab_id: None,
+        expected_name: None,
+        expected_session_incarnation: None,
+    };
     send_cli_action_to_server(&session_metadata, close_tab, client_id);
     std::thread::sleep(std::time::Duration::from_millis(100));
     mock_screen.teardown(vec![server_thread, screen_thread]);
@@ -5520,6 +5665,48 @@ pub fn close_tab_by_id_verifies_screen_state() {
     assert!(
         screen.get_tab_by_id(2).is_some(),
         "Tab with ID 2 should still exist"
+    );
+}
+
+#[test]
+pub fn close_tab_by_id_if_name_fails_closed_on_identity_mismatch() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, true, true);
+
+    new_tab(&mut screen, 1, 0);
+    new_tab(&mut screen, 2, 1);
+    screen.get_tab_by_id_mut(1).unwrap().name = "work-123".to_owned();
+    let incarnation = screen.session_incarnation.clone();
+
+    let mismatch = screen.close_tab_by_id_if_name(1, "work-456", &incarnation);
+    assert!(mismatch.is_err());
+    assert!(
+        screen.get_tab_by_id(1).is_some(),
+        "a name mismatch must preserve the target tab"
+    );
+    assert!(
+        screen.get_tab_by_id(0).is_some(),
+        "a name mismatch must not touch another tab"
+    );
+
+    let incarnation_mismatch =
+        screen.close_tab_by_id_if_name(1, "work-123", "another-server-lifetime");
+    assert!(incarnation_mismatch.is_err());
+    assert!(screen.get_tab_by_id(1).is_some());
+
+    screen
+        .close_tab_by_id_if_name(1, "work-123", &incarnation)
+        .expect("matching tab identity should close");
+    assert!(screen.get_tab_by_id(1).is_none());
+    assert!(screen.get_tab_by_id(0).is_some());
+
+    assert!(
+        screen
+            .close_tab_by_id_if_name(99, "work-123", &incarnation)
+            .is_err()
     );
 }
 
@@ -7286,7 +7473,11 @@ pub fn send_cli_close_tab_with_tab_id() {
     std::thread::sleep(std::time::Duration::from_millis(100));
     mock_screen.new_tab(TiledPaneLayout::default());
     std::thread::sleep(std::time::Duration::from_millis(100));
-    let cli_action = CliAction::CloseTab { tab_id: Some(1) };
+    let cli_action = CliAction::CloseTab {
+        tab_id: Some(1),
+        expected_name: None,
+        expected_session_incarnation: None,
+    };
     send_cli_action_to_server(&session_metadata, cli_action, client_id);
     std::thread::sleep(std::time::Duration::from_millis(100));
     mock_screen.teardown(vec![server_thread, screen_thread]);

@@ -41,6 +41,7 @@ use std::time::{Duration, Instant};
 use crate::route::NotificationEnd;
 
 use log::{debug, warn};
+use uuid::Uuid;
 use zellij_utils::data::{
     CommandOrPlugin, Direction, EventType, FloatingPaneCoordinates, GetFocusedPaneInfoResponse,
     HostTerminalThemeMode, KeyWithModifier, LayoutInfo, LayoutWithError, ListPanesResponse,
@@ -521,6 +522,7 @@ pub enum ScreenInstruction {
     MoveTabRight(ClientId, Option<NotificationEnd>),
     GoToTabWithId(usize, Option<ClientId>, Option<NotificationEnd>),
     CloseTabWithId(usize, Option<NotificationEnd>),
+    CloseTabWithIdIfName(usize, String, String, Option<NotificationEnd>),
     RenameTabWithId(usize, Vec<u8>, Option<NotificationEnd>),
     BreakPanesToTabWithId {
         pane_ids: Vec<PaneId>,
@@ -983,6 +985,7 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::MoveTabRight(..) => ScreenContext::MoveTabRight,
             ScreenInstruction::GoToTabWithId(..) => ScreenContext::GoToTabWithId,
             ScreenInstruction::CloseTabWithId(..) => ScreenContext::CloseTabWithId,
+            ScreenInstruction::CloseTabWithIdIfName(..) => ScreenContext::CloseTabWithIdIfName,
             ScreenInstruction::RenameTabWithId(..) => ScreenContext::RenameTabWithId,
             ScreenInstruction::BreakPanesToTabWithId { .. } => ScreenContext::BreakPanesToTabWithId,
             ScreenInstruction::TerminalResize(..) => ScreenContext::TerminalResize,
@@ -1369,6 +1372,13 @@ pub(crate) struct Screen {
     max_panes: Option<usize>,
     /// A map between this [`Screen`]'s tabs and their ID/key.
     tabs: BTreeMap<usize, Tab>,
+    /// The next stable tab ID. IDs are reserved monotonically and never reused
+    /// during a server lifetime, so a delayed close-by-ID cannot hit a new tab
+    /// that inherited the identity of a recently closed one.
+    next_tab_id: usize,
+    /// Unique to this server lifetime. Stable tab IDs are only meaningful
+    /// together with this incarnation.
+    session_incarnation: String,
     /// The full size of this [`Screen`].
     size: Size,
     pixel_dimensions: PixelDimensions,
@@ -1573,6 +1583,8 @@ impl Screen {
             client_sizes: HashMap::new(),
             global_last_active_tab_id: 0,
             tabs: BTreeMap::new(),
+            next_tab_id: 0,
+            session_incarnation: Uuid::new_v4().to_string(),
             terminal_emulator_colors: Rc::new(RefCell::new(Palette::default())),
             terminal_emulator_color_codes: Rc::new(RefCell::new(HashMap::new())),
             tab_history: BTreeMap::new(),
@@ -1629,12 +1641,37 @@ impl Screen {
         }
     }
 
-    fn get_new_tab_id(&self) -> usize {
-        if let Some(id) = self.tabs.keys().last() {
-            *id + 1
-        } else {
-            0
+    fn get_new_tab_id(&mut self) -> usize {
+        let tab_id = self.next_tab_id;
+        self.next_tab_id = self
+            .next_tab_id
+            .checked_add(1)
+            .expect("stable tab ID space exhausted");
+        tab_id
+    }
+
+    fn assign_stable_tab_ids_to_layout(&mut self, tab_layouts: &mut [TabLayoutInfo]) -> Result<()> {
+        let existing_id_by_position: HashMap<usize, usize> = self
+            .tabs
+            .values()
+            .map(|tab| (tab.position, tab.id))
+            .collect();
+        let mut requested_positions = HashSet::new();
+
+        for tab_layout in tab_layouts {
+            let requested_position = tab_layout.tab_index;
+            if !requested_positions.insert(requested_position) {
+                return Err(anyhow!(
+                    "override layout contains duplicate tab position {}",
+                    requested_position
+                ));
+            }
+            tab_layout.tab_index = existing_id_by_position
+                .get(&requested_position)
+                .copied()
+                .unwrap_or_else(|| self.get_new_tab_id());
         }
+        Ok(())
     }
 
     /// Gets a tab by its stable ID (BTreeMap key).
@@ -2037,6 +2074,35 @@ impl Screen {
                 .with_context(err_context)?;
             self.render(None).with_context(err_context)
         }
+    }
+
+    fn close_tab_by_id_if_name(
+        &mut self,
+        tab_id: usize,
+        expected_name: &str,
+        expected_session_incarnation: &str,
+    ) -> Result<()> {
+        if self.session_incarnation != expected_session_incarnation {
+            return Err(anyhow!(
+                "refusing to close tab ID {}: expected session incarnation {:?}, current {:?}",
+                tab_id,
+                expected_session_incarnation,
+                self.session_incarnation
+            ));
+        }
+        let actual_name = self
+            .get_tab_by_id(tab_id)
+            .map(|tab| tab.name.clone())
+            .ok_or_else(|| anyhow!("failed to find tab with ID: {}", tab_id))?;
+        if actual_name != expected_name {
+            return Err(anyhow!(
+                "refusing to close tab ID {}: expected name {:?}, found {:?}",
+                tab_id,
+                expected_name,
+                actual_name
+            ));
+        }
+        self.close_tab_by_id(tab_id)
     }
 
     // Closes the client_id's focused tab
@@ -2935,6 +3001,10 @@ impl Screen {
         placement: TabPlacement,
     ) -> Result<()> {
         let err_context = || format!("failed to create new tab for client {client_id:?}",);
+        let next_tab_id = tab_id
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("stable tab ID space exhausted"))?;
+        self.next_tab_id = self.next_tab_id.max(next_tab_id);
 
         let client_id = client_id.map(|client_id| {
             if self.get_active_tab(client_id).is_ok() {
@@ -3425,7 +3495,10 @@ impl Screen {
         // Sort by position (display order)
         tab_infos.sort_by_key(|t| t.position);
 
-        Ok(tab_infos)
+        Ok(ListTabsResponse {
+            session_incarnation: self.session_incarnation.clone(),
+            tabs: tab_infos,
+        })
     }
 
     fn get_current_tab_info(&self, client_id: ClientId) -> Result<Option<TabInfo>> {
@@ -6362,7 +6435,7 @@ pub(crate) fn screen_thread_main(
                 client_id,
                 full,
                 pane_id,
-                completion_tx,
+                mut completion_tx,
                 cli_client_id,
                 ansi,
             ) => {
@@ -6371,23 +6444,42 @@ pub(crate) fn screen_thread_main(
                         // Write dump to file (existing behavior)
                         match pane_id {
                             Some(pane_id) => {
+                                let mut target_found = false;
+                                let mut dump_error = None;
                                 for tab in screen.get_tabs_mut().values_mut() {
                                     if tab.has_pane_with_pid(&pane_id) {
-                                        if ansi {
+                                        target_found = true;
+                                        let result = if ansi {
                                             tab.dump_with_ansi_terminal_screen(
                                                 Some(file_path.clone()),
                                                 pane_id,
                                                 full,
-                                            )?;
+                                            )
                                         } else {
                                             tab.dump_terminal_screen(
                                                 Some(file_path.clone()),
                                                 pane_id,
                                                 full,
-                                            )?;
+                                            )
+                                        };
+                                        if let Err(error) = result {
+                                            dump_error = Some(error.to_string());
                                         }
                                         break;
                                     }
+                                }
+                                if !target_found {
+                                    dump_error =
+                                        Some(format!("Pane with id {:?} not found", pane_id));
+                                }
+                                if let Some(error) = dump_error {
+                                    log::error!("Failed to dump screen: {}", error);
+                                    if let Some(completion) = completion_tx.as_mut() {
+                                        completion.set_exit_status(1);
+                                        completion.set_error_message(error);
+                                    }
+                                    drop(completion_tx);
+                                    continue;
                                 }
                             },
                             None => {
@@ -6424,8 +6516,10 @@ pub(crate) fn screen_thread_main(
                         let dump = match pane_id {
                             Some(pane_id) => {
                                 let mut result = String::new();
+                                let mut target_found = false;
                                 for tab in screen.get_tabs_mut().values_mut() {
                                     if tab.has_pane_with_pid(&pane_id) {
+                                        target_found = true;
                                         if ansi {
                                             if let Some(dump) = tab
                                                 .get_dump_with_ansi_terminal_screen(pane_id, full)
@@ -6439,6 +6533,16 @@ pub(crate) fn screen_thread_main(
                                         }
                                         break;
                                     }
+                                }
+                                if !target_found {
+                                    let error = format!("Pane with id {:?} not found", pane_id);
+                                    log::error!("Failed to dump screen: {}", error);
+                                    if let Some(completion) = completion_tx.as_mut() {
+                                        completion.set_exit_status(1);
+                                        completion.set_error_message(error);
+                                    }
+                                    drop(completion_tx);
+                                    continue;
                                 }
                                 result
                             },
@@ -7300,45 +7404,67 @@ pub(crate) fn screen_thread_main(
                         .get(&client_id)
                         .copied()
                         .unwrap_or(false);
-                    if let Ok(tab_exists) = screen.go_to_tab_name(tab_name.clone(), client_id) {
-                        screen.render(None)?;
-                        if tab_exists {
-                            // Tab already exists - find its ID and set in completion
-                            if let Some(existing_tab) =
-                                screen.tabs.values().find(|t| t.name == tab_name)
-                                && let Some(c) = completion_tx.as_mut()
-                            {
-                                c.set_affected_tab_id(existing_tab.id)
+                    match screen.go_to_tab_name(tab_name.clone(), client_id) {
+                        Ok(tab_exists) => {
+                            screen.render(None)?;
+                            if tab_exists {
+                                // Tab already exists - find its ID and set in completion
+                                if let Some(existing_tab) =
+                                    screen.tabs.values().find(|t| t.name == tab_name)
+                                    && let Some(c) = completion_tx.as_mut()
+                                {
+                                    c.set_affected_tab_id(existing_tab.id)
+                                }
                             }
-                        }
-                        if create && !tab_exists {
-                            let tab_index = screen.get_new_tab_id();
-                            let should_change_focus_to_new_tab = true;
-                            screen.new_tab(
-                                tab_index,
-                                swap_layouts,
-                                Some(tab_name),
-                                Some(client_id),
-                                TabPlacement::Append,
-                            )?;
-                            screen
-                                .bus
-                                .senders
-                                .send_to_plugin(PluginInstruction::NewTab(
-                                    None,
-                                    default_shell,
-                                    None,
-                                    vec![],
+                            if create && !tab_exists {
+                                let tab_index = screen.get_new_tab_id();
+                                let should_change_focus_to_new_tab = true;
+                                screen.new_tab(
                                     tab_index,
-                                    None,  // initial_panes
-                                    false, // block_on_first_terminal
-                                    should_change_focus_to_new_tab,
-                                    (client_id, is_web_client),
-                                    completion_tx,
-                                ))?;
-                            continue; // so we don't get to the completion signalling below
-                        }
+                                    swap_layouts,
+                                    Some(tab_name),
+                                    Some(client_id),
+                                    TabPlacement::Append,
+                                )?;
+                                screen
+                                    .bus
+                                    .senders
+                                    .send_to_plugin(PluginInstruction::NewTab(
+                                        None,
+                                        default_shell,
+                                        None,
+                                        vec![],
+                                        tab_index,
+                                        None,  // initial_panes
+                                        false, // block_on_first_terminal
+                                        should_change_focus_to_new_tab,
+                                        (client_id, is_web_client),
+                                        completion_tx,
+                                    ))?;
+                                continue; // completion is owned by the plugin instruction
+                            }
+                            if !tab_exists && let Some(completion) = completion_tx.as_mut() {
+                                completion.set_exit_status(1);
+                                completion.set_error_message(format!(
+                                    "Tab named {:?} not found",
+                                    tab_name
+                                ));
+                            }
+                        },
+                        Err(error) => {
+                            if let Some(completion) = completion_tx.as_mut() {
+                                completion.set_exit_status(1);
+                                completion.set_error_message(format!(
+                                    "Failed to select tab named {:?}: {}",
+                                    tab_name, error
+                                ));
+                            }
+                        },
                     }
+                } else if let Some(completion) = completion_tx.as_mut() {
+                    completion.set_exit_status(1);
+                    completion
+                        .set_error_message("No connected clients to select a tab for".to_owned());
                 }
             },
             ScreenInstruction::UpdateTabName(
@@ -7718,6 +7844,13 @@ pub(crate) fn screen_thread_main(
                 client_id,
                 completion_tx,
             ) => {
+                // Layouts identify tabs by display position. Convert those
+                // positions to stable IDs before comparing, mutating or
+                // creating tabs so a retired ID is never resurrected.
+                if !apply_only_to_focused_tab {
+                    screen.assign_stable_tab_ids_to_layout(&mut tab_layouts)?;
+                }
+
                 // 1. Determine which tabs to close (exist but not in layout)
                 let existing_tab_indices: HashSet<usize> = screen.tabs.keys().copied().collect();
                 let layout_tab_indices: HashSet<usize> =
@@ -8585,11 +8718,48 @@ pub(crate) fn screen_thread_main(
                     log::error!("Failed to find tab with ID: {}", tab_id);
                 }
             },
-            ScreenInstruction::CloseTabWithId(tab_id, _completion_tx) => {
+            ScreenInstruction::CloseTabWithId(tab_id, mut completion_tx) => {
                 if screen.get_tab_by_id(tab_id).is_some() {
-                    screen.close_tab_by_id(tab_id).non_fatal();
+                    if let Err(error) = screen.close_tab_by_id(tab_id) {
+                        log::error!("Failed to close tab with ID {}: {}", tab_id, error);
+                        if let Some(ref mut completion_tx) = completion_tx {
+                            completion_tx.set_exit_status(1);
+                            completion_tx.set_error_message(format!(
+                                "Failed to close tab with ID {}: {}",
+                                tab_id, error
+                            ));
+                        }
+                    }
                 } else {
                     log::error!("Failed to find tab with ID: {}", tab_id);
+                    if let Some(ref mut completion_tx) = completion_tx {
+                        completion_tx.set_exit_status(1);
+                        completion_tx
+                            .set_error_message(format!("Failed to find tab with ID: {}", tab_id));
+                    }
+                }
+            },
+            ScreenInstruction::CloseTabWithIdIfName(
+                tab_id,
+                expected_name,
+                expected_session_incarnation,
+                mut completion_tx,
+            ) => {
+                if let Err(error) = screen.close_tab_by_id_if_name(
+                    tab_id,
+                    &expected_name,
+                    &expected_session_incarnation,
+                ) {
+                    log::error!(
+                        "Failed to close tab with ID {} and expected name {:?}: {}",
+                        tab_id,
+                        expected_name,
+                        error
+                    );
+                    if let Some(ref mut completion_tx) = completion_tx {
+                        completion_tx.set_exit_status(1);
+                        completion_tx.set_error_message(error.to_string());
+                    }
                 }
             },
             ScreenInstruction::BreakPanesToTabWithId {

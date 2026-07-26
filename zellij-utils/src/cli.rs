@@ -1730,6 +1730,11 @@ tail -f /tmp/my-live-logfile | vc-frame pipe --name logs --plugin https://exampl
         #[clap(long, value_parser)]
         pane_id: Option<String>,
 
+        /// Real runtime transcript to use only when terminal scrollback cannot
+        /// be captured. The file must already exist and be non-empty.
+        #[clap(long, value_parser)]
+        runtime_transcript: Option<PathBuf>,
+
         /// Working directory recorded for rerun
         #[clap(long, value_parser)]
         cwd: Option<PathBuf>,
@@ -2212,6 +2217,17 @@ pub enum CliAction {
         /// Target a specific tab by ID
         #[clap(short, long, value_parser)]
         tab_id: Option<usize>,
+        /// Close only if the tab's current name still matches this value
+        #[clap(
+            long,
+            value_parser,
+            requires("tab-id"),
+            requires("expected-session-incarnation")
+        )]
+        expected_name: Option<String>,
+        /// Close only inside the exact server lifetime that exposed the tab ID
+        #[clap(long, value_parser, requires("tab-id"), requires("expected-name"))]
+        expected_session_incarnation: Option<String>,
     },
     /// Go to tab with index [index]
     GoToTab {
@@ -2777,5 +2793,96 @@ mod tests {
     fn subscribe_requires_pane_id() {
         let result = CliArgs::try_parse_from(["vc-frame", "subscribe"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn close_tab_expected_name_requires_tab_id() {
+        let rejected = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                CliArgs::try_parse_from([
+                    "vc-frame",
+                    "action",
+                    "close-tab",
+                    "--expected-name",
+                    "work-123",
+                    "--expected-session-incarnation",
+                    "server-abc",
+                ])
+                .is_err()
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(rejected);
+    }
+
+    #[test]
+    fn close_tab_expected_name_parses_with_tab_id() {
+        let parsed = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let cli = CliArgs::try_parse_from([
+                    "vc-frame",
+                    "action",
+                    "close-tab",
+                    "--tab-id",
+                    "7",
+                    "--expected-name",
+                    "work-123",
+                    "--expected-session-incarnation",
+                    "server-abc",
+                ])
+                .unwrap();
+                matches!(
+                    cli.command,
+                    Some(Command::Action(action))
+                        if matches!(
+                            action.as_ref(),
+                            CliAction::CloseTab {
+                                tab_id: Some(7),
+                                expected_name: Some(expected_name),
+                                expected_session_incarnation: Some(incarnation),
+                            } if expected_name == "work-123" && incarnation == "server-abc"
+                        )
+                )
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(parsed);
+    }
+
+    #[test]
+    fn triage_run_accepts_signal_exit_and_real_transcript_fallback() {
+        std::thread::Builder::new()
+            .name("triage-run-cli-parser".to_owned())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let cli = CliArgs::try_parse_from([
+                    "vc-frame",
+                    "triage-run",
+                    "--run",
+                    "work-123",
+                    "--exit-code",
+                    "-15",
+                    "--origin-session",
+                    "fixture",
+                    "--runtime-transcript",
+                    "/tmp/work-123.log",
+                ])
+                .unwrap();
+                assert!(matches!(
+                    cli.command,
+                    Some(Command::Sessions(Sessions::TriageRun {
+                        exit_code: -15,
+                        runtime_transcript: Some(ref transcript),
+                        ..
+                    })) if transcript == std::path::Path::new("/tmp/work-123.log")
+                ));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

@@ -12,9 +12,12 @@
 //! that enforces that; [`TriageIo`] is the seam that lets the tests inject a
 //! fault at each step and assert the invariant still holds.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 /// Canonical bucket session for runs that finished cleanly.
 pub const FINALIZED_RUNS_SESSION: &str = "Finalized runs";
@@ -139,6 +142,10 @@ pub struct FinishedRun {
     pub origin_tab: String,
     /// Pane to dump. `None` dumps the tab's focused pane.
     pub pane_id: Option<String>,
+    /// Optional real transcript emitted by the runtime. This is only used when
+    /// the exact terminal pane cannot produce scrollback; placeholders are not
+    /// accepted.
+    pub runtime_transcript: Option<PathBuf>,
     /// Command line, preserved so the bucket tab can offer a one-keypress rerun.
     pub command: Vec<String>,
     pub cwd: Option<PathBuf>,
@@ -156,6 +163,33 @@ impl FinishedRun {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureSource {
+    TerminalScrollback,
+    RuntimeTranscript,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OriginTabIdentity {
+    pub session: String,
+    pub name: String,
+    pub id: u64,
+    #[serde(default)]
+    pub session_incarnation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureEvidence {
+    pub capture_source: CaptureSource,
+    pub source_identity: String,
+    pub bytes: u64,
+    #[serde(default)]
+    pub sha256: String,
+    #[serde(default)]
+    pub origin_tab_identity: Option<OriginTabIdentity>,
+}
+
 /// What lands next to the scrollback, so a run stays rerunnable after the
 /// origin tab is gone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,10 +204,14 @@ pub struct RunMeta {
     /// Unix seconds. Supplied by the caller — this module stays clock-free so
     /// its tests are deterministic.
     pub captured_at: u64,
+    pub capture_source: CaptureSource,
+    pub capture_source_identity: String,
+    pub capture_bytes: u64,
+    pub capture_sha256: String,
 }
 
 impl RunMeta {
-    pub fn new(run: &FinishedRun, captured_at: u64) -> Self {
+    pub fn new(run: &FinishedRun, captured_at: u64, capture: &CaptureEvidence) -> Self {
         RunMeta {
             run: run.run.clone(),
             exit_code: run.exit_code,
@@ -183,6 +221,10 @@ impl RunMeta {
             command: run.command.clone(),
             cwd: run.cwd.clone(),
             captured_at,
+            capture_source: capture.capture_source,
+            capture_source_identity: capture.source_identity.clone(),
+            capture_bytes: capture.bytes,
+            capture_sha256: capture.sha256.clone(),
         }
     }
 }
@@ -198,6 +240,27 @@ pub fn scrollback_path(root: &Path, run: &str) -> PathBuf {
 
 pub fn meta_path(root: &Path, run: &str) -> PathBuf {
     capture_dir(root, run).join("meta.json")
+}
+
+pub fn transfer_receipt_path(root: &Path, run: &str) -> PathBuf {
+    capture_dir(root, run).join("transfer.json")
+}
+
+pub fn capture_sha256(path: &Path) -> Result<String, String> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|error| format!("cannot hash {}: {}", path.display(), error))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let bytes = file
+            .read(&mut buffer)
+            .map_err(|error| format!("cannot hash {}: {}", path.display(), error))?;
+        if bytes == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 /// Control-plane root, `~/.vibecrafted/control_plane` by convention.
@@ -220,7 +283,9 @@ pub fn control_plane_root() -> Option<PathBuf> {
 /// the caller can tell "nothing happened" from "captured but not yet moved".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferStep {
+    LoadReceipt,
     Capture,
+    WriteReceipt,
     WriteMeta,
     EnsureBucketSession,
     OpenBucketTab,
@@ -232,11 +297,39 @@ pub enum TransferStep {
 pub struct TransferError {
     pub step: TransferStep,
     pub message: String,
-    /// True whenever the origin tab is still open — i.e. no scrollback was lost.
-    pub origin_tab_preserved: bool,
+    /// Proven state of the origin after the failing step. A close can remove a
+    /// tab and still fail during downstream cleanup, so a boolean "preserved"
+    /// claim is not honest enough for this boundary.
+    pub origin_tab_state: OriginTabState,
     /// True once the scrollback + meta are durable on disk, even if the move
     /// itself failed. The operator can still recover the run by hand.
     pub capture_is_durable: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OriginTabState {
+    #[default]
+    Preserved,
+    Closed,
+    Unknown,
+}
+
+impl std::fmt::Display for OriginTabState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            OriginTabState::Preserved => "preserved",
+            OriginTabState::Closed => "closed",
+            OriginTabState::Unknown => "unknown",
+        };
+        formatter.write_str(value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloseOriginError {
+    pub message: String,
+    pub origin_tab_state: OriginTabState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -246,6 +339,75 @@ pub struct TransferReport {
     pub scrollback: PathBuf,
     pub meta: PathBuf,
     pub origin_tab_closed: bool,
+    pub receipt: PathBuf,
+}
+
+/// Durable transfer evidence. This is deliberately independent from the live
+/// drawer inventory: it lets a reconciler resume after interruption without
+/// guessing whether capture, viewer creation or origin close already happened.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferReceipt {
+    pub version: u8,
+    pub run: String,
+    pub bucket: BucketKind,
+    #[serde(default)]
+    pub exit_code: i32,
+    #[serde(default)]
+    pub origin_session: String,
+    #[serde(default)]
+    pub origin_tab: String,
+    #[serde(default)]
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub cwd: Option<PathBuf>,
+    #[serde(default)]
+    pub pane_id: Option<String>,
+    #[serde(default)]
+    pub runtime_transcript: Option<PathBuf>,
+    pub capture: Option<CaptureEvidence>,
+    pub capture_committed: bool,
+    pub metadata_committed: bool,
+    pub viewer_confirmed: bool,
+    #[serde(default)]
+    pub viewer_tab_identity: Option<OriginTabIdentity>,
+    #[serde(default)]
+    pub viewer_creation_pending: bool,
+    #[serde(default)]
+    pub viewer_token: String,
+    pub origin_tab_state: OriginTabState,
+    pub fault: Option<String>,
+    pub updated_at: u64,
+}
+
+impl TransferReceipt {
+    fn new(run: &FinishedRun, captured_at: u64) -> Self {
+        Self {
+            version: 3,
+            run: run.run.clone(),
+            bucket: run.bucket(),
+            exit_code: run.exit_code,
+            origin_session: run.origin_session.clone(),
+            origin_tab: run.origin_tab.clone(),
+            command: run.command.clone(),
+            cwd: run.cwd.clone(),
+            pane_id: run.pane_id.clone(),
+            runtime_transcript: run.runtime_transcript.clone(),
+            capture: None,
+            capture_committed: false,
+            metadata_committed: false,
+            viewer_confirmed: false,
+            viewer_tab_identity: None,
+            viewer_creation_pending: false,
+            viewer_token: Uuid::new_v4().simple().to_string(),
+            origin_tab_state: OriginTabState::Preserved,
+            fault: None,
+            updated_at: captured_at,
+        }
+    }
+
+    fn viewer_tab_name(&self) -> String {
+        format!("{} [vc:{}]", self.run, self.viewer_token)
+    }
 }
 
 /// The side-effecting surface of a transfer. Split out so the ordering
@@ -259,17 +421,92 @@ pub trait TriageIo {
         session: &str,
         origin_tab: &str,
         pane_id: Option<&str>,
+        runtime_transcript: Option<&Path>,
         dest: &Path,
-    ) -> Result<(), String>;
+    ) -> Result<CaptureEvidence, String>;
+    fn load_receipt(&mut self, path: &Path) -> Result<Option<TransferReceipt>, String>;
+    fn write_receipt(&mut self, path: &Path, receipt: &TransferReceipt) -> Result<(), String>;
     fn write_meta(&mut self, dest: &Path, meta: &RunMeta) -> Result<(), String>;
     /// Create the bucket session if it does not exist yet. Idempotent.
     fn ensure_bucket_session(&mut self, session: &str) -> Result<(), String>;
     /// Open a tab named `tab` in `session`, showing the dump and offering a
     /// suspended rerun of the original command.
     fn open_bucket_tab(&mut self, session: &str, tab: &str, meta: &RunMeta) -> Result<(), String>;
-    /// Read back the target session and report whether `tab` is really there.
-    fn bucket_tab_exists(&mut self, session: &str, tab: &str) -> Result<bool, String>;
-    fn close_origin_tab(&mut self, session: &str, tab: &str) -> Result<(), String>;
+    /// Read back the target session and return the unique durable identity of
+    /// `tab`, including the server incarnation that owns its stable ID.
+    fn bucket_tab_identity(
+        &mut self,
+        session: &str,
+        tab: &str,
+    ) -> Result<Option<OriginTabIdentity>, String>;
+    fn close_origin_tab(
+        &mut self,
+        session: &str,
+        tab: &str,
+        identity: Option<&OriginTabIdentity>,
+    ) -> Result<(), CloseOriginError>;
+}
+
+fn file_matches_capture(path: &Path, capture: &CaptureEvidence) -> bool {
+    std::fs::metadata(path)
+        .map(|metadata| {
+            metadata.is_file()
+                && capture.bytes > 0
+                && metadata.len() == capture.bytes
+                && !capture.sha256.is_empty()
+                && capture_sha256(path).as_deref() == Ok(capture.sha256.as_str())
+        })
+        .unwrap_or(false)
+}
+
+fn file_matches_meta(path: &Path, expected: &RunMeta) -> bool {
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<RunMeta>(&bytes).ok())
+        .as_ref()
+        == Some(expected)
+}
+
+fn fail_transfer<Io: TriageIo>(
+    io: &mut Io,
+    receipt_path: &Path,
+    receipt: &mut TransferReceipt,
+    step: TransferStep,
+    message: String,
+    origin_tab_state: OriginTabState,
+) -> TransferError {
+    receipt.origin_tab_state = origin_tab_state;
+    receipt.fault = Some(format!("{:?}: {}", step, message));
+    let message = match io.write_receipt(receipt_path, receipt) {
+        Ok(()) => message,
+        Err(receipt_error) => format!(
+            "{}; additionally failed to persist transfer fault at {}: {}",
+            message,
+            receipt_path.display(),
+            receipt_error
+        ),
+    };
+    TransferError {
+        step,
+        message,
+        origin_tab_state,
+        capture_is_durable: receipt.capture_committed && receipt.metadata_committed,
+    }
+}
+
+fn persist_receipt<Io: TriageIo>(
+    io: &mut Io,
+    receipt_path: &Path,
+    receipt: &mut TransferReceipt,
+) -> Result<(), TransferError> {
+    receipt.fault = None;
+    io.write_receipt(receipt_path, receipt)
+        .map_err(|message| TransferError {
+            step: TransferStep::WriteReceipt,
+            message,
+            origin_tab_state: receipt.origin_tab_state,
+            capture_is_durable: receipt.capture_committed && receipt.metadata_committed,
+        })
 }
 
 /// Transfer one finished run into its status bucket.
@@ -286,59 +523,250 @@ pub fn transfer_finished_run<Io: TriageIo>(
     let bucket = run.bucket();
     let scrollback = scrollback_path(root, &run.run);
     let meta_dest = meta_path(root, &run.run);
-    let meta = RunMeta::new(run, captured_at);
+    let receipt_dest = transfer_receipt_path(root, &run.run);
+    let mut receipt = io
+        .load_receipt(&receipt_dest)
+        .map_err(|message| TransferError {
+            step: TransferStep::LoadReceipt,
+            message,
+            origin_tab_state: OriginTabState::Unknown,
+            capture_is_durable: false,
+        })?
+        .unwrap_or_else(|| TransferReceipt::new(run, captured_at));
 
-    let fail = |step: TransferStep, message: String, capture_is_durable: bool| TransferError {
-        step,
-        message,
-        // Nothing in this function closes the origin tab before the final step,
-        // so every early return leaves it standing.
-        origin_tab_preserved: true,
-        capture_is_durable,
-    };
-
-    io.capture_scrollback(
-        &run.origin_session,
-        &run.origin_tab,
-        run.pane_id.as_deref(),
-        &scrollback,
-    )
-    .map_err(|e| fail(TransferStep::Capture, e, false))?;
-    io.write_meta(&meta_dest, &meta)
-        .map_err(|e| fail(TransferStep::WriteMeta, e, false))?;
-
-    // From here on the run is recoverable from disk no matter what breaks.
-    io.ensure_bucket_session(bucket.session_name())
-        .map_err(|e| fail(TransferStep::EnsureBucketSession, e, true))?;
-    io.open_bucket_tab(bucket.session_name(), &run.run, &meta)
-        .map_err(|e| fail(TransferStep::OpenBucketTab, e, true))?;
-
-    // Read back rather than trust the open: a bucket session killed mid-transfer
-    // must not cost us the origin tab.
-    let confirmed = io
-        .bucket_tab_exists(bucket.session_name(), &run.run)
-        .map_err(|e| fail(TransferStep::ConfirmBucketTab, e, true))?;
-    if !confirmed {
-        return Err(fail(
-            TransferStep::ConfirmBucketTab,
-            format!(
-                "tab '{}' did not appear in session '{}'",
-                run.run,
-                bucket.session_name()
-            ),
-            true,
-        ));
+    if receipt.version != 3
+        || receipt.run != run.run
+        || receipt.bucket != bucket
+        || receipt.exit_code != run.exit_code
+        || receipt.origin_session != run.origin_session
+        || receipt.origin_tab != run.origin_tab
+        || receipt.command != run.command
+        || receipt.cwd != run.cwd
+        || receipt.pane_id != run.pane_id
+        || receipt.runtime_transcript != run.runtime_transcript
+        || receipt.viewer_token.is_empty()
+    {
+        let message = format!(
+            "receipt identity mismatch: stored v{} run '{}' in {:?} at {}/{}, requested v3 '{}' in {:?} at {}/{}",
+            receipt.version,
+            receipt.run,
+            receipt.bucket,
+            receipt.origin_session,
+            receipt.origin_tab,
+            run.run,
+            bucket,
+            run.origin_session,
+            run.origin_tab
+        );
+        return Err(TransferError {
+            step: TransferStep::LoadReceipt,
+            message,
+            origin_tab_state: OriginTabState::Unknown,
+            capture_is_durable: receipt.capture_committed && receipt.metadata_committed,
+        });
     }
 
-    io.close_origin_tab(&run.origin_session, &run.origin_tab)
-        .map_err(|e| TransferError {
-            step: TransferStep::CloseOriginTab,
-            message: e,
-            // The close is what failed, so the tab is still there — a duplicate,
-            // not a loss.
-            origin_tab_preserved: true,
-            capture_is_durable: true,
-        })?;
+    if receipt.capture_committed
+        && !receipt
+            .capture
+            .as_ref()
+            .map(|capture| file_matches_capture(&scrollback, capture))
+            .unwrap_or(false)
+    {
+        receipt.capture_committed = false;
+        receipt.metadata_committed = false;
+        receipt.capture = None;
+    }
+
+    if !receipt.capture_committed {
+        let capture = match io.capture_scrollback(
+            &run.origin_session,
+            &run.origin_tab,
+            run.pane_id.as_deref(),
+            run.runtime_transcript.as_deref(),
+            &scrollback,
+        ) {
+            Ok(capture) => capture,
+            Err(message) => {
+                return Err(fail_transfer(
+                    io,
+                    &receipt_dest,
+                    &mut receipt,
+                    TransferStep::Capture,
+                    message,
+                    OriginTabState::Preserved,
+                ));
+            },
+        };
+        receipt.capture = Some(capture);
+        receipt.capture_committed = true;
+        receipt.metadata_committed = false;
+        persist_receipt(io, &receipt_dest, &mut receipt)?;
+    }
+
+    let capture = receipt
+        .capture
+        .clone()
+        .expect("capture evidence exists after committed capture");
+    // A retry is a continuation of the same transfer, not a new capture
+    // epoch. Keeping the original timestamp makes metadata verification
+    // stable across process restarts.
+    let meta = RunMeta::new(run, receipt.updated_at, &capture);
+    if receipt.metadata_committed && !file_matches_meta(&meta_dest, &meta) {
+        receipt.metadata_committed = false;
+    }
+    if !receipt.metadata_committed {
+        if let Err(message) = io.write_meta(&meta_dest, &meta) {
+            return Err(fail_transfer(
+                io,
+                &receipt_dest,
+                &mut receipt,
+                TransferStep::WriteMeta,
+                message,
+                OriginTabState::Preserved,
+            ));
+        }
+        receipt.metadata_committed = true;
+        persist_receipt(io, &receipt_dest, &mut receipt)?;
+    }
+
+    // Always revalidate the viewer. A drawer server can restart after the
+    // receipt was committed; the durable capture remains truth and the viewer
+    // can be resurrected without touching the origin.
+    receipt.viewer_confirmed = false;
+    let current_origin_tab_state = receipt.origin_tab_state;
+    if let Err(message) = io.ensure_bucket_session(bucket.session_name()) {
+        return Err(fail_transfer(
+            io,
+            &receipt_dest,
+            &mut receipt,
+            TransferStep::EnsureBucketSession,
+            message,
+            current_origin_tab_state,
+        ));
+    }
+    let viewer_tab_name = receipt.viewer_tab_name();
+    let current_viewer_identity =
+        match io.bucket_tab_identity(bucket.session_name(), &viewer_tab_name) {
+            Ok(current_viewer_identity) => current_viewer_identity,
+            Err(message) => {
+                return Err(fail_transfer(
+                    io,
+                    &receipt_dest,
+                    &mut receipt,
+                    TransferStep::ConfirmBucketTab,
+                    message,
+                    current_origin_tab_state,
+                ));
+            },
+        };
+    let confirmed_viewer_identity =
+        match (current_viewer_identity, receipt.viewer_tab_identity.clone()) {
+            (Some(current), Some(expected)) if current == expected => current,
+            (Some(current), Some(expected)) => {
+                return Err(fail_transfer(
+                    io,
+                    &receipt_dest,
+                    &mut receipt,
+                    TransferStep::ConfirmBucketTab,
+                    format!(
+                        "viewer tab '{}' changed identity: expected {:?}, current {:?}",
+                        viewer_tab_name, expected, current
+                    ),
+                    current_origin_tab_state,
+                ));
+            },
+            (Some(current), None) if receipt.viewer_creation_pending => current,
+            (Some(current), None) => {
+                return Err(fail_transfer(
+                    io,
+                    &receipt_dest,
+                    &mut receipt,
+                    TransferStep::ConfirmBucketTab,
+                    format!(
+                        "unowned viewer tab '{}' ({:?}) already exists in session '{}'",
+                        viewer_tab_name,
+                        current,
+                        bucket.session_name()
+                    ),
+                    current_origin_tab_state,
+                ));
+            },
+            (None, _) => {
+                // Persist the creation reservation before opening. If the process
+                // dies after `new-tab`, a retry may adopt exactly one matching tab;
+                // an unrelated pre-existing tab is never accepted without this
+                // durable pending marker.
+                receipt.viewer_tab_identity = None;
+                receipt.viewer_creation_pending = true;
+                persist_receipt(io, &receipt_dest, &mut receipt)?;
+                if let Err(message) =
+                    io.open_bucket_tab(bucket.session_name(), &viewer_tab_name, &meta)
+                {
+                    return Err(fail_transfer(
+                        io,
+                        &receipt_dest,
+                        &mut receipt,
+                        TransferStep::OpenBucketTab,
+                        message,
+                        current_origin_tab_state,
+                    ));
+                }
+                match io.bucket_tab_identity(bucket.session_name(), &viewer_tab_name) {
+                    Ok(Some(viewer_identity)) => viewer_identity,
+                    Ok(None) => {
+                        return Err(fail_transfer(
+                            io,
+                            &receipt_dest,
+                            &mut receipt,
+                            TransferStep::ConfirmBucketTab,
+                            format!(
+                                "tab '{}' did not appear in session '{}'",
+                                viewer_tab_name,
+                                bucket.session_name()
+                            ),
+                            current_origin_tab_state,
+                        ));
+                    },
+                    Err(message) => {
+                        return Err(fail_transfer(
+                            io,
+                            &receipt_dest,
+                            &mut receipt,
+                            TransferStep::ConfirmBucketTab,
+                            message,
+                            current_origin_tab_state,
+                        ));
+                    },
+                }
+            },
+        };
+    receipt.viewer_tab_identity = Some(confirmed_viewer_identity);
+    receipt.viewer_creation_pending = false;
+    receipt.viewer_confirmed = true;
+    persist_receipt(io, &receipt_dest, &mut receipt)?;
+
+    // Revalidate even after a prior receipt said Closed. A server can restore
+    // serialized tabs after a crash; a stale Closed bit must never turn that
+    // resurrection into a false-success.
+    let identity = receipt
+        .capture
+        .as_ref()
+        .and_then(|capture| capture.origin_tab_identity.as_ref());
+    match io.close_origin_tab(&run.origin_session, &run.origin_tab, identity) {
+        Ok(()) => receipt.origin_tab_state = OriginTabState::Closed,
+        Err(error) => {
+            return Err(fail_transfer(
+                io,
+                &receipt_dest,
+                &mut receipt,
+                TransferStep::CloseOriginTab,
+                error.message,
+                error.origin_tab_state,
+            ));
+        },
+    }
+    persist_receipt(io, &receipt_dest, &mut receipt)?;
 
     Ok(TransferReport {
         run: run.run.clone(),
@@ -346,6 +774,7 @@ pub fn transfer_finished_run<Io: TriageIo>(
         scrollback,
         meta: meta_dest,
         origin_tab_closed: true,
+        receipt: receipt_dest,
     })
 }
 
@@ -360,6 +789,7 @@ mod tests {
             origin_session: "Operator".to_owned(),
             origin_tab: "impl-260720-120000-01000".to_owned(),
             pane_id: Some("terminal_3".to_owned()),
+            runtime_transcript: None,
             command: vec!["claude".to_owned(), "--resume".to_owned()],
             cwd: Some(PathBuf::from("/repo")),
             bucket_verdict: None,
@@ -378,20 +808,33 @@ mod tests {
         calls: Vec<&'static str>,
         fail_at: Option<TransferStep>,
         tab_appears: bool,
+        visible_tab_name: Option<String>,
+        open_materializes_tab: bool,
         captured_tab: Option<String>,
+        close_error_state: OriginTabState,
+        closed_identity: Option<OriginTabIdentity>,
+        receipt: Option<TransferReceipt>,
     }
 
     impl FakeIo {
         fn healthy() -> Self {
             FakeIo {
-                tab_appears: true,
+                open_materializes_tab: true,
                 ..Default::default()
             }
         }
         fn failing_at(step: TransferStep) -> Self {
             FakeIo {
                 fail_at: Some(step),
-                tab_appears: true,
+                open_materializes_tab: true,
+                ..Default::default()
+            }
+        }
+        fn failing_close_with_state(origin_tab_state: OriginTabState) -> Self {
+            FakeIo {
+                fail_at: Some(TransferStep::CloseOriginTab),
+                open_materializes_tab: true,
+                close_error_state: origin_tab_state,
                 ..Default::default()
             }
         }
@@ -410,10 +853,38 @@ mod tests {
             _session: &str,
             origin_tab: &str,
             _pane_id: Option<&str>,
+            _runtime_transcript: Option<&Path>,
             _dest: &Path,
-        ) -> Result<(), String> {
+        ) -> Result<CaptureEvidence, String> {
             self.captured_tab = Some(origin_tab.to_owned());
-            self.guard(TransferStep::Capture, "capture")
+            self.guard(TransferStep::Capture, "capture")?;
+            Ok(CaptureEvidence {
+                capture_source: CaptureSource::TerminalScrollback,
+                source_identity: "Operator/tab:7/pane:3".to_owned(),
+                bytes: 42,
+                sha256: "fake-sha256".to_owned(),
+                origin_tab_identity: Some(OriginTabIdentity {
+                    session: "Operator".to_owned(),
+                    name: origin_tab.to_owned(),
+                    id: 7,
+                    session_incarnation: "origin-incarnation".to_owned(),
+                }),
+            })
+        }
+        fn load_receipt(&mut self, _path: &Path) -> Result<Option<TransferReceipt>, String> {
+            self.calls.push("load");
+            if self.fail_at == Some(TransferStep::LoadReceipt) {
+                return Err("injected fault at LoadReceipt".to_owned());
+            }
+            Ok(self.receipt.clone())
+        }
+        fn write_receipt(&mut self, _path: &Path, receipt: &TransferReceipt) -> Result<(), String> {
+            self.calls.push("receipt");
+            if self.fail_at == Some(TransferStep::WriteReceipt) {
+                return Err("injected fault at WriteReceipt".to_owned());
+            }
+            self.receipt = Some(receipt.clone());
+            Ok(())
         }
         fn write_meta(&mut self, _dest: &Path, _meta: &RunMeta) -> Result<(), String> {
             self.guard(TransferStep::WriteMeta, "meta")
@@ -424,17 +895,51 @@ mod tests {
         fn open_bucket_tab(
             &mut self,
             _session: &str,
-            _tab: &str,
+            tab: &str,
             _meta: &RunMeta,
         ) -> Result<(), String> {
-            self.guard(TransferStep::OpenBucketTab, "open")
+            self.guard(TransferStep::OpenBucketTab, "open")?;
+            if self.open_materializes_tab {
+                self.tab_appears = true;
+                self.visible_tab_name = Some(tab.to_owned());
+            }
+            Ok(())
         }
-        fn bucket_tab_exists(&mut self, _session: &str, _tab: &str) -> Result<bool, String> {
+        fn bucket_tab_identity(
+            &mut self,
+            session: &str,
+            tab: &str,
+        ) -> Result<Option<OriginTabIdentity>, String> {
             self.guard(TransferStep::ConfirmBucketTab, "confirm")?;
-            Ok(self.tab_appears)
+            let name_matches = self
+                .visible_tab_name
+                .as_deref()
+                .map(|visible| visible == tab)
+                .unwrap_or(true);
+            Ok(
+                (self.tab_appears && name_matches).then(|| OriginTabIdentity {
+                    session: session.to_owned(),
+                    name: tab.to_owned(),
+                    id: 11,
+                    session_incarnation: "viewer-incarnation".to_owned(),
+                }),
+            )
         }
-        fn close_origin_tab(&mut self, _session: &str, _tab: &str) -> Result<(), String> {
-            self.guard(TransferStep::CloseOriginTab, "close")
+        fn close_origin_tab(
+            &mut self,
+            _session: &str,
+            _tab: &str,
+            identity: Option<&OriginTabIdentity>,
+        ) -> Result<(), CloseOriginError> {
+            self.calls.push("close");
+            self.closed_identity = identity.cloned();
+            if self.fail_at == Some(TransferStep::CloseOriginTab) {
+                return Err(CloseOriginError {
+                    message: "injected fault at CloseOriginTab".to_owned(),
+                    origin_tab_state: self.close_error_state,
+                });
+            }
+            Ok(())
         }
     }
 
@@ -579,7 +1084,10 @@ mod tests {
 
         assert_eq!(
             io.calls,
-            vec!["capture", "meta", "ensure", "open", "confirm", "close"]
+            vec![
+                "load", "capture", "receipt", "meta", "receipt", "ensure", "confirm", "receipt",
+                "open", "confirm", "receipt", "close", "receipt"
+            ]
         );
         assert_eq!(report.bucket, BucketKind::Finalized);
         assert!(report.origin_tab_closed);
@@ -597,6 +1105,7 @@ mod tests {
     fn a_fault_at_any_step_leaves_the_origin_tab_open() {
         for step in [
             TransferStep::Capture,
+            TransferStep::WriteReceipt,
             TransferStep::WriteMeta,
             TransferStep::EnsureBucketSession,
             TransferStep::OpenBucketTab,
@@ -609,7 +1118,7 @@ mod tests {
 
             assert_eq!(error.step, step, "reported the wrong failing step");
             assert!(
-                error.origin_tab_preserved,
+                error.origin_tab_state == OriginTabState::Preserved,
                 "origin tab must survive a fault at {:?}",
                 step
             );
@@ -625,15 +1134,111 @@ mod tests {
     fn a_bucket_session_killed_mid_transfer_does_not_cost_the_origin_tab() {
         // open() succeeds, but the target session dies before we read it back.
         let mut io = FakeIo {
-            tab_appears: false,
+            open_materializes_tab: false,
             ..FakeIo::healthy()
         };
         let error = transfer_finished_run(&mut io, &finished(0), Path::new("/cp"), 0).unwrap_err();
 
         assert_eq!(error.step, TransferStep::ConfirmBucketTab);
-        assert!(error.origin_tab_preserved);
+        assert_eq!(error.origin_tab_state, OriginTabState::Preserved);
         assert!(error.capture_is_durable, "capture landed before the move");
         assert!(!io.calls.contains(&"close"));
+    }
+
+    #[test]
+    fn an_unowned_preexisting_viewer_never_authorizes_origin_close() {
+        let mut io = FakeIo {
+            tab_appears: true,
+            open_materializes_tab: true,
+            ..Default::default()
+        };
+        let error = transfer_finished_run(&mut io, &finished(0), Path::new("/cp"), 0).unwrap_err();
+
+        assert_eq!(error.step, TransferStep::ConfirmBucketTab);
+        assert!(error.message.contains("unowned viewer tab"));
+        assert!(!io.calls.contains(&"close"));
+    }
+
+    #[test]
+    fn a_pending_creation_receipt_can_adopt_the_single_created_viewer() {
+        let root = tempfile::tempdir().unwrap();
+        let run = finished(0);
+        let mut first_process = FakeIo::failing_at(TransferStep::OpenBucketTab);
+        transfer_finished_run(&mut first_process, &run, root.path(), 1).unwrap_err();
+        assert!(
+            first_process
+                .receipt
+                .as_ref()
+                .unwrap()
+                .viewer_creation_pending
+        );
+        let viewer_tab_name = first_process.receipt.as_ref().unwrap().viewer_tab_name();
+
+        let mut second_process = FakeIo {
+            receipt: first_process.receipt,
+            tab_appears: true,
+            visible_tab_name: Some(viewer_tab_name.clone()),
+            open_materializes_tab: true,
+            ..Default::default()
+        };
+        transfer_finished_run(&mut second_process, &run, root.path(), 2).unwrap();
+
+        let receipt = second_process.receipt.unwrap();
+        assert_eq!(
+            receipt.viewer_tab_identity,
+            Some(OriginTabIdentity {
+                session: BucketKind::Finalized.session_name().to_owned(),
+                name: viewer_tab_name,
+                id: 11,
+                session_incarnation: "viewer-incarnation".to_owned(),
+            })
+        );
+        assert!(!receipt.viewer_creation_pending);
+        assert!(receipt.viewer_confirmed);
+        assert!(!second_process.calls.contains(&"open"));
+    }
+
+    #[test]
+    fn a_pending_receipt_never_adopts_a_plain_foreign_run_tab() {
+        let root = tempfile::tempdir().unwrap();
+        let run = finished(0);
+        let mut first_process = FakeIo::failing_at(TransferStep::OpenBucketTab);
+        transfer_finished_run(&mut first_process, &run, root.path(), 1).unwrap_err();
+
+        let mut second_process = FakeIo {
+            receipt: first_process.receipt,
+            tab_appears: true,
+            visible_tab_name: Some(run.run.clone()),
+            open_materializes_tab: true,
+            ..Default::default()
+        };
+        transfer_finished_run(&mut second_process, &run, root.path(), 2).unwrap();
+
+        assert!(
+            second_process.calls.contains(&"open"),
+            "the nonce-qualified viewer must be created instead of adopting the plain run tab"
+        );
+        assert_ne!(
+            second_process
+                .receipt
+                .as_ref()
+                .unwrap()
+                .viewer_tab_identity
+                .as_ref()
+                .unwrap()
+                .name,
+            run.run
+        );
+    }
+
+    #[test]
+    fn a_close_cleanup_failure_reports_when_the_origin_is_already_gone() {
+        let mut io = FakeIo::failing_close_with_state(OriginTabState::Closed);
+        let error = transfer_finished_run(&mut io, &finished(0), Path::new("/cp"), 0).unwrap_err();
+
+        assert_eq!(error.step, TransferStep::CloseOriginTab);
+        assert_eq!(error.origin_tab_state, OriginTabState::Closed);
+        assert!(error.capture_is_durable);
     }
 
     #[test]
@@ -659,11 +1264,174 @@ mod tests {
     }
 
     #[test]
+    fn a_new_process_resumes_with_the_durable_origin_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let run = finished(0);
+        let mut first_process = FakeIo::failing_at(TransferStep::EnsureBucketSession);
+        let first_error =
+            transfer_finished_run(&mut first_process, &run, root.path(), 1).unwrap_err();
+        assert_eq!(first_error.step, TransferStep::EnsureBucketSession);
+
+        let scrollback = scrollback_path(root.path(), &run.run);
+        let metadata = meta_path(root.path(), &run.run);
+        std::fs::create_dir_all(scrollback.parent().unwrap()).unwrap();
+        std::fs::write(&scrollback, vec![b'x'; 42]).unwrap();
+        let mut durable_receipt = first_process.receipt.clone().unwrap();
+        let capture = durable_receipt.capture.as_mut().unwrap();
+        capture.sha256 = capture_sha256(&scrollback).unwrap();
+        let durable_meta = RunMeta::new(&run, 1, capture);
+        std::fs::write(&metadata, serde_json::to_vec_pretty(&durable_meta).unwrap()).unwrap();
+
+        let mut second_process = FakeIo {
+            receipt: Some(durable_receipt),
+            open_materializes_tab: true,
+            ..Default::default()
+        };
+        transfer_finished_run(&mut second_process, &run, root.path(), 2).unwrap();
+
+        assert!(
+            !second_process.calls.contains(&"capture"),
+            "a committed capture must not be repeated on resume"
+        );
+        assert_eq!(
+            second_process.closed_identity,
+            Some(OriginTabIdentity {
+                session: run.origin_session,
+                name: run.origin_tab,
+                id: 7,
+                session_incarnation: "origin-incarnation".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_receipt_from_another_origin_is_rejected_before_reuse() {
+        let root = tempfile::tempdir().unwrap();
+        let run = finished(0);
+        let mut first_process = FakeIo::failing_at(TransferStep::EnsureBucketSession);
+        transfer_finished_run(&mut first_process, &run, root.path(), 1).unwrap_err();
+
+        let mut foreign_receipt = first_process.receipt.unwrap();
+        foreign_receipt.origin_tab = "another-run".to_owned();
+        let original_foreign_receipt = foreign_receipt.clone();
+        let mut second_process = FakeIo {
+            receipt: Some(foreign_receipt),
+            open_materializes_tab: true,
+            ..Default::default()
+        };
+        let error = transfer_finished_run(&mut second_process, &run, root.path(), 2).unwrap_err();
+
+        assert_eq!(error.step, TransferStep::LoadReceipt);
+        assert!(error.message.contains("receipt identity mismatch"));
+        assert_eq!(second_process.calls, vec!["load"]);
+        assert_eq!(second_process.receipt, Some(original_foreign_receipt));
+    }
+
+    #[test]
+    fn capture_selectors_are_part_of_the_receipt_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let run = finished(0);
+        let mut first_process = FakeIo::failing_at(TransferStep::EnsureBucketSession);
+        transfer_finished_run(&mut first_process, &run, root.path(), 1).unwrap_err();
+        let durable_receipt = first_process.receipt.unwrap();
+
+        let mut changed_pane = run.clone();
+        changed_pane.pane_id = Some("terminal_99".to_owned());
+        let mut pane_retry = FakeIo {
+            receipt: Some(durable_receipt.clone()),
+            ..Default::default()
+        };
+        let pane_error =
+            transfer_finished_run(&mut pane_retry, &changed_pane, root.path(), 2).unwrap_err();
+        assert_eq!(pane_error.step, TransferStep::LoadReceipt);
+
+        let mut changed_transcript = run;
+        changed_transcript.runtime_transcript = Some(PathBuf::from("/tmp/corrected.jsonl"));
+        let mut transcript_retry = FakeIo {
+            receipt: Some(durable_receipt),
+            ..Default::default()
+        };
+        let transcript_error =
+            transfer_finished_run(&mut transcript_retry, &changed_transcript, root.path(), 2)
+                .unwrap_err();
+        assert_eq!(transcript_error.step, TransferStep::LoadReceipt);
+    }
+
+    #[test]
+    fn same_size_scrollback_corruption_invalidates_the_capture() {
+        let root = tempfile::tempdir().unwrap();
+        let scrollback = root.path().join("scrollback.txt");
+        std::fs::write(&scrollback, b"good").unwrap();
+        let capture = CaptureEvidence {
+            capture_source: CaptureSource::RuntimeTranscript,
+            source_identity: "/tmp/runtime.log".to_owned(),
+            bytes: 4,
+            sha256: capture_sha256(&scrollback).unwrap(),
+            origin_tab_identity: None,
+        };
+        assert!(file_matches_capture(&scrollback, &capture));
+
+        std::fs::write(&scrollback, b"evil").unwrap();
+        assert!(!file_matches_capture(&scrollback, &capture));
+    }
+
+    #[test]
+    fn stale_metadata_is_not_treated_as_committed() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("meta.json");
+        let capture = CaptureEvidence {
+            capture_source: CaptureSource::RuntimeTranscript,
+            source_identity: "/tmp/runtime.log".to_owned(),
+            bytes: 10,
+            sha256: "runtime-sha256".to_owned(),
+            origin_tab_identity: None,
+        };
+        let expected = RunMeta::new(&finished(1), 1_753_000_000, &capture);
+        std::fs::write(&path, serde_json::to_vec_pretty(&expected).unwrap()).unwrap();
+        assert!(file_matches_meta(&path, &expected));
+
+        let stale = RunMeta {
+            origin_tab: "another-run".to_owned(),
+            ..expected.clone()
+        };
+        std::fs::write(&path, serde_json::to_vec_pretty(&stale).unwrap()).unwrap();
+        assert!(!file_matches_meta(&path, &expected));
+    }
+
+    #[test]
+    fn failed_viewer_revalidation_clears_the_old_confirmation() {
+        let root = tempfile::tempdir().unwrap();
+        let run = finished(0);
+        let mut first_process = FakeIo::failing_close_with_state(OriginTabState::Preserved);
+        transfer_finished_run(&mut first_process, &run, root.path(), 1).unwrap_err();
+        assert!(first_process.receipt.as_ref().unwrap().viewer_confirmed);
+
+        let mut second_process = FakeIo {
+            receipt: first_process.receipt,
+            fail_at: Some(TransferStep::EnsureBucketSession),
+            open_materializes_tab: true,
+            ..Default::default()
+        };
+        transfer_finished_run(&mut second_process, &run, root.path(), 2).unwrap_err();
+        assert!(!second_process.receipt.unwrap().viewer_confirmed);
+    }
+
+    #[test]
     fn meta_preserves_the_command_for_rerun() {
-        let meta = RunMeta::new(&finished(1), 1_753_000_000);
+        let capture = CaptureEvidence {
+            capture_source: CaptureSource::RuntimeTranscript,
+            source_identity: "/tmp/runtime.log".to_owned(),
+            bytes: 10,
+            sha256: "runtime-sha256".to_owned(),
+            origin_tab_identity: None,
+        };
+        let meta = RunMeta::new(&finished(1), 1_753_000_000, &capture);
         assert_eq!(meta.command, vec!["claude", "--resume"]);
         assert_eq!(meta.cwd, Some(PathBuf::from("/repo")));
         assert_eq!(meta.bucket, BucketKind::NeedsAttention);
         assert_eq!(meta.captured_at, 1_753_000_000);
+        assert_eq!(meta.capture_source, CaptureSource::RuntimeTranscript);
+        assert_eq!(meta.capture_source_identity, "/tmp/runtime.log");
+        assert_eq!(meta.capture_sha256, "runtime-sha256");
     }
 }

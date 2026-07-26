@@ -832,7 +832,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Options>
     }
 }
 
-// Complete Action conversion implementation - all 91 variants
+// Complete Action conversion implementation
 impl From<crate::input::actions::Action>
     for crate::client_server_contract::client_server_contract::Action
 {
@@ -851,6 +851,7 @@ impl From<crate::input::actions::Action>
             ClosePluginPaneAction,
             CloseTabAction,
             CloseTabByIdAction,
+            CloseTabByIdIfNameAction,
             CloseTerminalPaneAction,
             ConfirmAction,
             CopyAction,
@@ -1541,6 +1542,15 @@ impl From<crate::input::actions::Action>
             crate::input::actions::Action::CloseTabById { id } => {
                 ActionType::CloseTabById(CloseTabByIdAction { id })
             },
+            crate::input::actions::Action::CloseTabByIdIfName {
+                id,
+                expected_name,
+                expected_session_incarnation,
+            } => ActionType::CloseTabByIdIfName(CloseTabByIdIfNameAction {
+                id,
+                expected_name,
+                expected_session_incarnation,
+            }),
             crate::input::actions::Action::RenameTabById { id, name } => {
                 ActionType::RenameTabById(RenameTabByIdAction { id, name })
             },
@@ -2425,6 +2435,14 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
             ActionType::CloseTabById(close_tab_by_id_action) => {
                 Ok(crate::input::actions::Action::CloseTabById {
                     id: close_tab_by_id_action.id,
+                })
+            },
+            ActionType::CloseTabByIdIfName(close_tab_by_id_if_name_action) => {
+                Ok(crate::input::actions::Action::CloseTabByIdIfName {
+                    id: close_tab_by_id_if_name_action.id,
+                    expected_name: close_tab_by_id_if_name_action.expected_name,
+                    expected_session_incarnation: close_tab_by_id_if_name_action
+                        .expected_session_incarnation,
                 })
             },
             ActionType::RenameTabById(rename_tab_by_id_action) => {

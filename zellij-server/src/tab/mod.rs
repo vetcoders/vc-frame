@@ -4285,11 +4285,14 @@ impl Tab {
         pane_id: PaneId,
         full: bool,
     ) -> Result<()> {
-        if let Some(pane) = self.get_pane_with_id(pane_id) {
-            let dump = pane.dump_screen(full, None);
-            self.os_api.write_to_file(dump, file).non_fatal()
-        }
-        Ok(())
+        let tab_id = self.id;
+        let pane = self
+            .get_pane_with_id(pane_id)
+            .ok_or_else(|| anyhow!("pane {:?} not found in tab {}", pane_id, tab_id))?;
+        let dump = pane.dump_screen(full, None);
+        self.os_api
+            .write_to_file(dump, file)
+            .with_context(|| format!("failed to dump pane {:?} in tab {}", pane_id, tab_id))
     }
     pub fn dump_with_ansi_terminal_screen(
         &mut self,
@@ -4297,11 +4300,17 @@ impl Tab {
         pane_id: PaneId,
         full: bool,
     ) -> Result<()> {
-        if let Some(pane) = self.get_pane_with_id(pane_id) {
-            let dump = pane.dump_screen_with_ansi(full, None);
-            self.os_api.write_to_file(dump, file).non_fatal()
-        }
-        Ok(())
+        let tab_id = self.id;
+        let pane = self
+            .get_pane_with_id(pane_id)
+            .ok_or_else(|| anyhow!("pane {:?} not found in tab {}", pane_id, tab_id))?;
+        let dump = pane.dump_screen_with_ansi(full, None);
+        self.os_api.write_to_file(dump, file).with_context(|| {
+            format!(
+                "failed to dump pane {:?} with ANSI in tab {}",
+                pane_id, tab_id
+            )
+        })
     }
     pub fn get_dump_active_terminal_screen(&mut self, client_id: ClientId, full: bool) -> String {
         if let Some(active_pane) = self.get_active_pane_or_floating_pane_mut(client_id) {
