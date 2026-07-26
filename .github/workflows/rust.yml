@@ -83,7 +83,7 @@ jobs:
       - name: Install NASM
         uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1
 
-      - name: Use MSYS Perl for vendored OpenSSL
+      - name: Configure MSYS Perl for vendored OpenSSL
         shell: pwsh
         run: |
           $gitPerl = Join-Path $env:ProgramFiles 'Git\usr\bin'
@@ -95,7 +95,29 @@ jobs:
           if ($platform -ne 'msys') {
             throw "Expected MSYS Perl, got $platform"
           }
+          $simpleModule = 'C:\Strawberry\perl\lib\Locale\Maketext\Simple.pm'
+          if (-not (Test-Path $simpleModule)) {
+            throw "Locale::Maketext::Simple is required at $simpleModule"
+          }
+          $perlLib = Join-Path $env:RUNNER_TEMP 'vc-frame-perl-lib'
+          $moduleDir = Join-Path $perlLib 'Locale\Maketext'
+          New-Item -ItemType Directory -Force -Path $moduleDir | Out-Null
+          Copy-Item $simpleModule (Join-Path $moduleDir 'Simple.pm') -Force
+          $cygpath = Join-Path $gitPerl 'cygpath.exe'
+          $msysPerlLib = & $cygpath -u $perlLib
+          if ($LASTEXITCODE -ne 0 -or -not $msysPerlLib) {
+            throw "Could not translate $perlLib for MSYS Perl"
+          }
+          $env:PERL5LIB = $msysPerlLib
+          & $perl -MLocale::Maketext::Simple -MIPC::Cmd -e 'print qq(modules=ok\n)'
+          if ($LASTEXITCODE -ne 0) {
+            throw "MSYS Perl cannot load the OpenSSL configure modules"
+          }
           $gitPerl | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "OPENSSL_SRC_PERL=$perl" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PERL5LIB=$msysPerlLib" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Build
         run: cargo xtask build
