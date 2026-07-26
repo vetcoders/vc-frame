@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 from collections import Counter
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,10 +25,202 @@ REQUIRED_FIELDS = {
     "id", "fingerprint", "rule", "path", "line", "column", "verdict",
     "reason", "invariant", "owner", "evidence",
 }
+TERMINAL_CFG_TEST_MODULES = {
+    "default-plugins/link/src/main.rs",
+    "default-plugins/strider/src/file_list_view.rs",
+    "default-plugins/strider/src/main.rs",
+    "src/run_triage_cli.rs",
+}
+WEB_CLIENT_TEST_PATH = "zellij-client/src/web_client/unit/web_client_tests.rs"
+WEB_CLIENT_PARENT_PATH = "zellij-client/src/web_client/mod.rs"
+CURRENT_EXE_PATHS = {
+    "src/run_triage_cli.rs",
+    "zellij-client/src/lib.rs",
+    "zellij-client/src/web_client/mod.rs",
+}
 
 
 class InventoryError(RuntimeError):
     pass
+
+
+def validated_source_location(
+    result: dict[str, Any], root: Path = ROOT
+) -> tuple[str, Path, list[str], int]:
+    if not isinstance(result, dict):
+        raise InventoryError("finding must be an object")
+    path = result.get("path")
+    start = result.get("start")
+    if not isinstance(start, dict):
+        raise InventoryError(f"finding start must be an object for {path!r}")
+    line = start.get("line")
+    if not isinstance(path, str) or not path:
+        raise InventoryError("finding path must be a non-empty repository-relative string")
+    if (
+        path != PurePosixPath(path).as_posix()
+        or PurePosixPath(path).is_absolute()
+        or any(part in ("", ".", "..") for part in PurePosixPath(path).parts)
+        or "\\" in path
+    ):
+        raise InventoryError(f"finding path is not canonical: {path!r}")
+    if type(line) is not int or line < 1:
+        raise InventoryError(f"finding line is invalid for {path}: {line!r}")
+
+    try:
+        resolved_root = root.resolve(strict=True)
+        source_path = (resolved_root / path).resolve(strict=True)
+        canonical_path = source_path.relative_to(resolved_root).as_posix()
+    except (OSError, ValueError) as error:
+        raise InventoryError(f"finding path is outside the repository: {path}") from error
+    if canonical_path != path or not source_path.is_file():
+        raise InventoryError(f"finding path is not a canonical repository file: {path}")
+    try:
+        lines = source_path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as error:
+        raise InventoryError(f"cannot read finding source {path}: {error}") from error
+    if line > len(lines):
+        raise InventoryError(
+            f"finding line is outside {path}: {line} > {len(lines)}"
+        )
+    return path, source_path, lines, line
+
+
+def require_temp_dir_call(path: str, lines: list[str], line: int) -> None:
+    if not re.search(r"\b(?:std::env::)?temp_dir\(\)", lines[line - 1]):
+        raise InventoryError(
+            f"temp-dir finding source shape changed at {path}:{line}"
+        )
+
+
+def require_terminal_cfg_test(path: str, lines: list[str], line: int) -> None:
+    module_starts = [
+        index
+        for index in range(len(lines) - 1)
+        if lines[index] == "#[cfg(test)]" and lines[index + 1] == "mod tests {"
+    ]
+    if len(module_starts) != 1:
+        raise InventoryError(
+            f"expected one terminal #[cfg(test)] mod tests in {path}; "
+            f"found {len(module_starts)}"
+        )
+    module_start = module_starts[0]
+    try:
+        module_end = lines.index("}", module_start + 2)
+    except ValueError as error:
+        raise InventoryError(f"terminal test module has no closing brace in {path}") from error
+    last_source_line = next(
+        (index for index in range(len(lines) - 1, -1, -1) if lines[index].strip()),
+        -1,
+    )
+    if module_end != last_source_line:
+        raise InventoryError(f"#[cfg(test)] mod tests is not terminal in {path}")
+    finding_index = line - 1
+    if not module_start + 1 < finding_index < module_end:
+        raise InventoryError(
+            f"temp-dir finding is outside terminal #[cfg(test)] mod tests at {path}:{line}"
+        )
+    require_temp_dir_call(path, lines, line)
+
+
+def require_web_client_test_parent(root: Path) -> None:
+    try:
+        parent_lines = (root / WEB_CLIENT_PARENT_PATH).read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as error:
+        raise InventoryError(
+            f"cannot verify web-client test parent {WEB_CLIENT_PARENT_PATH}: {error}"
+        ) from error
+    declaration = [
+        "#[cfg(test)]",
+        '#[path = "./unit/web_client_tests.rs"]',
+        "mod web_client_tests;",
+    ]
+    occurrences = sum(
+        parent_lines[index:index + len(declaration)] == declaration
+        for index in range(len(parent_lines) - len(declaration) + 1)
+    )
+    if occurrences != 1:
+        raise InventoryError(
+            f"web-client unit file lacks its exact cfg(test) parent gate: "
+            f"{WEB_CLIENT_PARENT_PATH}"
+        )
+
+
+def require_temp_dir_policy(
+    path: str, lines: list[str], line: int, root: Path
+) -> None:
+    if path in TERMINAL_CFG_TEST_MODULES:
+        require_terminal_cfg_test(path, lines, line)
+        return
+    if path == WEB_CLIENT_TEST_PATH:
+        require_web_client_test_parent(root)
+        require_temp_dir_call(path, lines, line)
+        return
+    if path == "zellij-server/src/tab/mod.rs":
+        require_temp_dir_call(path, lines, line)
+        next_source_line = next(
+            (candidate.strip() for candidate in lines[line:] if candidate.strip()),
+            "",
+        )
+        if not re.fullmatch(
+            r'file\.push\(format!\("\{\}\.dump", Uuid::new_v4\(\)\)\);',
+            next_source_line,
+        ):
+            raise InventoryError(
+                f"scrollback temp path lost its fresh UUID v4 suffix at {path}:{line}"
+            )
+        return
+    raise InventoryError(f"temp-dir finding has no source policy: {path}:{line}")
+
+
+def require_current_exe_policy(path: str, lines: list[str], line: int) -> None:
+    if path not in CURRENT_EXE_PATHS:
+        raise InventoryError(f"current-exe finding has no source policy: {path}:{line}")
+    source_line = lines[line - 1].strip()
+    if path == "src/run_triage_cli.rs":
+        nearby = [candidate.strip() for candidate in lines[line - 1:line + 8]]
+        if (
+            nearby[:3]
+            != [
+                "let executable = std::env::current_exe()",
+                '.map_err(|e| format!("cannot resolve the vc-frame executable: {}", e))?;',
+                "Ok(CliTriageIo { executable, root })",
+            ]
+            or not any(
+                candidate.startswith(
+                    "let output = run_command_with_timeout(&self.executable, args,"
+                )
+                for candidate in nearby
+            )
+        ):
+            raise InventoryError(
+                f"current-exe source shape changed at {path}:{line}"
+            )
+        return
+    if path == "zellij-client/src/lib.rs":
+        allowed = {
+            "let mut cmd = Command::new(current_exe().map_err(|e| e.to_string())?);",
+            "let mut cmd = Command::new(current_exe()?);",
+        }
+        if source_line not in allowed:
+            raise InventoryError(
+                f"current-exe is no longer a direct Command::new call at {path}:{line}"
+            )
+        return
+    if path == "zellij-client/src/web_client/mod.rs":
+        nearby = [candidate.strip() for candidate in lines[line - 1:line + 5]]
+        if nearby != [
+            "let exe = current_exe().unwrap_or_else(|e| {",
+            'eprintln!("Failed to determine executable path: {}", e);',
+            "exit(2);",
+            "});",
+            "",
+            "let mut cmd = Command::new(&exe);",
+        ]:
+            raise InventoryError(
+                f"current-exe is no longer passed directly to Command::new at {path}:{line}"
+            )
+        return
+    raise InventoryError(f"current-exe finding has no source policy: {path}:{line}")
 
 
 def read_json(path: Path) -> Any:
@@ -143,6 +335,8 @@ def validate_results(
     if resolved_rules != baseline["resolved_rule_ids"]:
         raise InventoryError("resolved p/rust rules drifted; refresh and re-adjudicate")
     results = payload.get("results", [])
+    for result in results:
+        validated_source_location(result)
     current = {result["extra"]["fingerprint"]: result for result in results}
     if len(current) != len(results):
         raise InventoryError("Semgrep produced duplicate result fingerprints")
@@ -251,8 +445,11 @@ def unsafe_policy(path: str) -> tuple[str, str, list[str]]:
     raise InventoryError(f"unsafe finding has no policy: {path}")
 
 
-def adjudicate(result: dict[str, Any]) -> tuple[str, str, str, str, list[str]]:
-    rule, path = result["check_id"], result["path"]
+def adjudicate(
+    result: dict[str, Any], root: Path = ROOT
+) -> tuple[str, str, str, str, list[str]]:
+    path, _source_path, lines, line = validated_source_location(result, root)
+    rule = result["check_id"]
     if rule == "rust.lang.security.unsafe-usage.unsafe-usage":
         owner, invariant, evidence = unsafe_policy(path)
         return (
@@ -261,6 +458,7 @@ def adjudicate(result: dict[str, Any]) -> tuple[str, str, str, str, list[str]]:
             invariant, owner, evidence,
         )
     if rule == "rust.lang.security.temp-dir.temp-dir":
+        require_temp_dir_policy(path, lines, line, root.resolve(strict=True))
         if path == "zellij-server/src/tab/mod.rs":
             return (
                 "scoped_false_positive",
@@ -276,6 +474,7 @@ def adjudicate(result: dict[str, Any]) -> tuple[str, str, str, str, list[str]]:
             "Rust test harness", ["security/semgrep/EVIDENCE.md#temporary-paths", path],
         )
     if rule == "rust.lang.security.current-exe.current-exe":
+        require_current_exe_policy(path, lines, line)
         return (
             "scoped_false_positive",
             "current_exe only spawns another mode of the running vc-frame binary; it establishes no trust.",
