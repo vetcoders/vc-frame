@@ -59,8 +59,9 @@ The workflow accepts three repository secrets:
 - `GPG_PASSPHRASE`: optional passphrase for that key
 - `GPG_PUBLIC_KEY`: ASCII-armored public key published with the release
 
-Store them in a protected GitHub environment named `release` with a required
-reviewer. Every job that reads signing material is bound to that environment.
+Store them in the protected GitHub environment named `release`. It requires
+one of two maintainers to approve, forbids self-review, and disables admin
+bypass. Every job that reads signing material is bound to that environment.
 
 Candidates and tags fail before building if the private or public key is
 missing. `tools/install.sh` defaults to strict GPG verification and also
@@ -175,13 +176,13 @@ sight.
 
 ```console
 $ vc-frame --version
-vc-frame 0.46.0+gbcd9e175
+vc-frame 0.47.0+gbcd9e175
 
 $ vc-frame --build-info
 {
   "product": "vc-frame",
-  "version": "0.46.0",
-  "human_version": "0.46.0+gbcd9e175",
+  "version": "0.47.0",
+  "human_version": "0.47.0+gbcd9e175",
   "git_sha": "bcd9e175b5267fb0f0bdcbd12d657072db351999",
   "git_sha_short": "bcd9e175",
   "git_dirty": false,
@@ -190,7 +191,7 @@ $ vc-frame --build-info
 }
 ```
 
-A build from a modified tree reports `0.45.4+gbcd9e175.dirty`, and packaging
+A build from a modified tree reports `0.47.0+gbcd9e175.dirty`, and packaging
 refuses to proceed at all — see below.
 
 The commit identity resolves in this order:

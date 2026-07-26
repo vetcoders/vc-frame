@@ -9,7 +9,7 @@ and the default version advertised and installed by tools/install.sh.
 
 Usage:
     python3 tools/release_sync.py bump patch
-    python3 tools/release_sync.py bump 0.46.0
+    python3 tools/release_sync.py bump 0.47.0
     python3 tools/release_sync.py check
     python3 tools/release_sync.py check --require-version-section
     python3 tools/release_sync.py notes
