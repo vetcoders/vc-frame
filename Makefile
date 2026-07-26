@@ -233,7 +233,7 @@ triage-runtime-e2e-static:
 ## Real isolated process-boundary regression against the exact clean checkout build
 triage-runtime-e2e:
 	@test -x "$(TRIAGE_RUNTIME_E2E_BINARY)" \
-		|| { echo "ERROR: missing executable $(TRIAGE_RUNTIME_E2E_BINARY); run 'make binary' first"; exit 1; }
+		|| { echo "ERROR: missing executable $(TRIAGE_RUNTIME_E2E_BINARY); run 'cargo build --bin vc-frame' first"; exit 1; }
 	@VC_FRAME_E2E_ARTIFACT_ROOT="$(TRIAGE_RUNTIME_E2E_ARTIFACT_ROOT)" \
 		$(PYTHON) scripts/triage-runtime-e2e.py \
 		"$(TRIAGE_RUNTIME_E2E_BINARY)" \

@@ -2,7 +2,10 @@
 
 import importlib.util
 import json
+import os
 import pathlib
+import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -169,6 +172,22 @@ class SessionTruthTests(unittest.TestCase):
         self.assertEqual(result.inventory_state, "live")
         self.assertEqual(result.tabs[0]["tab_id"], 2)
 
+    @mock.patch.object(MODULE.time, "sleep")
+    @mock.patch.object(MODULE, "session_tabs")
+    def test_wait_for_tabs_retries_live_query_ambiguity_without_calling_it_absent(
+        self, session_tabs: mock.Mock, _sleep: mock.Mock
+    ) -> None:
+        ready = [{"tab_id": 1, "name": "ready", "active": True}]
+        session_tabs.side_effect = [
+            MODULE.AmbiguousSessionError("startup race"),
+            ready,
+        ]
+        self.assertEqual(
+            MODULE.wait_for_tabs(pathlib.Path("vc-frame"), {}, "starting"),
+            ready,
+        )
+        self.assertEqual(session_tabs.call_count, 2)
+
     def test_tab_state_requires_and_preserves_focus(self) -> None:
         tabs = [
             {"tab_id": 2, "name": "two", "active": False, "position": 1},
@@ -208,6 +227,101 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                 MODULE.sha256_bytes(MODULE.canonical_json(snapshot["files"]).encode()),
             )
 
+    def test_short_runtime_root_keeps_owned_socket_paths_within_limit(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="vcf-e2e-", dir="/tmp") as temporary:
+            root = pathlib.Path(temporary)
+            proof = MODULE.socket_path_budget(
+                root / "p" / "sockets",
+                {"e1234567890-origin", "Finalized runs"},
+            )
+            self.assertLessEqual(
+                int(proof["longest"]["bytes"]),
+                MODULE.UNIX_SOCKET_PATH_LIMIT,
+            )
+            self.assertGreater(int(proof["remaining_bytes"]), 0)
+
+    def test_socket_path_budget_fails_closed_before_overflow(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="vcf-e2e-", dir="/tmp") as temporary:
+            with self.assertRaisesRegex(AssertionError, "exceeds portable limit"):
+                MODULE.socket_path_budget(
+                    pathlib.Path(temporary) / "sockets",
+                    {"s" * MODULE.UNIX_SOCKET_PATH_LIMIT},
+                )
+
+    def test_runtime_root_cleanup_refuses_symlink_before_resolution(self) -> None:
+        target = pathlib.Path(tempfile.mkdtemp(prefix="vcf-e2e-target-", dir="/tmp"))
+        link = target.parent / f"vcf-e2e-link-{os.getpid()}-{MODULE.time.time_ns()}"
+        link.symlink_to(target, target_is_directory=True)
+        try:
+            with self.assertRaisesRegex(AssertionError, "symlink runtime root"):
+                MODULE.remove_runtime_root(link)
+            self.assertTrue(target.is_dir())
+        finally:
+            link.unlink(missing_ok=True)
+            target.rmdir()
+
+    def test_operator_guard_excludes_recursive_control_plane_archives(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "HOME": "/tmp/operator",
+                "VIBECRAFTED_CONTROL_PLANE": "/tmp/operator/multi-gig-control-plane",
+            },
+            clear=False,
+        ):
+            paths = MODULE.operator_guard_paths()
+        self.assertNotIn(
+            pathlib.Path("/tmp/operator/multi-gig-control-plane"),
+            paths,
+        )
+
+    def test_operator_guard_receipt_is_compact_and_volatile_log_is_identity_only(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            log = root / "vc-frame-log" / "zellij.log"
+            log.parent.mkdir()
+            log.write_text("before", encoding="utf-8")
+            before = MODULE.guarded_tree_snapshot(
+                [root],
+                volatile_files={log},
+            )
+            log.write_text("before + concurrent operator append", encoding="utf-8")
+            after = MODULE.guarded_tree_snapshot(
+                [root],
+                volatile_files={log},
+            )
+            self.assertEqual(before, after)
+            summary = MODULE.guarded_snapshot_summary(before)
+            self.assertNotIn("entries", summary)
+            self.assertEqual(summary["entry_count"], len(before["entries"]))
+            log_entry = next(
+                entry
+                for entry in before["entries"]
+                if entry.get("path") == "vc-frame-log/zellij.log"
+            )
+            self.assertEqual(log_entry["kind"], "volatile_file_identity")
+            self.assertNotIn("sha256", log_entry)
+            self.assertNotIn("bytes", log_entry)
+
+    def test_operator_guard_diff_reports_only_changed_path_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            state = root / "state"
+            state.write_text("before", encoding="utf-8")
+            before = MODULE.guarded_tree_snapshot([root])
+            state.write_text("after", encoding="utf-8")
+            after = MODULE.guarded_tree_snapshot([root])
+            difference = MODULE.guarded_snapshot_diff(before, after)
+            self.assertEqual(difference["changed_count"], 1)
+            self.assertEqual(
+                difference["changed"],
+                [{"root": str(root.resolve()), "path": "state"}],
+            )
+            self.assertNotIn("before", difference)
+            self.assertNotIn("after", difference)
+
     def test_evidence_recorder_persists_every_transition(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = pathlib.Path(temporary) / "evidence.json"
@@ -222,6 +336,100 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                 },
             )
             self.assertFalse(path.with_name(".evidence.json.tmp").exists())
+
+    def test_runtime_transcript_manifest_binds_run_root_bytes_and_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            transcript = root / "runtime.log"
+            transcript.write_bytes(b"runtime proof")
+            manifest_path = MODULE.write_runtime_transcript_manifest(
+                transcript,
+                run="run-1",
+                ownership_root=root,
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                manifest,
+                {
+                    "version": 1,
+                    "run_id": "run-1",
+                    "transcript": str(transcript.resolve()),
+                    "root": str(root.resolve()),
+                    "bytes": 13,
+                    "sha256": MODULE.sha256_bytes(b"runtime proof"),
+                },
+            )
+
+    def test_capture_and_viewer_killpoint_states_are_distinct(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            control_plane = pathlib.Path(temporary)
+            capture_dir = control_plane / "finished_runs" / "run-1"
+            capture_dir.mkdir(parents=True)
+            (capture_dir / "scrollback.txt").write_bytes(b"proof")
+            (capture_dir / "capture.manifest.json").write_text(
+                json.dumps({"version": 1, "evidence": {"bytes": 5}}),
+                encoding="utf-8",
+            )
+            receipt = {
+                "version": 4,
+                "capture_committed": True,
+                "metadata_committed": False,
+                "viewer_confirmed": False,
+                "viewer_creation_pending": False,
+                "viewer_tab_identity": None,
+                "origin_tab_state": "preserved",
+            }
+            (capture_dir / "transfer.json").write_text(
+                json.dumps(receipt), encoding="utf-8"
+            )
+            self.assertIsNotNone(
+                MODULE.capture_receipt_killpoint_state(control_plane, "run-1")
+            )
+            self.assertIsNone(
+                MODULE.viewer_confirmation_killpoint_state(control_plane, "run-1")
+            )
+            receipt.update(
+                {
+                    "metadata_committed": True,
+                    "viewer_confirmed": True,
+                    "viewer_tab_identity": {"id": 7},
+                }
+            )
+            (capture_dir / "transfer.json").write_text(
+                json.dumps(receipt), encoding="utf-8"
+            )
+            self.assertIsNone(
+                MODULE.capture_receipt_killpoint_state(control_plane, "run-1")
+            )
+            self.assertIsNotNone(
+                MODULE.viewer_confirmation_killpoint_state(control_plane, "run-1")
+            )
+
+    @unittest.skipUnless(hasattr(os, "killpg"), "requires Unix process groups")
+    def test_controlled_interruption_kills_only_after_observed_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            marker = root / "ready"
+            script = f"printf ready > {shlex.quote(str(marker))}; exec /bin/sleep 300"
+
+            def observe() -> dict[str, object] | None:
+                if not marker.is_file():
+                    return None
+                contents = marker.read_text(encoding="utf-8")
+                return {"marker": contents} if contents == "ready" else None
+
+            result = MODULE.interrupt_process_at_state(
+                pathlib.Path("/bin/sh"),
+                dict(os.environ),
+                ["-c", script],
+                scenario="unit-killpoint",
+                artifact_root=root,
+                observe=observe,
+                slice_seconds=0.001,
+                max_slices=1_000,
+            )
+            self.assertEqual(result.returncode, -signal.SIGKILL)
+            self.assertEqual(result.observed_state, {"marker": "ready"})
 
     def test_process_inventory_matches_exact_server_path_boundary(self) -> None:
         root = pathlib.Path("/tmp/vc-frame-proof/sockets")
@@ -294,6 +502,9 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                 error_category="missing",
             )
             self.assertTrue(recorder.data["negative_probes"][0]["state_unchanged"])
+            self.assertTrue(
+                recorder.data["negative_probes"][0]["state_contract_satisfied"]
+            )
             with self.assertRaisesRegex(AssertionError, "changed tab focus"):
                 MODULE.record_negative_probe(
                     recorder,
@@ -303,6 +514,75 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                     after={"digest": "changed", "state": {"tabs": []}},
                     error_category="unexpected_mutation",
                 )
+
+    def test_failed_transfer_audit_allows_only_typed_receipt_and_empty_lock(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            control_plane = pathlib.Path(temporary)
+            run = "run-failed"
+            run_directory = control_plane / "finished_runs" / run
+            run_directory.mkdir(parents=True)
+            receipt = {
+                "version": 4,
+                "run": run,
+                "exit_code": 2,
+                "origin_session": "missing",
+                "origin_tab": run,
+                "capture": None,
+                "capture_committed": False,
+                "metadata_committed": False,
+                "viewer_confirmed": False,
+                "viewer_tab_identity": None,
+                "viewer_creation_pending": False,
+                "viewer_token": "a" * 32,
+                "origin_tab_state": "preserved",
+                "fault": "Capture: session missing",
+            }
+            receipt_path = run_directory / "transfer.json"
+            receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+            lock_path = run_directory / "transfer.lock"
+            lock_path.write_bytes(b"")
+            before_control = MODULE.artifact_tree_snapshot(
+                control_plane / "before-absent"
+            )
+            before_control["root"] = str(control_plane.resolve())
+            after_control = MODULE.artifact_tree_snapshot(control_plane)
+            stable_runtime = {
+                "sessions": {"missing": {"state": "absent"}},
+                "session_inventory": {},
+                "server_processes": [],
+            }
+            before = {
+                "state": {
+                    **stable_runtime,
+                    "control_plane": before_control,
+                },
+                "digest": "before",
+            }
+            after = {
+                "state": {
+                    **stable_runtime,
+                    "control_plane": after_control,
+                },
+                "digest": "after",
+            }
+            evidence = MODULE.failed_transfer_audit_evidence(
+                control_plane,
+                run=run,
+                exit_code=2,
+                origin_session="missing",
+                before=before,
+                after=after,
+            )
+            self.assertTrue(evidence["success_artifacts_absent"])
+            self.assertEqual(
+                evidence["allowed_changed_paths"],
+                [
+                    f"finished_runs/{run}/transfer.json",
+                    f"finished_runs/{run}/transfer.lock",
+                ],
+            )
 
     @mock.patch.object(MODULE, "session_inventory")
     def test_cleanup_refuses_unowned_inventory(self, inventory: mock.Mock) -> None:

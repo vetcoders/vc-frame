@@ -43,7 +43,9 @@ jobs:
           rustflags: ""
 
       - name: Build
-        run: cargo xtask build
+        run: |
+          cargo xtask build
+          cargo build --bin vc-frame
 
       - name: Triage runtime process-boundary regression
         env:

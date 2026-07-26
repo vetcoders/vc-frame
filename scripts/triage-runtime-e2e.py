@@ -2,11 +2,10 @@
 """Isolated command-boundary proof for truthful run triage.
 
 The harness accepts only an exact, clean, profile-matched ``vc-frame`` build,
-constructs two empty runtime namespaces below one durable artifact directory,
-and never discovers or mutates the operator's normal socket tree. Canonical
-drawer names are safe here only because both socket aliases, HOME/XDG state and
-the control plane are bound below that artifact directory before the first
-session is created.
+constructs two empty runtime namespaces below one short ``mkdtemp`` root, and
+never discovers or mutates the operator's normal socket tree. Durable evidence
+and the isolated control plane live below the requested artifact directory;
+only the Unix-socket runtime uses the short root required by macOS.
 
 Every run leaves an atomic ``evidence.json`` receipt behind. A passing receipt
 contains the fixture namespaces, binary provenance, per-negative before/after
@@ -23,11 +22,15 @@ import json
 import os
 import pathlib
 import shlex
+import signal
+import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 
 DRAWER_BY_BUCKET = {
@@ -64,15 +67,20 @@ RECEIPT_FIELDS = (
     "run",
     "exit_code",
     "bucket",
+    "capture",
     "capture_committed",
     "metadata_committed",
     "viewer_confirmed",
+    "viewer_creation_pending",
     "origin_tab_state",
     "viewer_token",
     "viewer_tab_identity",
     "pane_id",
     "fault",
 )
+UNIX_SOCKET_PATH_LIMIT = 103
+SOCKET_CONTRACT_DIRECTORY = "contract_version_1"
+SHORT_RUNTIME_PARENT = pathlib.Path("/tmp")
 
 
 @dataclass(frozen=True)
@@ -84,6 +92,23 @@ class SessionQuery:
     list_tabs_exit: int
     list_tabs_stderr: str
     inventory_state: Literal["live", "exited", "missing"]
+
+
+class AmbiguousSessionError(AssertionError):
+    """The namespace says live while the exact session query cannot prove it."""
+
+
+@dataclass(frozen=True)
+class InterruptedProcess:
+    pid: int
+    slices: int
+    signal: str
+    observed_state: dict[str, object]
+    stdout_path: str
+    stderr_path: str
+    stdout: str
+    stderr: str
+    returncode: int
 
 
 class EvidenceRecorder:
@@ -278,6 +303,234 @@ def artifact_tree_snapshot(root: pathlib.Path) -> dict[str, object]:
     }
 
 
+def guarded_tree_snapshot(
+    roots: list[pathlib.Path],
+    *,
+    volatile_files: set[pathlib.Path] | None = None,
+) -> dict[str, object]:
+    """Content-address operator paths without following symlinks or sockets."""
+    volatile = {path.expanduser().resolve() for path in (volatile_files or set())}
+    entries: list[dict[str, object]] = []
+    for root in sorted({path.expanduser().resolve() for path in roots}):
+        if not root.exists():
+            entries.append({"root": str(root), "state": "absent"})
+            continue
+        candidates = [root, *sorted(root.rglob("*"))]
+        for path in candidates:
+            try:
+                metadata = path.lstat()
+                relative = "." if path == root else str(path.relative_to(root))
+                entry: dict[str, object] = {
+                    "root": str(root),
+                    "path": relative,
+                    "mode": stat.S_IFMT(metadata.st_mode),
+                    "device": metadata.st_dev,
+                    "inode": metadata.st_ino,
+                }
+                if stat.S_ISREG(metadata.st_mode):
+                    if path.resolve() in volatile:
+                        # Active operator servers may append this log while the
+                        # isolated fixture runs. Preserve its exact identity in
+                        # the guard, but do not turn unrelated appends into a
+                        # false claim that the fixture touched operator state.
+                        entry["kind"] = "volatile_file_identity"
+                    else:
+                        contents = path.read_bytes()
+                        entry.update(
+                            {
+                                "kind": "file",
+                                "bytes": len(contents),
+                                "sha256": sha256_bytes(contents),
+                            }
+                        )
+                elif stat.S_ISDIR(metadata.st_mode):
+                    entry["kind"] = "directory"
+                elif stat.S_ISLNK(metadata.st_mode):
+                    entry.update({"kind": "symlink", "target": os.readlink(path)})
+                elif stat.S_ISSOCK(metadata.st_mode):
+                    entry["kind"] = "socket"
+                else:
+                    entry["kind"] = "other"
+                entries.append(entry)
+            except (OSError, ValueError) as error:
+                entries.append(
+                    {
+                        "root": str(root),
+                        "path": str(path),
+                        "kind": "unreadable",
+                        "error": str(error),
+                    }
+                )
+    return {
+        "roots": [str(path.expanduser().resolve()) for path in roots],
+        "entries": entries,
+        "digest": sha256_bytes(canonical_json(entries).encode()),
+    }
+
+
+def guarded_snapshot_summary(snapshot: dict[str, object]) -> dict[str, object]:
+    entries = snapshot.get("entries")
+    require(isinstance(entries, list), "guard snapshot omitted entries")
+    roots = snapshot.get("roots")
+    digest = snapshot.get("digest")
+    require(isinstance(roots, list), "guard snapshot omitted roots")
+    require(isinstance(digest, str), "guard snapshot omitted digest")
+    return {
+        "roots": roots,
+        "digest": digest,
+        "entry_count": len(entries),
+    }
+
+
+def guarded_snapshot_diff(
+    before: dict[str, object],
+    after: dict[str, object],
+    *,
+    sample_limit: int = 50,
+) -> dict[str, object]:
+    """Return a bounded path-level difference without embedding full snapshots."""
+
+    def indexed(
+        snapshot: dict[str, object],
+    ) -> dict[tuple[str, str], dict[str, object]]:
+        raw_entries = snapshot.get("entries")
+        require(isinstance(raw_entries, list), "guard snapshot omitted entries")
+        result: dict[tuple[str, str], dict[str, object]] = {}
+        for raw in raw_entries:
+            require(isinstance(raw, dict), "guard snapshot entry is not an object")
+            root = raw.get("root")
+            path = raw.get("path", ".")
+            require(
+                isinstance(root, str) and isinstance(path, str),
+                "guard snapshot entry omitted path identity",
+            )
+            result[(root, path)] = raw
+        return result
+
+    before_entries = indexed(before)
+    after_entries = indexed(after)
+    before_keys = set(before_entries)
+    after_keys = set(after_entries)
+    added = sorted(after_keys - before_keys)
+    removed = sorted(before_keys - after_keys)
+    changed = sorted(
+        key
+        for key in before_keys & after_keys
+        if before_entries[key] != after_entries[key]
+    )
+
+    def labels(keys: list[tuple[str, str]]) -> list[dict[str, str]]:
+        return [{"root": root, "path": path} for root, path in keys[:sample_limit]]
+
+    return {
+        "added_count": len(added),
+        "removed_count": len(removed),
+        "changed_count": len(changed),
+        "sample_limit": sample_limit,
+        "added": labels(added),
+        "removed": labels(removed),
+        "changed": labels(changed),
+    }
+
+
+def operator_guard_paths() -> list[pathlib.Path]:
+    """Exact non-isolated vc-frame socket/state roots from the operator env."""
+    paths: set[pathlib.Path] = set()
+    home_value = os.environ.get("HOME")
+    if home_value:
+        home = pathlib.Path(home_value).expanduser()
+        paths.update(
+            {
+                home / ".cache" / "vc-frame",
+                home / ".config" / "vc-frame",
+                home / ".local" / "share" / "vc-frame",
+                home / "Library" / "Caches" / "io.vetcoders.vc-frame",
+                home / "Library" / "Application Support" / "io.vetcoders.vc-frame",
+            }
+        )
+    temporary_value = os.environ.get("TMPDIR", "/tmp")
+    paths.add(pathlib.Path(temporary_value) / f"vc-frame-{os.getuid()}")
+    for key in (
+        "VC_FRAME_SOCKET_DIR",
+        "ZELLIJ_SOCKET_DIR",
+    ):
+        value = os.environ.get(key)
+        if value:
+            paths.add(pathlib.Path(value).expanduser())
+    return sorted(paths)
+
+
+def operator_guard_volatile_paths() -> set[pathlib.Path]:
+    """Known append-only operator logs whose inode, not byte count, is guarded."""
+    temporary_value = os.environ.get("TMPDIR", "/tmp")
+    runtime_root = pathlib.Path(temporary_value) / f"vc-frame-{os.getuid()}"
+    return {runtime_root / "vc-frame-log" / "zellij.log"}
+
+
+def socket_path_budget(
+    socket_root: pathlib.Path,
+    sessions: set[str],
+    *,
+    limit: int = UNIX_SOCKET_PATH_LIMIT,
+) -> dict[str, object]:
+    """Fail before mutation if any owned server socket exceeds sockaddr_un."""
+    socket_root = socket_root.resolve()
+    paths = [
+        socket_root / SOCKET_CONTRACT_DIRECTORY / session
+        for session in sorted(sessions)
+    ]
+    entries = [
+        {
+            "session": path.name,
+            "path": str(path),
+            "bytes": len(os.fsencode(path)),
+        }
+        for path in paths
+    ]
+    longest = max(entries, key=lambda entry: int(entry["bytes"]), default=None)
+    remaining = limit - int(longest["bytes"]) if longest is not None else limit
+    require(
+        longest is None or (int(longest["bytes"]) <= limit and remaining > 0),
+        "fixture Unix socket path exceeds portable limit: "
+        f"limit={limit}, longest={longest!r}",
+    )
+    return {
+        "socket_root": str(socket_root),
+        "limit_bytes": limit,
+        "paths": entries,
+        "longest": longest,
+        "remaining_bytes": remaining,
+    }
+
+
+def remove_runtime_root(runtime_root: pathlib.Path) -> dict[str, object]:
+    """Remove only the exact short mkdtemp root created by this harness."""
+    requested_root = runtime_root.expanduser().absolute()
+    require(
+        not requested_root.is_symlink(),
+        f"refusing to remove symlink runtime root: {requested_root}",
+    )
+    runtime_root = requested_root.resolve()
+    temporary_root = SHORT_RUNTIME_PARENT.resolve()
+    require(
+        runtime_root.parent == temporary_root
+        and runtime_root.name.startswith("vcf-e2e-"),
+        f"refusing to remove non-fixture runtime root: {runtime_root}",
+    )
+    existed = runtime_root.exists()
+    if existed:
+        shutil.rmtree(runtime_root)
+    require(
+        not runtime_root.exists(),
+        f"fixture runtime root remained after removal: {runtime_root}",
+    )
+    return {
+        "runtime_root": str(runtime_root),
+        "existed_before_removal": existed,
+        "absent_after_removal": True,
+    }
+
+
 def receipt_projection(receipt: dict[str, object]) -> dict[str, object]:
     return {field: receipt.get(field) for field in RECEIPT_FIELDS}
 
@@ -289,12 +542,20 @@ def transfer_evidence(
 ) -> dict[str, object]:
     scrollback, metadata, receipt = transfer_files(control_plane, run)
     contents = scrollback.read_bytes()
+    manifest_path = scrollback.with_name("capture.manifest.json")
+    manifest_contents = manifest_path.read_bytes()
+    manifest = json.loads(manifest_contents)
+    require(isinstance(manifest, dict), f"{run} capture manifest is not an object")
     return {
         "stage": stage,
         "run": run,
         "capture_path": str(scrollback.resolve()),
         "capture_bytes": len(contents),
         "capture_sha256": sha256_bytes(contents),
+        "capture_manifest_path": str(manifest_path.resolve()),
+        "capture_manifest_bytes": len(manifest_contents),
+        "capture_manifest_sha256": sha256_bytes(manifest_contents),
+        "capture_manifest": manifest,
         "metadata": metadata,
         "receipt": receipt_projection(receipt),
     }
@@ -438,6 +699,7 @@ def namespace_preflight(
     binary: pathlib.Path,
     env: dict[str, str],
     namespace_root: pathlib.Path,
+    expected_control_plane: pathlib.Path,
     *,
     expected_sha: str,
     expected_profile: str,
@@ -458,8 +720,9 @@ def namespace_preflight(
         )
     control_plane = pathlib.Path(env["VIBECRAFTED_CONTROL_PLANE"]).resolve()
     require(
-        control_plane == namespace_root.parent / "control-plane",
-        f"isolated control plane escaped the artifact root: {control_plane}",
+        control_plane == expected_control_plane.resolve(),
+        f"isolated control plane does not match the durable fixture path: "
+        f"{control_plane}",
     )
 
     build = command(binary, env, "--build-info")
@@ -516,7 +779,7 @@ def query_session(
         )
     inventory_state = session_inventory(binary, env).get(session, "missing")
     if inventory_state == "live":
-        raise AssertionError(
+        raise AmbiguousSessionError(
             f"session {session!r} is active but list-tabs failed; refusing to "
             f"treat command failure as absence: exit={result.returncode}, "
             f"stdout={result.stdout!r}, stderr={result.stderr!r}"
@@ -544,12 +807,20 @@ def wait_for_tabs(
     binary: pathlib.Path, env: dict[str, str], session: str
 ) -> list[dict[str, object]]:
     deadline = time.monotonic() + 15
+    last_ambiguity: AmbiguousSessionError | None = None
     while time.monotonic() < deadline:
-        tabs = session_tabs(binary, env, session)
+        try:
+            tabs = session_tabs(binary, env, session)
+            last_ambiguity = None
+        except AmbiguousSessionError as error:
+            last_ambiguity = error
+            time.sleep(0.1)
+            continue
         if tabs is not None:
             return tabs
         time.sleep(0.1)
-    raise AssertionError(f"session {session!r} did not become ready")
+    suffix = f"; last query ambiguity: {last_ambiguity}" if last_ambiguity else ""
+    raise AssertionError(f"session {session!r} did not become ready{suffix}")
 
 
 def wait_for_session_gone(
@@ -594,7 +865,11 @@ def tab_state(tabs: list[dict[str, object]]) -> list[dict[str, object]]:
 
 
 def wait_for_stable_tab_state(
-    binary: pathlib.Path, env: dict[str, str], session: str
+    binary: pathlib.Path,
+    env: dict[str, str],
+    session: str,
+    *,
+    stable_for: float = 0.5,
 ) -> list[dict[str, object]]:
     deadline = time.monotonic() + 15
     previous: list[dict[str, object]] | None = None
@@ -604,7 +879,7 @@ def wait_for_stable_tab_state(
         if current != previous:
             previous = current
             stable_since = time.monotonic()
-        elif time.monotonic() - stable_since >= 0.5:
+        elif time.monotonic() - stable_since >= stable_for:
             return current
         time.sleep(0.1)
     raise AssertionError(f"full tab state for {session!r} did not stabilize")
@@ -656,6 +931,54 @@ def tab_identity(
     tab_id = matches[0].get("tab_id")
     require(isinstance(tab_id, int), f"tab {session}/{name} has no integer id")
     return tab_id
+
+
+def typed_tab_identity(
+    binary: pathlib.Path,
+    env: dict[str, str],
+    session: str,
+    name: str,
+    tab_id: int,
+) -> dict[str, object]:
+    matches = [
+        tab
+        for tab in wait_for_tabs(binary, env, session)
+        if tab.get("name") == name and tab.get("tab_id") == tab_id
+    ]
+    require(
+        len(matches) == 1,
+        f"expected one typed tab {session}/{name} id={tab_id}, got {matches!r}",
+    )
+    identity = matches[0]
+    incarnation = identity.get("session_incarnation")
+    instance = identity.get("tab_instance_id")
+    require(
+        isinstance(incarnation, str) and bool(incarnation),
+        f"tab {session}/{name} has no session incarnation",
+    )
+    require(
+        isinstance(instance, str)
+        and len(instance) == 32
+        and all(character in "0123456789abcdef" for character in instance),
+        f"tab {session}/{name} has no typed instance id: {instance!r}",
+    )
+    return {
+        "session": session,
+        "name": name,
+        "id": tab_id,
+        "session_incarnation": incarnation,
+        "tab_instance_id": instance,
+    }
+
+
+def terminal_capture_identity(
+    session: str, tab_identity_value: dict[str, object], pane_id: int
+) -> str:
+    return (
+        f"session={session};tab_id={tab_identity_value['id']};"
+        f"tab_instance_id={tab_identity_value['tab_instance_id']};"
+        f"pane_id=terminal_{pane_id}"
+    )
 
 
 def terminal_panes(
@@ -891,8 +1214,25 @@ def record_negative_probe(
     before: dict[str, object],
     after: dict[str, object],
     error_category: str,
+    durable_failure_audit: dict[str, object] | None = None,
 ) -> None:
     unchanged = before == after
+    before_state = before.get("state")
+    after_state = after.get("state")
+    require(
+        isinstance(before_state, dict) and isinstance(after_state, dict),
+        f"{scenario} snapshots omitted runtime state",
+    )
+    before_non_durable = {
+        key: value for key, value in before_state.items() if key != "control_plane"
+    }
+    after_non_durable = {
+        key: value for key, value in after_state.items() if key != "control_plane"
+    }
+    non_durable_unchanged = before_non_durable == after_non_durable
+    state_contract_satisfied = (
+        non_durable_unchanged if durable_failure_audit is not None else unchanged
+    )
     recorder.append(
         "negative_probes",
         {
@@ -904,15 +1244,146 @@ def record_negative_probe(
             "before": before,
             "after": after,
             "state_unchanged": unchanged,
+            "non_durable_state_unchanged": non_durable_unchanged,
+            "durable_failure_audit": durable_failure_audit,
+            "state_contract_satisfied": state_contract_satisfied,
         },
     )
     require(result.returncode != 0, f"{scenario} exited zero")
-    require(unchanged, f"{scenario} changed tab focus/inventory or durable artifacts")
+    require(
+        state_contract_satisfied,
+        f"{scenario} changed tab focus/inventory or unallowlisted durable artifacts",
+    )
 
 
-def triage(
-    binary: pathlib.Path,
-    env: dict[str, str],
+def failed_transfer_audit_evidence(
+    control_plane: pathlib.Path,
+    *,
+    run: str,
+    exit_code: int,
+    origin_session: str,
+    before: dict[str, object],
+    after: dict[str, object],
+) -> dict[str, object]:
+    """Prove a failed triage wrote only its typed audit receipt and lock."""
+    before_state = before.get("state")
+    after_state = after.get("state")
+    require(
+        isinstance(before_state, dict) and isinstance(after_state, dict),
+        f"{run} failure snapshots omitted state",
+    )
+    before_artifacts = before_state.get("control_plane")
+    after_artifacts = after_state.get("control_plane")
+    require(
+        isinstance(before_artifacts, dict) and isinstance(after_artifacts, dict),
+        f"{run} failure snapshots omitted control-plane state",
+    )
+    before_files_raw = before_artifacts.get("files")
+    after_files_raw = after_artifacts.get("files")
+    require(
+        isinstance(before_files_raw, list) and isinstance(after_files_raw, list),
+        f"{run} failure snapshots omitted artifact inventories",
+    )
+
+    def by_path(raw_files: list[object]) -> dict[str, dict[str, object]]:
+        indexed: dict[str, dict[str, object]] = {}
+        for raw in raw_files:
+            require(isinstance(raw, dict), f"{run} artifact entry is not an object")
+            path = raw.get("path")
+            require(isinstance(path, str), f"{run} artifact entry omitted path")
+            indexed[path] = raw
+        return indexed
+
+    before_files = by_path(before_files_raw)
+    after_files = by_path(after_files_raw)
+    run_prefix = f"finished_runs/{run}"
+    receipt_relative = f"{run_prefix}/transfer.json"
+    lock_relative = f"{run_prefix}/transfer.lock"
+    allowed_delta = {receipt_relative, lock_relative}
+    changed_paths = {
+        path
+        for path in set(before_files) | set(after_files)
+        if before_files.get(path) != after_files.get(path)
+    }
+    require(
+        changed_paths == allowed_delta,
+        f"{run} failed triage changed artifacts outside its exact audit pair: "
+        f"{sorted(changed_paths)!r}",
+    )
+    require(
+        receipt_relative not in before_files and lock_relative not in before_files,
+        f"{run} failure audit unexpectedly existed before the probe",
+    )
+    lock_entry = after_files.get(lock_relative)
+    require(
+        isinstance(lock_entry, dict)
+        and lock_entry.get("bytes") == 0
+        and lock_entry.get("sha256") == sha256_bytes(b""),
+        f"{run} failure lock was not an empty durable lock file",
+    )
+
+    run_directory = control_plane / "finished_runs" / run
+    receipt_path = run_directory / "transfer.json"
+    receipt_contents = receipt_path.read_bytes()
+    receipt = json.loads(receipt_contents)
+    require(isinstance(receipt, dict), f"{run} failure receipt is not an object")
+    expected_fields = {
+        "version": 4,
+        "run": run,
+        "exit_code": exit_code,
+        "origin_session": origin_session,
+        "origin_tab": run,
+        "capture": None,
+        "capture_committed": False,
+        "metadata_committed": False,
+        "viewer_confirmed": False,
+        "viewer_tab_identity": None,
+        "viewer_creation_pending": False,
+        "origin_tab_state": "preserved",
+    }
+    for field, expected in expected_fields.items():
+        require(
+            receipt.get(field) == expected,
+            f"{run} failure receipt {field!r} mismatch: "
+            f"expected={expected!r}, actual={receipt.get(field)!r}",
+        )
+    fault = receipt.get("fault")
+    require(
+        isinstance(fault, str) and fault.startswith("Capture:"),
+        f"{run} failure receipt did not retain a Capture fault: {fault!r}",
+    )
+    viewer_token = receipt.get("viewer_token")
+    require(
+        isinstance(viewer_token, str)
+        and len(viewer_token) == 32
+        and all(character in "0123456789abcdef" for character in viewer_token),
+        f"{run} failure receipt has invalid attempt token: {viewer_token!r}",
+    )
+    forbidden = {
+        "scrollback.txt",
+        "capture.manifest.json",
+        f"{run}.meta.json",
+    }
+    present_forbidden = sorted(
+        path.name for path in run_directory.iterdir() if path.name in forbidden
+    )
+    require(
+        not present_forbidden,
+        f"{run} failed triage committed success artifacts: {present_forbidden!r}",
+    )
+    return {
+        "allowed_changed_paths": sorted(allowed_delta),
+        "receipt_path": str(receipt_path.resolve()),
+        "receipt_bytes": len(receipt_contents),
+        "receipt_sha256": sha256_bytes(receipt_contents),
+        "receipt": receipt_projection(receipt),
+        "lock": lock_entry,
+        "success_artifacts_absent": True,
+        "fault_stage": "Capture",
+    }
+
+
+def triage_arguments(
     run: str,
     exit_code: int,
     origin_session: str,
@@ -920,8 +1391,7 @@ def triage(
     bucket: str | None = None,
     pane_id: int | None = None,
     transcript: pathlib.Path | None = None,
-    expect_success: bool = True,
-) -> subprocess.CompletedProcess[str]:
+) -> list[str]:
     args = [
         "triage-run",
         "--run",
@@ -939,7 +1409,199 @@ def triage(
         args += ["--pane-id", f"terminal_{pane_id}"]
     if transcript is not None:
         args += ["--runtime-transcript", str(transcript)]
+    return args
+
+
+def triage(
+    binary: pathlib.Path,
+    env: dict[str, str],
+    run: str,
+    exit_code: int,
+    origin_session: str,
+    *,
+    bucket: str | None = None,
+    pane_id: int | None = None,
+    transcript: pathlib.Path | None = None,
+    expect_success: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    args = triage_arguments(
+        run,
+        exit_code,
+        origin_session,
+        bucket=bucket,
+        pane_id=pane_id,
+        transcript=transcript,
+    )
     return command(binary, env, *args, expect_success=expect_success)
+
+
+def write_runtime_transcript_manifest(
+    transcript: pathlib.Path,
+    *,
+    run: str,
+    ownership_root: pathlib.Path,
+) -> pathlib.Path:
+    transcript = transcript.resolve()
+    ownership_root = ownership_root.resolve()
+    require(
+        transcript.is_relative_to(ownership_root),
+        f"runtime transcript escaped its ownership root: {transcript}",
+    )
+    contents = transcript.read_bytes()
+    manifest = pathlib.Path(f"{transcript}.manifest.json")
+    manifest.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "run_id": run,
+                "transcript": str(transcript),
+                "root": str(ownership_root),
+                "bytes": len(contents),
+                "sha256": sha256_bytes(contents),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return manifest
+
+
+def read_json_object_if_ready(path: pathlib.Path) -> dict[str, object] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def process_state(pid: int) -> str | None:
+    result = subprocess.run(
+        ["ps", "-o", "state=", "-p", str(pid)],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    state = result.stdout.strip()
+    return state or None
+
+
+def wait_for_process_stop(
+    pid: int,
+    *,
+    timeout: float = 5,
+    reassert_stop: bool = False,
+) -> None:
+    deadline = time.monotonic() + timeout
+    last_state: str | None = None
+    while time.monotonic() < deadline:
+        if reassert_stop:
+            try:
+                process_group = os.getpgid(pid)
+                os.killpg(process_group, signal.SIGSTOP)
+                # Reassert on the exact leader as well: a just-delivered
+                # SIGCONT can otherwise win a very short CONT/STOP pulse on
+                # macOS after the wrapper execs the target binary.
+                os.kill(pid, signal.SIGSTOP)
+            except ProcessLookupError as error:
+                raise AssertionError(
+                    f"killpoint process {pid} exited before SIGSTOP"
+                ) from error
+        state = process_state(pid)
+        if state is None:
+            raise AssertionError(f"killpoint process {pid} exited before SIGSTOP")
+        last_state = state
+        if "T" in state:
+            return
+        time.sleep(0.001)
+    raise AssertionError(
+        f"killpoint process {pid} did not enter stopped state "
+        f"(last state: {last_state!r})"
+    )
+
+
+def interrupt_process_at_state(
+    binary: pathlib.Path,
+    env: dict[str, str],
+    args: list[str],
+    *,
+    scenario: str,
+    artifact_root: pathlib.Path,
+    observe: Callable[[], dict[str, object] | None],
+    slice_seconds: float = 0.0005,
+    max_slices: int = 20_000,
+) -> InterruptedProcess:
+    """Time-slice a process group and SIGKILL only after durable state is seen."""
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    stdout_path = artifact_root / f"{scenario}.stdout.log"
+    stderr_path = artifact_root / f"{scenario}.stderr.log"
+    process: subprocess.Popen[bytes] | None = None
+    observed: dict[str, object] | None = None
+    slices = 0
+    with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+        process = subprocess.Popen(
+            [
+                "/bin/sh",
+                "-c",
+                'kill -STOP "$$"; exec "$@"',
+                f"vc-frame-{scenario}",
+                str(binary),
+                *args,
+            ],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=stdout,
+            stderr=stderr,
+            start_new_session=True,
+        )
+        try:
+            wait_for_process_stop(process.pid)
+            for slices in range(1, max_slices + 1):
+                os.killpg(process.pid, signal.SIGCONT)
+                time.sleep(slice_seconds)
+                if process.poll() is not None:
+                    break
+                wait_for_process_stop(process.pid, reassert_stop=True)
+                observed = observe()
+                if observed is not None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    break
+            else:
+                raise AssertionError(
+                    f"{scenario} did not reach its killpoint after {max_slices} slices"
+                )
+            if observed is None:
+                returncode = process.wait(timeout=5)
+                raise AssertionError(
+                    f"{scenario} exited before its killpoint: exit={returncode}"
+                )
+            returncode = process.wait(timeout=5)
+        finally:
+            if process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait(timeout=5)
+    stdout_text = stdout_path.read_text(encoding="utf-8", errors="replace")
+    stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")
+    require(
+        returncode == -signal.SIGKILL,
+        f"{scenario} was not terminated at its controlled killpoint: {returncode}",
+    )
+    return InterruptedProcess(
+        pid=process.pid,
+        slices=slices,
+        signal="SIGKILL",
+        observed_state=observed,
+        stdout_path=str(stdout_path.resolve()),
+        stderr_path=str(stderr_path.resolve()),
+        stdout=stdout_text,
+        stderr=stderr_text,
+        returncode=returncode,
+    )
 
 
 def transfer_files(
@@ -954,6 +1616,90 @@ def transfer_files(
     return scrollback, metadata, receipt
 
 
+def capture_commit_snapshot(
+    control_plane: pathlib.Path, run: str
+) -> dict[str, object] | None:
+    capture_dir = control_plane / "finished_runs" / run
+    scrollback = capture_dir / "scrollback.txt"
+    manifest_path = capture_dir / "capture.manifest.json"
+    if not scrollback.is_file() or not manifest_path.is_file():
+        return None
+    contents = scrollback.read_bytes()
+    manifest_contents = manifest_path.read_bytes()
+    try:
+        manifest = json.loads(manifest_contents)
+    except json.JSONDecodeError:
+        return None
+    if not contents or not isinstance(manifest, dict):
+        return None
+    receipt = read_json_object_if_ready(capture_dir / "transfer.json")
+    metadata = read_json_object_if_ready(capture_dir / "meta.json")
+    return {
+        "capture_path": str(scrollback.resolve()),
+        "capture_bytes": len(contents),
+        "capture_sha256": sha256_bytes(contents),
+        "manifest_path": str(manifest_path.resolve()),
+        "manifest_bytes": len(manifest_contents),
+        "manifest_sha256": sha256_bytes(manifest_contents),
+        "manifest": manifest,
+        "receipt": receipt,
+        "metadata": metadata,
+    }
+
+
+def capture_receipt_killpoint_state(
+    control_plane: pathlib.Path, run: str
+) -> dict[str, object] | None:
+    snapshot = capture_commit_snapshot(control_plane, run)
+    if snapshot is None:
+        return None
+    receipt = snapshot.get("receipt")
+    if (
+        isinstance(receipt, dict)
+        and receipt.get("version") == 4
+        and receipt.get("capture_committed") is True
+        and receipt.get("viewer_confirmed") is False
+        and receipt.get("viewer_creation_pending") is False
+        and receipt.get("viewer_tab_identity") is None
+        and receipt.get("origin_tab_state") == "preserved"
+    ):
+        return snapshot
+    return None
+
+
+def viewer_confirmation_killpoint_state(
+    control_plane: pathlib.Path, run: str
+) -> dict[str, object] | None:
+    snapshot = capture_commit_snapshot(control_plane, run)
+    if snapshot is None:
+        return None
+    receipt = snapshot.get("receipt")
+    if (
+        isinstance(receipt, dict)
+        and receipt.get("version") == 4
+        and receipt.get("capture_committed") is True
+        and receipt.get("metadata_committed") is True
+        and receipt.get("viewer_confirmed") is True
+        and receipt.get("origin_tab_state") == "preserved"
+    ):
+        return snapshot
+    return None
+
+
+def interrupted_process_evidence(result: InterruptedProcess) -> dict[str, object]:
+    return {
+        "pid": result.pid,
+        "slices": result.slices,
+        "signal": result.signal,
+        "observed_state": result.observed_state,
+        "stdout_path": result.stdout_path,
+        "stderr_path": result.stderr_path,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "returncode": result.returncode,
+    }
+
+
 def assert_viewer_inventory(
     binary: pathlib.Path,
     env: dict[str, str],
@@ -962,7 +1708,7 @@ def assert_viewer_inventory(
     run: str,
     drawer: str,
 ) -> dict[str, object]:
-    require(receipt.get("version") == 3, f"{run} receipt is not the v3 contract")
+    require(receipt.get("version") == 4, f"{run} receipt is not the v4 contract")
     token = receipt.get("viewer_token")
     require(
         isinstance(token, str)
@@ -991,6 +1737,13 @@ def assert_viewer_inventory(
         isinstance(incarnation, str) and bool(incarnation),
         f"{run} viewer identity has no session incarnation",
     )
+    instance = identity.get("tab_instance_id")
+    require(
+        isinstance(instance, str)
+        and len(instance) == 32
+        and all(character in "0123456789abcdef" for character in instance),
+        f"{run} viewer identity has no typed instance id",
+    )
 
     drawer_tabs = wait_for_tabs(binary, env, drawer)
     matches = [
@@ -999,6 +1752,7 @@ def assert_viewer_inventory(
         if tab.get("tab_id") == viewer_id
         and tab.get("name") == expected_name
         and tab.get("session_incarnation") == incarnation
+        and tab.get("tab_instance_id") == instance
     ]
     require(
         len(matches) == 1
@@ -1025,6 +1779,14 @@ def verify_transfer(
 ) -> tuple[bytes, dict[str, object]]:
     scrollback, metadata, receipt = transfer_files(control_plane, run)
     contents = scrollback.read_bytes()
+    manifest_path = scrollback.with_name("capture.manifest.json")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    require(isinstance(manifest, dict), f"{run} capture manifest is not an object")
+    manifest_evidence = manifest.get("evidence")
+    require(
+        isinstance(manifest_evidence, dict),
+        f"{run} capture manifest lacks evidence",
+    )
     require(contents, f"{run} committed an empty scrollback")
     if marker is not None:
         require(marker.encode() in contents, f"{run} captured a foreign pane")
@@ -1058,6 +1820,36 @@ def verify_transfer(
         metadata.get("capture_bytes") == len(contents), f"{run} has wrong byte count"
     )
     require(metadata.get("capture_sha256") == digest, f"{run} has wrong capture digest")
+    require(
+        manifest.get("version") == 1
+        and manifest.get("run_id") == run
+        and manifest.get("session") == receipt.get("origin_session")
+        and manifest.get("origin_tab") == receipt.get("origin_tab"),
+        f"{run} capture manifest has the wrong transfer identity: {manifest!r}",
+    )
+    require(
+        manifest_evidence.get("capture_source") == expected_source
+        and manifest_evidence.get("source_identity") == expected_identity
+        and manifest_evidence.get("bytes") == len(contents)
+        and manifest_evidence.get("sha256") == digest,
+        f"{run} capture manifest does not bind the committed bytes",
+    )
+    require(
+        receipt.get("capture") == manifest_evidence,
+        f"{run} receipt capture evidence diverges from capture.manifest.json",
+    )
+    if expected_source == "terminal_scrollback":
+        origin_identity = manifest_evidence.get("origin_tab_identity")
+        require(
+            isinstance(origin_identity, dict)
+            and origin_identity.get("session") == receipt.get("origin_session")
+            and origin_identity.get("name") == receipt.get("origin_tab")
+            and isinstance(origin_identity.get("session_incarnation"), str)
+            and bool(origin_identity.get("session_incarnation"))
+            and isinstance(origin_identity.get("tab_instance_id"), str)
+            and len(origin_identity.get("tab_instance_id", "")) == 32,
+            f"{run} terminal capture lacks typed origin identity",
+        )
     require(receipt.get("capture_committed") is True, f"{run} capture is not committed")
     require(
         receipt.get("metadata_committed") is True, f"{run} metadata is not committed"
@@ -1152,13 +1944,20 @@ def cleanup_namespace(
     process_residue = wait_for_no_server_processes(socket_root, timeout=timeout)
     require(not process_residue, "isolated namespace retained server processes")
     socket_entries = (
-        sorted(str(path.relative_to(socket_root)) for path in socket_root.rglob("*"))
+        [
+            {
+                "path": str(path.relative_to(socket_root)),
+                "kind": "directory" if path.is_dir() else "residue",
+            }
+            for path in sorted(socket_root.rglob("*"))
+        ]
         if socket_root.exists()
         else []
     )
+    socket_residue = [entry for entry in socket_entries if entry["kind"] != "directory"]
     require(
-        not socket_entries,
-        f"isolated socket root retained entries after cleanup: {socket_entries!r}",
+        not socket_residue,
+        f"isolated socket root retained socket/file residue: {socket_residue!r}",
     )
     return {
         "initial_session_inventory": initial,
@@ -1167,6 +1966,7 @@ def cleanup_namespace(
         "final_session_inventory": {},
         "process_residue": process_residue,
         "socket_entries_after_cleanup": socket_entries,
+        "socket_residue_after_cleanup": socket_residue,
     }
 
 
@@ -1225,20 +2025,23 @@ def main() -> int:
     if not binary.is_file():
         raise SystemExit(f"binary does not exist: {binary}")
 
-    unique = f"e{os.getpid()}-{time.time_ns()}"
+    unique = f"e{os.getpid():x}{time.time_ns() & 0xFFFFFFFF:08x}"
     stamp = datetime.datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%S.%fZ")
     root = options.artifact_root.expanduser().resolve() / f"{stamp}-{unique}"
     root.mkdir(parents=True, exist_ok=False)
     control_plane = root / "control-plane"
-    primary_root = root / "primary"
-    restart_root = root / "restart"
+    runtime_root = pathlib.Path(
+        tempfile.mkdtemp(prefix=f"vcf-e2e-{unique}-", dir=SHORT_RUNTIME_PARENT)
+    ).resolve()
+    primary_root = runtime_root / "p"
+    restart_root = runtime_root / "r"
     env = isolated_env(primary_root, control_plane)
     restart_env = isolated_env(restart_root, control_plane)
     receipt_path = root / "evidence.json"
     recorder = EvidenceRecorder(
         receipt_path,
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "status": "initializing",
             "started_at": utc_now(),
             "fixture_id": unique,
@@ -1250,6 +2053,7 @@ def main() -> int:
                 else "explicit_sha"
             ),
             "artifact_root": str(root),
+            "runtime_root": str(runtime_root),
             "evidence_path": str(receipt_path),
             "namespaces": {
                 "primary": {
@@ -1262,15 +2066,13 @@ def main() -> int:
                 },
                 "control_plane": str(control_plane),
             },
+            "socket_path_budget": {},
             "negative_probes": [],
+            "interruption_probes": [],
             "transfers": [],
             "restart": {},
             "cleanup": {},
-            # Phase 2 is intentionally blocked on explicit protocol killpoints.
-            "deferred_protocol_scenarios": [
-                "interruption_after_capture_commit",
-                "interruption_after_viewer_confirmation",
-            ],
+            "operator_guard": {},
         },
     )
     # Print before the first mutation so a hard interruption still leaves an
@@ -1280,9 +2082,29 @@ def main() -> int:
     origin = f"{unique}-origin"
     peer = f"{unique}-peer"
     headless_origin = f"{unique}-headless"
+    missing_name = f"{unique}-missing"
+    missing_origin_session = f"{unique}-miss"
+    empty_origin = f"{unique}-empty"
     drawers = set(DRAWER_BY_BUCKET.values())
     primary_targets = {origin, peer, headless_origin, *drawers}
     restart_targets = {"Finalized runs"}
+    primary_session_selectors = primary_targets | {
+        missing_name,
+        missing_origin_session,
+        empty_origin,
+    }
+    recorder.set(
+        "socket_path_budget",
+        {
+            "primary": socket_path_budget(
+                pathlib.Path(env["VC_FRAME_SOCKET_DIR"]),
+                primary_session_selectors,
+            ),
+            "restart": socket_path_budget(
+                pathlib.Path(restart_env["VC_FRAME_SOCKET_DIR"]), restart_targets
+            ),
+        },
+    )
     probe_root = root / "probes"
     recorder.set(
         "fixtures",
@@ -1291,6 +2113,22 @@ def main() -> int:
             "restart_owned_sessions": sorted(restart_targets),
             "probe_root": str(probe_root),
             "control_plane": str(control_plane),
+        },
+    )
+    guarded_operator_paths = operator_guard_paths()
+    guarded_volatile_paths = operator_guard_volatile_paths()
+    operator_guard_before = guarded_tree_snapshot(
+        guarded_operator_paths,
+        volatile_files=guarded_volatile_paths,
+    )
+    recorder.set(
+        "operator_guard",
+        {
+            "paths": [str(path) for path in guarded_operator_paths],
+            "volatile_identity_only": [
+                str(path) for path in sorted(guarded_volatile_paths)
+            ],
+            "before": guarded_snapshot_summary(operator_guard_before),
         },
     )
     caught: BaseException | None = None
@@ -1317,6 +2155,7 @@ def main() -> int:
             binary,
             env,
             primary_root,
+            control_plane,
             expected_sha=expected_sha,
             expected_profile=options.expected_profile,
         )
@@ -1324,6 +2163,7 @@ def main() -> int:
             binary,
             restart_env,
             restart_root,
+            control_plane,
             expected_sha=expected_sha,
             expected_profile=options.expected_profile,
         )
@@ -1350,11 +2190,13 @@ def main() -> int:
         peer_pane = peer_panes[0]
         wait_for_marker(binary, env, origin, origin_pane, origin_marker, probe_root)
         wait_for_marker(binary, env, peer, peer_pane, peer_marker, probe_root)
-        wait_for_stable_tab_state(binary, env, origin)
-        wait_for_stable_tab_state(binary, env, peer)
+        # The bootstrap shell can rename its first tab shortly after the marker
+        # tab appears. Quiesce that owned initialization before state-invariance
+        # negatives so a cosmetic startup rename is not blamed on triage.
+        wait_for_stable_tab_state(binary, env, origin, stable_for=2.0)
+        wait_for_stable_tab_state(binary, env, peer, stable_for=2.0)
         guard_sessions = {origin, peer}
 
-        missing_name = f"{unique}-missing"
         before = runtime_state_snapshot(
             binary, env, guard_sessions | {missing_name}, control_plane
         )
@@ -1466,7 +2308,6 @@ def main() -> int:
         )
 
         missing_origin_run = f"{unique}-missing-origin"
-        missing_origin_session = f"{unique}-missing-origin-session"
         before = runtime_state_snapshot(
             binary,
             env,
@@ -1494,6 +2335,14 @@ def main() -> int:
             before=before,
             after=after,
             error_category="capture_target_missing",
+            durable_failure_audit=failed_transfer_audit_evidence(
+                control_plane,
+                run=missing_origin_run,
+                exit_code=2,
+                origin_session=missing_origin_session,
+                before=before,
+                after=after,
+            ),
         )
         require(
             "Capture" in missing_origin.stderr,
@@ -1506,8 +2355,12 @@ def main() -> int:
 
         empty_transcript = root / "empty-runtime-transcript.log"
         empty_transcript.write_bytes(b"")
-        empty_origin = f"{unique}-empty-origin"
         empty_run = f"{unique}-empty-transcript"
+        empty_transcript_manifest = write_runtime_transcript_manifest(
+            empty_transcript,
+            run=empty_run,
+            ownership_root=root,
+        )
         before = runtime_state_snapshot(
             binary, env, guard_sessions | {empty_origin}, control_plane
         )
@@ -1531,11 +2384,23 @@ def main() -> int:
             before=before,
             after=after,
             error_category="empty_runtime_transcript",
+            durable_failure_audit=failed_transfer_audit_evidence(
+                control_plane,
+                run=empty_run,
+                exit_code=-9,
+                origin_session=empty_origin,
+                before=before,
+                after=after,
+            ),
         )
         require(
             "empty" in empty_fallback.stderr.lower(),
             f"empty transcript failed without an explicit empty-source error: "
             f"{empty_fallback.stderr!r}",
+        )
+        require(
+            empty_transcript_manifest.is_file(),
+            "empty transcript probe lost its ownership manifest",
         )
 
         require(
@@ -1544,6 +2409,231 @@ def main() -> int:
         )
         wait_for_marker(binary, env, origin, origin_pane, origin_marker, probe_root)
         wait_for_marker(binary, env, peer, peer_pane, peer_marker, probe_root)
+
+        capture_interrupt_run = f"{unique}-kill-after-capture"
+        capture_interrupt_marker = f"KILLCAPTURE-{unique}"
+        capture_interrupt_tab, capture_interrupt_panes = create_marker_tab(
+            binary,
+            env,
+            origin,
+            capture_interrupt_run,
+            capture_interrupt_marker,
+        )
+        capture_interrupt_pane = capture_interrupt_panes[0]
+        wait_for_marker(
+            binary,
+            env,
+            origin,
+            capture_interrupt_pane,
+            capture_interrupt_marker,
+            probe_root,
+        )
+        capture_interrupt_identity = typed_tab_identity(
+            binary,
+            env,
+            origin,
+            capture_interrupt_run,
+            capture_interrupt_tab,
+        )
+        capture_interrupt_source = terminal_capture_identity(
+            origin,
+            capture_interrupt_identity,
+            capture_interrupt_pane,
+        )
+        capture_interrupted = interrupt_process_at_state(
+            binary,
+            env,
+            triage_arguments(
+                capture_interrupt_run,
+                0,
+                origin,
+                pane_id=capture_interrupt_pane,
+            ),
+            scenario="after_capture_receipt",
+            artifact_root=root / "interruptions",
+            observe=lambda: capture_receipt_killpoint_state(
+                control_plane, capture_interrupt_run
+            ),
+        )
+        require(
+            typed_tab_identity(
+                binary,
+                env,
+                origin,
+                capture_interrupt_run,
+                capture_interrupt_tab,
+            )
+            == capture_interrupt_identity,
+            "capture killpoint changed or closed the durable origin identity",
+        )
+        capture_before_recovery = capture_interrupted.observed_state
+        recorder.append(
+            "interruption_probes",
+            {
+                "scenario": "after_capture_receipt",
+                "phase": "interrupted",
+                **interrupted_process_evidence(capture_interrupted),
+            },
+        )
+        capture_recovery = triage(
+            binary,
+            env,
+            capture_interrupt_run,
+            0,
+            origin,
+            pane_id=capture_interrupt_pane,
+        )
+        capture_recovered_bytes, _capture_recovered_receipt = verify_transfer(
+            binary,
+            env,
+            control_plane,
+            run=capture_interrupt_run,
+            exit_code=0,
+            expected_bucket="Finalized",
+            expected_source="terminal_scrollback",
+            expected_identity=capture_interrupt_source,
+            marker=capture_interrupt_marker,
+        )
+        require(
+            sha256_bytes(capture_recovered_bytes)
+            == capture_before_recovery.get("capture_sha256"),
+            "capture-receipt recovery rewrote durable scrollback",
+        )
+        recorder.append(
+            "interruption_probes",
+            {
+                "scenario": "after_capture_receipt",
+                "phase": "recovered",
+                "triage_exit": capture_recovery.returncode,
+                "transfer": transfer_evidence(
+                    control_plane,
+                    capture_interrupt_run,
+                    "killpoint_recovery",
+                ),
+            },
+        )
+
+        viewer_interrupt_run = f"{unique}-kill-after-viewer"
+        viewer_interrupt_marker = f"KILLVIEWER-{unique}"
+        viewer_interrupt_tab, viewer_interrupt_panes = create_marker_tab(
+            binary,
+            env,
+            origin,
+            viewer_interrupt_run,
+            viewer_interrupt_marker,
+        )
+        viewer_interrupt_pane = viewer_interrupt_panes[0]
+        wait_for_marker(
+            binary,
+            env,
+            origin,
+            viewer_interrupt_pane,
+            viewer_interrupt_marker,
+            probe_root,
+        )
+        viewer_interrupt_identity = typed_tab_identity(
+            binary,
+            env,
+            origin,
+            viewer_interrupt_run,
+            viewer_interrupt_tab,
+        )
+        viewer_interrupt_source = terminal_capture_identity(
+            origin,
+            viewer_interrupt_identity,
+            viewer_interrupt_pane,
+        )
+        viewer_interrupted = interrupt_process_at_state(
+            binary,
+            env,
+            triage_arguments(
+                viewer_interrupt_run,
+                -9,
+                origin,
+                pane_id=viewer_interrupt_pane,
+            ),
+            scenario="after_viewer_confirmation",
+            artifact_root=root / "interruptions",
+            observe=lambda: viewer_confirmation_killpoint_state(
+                control_plane, viewer_interrupt_run
+            ),
+            slice_seconds=0.00025,
+        )
+        require(
+            typed_tab_identity(
+                binary,
+                env,
+                origin,
+                viewer_interrupt_run,
+                viewer_interrupt_tab,
+            )
+            == viewer_interrupt_identity,
+            "viewer-confirmation killpoint closed the durable origin before interruption",
+        )
+        viewer_receipt_before = viewer_interrupted.observed_state.get("receipt")
+        require(
+            isinstance(viewer_receipt_before, dict),
+            "viewer killpoint did not preserve its receipt",
+        )
+        viewer_identity_before = assert_viewer_inventory(
+            binary,
+            env,
+            viewer_receipt_before,
+            run=viewer_interrupt_run,
+            drawer="Needs attention",
+        )
+        recorder.append(
+            "interruption_probes",
+            {
+                "scenario": "after_viewer_confirmation",
+                "phase": "interrupted",
+                **interrupted_process_evidence(viewer_interrupted),
+            },
+        )
+        viewer_recovery = triage(
+            binary,
+            env,
+            viewer_interrupt_run,
+            -9,
+            origin,
+            pane_id=viewer_interrupt_pane,
+        )
+        viewer_recovered_bytes, viewer_receipt_after = verify_transfer(
+            binary,
+            env,
+            control_plane,
+            run=viewer_interrupt_run,
+            exit_code=-9,
+            expected_bucket="NeedsAttention",
+            expected_source="terminal_scrollback",
+            expected_identity=viewer_interrupt_source,
+            marker=viewer_interrupt_marker,
+        )
+        require(
+            sha256_bytes(viewer_recovered_bytes)
+            == viewer_interrupted.observed_state.get("capture_sha256"),
+            "viewer-confirmation recovery rewrote durable scrollback",
+        )
+        require(
+            viewer_receipt_after.get("viewer_token")
+            == viewer_receipt_before.get("viewer_token")
+            and viewer_receipt_after.get("viewer_tab_identity")
+            == viewer_identity_before,
+            "viewer-confirmation recovery changed confirmed viewer ownership",
+        )
+        recorder.append(
+            "interruption_probes",
+            {
+                "scenario": "after_viewer_confirmation",
+                "phase": "recovered",
+                "triage_exit": viewer_recovery.returncode,
+                "transfer": transfer_evidence(
+                    control_plane,
+                    viewer_interrupt_run,
+                    "killpoint_recovery",
+                ),
+            },
+        )
 
         multi_run = f"{unique}-multi-pane"
         target_marker = f"TARGET-{unique}"
@@ -1565,8 +2655,11 @@ def main() -> int:
         )
         target_pane = marker_panes[target_marker]
         sibling_pane = marker_panes[sibling_marker]
-        multi_identity = (
-            f"session={origin};tab_id={multi_tab_id};pane_id=terminal_{target_pane}"
+        multi_tab_identity = typed_tab_identity(
+            binary, env, origin, multi_run, multi_tab_id
+        )
+        multi_identity = terminal_capture_identity(
+            origin, multi_tab_identity, target_pane
         )
         multi_result = triage(
             binary,
@@ -1622,8 +2715,9 @@ def main() -> int:
             tab_id, panes = create_marker_tab(binary, env, origin, run, marker)
             pane_id = panes[0]
             wait_for_marker(binary, env, origin, pane_id, marker, probe_root)
-            expected_identity = (
-                f"session={origin};tab_id={tab_id};pane_id=terminal_{pane_id}"
+            origin_tab_identity = typed_tab_identity(binary, env, origin, run, tab_id)
+            expected_identity = terminal_capture_identity(
+                origin, origin_tab_identity, pane_id
             )
             initial_result = triage(
                 binary,
@@ -1688,11 +2782,20 @@ def main() -> int:
             replay_evidence = transfer_evidence(control_plane, run, "clean_replay")
             replay_evidence["triage_exit"] = replay_result.returncode
             recorder.append("transfers", replay_evidence)
-            _capture_path, metadata_before_foreign, _receipt = transfer_files(
-                control_plane, run
+            _capture_path, metadata_before_foreign, receipt_before_foreign = (
+                transfer_files(control_plane, run)
+            )
+            completed_run_directory = control_plane / "finished_runs" / run
+            completed_artifacts_before_foreign = artifact_tree_snapshot(
+                completed_run_directory
+            )
+            viewer_identity_before_foreign = receipt_before_foreign.get(
+                "viewer_tab_identity"
             )
 
             # A replacement with the same name is foreign to the durable receipt.
+            # A fully committed v4 replay must return success without re-entering
+            # CloseOriginTab or touching that successor.
             replacement_marker = f"REPLACEMENT-{marker}"
             replacement_id, replacement_panes = create_marker_tab(
                 binary, env, origin, run, replacement_marker
@@ -1702,6 +2805,13 @@ def main() -> int:
                 f"{run} replacement reused the captured stable tab id",
             )
             replacement_pane = replacement_panes[0]
+            replacement_identity = typed_tab_identity(
+                binary,
+                env,
+                origin,
+                run,
+                replacement_id,
+            )
             wait_for_marker(
                 binary,
                 env,
@@ -1718,17 +2828,12 @@ def main() -> int:
                 origin,
                 bucket=bucket,
                 pane_id=pane_id,
-                expect_success=False,
-            )
-            require(
-                "CloseOriginTab" in foreign_replay.stderr
-                and "refusing to close a successor" in foreign_replay.stderr
-                and "capture durable: true" in foreign_replay.stderr,
-                f"{run} foreign replay did not report a durable fail-closed "
-                f"result: {foreign_replay.stderr!r}",
             )
             capture_after_path, metadata_after_foreign, receipt_after_foreign = (
                 transfer_files(control_plane, run)
+            )
+            completed_artifacts_after_foreign = artifact_tree_snapshot(
+                completed_run_directory
             )
             require(
                 capture_after_path.read_bytes() == capture_before,
@@ -1739,22 +2844,23 @@ def main() -> int:
                 f"{run} foreign replay rewrote metadata",
             )
             require(
-                receipt_after_foreign.get("capture_committed") is True
-                and receipt_after_foreign.get("metadata_committed") is True
-                and receipt_after_foreign.get("viewer_confirmed") is True
-                and receipt_after_foreign.get("origin_tab_state") == "preserved",
-                f"{run} foreign replay recorded dishonest transfer state",
+                completed_artifacts_after_foreign == completed_artifacts_before_foreign,
+                f"{run} foreign replay changed committed transfer/capture/meta bytes",
             )
             require(
-                isinstance(receipt_after_foreign.get("fault"), str)
-                and "CloseOriginTab" in receipt_after_foreign["fault"],
-                f"{run} foreign replay did not persist its close fault",
+                receipt_after_foreign == receipt_before_foreign
+                and receipt_after_foreign.get("capture_committed") is True
+                and receipt_after_foreign.get("metadata_committed") is True
+                and receipt_after_foreign.get("viewer_confirmed") is True
+                and receipt_after_foreign.get("origin_tab_state") == "closed"
+                and receipt_after_foreign.get("fault") is None,
+                f"{run} fully committed replay changed its v4 receipt",
             )
             require(
                 receipt_after_foreign.get("viewer_tab_identity")
-                == receipt_before.get("viewer_tab_identity")
+                == viewer_identity_before_foreign
                 and receipt_after_foreign.get("viewer_token")
-                == receipt_before.get("viewer_token"),
+                == receipt_before_foreign.get("viewer_token"),
                 f"{run} foreign replay changed the confirmed viewer identity",
             )
             assert_viewer_inventory(
@@ -1765,8 +2871,20 @@ def main() -> int:
                 drawer=DRAWER_BY_BUCKET[expected_bucket],
             )
             require(
-                tab_identity(binary, env, origin, run) == replacement_id,
-                f"{run} replay closed or replaced a foreign origin",
+                typed_tab_identity(
+                    binary,
+                    env,
+                    origin,
+                    run,
+                    replacement_id,
+                )
+                == replacement_identity,
+                f"{run} replay closed or changed a foreign successor identity",
+            )
+            require(
+                "CloseOriginTab" not in foreign_replay.stderr,
+                f"{run} fully committed replay re-entered CloseOriginTab: "
+                f"{foreign_replay.stderr!r}",
             )
             wait_for_marker(
                 binary,
@@ -1777,10 +2895,17 @@ def main() -> int:
                 probe_root,
             )
             foreign_evidence = transfer_evidence(
-                control_plane, run, "foreign_successor_replay"
+                control_plane, run, "foreign_successor_idempotent_replay"
             )
             foreign_evidence["triage_exit"] = foreign_replay.returncode
             foreign_evidence["triage_stderr"] = foreign_replay.stderr
+            foreign_evidence["committed_artifacts_digest_before"] = (
+                completed_artifacts_before_foreign["digest"]
+            )
+            foreign_evidence["committed_artifacts_digest_after"] = (
+                completed_artifacts_after_foreign["digest"]
+            )
+            foreign_evidence["foreign_successor_identity"] = replacement_identity
             recorder.append("transfers", foreign_evidence)
 
         # A real headless fallback means the entire origin server is gone, not
@@ -1809,6 +2934,11 @@ def main() -> int:
             "real runtime transcript\nworker exited by signal\n",
             encoding="utf-8",
         )
+        transcript_manifest = write_runtime_transcript_manifest(
+            transcript,
+            run=fallback_run,
+            ownership_root=root,
+        )
         transcript_bytes = transcript.read_bytes()
         kill_confirmed_session(binary, env, headless_origin)
         fallback_result = triage(
@@ -1834,6 +2964,10 @@ def main() -> int:
         require(
             query_session(binary, env, headless_origin).state == "absent",
             "transcript fallback resurrected the dead origin",
+        )
+        require(
+            transcript_manifest.is_file(),
+            "runtime transcript ownership manifest disappeared",
         )
         fallback_evidence = transfer_evidence(
             control_plane, fallback_run, "runtime_transcript"
@@ -1978,7 +3112,54 @@ def main() -> int:
                     }
         else:
             cleanup_receipts["status"] = "not_needed_preflight_failed"
+        if not cleanup_errors:
+            try:
+                cleanup_receipts["runtime_root"] = {
+                    "status": "passed",
+                    **remove_runtime_root(runtime_root),
+                }
+            except BaseException as error:
+                cleanup_errors.append(f"runtime_root: {error}")
+                cleanup_receipts["runtime_root"] = {
+                    "status": "failed",
+                    "error_type": type(error).__name__,
+                    "error": str(error),
+                    "retained": runtime_root.exists(),
+                }
+        else:
+            cleanup_receipts["runtime_root"] = {
+                "status": "retained_after_namespace_cleanup_failure",
+                "runtime_root": str(runtime_root),
+            }
         recorder.set("cleanup", cleanup_receipts)
+
+    operator_guard_after = guarded_tree_snapshot(
+        guarded_operator_paths,
+        volatile_files=guarded_volatile_paths,
+    )
+    operator_guard_unchanged = operator_guard_after == operator_guard_before
+    operator_guard_receipt: dict[str, object] = {
+        "paths": [str(path) for path in guarded_operator_paths],
+        "volatile_identity_only": [
+            str(path) for path in sorted(guarded_volatile_paths)
+        ],
+        "before": guarded_snapshot_summary(operator_guard_before),
+        "after": guarded_snapshot_summary(operator_guard_after),
+        "unchanged": operator_guard_unchanged,
+    }
+    if not operator_guard_unchanged:
+        operator_guard_receipt["diff"] = guarded_snapshot_diff(
+            operator_guard_before,
+            operator_guard_after,
+        )
+    recorder.set(
+        "operator_guard",
+        operator_guard_receipt,
+    )
+    if caught is None and not operator_guard_unchanged:
+        caught = AssertionError(
+            "operator vc-frame socket/state roots changed during isolated E2E"
+        )
 
     if caught is None and cleanup_errors:
         caught = AssertionError("isolated cleanup failed: " + "; ".join(cleanup_errors))
