@@ -914,8 +914,8 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
     // spin at high CPU for many hours with zero clients. After daemonize, PPID
     // is always 1 (launchd) — PPID alone is NOT an orphan detector. Arm:
     // (1) SIGTERM/SIGINT → KillSession so plain kill works without SIGKILL
-    // (2) idle-exit after N seconds with zero connected clients (default 900;
-    //     VC_FRAME_SERVER_IDLE_EXIT_SECS=0 disables for intentional long detach).
+    // (2) optional idle-exit after N seconds with zero connected clients, armed
+    //     only by an explicit positive VC_FRAME_SERVER_IDLE_EXIT_SECS value.
     // Triage drawers are exempt from (2) — see `run_triage::idle_exit_may_reap`.
     install_server_lifecycle_watchdogs(
         to_server.clone(),
@@ -1860,26 +1860,14 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
     drop(std::fs::remove_file(&socket_path));
 }
 
-/// Default idle exit when no clients are connected (seconds).
-/// Override with `VC_FRAME_SERVER_IDLE_EXIT_SECS` (`0` disables).
-pub const DEFAULT_SERVER_IDLE_EXIT_SECS: u64 = 900;
-
-/// Parse idle-exit seconds from env. `0` or empty invalid → disabled / default.
+/// Parse an explicit idle-exit opt-in from `VC_FRAME_SERVER_IDLE_EXIT_SECS`.
+///
+/// Unset, empty, zero, and invalid values disable idle reaping. A server with
+/// zero UI clients is not necessarily idle: detached panes may still be doing
+/// useful work.
 pub fn server_idle_exit_secs_from_env(raw: Option<&str>) -> Option<u64> {
-    match raw {
-        None => Some(DEFAULT_SERVER_IDLE_EXIT_SECS),
-        Some(s) => {
-            let s = s.trim();
-            if s.is_empty() {
-                return Some(DEFAULT_SERVER_IDLE_EXIT_SECS);
-            }
-            match s.parse::<u64>() {
-                Ok(0) => None,
-                Ok(n) => Some(n),
-                Err(_) => Some(DEFAULT_SERVER_IDLE_EXIT_SECS),
-            }
-        },
-    }
+    let idle_secs = raw?.trim().parse::<u64>().ok()?;
+    (idle_secs > 0).then_some(idle_secs)
 }
 
 fn install_server_lifecycle_watchdogs(
@@ -1935,7 +1923,7 @@ fn install_server_lifecycle_watchdogs(
                         let since = empty_since.get_or_insert_with(Instant::now);
                         if since.elapsed() >= idle_limit {
                             log::warn!(
-                                "server idle: zero clients for ≥{}s — requesting KillSession (set VC_FRAME_SERVER_IDLE_EXIT_SECS=0 to disable)",
+                                "server idle: zero clients for ≥{}s under explicit VC_FRAME_SERVER_IDLE_EXIT_SECS policy — requesting KillSession",
                                 idle_secs
                             );
                             let _ = to_server_idle.send(ServerInstruction::KillSession);
@@ -1947,21 +1935,16 @@ fn install_server_lifecycle_watchdogs(
                 }
             });
     } else {
-        log::info!(
-            "server idle-exit disabled (triage drawer, or VC_FRAME_SERVER_IDLE_EXIT_SECS=0)"
-        );
+        log::info!("server idle-exit disabled (default, invalid/zero opt-in, or triage drawer)");
     }
 }
 
 /// How long this server may sit client-less before it reaps itself, or `None`
 /// when the idle watchdog must not be armed at all.
 ///
-/// Two independent reasons to stay armed-forever: the operator asked for it
-/// (`VC_FRAME_SERVER_IDLE_EXIT_SECS=0`, an intentional long detach), or the
-/// session is a triage drawer, which holds zero clients for its entire life by
-/// construction. Keeping the decision in one pure function is what makes the
-/// second reason testable — the bug it fixes was invisible precisely because
-/// the arming path never looked at which session it was arming.
+/// The watchdog is disabled by default and requires an explicit positive env
+/// value. Triage drawers additionally reject even that opt-in because they hold
+/// zero clients for their entire life by construction.
 fn idle_exit_plan(session_name: Option<&str>, raw_env: Option<&str>) -> Option<u64> {
     if !run_triage::idle_exit_may_reap(session_name) {
         return None;
@@ -2574,19 +2557,10 @@ mod session_state_tests {
     }
 
     #[test]
-    fn server_idle_exit_secs_default_when_unset() {
-        assert_eq!(
-            server_idle_exit_secs_from_env(None),
-            Some(DEFAULT_SERVER_IDLE_EXIT_SECS)
-        );
-        assert_eq!(
-            server_idle_exit_secs_from_env(Some("")),
-            Some(DEFAULT_SERVER_IDLE_EXIT_SECS)
-        );
-        assert_eq!(
-            server_idle_exit_secs_from_env(Some("not-a-number")),
-            Some(DEFAULT_SERVER_IDLE_EXIT_SECS)
-        );
+    fn server_idle_exit_is_disabled_without_an_explicit_positive_opt_in() {
+        assert_eq!(server_idle_exit_secs_from_env(None), None);
+        assert_eq!(server_idle_exit_secs_from_env(Some("")), None);
+        assert_eq!(server_idle_exit_secs_from_env(Some("not-a-number")), None);
     }
 
     #[test]
@@ -2599,6 +2573,7 @@ mod session_state_tests {
     fn server_idle_exit_secs_custom() {
         assert_eq!(server_idle_exit_secs_from_env(Some("60")), Some(60));
         assert_eq!(server_idle_exit_secs_from_env(Some("900")), Some(900));
+        assert_eq!(server_idle_exit_secs_from_env(Some(" 60 ")), Some(60));
     }
 
     /// Regression, 2026-07-25 — the rail's f/x/n settlement counters went blind.
@@ -2618,29 +2593,24 @@ mod session_state_tests {
     fn the_idle_watchdog_is_never_armed_for_a_triage_drawer() {
         for drawer in ["Finalized runs", "Failed runs", "Needs attention"] {
             assert_eq!(
-                idle_exit_plan(Some(drawer), None),
+                idle_exit_plan(Some(drawer), Some("60")),
                 None,
-                "drawer '{drawer}' must not arm idle-exit — it holds the rail's counter"
+                "drawer '{drawer}' must reject even an explicit idle-reaping opt-in"
             );
-            // Not even an explicit non-zero override may reap a drawer.
-            assert_eq!(idle_exit_plan(Some(drawer), Some("60")), None);
         }
     }
 
     #[test]
-    fn ordinary_sessions_keep_the_idle_watchdog_they_were_given() {
-        // The watchdog exists for abandoned `--server` processes burning CPU;
-        // exempting the drawers must not quietly disarm it everywhere else.
-        assert_eq!(
-            idle_exit_plan(Some("Operator"), None),
-            Some(DEFAULT_SERVER_IDLE_EXIT_SECS)
-        );
+    fn idle_watchdog_is_disabled_by_default_for_ordinary_sessions() {
+        assert_eq!(idle_exit_plan(Some("Operator"), None), None);
+        assert_eq!(idle_exit_plan(Some("vc-frame"), None), None);
+        assert_eq!(idle_exit_plan(None, None), None);
+    }
+
+    #[test]
+    fn ordinary_sessions_can_explicitly_opt_in_to_idle_reaping() {
         assert_eq!(idle_exit_plan(Some("vc-frame"), Some("60")), Some(60));
-        assert_eq!(
-            idle_exit_plan(None, None),
-            Some(DEFAULT_SERVER_IDLE_EXIT_SECS)
-        );
-        // The operator's explicit long-detach opt-out still wins.
+        assert_eq!(idle_exit_plan(None, Some("900")), Some(900));
         assert_eq!(idle_exit_plan(Some("Operator"), Some("0")), None);
     }
 }
