@@ -133,7 +133,8 @@ DEST ?= $(CARGO_BIN_DIR)/vc-frame
 LOCAL_BIN_DIR ?= $(HOME)/.local/bin
 LOCAL_VC_FRAME_ALIAS ?= $(LOCAL_BIN_DIR)/vc-frame
 install: doctor-quiet doctor-install-quiet
-	$(CARGO) xtask install $(DEST)
+	@./scripts/plugins-parity.zsh check
+	$(CARGO) xtask install --no-plugins $(DEST)
 	@mkdir -p "$(LOCAL_BIN_DIR)"
 	@installed="$(DEST)"; \
 	if [ -d "$$installed" ]; then installed="$$installed/vc-frame"; fi; \
@@ -263,6 +264,7 @@ package:
 
 ## Installer negative matrix — proves tools/install.sh fails closed
 install-test:
+	@sh tools/make_install_contract_test.sh
 	@sh tools/install_test.sh
 
 ## Static release contract — version/signing/workflow/cold-install invariants
