@@ -128,10 +128,13 @@ fn migrate_cased_path(legacy_path: &Path, vc_frame_path: &Path) {
     if same_directory {
         let tmp = parent.join(format!(
             "{}.case-migration",
-            vc_frame_path.file_name().unwrap_or_default().to_string_lossy()
+            vc_frame_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
         ));
-        let renamed = std::fs::rename(legacy_path, &tmp)
-            .and_then(|_| std::fs::rename(&tmp, vc_frame_path));
+        let renamed =
+            std::fs::rename(legacy_path, &tmp).and_then(|_| std::fs::rename(&tmp, vc_frame_path));
         if let Err(e) = renamed {
             log::debug!(
                 "Failed to normalize casing of {:?} to {:?}: {:?}",

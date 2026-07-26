@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "captured_at": "2026-07-20T16:03:00Z",
-  "repo_sha": "db31b176cbd817755d219cb2325d657e50f00fa6",
+  "captured_at": "2026-07-26T05:37:25Z",
+  "repo_sha": "83009f2740a358940233e7b01f7d9d1ee12a838b",
   "scanner_version": "1.164.0",
   "config": "p/rust",
   "config_kind": "explicit_registry_pack",
@@ -70,14 +70,14 @@
     "skills.command-execution.skill-rust-command-dev-tcp.skill-rust-command-dev-tcp",
     "skills.command-execution.skill-rust-command-network-tools.skill-rust-command-network-tools"
   ],
-  "target_count": 353,
-  "finding_count": 310,
+  "target_count": 370,
+  "finding_count": 313,
   "finding_counts_by_rule": {
     "rust.actix.path-traversal.tainted-path.tainted-path": 9,
     "rust.lang.security.args-os.args-os": 1,
-    "rust.lang.security.current-exe.current-exe": 5,
-    "rust.lang.security.temp-dir.temp-dir": 31,
+    "rust.lang.security.current-exe.current-exe": 6,
+    "rust.lang.security.temp-dir.temp-dir": 33,
     "rust.lang.security.unsafe-usage.unsafe-usage": 264
   },
-  "raw_results_sha256": "5c0fbb645fdcfd3d582165111ee75df653cdf8971fb9efe42b56c96a16efb9ae"
+  "raw_results_sha256": "26ec4bcb95793b7b40e449c629732dee5cc1fe749d893580647e7ed3a4acc71a"
 }

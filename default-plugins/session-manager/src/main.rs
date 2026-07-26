@@ -2468,7 +2468,10 @@ mod rail_tests {
             " x -  2 · Failed tabs  "
         );
         // Degenerate width: falls back to plain clipping, no suffix games.
-        assert_eq!(fit_bucket_rail_line(" n -  1 · Needs attention tabs", 4), " n -");
+        assert_eq!(
+            fit_bucket_rail_line(" n -  1 · Needs attention tabs", 4),
+            " n -"
+        );
         // Non-bucket text is untouched by the suffix rule.
         assert_eq!(fit_bucket_rail_line("01 * alpha", 6), "01 * a");
     }

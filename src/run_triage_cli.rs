@@ -22,7 +22,16 @@ use zellij_utils::run_triage::{
 use zellij_utils::sessions::session_exists;
 
 struct RunTransferLock {
-    _file: std::fs::File,
+    file: std::fs::File,
+}
+
+#[cfg(unix)]
+impl Drop for RunTransferLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+
+        let _ = nix::fcntl::flock(self.file.as_raw_fd(), nix::fcntl::FlockArg::Unlock);
+    }
 }
 
 impl RunTransferLock {
@@ -52,7 +61,7 @@ impl RunTransferLock {
                 error
             )
         })?;
-        Ok(Self { _file: file })
+        Ok(Self { file })
     }
 
     #[cfg(windows)]
@@ -73,7 +82,7 @@ impl RunTransferLock {
             .map_err(|error| {
                 format!("cannot acquire transfer lock {}: {}", path.display(), error)
             })?;
-        Ok(Self { _file: file })
+        Ok(Self { file })
     }
 
     #[cfg(not(any(unix, windows)))]
@@ -199,8 +208,33 @@ impl CliTriageIo {
     fn wait_for_session_ready(&self, session: &str) -> Result<(), String> {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let error = match self.run(&["-s", session, "action", "list-tabs", "--json"]) {
-                Ok(_) => return Ok(()),
+            let readiness = self
+                .run(&["-s", session, "action", "list-tabs", "--json"])
+                .and_then(|_| {
+                    self.run(&[
+                        "-s",
+                        session,
+                        "action",
+                        "list-panes",
+                        "--json",
+                        "--all",
+                        "--tab",
+                        "--state",
+                    ])
+                })
+                .and_then(|panes| {
+                    serde_json::from_str::<Vec<serde_json::Value>>(&panes)
+                        .map_err(|error| format!("cannot parse pane inventory: {}", error))
+                })
+                .and_then(|panes| {
+                    if panes.is_empty() {
+                        Err("pane inventory is still empty".to_owned())
+                    } else {
+                        Ok(())
+                    }
+                });
+            let error = match readiness {
+                Ok(()) => return Ok(()),
                 Err(error) => error,
             };
             if Instant::now() >= deadline {
