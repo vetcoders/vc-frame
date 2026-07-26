@@ -198,6 +198,15 @@ def require_current_exe_policy(path: str, lines: list[str], line: int) -> None:
         ):
             return
         require_terminal_cfg_test_location(path, lines, line, "current-exe")
+        if nearby[:6] == [
+            "let output = Command::new(std::env::current_exe().unwrap())",
+            '.arg("isolated_transfer_lock_scenario_child")',
+            '.env("VC_FRAME_TEST_TRANSFER_LOCK_SCENARIO", case)',
+            ".output()",
+            ".unwrap();",
+            "assert!(",
+        ]:
+            return
         if (
             not re.fullmatch(
                 r"let (?:locked|available)_probe = "

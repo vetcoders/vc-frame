@@ -159,6 +159,17 @@ class SemgrepInventoryTests(unittest.TestCase):
         with self.assertRaisesRegex(MODULE.InventoryError, "terminal"):
             MODULE.require_current_exe_policy(path, lines, 2)
 
+    def test_changed_isolated_transfer_lock_probe_shape_fails(self) -> None:
+        path = MODULE.TRANSFER_LOCK_PATH
+        lines = (MODULE.ROOT / path).read_text(encoding="utf-8").splitlines()
+        finding_line = self.live_lines(
+            path,
+            r"let output = Command::new\(std::env::current_exe\(\)\.unwrap\(\)\)",
+        )[0]
+        lines[finding_line] = '.arg("unreviewed_transfer_lock_child")'
+        with self.assertRaisesRegex(MODULE.InventoryError, "source shape"):
+            MODULE.require_current_exe_policy(path, lines, finding_line)
+
     def test_changed_transfer_lock_unsafe_shape_fails(self) -> None:
         with self.assertRaisesRegex(MODULE.InventoryError, "source shape"):
             MODULE.require_transfer_lock_fd_policy(

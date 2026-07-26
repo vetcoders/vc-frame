@@ -76,7 +76,8 @@ current user's terminal dump; no fixed authority filename is used.
 `current_exe` starts another internal mode of the already running vc-frame
 binary. It establishes no identity, trust, privilege or update provenance.
 The triage transfer-lock tests additionally re-enter the same test executable
-under a fixed test name with only the lock path and expected lock state.
+under fixed test names with only the selected isolated scenario or the lock
+path and expected lock state.
 
 ## CLI arguments
 
