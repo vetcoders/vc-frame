@@ -2866,6 +2866,8 @@ mod tests {
                     "work-123",
                     "--expected-session-incarnation",
                     "server-abc",
+                    "--expected-tab-instance-id",
+                    "11111111111111111111111111111111",
                 ])
                 .unwrap();
                 matches!(

@@ -352,6 +352,10 @@ pub struct DumpScreenTargetIdentity {
     pub tab_instance_id: String,
 }
 
+fn dump_screen_error_message(error: &anyhow::Error) -> String {
+    format!("{error:#}")
+}
+
 /// Instructions that can be sent to the [`Screen`].
 #[derive(Debug, Clone)]
 pub enum ScreenInstruction {
@@ -6566,7 +6570,7 @@ pub(crate) fn screen_thread_main(
                     },
                     Ok(None) => drop(completion_tx),
                     Err(error) => {
-                        let error = error.to_string();
+                        let error = dump_screen_error_message(&error);
                         log::error!("Failed to dump screen: {}", error);
                         if let Some(completion) = completion_tx.as_mut() {
                             completion.set_exit_status(1);
@@ -10223,6 +10227,37 @@ pub(crate) fn screen_thread_main(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod dump_screen_error_tests {
+    use super::dump_screen_error_message;
+    use crate::route::NotificationEnd;
+    use anyhow::Context;
+    use tokio::sync::oneshot;
+
+    #[test]
+    fn dump_screen_write_error_preserves_source_chain_in_completion_ack() {
+        let source = std::io::Error::other("destination is a directory");
+        let error = Err::<(), _>(source)
+            .context("failed to write to file")
+            .context("failed to dump pane Terminal(1) in tab 1")
+            .unwrap_err();
+        let (tx, rx) = oneshot::channel();
+        let mut completion = NotificationEnd::new(tx);
+        completion.set_exit_status(1);
+        completion.set_error_message(dump_screen_error_message(&error));
+        drop(completion);
+
+        let result = rx.blocking_recv().unwrap();
+        let message = result.error_message.unwrap();
+        assert!(
+            message.contains("failed to dump pane Terminal(1) in tab 1"),
+            "{message}"
+        );
+        assert!(message.contains("failed to write to file"), "{message}");
+        assert!(message.contains("destination is a directory"), "{message}");
+    }
 }
 
 #[path = "./unit/screen_tests.rs"]

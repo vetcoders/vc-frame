@@ -618,13 +618,127 @@ fn file_name_only(path: &Path) -> Result<String, String> {
         .ok_or_else(|| format!("{} has no safe staging filename", path.display()))
 }
 
-fn committed_capture_matches(path: &Path, evidence: &CaptureEvidence) -> bool {
-    std::fs::metadata(path)
-        .map(|metadata| metadata.is_file() && metadata.len() == evidence.bytes)
-        .unwrap_or(false)
-        && evidence.bytes > 0
-        && !evidence.sha256.is_empty()
-        && capture_sha256(path).as_deref() == Ok(evidence.sha256.as_str())
+fn capture_staging_path(parent: &Path, staging_file: &str) -> Result<PathBuf, String> {
+    let relative = Path::new(staging_file);
+    let mut components = relative.components();
+    match (components.next(), components.next()) {
+        (Some(std::path::Component::Normal(file_name)), None) => Ok(parent.join(file_name)),
+        _ => Err(format!(
+            "capture commit manifest has unsafe staging filename {:?}",
+            staging_file
+        )),
+    }
+}
+
+fn validate_capture_commit_manifest(
+    manifest_path: &Path,
+    manifest: &CaptureCommitManifest,
+) -> Result<(), String> {
+    let digest_is_lower_hex = manifest.evidence.sha256.len() == 64
+        && manifest
+            .evidence
+            .sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    if manifest.evidence.bytes == 0
+        || !digest_is_lower_hex
+        || manifest.evidence.source_identity.is_empty()
+    {
+        return Err(format!(
+            "capture commit manifest {} lacks valid digest evidence",
+            manifest_path.display()
+        ));
+    }
+    match (
+        manifest.evidence.capture_source,
+        manifest.evidence.origin_tab_identity.as_ref(),
+    ) {
+        (CaptureSource::TerminalScrollback, Some(identity)) if identity.is_typed() => {},
+        (CaptureSource::TerminalScrollback, _) => {
+            return Err(format!(
+                "capture commit manifest {} lacks typed terminal identity",
+                manifest_path.display()
+            ));
+        },
+        (CaptureSource::RuntimeTranscript, Some(identity)) if !identity.is_typed() => {
+            return Err(format!(
+                "capture commit manifest {} has an invalid origin identity",
+                manifest_path.display()
+            ));
+        },
+        (CaptureSource::RuntimeTranscript, _) => {},
+    }
+    let parent = manifest_path
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", manifest_path.display()))?;
+    capture_staging_path(parent, &manifest.staging_file)?;
+    Ok(())
+}
+
+fn committed_capture_matches(path: &Path, evidence: &CaptureEvidence) -> Result<bool, String> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(format!("cannot inspect {}: {}", path.display(), error));
+        },
+    };
+    if !metadata.file_type().is_file() {
+        return Err(format!(
+            "refusing non-regular committed capture {}",
+            path.display()
+        ));
+    }
+    if metadata.len() != evidence.bytes {
+        return Ok(false);
+    }
+    Ok(capture_sha256(path)? == evidence.sha256)
+}
+
+fn retire_stale_capture_manifest(manifest_path: &Path) -> Result<PathBuf, String> {
+    let parent = manifest_path
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", manifest_path.display()))?;
+    let manifest_name = manifest_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("{} has no safe filename", manifest_path.display()))?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("cannot timestamp stale capture manifest: {}", error))?
+        .as_nanos();
+    let retired_path = parent.join(format!(
+        ".{}.retired.{}.{}",
+        manifest_name,
+        std::process::id(),
+        nonce
+    ));
+    match std::fs::symlink_metadata(&retired_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+        Ok(_) => {
+            return Err(format!(
+                "refusing to overwrite retired capture manifest {}",
+                retired_path.display()
+            ));
+        },
+        Err(error) => {
+            return Err(format!(
+                "cannot inspect retired capture manifest path {}: {}",
+                retired_path.display(),
+                error
+            ));
+        },
+    }
+    std::fs::rename(manifest_path, &retired_path).map_err(|error| {
+        format!(
+            "cannot atomically retire stale capture manifest {} -> {}: {}",
+            manifest_path.display(),
+            retired_path.display(),
+            error
+        )
+    })?;
+    sync_parent(&retired_path)?;
+    Ok(retired_path)
 }
 
 fn adopt_capture_commit(
@@ -666,32 +780,38 @@ fn adopt_capture_commit(
             manifest_path.display()
         ));
     }
-    if manifest.evidence.capture_source == CaptureSource::TerminalScrollback
-        && !manifest
-            .evidence
-            .origin_tab_identity
-            .as_ref()
-            .map(OriginTabIdentity::is_typed)
-            .unwrap_or(false)
-    {
-        return Err(format!(
-            "capture commit manifest {} lacks typed terminal identity",
-            manifest_path.display()
-        ));
-    }
-    if committed_capture_matches(dest, &manifest.evidence) {
+    validate_capture_commit_manifest(&manifest_path, &manifest)?;
+    if committed_capture_matches(dest, &manifest.evidence)? {
         return Ok(Some(manifest.evidence));
     }
     let parent = dest
         .parent()
         .ok_or_else(|| format!("{} has no parent directory", dest.display()))?;
-    let staging = parent.join(&manifest.staging_file);
-    if staging.parent() != Some(parent) || !committed_capture_matches(&staging, &manifest.evidence)
-    {
-        return Err(format!(
-            "capture commit manifest {} has neither a matching destination nor staging file",
-            manifest_path.display()
-        ));
+    let staging = capture_staging_path(parent, &manifest.staging_file)?;
+    match std::fs::symlink_metadata(&staging) {
+        Ok(_) if committed_capture_matches(&staging, &manifest.evidence)? => {},
+        Ok(_) => {
+            return Err(format!(
+                "capture commit manifest {} has neither a matching destination nor staging file",
+                manifest_path.display()
+            ));
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let retired_path = retire_stale_capture_manifest(&manifest_path)?;
+            log::warn!(
+                "Retired stale capture commit manifest {} as {} before recapture",
+                manifest_path.display(),
+                retired_path.display()
+            );
+            return Ok(None);
+        },
+        Err(error) => {
+            return Err(format!(
+                "cannot inspect capture staging file {}: {}",
+                staging.display(),
+                error
+            ));
+        },
     }
     std::fs::rename(&staging, dest).map_err(|error| {
         format!(
@@ -756,7 +876,7 @@ fn commit_scrollback_capture(
         )
     })?;
     sync_parent(dest)?;
-    if !committed_capture_matches(dest, &manifest.evidence) {
+    if !committed_capture_matches(dest, &manifest.evidence)? {
         return Err(format!(
             "committed scrollback {} does not match its durable manifest",
             dest.display()
@@ -1927,6 +2047,115 @@ mod tests {
 
         assert_eq!(adopted, committed);
         assert_eq!(std::fs::read(&dest).unwrap(), b"durable terminal evidence");
+    }
+
+    #[test]
+    fn stale_committed_capture_is_retired_before_a_full_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let transcript = directory.path().join("runtime.log");
+        let dest = directory.path().join("scrollback.txt");
+        std::fs::write(&transcript, b"fresh runtime evidence").unwrap();
+        std::fs::write(
+            runtime_transcript_manifest_path(&transcript),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "version": 1,
+                "run_id": "run-1",
+                "transcript": transcript.clone(),
+                "root": directory.path(),
+                "bytes": std::fs::metadata(&transcript).unwrap().len(),
+                "sha256": capture_sha256(&transcript).unwrap(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let temporary = unique_staging_path(&dest, "terminal-capture").unwrap();
+        std::fs::write(&temporary, b"stale terminal evidence").unwrap();
+        let mut stale_manifest = CaptureCommitManifest {
+            version: 1,
+            run_id: "run-1".to_owned(),
+            session: "workers".to_owned(),
+            origin_tab: "run-1".to_owned(),
+            pane_id: Some("terminal_7".to_owned()),
+            runtime_transcript: capture_request_transcript(Some(&transcript)),
+            staging_file: String::new(),
+            evidence: CaptureEvidence {
+                capture_source: CaptureSource::TerminalScrollback,
+                source_identity: "typed-test".to_owned(),
+                bytes: 0,
+                sha256: String::new(),
+                origin_tab_identity: Some(OriginTabIdentity {
+                    session: "workers".to_owned(),
+                    name: "run-1".to_owned(),
+                    id: 7,
+                    session_incarnation: "inc-1".to_owned(),
+                    tab_instance_id: "11111111111111111111111111111111".to_owned(),
+                }),
+            },
+        };
+        commit_scrollback_capture(&temporary, &dest, &mut stale_manifest).unwrap();
+        assert!(!directory.path().join(&stale_manifest.staging_file).exists());
+
+        let mismatch = adopt_capture_commit(
+            "another-run",
+            "workers",
+            "run-1",
+            Some("terminal_7"),
+            Some(&transcript),
+            &dest,
+        )
+        .unwrap_err();
+        assert!(mismatch.contains("different transfer"), "{mismatch}");
+        assert!(capture_manifest_path(&dest).is_file());
+
+        std::fs::write(&dest, b"corrupt destination").unwrap();
+        let mut io = CliTriageIo {
+            executable: directory.path().join("missing-vc-frame"),
+            root: directory.path().join("control-plane"),
+        };
+        let recovered = io
+            .capture_scrollback(
+                "run-1",
+                "workers",
+                "run-1",
+                Some("terminal_7"),
+                Some(&transcript),
+                &dest,
+            )
+            .unwrap();
+
+        assert_eq!(recovered.capture_source, CaptureSource::RuntimeTranscript);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"fresh runtime evidence");
+        let active: CaptureCommitManifest =
+            serde_json::from_slice(&std::fs::read(capture_manifest_path(&dest)).unwrap()).unwrap();
+        assert_eq!(
+            active.evidence.capture_source,
+            CaptureSource::RuntimeTranscript
+        );
+        let retired = std::fs::read_dir(directory.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".capture.manifest.json.retired.")
+            })
+            .count();
+        assert_eq!(retired, 1);
+    }
+
+    #[test]
+    fn corrupt_capture_manifest_remains_fail_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let dest = directory.path().join("scrollback.txt");
+        std::fs::write(capture_manifest_path(&dest), b"{not-json").unwrap();
+
+        let error =
+            adopt_capture_commit("run-1", "workers", "run-1", None, None, &dest).unwrap_err();
+
+        assert!(error.contains("cannot parse"), "{error}");
+        assert!(capture_manifest_path(&dest).is_file());
     }
 
     #[test]

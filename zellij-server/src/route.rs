@@ -34,6 +34,10 @@ use zellij_utils::{
 use crate::ClientId;
 
 const ACTION_COMPLETION_TIMEOUT: Duration = Duration::from_secs(1);
+// `CliTriageIo` kills child CLI commands after 10 seconds. Critical actions
+// must fail explicitly before that outer boundary instead of blocking the
+// route thread forever.
+const CRITICAL_ACTION_COMPLETION_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Debug, Clone)]
 pub struct ActionCompletionResult {
@@ -47,51 +51,54 @@ pub struct ActionCompletionResult {
 pub fn wait_for_action_completion(
     receiver: oneshot::Receiver<ActionCompletionResult>,
     action_name: &str,
-    wait_forever: bool,
+    critical_completion: bool,
+) -> ActionCompletionResult {
+    let completion_timeout = if critical_completion {
+        CRITICAL_ACTION_COMPLETION_TIMEOUT
+    } else {
+        ACTION_COMPLETION_TIMEOUT
+    };
+    wait_for_action_completion_with_timeout(receiver, action_name, completion_timeout)
+}
+
+fn wait_for_action_completion_with_timeout(
+    receiver: oneshot::Receiver<ActionCompletionResult>,
+    action_name: &str,
+    completion_timeout: Duration,
 ) -> ActionCompletionResult {
     let runtime = get_tokio_runtime();
-    if wait_forever {
-        runtime.block_on(async {
-            match receiver.await {
-                Ok(result) => result,
-                Err(e) => {
-                    log::error!("Failed to wait for action {}: {}", action_name, e);
-                    ActionCompletionResult {
-                        exit_status: Some(1),
-                        affected_pane_id: None,
-                        affected_tab_id: None,
-                        error_message: Some(format!(
-                            "action '{}' completion channel closed before acknowledgement: {}",
-                            action_name, e
-                        )),
-                        stdout_message: None,
-                    }
-                },
+    match runtime.block_on(async { tokio::time::timeout(completion_timeout, receiver).await }) {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => {
+            log::error!("Failed to wait for action {}: {}", action_name, error);
+            ActionCompletionResult {
+                exit_status: Some(1),
+                affected_pane_id: None,
+                affected_tab_id: None,
+                error_message: Some(format!(
+                    "action '{}' completion channel closed before acknowledgement: {}",
+                    action_name, error
+                )),
+                stdout_message: None,
             }
-        })
-    } else {
-        match runtime
-            .block_on(async { tokio::time::timeout(ACTION_COMPLETION_TIMEOUT, receiver).await })
-        {
-            Ok(Ok(result)) => result,
-            Err(_) | Ok(Err(_)) => {
-                log::error!(
-                    "Action {} did not complete within {:?} timeout",
-                    action_name,
-                    ACTION_COMPLETION_TIMEOUT
-                );
-                ActionCompletionResult {
-                    exit_status: Some(1),
-                    affected_pane_id: None,
-                    affected_tab_id: None,
-                    error_message: Some(format!(
-                        "action '{}' did not acknowledge completion within {:?}",
-                        action_name, ACTION_COMPLETION_TIMEOUT
-                    )),
-                    stdout_message: None,
-                }
-            },
-        }
+        },
+        Err(_) => {
+            log::error!(
+                "Action {} did not complete within {:?} timeout",
+                action_name,
+                completion_timeout
+            );
+            ActionCompletionResult {
+                exit_status: Some(1),
+                affected_pane_id: None,
+                affected_tab_id: None,
+                error_message: Some(format!(
+                    "action '{}' did not acknowledge completion within {:?}",
+                    action_name, completion_timeout
+                )),
+                stdout_message: None,
+            }
+        },
     }
 }
 
@@ -197,7 +204,7 @@ impl Drop for NotificationEnd {
 
 // `route_action` must not borrow from the `session_data` read guard.
 // otherwise blocking-CLI actions
-// (`wait_forever=true`) park this function while still holding the guard,
+// (`critical_completion=true`) park this function while still holding the guard,
 // deadlocking concurrent `session_data.write()`s.
 pub(crate) fn route_action(
     action: Action,
@@ -229,11 +236,11 @@ pub(crate) fn route_action(
     // we use this oneshot channel to wait for an action to be "logically"
     // done, meaning that it traveled through all the threads it needed to travel through and the
     // app has confirmed that it is complete. Once this happens, we get a signal through the
-    // wait_for_action_completion call below (or timeout after 1 second) and release this thread,
+    // wait_for_action_completion call below (or its bounded deadline) and release this thread,
     // allowing the client to produce another action without risking races
     let (completion_tx, completion_rx) = oneshot::channel();
 
-    let mut wait_forever = false;
+    let mut critical_completion = false;
 
     match action {
         Action::ToggleTab => {
@@ -487,7 +494,7 @@ pub(crate) fn route_action(
                     ));
                 },
             };
-            wait_forever = true;
+            critical_completion = true;
             senders
                 .send_to_screen(ScreenInstruction::DumpScreen(
                     file_path,
@@ -723,7 +730,7 @@ pub(crate) fn route_action(
                     set_pane_blocking,
                 ))
                 .with_context(err_context)?;
-            wait_forever = true;
+            critical_completion = true;
         },
         Action::EditFile {
             payload: open_file_payload,
@@ -1037,7 +1044,7 @@ pub(crate) fn route_action(
             // New-tab completion is the commit acknowledgement. Returning after
             // the generic one-second timeout lets a late server writer create a
             // duplicate tab after the caller has already retried.
-            wait_forever = true;
+            critical_completion = true;
             let shell = default_shell.clone();
             let is_web_client = false; // actions cannot be initiated directly from the web
 
@@ -1046,7 +1053,7 @@ pub(crate) fn route_action(
                 first_pane_unblock_condition
             {
                 let notification = NotificationEnd::new_with_condition(completion_tx, condition);
-                wait_forever = true;
+                critical_completion = true;
                 (notification, true)
             } else {
                 (NotificationEnd::new(completion_tx), false)
@@ -1162,7 +1169,7 @@ pub(crate) fn route_action(
             expected_session_incarnation,
             expected_tab_instance_id,
         } => {
-            wait_forever = true;
+            critical_completion = true;
             senders
                 .send_to_screen(ScreenInstruction::CloseTabWithIdIfName(
                     id as usize,
@@ -2153,7 +2160,7 @@ pub(crate) fn route_action(
                 .with_context(err_context)?;
         },
     }
-    let result = wait_for_action_completion(completion_rx, &action_name, wait_forever);
+    let result = wait_for_action_completion(completion_rx, &action_name, critical_completion);
     if let Some(error_message) = &result.error_message {
         if let Some(cli_client_id) = cli_client_id
             && let Some(ref os_input) = os_input
@@ -3276,7 +3283,8 @@ mod tests {
     fn action_completion_timeout_is_an_explicit_failure() {
         let (_tx, rx) = oneshot::channel();
 
-        let result = wait_for_action_completion(rx, "legacy-action", false);
+        let result =
+            wait_for_action_completion_with_timeout(rx, "legacy-action", Duration::from_millis(20));
 
         assert_eq!(result.exit_status, Some(1));
         assert!(
@@ -3285,6 +3293,11 @@ mod tests {
                 .as_deref()
                 .is_some_and(|message| message.contains("did not acknowledge completion"))
         );
+    }
+
+    #[test]
+    fn critical_action_deadline_finishes_before_the_outer_cli_timeout() {
+        assert!(CRITICAL_ACTION_COMPLETION_TIMEOUT < Duration::from_secs(10));
     }
 
     #[test]
