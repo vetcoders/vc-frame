@@ -1,7 +1,7 @@
 ---
 source: zellij-server/src/./unit/screen_tests.rs
-assertion_line: 3515
-expression: "format!(\"{:#?}\", new_tab_action)"
+assertion_line: 4237
+expression: "normalize_layout_debug(format!(\"{:#?}\", new_tab_action))"
 ---
 Some(
     NewTab(
@@ -73,6 +73,7 @@ Some(
             1,
             false,
         ),
+        None,
         None,
     ),
 )

@@ -1,5 +1,6 @@
 ---
 source: zellij-server/src/./unit/screen_tests.rs
+assertion_line: 4293
 expression: output
 ---
 NewTab(
@@ -116,4 +117,5 @@ NewTab(
             stdout_message: None,
         },
     ),
+    None,
 )

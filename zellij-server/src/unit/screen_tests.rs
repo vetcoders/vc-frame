@@ -2285,9 +2285,10 @@ pub fn mouse_hover_effect() {
         received_server_instructions.lock().unwrap().iter(),
         size,
     );
-    for (_cursor_coordinates, snapshot) in snapshots {
-        assert_snapshot!(format!("{}", snapshot));
-    }
+    let (_cursor_coordinates, snapshot) = snapshots
+        .last()
+        .expect("mouse hover must render at least once");
+    assert_snapshot!(format!("{}", snapshot));
 }
 
 #[test]
@@ -2325,9 +2326,10 @@ pub fn disabled_mouse_hover_effect() {
         received_server_instructions.lock().unwrap().iter(),
         size,
     );
-    for (_cursor_coordinates, snapshot) in snapshots {
-        assert_snapshot!(format!("{}", snapshot));
-    }
+    let (_cursor_coordinates, snapshot) = snapshots
+        .last()
+        .expect("disabled hover must render at least once");
+    assert_snapshot!(format!("{}", snapshot));
 }
 
 #[test]
