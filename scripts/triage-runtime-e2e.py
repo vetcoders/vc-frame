@@ -72,6 +72,7 @@ RECEIPT_FIELDS = (
     "metadata_committed",
     "viewer_confirmed",
     "viewer_creation_pending",
+    "viewer_creation_generation",
     "origin_tab_state",
     "viewer_token",
     "viewer_tab_identity",
@@ -1626,11 +1627,59 @@ def process_state(pid: int) -> str | None:
     return state or None
 
 
+def process_group_members(group_id: int) -> list[dict[str, object]]:
+    result = subprocess.run(
+        ["ps", "-axo", "pid=,pgid=,state=,command="],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    require(
+        result.returncode == 0,
+        f"cannot inspect owned process group {group_id}: {result.stderr.strip()}",
+    )
+    members: list[dict[str, object]] = []
+    for raw_line in result.stdout.splitlines():
+        fields = raw_line.strip().split(maxsplit=3)
+        if len(fields) < 3:
+            continue
+        try:
+            pid = int(fields[0])
+            pgid = int(fields[1])
+        except ValueError:
+            continue
+        if pgid == group_id:
+            members.append(
+                {
+                    "pid": pid,
+                    "pgid": pgid,
+                    "state": fields[2],
+                    "command": fields[3] if len(fields) == 4 else "",
+                }
+            )
+    return members
+
+
+def wait_for_process_group_gone(group_id: int, timeout: float = 5) -> None:
+    deadline = time.monotonic() + timeout
+    last_members: list[dict[str, object]] = []
+    while time.monotonic() < deadline:
+        last_members = process_group_members(group_id)
+        if not last_members:
+            return
+        time.sleep(0.01)
+    raise AssertionError(
+        f"owned interrupted process group {group_id} left members: {last_members!r}"
+    )
+
+
 def wait_for_process_stop(
     process: subprocess.Popen[bytes],
     *,
     timeout: float = 5,
     reassert_stop: bool = False,
+    signal_process_group: bool = False,
 ) -> None:
     deadline = time.monotonic() + timeout
     last_state: str | None = None
@@ -1641,9 +1690,15 @@ def wait_for_process_stop(
             )
         if reassert_stop:
             try:
-                # Signal only the still-owned, unreaped Popen child. A process
-                # group keyed by a dead PID can later identify unrelated work.
-                process.send_signal(signal.SIGSTOP)
+                if signal_process_group:
+                    # The leader is still an owned, unreaped Popen child and
+                    # start_new_session made its PID the fresh group ID.
+                    os.killpg(process.pid, signal.SIGSTOP)
+                else:
+                    # Signal only the still-owned, unreaped Popen child. A
+                    # group keyed by a dead PID can later identify unrelated
+                    # work, so group signalling is explicit and opt-in.
+                    process.send_signal(signal.SIGSTOP)
             except ProcessLookupError as error:
                 raise AssertionError(
                     f"killpoint process {process.pid} exited before SIGSTOP"
@@ -1671,10 +1726,16 @@ def interrupt_process_at_state(
     scenario: str,
     artifact_root: pathlib.Path,
     observe: Callable[[], dict[str, object] | None],
+    before_interrupt: Callable[[dict[str, object]], dict[str, object]] | None = None,
+    signal_process_group: bool = False,
     slice_seconds: float = 0.0005,
     max_slices: int = 20_000,
 ) -> InterruptedProcess:
-    """Time-slice a process group and SIGKILL only after durable state is seen."""
+    """Time-slice one owned child and interrupt only after durable state is seen.
+
+    Group signalling is opt-in and safe only because ``start_new_session``
+    creates a fresh group whose still-live leader is the owned ``Popen`` child.
+    """
     artifact_root.mkdir(parents=True, exist_ok=True)
     stdout_path = artifact_root / f"{scenario}.stdout.log"
     stderr_path = artifact_root / f"{scenario}.stderr.log"
@@ -1700,16 +1761,28 @@ def interrupt_process_at_state(
         try:
             wait_for_process_stop(process)
             for slices in range(1, max_slices + 1):
-                process.send_signal(signal.SIGCONT)
+                if signal_process_group:
+                    os.killpg(process.pid, signal.SIGCONT)
+                else:
+                    process.send_signal(signal.SIGCONT)
                 time.sleep(slice_seconds)
                 if process.poll() is not None:
                     break
-                wait_for_process_stop(process, reassert_stop=True)
+                wait_for_process_stop(
+                    process,
+                    reassert_stop=True,
+                    signal_process_group=signal_process_group,
+                )
                 observed = observe()
                 if observed is not None:
                     if process.poll() is not None:
                         break
-                    process.kill()
+                    if before_interrupt is not None:
+                        observed = before_interrupt(observed)
+                    if signal_process_group:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    else:
+                        process.kill()
                     break
             else:
                 raise AssertionError(
@@ -1724,10 +1797,15 @@ def interrupt_process_at_state(
         finally:
             if process.poll() is None:
                 try:
-                    process.kill()
+                    if signal_process_group:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    else:
+                        process.kill()
                 except ProcessLookupError:
                     pass
                 process.wait(timeout=5)
+    if signal_process_group:
+        wait_for_process_group_gone(process.pid)
     stdout_text = stdout_path.read_text(encoding="utf-8", errors="replace")
     stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")
     require(
@@ -1810,6 +1888,79 @@ def capture_receipt_killpoint_state(
     return None
 
 
+def pending_viewer_reservation_killpoint_state(
+    control_plane: pathlib.Path, run: str
+) -> dict[str, object] | None:
+    snapshot = capture_commit_snapshot(control_plane, run)
+    if snapshot is None:
+        return None
+    receipt = snapshot.get("receipt")
+    if not isinstance(receipt, dict):
+        return None
+    token = receipt.get("viewer_token")
+    if (
+        receipt.get("version") == 4
+        and receipt.get("capture_committed") is True
+        and receipt.get("metadata_committed") is True
+        and receipt.get("viewer_confirmed") is False
+        and receipt.get("viewer_creation_pending") is True
+        and receipt.get("viewer_creation_generation") == 1
+        and receipt.get("viewer_tab_identity") is None
+        and receipt.get("origin_tab_state") == "preserved"
+        and receipt.get("fault") is None
+        and isinstance(token, str)
+        and len(token) == 32
+        and all(character in "0123456789abcdef" for character in token)
+    ):
+        return snapshot
+    return None
+
+
+def pending_empty_viewer_killpoint_state(
+    binary: pathlib.Path,
+    env: dict[str, str],
+    control_plane: pathlib.Path,
+    *,
+    run: str,
+    drawer: str,
+) -> dict[str, object] | None:
+    snapshot = pending_viewer_reservation_killpoint_state(control_plane, run)
+    if snapshot is None:
+        return None
+    receipt = snapshot.get("receipt")
+    require(isinstance(receipt, dict), f"{run} pending receipt disappeared")
+    token = receipt.get("viewer_token")
+    require(isinstance(token, str), f"{run} pending receipt lost its token")
+    viewer_name = f"{run} [vc:{token}]"
+    matches = [
+        tab
+        for tab in wait_for_tabs(binary, env, drawer)
+        if tab.get("name") == viewer_name
+    ]
+    require(
+        len(matches) <= 1,
+        f"{run} pending reservation already has duplicate viewers: {matches!r}",
+    )
+    if matches:
+        return None
+    # The triage group is stopped while this observer runs. Give any NewTab
+    # already delivered to the independent server time to become visible; the
+    # synthetic empty reservation below is valid only when no writer is in
+    # flight from the interrupted client.
+    time.sleep(0.05)
+    settled_matches = [
+        tab
+        for tab in wait_for_tabs(binary, env, drawer)
+        if tab.get("name") == viewer_name
+    ]
+    require(
+        len(settled_matches) <= 1,
+        f"{run} pending reservation settled into duplicate viewers: "
+        f"{settled_matches!r}",
+    )
+    return snapshot if not settled_matches else None
+
+
 def viewer_confirmation_killpoint_state(
     control_plane: pathlib.Path, run: str
 ) -> dict[str, object] | None:
@@ -1827,6 +1978,71 @@ def viewer_confirmation_killpoint_state(
     ):
         return snapshot
     return None
+
+
+def materialize_empty_reserved_viewer(
+    binary: pathlib.Path,
+    env: dict[str, str],
+    snapshot: dict[str, object],
+    *,
+    run: str,
+    drawer: str,
+) -> dict[str, object]:
+    """Create the exact durable reservation with plugins but no terminal pane."""
+    receipt = snapshot.get("receipt")
+    require(isinstance(receipt, dict), f"{run} killpoint has no receipt")
+    token = receipt.get("viewer_token")
+    require(
+        isinstance(token, str)
+        and len(token) == 32
+        and all(character in "0123456789abcdef" for character in token),
+        f"{run} killpoint has an invalid viewer token: {token!r}",
+    )
+    viewer_name = f"{run} [vc:{token}]"
+    matches = [
+        tab
+        for tab in wait_for_tabs(binary, env, drawer)
+        if tab.get("name") == viewer_name
+    ]
+    require(
+        not matches,
+        f"{run} reached its empty-viewer materialization with an existing viewer: "
+        f"{matches!r}",
+    )
+    layout = (
+        f'layout vc_tab_instance_id="{token}" {{\n'
+        "    pane {\n"
+        '        plugin location="compact-bar"\n'
+        "    }\n"
+        "}\n"
+    )
+    command(
+        binary,
+        env,
+        "-s",
+        drawer,
+        "action",
+        "new-tab",
+        "--name",
+        viewer_name,
+        "--layout-string",
+        layout,
+    )
+    viewer_id = tab_identity(binary, env, drawer, viewer_name)
+    identity = typed_tab_identity(binary, env, drawer, viewer_name, viewer_id)
+    require(
+        identity.get("tab_instance_id") == token,
+        f"{run} empty viewer did not retain its reservation token: {identity!r}",
+    )
+    panes = terminal_panes(binary, env, drawer, viewer_id)
+    require(
+        panes == [],
+        f"{run} empty viewer unexpectedly has terminal panes: {panes!r}",
+    )
+    enriched = dict(snapshot)
+    enriched["empty_viewer_identity"] = identity
+    enriched["empty_viewer_terminal_panes"] = panes
+    return enriched
 
 
 def interrupted_process_evidence(result: InterruptedProcess) -> dict[str, object]:
@@ -2669,6 +2885,172 @@ def main() -> int:
                 "transfer": transfer_evidence(
                     control_plane,
                     capture_interrupt_run,
+                    "killpoint_recovery",
+                ),
+            },
+        )
+
+        empty_viewer_run = f"{unique}-kill-after-empty-viewer"
+        empty_viewer_marker = f"KILLEMPTY-{unique}"
+        empty_viewer_origin_tab, empty_viewer_origin_panes = create_marker_tab(
+            binary,
+            env,
+            origin,
+            empty_viewer_run,
+            empty_viewer_marker,
+        )
+        empty_viewer_origin_pane = empty_viewer_origin_panes[0]
+        wait_for_marker(
+            binary,
+            env,
+            origin,
+            empty_viewer_origin_pane,
+            empty_viewer_marker,
+            probe_root,
+        )
+        empty_viewer_origin_identity = typed_tab_identity(
+            binary,
+            env,
+            origin,
+            empty_viewer_run,
+            empty_viewer_origin_tab,
+        )
+        empty_viewer_source = terminal_capture_identity(
+            origin,
+            empty_viewer_origin_identity,
+            empty_viewer_origin_pane,
+        )
+        empty_viewer_interrupted = interrupt_process_at_state(
+            binary,
+            env,
+            triage_arguments(
+                empty_viewer_run,
+                -9,
+                origin,
+                pane_id=empty_viewer_origin_pane,
+            ),
+            scenario="after_empty_viewer_reservation",
+            artifact_root=root / "interruptions",
+            observe=lambda: pending_empty_viewer_killpoint_state(
+                binary,
+                env,
+                control_plane,
+                run=empty_viewer_run,
+                drawer="Needs attention",
+            ),
+            before_interrupt=lambda snapshot: materialize_empty_reserved_viewer(
+                binary,
+                env,
+                snapshot,
+                run=empty_viewer_run,
+                drawer="Needs attention",
+            ),
+            signal_process_group=True,
+            slice_seconds=0.00025,
+        )
+        require(
+            process_state(empty_viewer_interrupted.pid) is None,
+            "empty-viewer interruption left its owned triage process alive",
+        )
+        require(
+            typed_tab_identity(
+                binary,
+                env,
+                origin,
+                empty_viewer_run,
+                empty_viewer_origin_tab,
+            )
+            == empty_viewer_origin_identity,
+            "empty-viewer killpoint changed or closed the durable origin identity",
+        )
+        empty_viewer_receipt_before = empty_viewer_interrupted.observed_state.get(
+            "receipt"
+        )
+        empty_viewer_identity_before = empty_viewer_interrupted.observed_state.get(
+            "empty_viewer_identity"
+        )
+        require(
+            isinstance(empty_viewer_receipt_before, dict)
+            and isinstance(empty_viewer_identity_before, dict),
+            "empty-viewer killpoint did not preserve its receipt and live identity",
+        )
+        require(
+            empty_viewer_receipt_before.get("viewer_creation_generation") == 1
+            and empty_viewer_interrupted.observed_state.get(
+                "empty_viewer_terminal_panes"
+            )
+            == [],
+            "empty-viewer killpoint was not the first unready reservation",
+        )
+        recorder.append(
+            "interruption_probes",
+            {
+                "scenario": "after_empty_viewer_reservation",
+                "phase": "interrupted",
+                **interrupted_process_evidence(empty_viewer_interrupted),
+            },
+        )
+        empty_viewer_recovery = triage(
+            binary,
+            env,
+            empty_viewer_run,
+            -9,
+            origin,
+            pane_id=empty_viewer_origin_pane,
+        )
+        empty_viewer_recovered_bytes, empty_viewer_receipt_after = verify_transfer(
+            binary,
+            env,
+            control_plane,
+            run=empty_viewer_run,
+            exit_code=-9,
+            expected_bucket="NeedsAttention",
+            expected_source="terminal_scrollback",
+            expected_identity=empty_viewer_source,
+            marker=empty_viewer_marker,
+        )
+        require(
+            sha256_bytes(empty_viewer_recovered_bytes)
+            == empty_viewer_interrupted.observed_state.get("capture_sha256"),
+            "empty-viewer recovery rewrote durable scrollback",
+        )
+        require(
+            empty_viewer_receipt_after.get("viewer_token")
+            == empty_viewer_receipt_before.get("viewer_token")
+            and empty_viewer_receipt_after.get("viewer_tab_identity")
+            == empty_viewer_identity_before
+            and empty_viewer_receipt_after.get("viewer_creation_generation") == 2
+            and empty_viewer_receipt_after.get("viewer_creation_pending") is False,
+            "empty-viewer recovery changed ownership or skipped generation two",
+        )
+        empty_viewer_final_id = empty_viewer_identity_before.get("id")
+        require(
+            isinstance(empty_viewer_final_id, int)
+            and terminal_panes(
+                binary,
+                env,
+                "Needs attention",
+                empty_viewer_final_id,
+            ),
+            "empty-viewer recovery did not install a terminal on the same stable tab",
+        )
+        require(
+            all(
+                tab.get("name") != empty_viewer_run
+                for tab in wait_for_tabs(binary, env, origin)
+            ),
+            "empty-viewer recovery left the origin tab open",
+        )
+        recorder.append(
+            "interruption_probes",
+            {
+                "scenario": "after_empty_viewer_reservation",
+                "phase": "recovered",
+                "triage_exit": empty_viewer_recovery.returncode,
+                "same_viewer_identity": empty_viewer_identity_before,
+                "transfer": transfer_evidence(
+                    control_plane,
+                    empty_viewer_run,
                     "killpoint_recovery",
                 ),
             },

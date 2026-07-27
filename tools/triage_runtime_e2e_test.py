@@ -549,7 +549,9 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                 },
             )
 
-    def test_capture_and_viewer_killpoint_states_are_distinct(self) -> None:
+    def test_capture_pending_and_confirmed_killpoint_states_are_distinct(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             control_plane = pathlib.Path(temporary)
             capture_dir = control_plane / "finished_runs" / "run-1"
@@ -567,6 +569,7 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                 "viewer_creation_pending": False,
                 "viewer_tab_identity": None,
                 "origin_tab_state": "preserved",
+                "viewer_token": "0123456789abcdef0123456789abcdef",
             }
             (capture_dir / "transfer.json").write_text(
                 json.dumps(receipt), encoding="utf-8"
@@ -575,12 +578,39 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                 MODULE.capture_receipt_killpoint_state(control_plane, "run-1")
             )
             self.assertIsNone(
+                MODULE.pending_viewer_reservation_killpoint_state(
+                    control_plane, "run-1"
+                )
+            )
+            self.assertIsNone(
                 MODULE.viewer_confirmation_killpoint_state(control_plane, "run-1")
             )
             receipt.update(
                 {
                     "metadata_committed": True,
+                    "viewer_creation_pending": True,
+                    "viewer_creation_generation": 1,
+                    "fault": None,
+                }
+            )
+            (capture_dir / "transfer.json").write_text(
+                json.dumps(receipt), encoding="utf-8"
+            )
+            self.assertIsNone(
+                MODULE.capture_receipt_killpoint_state(control_plane, "run-1")
+            )
+            self.assertIsNotNone(
+                MODULE.pending_viewer_reservation_killpoint_state(
+                    control_plane, "run-1"
+                )
+            )
+            self.assertIsNone(
+                MODULE.viewer_confirmation_killpoint_state(control_plane, "run-1")
+            )
+            receipt.update(
+                {
                     "viewer_confirmed": True,
+                    "viewer_creation_pending": False,
                     "viewer_tab_identity": {"id": 7},
                 }
             )
@@ -589,6 +619,11 @@ class EvidenceAndCleanupTests(unittest.TestCase):
             )
             self.assertIsNone(
                 MODULE.capture_receipt_killpoint_state(control_plane, "run-1")
+            )
+            self.assertIsNone(
+                MODULE.pending_viewer_reservation_killpoint_state(
+                    control_plane, "run-1"
+                )
             )
             self.assertIsNotNone(
                 MODULE.viewer_confirmation_killpoint_state(control_plane, "run-1")
@@ -623,6 +658,49 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                 )
             self.assertEqual(result.returncode, -signal.SIGKILL)
             self.assertEqual(result.observed_state, {"marker": "ready"})
+
+    def test_group_interruption_signals_only_its_fresh_owned_group(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            marker = root / "ready"
+            script = f"printf ready > {shlex.quote(str(marker))}; exec /bin/sleep 300"
+            real_killpg = os.killpg
+            signalled_groups: list[int] = []
+
+            def observe() -> dict[str, object] | None:
+                if not marker.is_file():
+                    return None
+                return {"marker": marker.read_text(encoding="utf-8")}
+
+            def kill_owned_group(group: int, signal_number: int) -> None:
+                signalled_groups.append(group)
+                real_killpg(group, signal_number)
+
+            with mock.patch.object(
+                MODULE.os,
+                "killpg",
+                side_effect=kill_owned_group,
+            ):
+                result = MODULE.interrupt_process_at_state(
+                    pathlib.Path("/bin/sh"),
+                    dict(os.environ),
+                    ["-c", script],
+                    scenario="unit-owned-group-killpoint",
+                    artifact_root=root,
+                    observe=observe,
+                    before_interrupt=lambda state: {**state, "callback": "ran"},
+                    signal_process_group=True,
+                    slice_seconds=0.001,
+                    max_slices=1_000,
+                )
+
+            self.assertEqual(result.returncode, -signal.SIGKILL)
+            self.assertEqual(
+                result.observed_state,
+                {"marker": "ready", "callback": "ran"},
+            )
+            self.assertTrue(signalled_groups)
+            self.assertEqual(set(signalled_groups), {result.pid})
 
     def test_early_exit_never_signals_process_group(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
