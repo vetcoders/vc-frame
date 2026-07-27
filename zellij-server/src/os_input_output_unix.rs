@@ -455,14 +455,20 @@ impl UnixPtyBackend {
     pub fn reserve_terminal_id(&self, terminal_id: u32) {
         self.terminal_id_to_raw_fd
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| {
+                log::error!("PTY terminal registry was poisoned while reserving; recovering");
+                poisoned.into_inner()
+            })
             .insert(terminal_id, None);
     }
 
     pub fn clear_terminal_id(&self, terminal_id: u32) {
         self.terminal_id_to_raw_fd
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| {
+                log::error!("PTY terminal registry was poisoned while clearing; recovering");
+                poisoned.into_inner()
+            })
             .remove(&terminal_id);
     }
 
@@ -480,6 +486,38 @@ mod tests {
     use nix::fcntl::{FcntlArg, OFlag, fcntl};
     use nix::sys::termios;
     use std::io::Read;
+
+    #[test]
+    fn reservation_cleanup_recovers_a_poisoned_terminal_registry() {
+        let backend = UnixPtyBackend::new().expect("backend");
+        let terminal_registry = backend.terminal_id_to_raw_fd.clone();
+        let registry_to_poison = terminal_registry.clone();
+
+        let poison_result = std::panic::catch_unwind(move || {
+            let _guard = registry_to_poison.lock().expect("initial lock");
+            panic!("inject terminal registry poison");
+        });
+        assert!(
+            poison_result.is_err(),
+            "the registry must actually be poisoned"
+        );
+
+        backend.reserve_terminal_id(77);
+        assert!(
+            terminal_registry
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains_key(&77)
+        );
+        backend.clear_terminal_id(77);
+        assert!(
+            !terminal_registry
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains_key(&77),
+            "cleanup must recover the poisoned guard instead of panicking again"
+        );
+    }
 
     /// Verify that `try_write_to_fd` writes as many bytes as the kernel will
     /// accept in one pass and returns a partial count (not an error) when the

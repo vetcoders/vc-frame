@@ -115,7 +115,7 @@ fn failed_spawn_releases_reservation_except_command_not_found() {
         "CommandNotFound deliberately transfers its reserved id to the pane hold path"
     );
 
-    resolve_reserved_terminal_spawn(
+    let mismatched_command_not_found = resolve_reserved_terminal_spawn(
         43,
         Err::<(), _>(anyhow::Error::new(ZellijError::CommandNotFound {
             terminal_id: 99,
@@ -124,6 +124,18 @@ fn failed_spawn_releases_reservation_except_command_not_found() {
         |terminal_id| cleared_terminal_ids.push(terminal_id),
     )
     .expect_err("a mismatched CommandNotFound id remains an error");
+    assert!(
+        mismatched_command_not_found
+            .downcast_ref::<ZellijError>()
+            .is_none(),
+        "a foreign terminal id must be normalized to an ordinary protocol error"
+    );
+    assert!(
+        mismatched_command_not_found
+            .to_string()
+            .contains("reserved terminal 43"),
+        "the normalized error must identify the reservation"
+    );
     assert_eq!(
         cleared_terminal_ids,
         vec![41, 43],

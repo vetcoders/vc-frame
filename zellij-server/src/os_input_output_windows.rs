@@ -635,11 +635,23 @@ impl WindowsPtyBackend {
     }
 
     pub fn reserve_terminal_id(&self, terminal_id: u32) {
-        self.terminals.lock().unwrap().insert(terminal_id, None);
+        self.terminals
+            .lock()
+            .unwrap_or_else(|poisoned| {
+                log::error!("PTY terminal registry was poisoned while reserving; recovering");
+                poisoned.into_inner()
+            })
+            .insert(terminal_id, None);
     }
 
     pub fn clear_terminal_id(&self, terminal_id: u32) {
-        self.terminals.lock().unwrap().remove(&terminal_id);
+        self.terminals
+            .lock()
+            .unwrap_or_else(|poisoned| {
+                log::error!("PTY terminal registry was poisoned while clearing; recovering");
+                poisoned.into_inner()
+            })
+            .remove(&terminal_id);
     }
 
     pub fn next_terminal_id(&self) -> Option<u32> {

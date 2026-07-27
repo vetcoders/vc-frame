@@ -1,6 +1,6 @@
 use crate::background_jobs::{BackgroundJob, SessionLayoutSnapshot, write_session_state_to_disk};
 use crate::global_async_runtime::get_tokio_runtime as async_runtime;
-use crate::os_input_output::{AsyncReader, NullAsyncReader};
+use crate::os_input_output::AsyncReader;
 use crate::route::NotificationEnd;
 use crate::terminal_bytes::TerminalBytes;
 use crate::{
@@ -200,6 +200,62 @@ impl From<&PtyInstruction> for PtyContext {
             PtyInstruction::Exit => PtyContext::Exit,
         }
     }
+}
+
+#[derive(Default)]
+struct LayoutAllocationLedger {
+    allocated_ids: BTreeSet<PaneId>,
+}
+
+impl LayoutAllocationLedger {
+    fn track_plugin_ids(&mut self, plugin_ids: &HashMap<RunPluginOrAlias, Vec<u32>>) {
+        self.allocated_ids
+            .extend(plugin_ids.values().flatten().copied().map(PaneId::Plugin));
+    }
+
+    fn track_terminal(&mut self, terminal_id: u32) {
+        self.allocated_ids.insert(PaneId::Terminal(terminal_id));
+    }
+
+    fn disarm(self) {}
+}
+
+enum PreparedTerminal {
+    Runnable {
+        terminal_id: u32,
+        reader: Box<dyn AsyncReader>,
+    },
+    HeldTerminal {
+        terminal_id: u32,
+        run_command: RunCommand,
+        command_not_found: bool,
+    },
+}
+
+impl PreparedTerminal {
+    fn terminal_id(&self) -> u32 {
+        match self {
+            PreparedTerminal::Runnable { terminal_id, .. }
+            | PreparedTerminal::HeldTerminal { terminal_id, .. } => *terminal_id,
+        }
+    }
+
+    fn layout_entry(&self) -> (u32, Option<RunCommand>) {
+        match self {
+            PreparedTerminal::Runnable { terminal_id, .. } => (*terminal_id, None),
+            PreparedTerminal::HeldTerminal {
+                terminal_id,
+                run_command,
+                ..
+            } => (*terminal_id, Some(run_command.clone())),
+        }
+    }
+}
+
+struct PreparedTabOverride {
+    tab_result: TabOverrideResult,
+    terminals: Vec<PreparedTerminal>,
+    originating_plugins_to_inform: Vec<(u32, OriginatingPlugin)>,
 }
 
 pub(crate) struct Pty {
@@ -541,60 +597,22 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
                 retain_existing_terminal_panes,
                 retain_existing_plugin_panes,
                 client_id,
-                mut completion_tx,
+                completion_tx,
                 layout_generation,
             ) => {
                 let err_context = || "failed to override layout";
-
-                let mut all_tab_results = Vec::new();
-
-                // Process each tab
-                for (tab_layout_info, plugin_ids) in tab_layouts_with_plugin_ids {
-                    match pty.spawn_terminals_for_layout_override(
-                        cwd.clone(),
-                        tab_layout_info.tiled_layout,
-                        tab_layout_info.floating_layouts,
-                        default_shell.clone(),
-                        plugin_ids,
-                        tab_layout_info.tab_index,
-                        tab_layout_info.tab_name,
-                        client_id,
-                        tab_layout_info.swap_tiled_layouts,
-                        tab_layout_info.swap_floating_layouts,
-                        retain_existing_terminal_panes,
-                        retain_existing_plugin_panes,
-                    ) {
-                        Ok(tab_result) => all_tab_results.push(tab_result),
-                        Err(e) => {
-                            log::error!(
-                                "Failed to spawn terminals for tab {}: {:?}",
-                                tab_layout_info.tab_index,
-                                e
-                            );
-                            if let Some(completion) = completion_tx.as_mut() {
-                                completion.set_exit_status(1);
-                                completion.set_error_message(format!(
-                                    "failed to prepare recovered layout for tab {}: {}",
-                                    tab_layout_info.tab_index, e
-                                ));
-                            }
-                            // Continue with other tabs (best-effort approach)
-                        },
-                    }
+                if let Err(error) = pty.override_layout_transaction(
+                    cwd,
+                    default_shell,
+                    tab_layouts_with_plugin_ids,
+                    retain_existing_terminal_panes,
+                    retain_existing_plugin_panes,
+                    client_id,
+                    completion_tx,
+                    layout_generation,
+                ) {
+                    Err::<(), _>(error).with_context(err_context).non_fatal();
                 }
-
-                // Send all results back to screen in one message
-                pty.bus
-                    .senders
-                    .send_to_screen(ScreenInstruction::OverrideLayoutComplete(
-                        all_tab_results,
-                        retain_existing_terminal_panes,
-                        retain_existing_plugin_panes,
-                        client_id,
-                        completion_tx,
-                        layout_generation,
-                    ))
-                    .with_context(err_context)?;
             },
             PtyInstruction::ClosePane(id, _completion_tx) => {
                 pty.close_pane(id)
@@ -1268,28 +1286,12 @@ impl Pty {
             .iter()
             .filter(|f| !f.already_running)
             .map(|f| f.run.clone());
-        let mut new_pane_pids: Vec<(u32, bool, Option<RunCommand>, Result<Box<dyn AsyncReader>>)> =
-            vec![]; // (terminal_id,
-        // starts_held,
-        // run_command,
-        // file_descriptor)
-
-        let mut new_floating_panes_pids: Vec<(
-            u32,
-            bool,
-            Option<RunCommand>,
-            Result<Box<dyn AsyncReader>>,
-        )> = vec![]; // same
-        // as
-        // new_pane_pids
+        let mut new_pane_pids = Vec::new();
+        let mut new_floating_panes_pids = Vec::new();
 
         let mut originating_plugins_to_inform = vec![];
-        let mut allocated_ids = plugin_ids
-            .values()
-            .flatten()
-            .copied()
-            .map(PaneId::Plugin)
-            .collect::<BTreeSet<_>>();
+        let mut allocation_ledger = LayoutAllocationLedger::default();
+        allocation_ledger.track_plugin_ids(&plugin_ids);
 
         for run_instruction in extracted_run_instructions {
             let originating_plugin = run_instruction.as_ref().and_then(|r| {
@@ -1300,15 +1302,18 @@ impl Pty {
                 }
             });
             let mut terminal_id = None;
-            match self.apply_run_instruction(run_instruction, default_shell.clone()) {
-                Ok(Some(new_pane_data)) => {
-                    terminal_id = Some(new_pane_data.0);
-                    allocated_ids.insert(PaneId::Terminal(new_pane_data.0));
-                    new_pane_pids.push(new_pane_data);
+            match self.apply_run_instruction(
+                run_instruction,
+                default_shell.clone(),
+                &mut allocation_ledger,
+            ) {
+                Ok(Some(prepared_terminal)) => {
+                    terminal_id = Some(prepared_terminal.terminal_id());
+                    new_pane_pids.push(prepared_terminal);
                 },
                 Ok(None) => {},
                 Err(error) => {
-                    return Err(self.rollback_partial_layout_allocations(error, &allocated_ids));
+                    return Err(self.rollback_partial_layout_allocations(error, allocation_ledger));
                 },
             }
             if let (Some(originating_plugin), Some(terminal_id)) = (originating_plugin, terminal_id)
@@ -1325,15 +1330,18 @@ impl Pty {
                 }
             });
             let mut terminal_id = None;
-            match self.apply_run_instruction(run_instruction, default_shell.clone()) {
-                Ok(Some(new_pane_data)) => {
-                    terminal_id = Some(new_pane_data.0);
-                    allocated_ids.insert(PaneId::Terminal(new_pane_data.0));
-                    new_floating_panes_pids.push(new_pane_data);
+            match self.apply_run_instruction(
+                run_instruction,
+                default_shell.clone(),
+                &mut allocation_ledger,
+            ) {
+                Ok(Some(prepared_terminal)) => {
+                    terminal_id = Some(prepared_terminal.terminal_id());
+                    new_floating_panes_pids.push(prepared_terminal);
                 },
                 Ok(None) => {},
                 Err(error) => {
-                    return Err(self.rollback_partial_layout_allocations(error, &allocated_ids));
+                    return Err(self.rollback_partial_layout_allocations(error, allocation_ledger));
                 },
             }
             if let (Some(originating_plugin), Some(terminal_id)) = (originating_plugin, terminal_id)
@@ -1342,32 +1350,19 @@ impl Pty {
             }
         }
 
-        // Option<RunCommand> should only be Some if the pane starts held
         let new_tab_pane_ids: Vec<(u32, Option<RunCommand>)> = new_pane_pids
             .iter()
-            .map(|(terminal_id, starts_held, run_command, _)| {
-                if *starts_held {
-                    (*terminal_id, run_command.clone())
-                } else {
-                    (*terminal_id, None)
-                }
-            })
+            .map(PreparedTerminal::layout_entry)
             .collect();
         let new_tab_floating_pane_ids: Vec<(u32, Option<RunCommand>)> = new_floating_panes_pids
             .iter()
-            .map(|(terminal_id, starts_held, run_command, _)| {
-                if *starts_held {
-                    (*terminal_id, run_command.clone())
-                } else {
-                    (*terminal_id, None)
-                }
-            })
+            .map(PreparedTerminal::layout_entry)
             .collect();
 
         // Track the first terminal_id if blocking is requested
         let first_initial_pane_terminal_id = if block_on_first_terminal && !new_pane_pids.is_empty()
         {
-            Some(new_pane_pids[0].0)
+            Some(new_pane_pids[0].terminal_id())
         } else {
             None
         };
@@ -1403,66 +1398,102 @@ impl Pty {
             ))
             .with_context(err_context);
         if let Err(error) = apply_layout_result {
-            return Err(self.rollback_partial_layout_allocations(error, &allocated_ids));
+            return Err(self.rollback_partial_layout_allocations(error, allocation_ledger));
         }
-        let mut terminals_to_start = vec![];
+        allocation_ledger.disarm();
 
+        let mut terminals_to_start = vec![];
         terminals_to_start.append(&mut new_pane_pids);
         terminals_to_start.append(&mut new_floating_panes_pids);
-        for (terminal_id, starts_held, run_command, reader_result) in terminals_to_start {
-            if starts_held {
-                // we do not run a command or start listening for bytes on held panes
-                continue;
-            }
-            match reader_result {
-                Ok(reader) => {
-                    let activity_flag =
-                        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                    let terminal_bytes = async_runtime().spawn({
-                        let senders = self.bus.senders.clone();
-                        let debug_to_file = self.debug_to_file;
-                        let activity_flag = activity_flag.clone();
-                        async move {
-                            TerminalBytes::new(
-                                terminal_id,
-                                reader,
-                                senders,
-                                debug_to_file,
-                                activity_flag,
-                            )
-                            .listen()
-                            .await
-                            .context("failed to spawn terminals for layout")
-                            .fatal();
-                        }
-                    });
-                    self.task_handles.insert(terminal_id, terminal_bytes);
-                    self.pane_activity_flags.insert(terminal_id, activity_flag);
-                },
-                _ => match run_command {
-                    Some(run_command) if run_command.hold_on_close => {
-                        send_command_not_found_to_screen(
-                            self.bus.senders.clone(),
-                            terminal_id,
-                            run_command.clone(),
-                        )
-                        .with_context(err_context)
-                        .non_fatal();
-                    },
-                    Some(_) => {},
-                    None => {
-                        self.close_pane(PaneId::Terminal(terminal_id))
-                            .with_context(err_context)?;
-                    },
-                },
-            }
+        for prepared_terminal in terminals_to_start {
+            self.activate_prepared_terminal(prepared_terminal);
         }
         for (terminal_id, originating_plugin) in originating_plugins_to_inform {
             self.inform_originating_plugin_of_open(terminal_id, originating_plugin);
         }
         Ok(())
     }
-    pub fn spawn_terminals_for_layout_override(
+    fn override_layout_transaction(
+        &mut self,
+        cwd: Option<PathBuf>,
+        default_shell: Option<TerminalAction>,
+        tab_layouts_with_plugin_ids: Vec<(TabLayoutInfo, HashMap<RunPluginOrAlias, Vec<u32>>)>,
+        retain_existing_terminal_panes: bool,
+        retain_existing_plugin_panes: bool,
+        client_id: ClientId,
+        mut completion_tx: Option<NotificationEnd>,
+        layout_generation: Option<Box<DurableTabLayoutGeneration>>,
+    ) -> Result<()> {
+        let mut allocation_ledger = LayoutAllocationLedger::default();
+        let mut all_tab_results = Vec::new();
+        let mut all_prepared_terminals = Vec::new();
+        let mut all_originating_plugins_to_inform = Vec::new();
+
+        for (tab_layout_info, plugin_ids) in tab_layouts_with_plugin_ids {
+            let tab_index = tab_layout_info.tab_index;
+            match self.prepare_terminals_for_layout_override(
+                cwd.clone(),
+                tab_layout_info.tiled_layout,
+                tab_layout_info.floating_layouts,
+                default_shell.clone(),
+                plugin_ids,
+                tab_index,
+                tab_layout_info.tab_name,
+                client_id,
+                tab_layout_info.swap_tiled_layouts,
+                tab_layout_info.swap_floating_layouts,
+                &mut allocation_ledger,
+            ) {
+                Ok(mut prepared_tab) => {
+                    all_tab_results.push(prepared_tab.tab_result);
+                    all_prepared_terminals.append(&mut prepared_tab.terminals);
+                    all_originating_plugins_to_inform
+                        .append(&mut prepared_tab.originating_plugins_to_inform);
+                },
+                Err(error) => {
+                    if let Some(completion) = completion_tx.as_mut() {
+                        completion.set_exit_status(1);
+                        completion.set_error_message(format!(
+                            "failed to prepare recovered layout for tab {tab_index}: {error}"
+                        ));
+                    }
+                    let error = error.context(format!(
+                        "failed to prepare recovered layout tab {tab_index}"
+                    ));
+                    return Err(self.rollback_partial_layout_allocations(error, allocation_ledger));
+                },
+            }
+        }
+
+        let final_send_result =
+            self.bus
+                .senders
+                .send_to_screen(ScreenInstruction::OverrideLayoutComplete(
+                    all_tab_results,
+                    retain_existing_terminal_panes,
+                    retain_existing_plugin_panes,
+                    client_id,
+                    completion_tx,
+                    layout_generation,
+                ));
+        if let Err(error) = final_send_result {
+            return Err(self.rollback_partial_layout_allocations(
+                error.context("failed to commit recovered layout"),
+                allocation_ledger,
+            ));
+        }
+        allocation_ledger.disarm();
+
+        for prepared_terminal in all_prepared_terminals {
+            self.activate_prepared_terminal(prepared_terminal);
+        }
+        for (terminal_id, originating_plugin) in all_originating_plugins_to_inform {
+            self.inform_originating_plugin_of_open(terminal_id, originating_plugin);
+        }
+        Ok(())
+    }
+
+    fn prepare_terminals_for_layout_override(
         &mut self,
         cwd: Option<PathBuf>,
         layout: TiledPaneLayout,
@@ -1474,10 +1505,9 @@ impl Pty {
         client_id: ClientId,
         swap_tiled_layouts: Option<Vec<SwapTiledLayout>>,
         swap_floating_layouts: Option<Vec<SwapFloatingLayout>>,
-        _retain_existing_terminal_panes: bool,
-        _retain_existing_plugin_panes: bool,
-    ) -> Result<TabOverrideResult> {
-        let err_context = || "failed to spawn terminals for layout for".to_string();
+        allocation_ledger: &mut LayoutAllocationLedger,
+    ) -> Result<PreparedTabOverride> {
+        allocation_ledger.track_plugin_ids(&plugin_ids);
 
         let mut default_shell =
             default_shell.unwrap_or_else(|| self.get_default_terminal(cwd, None));
@@ -1488,28 +1518,9 @@ impl Pty {
             .iter()
             .filter(|f| !f.already_running)
             .map(|f| f.run.clone());
-        let mut new_pane_pids: Vec<(u32, bool, Option<RunCommand>, Result<Box<dyn AsyncReader>>)> =
-            vec![]; // (terminal_id,
-        // starts_held,
-        // run_command,
-        // file_descriptor)
-
-        let mut new_floating_panes_pids: Vec<(
-            u32,
-            bool,
-            Option<RunCommand>,
-            Result<Box<dyn AsyncReader>>,
-        )> = vec![]; // same
-        // as
-        // new_pane_pids
-
+        let mut new_pane_pids = Vec::new();
+        let mut new_floating_panes_pids = Vec::new();
         let mut originating_plugins_to_inform = vec![];
-        let mut allocated_ids = plugin_ids
-            .values()
-            .flatten()
-            .copied()
-            .map(PaneId::Plugin)
-            .collect::<BTreeSet<_>>();
 
         for run_instruction in extracted_run_instructions {
             let originating_plugin = run_instruction.as_ref().and_then(|r| {
@@ -1520,16 +1531,17 @@ impl Pty {
                 }
             });
             let mut terminal_id = None;
-            match self.apply_run_instruction(run_instruction, default_shell.clone()) {
-                Ok(Some(new_pane_data)) => {
-                    terminal_id = Some(new_pane_data.0);
-                    allocated_ids.insert(PaneId::Terminal(new_pane_data.0));
-                    new_pane_pids.push(new_pane_data);
+            match self.apply_run_instruction(
+                run_instruction,
+                default_shell.clone(),
+                allocation_ledger,
+            ) {
+                Ok(Some(prepared_terminal)) => {
+                    terminal_id = Some(prepared_terminal.terminal_id());
+                    new_pane_pids.push(prepared_terminal);
                 },
                 Ok(None) => {},
-                Err(error) => {
-                    return Err(self.rollback_partial_layout_allocations(error, &allocated_ids));
-                },
+                Err(error) => return Err(error),
             }
             if let (Some(originating_plugin), Some(terminal_id)) = (originating_plugin, terminal_id)
             {
@@ -1545,16 +1557,17 @@ impl Pty {
                 }
             });
             let mut terminal_id = None;
-            match self.apply_run_instruction(run_instruction, default_shell.clone()) {
-                Ok(Some(new_pane_data)) => {
-                    terminal_id = Some(new_pane_data.0);
-                    allocated_ids.insert(PaneId::Terminal(new_pane_data.0));
-                    new_floating_panes_pids.push(new_pane_data);
+            match self.apply_run_instruction(
+                run_instruction,
+                default_shell.clone(),
+                allocation_ledger,
+            ) {
+                Ok(Some(prepared_terminal)) => {
+                    terminal_id = Some(prepared_terminal.terminal_id());
+                    new_floating_panes_pids.push(prepared_terminal);
                 },
                 Ok(None) => {},
-                Err(error) => {
-                    return Err(self.rollback_partial_layout_allocations(error, &allocated_ids));
-                },
+                Err(error) => return Err(error),
             }
             if let (Some(originating_plugin), Some(terminal_id)) = (originating_plugin, terminal_id)
             {
@@ -1562,26 +1575,13 @@ impl Pty {
             }
         }
 
-        // Option<RunCommand> should only be Some if the pane starts held
         let new_tab_pane_ids: Vec<(u32, Option<RunCommand>)> = new_pane_pids
             .iter()
-            .map(|(terminal_id, starts_held, run_command, _)| {
-                if *starts_held {
-                    (*terminal_id, run_command.clone())
-                } else {
-                    (*terminal_id, None)
-                }
-            })
+            .map(PreparedTerminal::layout_entry)
             .collect();
         let new_tab_floating_pane_ids: Vec<(u32, Option<RunCommand>)> = new_floating_panes_pids
             .iter()
-            .map(|(terminal_id, starts_held, run_command, _)| {
-                if *starts_held {
-                    (*terminal_id, run_command.clone())
-                } else {
-                    (*terminal_id, None)
-                }
-            })
+            .map(PreparedTerminal::layout_entry)
             .collect();
 
         let tab_result = TabOverrideResult {
@@ -1596,71 +1596,22 @@ impl Pty {
             plugin_ids,
         };
 
-        let mut terminals_to_start = vec![];
-
-        terminals_to_start.append(&mut new_pane_pids);
-        terminals_to_start.append(&mut new_floating_panes_pids);
-        for (terminal_id, starts_held, run_command, reader_result) in terminals_to_start {
-            if starts_held {
-                // we do not run a command or start listening for bytes on held panes
-                continue;
-            }
-            match reader_result {
-                Ok(reader) => {
-                    let activity_flag =
-                        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                    let terminal_bytes = async_runtime().spawn({
-                        let senders = self.bus.senders.clone();
-                        let debug_to_file = self.debug_to_file;
-                        let activity_flag = activity_flag.clone();
-                        async move {
-                            TerminalBytes::new(
-                                terminal_id,
-                                reader,
-                                senders,
-                                debug_to_file,
-                                activity_flag,
-                            )
-                            .listen()
-                            .await
-                            .context("failed to spawn terminals for layout")
-                            .fatal();
-                        }
-                    });
-                    self.task_handles.insert(terminal_id, terminal_bytes);
-                    self.pane_activity_flags.insert(terminal_id, activity_flag);
-                },
-                _ => match run_command {
-                    Some(run_command) if run_command.hold_on_close => {
-                        send_command_not_found_to_screen(
-                            self.bus.senders.clone(),
-                            terminal_id,
-                            run_command.clone(),
-                        )
-                        .with_context(err_context)
-                        .non_fatal();
-                    },
-                    Some(_) => {},
-                    None => {
-                        self.close_pane(PaneId::Terminal(terminal_id))
-                            .with_context(err_context)?;
-                    },
-                },
-            }
-        }
-        for (terminal_id, originating_plugin) in originating_plugins_to_inform {
-            self.inform_originating_plugin_of_open(terminal_id, originating_plugin);
-        }
-        Ok(tab_result)
+        new_pane_pids.append(&mut new_floating_panes_pids);
+        Ok(PreparedTabOverride {
+            tab_result,
+            terminals: new_pane_pids,
+            originating_plugins_to_inform,
+        })
     }
+
     fn rollback_partial_layout_allocations(
         &mut self,
         original_error: anyhow::Error,
-        allocated_ids: &BTreeSet<PaneId>,
+        allocation_ledger: LayoutAllocationLedger,
     ) -> anyhow::Error {
         let mut cleanup_errors = Vec::new();
-        for pane_id in allocated_ids {
-            if let Err(error) = self.close_pane(*pane_id) {
+        for pane_id in allocation_ledger.allocated_ids {
+            if let Err(error) = self.close_pane(pane_id) {
                 cleanup_errors.push(format!("{pane_id:?}: {error}"));
             }
         }
@@ -1671,6 +1622,52 @@ impl Pty {
                 "failed to release one or more partial layout allocations: {}",
                 cleanup_errors.join("; ")
             ))
+        }
+    }
+
+    fn activate_prepared_terminal(&mut self, prepared_terminal: PreparedTerminal) {
+        match prepared_terminal {
+            PreparedTerminal::Runnable {
+                terminal_id,
+                reader,
+            } => {
+                let activity_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let terminal_bytes = async_runtime().spawn({
+                    let senders = self.bus.senders.clone();
+                    let debug_to_file = self.debug_to_file;
+                    let activity_flag = activity_flag.clone();
+                    async move {
+                        TerminalBytes::new(
+                            terminal_id,
+                            reader,
+                            senders,
+                            debug_to_file,
+                            activity_flag,
+                        )
+                        .listen()
+                        .await
+                        .context("failed to spawn terminals for layout")
+                        .fatal();
+                    }
+                });
+                self.task_handles.insert(terminal_id, terminal_bytes);
+                self.pane_activity_flags.insert(terminal_id, activity_flag);
+            },
+            PreparedTerminal::HeldTerminal {
+                terminal_id,
+                run_command,
+                command_not_found,
+            } => {
+                if command_not_found {
+                    send_command_not_found_to_screen(
+                        self.bus.senders.clone(),
+                        terminal_id,
+                        run_command,
+                    )
+                    .context("failed to notify screen about held command-not-found terminal")
+                    .non_fatal();
+                }
+            },
         }
     }
     fn inform_originating_plugin_of_open(
@@ -1695,11 +1692,8 @@ impl Pty {
         &mut self,
         run_instruction: Option<Run>,
         default_shell: TerminalAction,
-    ) -> Result<Option<(u32, bool, Option<RunCommand>, Result<Box<dyn AsyncReader>>)>> {
-        // terminal_id,
-        // starts_held,
-        // command
-        // successfully opened
+        allocation_ledger: &mut LayoutAllocationLedger,
+    ) -> Result<Option<PreparedTerminal>> {
         let err_context = || "failed to apply run instruction".to_string();
         let quit_cb = Box::new({
             let senders = self.bus.senders.clone();
@@ -1776,12 +1770,12 @@ impl Pty {
                         .reserve_terminal_id()
                     {
                         Ok(terminal_id) => {
-                            Ok(Some((
+                            allocation_ledger.track_terminal(terminal_id);
+                            Ok(Some(PreparedTerminal::HeldTerminal {
                                 terminal_id,
-                                starts_held,
-                                Some(command.clone()),
-                                Ok(Box::new(NullAsyncReader) as Box<dyn AsyncReader>), // placeholder, never used for held panes
-                            )))
+                                run_command: command,
+                                command_not_found: false,
+                            }))
                         },
                         Err(e) => Err(e),
                     }
@@ -1796,30 +1790,39 @@ impl Pty {
                         .with_context(err_context)
                     {
                         Ok((terminal_id, reader, child_pid)) => {
+                            allocation_ledger.track_terminal(terminal_id);
                             if let Some(child_pid) = child_pid {
                                 self.id_to_child_pid.insert(terminal_id, child_pid);
                                 self.capture_initial_cwd(terminal_id, child_pid);
                             }
-                            Ok(Some((
+                            Ok(Some(PreparedTerminal::Runnable {
                                 terminal_id,
-                                starts_held,
-                                Some(command.clone()),
-                                Ok(reader),
-                            )))
+                                reader,
+                            }))
                         },
-                        Err(err) => {
-                            match err.downcast_ref::<ZellijError>() {
-                                Some(ZellijError::CommandNotFound { terminal_id, .. }) => Ok(Some(
-                                    (*terminal_id, starts_held, Some(command.clone()), Err(err)),
-                                )),
-                                _ => Err(err),
-                            }
+                        Err(error) => match error.downcast_ref::<ZellijError>() {
+                            Some(ZellijError::CommandNotFound { terminal_id, .. }) => {
+                                let terminal_id = *terminal_id;
+                                allocation_ledger.track_terminal(terminal_id);
+                                if command.hold_on_close {
+                                    Ok(Some(PreparedTerminal::HeldTerminal {
+                                        terminal_id,
+                                        run_command: command,
+                                        command_not_found: true,
+                                    }))
+                                } else {
+                                    Err(error.context(
+                                        "CommandNotFound terminal cannot enter a layout without \
+                                         hold_on_close",
+                                    ))
+                                }
+                            },
+                            _ => Err(error),
                         },
                     }
                 }
             },
             Some(Run::Cwd(cwd)) => {
-                let starts_held = false; // we do not hold Cwd panes
                 let shell = self.get_default_terminal(Some(cwd), Some(default_shell.clone()));
                 match self
                     .bus
@@ -1831,22 +1834,29 @@ impl Pty {
                     .with_context(err_context)
                 {
                     Ok((terminal_id, reader, child_pid)) => {
+                        allocation_ledger.track_terminal(terminal_id);
                         if let Some(child_pid) = child_pid {
                             self.id_to_child_pid.insert(terminal_id, child_pid);
                             self.capture_initial_cwd(terminal_id, child_pid);
                         }
-                        Ok(Some((terminal_id, starts_held, None, Ok(reader))))
+                        Ok(Some(PreparedTerminal::Runnable {
+                            terminal_id,
+                            reader,
+                        }))
                     },
-                    Err(err) => match err.downcast_ref::<ZellijError>() {
+                    Err(error) => match error.downcast_ref::<ZellijError>() {
                         Some(ZellijError::CommandNotFound { terminal_id, .. }) => {
-                            Ok(Some((*terminal_id, starts_held, None, Err(err))))
+                            allocation_ledger.track_terminal(*terminal_id);
+                            Err(error.context(
+                                "CommandNotFound Cwd terminal cannot enter a layout without an \
+                                 explicit held command",
+                            ))
                         },
-                        _ => Err(err),
+                        _ => Err(error),
                     },
                 }
             },
             Some(Run::EditFile(path_to_file, line_number, cwd)) => {
-                let starts_held = false; // we do not hold edit panes (for now?)
                 match self
                     .bus
                     .os_input
@@ -1865,22 +1875,29 @@ impl Pty {
                     .with_context(err_context)
                 {
                     Ok((terminal_id, reader, child_pid)) => {
+                        allocation_ledger.track_terminal(terminal_id);
                         if let Some(child_pid) = child_pid {
                             self.id_to_child_pid.insert(terminal_id, child_pid);
                             self.capture_initial_cwd(terminal_id, child_pid);
                         }
-                        Ok(Some((terminal_id, starts_held, None, Ok(reader))))
+                        Ok(Some(PreparedTerminal::Runnable {
+                            terminal_id,
+                            reader,
+                        }))
                     },
-                    Err(err) => match err.downcast_ref::<ZellijError>() {
+                    Err(error) => match error.downcast_ref::<ZellijError>() {
                         Some(ZellijError::CommandNotFound { terminal_id, .. }) => {
-                            Ok(Some((*terminal_id, starts_held, None, Err(err))))
+                            allocation_ledger.track_terminal(*terminal_id);
+                            Err(error.context(
+                                "CommandNotFound editor terminal cannot enter a layout without an \
+                                 explicit held command",
+                            ))
                         },
-                        _ => Err(err),
+                        _ => Err(error),
                     },
                 }
             },
             None => {
-                let starts_held = false;
                 match self
                     .bus
                     .os_input
@@ -1891,17 +1908,25 @@ impl Pty {
                     .with_context(err_context)
                 {
                     Ok((terminal_id, reader, child_pid)) => {
+                        allocation_ledger.track_terminal(terminal_id);
                         if let Some(child_pid) = child_pid {
                             self.id_to_child_pid.insert(terminal_id, child_pid);
                             self.capture_initial_cwd(terminal_id, child_pid);
                         }
-                        Ok(Some((terminal_id, starts_held, None, Ok(reader))))
+                        Ok(Some(PreparedTerminal::Runnable {
+                            terminal_id,
+                            reader,
+                        }))
                     },
-                    Err(err) => match err.downcast_ref::<ZellijError>() {
+                    Err(error) => match error.downcast_ref::<ZellijError>() {
                         Some(ZellijError::CommandNotFound { terminal_id, .. }) => {
-                            Ok(Some((*terminal_id, starts_held, None, Err(err))))
+                            allocation_ledger.track_terminal(*terminal_id);
+                            Err(error.context(
+                                "CommandNotFound default terminal cannot enter a layout without an \
+                                 explicit held command",
+                            ))
                         },
-                        _ => Err(err),
+                        _ => Err(error),
                     },
                 }
             },
@@ -1938,11 +1963,11 @@ impl Pty {
                     .and_then(|os_input| os_input.clear_terminal_id(id))
                     .with_context(err_context)?;
             },
-            PaneId::Plugin(pid) => drop(
-                self.bus
-                    .senders
-                    .send_to_plugin(PluginInstruction::Unload(pid)),
-            ),
+            PaneId::Plugin(pid) => self
+                .bus
+                .senders
+                .send_to_plugin(PluginInstruction::Unload(pid))
+                .with_context(err_context)?,
         }
         Ok(())
     }
@@ -2475,13 +2500,30 @@ impl Drop for Pty {
 
 #[cfg(test)]
 std::thread_local! {
-    static FAIL_NEXT_COMMAND_NOT_FOUND_NOTIFICATION: std::cell::Cell<bool> =
-        const { std::cell::Cell::new(false) };
+    static FAIL_COMMAND_NOT_FOUND_NOTIFICATION_AT_SEND: std::cell::Cell<u8> =
+        const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
 fn fail_next_command_not_found_notification() {
-    FAIL_NEXT_COMMAND_NOT_FOUND_NOTIFICATION.with(|fail_next| fail_next.set(true));
+    FAIL_COMMAND_NOT_FOUND_NOTIFICATION_AT_SEND.with(|fail_at| fail_at.set(1));
+}
+
+#[cfg(test)]
+fn fail_command_not_found_notification_between_messages() {
+    FAIL_COMMAND_NOT_FOUND_NOTIFICATION_AT_SEND.with(|fail_at| fail_at.set(2));
+}
+
+#[cfg(test)]
+fn command_not_found_notification_failure_is_due(send_index: u8) -> bool {
+    FAIL_COMMAND_NOT_FOUND_NOTIFICATION_AT_SEND.with(|fail_at| {
+        if fail_at.get() == send_index {
+            fail_at.set(0);
+            true
+        } else {
+            false
+        }
+    })
 }
 
 fn send_command_not_found_to_screen(
@@ -2490,7 +2532,7 @@ fn send_command_not_found_to_screen(
     run_command: RunCommand,
 ) -> Result<()> {
     #[cfg(test)]
-    if FAIL_NEXT_COMMAND_NOT_FOUND_NOTIFICATION.with(|fail_next| fail_next.replace(false)) {
+    if command_not_found_notification_failure_is_due(1) {
         return Err(anyhow!(
             "injected post-transfer command-not-found notification failure"
         ));
@@ -2504,6 +2546,12 @@ fn send_command_not_found_to_screen(
                 .to_vec(),
         ))
         .with_context(err_context)?;
+    #[cfg(test)]
+    if command_not_found_notification_failure_is_due(2) {
+        return Err(anyhow!(
+            "injected between-message command-not-found notification failure"
+        ));
+    }
     senders
         .send_to_screen(ScreenInstruction::HoldPane(
             PaneId::Terminal(terminal_id),

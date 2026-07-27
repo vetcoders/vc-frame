@@ -1,5 +1,5 @@
 use super::*;
-use crate::os_input_output::ServerOsApi;
+use crate::os_input_output::{NullAsyncReader, ServerOsApi, resolve_reserved_terminal_spawn};
 use crate::plugins::PluginInstruction;
 use crate::thread_bus::{Bus, ThreadSenders};
 use interprocess::local_socket::Stream as LocalSocketStream;
@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use zellij_utils::channels::{self, SenderWithContext};
 use zellij_utils::data::{Event, Palette};
 use zellij_utils::errors::ErrorContext;
@@ -22,9 +22,17 @@ struct MockOsApi {
     fail_spawn_terminal: Arc<AtomicBool>,
     fail_on_spawn_call: Arc<AtomicUsize>,
     command_not_found_on_spawn_call: Arc<AtomicUsize>,
+    command_not_found_payload_terminal_id: Arc<AtomicUsize>,
     spawn_terminal_calls: Arc<AtomicUsize>,
     next_terminal_id: Arc<AtomicUsize>,
     cleared_terminal_ids: Arc<Mutex<Vec<u32>>>,
+    fail_clear_terminal_ids: Arc<Mutex<Vec<u32>>>,
+}
+
+fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl MockOsApi {
@@ -36,9 +44,11 @@ impl MockOsApi {
             fail_spawn_terminal: Arc::new(AtomicBool::new(false)),
             fail_on_spawn_call: Arc::new(AtomicUsize::new(0)),
             command_not_found_on_spawn_call: Arc::new(AtomicUsize::new(0)),
+            command_not_found_payload_terminal_id: Arc::new(AtomicUsize::new(0)),
             spawn_terminal_calls: Arc::new(AtomicUsize::new(0)),
             next_terminal_id: Arc::new(AtomicUsize::new(100)),
             cleared_terminal_ids: Arc::new(Mutex::new(vec![])),
+            fail_clear_terminal_ids: Arc::new(Mutex::new(vec![])),
         }
     }
     fn fail_spawn_terminal(&self) {
@@ -50,6 +60,20 @@ impl MockOsApi {
     fn command_not_found_on_spawn_call(&self, call: usize) {
         self.command_not_found_on_spawn_call
             .store(call, Ordering::Relaxed);
+    }
+    fn mismatched_command_not_found_on_spawn_call(&self, call: usize, foreign_terminal_id: u32) {
+        self.command_not_found_on_spawn_call(call);
+        self.command_not_found_payload_terminal_id
+            .store(foreign_terminal_id as usize, Ordering::Relaxed);
+    }
+    fn fail_clear_terminal_id(&self, terminal_id: u32) {
+        lock_recover(&self.fail_clear_terminal_ids).push(terminal_id);
+    }
+    fn record_cleared_terminal_id(&self, terminal_id: u32) {
+        lock_recover(&self.cleared_terminal_ids).push(terminal_id);
+    }
+    fn cleared_terminal_ids(&self) -> Vec<u32> {
+        lock_recover(&self.cleared_terminal_ids).clone()
     }
     fn set_cwd(&self, pid: u32, path: PathBuf) {
         self.cwds.lock().unwrap().insert(pid, path);
@@ -86,21 +110,36 @@ impl ServerOsApi for MockOsApi {
         _: Option<PathBuf>,
     ) -> anyhow::Result<(u32, Box<dyn AsyncReader>, Option<u32>)> {
         let call = self.spawn_terminal_calls.fetch_add(1, Ordering::Relaxed) + 1;
-        if self.fail_spawn_terminal.load(Ordering::Relaxed)
-            || self.fail_on_spawn_call.load(Ordering::Relaxed) == call
-        {
-            return Err(anyhow::Error::new(io::Error::other(
-                "injected EMFILE-like spawn failure",
-            )));
-        }
         let terminal_id = self.next_terminal_id.fetch_add(1, Ordering::Relaxed) as u32;
-        if self.command_not_found_on_spawn_call.load(Ordering::Relaxed) == call {
-            return Err(anyhow::Error::new(ZellijError::CommandNotFound {
-                terminal_id,
-                command: "injected-missing-command".to_owned(),
-            }));
-        }
-        Ok((terminal_id, Box::new(NullAsyncReader), None))
+        let spawn_result: anyhow::Result<(u32, Box<dyn AsyncReader>, Option<u32>)> =
+            if self.fail_spawn_terminal.load(Ordering::Relaxed)
+                || self.fail_on_spawn_call.load(Ordering::Relaxed) == call
+            {
+                Err(anyhow::Error::new(io::Error::other(
+                    "injected EMFILE-like spawn failure",
+                )))
+            } else if self.command_not_found_on_spawn_call.load(Ordering::Relaxed) == call {
+                let payload_terminal_id = self
+                    .command_not_found_payload_terminal_id
+                    .load(Ordering::Relaxed);
+                let payload_terminal_id = if payload_terminal_id == 0 {
+                    terminal_id
+                } else {
+                    payload_terminal_id as u32
+                };
+                Err(anyhow::Error::new(ZellijError::CommandNotFound {
+                    terminal_id: payload_terminal_id,
+                    command: "injected-missing-command".to_owned(),
+                }))
+            } else {
+                Ok((terminal_id, Box::new(NullAsyncReader), None))
+            };
+        resolve_reserved_terminal_spawn(terminal_id, spawn_result, |terminal_id| {
+            self.record_cleared_terminal_id(terminal_id);
+        })
+    }
+    fn reserve_terminal_id(&self) -> anyhow::Result<u32> {
+        Ok(self.next_terminal_id.fetch_add(1, Ordering::Relaxed) as u32)
     }
     fn write_to_tty_stdin(&self, _: u32, buf: &[u8]) -> anyhow::Result<usize> {
         Ok(buf.len())
@@ -175,8 +214,12 @@ impl ServerOsApi for MockOsApi {
         unimplemented!()
     }
     fn clear_terminal_id(&self, terminal_id: u32) -> anyhow::Result<()> {
-        self.cleared_terminal_ids.lock().unwrap().push(terminal_id);
-        Ok(())
+        self.record_cleared_terminal_id(terminal_id);
+        if lock_recover(&self.fail_clear_terminal_ids).contains(&terminal_id) {
+            Err(anyhow!("injected clear failure for terminal {terminal_id}"))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -279,7 +322,7 @@ fn new_tab_spawn_failure_does_not_terminate_pty_thread() {
 fn partial_new_tab_spawn_failure_releases_terminals_and_plugins() {
     let mock = MockOsApi::new();
     mock.fail_on_spawn_call(2);
-    let cleared_terminal_ids = mock.cleared_terminal_ids.clone();
+    let probe = mock.clone();
     let (mut pty, plugin_rx) = make_pty_with_plugin_receiver(mock);
     let plugin =
         RunPluginOrAlias::from_url("file:/partial-new-tab.wasm", &None, None, None).unwrap();
@@ -315,9 +358,9 @@ fn partial_new_tab_spawn_failure_releases_terminals_and_plugins() {
         "the original spawn failure must remain in the error chain"
     );
     assert_eq!(
-        *cleared_terminal_ids.lock().unwrap(),
-        vec![100],
-        "the terminal allocated before the failure must not remain reserved"
+        probe.cleared_terminal_ids(),
+        vec![101, 100],
+        "the failed reservation and the prior terminal must each be cleared exactly once"
     );
     let unloaded_plugin_ids = plugin_rx
         .try_iter()
@@ -334,9 +377,56 @@ fn partial_new_tab_spawn_failure_releases_terminals_and_plugins() {
 }
 
 #[test]
+fn floating_nth_spawn_failure_releases_every_prior_allocation_exactly_once() {
+    let mock = MockOsApi::new();
+    mock.fail_on_spawn_call(3);
+    let probe = mock.clone();
+    let (mut pty, plugin_rx) = make_pty_with_plugin_receiver(mock);
+    let plugin =
+        RunPluginOrAlias::from_url("file:/floating-failure.wasm", &None, None, None).unwrap();
+
+    let error = pty
+        .spawn_terminals_for_layout(
+            None,
+            TiledPaneLayout::default(),
+            vec![FloatingPaneLayout::default(), FloatingPaneLayout::default()],
+            Some(TerminalAction::RunCommand(RunCommand {
+                command: PathBuf::from("sh"),
+                ..Default::default()
+            })),
+            HashMap::from([(plugin, vec![77])]),
+            None,
+            7,
+            false,
+            true,
+            (1, false),
+            None,
+            None,
+        )
+        .expect_err("the second floating terminal spawn must fail");
+
+    assert!(format!("{error:#}").contains("injected EMFILE-like spawn failure"));
+    assert_eq!(
+        probe.cleared_terminal_ids(),
+        vec![102, 100, 101],
+        "the failed reservation is cleared first, then the ledger rolls back in id order"
+    );
+    assert_eq!(
+        plugin_rx
+            .try_iter()
+            .filter_map(|(instruction, _)| match instruction {
+                PluginInstruction::Unload(plugin_id) => Some(plugin_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![77]
+    );
+}
+
+#[test]
 fn new_tab_apply_layout_failure_releases_terminals_and_plugins() {
     let mock = MockOsApi::new();
-    let cleared_terminal_ids = mock.cleared_terminal_ids.clone();
+    let probe = mock.clone();
     let (plugin_tx, plugin_rx) = channels::unbounded();
     let plugin_sender = SenderWithContext::new(plugin_tx);
     let mut bus: Bus<PtyInstruction> = Bus::empty();
@@ -374,7 +464,7 @@ fn new_tab_apply_layout_failure_releases_terminals_and_plugins() {
         "the ApplyLayout delivery failure must remain in the error chain"
     );
     assert_eq!(
-        *cleared_terminal_ids.lock().unwrap(),
+        probe.cleared_terminal_ids(),
         vec![100],
         "the terminal allocated before ApplyLayout must not remain reserved"
     );
@@ -396,7 +486,7 @@ fn new_tab_apply_layout_failure_releases_terminals_and_plugins() {
 fn post_apply_layout_notification_failure_keeps_new_tab_allocations() {
     let mock = MockOsApi::new();
     mock.command_not_found_on_spawn_call(1);
-    let cleared_terminal_ids = mock.cleared_terminal_ids.clone();
+    let probe = mock.clone();
     let (plugin_tx, plugin_rx) = channels::unbounded();
     let (screen_tx, screen_rx) = channels::unbounded();
     let mut bus: Bus<PtyInstruction> = Bus::empty();
@@ -440,11 +530,14 @@ fn post_apply_layout_notification_failure_keeps_new_tab_allocations() {
     match screen_instruction {
         ScreenInstruction::ApplyLayout(_, _, terminal_ids, _, plugin_ids, ..) => {
             assert_eq!(
-                terminal_ids
-                    .iter()
-                    .map(|(terminal_id, _)| *terminal_id)
-                    .collect::<Vec<_>>(),
-                vec![100]
+                terminal_ids.len(),
+                1,
+                "only one explicit held terminal enters the layout"
+            );
+            assert_eq!(terminal_ids[0].0, 100);
+            assert!(
+                terminal_ids[0].1.is_some(),
+                "CommandNotFound with hold_on_close must be explicit held state"
             );
             assert_eq!(
                 plugin_ids.values().flatten().copied().collect::<Vec<_>>(),
@@ -458,7 +551,7 @@ fn post_apply_layout_notification_failure_keeps_new_tab_allocations() {
         "the injected optional notification must not produce a partial second screen message"
     );
     assert!(
-        cleared_terminal_ids.lock().unwrap().is_empty(),
+        probe.cleared_terminal_ids().is_empty(),
         "screen-owned terminal must not be locally cleared or double-cleaned"
     );
     assert!(
@@ -470,14 +563,242 @@ fn post_apply_layout_notification_failure_keeps_new_tab_allocations() {
 }
 
 #[test]
-fn post_prepare_notification_failure_keeps_override_allocations() {
+fn command_not_found_without_explicit_hold_never_enters_a_layout() {
+    let cases = vec![
+        (
+            "command without hold_on_close",
+            Some(Run::Command(RunCommand {
+                command: PathBuf::from("missing-command"),
+                hold_on_close: false,
+                ..Default::default()
+            })),
+        ),
+        ("cwd", Some(Run::Cwd(PathBuf::from("/tmp")))),
+        (
+            "edit file",
+            Some(Run::EditFile(
+                PathBuf::from("/tmp/file.txt"),
+                Some(1),
+                Some(PathBuf::from("/tmp")),
+            )),
+        ),
+        ("default shell", None),
+    ];
+
+    for (label, run) in cases {
+        let mock = MockOsApi::new();
+        mock.command_not_found_on_spawn_call(1);
+        let probe = mock.clone();
+        let (screen_tx, screen_rx) = channels::unbounded();
+        let mut bus: Bus<PtyInstruction> = Bus::empty();
+        bus.os_input = Some(Box::new(mock));
+        bus.senders.to_screen = Some(SenderWithContext::new(screen_tx));
+        bus.senders.should_silently_fail = false;
+        let mut pty = Pty::new(bus, false, None, None);
+
+        let error = pty
+            .spawn_terminals_for_layout(
+                None,
+                TiledPaneLayout {
+                    run,
+                    ..Default::default()
+                },
+                vec![],
+                Some(TerminalAction::RunCommand(RunCommand {
+                    command: PathBuf::from("missing-default"),
+                    ..Default::default()
+                })),
+                HashMap::new(),
+                None,
+                7,
+                false,
+                true,
+                (1, false),
+                None,
+                None,
+            )
+            .unwrap_err();
+
+        assert!(
+            error.downcast_ref::<ZellijError>().is_some(),
+            "{label}: the exact CommandNotFound remains the source"
+        );
+        assert_eq!(
+            probe.cleared_terminal_ids(),
+            vec![100],
+            "{label}: the retained reservation must roll back before transfer"
+        );
+        assert!(
+            screen_rx.try_recv().is_err(),
+            "{label}: ApplyLayout must never be sent"
+        );
+    }
+}
+
+#[test]
+fn hold_on_start_is_an_explicit_held_terminal_without_notification() {
+    let mock = MockOsApi::new();
+    let probe = mock.clone();
+    let (screen_tx, screen_rx) = channels::unbounded();
+    let mut bus: Bus<PtyInstruction> = Bus::empty();
+    bus.os_input = Some(Box::new(mock));
+    bus.senders.to_screen = Some(SenderWithContext::new(screen_tx));
+    bus.senders.should_silently_fail = false;
+    let mut pty = Pty::new(bus, false, None, None);
+
+    pty.spawn_terminals_for_layout(
+        None,
+        TiledPaneLayout {
+            run: Some(Run::Command(RunCommand {
+                command: PathBuf::from("held-before-start"),
+                hold_on_start: true,
+                ..Default::default()
+            })),
+            ..Default::default()
+        },
+        vec![],
+        None,
+        HashMap::new(),
+        None,
+        7,
+        false,
+        true,
+        (1, false),
+        None,
+        None,
+    )
+    .expect("hold_on_start must commit as an explicit held terminal");
+
+    let (instruction, _) = screen_rx.try_recv().expect("ApplyLayout");
+    match instruction {
+        ScreenInstruction::ApplyLayout(_, _, terminal_ids, ..) => {
+            assert_eq!(terminal_ids.len(), 1);
+            assert_eq!(terminal_ids[0].0, 100);
+            assert!(terminal_ids[0].1.is_some());
+        },
+        other => panic!("expected ApplyLayout, got {other:?}"),
+    }
+    assert!(
+        screen_rx.try_recv().is_err(),
+        "hold_on_start is not a command-not-found notification"
+    );
+    assert!(probe.cleared_terminal_ids().is_empty());
+}
+
+#[test]
+fn mismatched_command_not_found_never_transfers_or_clears_the_foreign_payload_id() {
+    let mock = MockOsApi::new();
+    mock.mismatched_command_not_found_on_spawn_call(1, 999);
+    let probe = mock.clone();
+    let (plugin_tx, plugin_rx) = channels::unbounded();
+    let (screen_tx, screen_rx) = channels::unbounded();
+    let mut bus: Bus<PtyInstruction> = Bus::empty();
+    bus.os_input = Some(Box::new(mock));
+    bus.senders.to_plugin = Some(SenderWithContext::new(plugin_tx));
+    bus.senders.to_screen = Some(SenderWithContext::new(screen_tx));
+    bus.senders.should_silently_fail = false;
+    let mut pty = Pty::new(bus, false, None, None);
+    let plugin = RunPluginOrAlias::from_url("file:/foreign-id.wasm", &None, None, None).unwrap();
+
+    let error = pty
+        .spawn_terminals_for_layout(
+            None,
+            TiledPaneLayout {
+                run: Some(Run::Command(RunCommand {
+                    command: PathBuf::from("missing-command"),
+                    hold_on_close: true,
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+            vec![],
+            None,
+            HashMap::from([(plugin, vec![77])]),
+            None,
+            7,
+            false,
+            true,
+            (1, false),
+            None,
+            None,
+        )
+        .expect_err("a foreign CommandNotFound id is a protocol error");
+
+    assert!(
+        error.downcast_ref::<ZellijError>().is_none(),
+        "the protocol error must not remain downcastable to CommandNotFound"
+    );
+    assert!(
+        format!("{error:#}").contains("reserved terminal 100"),
+        "the source chain must identify the real reservation: {error:#}"
+    );
+    assert_eq!(
+        probe.cleared_terminal_ids(),
+        vec![100],
+        "only the real reservation is cleared"
+    );
+    assert!(!probe.cleared_terminal_ids().contains(&999));
+    assert!(
+        screen_rx.try_recv().is_err(),
+        "the foreign payload id must never reach ApplyLayout"
+    );
+    assert_eq!(
+        plugin_rx
+            .try_iter()
+            .filter_map(|(instruction, _)| match instruction {
+                PluginInstruction::Unload(plugin_id) => Some(plugin_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![77]
+    );
+}
+
+fn override_tab(
+    tab_index: usize,
+    tiled_layout: TiledPaneLayout,
+    floating_layouts: Vec<FloatingPaneLayout>,
+) -> TabLayoutInfo {
+    TabLayoutInfo {
+        tab_index,
+        tab_name: Some(format!("tab-{tab_index}")),
+        tiled_layout,
+        floating_layouts,
+        swap_tiled_layouts: None,
+        swap_floating_layouts: None,
+    }
+}
+
+fn override_plugin(url: &str, plugin_id: u32) -> HashMap<RunPluginOrAlias, Vec<u32>> {
+    HashMap::from([(
+        RunPluginOrAlias::from_url(url, &None, None, None).unwrap(),
+        vec![plugin_id],
+    )])
+}
+
+fn unloaded_plugin_ids(
+    plugin_rx: &channels::Receiver<(PluginInstruction, ErrorContext)>,
+) -> Vec<u32> {
+    plugin_rx
+        .try_iter()
+        .filter_map(|(instruction, _)| match instruction {
+            PluginInstruction::Unload(plugin_id) => Some(plugin_id),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn override_between_notification_failure_is_nonfatal_after_final_commit() {
     let mock = MockOsApi::new();
     mock.command_not_found_on_spawn_call(1);
-    let cleared_terminal_ids = mock.cleared_terminal_ids.clone();
+    let probe = mock.clone();
     let (mut pty, plugin_rx) = make_pty_with_plugin_receiver(mock);
     let plugin =
         RunPluginOrAlias::from_url("file:/prepared-override.wasm", &None, None, None).unwrap();
     let plugin_ids = HashMap::from([(plugin, vec![77])]);
+    let (screen_tx, screen_rx) = channels::unbounded();
+    pty.bus.senders.to_screen = Some(SenderWithContext::new(screen_tx));
     let layout = TiledPaneLayout {
         run: Some(Run::Command(RunCommand {
             command: PathBuf::from("missing-command"),
@@ -486,44 +807,69 @@ fn post_prepare_notification_failure_keeps_override_allocations() {
         })),
         ..Default::default()
     };
-    fail_next_command_not_found_notification();
+    fail_command_not_found_notification_between_messages();
 
-    let tab_result = pty
-        .spawn_terminals_for_layout_override(
-            None,
-            layout,
-            vec![],
-            None,
+    pty.override_layout_transaction(
+        None,
+        None,
+        vec![(
+            TabLayoutInfo {
+                tab_index: 7,
+                tab_name: Some("Recovered tab".to_owned()),
+                tiled_layout: layout,
+                floating_layouts: vec![],
+                swap_tiled_layouts: None,
+                swap_floating_layouts: None,
+            },
             plugin_ids,
-            7,
-            Some("Recovered tab".to_owned()),
-            1,
-            None,
-            None,
-            true,
-            true,
-        )
-        .expect("optional notification failure must not discard a prepared override result");
+        )],
+        true,
+        true,
+        1,
+        None,
+        None,
+    )
+    .expect("between-message notification failure must not revoke a committed override");
 
-    assert_eq!(
-        tab_result
-            .new_terminal_pids
-            .iter()
-            .map(|(terminal_id, _)| *terminal_id)
-            .collect::<Vec<_>>(),
-        vec![100]
-    );
-    assert_eq!(
-        tab_result
-            .plugin_ids
-            .values()
-            .flatten()
-            .copied()
-            .collect::<Vec<_>>(),
-        vec![77]
+    let (screen_instruction, _) = screen_rx
+        .try_recv()
+        .expect("the prepared override must transfer to screen");
+    match screen_instruction {
+        ScreenInstruction::OverrideLayoutComplete(tab_results, ..) => {
+            assert_eq!(tab_results.len(), 1);
+            assert_eq!(
+                tab_results[0].new_terminal_pids,
+                vec![(
+                    100,
+                    Some(RunCommand {
+                        command: PathBuf::from("missing-command"),
+                        hold_on_close: true,
+                        ..Default::default()
+                    })
+                )]
+            );
+            assert_eq!(
+                tab_results[0]
+                    .plugin_ids
+                    .values()
+                    .flatten()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                vec![77]
+            );
+        },
+        other => panic!("expected OverrideLayoutComplete, got {other:?}"),
+    }
+    assert!(matches!(
+        screen_rx.try_recv(),
+        Ok((ScreenInstruction::PtyBytes(100, _), _))
+    ));
+    assert!(
+        screen_rx.try_recv().is_err(),
+        "the injected between-message failure suppresses HoldPane only"
     );
     assert!(
-        cleared_terminal_ids.lock().unwrap().is_empty(),
+        probe.cleared_terminal_ids().is_empty(),
         "caller-owned override terminal must not be cleared or double-cleaned"
     );
     assert!(
@@ -538,7 +884,7 @@ fn post_prepare_notification_failure_keeps_override_allocations() {
 fn partial_override_spawn_failure_releases_terminals_and_plugins() {
     let mock = MockOsApi::new();
     mock.fail_on_spawn_call(2);
-    let cleared_terminal_ids = mock.cleared_terminal_ids.clone();
+    let probe = mock.clone();
     let (mut pty, plugin_rx) = make_pty_with_plugin_receiver(mock);
     let plugin =
         RunPluginOrAlias::from_url("file:/partial-allocation.wasm", &None, None, None).unwrap();
@@ -553,19 +899,25 @@ fn partial_override_spawn_failure_releases_terminals_and_plugins() {
     });
 
     let error = pty
-        .spawn_terminals_for_layout_override(
+        .override_layout_transaction(
             None,
-            layout,
-            vec![],
             Some(default_shell),
-            plugin_ids,
-            7,
-            Some("Finalized runs".to_owned()),
+            vec![(
+                TabLayoutInfo {
+                    tab_index: 7,
+                    tab_name: Some("Finalized runs".to_owned()),
+                    tiled_layout: layout,
+                    floating_layouts: vec![],
+                    swap_tiled_layouts: None,
+                    swap_floating_layouts: None,
+                },
+                plugin_ids,
+            )],
+            true,
+            true,
             1,
             None,
             None,
-            true,
-            true,
         )
         .expect_err("the second terminal spawn must fail");
 
@@ -573,12 +925,146 @@ fn partial_override_spawn_failure_releases_terminals_and_plugins() {
         format!("{:#}", error).contains("injected EMFILE-like spawn failure"),
         "the original spawn failure must remain in the error chain"
     );
-    assert_eq!(*cleared_terminal_ids.lock().unwrap(), vec![100]);
+    assert_eq!(probe.cleared_terminal_ids(), vec![101, 100]);
     assert!(
         plugin_rx
             .try_iter()
             .any(|(instruction, _)| matches!(instruction, PluginInstruction::Unload(77))),
         "every plugin allocated before the terminal failure must be unloaded"
+    );
+}
+
+#[test]
+fn override_per_tab_failure_rolls_back_current_and_all_prior_tabs() {
+    let mock = MockOsApi::new();
+    mock.fail_on_spawn_call(3);
+    let probe = mock.clone();
+    let (plugin_tx, plugin_rx) = channels::unbounded();
+    let (screen_tx, screen_rx) = channels::unbounded();
+    let mut bus: Bus<PtyInstruction> = Bus::empty();
+    bus.os_input = Some(Box::new(mock));
+    bus.senders.to_plugin = Some(SenderWithContext::new(plugin_tx));
+    bus.senders.to_screen = Some(SenderWithContext::new(screen_tx));
+    bus.senders.should_silently_fail = false;
+    let mut pty = Pty::new(bus, false, None, None);
+    let second_tab_layout = TiledPaneLayout {
+        children: vec![TiledPaneLayout::default(), TiledPaneLayout::default()],
+        ..Default::default()
+    };
+
+    let error = pty
+        .override_layout_transaction(
+            None,
+            None,
+            vec![
+                (
+                    override_tab(0, TiledPaneLayout::default(), vec![]),
+                    override_plugin("file:/first-tab.wasm", 71),
+                ),
+                (
+                    override_tab(1, second_tab_layout, vec![]),
+                    override_plugin("file:/second-tab.wasm", 72),
+                ),
+            ],
+            true,
+            true,
+            1,
+            None,
+            None,
+        )
+        .expect_err("a later tab failure aborts the whole override");
+
+    assert!(format!("{error:#}").contains("injected EMFILE-like spawn failure"));
+    assert_eq!(
+        probe.cleared_terminal_ids(),
+        vec![102, 100, 101],
+        "failed reservation plus prior/current prepared terminals are cleared exactly once"
+    );
+    assert_eq!(unloaded_plugin_ids(&plugin_rx), vec![71, 72]);
+    assert!(
+        screen_rx.try_recv().is_err(),
+        "no partial OverrideLayoutComplete may be sent"
+    );
+}
+
+#[test]
+fn override_final_send_failure_rolls_back_the_union_exactly_once() {
+    let mock = MockOsApi::new();
+    let probe = mock.clone();
+    let (plugin_tx, plugin_rx) = channels::unbounded();
+    let mut bus: Bus<PtyInstruction> = Bus::empty();
+    bus.os_input = Some(Box::new(mock));
+    bus.senders.to_plugin = Some(SenderWithContext::new(plugin_tx));
+    bus.senders.should_silently_fail = false;
+    let mut pty = Pty::new(bus, false, None, None);
+
+    let error = pty
+        .override_layout_transaction(
+            None,
+            None,
+            vec![
+                (
+                    override_tab(0, TiledPaneLayout::default(), vec![]),
+                    override_plugin("file:/first-final-send.wasm", 71),
+                ),
+                (
+                    override_tab(1, TiledPaneLayout::default(), vec![]),
+                    override_plugin("file:/second-final-send.wasm", 72),
+                ),
+            ],
+            true,
+            true,
+            1,
+            None,
+            None,
+        )
+        .expect_err("a missing screen sender must reject the final transaction");
+
+    assert!(format!("{error:#}").contains("failed to get screen sender"));
+    assert_eq!(probe.cleared_terminal_ids(), vec![100, 101]);
+    assert_eq!(unloaded_plugin_ids(&plugin_rx), vec![71, 72]);
+}
+
+#[test]
+fn rollback_aggregates_cleanup_errors_in_stable_order_and_preserves_source() {
+    let mock = MockOsApi::new();
+    mock.fail_clear_terminal_id(2);
+    let probe = mock.clone();
+    let mut bus: Bus<PtyInstruction> = Bus::empty();
+    bus.os_input = Some(Box::new(mock));
+    bus.senders.should_silently_fail = false;
+    let mut pty = Pty::new(bus, false, None, None);
+    let mut allocation_ledger = LayoutAllocationLedger::default();
+    allocation_ledger.track_terminal(2);
+    allocation_ledger.track_terminal(1);
+    allocation_ledger.track_plugin_ids(&override_plugin("file:/cleanup-errors.wasm", 9));
+    allocation_ledger.allocated_ids.insert(PaneId::Plugin(8));
+
+    let error = pty.rollback_partial_layout_allocations(
+        anyhow::Error::new(io::Error::other("primary layout failure")),
+        allocation_ledger,
+    );
+    assert!(
+        error.downcast_ref::<io::Error>().is_some(),
+        "cleanup context must preserve the original source"
+    );
+    let message = error.to_string();
+    let terminal_2 = message
+        .find("Terminal(2):")
+        .expect("terminal cleanup error");
+    let plugin_8 = message.find("Plugin(8):").expect("plugin 8 cleanup error");
+    let plugin_9 = message.find("Plugin(9):").expect("plugin 9 cleanup error");
+    assert!(
+        terminal_2 < plugin_8 && plugin_8 < plugin_9,
+        "cleanup errors must follow deterministic PaneId order: {message}"
+    );
+    assert_eq!(message.matches("Terminal(2):").count(), 1);
+    assert_eq!(message.matches("Plugin(8):").count(), 1);
+    assert_eq!(message.matches("Plugin(9):").count(), 1);
+    assert_eq!(
+        probe.cleared_terminal_ids(),
+        vec![1, 2],
+        "every terminal cleanup is attempted once despite failures"
     );
 }
 

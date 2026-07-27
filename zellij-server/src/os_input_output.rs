@@ -1,4 +1,5 @@
 pub use crate::os_input_output_api::AsyncReader;
+#[cfg(test)]
 pub(crate) use crate::os_input_output_api::NullAsyncReader;
 use crate::{ClientId, panes::PaneId};
 
@@ -136,25 +137,35 @@ fn build_command(
     (cmd, failover_cmd)
 }
 
-fn resolve_reserved_terminal_spawn<T>(
+pub(crate) fn resolve_reserved_terminal_spawn<T>(
     terminal_id: u32,
     spawn_result: Result<T>,
     clear_terminal_id: impl FnOnce(u32),
 ) -> Result<T> {
     match spawn_result {
         Ok(spawned_terminal) => Ok(spawned_terminal),
-        Err(error) => {
-            let command_not_found_owns_reservation = matches!(
-                error.downcast_ref::<ZellijError>(),
-                Some(ZellijError::CommandNotFound {
-                    terminal_id: missing_command_terminal_id,
-                    ..
-                }) if *missing_command_terminal_id == terminal_id
-            );
-            if !command_not_found_owns_reservation {
+        Err(error) => match error.downcast_ref::<ZellijError>() {
+            Some(ZellijError::CommandNotFound {
+                terminal_id: missing_command_terminal_id,
+                ..
+            }) if *missing_command_terminal_id == terminal_id => Err(error),
+            Some(ZellijError::CommandNotFound {
+                terminal_id: missing_command_terminal_id,
+                command,
+            }) => {
+                let missing_command_terminal_id = *missing_command_terminal_id;
+                let command = command.clone();
                 clear_terminal_id(terminal_id);
-            }
-            Err(error)
+                Err(anyhow!(
+                    "terminal spawn protocol violation: reserved terminal {terminal_id}, \
+                         but CommandNotFound reported foreign terminal \
+                         {missing_command_terminal_id} for command {command}"
+                ))
+            },
+            _ => {
+                clear_terminal_id(terminal_id);
+                Err(error)
+            },
         },
     }
 }
