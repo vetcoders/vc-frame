@@ -663,7 +663,10 @@ class EvidenceAndCleanupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
             marker = root / "ready"
-            script = f"printf ready > {shlex.quote(str(marker))}; exec /bin/sleep 300"
+            script = (
+                f"/bin/sleep 300 & child=$!; "
+                f"printf %s \"$child\" > {shlex.quote(str(marker))}; wait"
+            )
             real_killpg = os.killpg
             signalled_groups: list[int] = []
 
@@ -675,6 +678,16 @@ class EvidenceAndCleanupTests(unittest.TestCase):
             def kill_owned_group(group: int, signal_number: int) -> None:
                 signalled_groups.append(group)
                 real_killpg(group, signal_number)
+
+            def record_stopped_child(
+                state: dict[str, object],
+            ) -> dict[str, object]:
+                child_pid = int(marker.read_text(encoding="utf-8"))
+                return {
+                    **state,
+                    "child_pid": child_pid,
+                    "child_state": MODULE.process_state(child_pid),
+                }
 
             with mock.patch.object(
                 MODULE.os,
@@ -688,16 +701,16 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                     scenario="unit-owned-group-killpoint",
                     artifact_root=root,
                     observe=observe,
-                    before_interrupt=lambda state: {**state, "callback": "ran"},
+                    before_interrupt=record_stopped_child,
                     signal_process_group=True,
                     slice_seconds=0.001,
                     max_slices=1_000,
                 )
 
             self.assertEqual(result.returncode, -signal.SIGKILL)
-            self.assertEqual(
-                result.observed_state,
-                {"marker": "ready", "callback": "ran"},
+            self.assertIn(
+                "T",
+                str(result.observed_state.get("child_state")),
             )
             self.assertTrue(signalled_groups)
             self.assertEqual(set(signalled_groups), {result.pid})

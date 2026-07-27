@@ -1682,7 +1682,7 @@ def wait_for_process_stop(
     signal_process_group: bool = False,
 ) -> None:
     deadline = time.monotonic() + timeout
-    last_state: str | None = None
+    last_state: object = None
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise AssertionError(
@@ -1703,14 +1703,24 @@ def wait_for_process_stop(
                 raise AssertionError(
                     f"killpoint process {process.pid} exited before SIGSTOP"
                 ) from error
-        state = process_state(process.pid)
-        if state is None:
-            raise AssertionError(
-                f"killpoint process {process.pid} exited before SIGSTOP"
-            )
-        last_state = state
-        if "T" in state:
-            return
+        if signal_process_group:
+            members = process_group_members(process.pid)
+            if not members:
+                raise AssertionError(
+                    f"killpoint process group {process.pid} disappeared before SIGSTOP"
+                )
+            last_state = members
+            if all("T" in str(member.get("state", "")) for member in members):
+                return
+        else:
+            state = process_state(process.pid)
+            if state is None:
+                raise AssertionError(
+                    f"killpoint process {process.pid} exited before SIGSTOP"
+                )
+            last_state = state
+            if "T" in state:
+                return
         time.sleep(0.001)
     raise AssertionError(
         f"killpoint process {process.pid} did not enter stopped state "
