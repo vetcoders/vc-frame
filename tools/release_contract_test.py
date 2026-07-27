@@ -100,6 +100,8 @@ class ReleaseContractTests(unittest.TestCase):
             'if [ "$build_git_sha" != "$expected_git_sha" ]',
             'verify_gpg_signature "$manifest_file"',
             "MANIFEST_GIT_SHA",
+            "validate_configuration",
+            "VCFRAME_REQUIRE_GPG must be exactly 0 or 1",
         ):
             self.assertIn(required, installer)
         self.assertLess(
@@ -111,8 +113,10 @@ class ReleaseContractTests(unittest.TestCase):
             "pinned signing subkey installs",
             "foreign signer in imported bundle fails closed",
             "missing manifest signature fails closed",
+            "pinned manifest with foreign archive signer fails closed",
             "pinned signed old-binary replay preserves existing install",
             "pinned signed wrong-commit binary preserves existing install",
+            "VCFRAME_REQUIRE_GPG=$display_value is rejected before downloads",
         ):
             self.assertIn(dynamic_case, installer_test)
 
@@ -663,7 +667,7 @@ class ReleaseContractTests(unittest.TestCase):
             'git cat-file -t "refs/tags/$tag"',
             'git verify-tag --raw "refs/tags/$tag"',
             'git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main',
-            "tag_primary_fingerprint",
+            "tag_primary_fingerprints",
             "tools/release_sync.py notes --output",
             "releases/tags/$tag",
             "--method DELETE",
@@ -674,11 +678,24 @@ class ReleaseContractTests(unittest.TestCase):
             'sh "$release_dir/install.sh"',
             "manifest.json.sig",
             'printf \'  "git_sha": "%s",\\n\' "$git_sha"',
-            "manifest_primary_fingerprint",
+            "manifest_primary_fingerprints",
             'test "${#signatures[@]}" -eq 9',
             'test "$manifest_git_sha" = "$GITHUB_SHA"',
+            'cmp -s "$asset_contract_dir/expected" "$asset_contract_dir/actual"',
+            "release asset set does not exactly match the canonical contract",
         ):
             self.assertIn(required, workflow)
+        self.assertNotIn("for asset in $required", workflow)
+        self.assertNotRegex(
+            workflow,
+            r"(?m)^.*(?:VALIDSIG|\bfpr\b).*\bexit\b",
+            "fingerprint parsers must collect all candidates before exact comparison",
+        )
+        self.assertEqual(
+            workflow.count('want_primary_fingerprint && $1 == "fpr"'),
+            3,
+            "all public-key bundle checks must collect every primary fingerprint",
+        )
         self.assertEqual(
             workflow.count('--local-user "$expected_fingerprint"'),
             4,
@@ -689,8 +706,8 @@ class ReleaseContractTests(unittest.TestCase):
             5,
             "canary, artifact lanes, manifest, and final verification must expose VALIDSIG",
         )
-        self.assertIn("canary_primary_fingerprint", workflow)
-        self.assertIn("signature_primary_fingerprint", workflow)
+        self.assertIn("canary_primary_fingerprints", workflow)
+        self.assertIn("signature_primary_fingerprints", workflow)
 
         release_docs = read("docs/RELEASE.md")
         self.assertIn("make release-preflight", release_docs)

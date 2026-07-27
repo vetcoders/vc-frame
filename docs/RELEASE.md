@@ -73,6 +73,8 @@ from the same untrusted location is not treated as proof of identity. The
 installer authenticates `manifest.json.sig` first, then requires the extracted
 binary's embedded full `git_sha` to equal the signed manifest. A valid old
 archive signature therefore cannot be replayed as a newer release.
+`VCFRAME_REQUIRE_GPG` is an exact `0|1` enum: unset means strict `1`, while an
+empty value, `true`, `2`, or any other typo aborts before network access.
 
 GPG and OIDC have different jobs. GPG gives users a stable, offline-compatible
 VetCoders trust root. GitHub OIDC gives each CI build a short-lived identity
@@ -109,7 +111,8 @@ Run **Actions → Release → Run workflow**. The workflow:
 3. runs `make semgrep` and `make ci`;
 4. creates draft `candidate-<run-id>`;
 5. builds, signs, and OIDC-attests the full matrix;
-6. verifies the complete asset list, all 12 checksums, all 8 Unix archive
+6. verifies the exact canonical asset set with no missing or extra files, all
+   12 checksums, all 8 Unix archive
    signatures plus the signed manifest, the published key fingerprint, the
    manifest's exact `GITHUB_SHA`, and every attestation;
 7. leaves the candidate as a draft.
@@ -246,8 +249,9 @@ foreign-product manifest, version-mismatched manifest, manifest without this
 target or full commit identity, missing manifest signature, missing archive,
 missing checksum sidecar, checksum mismatch, strict mode without a pinned
 fingerprint, strict mode with no published key, a foreign signer included in
-the imported key bundle, an old signed binary replay, a current-version binary
-from the wrong commit, and a binary that fails any part of the post-install
+the imported key bundle, a pinned manifest paired with a foreign-signed archive,
+invalid `VCFRAME_REQUIRE_GPG` values, an old signed binary replay, a
+current-version binary from the wrong commit, and a binary that fails any part of the post-install
 smoke contract (`--version`, `--build-info`, `setup --check`, or a session
 command). Replay failures additionally prove an existing `vc-frame` remains
 byte-for-byte untouched with no staging debris. The positive control asserts
