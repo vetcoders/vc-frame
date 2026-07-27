@@ -465,7 +465,7 @@ def validate_results(
         raise InventoryError("resolved p/rust rules drifted; refresh and re-adjudicate")
     results = payload.get("results", [])
     for result in results:
-        adjudicate(result)
+        validated_source_location(result)
     current = {result["extra"]["fingerprint"]: result for result in results}
     if len(current) != len(results):
         raise InventoryError("Semgrep produced duplicate result fingerprints")
@@ -483,6 +483,8 @@ def validate_results(
             row = active[fingerprint]
             details.append(f"missing {row['id']} {row['path']}:{row['line']}")
         raise InventoryError("finding drift: " + "; ".join(details))
+    for result in results:
+        adjudicate(result)
     target_count = len(payload.get("paths", {}).get("scanned", []))
     if target_count < baseline["target_count"]:
         raise InventoryError(f"target coverage regressed: {target_count} < {baseline['target_count']}")
