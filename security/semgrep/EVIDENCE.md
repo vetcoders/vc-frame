@@ -1,8 +1,8 @@
 # Semgrep adjudication evidence
 
 Receiver baseline: Semgrep 1.164.0, explicit registry pack `p/rust`, 60 resolved
-rules, 57 rules executed over 376 targets, 319 blocking findings and zero scan
-errors at `5557bf16`. The exact raw JSON hash is pinned in `baseline.json`;
+rules, 57 rules executed over 376 targets, 326 blocking findings and zero scan
+errors at `f41af931`. The exact raw JSON hash is pinned in `baseline.json`;
 `findings.jsonl` is the checked-in machine-verifiable verdict surface.
 The gate also hashes Semgrep's normalized resolved rule representation, so a
 registry rule-body change fails even when rule IDs stay the same. Scanner
@@ -58,12 +58,16 @@ compiled into production paths.
 ## Windows platform FFI
 
 Windows findings are narrow Win32/ConPTY adapters. Raw handles and tagged
-unions are checked or wrapped before safe Rust code observes them.
+unions are checked or wrapped before safe Rust code observes them. Process and
+pseudoconsole handles stay under RAII guards until fallible monitor-thread
+handoff succeeds; cleanup calls consume only the exact guarded resources.
 
 ## Unix platform FFI
 
 Unix findings are narrow terminal/libc adapters. Descriptors, pointers and
 return values are checked at the boundary and converted to owned safe types.
+The new test-only boundary injects a deliberate `EMFILE` spawn failure to prove
+the child and PTY descriptors are reaped without publishing a terminal owner.
 
 ## Temporary paths
 
