@@ -837,6 +837,127 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                 "failed",
             )
 
+    def test_legal_grandchild_tree_uses_preorder_stop_and_postorder_resume_kill(
+        self,
+    ) -> None:
+        leader_pid = 9_801
+        child_pid = 9_802
+        grandchild_pid = 9_803
+        topology = [
+            {
+                "pid": leader_pid,
+                "ppid": 1,
+                "command": "owned-leader",
+            },
+            {
+                "pid": child_pid,
+                "ppid": leader_pid,
+                "command": "owned-child",
+            },
+            {
+                "pid": grandchild_pid,
+                "ppid": child_pid,
+                "command": "owned-grandchild",
+            },
+        ]
+        cases = (
+            (
+                "stop",
+                "S",
+                MODULE.stop_owned_process_group,
+                [
+                    (leader_pid, signal.SIGSTOP),
+                    (child_pid, signal.SIGSTOP),
+                    (grandchild_pid, signal.SIGSTOP),
+                ],
+            ),
+            (
+                "continue",
+                "T",
+                MODULE.continue_owned_process_group,
+                [
+                    (grandchild_pid, signal.SIGCONT),
+                    (child_pid, signal.SIGCONT),
+                    (leader_pid, signal.SIGCONT),
+                ],
+            ),
+            (
+                "kill",
+                "T",
+                MODULE.kill_owned_process_group,
+                [
+                    (grandchild_pid, signal.SIGKILL),
+                    (child_pid, signal.SIGKILL),
+                    (leader_pid, signal.SIGKILL),
+                ],
+            ),
+        )
+        for operation, initial_state, action, expected in cases:
+            with self.subTest(operation=operation):
+                process = mock.Mock()
+                process.pid = leader_pid
+                process.poll.return_value = None
+                states = {
+                    member["pid"]: initial_state for member in topology
+                }
+                signals: list[tuple[int, int]] = []
+
+                def inventory(_group_id: int) -> list[dict[str, object]]:
+                    return [
+                        {
+                            **member,
+                            "pgid": leader_pid,
+                            "uid": 501,
+                            "sid": leader_pid,
+                            "sid_errno": None,
+                            "sid_error": None,
+                            "state": states[member["pid"]],
+                        }
+                        for member in topology
+                    ]
+
+                def transition(pid: int, signal_number: int) -> None:
+                    signals.append((pid, signal_number))
+                    states[pid] = {
+                        signal.SIGSTOP: "T",
+                        signal.SIGCONT: "S",
+                        signal.SIGKILL: "Z",
+                    }[signal_number]
+
+                process.send_signal.side_effect = lambda signal_number: transition(
+                    leader_pid, signal_number
+                )
+                process.kill.side_effect = lambda: transition(
+                    leader_pid, signal.SIGKILL
+                )
+                with mock.patch.object(
+                    MODULE,
+                    "process_group_members",
+                    side_effect=inventory,
+                ), mock.patch.object(
+                    MODULE.os,
+                    "getpgid",
+                    return_value=leader_pid,
+                ), mock.patch.object(
+                    MODULE.os,
+                    "getsid",
+                    return_value=leader_pid,
+                ), mock.patch.object(
+                    MODULE.os,
+                    "geteuid",
+                    return_value=501,
+                ), mock.patch.object(
+                    MODULE.os,
+                    "kill",
+                    side_effect=transition,
+                ), mock.patch.object(
+                    MODULE.os,
+                    "killpg",
+                    side_effect=AssertionError("must not signal a process group"),
+                ):
+                    action(process, timeout=1)
+                self.assertEqual(signals, expected)
+
     def test_group_continue_resumes_revalidated_descendants_before_leader(
         self,
     ) -> None:
@@ -909,58 +1030,129 @@ class EvidenceAndCleanupTests(unittest.TestCase):
             [
                 mock.call(9_402, signal.SIGCONT),
                 mock.call(9_403, signal.SIGCONT),
-                mock.call(process.pid, signal.SIGCONT),
+            ],
+        )
+        process.send_signal.assert_called_once_with(signal.SIGCONT)
+
+    def test_group_continue_ignores_new_running_child_of_resumed_node(self) -> None:
+        process = mock.Mock()
+        process.pid = 9_751
+        process.poll.return_value = None
+        states = {
+            process.pid: "T",
+            9_752: "T",
+        }
+        parents = {
+            process.pid: 1,
+            9_752: process.pid,
+        }
+        signals: list[tuple[int, int]] = []
+
+        def inventory(_group_id: int) -> list[dict[str, object]]:
+            return [
+                {
+                    "pid": pid,
+                    "ppid": parents[pid],
+                    "pgid": process.pid,
+                    "uid": 501,
+                    "sid": process.pid,
+                    "sid_errno": None,
+                    "sid_error": None,
+                    "state": state,
+                    "command": f"owned-{pid}",
+                }
+                for pid, state in states.items()
+            ]
+
+        def resume_child(pid: int, signal_number: int) -> None:
+            signals.append((pid, signal_number))
+            states[pid] = "S"
+            states[9_753] = "S"
+            parents[9_753] = pid
+
+        process.send_signal.side_effect = lambda signal_number: signals.append(
+            (process.pid, signal_number)
+        )
+        with mock.patch.object(
+            MODULE,
+            "process_group_members",
+            side_effect=inventory,
+        ), mock.patch.object(
+            MODULE.os,
+            "getpgid",
+            return_value=process.pid,
+        ), mock.patch.object(
+            MODULE.os,
+            "getsid",
+            return_value=process.pid,
+        ), mock.patch.object(
+            MODULE.os,
+            "geteuid",
+            return_value=501,
+        ), mock.patch.object(
+            MODULE.os,
+            "kill",
+            side_effect=resume_child,
+        ), mock.patch.object(
+            MODULE.os,
+            "killpg",
+            side_effect=AssertionError("must not signal a process group"),
+        ):
+            MODULE.continue_owned_process_group(process)
+        self.assertEqual(
+            signals,
+            [
+                (9_752, signal.SIGCONT),
+                (process.pid, signal.SIGCONT),
             ],
         )
 
-    def test_group_topology_rejects_grandchild_and_orphan_before_signal(
+    def test_group_topology_rejects_disconnected_and_cycle_live_without_signal(
         self,
     ) -> None:
-        process = mock.Mock()
-        process.pid = 9_701
-        process.poll.return_value = None
-        leader = {
-            "pid": process.pid,
-            "ppid": 1,
-            "pgid": process.pid,
-            "uid": 501,
-            "sid": process.pid,
-            "sid_errno": None,
-            "sid_error": None,
-            "state": "T",
-            "command": "owned-leader",
-        }
-        direct_child = {
-            "pid": 9_702,
-            "ppid": process.pid,
-            "pgid": process.pid,
-            "uid": 501,
-            "sid": process.pid,
-            "sid_errno": None,
-            "sid_error": None,
-            "state": "T",
-            "command": "owned-child",
-        }
-        for topology, invalid_member in (
+        for topology, descendants, invalid_pid in (
             (
-                "grandchild",
-                {
-                    **direct_child,
-                    "pid": 9_703,
-                    "ppid": direct_child["pid"],
-                    "command": "owned-grandchild",
-                },
+                "disconnected",
+                [(9_702, 1)],
+                9_702,
             ),
             (
-                "orphan",
-                {
-                    **direct_child,
-                    "pid": 9_704,
-                    "ppid": 1,
-                    "command": "owned-orphan",
-                },
+                "cycle",
+                [(9_703, 9_704), (9_704, 9_703)],
+                9_703,
             ),
         ):
+            process = mock.Mock()
+            process.pid = 9_701
+            process.poll.return_value = None
+            leader = {
+                "pid": process.pid,
+                "ppid": 1,
+                "pgid": process.pid,
+                "uid": 501,
+                "sid": process.pid,
+                "sid_errno": None,
+                "sid_error": None,
+                "state": "T",
+                "command": "owned-leader",
+            }
+            members = [
+                leader,
+                *[
+                    {
+                        "pid": pid,
+                        "ppid": ppid,
+                        "pgid": process.pid,
+                        "uid": 501,
+                        "sid": process.pid,
+                        "sid_errno": None,
+                        "sid_error": None,
+                        "state": "T",
+                        "command": f"owned-{topology}",
+                    }
+                    for pid, ppid in descendants
+                ],
+            ]
             with self.subTest(topology=topology), mock.patch.object(
                 MODULE.os,
                 "getpgid",
@@ -976,8 +1168,8 @@ class EvidenceAndCleanupTests(unittest.TestCase):
             ), mock.patch.object(
                 MODULE,
                 "process_group_members",
-                return_value=[leader, direct_child, invalid_member],
-            ), mock.patch.object(
+                return_value=members,
+            ) as inventory, mock.patch.object(
                 MODULE.os,
                 "kill",
             ) as exact_kill, mock.patch.object(
@@ -987,11 +1179,124 @@ class EvidenceAndCleanupTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(
                     MODULE.OwnedProcessGroupRefusal,
-                    rf"invalid_members=.*{invalid_member['pid']}.*"
-                    rf"'ppid': {invalid_member['ppid']}",
+                    rf"persistently ambiguous process group {process.pid}: "
+                    rf".*ambiguous_members=.*{invalid_pid}.*topology_error.*"
+                    rf"observations=",
                 ):
                     MODULE.continue_owned_process_group(process)
+            self.assertEqual(inventory.call_count, 4)
             exact_kill.assert_not_called()
+            process.send_signal.assert_not_called()
+
+    def test_transient_disconnected_live_member_disappears_without_signal(
+        self,
+    ) -> None:
+        process = mock.Mock()
+        process.pid = 9_721
+        process.poll.return_value = None
+        leader = {
+            "pid": process.pid,
+            "ppid": 1,
+            "pgid": process.pid,
+            "uid": 501,
+            "sid": process.pid,
+            "sid_errno": None,
+            "sid_error": None,
+            "state": "T",
+            "command": "owned-leader",
+        }
+        disconnected = {
+            "pid": 9_722,
+            "ppid": 1,
+            "pgid": process.pid,
+            "uid": 501,
+            "sid": process.pid,
+            "sid_errno": None,
+            "sid_error": None,
+            "state": "S",
+            "command": "exiting-child",
+        }
+        with mock.patch.object(
+            MODULE.os,
+            "getpgid",
+            return_value=process.pid,
+        ), mock.patch.object(
+            MODULE.os,
+            "getsid",
+            return_value=process.pid,
+        ), mock.patch.object(
+            MODULE.os,
+            "geteuid",
+            return_value=501,
+        ), mock.patch.object(
+            MODULE,
+            "process_group_members",
+            side_effect=[[leader, disconnected], [leader]],
+        ) as inventory, mock.patch.object(
+            MODULE.time,
+            "sleep",
+        ) as pause, mock.patch.object(
+            MODULE.os,
+            "kill",
+        ) as exact_kill:
+            validated = MODULE.validated_owned_process_group_members(process)
+        self.assertEqual([member["pid"] for member in validated], [process.pid])
+        self.assertEqual(inventory.call_count, 2)
+        pause.assert_called_once_with(0.001)
+        exact_kill.assert_not_called()
+        process.send_signal.assert_not_called()
+
+    def test_group_topology_accepts_detached_zombie_as_evidence_only(self) -> None:
+        process = mock.Mock()
+        process.pid = 9_711
+        process.poll.return_value = None
+        members = [
+            {
+                "pid": process.pid,
+                "ppid": 1,
+                "pgid": process.pid,
+                "uid": 501,
+                "sid": process.pid,
+                "sid_errno": None,
+                "sid_error": None,
+                "state": "T",
+                "command": "owned-leader",
+            },
+            {
+                "pid": 9_712,
+                "ppid": 1,
+                "pgid": process.pid,
+                "uid": 501,
+                "sid": None,
+                "sid_errno": errno.ESRCH,
+                "sid_error": "ProcessLookupError: gone",
+                "state": "Z",
+                "command": "(owned-zombie)",
+            },
+        ]
+        with mock.patch.object(
+            MODULE.os,
+            "getpgid",
+            return_value=process.pid,
+        ), mock.patch.object(
+            MODULE.os,
+            "getsid",
+            return_value=process.pid,
+        ), mock.patch.object(
+            MODULE.os,
+            "geteuid",
+            return_value=501,
+        ), mock.patch.object(
+            MODULE,
+            "process_group_members",
+            return_value=members,
+        ), mock.patch.object(MODULE.os, "kill") as exact_kill:
+            validated = MODULE.validated_owned_process_group_members(process)
+        detached = next(member for member in validated if member["pid"] == 9_712)
+        self.assertIsNone(detached["depth"])
+        self.assertIn("disconnected", detached["topology_error"])
+        exact_kill.assert_not_called()
+        process.send_signal.assert_not_called()
 
     def test_group_continue_refuses_unstopped_revalidated_target_without_signal(
         self,
@@ -1008,6 +1313,7 @@ class EvidenceAndCleanupTests(unittest.TestCase):
             "sid_errno": None,
             "sid_error": None,
             "state": "T",
+            "depth": 0,
             "command": "owned-leader",
         }
         stopped_child = {
@@ -1019,6 +1325,7 @@ class EvidenceAndCleanupTests(unittest.TestCase):
             "sid_errno": None,
             "sid_error": None,
             "state": "T",
+            "depth": 1,
             "command": "owned-child",
         }
         running_child = {**stopped_child, "state": "S"}
@@ -1073,6 +1380,102 @@ class EvidenceAndCleanupTests(unittest.TestCase):
         process.poll.assert_called_once_with()
         stop_group.assert_not_called()
         exact_kill.assert_not_called()
+
+    def test_stopped_target_still_requires_its_pinned_parent_stopped(self) -> None:
+        process = mock.Mock()
+        process.pid = 9_731
+        leader = {
+            "pid": process.pid,
+            "ppid": 1,
+            "state": "S",
+            "depth": 0,
+        }
+        stopped_child = {
+            "pid": 9_732,
+            "ppid": process.pid,
+            "state": "T",
+            "depth": 1,
+        }
+        with mock.patch.object(
+            MODULE,
+            "validated_owned_process_group_members",
+            return_value=[leader, stopped_child],
+        ):
+            with self.assertRaisesRegex(
+                MODULE.OwnedProcessGroupRefusal,
+                r"lost stopped parent 9731",
+            ):
+                MODULE.wait_for_owned_member_quiescence(
+                    process,
+                    stopped_child["pid"],
+                    deadline=MODULE.time.monotonic() + 1,
+                    expected_stopped_parent=process.pid,
+                    terminal=False,
+                )
+
+    def test_pinned_esrch_accepts_only_a_refreshed_zombie_proof(self) -> None:
+        process = mock.Mock()
+        process.pid = 9_741
+        leader = {
+            "pid": process.pid,
+            "ppid": 1,
+            "state": "T",
+            "depth": 0,
+        }
+        running_child = {
+            "pid": 9_742,
+            "ppid": process.pid,
+            "state": "S",
+            "depth": 1,
+        }
+        zombie_child = {
+            **running_child,
+            "ppid": 1,
+            "state": "Z",
+            "depth": None,
+        }
+        lookup_error = ProcessLookupError(errno.ESRCH, "gone")
+        for outcome, refreshed, accepted in (
+            ("zombie", [leader, zombie_child], True),
+            ("missing", [leader], False),
+        ):
+            with self.subTest(outcome=outcome), mock.patch.object(
+                MODULE,
+                "validated_owned_process_group_members",
+                side_effect=[[leader, running_child], refreshed],
+            ), mock.patch.object(
+                MODULE.os,
+                "kill",
+                side_effect=lookup_error,
+            ) as exact_kill:
+                if accepted:
+                    self.assertFalse(
+                        MODULE.signal_exact_owned_group_member(
+                            process,
+                            running_child["pid"],
+                            signal.SIGSTOP,
+                            deadline=MODULE.time.monotonic() + 1,
+                            require_running=True,
+                            expected_stopped_parent=process.pid,
+                        )
+                    )
+                else:
+                    with self.assertRaisesRegex(
+                        MODULE.OwnedProcessGroupRefusal,
+                        r"without a zombie proof",
+                    ):
+                        MODULE.signal_exact_owned_group_member(
+                            process,
+                            running_child["pid"],
+                            signal.SIGSTOP,
+                            deadline=MODULE.time.monotonic() + 1,
+                            require_running=True,
+                            expected_stopped_parent=process.pid,
+                        )
+            exact_kill.assert_called_once_with(
+                running_child["pid"],
+                signal.SIGSTOP,
+            )
 
     def test_transient_non_zombie_esrch_disappears_without_signal(self) -> None:
         process = mock.Mock()

@@ -1725,6 +1725,73 @@ def validate_owned_process_group_leader(
         )
 
 
+def annotate_owned_process_group_depths(
+    process: subprocess.Popen[bytes],
+    members: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Attach PPID-tree depth and reject every unresolved live ancestry."""
+    annotated = [dict(member) for member in members]
+    by_pid: dict[int, dict[str, object]] = {}
+    duplicate_pids: set[int] = set()
+    for member in annotated:
+        pid = int(member.get("pid", -1))
+        if pid in by_pid:
+            duplicate_pids.add(pid)
+        by_pid[pid] = member
+
+    invalid: list[dict[str, object]] = []
+    for member in annotated:
+        pid = int(member.get("pid", -1))
+        if pid in duplicate_pids:
+            member["depth"] = None
+            member["topology_error"] = f"duplicate pid {pid}"
+            invalid.append(dict(member))
+            continue
+        if pid == process.pid:
+            member["depth"] = 0
+            member["ancestry"] = [process.pid]
+            continue
+
+        ancestry = [pid]
+        visited: set[int] = set()
+        cursor = pid
+        depth: int | None = None
+        topology_error: str | None = None
+        while cursor != process.pid:
+            if cursor in visited:
+                topology_error = f"cycle through pid {cursor}"
+                break
+            visited.add(cursor)
+            node = by_pid.get(cursor)
+            if node is None:
+                topology_error = f"missing member pid {cursor}"
+                break
+            try:
+                parent_pid = int(node.get("ppid", -1))
+            except (TypeError, ValueError):
+                topology_error = f"invalid ppid {node.get('ppid')!r} for pid {cursor}"
+                break
+            ancestry.append(parent_pid)
+            if parent_pid == process.pid:
+                depth = len(ancestry) - 1
+                break
+            if parent_pid not in by_pid:
+                topology_error = (
+                    f"disconnected at pid {cursor}: parent {parent_pid} "
+                    "is not in the owned group"
+                )
+                break
+            cursor = parent_pid
+
+        member["depth"] = depth
+        member["ancestry"] = ancestry
+        if topology_error is not None:
+            member["topology_error"] = topology_error
+            if "Z" not in str(member.get("state", "")):
+                invalid.append(dict(member))
+    return annotated, invalid
+
+
 def validated_owned_process_group_members(
     process: subprocess.Popen[bytes],
     *,
@@ -1738,35 +1805,54 @@ def validated_owned_process_group_members(
     for observation_number in range(max_observations):
         validate_owned_process_group_leader(process)
         members = process_group_members(process.pid)
+        members, topology_invalid = annotate_owned_process_group_depths(
+            process, members
+        )
         observations.append(members)
         leader = next(
             (member for member in members if int(member["pid"]) == process.pid),
             None,
         )
-        ambiguous_members = [
+        sid_ambiguous_members = [
             member
             for member in members
             if member.get("sid") is None
             and member.get("sid_errno") == errno.ESRCH
             and "Z" not in str(member.get("state", ""))
         ]
-        ambiguous_pids = {
-            int(member["pid"]) for member in ambiguous_members
+        sid_ambiguous_pids = {
+            int(member["pid"]) for member in sid_ambiguous_members
         }
-        # The triage runtime spawns command helpers directly. A deeper or
-        # orphaned topology has no PID-safe resume order without pidfds.
+        members_by_pid = {int(member["pid"]): member for member in members}
+        unstable_parent_members = [
+            member
+            for member in members
+            if int(member["pid"]) != process.pid
+            and "Z" not in str(member.get("state", ""))
+            and (
+                parent := members_by_pid.get(int(member.get("ppid", -1)))
+            )
+            is not None
+            and "Z" in str(parent.get("state", ""))
+        ]
+        ambiguous_members = list(
+            {
+                int(member["pid"]): member
+                for member in [
+                    *sid_ambiguous_members,
+                    *unstable_parent_members,
+                    *topology_invalid,
+                ]
+            }.values()
+        )
         invalid_members = [
             member
             for member in members
             if int(member.get("pgid", -1)) != process.pid
             or int(member.get("uid", -1)) != expected_uid
             or (
-                int(member.get("pid", -1)) != process.pid
-                and int(member.get("ppid", -1)) != process.pid
-            )
-            or (
                 member.get("sid") != process.pid
-                and int(member.get("pid", -1)) not in ambiguous_pids
+                and int(member.get("pid", -1)) not in sid_ambiguous_pids
                 and not (
                     "Z" in str(member.get("state", ""))
                     and member.get("sid") is None
@@ -1804,7 +1890,13 @@ def signal_exact_owned_group_member(
     *,
     deadline: float,
     require_stopped: bool = False,
+    require_running: bool = False,
+    expected_stopped_parent: int | None = None,
 ) -> bool:
+    require(
+        not (require_stopped and require_running),
+        "exact owned signal cannot require stopped and running simultaneously",
+    )
     signal_name = signal.Signals(signal_number).name
     last_members: list[dict[str, object]] = []
     while True:
@@ -1818,9 +1910,17 @@ def signal_exact_owned_group_member(
             None,
         )
         if member is None:
+            if expected_stopped_parent is not None:
+                raise OwnedProcessGroupRefusal(
+                    f"refusing {signal_name} for missing pinned member "
+                    f"{member_pid}: stopped parent={expected_stopped_parent}, "
+                    f"members={last_members!r}"
+                )
             return False
         member_state = str(member.get("state", ""))
         if "Z" in member_state:
+            return False
+        if require_running and "T" in member_state:
             return False
         if require_stopped and "T" not in member_state:
             raise OwnedProcessGroupRefusal(
@@ -1828,10 +1928,51 @@ def signal_exact_owned_group_member(
                 f"revalidated state is {member_state!r}, expected stopped; "
                 f"member={member!r}, members={last_members!r}"
             )
+        if expected_stopped_parent is not None:
+            parent_pid = int(member.get("ppid", -1))
+            parent = next(
+                (
+                    current
+                    for current in last_members
+                    if int(current["pid"]) == expected_stopped_parent
+                ),
+                None,
+            )
+            if (
+                parent_pid != expected_stopped_parent
+                or parent is None
+                or "T" not in str(parent.get("state", ""))
+            ):
+                raise OwnedProcessGroupRefusal(
+                    f"refusing {signal_name} for exact owned member {member_pid}: "
+                    f"stabilizing parent {expected_stopped_parent} is not stopped; "
+                    f"member={member!r}, parent={parent!r}, "
+                    f"members={last_members!r}"
+                )
         try:
             os.kill(member_pid, signal_number)
             return True
-        except ProcessLookupError:
+        except ProcessLookupError as error:
+            if expected_stopped_parent is not None:
+                refreshed = validated_owned_process_group_members(process)
+                refreshed_member = next(
+                    (
+                        current
+                        for current in refreshed
+                        if int(current["pid"]) == member_pid
+                    ),
+                    None,
+                )
+                if refreshed_member is not None and "Z" in str(
+                    refreshed_member.get("state", "")
+                ):
+                    return False
+                raise OwnedProcessGroupRefusal(
+                    f"exact pinned member {member_pid} returned ESRCH for "
+                    f"{signal_name} without a zombie proof: "
+                    f"parent={expected_stopped_parent}, "
+                    f"member={refreshed_member!r}, members={refreshed!r}"
+                ) from error
             return False
         except PermissionError as error:
             if error.errno != errno.EPERM or time.monotonic() >= deadline:
@@ -1842,38 +1983,191 @@ def signal_exact_owned_group_member(
             time.sleep(0.001)
 
 
+def wait_for_owned_member_quiescence(
+    process: subprocess.Popen[bytes],
+    member_pid: int,
+    *,
+    deadline: float,
+    expected_stopped_parent: int | None,
+    terminal: bool,
+) -> None:
+    """Observe a signalled PID only while its immediate parent stays stopped."""
+    last_members: list[dict[str, object]] = []
+    while time.monotonic() < deadline:
+        last_members = validated_owned_process_group_members(process)
+        member = next(
+            (
+                current
+                for current in last_members
+                if int(current["pid"]) == member_pid
+            ),
+            None,
+        )
+        if member is None:
+            parent = (
+                next(
+                    (
+                        current
+                        for current in last_members
+                        if int(current["pid"]) == expected_stopped_parent
+                    ),
+                    None,
+                )
+                if expected_stopped_parent is not None
+                else None
+            )
+            if (
+                expected_stopped_parent is not None
+                and parent is not None
+                and "T" in str(parent.get("state", ""))
+            ):
+                time.sleep(0.001)
+                continue
+            raise OwnedProcessGroupRefusal(
+                f"owned member {member_pid} disappeared before observed "
+                f"{'terminal' if terminal else 'stopped'} state: "
+                f"parent={parent!r}, members={last_members!r}"
+            )
+        state = str(member.get("state", ""))
+        if "Z" in state:
+            return
+        if expected_stopped_parent is not None:
+            parent = next(
+                (
+                    current
+                    for current in last_members
+                    if int(current["pid"]) == expected_stopped_parent
+                ),
+                None,
+            )
+            if (
+                int(member.get("ppid", -1)) != expected_stopped_parent
+                or parent is None
+                or "T" not in str(parent.get("state", ""))
+            ):
+                raise OwnedProcessGroupRefusal(
+                    f"owned member {member_pid} lost stopped parent "
+                    f"{expected_stopped_parent} before reaching "
+                    f"{'terminal' if terminal else 'stopped'} state: "
+                    f"member={member!r}, parent={parent!r}, "
+                    f"members={last_members!r}"
+                )
+        if not terminal and "T" in state:
+            return
+        time.sleep(0.001)
+    raise OwnedProcessGroupRefusal(
+        f"owned member {member_pid} did not reach "
+        f"{'terminal' if terminal else 'stopped'} state before timeout: "
+        f"members={last_members!r}"
+    )
+
+
 def stop_owned_process_group(
     process: subprocess.Popen[bytes],
     *,
     timeout: float = 5,
 ) -> list[dict[str, object]]:
     deadline = time.monotonic() + timeout
-    validate_owned_process_group_leader(process)
-    signal_exact_owned_group_member(
-        process,
-        process.pid,
-        signal.SIGSTOP,
-        deadline=deadline,
-    )
     last_members: list[dict[str, object]] = []
+    quiesced_signature: tuple[tuple[object, ...], ...] | None = None
     while time.monotonic() < deadline:
         last_members = validated_owned_process_group_members(process)
-        for member in last_members:
-            state = str(member.get("state", ""))
-            if "T" not in state and "Z" not in state:
-                signal_exact_owned_group_member(
-                    process,
-                    int(member["pid"]),
-                    signal.SIGSTOP,
-                    deadline=deadline,
-                )
-        last_members = validated_owned_process_group_members(process)
-        if last_members and all(
-            "T" in str(member.get("state", ""))
-            or "Z" in str(member.get("state", ""))
+        running = [
+            member
             for member in last_members
-        ):
-            return last_members
+            if "T" not in str(member.get("state", ""))
+            and "Z" not in str(member.get("state", ""))
+        ]
+        if not running:
+            signature = tuple(
+                (
+                    int(member["pid"]),
+                    int(member.get("ppid", -1)),
+                    str(member.get("state", "")),
+                    member.get("depth"),
+                )
+                for member in last_members
+            )
+            if signature == quiesced_signature:
+                return last_members
+            quiesced_signature = signature
+            time.sleep(0.001)
+            continue
+
+        quiesced_signature = None
+        members_by_pid = {
+            int(member["pid"]): member for member in last_members
+        }
+        ready = [
+            member
+            for member in running
+            if int(member["pid"]) == process.pid
+            or (
+                (parent := members_by_pid.get(int(member.get("ppid", -1))))
+                is not None
+                and "T" in str(parent.get("state", ""))
+            )
+        ]
+        if not ready:
+            raise OwnedProcessGroupRefusal(
+                f"owned process group {process.pid} has no ancestor-stable "
+                f"STOP candidate: members={last_members!r}"
+            )
+        ready.sort(
+            key=lambda member: (
+                int(member.get("depth", -1)),
+                int(member["pid"]),
+            )
+        )
+        target = ready[0]
+        target_pid = int(target["pid"])
+        if target_pid == process.pid:
+            fresh_members = validated_owned_process_group_members(process)
+            fresh_leader = next(
+                (
+                    member
+                    for member in fresh_members
+                    if int(member["pid"]) == process.pid
+                ),
+                None,
+            )
+            if fresh_leader is None:
+                raise OwnedProcessGroupRefusal(
+                    f"owned leader {process.pid} disappeared before exact STOP"
+                )
+            leader_state = str(fresh_leader.get("state", ""))
+            if "Z" in leader_state:
+                raise OwnedProcessGroupRefusal(
+                    f"owned leader {process.pid} became zombie before exact STOP"
+                )
+            if "T" in leader_state:
+                continue
+            process.send_signal(signal.SIGSTOP)
+            wait_for_owned_member_quiescence(
+                process,
+                process.pid,
+                deadline=deadline,
+                expected_stopped_parent=None,
+                terminal=False,
+            )
+            continue
+
+        expected_parent = int(target["ppid"])
+        signal_exact_owned_group_member(
+            process,
+            target_pid,
+            signal.SIGSTOP,
+            deadline=deadline,
+            require_running=True,
+            expected_stopped_parent=expected_parent,
+        )
+        wait_for_owned_member_quiescence(
+            process,
+            target_pid,
+            deadline=deadline,
+            expected_stopped_parent=expected_parent,
+            terminal=False,
+        )
         time.sleep(0.001)
     raise OwnedProcessGroupRefusal(
         f"owned process group {process.pid} did not reach a quiesced fixed point: "
@@ -1888,19 +2182,61 @@ def continue_owned_process_group(
 ) -> None:
     deadline = time.monotonic() + timeout
     members = validated_owned_process_group_members(process)
-    # Resume each descendant only after revalidating that exact PID is still
-    # stopped, then never address it again. Resume the leader last so it cannot
-    # reap a descendant and expose that PID to reuse before its SIGCONT.
-    members.sort(key=lambda member: int(member["pid"]) == process.pid)
-    for member in members:
-        if "Z" in str(member.get("state", "")):
+    unstopped = [
+        member
+        for member in members
+        if "Z" not in str(member.get("state", ""))
+        and "T" not in str(member.get("state", ""))
+    ]
+    if unstopped:
+        raise OwnedProcessGroupRefusal(
+            f"refusing CONT for group {process.pid} before full stop: "
+            f"unstopped={unstopped!r}, members={members!r}"
+        )
+    targets = [
+        member for member in members if "Z" not in str(member.get("state", ""))
+    ]
+    targets.sort(
+        key=lambda member: (
+            -int(member.get("depth", -1)),
+            int(member["pid"]),
+        )
+    )
+    addressed: set[int] = set()
+    for member in targets:
+        member_pid = int(member["pid"])
+        if member_pid in addressed:
+            raise OwnedProcessGroupRefusal(
+                f"refusing to revisit resumed member {member_pid}"
+            )
+        addressed.add(member_pid)
+        if member_pid == process.pid:
+            fresh_members = validated_owned_process_group_members(process)
+            fresh_leader = next(
+                (
+                    current
+                    for current in fresh_members
+                    if int(current["pid"]) == process.pid
+                ),
+                None,
+            )
+            if (
+                fresh_leader is None
+                or "T" not in str(fresh_leader.get("state", ""))
+            ):
+                raise OwnedProcessGroupRefusal(
+                    f"refusing leader CONT without fresh stopped identity: "
+                    f"leader={fresh_leader!r}, members={fresh_members!r}"
+                )
+            process.send_signal(signal.SIGCONT)
             continue
         signal_exact_owned_group_member(
             process,
-            int(member["pid"]),
+            member_pid,
             signal.SIGCONT,
             deadline=deadline,
             require_stopped=True,
+            expected_stopped_parent=int(member["ppid"]),
         )
 
 
@@ -1910,40 +2246,81 @@ def kill_owned_process_group(
     timeout: float = 5,
 ) -> None:
     deadline = time.monotonic() + timeout
-    last_members = stop_owned_process_group(
+    stopped_members = stop_owned_process_group(
         process,
         timeout=max(deadline - time.monotonic(), 0.001),
     )
-    while time.monotonic() < deadline:
-        descendants = [
-            member for member in last_members if int(member["pid"]) != process.pid
-        ]
-        live_descendants = [
-            member
-            for member in descendants
-            if "Z" not in str(member.get("state", ""))
-        ]
-        if not live_descendants:
-            signal_exact_owned_group_member(
-                process,
-                process.pid,
-                signal.SIGKILL,
-                deadline=deadline,
+    targets = [
+        member
+        for member in stopped_members
+        if "Z" not in str(member.get("state", ""))
+    ]
+    targets.sort(
+        key=lambda member: (
+            -int(member.get("depth", -1)),
+            int(member["pid"]),
+        )
+    )
+    target_pids = {int(member["pid"]) for member in targets}
+    addressed: set[int] = set()
+    for member in targets:
+        member_pid = int(member["pid"])
+        if member_pid in addressed:
+            raise OwnedProcessGroupRefusal(
+                f"refusing to revisit killed member {member_pid}"
             )
+        addressed.add(member_pid)
+        current_members = validated_owned_process_group_members(process)
+        unexpected_live = [
+            current
+            for current in current_members
+            if "Z" not in str(current.get("state", ""))
+            and int(current["pid"]) not in target_pids
+        ]
+        if unexpected_live:
+            raise OwnedProcessGroupRefusal(
+                f"owned group {process.pid} changed after its stopped fixed "
+                f"point: unexpected_live={unexpected_live!r}, "
+                f"members={current_members!r}"
+            )
+        if member_pid == process.pid:
+            fresh_members = current_members
+            fresh_leader = next(
+                (
+                    current
+                    for current in fresh_members
+                    if int(current["pid"]) == process.pid
+                ),
+                None,
+            )
+            if (
+                fresh_leader is None
+                or "T" not in str(fresh_leader.get("state", ""))
+            ):
+                raise OwnedProcessGroupRefusal(
+                    f"refusing leader KILL without fresh stopped identity: "
+                    f"leader={fresh_leader!r}, members={fresh_members!r}"
+                )
+            process.kill()
             return
-        for member in live_descendants:
-            signal_exact_owned_group_member(
-                process,
-                int(member["pid"]),
-                signal.SIGKILL,
-                deadline=deadline,
-            )
-        time.sleep(0.001)
-        last_members = validated_owned_process_group_members(process)
+        expected_parent = int(member["ppid"])
+        signal_exact_owned_group_member(
+            process,
+            member_pid,
+            signal.SIGKILL,
+            deadline=deadline,
+            require_stopped=True,
+            expected_stopped_parent=expected_parent,
+        )
+        wait_for_owned_member_quiescence(
+            process,
+            member_pid,
+            deadline=deadline,
+            expected_stopped_parent=expected_parent,
+            terminal=True,
+        )
     raise OwnedProcessGroupRefusal(
-        f"owned process group {process.pid} retained live descendants before "
-        f"leader kill: "
-        f"members={last_members!r}"
+        f"owned process group {process.pid} lost its leader before exact KILL"
     )
 
 
