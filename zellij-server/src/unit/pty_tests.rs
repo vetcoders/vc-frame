@@ -234,6 +234,7 @@ fn new_tab_spawn_failure_does_not_terminate_pty_thread() {
             true,
             (0, false),
             None,
+            None,
         ))
         .unwrap();
     pty_sender.send(PtyInstruction::Exit).unwrap();

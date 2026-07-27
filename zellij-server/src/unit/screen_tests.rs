@@ -1,4 +1,7 @@
-use super::{CopyOptions, Screen, ScreenInstruction, screen_thread_main};
+use super::{
+    CopyOptions, Screen, ScreenInstruction, TabOverrideResult, reserve_durable_tab_layout_recovery,
+    reserve_new_durable_tab_layout_generation, screen_thread_main,
+};
 use crate::panes::PaneId;
 use crate::{
     ClientId, ServerInstruction, SessionMetaData, ThreadSenders, channels::SenderWithContext,
@@ -587,6 +590,7 @@ impl MockScreen {
             (self.main_client_id, false),
             None,
             None,
+            None,
         ));
         self.last_opened_tab_index = Some(tab_index);
         std::thread::sleep(std::time::Duration::from_millis(100)); // give time for the async render
@@ -687,6 +691,7 @@ impl MockScreen {
             (self.main_client_id, false),
             None,
             None,
+            None,
         ));
         self.last_opened_tab_index = Some(tab_index);
         screen_thread
@@ -725,6 +730,7 @@ impl MockScreen {
             0,
             true,
             (self.main_client_id, false),
+            None,
             None,
             None,
         ));
@@ -775,6 +781,7 @@ impl MockScreen {
             tab_index,
             true,
             (self.main_client_id, false),
+            None,
             None,
             None,
         ));
@@ -4872,6 +4879,7 @@ pub fn screen_can_break_pane_to_a_new_tab() {
         (1, false),
         None,
         None,
+        None,
     ));
     std::thread::sleep(std::time::Duration::from_millis(100));
     // move back to make sure the other pane is in the previous tab
@@ -4981,6 +4989,7 @@ pub fn screen_can_break_floating_pane_to_a_new_tab() {
         (1, false),
         None,
         None,
+        None,
     ));
     std::thread::sleep(std::time::Duration::from_millis(200));
     // move back to make sure the other pane is in the previous tab
@@ -5072,6 +5081,7 @@ pub fn screen_can_break_multiple_stacked_panes_to_a_new_tab() {
         (1, false),
         None,
         None,
+        None,
     ));
     std::thread::sleep(std::time::Duration::from_millis(100));
     // move back to make sure the other pane is in the previous tab
@@ -5153,6 +5163,7 @@ pub fn screen_can_break_plugin_pane_to_a_new_tab() {
         1,
         true,
         (1, false),
+        None,
         None,
         None,
     ));
@@ -5238,6 +5249,7 @@ pub fn screen_can_break_floating_plugin_pane_to_a_new_tab() {
         (1, false),
         None,
         None,
+        None,
     ));
     std::thread::sleep(std::time::Duration::from_millis(100));
     // move back to make sure the other pane is in the previous tab
@@ -5308,6 +5320,7 @@ pub fn screen_can_move_pane_to_a_new_tab_right() {
         (1, false),
         None,
         None,
+        None,
     ));
     std::thread::sleep(std::time::Duration::from_millis(100));
     let _ = mock_screen
@@ -5372,6 +5385,7 @@ pub fn screen_can_move_pane_to_a_new_tab_left() {
         1,
         true,
         (1, false),
+        None,
         None,
         None,
     ));
@@ -5797,6 +5811,319 @@ pub fn durable_tab_instance_reuse_requires_one_same_named_owner() {
             .contains("ambiguous across tabs"),
         "a corrupted duplicate must fail closed"
     );
+}
+
+#[test]
+pub fn durable_tab_layout_generation_rejects_name_and_id_aba() {
+    let token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let mut generations = HashMap::new();
+    let original =
+        reserve_new_durable_tab_layout_generation(&mut generations, 7, "Finalized runs", token);
+    let original_state = generations.clone();
+
+    let wrong_id =
+        reserve_durable_tab_layout_recovery(&mut generations, 8, "Finalized runs", token)
+            .expect_err("a reused token must not move to another numeric tab ID");
+    assert!(wrong_id.contains("ABA replacement"));
+    assert_eq!(
+        generations, original_state,
+        "a rejected ID replacement must not advance or replace the reservation"
+    );
+
+    let wrong_name =
+        reserve_durable_tab_layout_recovery(&mut generations, 7, "Needs attention", token)
+            .expect_err("a reused token must not move to another exact tab name");
+    assert!(wrong_name.contains("ABA replacement"));
+    assert_eq!(
+        generations, original_state,
+        "a rejected name replacement must not advance or replace the reservation"
+    );
+    assert_eq!(generations.get(token), Some(&original));
+}
+
+#[test]
+pub fn durable_empty_tab_retry_is_generation_fenced_and_does_not_duplicate_resources() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 1;
+    let viewer_name = "Finalized runs";
+    let token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let durable_layout = || TiledPaneLayout {
+        tab_instance_id: Some(token.to_owned()),
+        ..Default::default()
+    };
+
+    let mut mock_screen = MockScreen::new(size);
+    let screen_thread = mock_screen.run(None, vec![]);
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    let pty_receiver = mock_screen.pty_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+    while pty_receiver.try_recv().is_ok() {}
+
+    let _ = mock_screen.to_screen.send(ScreenInstruction::NewTab(
+        None,
+        None,
+        Some(durable_layout()),
+        vec![],
+        Some(viewer_name.to_owned()),
+        (Some(vec![]), Some(vec![])),
+        None,
+        false,
+        false,
+        TabPlacement::Append,
+        (client_id, false),
+        None,
+    ));
+    let (viewer_tab_id, generation_one) = loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("first durable layout dispatch must reach the plugin worker");
+        if let PluginInstruction::NewTab(
+            _,
+            _,
+            Some(layout),
+            _,
+            tab_id,
+            _,
+            _,
+            _,
+            _,
+            _,
+            Some(generation),
+        ) = instruction
+            && layout
+                .tab_instance_id
+                .as_deref()
+                .is_some_and(|instance_id| instance_id.eq_ignore_ascii_case(token))
+        {
+            break (tab_id, generation);
+        }
+    };
+    assert_eq!(generation_one.generation, 1);
+
+    // The first asynchronous writer is deliberately left unfinished. The
+    // retry must target this exact empty reservation instead of allocating a
+    // second tab.
+    let _ = mock_screen.to_screen.send(ScreenInstruction::NewTab(
+        None,
+        None,
+        Some(durable_layout()),
+        vec![],
+        Some(viewer_name.to_owned()),
+        (Some(vec![]), Some(vec![])),
+        None,
+        false,
+        false,
+        TabPlacement::Append,
+        (client_id, false),
+        None,
+    ));
+    let (retry_tab_id, retry_layout, generation_two) = loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("durable retry must reach the plugin worker");
+        if let PluginInstruction::OverrideLayout(
+            _,
+            _,
+            layouts,
+            retain_terminals,
+            retain_plugins,
+            _,
+            _,
+            Some(generation),
+        ) = instruction
+            && layouts.len() == 1
+            && layouts[0]
+                .tiled_layout
+                .tab_instance_id
+                .as_deref()
+                .is_some_and(|instance_id| instance_id.eq_ignore_ascii_case(token))
+        {
+            assert!(retain_terminals);
+            assert!(retain_plugins);
+            break (
+                layouts[0].tab_index,
+                layouts[0].tiled_layout.clone(),
+                generation,
+            );
+        }
+    };
+    assert_eq!(retry_tab_id, viewer_tab_id);
+    assert_eq!(generation_two.tab_id, viewer_tab_id);
+    assert_eq!(generation_two.generation, 2);
+
+    let (tabs_tx, tabs_rx) = crossbeam::channel::bounded(1);
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ListTabs {
+        client_id,
+        response_channel: tabs_tx,
+    });
+    let tabs = tabs_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("tab-list barrier must answer");
+    let viewer_tabs = tabs
+        .tabs
+        .iter()
+        .filter(|tab| tab.name == viewer_name)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        viewer_tabs.len(),
+        1,
+        "retry must retain exactly one viewer tab"
+    );
+    assert_eq!(viewer_tabs[0].tab_id, viewer_tab_id);
+    assert_eq!(
+        viewer_tabs[0].selectable_tiled_panes_count, 0,
+        "the retry must be able to heal the exact empty preallocated tab"
+    );
+    assert_eq!(
+        tabs.tab_instance_ids
+            .get(&viewer_tab_id)
+            .map(String::as_str),
+        Some(token)
+    );
+
+    let _ = mock_screen
+        .to_screen
+        .send(ScreenInstruction::OverrideLayoutComplete(
+            vec![TabOverrideResult {
+                tab_index: viewer_tab_id,
+                tab_name: None,
+                tiled_layout: retry_layout,
+                floating_layouts: vec![],
+                swap_tiled_layouts: Some(vec![]),
+                swap_floating_layouts: Some(vec![]),
+                new_terminal_pids: vec![(200, None)],
+                new_floating_pane_pids: vec![],
+                plugin_ids: HashMap::new(),
+            }],
+            true,
+            true,
+            client_id,
+            None,
+            Some(generation_two.clone()),
+        ));
+
+    let (ready_panes_tx, ready_panes_rx) = crossbeam::channel::bounded(1);
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ListPanes {
+        show_all: true,
+        response_channel: ready_panes_tx,
+    });
+    let ready_panes = ready_panes_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("pane-list barrier after recovery must answer");
+    assert!(
+        ready_panes.iter().any(|pane| {
+            pane.tab_id == viewer_tab_id && pane.pane_info.id == 200 && !pane.pane_info.is_plugin
+        }),
+        "the current generation must make the recovered terminal visible"
+    );
+
+    let stale_plugin =
+        RunPluginOrAlias::from_url("file:/path/to/stale/plugin", &None, None, None).unwrap();
+    let mut stale_plugin_ids = HashMap::new();
+    stale_plugin_ids.insert(stale_plugin, vec![300]);
+    while pty_receiver.try_recv().is_ok() {}
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ApplyLayout(
+        durable_layout(),
+        vec![],
+        vec![(100, None)],
+        vec![],
+        stale_plugin_ids,
+        viewer_tab_id,
+        false,
+        (client_id, false),
+        None,
+        None,
+        Some(generation_one),
+    ));
+
+    let (final_panes_tx, final_panes_rx) = crossbeam::channel::bounded(1);
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ListPanes {
+        show_all: true,
+        response_channel: final_panes_tx,
+    });
+    let final_panes = final_panes_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("pane-list barrier after stale completion must answer");
+    let stale_resources = loop {
+        let (instruction, _) = pty_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("stale resources must be handed to PTY cleanup");
+        if let PtyInstruction::CloseTab(resource_ids) = instruction {
+            break resource_ids.into_iter().collect::<HashSet<_>>();
+        }
+    };
+    assert_eq!(
+        stale_resources,
+        HashSet::from([PaneId::Terminal(100), PaneId::Plugin(300)])
+    );
+    assert!(
+        final_panes
+            .iter()
+            .all(|pane| { pane.pane_info.id != 100 || pane.pane_info.is_plugin })
+            && final_panes
+                .iter()
+                .all(|pane| { pane.pane_info.id != 300 || !pane.pane_info.is_plugin }),
+        "a late generation must not enter the recovered tab"
+    );
+    let viewer_panes = final_panes
+        .iter()
+        .filter(|pane| pane.tab_id == viewer_tab_id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        viewer_panes.len(),
+        1,
+        "generation two followed by late generation one must leave one viewer pane"
+    );
+    assert_eq!(viewer_panes[0].pane_info.id, 200);
+
+    // The public token/name guard is the first ABA fence. It must fail before
+    // either asynchronous layout worker receives a replacement dispatch.
+    while plugin_receiver.try_recv().is_ok() {}
+    let _ = mock_screen.to_screen.send(ScreenInstruction::NewTab(
+        None,
+        None,
+        Some(durable_layout()),
+        vec![],
+        Some("Needs attention".to_owned()),
+        (Some(vec![]), Some(vec![])),
+        None,
+        false,
+        false,
+        TabPlacement::Append,
+        (client_id, false),
+        None,
+    ));
+    let (final_tabs_tx, final_tabs_rx) = crossbeam::channel::bounded(1);
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ListTabs {
+        client_id,
+        response_channel: final_tabs_tx,
+    });
+    let final_tabs = final_tabs_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("final tab-list barrier must answer");
+    while let Ok((instruction, _)) = plugin_receiver.try_recv() {
+        assert!(
+            !matches!(
+                instruction,
+                PluginInstruction::NewTab(..) | PluginInstruction::OverrideLayout(..)
+            ),
+            "an ABA name mismatch must fail before async dispatch"
+        );
+    }
+    assert_eq!(
+        final_tabs
+            .tabs
+            .iter()
+            .filter(|tab| tab.name == viewer_name)
+            .count(),
+        1
+    );
+    assert_eq!(final_tabs.tabs.len(), 2, "ABA retry must not add a tab");
+
+    mock_screen.teardown(vec![screen_thread]);
 }
 
 #[test]

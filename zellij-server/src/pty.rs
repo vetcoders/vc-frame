@@ -7,7 +7,7 @@ use crate::{
     ClientId, ServerInstruction,
     panes::PaneId,
     plugins::{DumpSessionLayoutResponse, PluginId, PluginInstruction},
-    screen::{ScreenInstruction, TabOverrideResult},
+    screen::{DurableTabLayoutGeneration, ScreenInstruction, TabOverrideResult},
     session_layout_metadata::SessionLayoutMetadata,
     thread_bus::{Bus, ThreadSenders},
 };
@@ -75,6 +75,7 @@ pub enum PtyInstruction {
         bool,                                // should change focus to new tab
         (ClientId, bool),                    // bool -> is_web_client
         Option<NotificationEnd>,             // completion signal
+        Option<Box<DurableTabLayoutGeneration>>,
     ), // the String is the tab name
     OverrideLayout(
         Option<PathBuf>,                                           // CWD
@@ -84,6 +85,7 @@ pub enum PtyInstruction {
         bool,                                                      // retain_existing_plugin_panes
         ClientId,
         Option<NotificationEnd>,
+        Option<Box<DurableTabLayoutGeneration>>,
     ),
     ClosePane(PaneId, Option<NotificationEnd>),
     CloseTab(Vec<PaneId>),
@@ -499,6 +501,7 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
                 should_change_focus_to_new_tab,
                 client_id_and_is_web_client,
                 completion_tx,
+                layout_generation,
             ) => {
                 let err_context = || "failed to open new tab";
                 log::info!(
@@ -523,6 +526,7 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
                     should_change_focus_to_new_tab,
                     client_id_and_is_web_client,
                     completion_tx,
+                    layout_generation,
                 ) {
                     Err::<(), _>(e).with_context(err_context).non_fatal();
                 }
@@ -534,7 +538,8 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
                 retain_existing_terminal_panes,
                 retain_existing_plugin_panes,
                 client_id,
-                completion_tx,
+                mut completion_tx,
+                layout_generation,
             ) => {
                 let err_context = || "failed to override layout";
 
@@ -563,6 +568,13 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
                                 tab_layout_info.tab_index,
                                 e
                             );
+                            if let Some(completion) = completion_tx.as_mut() {
+                                completion.set_exit_status(1);
+                                completion.set_error_message(format!(
+                                    "failed to prepare recovered layout for tab {}: {}",
+                                    tab_layout_info.tab_index, e
+                                ));
+                            }
                             // Continue with other tabs (best-effort approach)
                         },
                     }
@@ -577,6 +589,7 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
                         retain_existing_plugin_panes,
                         client_id,
                         completion_tx,
+                        layout_generation,
                     ))
                     .with_context(err_context)?;
             },
@@ -1214,6 +1227,7 @@ impl Pty {
         should_change_focus_to_new_tab: bool,
         client_id_and_is_web_client: (ClientId, bool),
         completion_tx: Option<NotificationEnd>,
+        layout_generation: Option<Box<DurableTabLayoutGeneration>>,
     ) -> Result<()> {
         let err_context = || "failed to spawn terminals for layout for".to_string();
 
@@ -1365,6 +1379,7 @@ impl Pty {
                 (client_id, is_web_client),
                 direct_completion_tx,
                 blocking_terminal,
+                layout_generation,
             ))
             .with_context(err_context)?;
         let mut terminals_to_start = vec![];

@@ -208,6 +208,13 @@ impl OriginTabIdentity {
             && !self.tab_instance_id.is_empty()
             && self.tab_instance_id == other.tab_instance_id
     }
+
+    pub fn is_same_live_tab(&self, other: &Self) -> bool {
+        self.is_same_durable_tab(other)
+            && self.id == other.id
+            && !self.session_incarnation.is_empty()
+            && self.session_incarnation == other.session_incarnation
+    }
 }
 
 fn matches_viewer_reservation(
@@ -486,6 +493,8 @@ pub struct TransferReceipt {
     #[serde(default)]
     pub viewer_creation_pending: bool,
     #[serde(default)]
+    pub viewer_creation_generation: u64,
+    #[serde(default)]
     pub viewer_token: String,
     #[serde(default)]
     pub superseded_viewers: Vec<SupersededViewer>,
@@ -526,6 +535,7 @@ impl TransferReceipt {
             viewer_confirmed: false,
             viewer_tab_identity: None,
             viewer_creation_pending: false,
+            viewer_creation_generation: 0,
             viewer_token: Uuid::new_v4().simple().to_string(),
             superseded_viewers: Vec::new(),
             origin_tab_state: OriginTabState::Preserved,
@@ -573,6 +583,17 @@ pub trait TriageIo {
         session: &str,
         tab: &str,
         tab_instance_id: &str,
+        meta: &RunMeta,
+    ) -> Result<(), String>;
+    /// Re-apply the viewer layout to the exact pending tab reservation. The
+    /// generation is durably incremented before dispatch so a retry can fence
+    /// off every older in-flight layout writer.
+    fn recover_bucket_tab(
+        &mut self,
+        session: &str,
+        tab: &str,
+        identity: &OriginTabIdentity,
+        generation: u64,
         meta: &RunMeta,
     ) -> Result<(), String>;
     /// Read back the target session and return the unique durable identity of
@@ -850,6 +871,7 @@ pub fn transfer_finished_run<Io: TriageIo>(
             receipt.viewer_confirmed = false;
             receipt.viewer_tab_identity = None;
             receipt.viewer_creation_pending = false;
+            receipt.viewer_creation_generation = 0;
             receipt.viewer_token = Uuid::new_v4().simple().to_string();
         }
         receipt.settlement_revision = run.settlement_revision;
@@ -1030,6 +1052,8 @@ pub fn transfer_finished_run<Io: TriageIo>(
             // durable pending marker.
             receipt.viewer_tab_identity = None;
             receipt.viewer_creation_pending = true;
+            receipt.viewer_creation_generation =
+                receipt.viewer_creation_generation.saturating_add(1);
             persist_receipt(io, &receipt_dest, &mut receipt)?;
             if let Err(message) = io.open_bucket_tab(
                 bucket.session_name(),
@@ -1103,31 +1127,114 @@ pub fn transfer_finished_run<Io: TriageIo>(
             }
         },
     };
-    match io.bucket_tab_ready(bucket.session_name(), &confirmed_viewer_identity) {
-        Ok(true) => {},
-        Ok(false) => {
+    let mut confirmed_viewer_identity = confirmed_viewer_identity;
+    let viewer_is_ready =
+        match io.bucket_tab_ready(bucket.session_name(), &confirmed_viewer_identity) {
+            Ok(is_ready) => is_ready,
+            Err(message) => {
+                return Err(fail_transfer(
+                    io,
+                    &receipt_dest,
+                    &mut receipt,
+                    TransferStep::ConfirmBucketTab,
+                    message,
+                    current_origin_tab_state,
+                ));
+            },
+        };
+    if !viewer_is_ready {
+        // The exact durable tab exists but NewTab died between reserving it and
+        // applying its panes. Persist both the concrete live identity and the
+        // next generation before asking the server to re-drive only this tab.
+        receipt.viewer_tab_identity = Some(confirmed_viewer_identity.clone());
+        receipt.viewer_creation_pending = true;
+        receipt.viewer_creation_generation = receipt.viewer_creation_generation.saturating_add(1);
+        persist_receipt(io, &receipt_dest, &mut receipt)?;
+        if let Err(message) = io.recover_bucket_tab(
+            bucket.session_name(),
+            &viewer_tab_name,
+            &confirmed_viewer_identity,
+            receipt.viewer_creation_generation,
+            &meta,
+        ) {
             return Err(fail_transfer(
                 io,
                 &receipt_dest,
                 &mut receipt,
-                TransferStep::ConfirmBucketTab,
-                format!(
-                    "viewer tab '{}' exists but its runtime layout is not ready",
-                    viewer_tab_name
-                ),
-                current_origin_tab_state,
-            ));
-        },
-        Err(message) => {
-            return Err(fail_transfer(
-                io,
-                &receipt_dest,
-                &mut receipt,
-                TransferStep::ConfirmBucketTab,
+                TransferStep::OpenBucketTab,
                 message,
                 current_origin_tab_state,
             ));
-        },
+        }
+        let recovered_identity = match io.bucket_tab_identity(
+            bucket.session_name(),
+            &viewer_tab_name,
+            Some(&confirmed_viewer_identity),
+        ) {
+            Ok(Some(identity)) if identity.is_same_live_tab(&confirmed_viewer_identity) => identity,
+            Ok(Some(identity)) => {
+                return Err(fail_transfer(
+                    io,
+                    &receipt_dest,
+                    &mut receipt,
+                    TransferStep::ConfirmBucketTab,
+                    format!(
+                        "viewer recovery changed the exact pending identity: expected {:?}, current {:?}",
+                        confirmed_viewer_identity, identity
+                    ),
+                    current_origin_tab_state,
+                ));
+            },
+            Ok(None) => {
+                return Err(fail_transfer(
+                    io,
+                    &receipt_dest,
+                    &mut receipt,
+                    TransferStep::ConfirmBucketTab,
+                    format!(
+                        "viewer tab '{}' disappeared during exact-layout recovery",
+                        viewer_tab_name
+                    ),
+                    current_origin_tab_state,
+                ));
+            },
+            Err(message) => {
+                return Err(fail_transfer(
+                    io,
+                    &receipt_dest,
+                    &mut receipt,
+                    TransferStep::ConfirmBucketTab,
+                    message,
+                    current_origin_tab_state,
+                ));
+            },
+        };
+        match io.bucket_tab_ready(bucket.session_name(), &recovered_identity) {
+            Ok(true) => confirmed_viewer_identity = recovered_identity,
+            Ok(false) => {
+                return Err(fail_transfer(
+                    io,
+                    &receipt_dest,
+                    &mut receipt,
+                    TransferStep::ConfirmBucketTab,
+                    format!(
+                        "viewer tab '{}' recovery completed without a runtime layout",
+                        viewer_tab_name
+                    ),
+                    current_origin_tab_state,
+                ));
+            },
+            Err(message) => {
+                return Err(fail_transfer(
+                    io,
+                    &receipt_dest,
+                    &mut receipt,
+                    TransferStep::ConfirmBucketTab,
+                    message,
+                    current_origin_tab_state,
+                ));
+            },
+        }
     }
     receipt.viewer_tab_identity = Some(confirmed_viewer_identity);
     receipt.viewer_creation_pending = false;
@@ -1454,6 +1561,7 @@ mod tests {
         resurrect_on_ensure: Option<OriginTabIdentity>,
         receipt: Option<TransferReceipt>,
         viewer_ready: Option<bool>,
+        recovered_generation: Option<u64>,
     }
 
     impl FakeIo {
@@ -1564,6 +1672,25 @@ mod tests {
                 self.visible_tab_name = Some(tab.to_owned());
                 self.opened_tab_instance_id = Some(tab_instance_id.to_owned());
             }
+            Ok(())
+        }
+        fn recover_bucket_tab(
+            &mut self,
+            _session: &str,
+            tab: &str,
+            identity: &OriginTabIdentity,
+            generation: u64,
+            _meta: &RunMeta,
+        ) -> Result<(), String> {
+            self.guard(TransferStep::OpenBucketTab, "recover")?;
+            let current = self
+                .bucket_tab_identity(&identity.session, tab, Some(identity))?
+                .ok_or_else(|| "pending viewer disappeared before recovery".to_owned())?;
+            if !current.is_same_live_tab(identity) {
+                return Err("pending viewer changed identity before recovery".to_owned());
+            }
+            self.recovered_generation = Some(generation);
+            self.viewer_ready = Some(true);
             Ok(())
         }
         fn bucket_tab_identity(
@@ -1915,7 +2042,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pending_receipt_never_adopts_an_empty_preallocated_viewer() {
+    fn a_pending_receipt_recovers_the_exact_empty_preallocated_viewer() {
         let root = tempfile::tempdir().unwrap();
         let run = finished(0);
         let mut first_process = FakeIo::failing_at(TransferStep::OpenBucketTab);
@@ -1932,16 +2059,15 @@ mod tests {
             viewer_ready: Some(false),
             ..Default::default()
         };
-        let error = transfer_finished_run(&mut second_process, &run, root.path(), 2).unwrap_err();
+        transfer_finished_run(&mut second_process, &run, root.path(), 2).unwrap();
 
-        assert_eq!(error.step, TransferStep::ConfirmBucketTab);
-        assert_eq!(error.origin_tab_state, OriginTabState::Preserved);
-        assert!(error.message.contains("runtime layout is not ready"));
-        assert!(!second_process.calls.contains(&"open"));
-        assert!(!second_process.calls.contains(&"close"));
+        assert!(second_process.calls.contains(&"recover"));
+        assert!(second_process.calls.contains(&"close"));
         let retained = second_process.receipt.unwrap();
-        assert!(retained.viewer_creation_pending);
-        assert!(!retained.viewer_confirmed);
+        assert_eq!(retained.viewer_creation_generation, 2);
+        assert_eq!(second_process.recovered_generation, Some(2));
+        assert!(!retained.viewer_creation_pending);
+        assert!(retained.viewer_confirmed);
     }
 
     #[test]

@@ -19,7 +19,7 @@ use wasmi::Engine;
 
 use crate::panes::PaneId;
 use crate::route::NotificationEnd;
-use crate::screen::ScreenInstruction;
+use crate::screen::{DurableTabLayoutGeneration, ScreenInstruction};
 use crate::session_layout_metadata::SessionLayoutMetadata;
 use crate::{ClientId, ServerInstruction, pty::PtyInstruction, thread_bus::Bus};
 use zellij_utils::data::PaneRenderReport;
@@ -99,6 +99,7 @@ pub enum PluginInstruction {
         bool,                         // should change focus to new tab
         (ClientId, bool),             // bool -> is_web_client
         Option<NotificationEnd>,      // completion signal
+        Option<Box<DurableTabLayoutGeneration>>,
     ),
     OverrideLayout(
         Option<PathBuf>,        // cwd
@@ -108,6 +109,7 @@ pub enum PluginInstruction {
         bool,                   // retain_existing_plugin_panes
         ClientId,
         Option<NotificationEnd>,
+        Option<Box<DurableTabLayoutGeneration>>,
     ),
     ApplyCachedEvents {
         plugin_ids: Vec<PluginId>,
@@ -525,6 +527,7 @@ pub(crate) fn plugin_thread_main(
                 should_change_focus_to_new_tab,
                 (client_id, is_web_client),
                 completion_tx,
+                layout_generation,
             ) => {
                 // prefer connected clients so as to avoid opening plugins in the background for
                 // CLI clients unless no-one else is connected
@@ -623,6 +626,7 @@ pub(crate) fn plugin_thread_main(
                     should_change_focus_to_new_tab,
                     (client_id, is_web_client),
                     completion_tx,
+                    layout_generation,
                 )));
             },
             PluginInstruction::OverrideLayout(
@@ -633,6 +637,7 @@ pub(crate) fn plugin_thread_main(
                 retain_existing_plugin_panes,
                 client_id,
                 completion_tx,
+                layout_generation,
             ) => {
                 // 1. Prefer connected clients over CLI clients
                 let client_id = if wasm_bridge.client_is_connected(&client_id) {
@@ -717,6 +722,7 @@ pub(crate) fn plugin_thread_main(
                     retain_existing_plugin_panes,
                     client_id,
                     completion_tx,
+                    layout_generation,
                 )));
             },
             PluginInstruction::ApplyCachedEvents {

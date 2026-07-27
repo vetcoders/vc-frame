@@ -1709,6 +1709,39 @@ impl TriageIo for CliTriageIo {
         Ok(())
     }
 
+    fn recover_bucket_tab(
+        &mut self,
+        session: &str,
+        tab: &str,
+        identity: &OriginTabIdentity,
+        generation: u64,
+        meta: &RunMeta,
+    ) -> Result<(), String> {
+        let before = TriageIo::bucket_tab_identity(self, session, tab, Some(identity))?
+            .ok_or_else(|| format!("pending viewer '{}' disappeared before recovery", tab))?;
+        if !before.is_same_live_tab(identity) {
+            return Err(format!(
+                "pending viewer '{}' changed exact identity before generation {} recovery: expected {:?}, current {:?}",
+                tab, generation, identity, before
+            ));
+        }
+
+        // Reissuing NewTab is intentional: the server recognizes the durable
+        // token, keeps the same stable tab ID, and routes this request through
+        // its generation-fenced single-tab OverrideLayout path.
+        TriageIo::open_bucket_tab(self, session, tab, &identity.tab_instance_id, meta)?;
+
+        let after = TriageIo::bucket_tab_identity(self, session, tab, Some(identity))?
+            .ok_or_else(|| format!("pending viewer '{}' disappeared during recovery", tab))?;
+        if !after.is_same_live_tab(identity) {
+            return Err(format!(
+                "pending viewer '{}' changed exact identity during generation {} recovery: expected {:?}, current {:?}",
+                tab, generation, identity, after
+            ));
+        }
+        Ok(())
+    }
+
     fn bucket_tab_identity(
         &mut self,
         session: &str,
