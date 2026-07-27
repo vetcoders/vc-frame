@@ -32,13 +32,12 @@ use crate::background_jobs::BackgroundJob;
 use crate::os_input_output::AsyncReader;
 use crate::pty_writer::PtyWriteInstruction;
 use std::collections::HashSet;
-use std::env::set_var;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use crate::{
     plugins::PluginInstruction,
-    pty::{ClientTabIndexOrPaneId, PtyInstruction},
+    pty::{ClientTabIndexOrPaneId, LayoutCommitOutcome, PtyInstruction},
 };
 use zellij_utils::ipc::PixelDimensions;
 
@@ -64,6 +63,64 @@ fn normalize_layout_debug(output: String) -> String {
         .filter(|line| line.trim() != "tab_instance_id: None,")
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn assert_layout_transaction_rejected(
+    pty_receiver: &Receiver<(PtyInstruction, ErrorContext)>,
+    transaction_id: u64,
+    writer_resource_ids: &[PaneId],
+) -> String {
+    let writer_resource_ids = writer_resource_ids.iter().copied().collect::<HashSet<_>>();
+    loop {
+        let (instruction, _) = pty_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("Screen must resolve every rejected layout transaction");
+        match instruction {
+            PtyInstruction::LayoutCommitResolved(
+                received_transaction_id,
+                LayoutCommitOutcome::Rejected(message),
+            ) if received_transaction_id == transaction_id => return message,
+            PtyInstruction::LayoutCommitResolved(
+                received_transaction_id,
+                LayoutCommitOutcome::Committed,
+            ) if received_transaction_id == transaction_id => {
+                panic!("rejected layout transaction {transaction_id} was falsely committed")
+            },
+            PtyInstruction::CloseTab(resource_ids) => {
+                assert!(
+                    resource_ids
+                        .iter()
+                        .all(|resource_id| !writer_resource_ids.contains(resource_id)),
+                    "Screen must not directly close writer-owned resources before PTY consumes the rejection ACK: {resource_ids:?}"
+                );
+            },
+            _ => {},
+        }
+    }
+}
+
+fn assert_layout_transaction_committed(
+    pty_receiver: &Receiver<(PtyInstruction, ErrorContext)>,
+    transaction_id: u64,
+) {
+    loop {
+        let (instruction, _) = pty_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("Screen must resolve every committed layout transaction");
+        match instruction {
+            PtyInstruction::LayoutCommitResolved(
+                received_transaction_id,
+                LayoutCommitOutcome::Committed,
+            ) if received_transaction_id == transaction_id => return,
+            PtyInstruction::LayoutCommitResolved(
+                received_transaction_id,
+                LayoutCommitOutcome::Rejected(message),
+            ) if received_transaction_id == transaction_id => {
+                panic!("layout transaction {transaction_id} was falsely rejected: {message}")
+            },
+            _ => {},
+        }
+    }
 }
 
 fn take_snapshot_and_cursor_coordinates(
@@ -532,9 +589,6 @@ impl MockScreen {
         let screen_thread = std::thread::Builder::new()
             .name("screen_thread".to_string())
             .spawn(move || {
-                // SAFETY: test threads set this process-wide env var before reading it; no
-                // concurrent unsynchronized env access in these single-purpose test harnesses.
-                unsafe { set_var("ZELLIJ_SESSION_NAME", session_name) };
                 screen_thread_main(
                     screen_bus,
                     None,
@@ -543,6 +597,7 @@ impl MockScreen {
                     debug,
                     Box::default(),
                     Arc::new(AtomicBool::new(false)),
+                    Some(session_name),
                 )
                 .expect("TEST")
             })
@@ -595,6 +650,7 @@ impl MockScreen {
             None,
             None,
             None,
+            0,
         ));
         self.last_opened_tab_index = Some(tab_index);
         std::thread::sleep(std::time::Duration::from_millis(100)); // give time for the async render
@@ -626,9 +682,6 @@ impl MockScreen {
         let screen_thread = std::thread::Builder::new()
             .name("screen_thread".to_string())
             .spawn(move || {
-                // SAFETY: test threads set this process-wide env var before reading it; no
-                // concurrent unsynchronized env access in these single-purpose test harnesses.
-                unsafe { set_var("ZELLIJ_SESSION_NAME", "zellij-test") };
                 screen_thread_main(
                     screen_bus,
                     None,
@@ -637,6 +690,7 @@ impl MockScreen {
                     debug,
                     Box::default(),
                     Arc::new(AtomicBool::new(false)),
+                    Some("zellij-test".to_owned()),
                 )
                 .expect("TEST")
             })
@@ -696,6 +750,7 @@ impl MockScreen {
             None,
             None,
             None,
+            0,
         ));
         self.last_opened_tab_index = Some(tab_index);
         screen_thread
@@ -737,6 +792,7 @@ impl MockScreen {
             None,
             None,
             None,
+            0,
         ));
         self.last_opened_tab_index = Some(tab_index);
     }
@@ -788,6 +844,7 @@ impl MockScreen {
             None,
             None,
             None,
+            0,
         ));
         self.last_opened_tab_index = Some(tab_index);
     }
@@ -4887,6 +4944,7 @@ pub fn screen_can_break_pane_to_a_new_tab() {
         None,
         None,
         None,
+        0,
     ));
     std::thread::sleep(std::time::Duration::from_millis(100));
     // move back to make sure the other pane is in the previous tab
@@ -4997,6 +5055,7 @@ pub fn screen_can_break_floating_pane_to_a_new_tab() {
         None,
         None,
         None,
+        0,
     ));
     std::thread::sleep(std::time::Duration::from_millis(200));
     // move back to make sure the other pane is in the previous tab
@@ -5089,6 +5148,7 @@ pub fn screen_can_break_multiple_stacked_panes_to_a_new_tab() {
         None,
         None,
         None,
+        0,
     ));
     std::thread::sleep(std::time::Duration::from_millis(100));
     // move back to make sure the other pane is in the previous tab
@@ -5173,6 +5233,7 @@ pub fn screen_can_break_plugin_pane_to_a_new_tab() {
         None,
         None,
         None,
+        0,
     ));
     std::thread::sleep(std::time::Duration::from_millis(100));
     // move back to make sure the other pane is in the previous tab
@@ -5257,6 +5318,7 @@ pub fn screen_can_break_floating_plugin_pane_to_a_new_tab() {
         None,
         None,
         None,
+        0,
     ));
     std::thread::sleep(std::time::Duration::from_millis(100));
     // move back to make sure the other pane is in the previous tab
@@ -5328,6 +5390,7 @@ pub fn screen_can_move_pane_to_a_new_tab_right() {
         None,
         None,
         None,
+        0,
     ));
     std::thread::sleep(std::time::Duration::from_millis(100));
     let _ = mock_screen
@@ -5395,6 +5458,7 @@ pub fn screen_can_move_pane_to_a_new_tab_left() {
         None,
         None,
         None,
+        0,
     ));
     std::thread::sleep(std::time::Duration::from_millis(100));
     let _ = mock_screen
@@ -6132,6 +6196,54 @@ pub fn newer_receipt_generation_rejects_an_old_request_before_allocation() {
 }
 
 #[test]
+pub fn missing_apply_target_rejects_transaction_without_direct_writer_cleanup() {
+    let size = Size { cols: 80, rows: 20 };
+    let mut mock_screen = MockScreen::new(size);
+    let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
+    let pty_receiver = mock_screen.pty_receiver.take().unwrap();
+    while pty_receiver.try_recv().is_ok() {}
+    let plugin =
+        RunPluginOrAlias::from_url("file:/missing-apply-target.wasm", &None, None, None).unwrap();
+
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ApplyLayout(
+        TiledPaneLayout::default(),
+        vec![],
+        vec![(901, None)],
+        vec![],
+        HashMap::from([(plugin, vec![902])]),
+        999,
+        false,
+        (1, false),
+        None,
+        None,
+        None,
+        42,
+    ));
+    let rejection = assert_layout_transaction_rejected(
+        &pty_receiver,
+        42,
+        &[PaneId::Terminal(901), PaneId::Plugin(902)],
+    );
+    assert!(rejection.contains("Tab with index 999 not found"));
+
+    let (panes_tx, panes_rx) = crossbeam::channel::bounded(1);
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ListPanes {
+        show_all: true,
+        response_channel: panes_tx,
+    });
+    let panes = panes_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("screen must remain alive after rejecting the layout");
+    assert!(
+        panes
+            .iter()
+            .all(|pane| pane.pane_info.id != 901 && pane.pane_info.id != 902)
+    );
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
 pub fn old_request_that_finishes_after_reclassification_self_cleans_exact_resources() {
     let directory = tempfile::tempdir().unwrap();
     let receipt_path = directory.path().join("transfer.json");
@@ -6205,6 +6317,7 @@ pub fn old_request_that_finishes_after_reclassification_self_cleans_exact_resour
         None,
         None,
         Some(old_generation),
+        410,
     ));
     let (tabs_tx, tabs_rx) = crossbeam::channel::bounded(1);
     let _ = old_drawer.to_screen.send(ScreenInstruction::ListTabs {
@@ -6218,15 +6331,11 @@ pub fn old_request_that_finishes_after_reclassification_self_cleans_exact_resour
         tabs.tabs.iter().all(|tab| tab.name != old_name),
         "a globally stale cross-drawer writer must close only its exact placeholder"
     );
-    let mut cleaned = HashSet::new();
-    while !cleaned.contains(&PaneId::Terminal(410)) || !cleaned.contains(&PaneId::Plugin(411)) {
-        let (instruction, _) = pty_receiver
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .expect("late old resources must be returned to PTY cleanup");
-        if let PtyInstruction::CloseTab(ids) = instruction {
-            cleaned.extend(ids);
-        }
-    }
+    assert_layout_transaction_rejected(
+        &pty_receiver,
+        410,
+        &[PaneId::Terminal(410), PaneId::Plugin(411)],
+    );
     old_drawer.teardown(vec![old_screen_thread]);
 
     let new_name = format!("{} [vc:{}]", run_id, new_token);
@@ -6301,6 +6410,7 @@ pub fn newer_same_viewer_generation_discards_apply_writer_without_closing_stable
         None,
         None,
         Some(generation),
+        420,
     ));
     let _ = drawer.to_screen.send(ScreenInstruction::RenderToClients);
 
@@ -6327,18 +6437,10 @@ pub fn newer_same_viewer_generation_discards_apply_writer_without_closing_stable
         "the superseded writer must not install resources"
     );
 
-    let mut cleaned = HashSet::new();
-    while !cleaned.contains(&PaneId::Terminal(420)) || !cleaned.contains(&PaneId::Plugin(421)) {
-        let (instruction, _) = pty_receiver
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .expect("same-viewer superseded resources must return to PTY cleanup");
-        if let PtyInstruction::CloseTab(ids) = instruction {
-            cleaned.extend(ids);
-        }
-    }
-    assert_eq!(
-        cleaned,
-        HashSet::from([PaneId::Terminal(420), PaneId::Plugin(421)])
+    assert_layout_transaction_rejected(
+        &pty_receiver,
+        420,
+        &[PaneId::Terminal(420), PaneId::Plugin(421)],
     );
 
     drawer.teardown(vec![screen_thread]);
@@ -6426,6 +6528,7 @@ pub fn receipt_change_after_install_is_caught_by_the_final_fence() {
         None,
         None,
         Some(generation),
+        510,
     ));
     installed_rx
         .recv_timeout(std::time::Duration::from_secs(1))
@@ -6449,15 +6552,11 @@ pub fn receipt_change_after_install_is_caught_by_the_final_fence() {
         tabs.tabs.iter().all(|tab| tab.name != old_name),
         "final verification must exact-close a writer invalidated after install"
     );
-    let mut cleaned = HashSet::new();
-    while !cleaned.contains(&PaneId::Terminal(510)) || !cleaned.contains(&PaneId::Plugin(511)) {
-        let (instruction, _) = pty_receiver
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .expect("post-install stale resources must be returned to PTY cleanup");
-        if let PtyInstruction::CloseTab(ids) = instruction {
-            cleaned.extend(ids);
-        }
-    }
+    assert_layout_transaction_rejected(
+        &pty_receiver,
+        510,
+        &[PaneId::Terminal(510), PaneId::Plugin(511)],
+    );
 
     drawer.teardown(vec![screen_thread]);
 }
@@ -6500,6 +6599,7 @@ pub fn same_viewer_reclassification_after_apply_install_removes_only_writer_reso
         None,
         None,
         Some(generation),
+        520,
     ));
     installed_rx
         .recv_timeout(std::time::Duration::from_secs(1))
@@ -6512,6 +6612,15 @@ pub fn same_viewer_reclassification_after_apply_install_removes_only_writer_reso
     );
     resume_tx.send(()).unwrap();
     let _ = drawer.to_screen.send(ScreenInstruction::RenderToClients);
+    let rejection = assert_layout_transaction_rejected(
+        &pty_receiver,
+        520,
+        &[PaneId::Terminal(520), PaneId::Plugin(521)],
+    );
+    assert!(
+        rejection.contains("superseded for the same viewer"),
+        "same-viewer rejection must not be promoted to ownership loss: {rejection}"
+    );
 
     let (tabs_tx, tabs_rx) = crossbeam::channel::bounded(1);
     let _ = drawer.to_screen.send(ScreenInstruction::ListTabs {
@@ -6540,20 +6649,6 @@ pub fn same_viewer_reclassification_after_apply_install_removes_only_writer_reso
     assert_eq!(
         stable_tab.selectable_tiled_panes_count, 0,
         "only the superseded writer's installed panes must be removed"
-    );
-
-    let mut cleaned = HashSet::new();
-    while !cleaned.contains(&PaneId::Terminal(520)) || !cleaned.contains(&PaneId::Plugin(521)) {
-        let (instruction, _) = pty_receiver
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .expect("post-install same-viewer resources must return to PTY cleanup");
-        if let PtyInstruction::CloseTab(ids) = instruction {
-            cleaned.extend(ids);
-        }
-    }
-    assert_eq!(
-        cleaned,
-        HashSet::from([PaneId::Terminal(520), PaneId::Plugin(521)])
     );
 
     drawer.teardown(vec![screen_thread]);
@@ -6631,6 +6726,7 @@ fn assert_override_preinstall_rejection_cleanup(same_viewer: bool) {
             1,
             None,
             Some(recovery_generation),
+            610,
         ));
     let _ = drawer.to_screen.send(ScreenInstruction::RenderToClients);
 
@@ -6659,18 +6755,10 @@ fn assert_override_preinstall_rejection_cleanup(same_viewer: bool) {
         );
     }
 
-    let mut cleaned = HashSet::new();
-    while !cleaned.contains(&PaneId::Terminal(610)) || !cleaned.contains(&PaneId::Plugin(611)) {
-        let (instruction, _) = pty_receiver
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .expect("override pre-install resources must return to PTY cleanup");
-        if let PtyInstruction::CloseTab(ids) = instruction {
-            cleaned.extend(ids);
-        }
-    }
-    assert_eq!(
-        cleaned,
-        HashSet::from([PaneId::Terminal(610), PaneId::Plugin(611)])
+    assert_layout_transaction_rejected(
+        &pty_receiver,
+        610,
+        &[PaneId::Terminal(610), PaneId::Plugin(611)],
     );
 
     drawer.teardown(vec![screen_thread]);
@@ -6751,6 +6839,7 @@ fn assert_override_postinstall_rejection_cleanup(same_viewer: bool) {
             1,
             None,
             Some(recovery_generation),
+            710,
         ));
     installed_rx
         .recv_timeout(std::time::Duration::from_secs(1))
@@ -6765,6 +6854,22 @@ fn assert_override_postinstall_rejection_cleanup(same_viewer: bool) {
     );
     resume_tx.send(()).unwrap();
     let _ = drawer.to_screen.send(ScreenInstruction::RenderToClients);
+    let rejection = assert_layout_transaction_rejected(
+        &pty_receiver,
+        710,
+        &[PaneId::Terminal(710), PaneId::Plugin(711)],
+    );
+    if same_viewer {
+        assert!(
+            rejection.contains("superseded for the same viewer"),
+            "same-viewer rejection must not be promoted to ownership loss: {rejection}"
+        );
+    } else {
+        assert!(
+            rejection.contains("lost ownership"),
+            "cross-viewer rejection must remain ownership loss: {rejection}"
+        );
+    }
 
     let (tabs_tx, tabs_rx) = crossbeam::channel::bounded(1);
     let _ = drawer.to_screen.send(ScreenInstruction::ListTabs {
@@ -6790,20 +6895,6 @@ fn assert_override_postinstall_rejection_cleanup(same_viewer: bool) {
             "cross-token/bucket post-install ownership loss must exact-close the stale tab"
         );
     }
-
-    let mut cleaned = HashSet::new();
-    while !cleaned.contains(&PaneId::Terminal(710)) || !cleaned.contains(&PaneId::Plugin(711)) {
-        let (instruction, _) = pty_receiver
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .expect("override post-install resources must return to PTY cleanup");
-        if let PtyInstruction::CloseTab(ids) = instruction {
-            cleaned.extend(ids);
-        }
-    }
-    assert_eq!(
-        cleaned,
-        HashSet::from([PaneId::Terminal(710), PaneId::Plugin(711)])
-    );
 
     drawer.teardown(vec![screen_thread]);
 }
@@ -6980,6 +7071,7 @@ pub fn durable_empty_tab_retry_is_generation_fenced_and_does_not_duplicate_resou
             client_id,
             None,
             Some(generation_two.clone()),
+            200,
         ));
 
     let (ready_panes_tx, ready_panes_rx) = crossbeam::channel::bounded(1);
@@ -6996,6 +7088,7 @@ pub fn durable_empty_tab_retry_is_generation_fenced_and_does_not_duplicate_resou
         }),
         "the current generation must make the recovered terminal visible"
     );
+    assert_layout_transaction_committed(&pty_receiver, 200);
 
     let stale_plugin =
         RunPluginOrAlias::from_url("file:/path/to/stale/plugin", &None, None, None).unwrap();
@@ -7014,6 +7107,7 @@ pub fn durable_empty_tab_retry_is_generation_fenced_and_does_not_duplicate_resou
         None,
         None,
         Some(generation_one),
+        100,
     ));
 
     let (final_panes_tx, final_panes_rx) = crossbeam::channel::bounded(1);
@@ -7024,17 +7118,10 @@ pub fn durable_empty_tab_retry_is_generation_fenced_and_does_not_duplicate_resou
     let final_panes = final_panes_rx
         .recv_timeout(std::time::Duration::from_secs(1))
         .expect("pane-list barrier after stale completion must answer");
-    let stale_resources = loop {
-        let (instruction, _) = pty_receiver
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .expect("stale resources must be handed to PTY cleanup");
-        if let PtyInstruction::CloseTab(resource_ids) = instruction {
-            break resource_ids.into_iter().collect::<HashSet<_>>();
-        }
-    };
-    assert_eq!(
-        stale_resources,
-        HashSet::from([PaneId::Terminal(100), PaneId::Plugin(300)])
+    assert_layout_transaction_rejected(
+        &pty_receiver,
+        100,
+        &[PaneId::Terminal(100), PaneId::Plugin(300)],
     );
     assert!(
         final_panes

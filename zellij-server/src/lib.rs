@@ -2115,6 +2115,7 @@ fn init_session(params: SessionInitParams) -> SessionMetaData {
                     debug,
                     layout,
                     has_clients_flag,
+                    None,
                 )
                 .fatal();
             }

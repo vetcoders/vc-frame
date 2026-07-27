@@ -11,10 +11,10 @@ use crate::{
     session_layout_metadata::SessionLayoutMetadata,
     thread_bus::{Bus, ThreadSenders},
 };
-use std::sync::Arc;
 use std::{
     collections::{BTreeSet, HashMap},
     path::PathBuf,
+    sync::{Arc, Mutex},
 };
 use tokio::task::JoinHandle;
 use zellij_utils::{
@@ -37,6 +37,116 @@ use zellij_utils::{
 
 pub type VteBytes = Vec<u8>;
 pub type TabIndex = u32;
+/// Zero is reserved for legacy/test Screen instructions without a PTY owner.
+pub type LayoutTransactionId = u64;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LayoutCommitOutcome {
+    Committed,
+    Rejected(String),
+}
+
+type QuitCallback = Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>;
+type QuitCallbackInvocation = (PaneId, Option<i32>, RunCommand);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QuitCallbackFenceStatus {
+    Pending,
+    Committed,
+    Cancelled,
+    Fired,
+}
+
+struct QuitCallbackFenceState {
+    status: QuitCallbackFenceStatus,
+    callback: Option<QuitCallback>,
+    pending_invocation: Option<QuitCallbackInvocation>,
+}
+
+#[derive(Clone)]
+struct QuitCallbackFence {
+    state: Arc<Mutex<QuitCallbackFenceState>>,
+}
+
+impl QuitCallbackFence {
+    fn wrap(callback: QuitCallback) -> (Self, QuitCallback) {
+        let fence = Self {
+            state: Arc::new(Mutex::new(QuitCallbackFenceState {
+                status: QuitCallbackFenceStatus::Pending,
+                callback: Some(callback),
+                pending_invocation: None,
+            })),
+        };
+        let callback_fence = fence.clone();
+        let fenced_callback = Box::new(move |pane_id, exit_status, command| {
+            callback_fence.handle_exit(pane_id, exit_status, command);
+        });
+        (fence, fenced_callback)
+    }
+
+    fn handle_exit(&self, pane_id: PaneId, exit_status: Option<i32>, command: RunCommand) {
+        let invocation = (pane_id, exit_status, command);
+        let callback_to_fire = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match state.status {
+                QuitCallbackFenceStatus::Pending => {
+                    if state.pending_invocation.is_none() {
+                        state.pending_invocation = Some(invocation);
+                    }
+                    None
+                },
+                QuitCallbackFenceStatus::Committed => {
+                    state.status = QuitCallbackFenceStatus::Fired;
+                    state.callback.take().map(|callback| (callback, invocation))
+                },
+                QuitCallbackFenceStatus::Cancelled | QuitCallbackFenceStatus::Fired => None,
+            }
+        };
+        if let Some((callback, invocation)) = callback_to_fire {
+            callback(invocation.0, invocation.1, invocation.2);
+        }
+    }
+
+    fn commit(&self) {
+        let callback_to_fire = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state.status != QuitCallbackFenceStatus::Pending {
+                return;
+            }
+            if let Some(invocation) = state.pending_invocation.take() {
+                state.status = QuitCallbackFenceStatus::Fired;
+                state.callback.take().map(|callback| (callback, invocation))
+            } else {
+                state.status = QuitCallbackFenceStatus::Committed;
+                None
+            }
+        };
+        if let Some((callback, invocation)) = callback_to_fire {
+            callback(invocation.0, invocation.1, invocation.2);
+        }
+    }
+
+    fn cancel(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if matches!(
+            state.status,
+            QuitCallbackFenceStatus::Pending | QuitCallbackFenceStatus::Committed
+        ) {
+            state.status = QuitCallbackFenceStatus::Cancelled;
+            state.callback = None;
+            state.pending_invocation = None;
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClientTabIndexOrPaneId {
@@ -164,6 +274,7 @@ pub enum PtyInstruction {
     },
     UpdateAndReportCwds,
     NotifyCwdFromOsc7(u32, PathBuf),
+    LayoutCommitResolved(LayoutTransactionId, LayoutCommitOutcome),
     Exit,
 }
 
@@ -197,6 +308,7 @@ impl From<&PtyInstruction> for PtyContext {
             PtyInstruction::GetPaneCwd { .. } => PtyContext::GetPaneCwd,
             PtyInstruction::UpdateAndReportCwds => PtyContext::UpdateAndReportCwds,
             PtyInstruction::NotifyCwdFromOsc7(..) => PtyContext::NotifyCwdFromOsc7,
+            PtyInstruction::LayoutCommitResolved(..) => PtyContext::LayoutCommitResolved,
             PtyInstruction::Exit => PtyContext::Exit,
         }
     }
@@ -205,6 +317,7 @@ impl From<&PtyInstruction> for PtyContext {
 #[derive(Default)]
 struct LayoutAllocationLedger {
     allocated_ids: BTreeSet<PaneId>,
+    quit_callback_fences: Vec<QuitCallbackFence>,
 }
 
 impl LayoutAllocationLedger {
@@ -217,6 +330,10 @@ impl LayoutAllocationLedger {
         self.allocated_ids.insert(PaneId::Terminal(terminal_id));
     }
 
+    fn track_quit_callback_fence(&mut self, fence: QuitCallbackFence) {
+        self.quit_callback_fences.push(fence);
+    }
+
     fn disarm(self) {}
 }
 
@@ -224,6 +341,7 @@ enum PreparedTerminal {
     Runnable {
         terminal_id: u32,
         reader: Box<dyn AsyncReader>,
+        quit_callback_fence: QuitCallbackFence,
     },
     HeldTerminal {
         terminal_id: u32,
@@ -258,6 +376,12 @@ struct PreparedTabOverride {
     originating_plugins_to_inform: Vec<(u32, OriginatingPlugin)>,
 }
 
+struct PendingLayoutCommit {
+    allocation_ledger: LayoutAllocationLedger,
+    terminals: Vec<PreparedTerminal>,
+    originating_plugins_to_inform: Vec<(u32, OriginatingPlugin)>,
+}
+
 pub(crate) struct Pty {
     pub active_panes: HashMap<ClientId, PaneId>,
     pub bus: Bus<PtyInstruction>,
@@ -272,6 +396,8 @@ pub(crate) struct Pty {
     pane_activity_flags: HashMap<u32, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     terminal_cmds: HashMap<u32, Vec<String>>,
     terminal_foreground_cmds: HashMap<u32, Vec<String>>,
+    pending_layout_commits: HashMap<LayoutTransactionId, PendingLayoutCommit>,
+    next_layout_transaction_id: LayoutTransactionId,
 }
 
 pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
@@ -978,7 +1104,14 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
             PtyInstruction::NotifyCwdFromOsc7(terminal_id, path) => {
                 pty.notify_cwd_from_osc7(terminal_id, path);
             },
-            PtyInstruction::Exit => break,
+            PtyInstruction::LayoutCommitResolved(transaction_id, outcome) => {
+                pty.resolve_layout_commit(transaction_id, outcome)
+                    .non_fatal();
+            },
+            PtyInstruction::Exit => {
+                pty.rollback_pending_layout_commits_on_exit();
+                break;
+            },
         }
     }
     Ok(())
@@ -1005,8 +1138,81 @@ impl Pty {
             pane_activity_flags: HashMap::new(),
             terminal_cmds: HashMap::new(),
             terminal_foreground_cmds: HashMap::new(),
+            pending_layout_commits: HashMap::new(),
+            next_layout_transaction_id: 1,
         }
     }
+
+    fn begin_layout_commit(&mut self, pending_commit: PendingLayoutCommit) -> LayoutTransactionId {
+        loop {
+            let transaction_id = self.next_layout_transaction_id;
+            self.next_layout_transaction_id = self.next_layout_transaction_id.wrapping_add(1);
+            if transaction_id != 0 && !self.pending_layout_commits.contains_key(&transaction_id) {
+                self.pending_layout_commits
+                    .insert(transaction_id, pending_commit);
+                return transaction_id;
+            }
+        }
+    }
+
+    fn resolve_layout_commit(
+        &mut self,
+        transaction_id: LayoutTransactionId,
+        outcome: LayoutCommitOutcome,
+    ) -> Result<()> {
+        let Some(pending_commit) = self.pending_layout_commits.remove(&transaction_id) else {
+            log::debug!(
+                "ignoring duplicate or stale layout commit resolution for transaction {}",
+                transaction_id
+            );
+            return Ok(());
+        };
+
+        match outcome {
+            LayoutCommitOutcome::Committed => {
+                pending_commit.allocation_ledger.disarm();
+                for prepared_terminal in pending_commit.terminals {
+                    self.activate_prepared_terminal(prepared_terminal);
+                }
+                for (terminal_id, originating_plugin) in
+                    pending_commit.originating_plugins_to_inform
+                {
+                    self.inform_originating_plugin_of_open(terminal_id, originating_plugin);
+                }
+                Ok(())
+            },
+            LayoutCommitOutcome::Rejected(message) => Err(self
+                .rollback_partial_layout_allocations(
+                    anyhow!("screen rejected layout transaction {transaction_id}: {message}"),
+                    pending_commit.allocation_ledger,
+                )),
+        }
+    }
+
+    fn rollback_pending_layout_commits_on_exit(&mut self) {
+        let pending_layout_commits = std::mem::take(&mut self.pending_layout_commits);
+        for (transaction_id, pending_commit) in pending_layout_commits {
+            Err::<(), _>(self.rollback_partial_layout_allocations(
+                anyhow!("PTY exited with layout transaction {transaction_id} unresolved"),
+                pending_commit.allocation_ledger,
+            ))
+            .non_fatal();
+        }
+    }
+
+    fn reject_pending_layout_send(
+        &mut self,
+        transaction_id: LayoutTransactionId,
+        error: anyhow::Error,
+    ) -> anyhow::Error {
+        let Some(pending_commit) = self.pending_layout_commits.remove(&transaction_id) else {
+            return error.context(format!(
+                "layout transaction {transaction_id} disappeared before send rollback"
+            ));
+        };
+        self.rollback_partial_layout_allocations(error, pending_commit.allocation_ledger)
+    }
+
     pub fn get_default_terminal(
         &self,
         cwd: Option<PathBuf>,
@@ -1374,6 +1580,13 @@ impl Pty {
             } else {
                 (completion_tx, None)
             };
+        let mut terminals = new_pane_pids;
+        terminals.extend(new_floating_panes_pids);
+        let transaction_id = self.begin_layout_commit(PendingLayoutCommit {
+            allocation_ledger,
+            terminals,
+            originating_plugins_to_inform,
+        });
 
         log::info!(
             "spawn_terminals_for_layout: {} tiled + {} floating panes created, sending ApplyLayout",
@@ -1395,21 +1608,11 @@ impl Pty {
                 direct_completion_tx,
                 blocking_terminal,
                 layout_generation,
+                transaction_id,
             ))
             .with_context(err_context);
         if let Err(error) = apply_layout_result {
-            return Err(self.rollback_partial_layout_allocations(error, allocation_ledger));
-        }
-        allocation_ledger.disarm();
-
-        let mut terminals_to_start = vec![];
-        terminals_to_start.append(&mut new_pane_pids);
-        terminals_to_start.append(&mut new_floating_panes_pids);
-        for prepared_terminal in terminals_to_start {
-            self.activate_prepared_terminal(prepared_terminal);
-        }
-        for (terminal_id, originating_plugin) in originating_plugins_to_inform {
-            self.inform_originating_plugin_of_open(terminal_id, originating_plugin);
+            return Err(self.reject_pending_layout_send(transaction_id, error));
         }
         Ok(())
     }
@@ -1465,6 +1668,11 @@ impl Pty {
             }
         }
 
+        let transaction_id = self.begin_layout_commit(PendingLayoutCommit {
+            allocation_ledger,
+            terminals: all_prepared_terminals,
+            originating_plugins_to_inform: all_originating_plugins_to_inform,
+        });
         let final_send_result =
             self.bus
                 .senders
@@ -1475,20 +1683,13 @@ impl Pty {
                     client_id,
                     completion_tx,
                     layout_generation,
+                    transaction_id,
                 ));
         if let Err(error) = final_send_result {
-            return Err(self.rollback_partial_layout_allocations(
+            return Err(self.reject_pending_layout_send(
+                transaction_id,
                 error.context("failed to commit recovered layout"),
-                allocation_ledger,
             ));
-        }
-        allocation_ledger.disarm();
-
-        for prepared_terminal in all_prepared_terminals {
-            self.activate_prepared_terminal(prepared_terminal);
-        }
-        for (terminal_id, originating_plugin) in all_originating_plugins_to_inform {
-            self.inform_originating_plugin_of_open(terminal_id, originating_plugin);
         }
         Ok(())
     }
@@ -1610,6 +1811,9 @@ impl Pty {
         allocation_ledger: LayoutAllocationLedger,
     ) -> anyhow::Error {
         let mut cleanup_errors = Vec::new();
+        for quit_callback_fence in &allocation_ledger.quit_callback_fences {
+            quit_callback_fence.cancel();
+        }
         for pane_id in allocation_ledger.allocated_ids {
             if let Err(error) = self.close_pane(pane_id) {
                 cleanup_errors.push(format!("{pane_id:?}: {error}"));
@@ -1630,6 +1834,7 @@ impl Pty {
             PreparedTerminal::Runnable {
                 terminal_id,
                 reader,
+                quit_callback_fence,
             } => {
                 let activity_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let terminal_bytes = async_runtime().spawn({
@@ -1652,6 +1857,7 @@ impl Pty {
                 });
                 self.task_handles.insert(terminal_id, terminal_bytes);
                 self.pane_activity_flags.insert(terminal_id, activity_flag);
+                quit_callback_fence.commit();
             },
             PreparedTerminal::HeldTerminal {
                 terminal_id,
@@ -1780,6 +1986,7 @@ impl Pty {
                         Err(e) => Err(e),
                     }
                 } else {
+                    let (quit_callback_fence, quit_cb) = QuitCallbackFence::wrap(quit_cb);
                     match self
                         .bus
                         .os_input
@@ -1791,6 +1998,8 @@ impl Pty {
                     {
                         Ok((terminal_id, reader, child_pid)) => {
                             allocation_ledger.track_terminal(terminal_id);
+                            allocation_ledger
+                                .track_quit_callback_fence(quit_callback_fence.clone());
                             if let Some(child_pid) = child_pid {
                                 self.id_to_child_pid.insert(terminal_id, child_pid);
                                 self.capture_initial_cwd(terminal_id, child_pid);
@@ -1798,32 +2007,37 @@ impl Pty {
                             Ok(Some(PreparedTerminal::Runnable {
                                 terminal_id,
                                 reader,
+                                quit_callback_fence,
                             }))
                         },
-                        Err(error) => match error.downcast_ref::<ZellijError>() {
-                            Some(ZellijError::CommandNotFound { terminal_id, .. }) => {
-                                let terminal_id = *terminal_id;
-                                allocation_ledger.track_terminal(terminal_id);
-                                if command.hold_on_close {
-                                    Ok(Some(PreparedTerminal::HeldTerminal {
-                                        terminal_id,
-                                        run_command: command,
-                                        command_not_found: true,
-                                    }))
-                                } else {
-                                    Err(error.context(
-                                        "CommandNotFound terminal cannot enter a layout without \
-                                         hold_on_close",
-                                    ))
-                                }
-                            },
-                            _ => Err(error),
+                        Err(error) => {
+                            quit_callback_fence.cancel();
+                            match error.downcast_ref::<ZellijError>() {
+                                Some(ZellijError::CommandNotFound { terminal_id, .. }) => {
+                                    let terminal_id = *terminal_id;
+                                    allocation_ledger.track_terminal(terminal_id);
+                                    if command.hold_on_close {
+                                        Ok(Some(PreparedTerminal::HeldTerminal {
+                                            terminal_id,
+                                            run_command: command,
+                                            command_not_found: true,
+                                        }))
+                                    } else {
+                                        Err(error.context(
+                                            "CommandNotFound terminal cannot enter a layout without \
+                                             hold_on_close",
+                                        ))
+                                    }
+                                },
+                                _ => Err(error),
+                            }
                         },
                     }
                 }
             },
             Some(Run::Cwd(cwd)) => {
                 let shell = self.get_default_terminal(Some(cwd), Some(default_shell.clone()));
+                let (quit_callback_fence, quit_cb) = QuitCallbackFence::wrap(quit_cb);
                 match self
                     .bus
                     .os_input
@@ -1835,6 +2049,7 @@ impl Pty {
                 {
                     Ok((terminal_id, reader, child_pid)) => {
                         allocation_ledger.track_terminal(terminal_id);
+                        allocation_ledger.track_quit_callback_fence(quit_callback_fence.clone());
                         if let Some(child_pid) = child_pid {
                             self.id_to_child_pid.insert(terminal_id, child_pid);
                             self.capture_initial_cwd(terminal_id, child_pid);
@@ -1842,21 +2057,26 @@ impl Pty {
                         Ok(Some(PreparedTerminal::Runnable {
                             terminal_id,
                             reader,
+                            quit_callback_fence,
                         }))
                     },
-                    Err(error) => match error.downcast_ref::<ZellijError>() {
-                        Some(ZellijError::CommandNotFound { terminal_id, .. }) => {
-                            allocation_ledger.track_terminal(*terminal_id);
-                            Err(error.context(
-                                "CommandNotFound Cwd terminal cannot enter a layout without an \
-                                 explicit held command",
-                            ))
-                        },
-                        _ => Err(error),
+                    Err(error) => {
+                        quit_callback_fence.cancel();
+                        match error.downcast_ref::<ZellijError>() {
+                            Some(ZellijError::CommandNotFound { terminal_id, .. }) => {
+                                allocation_ledger.track_terminal(*terminal_id);
+                                Err(error.context(
+                                    "CommandNotFound Cwd terminal cannot enter a layout without an \
+                                     explicit held command",
+                                ))
+                            },
+                            _ => Err(error),
+                        }
                     },
                 }
             },
             Some(Run::EditFile(path_to_file, line_number, cwd)) => {
+                let (quit_callback_fence, quit_cb) = QuitCallbackFence::wrap(quit_cb);
                 match self
                     .bus
                     .os_input
@@ -1876,6 +2096,7 @@ impl Pty {
                 {
                     Ok((terminal_id, reader, child_pid)) => {
                         allocation_ledger.track_terminal(terminal_id);
+                        allocation_ledger.track_quit_callback_fence(quit_callback_fence.clone());
                         if let Some(child_pid) = child_pid {
                             self.id_to_child_pid.insert(terminal_id, child_pid);
                             self.capture_initial_cwd(terminal_id, child_pid);
@@ -1883,21 +2104,26 @@ impl Pty {
                         Ok(Some(PreparedTerminal::Runnable {
                             terminal_id,
                             reader,
+                            quit_callback_fence,
                         }))
                     },
-                    Err(error) => match error.downcast_ref::<ZellijError>() {
-                        Some(ZellijError::CommandNotFound { terminal_id, .. }) => {
-                            allocation_ledger.track_terminal(*terminal_id);
-                            Err(error.context(
-                                "CommandNotFound editor terminal cannot enter a layout without an \
-                                 explicit held command",
-                            ))
-                        },
-                        _ => Err(error),
+                    Err(error) => {
+                        quit_callback_fence.cancel();
+                        match error.downcast_ref::<ZellijError>() {
+                            Some(ZellijError::CommandNotFound { terminal_id, .. }) => {
+                                allocation_ledger.track_terminal(*terminal_id);
+                                Err(error.context(
+                                    "CommandNotFound editor terminal cannot enter a layout without an \
+                                     explicit held command",
+                                ))
+                            },
+                            _ => Err(error),
+                        }
                     },
                 }
             },
             None => {
+                let (quit_callback_fence, quit_cb) = QuitCallbackFence::wrap(quit_cb);
                 match self
                     .bus
                     .os_input
@@ -1909,6 +2135,7 @@ impl Pty {
                 {
                     Ok((terminal_id, reader, child_pid)) => {
                         allocation_ledger.track_terminal(terminal_id);
+                        allocation_ledger.track_quit_callback_fence(quit_callback_fence.clone());
                         if let Some(child_pid) = child_pid {
                             self.id_to_child_pid.insert(terminal_id, child_pid);
                             self.capture_initial_cwd(terminal_id, child_pid);
@@ -1916,17 +2143,21 @@ impl Pty {
                         Ok(Some(PreparedTerminal::Runnable {
                             terminal_id,
                             reader,
+                            quit_callback_fence,
                         }))
                     },
-                    Err(error) => match error.downcast_ref::<ZellijError>() {
-                        Some(ZellijError::CommandNotFound { terminal_id, .. }) => {
-                            allocation_ledger.track_terminal(*terminal_id);
-                            Err(error.context(
-                                "CommandNotFound default terminal cannot enter a layout without an \
-                                 explicit held command",
-                            ))
-                        },
-                        _ => Err(error),
+                    Err(error) => {
+                        quit_callback_fence.cancel();
+                        match error.downcast_ref::<ZellijError>() {
+                            Some(ZellijError::CommandNotFound { terminal_id, .. }) => {
+                                allocation_ledger.track_terminal(*terminal_id);
+                                Err(error.context(
+                                    "CommandNotFound default terminal cannot enter a layout without an \
+                                     explicit held command",
+                                ))
+                            },
+                            _ => Err(error),
+                        }
                     },
                 }
             },

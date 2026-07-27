@@ -27,6 +27,7 @@ struct MockOsApi {
     next_terminal_id: Arc<AtomicUsize>,
     cleared_terminal_ids: Arc<Mutex<Vec<u32>>>,
     fail_clear_terminal_ids: Arc<Mutex<Vec<u32>>>,
+    quit_callbacks: Arc<Mutex<Vec<QuitCallback>>>,
 }
 
 fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -49,6 +50,7 @@ impl MockOsApi {
             next_terminal_id: Arc::new(AtomicUsize::new(100)),
             cleared_terminal_ids: Arc::new(Mutex::new(vec![])),
             fail_clear_terminal_ids: Arc::new(Mutex::new(vec![])),
+            quit_callbacks: Arc::new(Mutex::new(vec![])),
         }
     }
     fn fail_spawn_terminal(&self) {
@@ -74,6 +76,17 @@ impl MockOsApi {
     }
     fn cleared_terminal_ids(&self) -> Vec<u32> {
         lock_recover(&self.cleared_terminal_ids).clone()
+    }
+    fn fire_next_quit_callback(
+        &self,
+        pane_id: PaneId,
+        exit_status: Option<i32>,
+        command: RunCommand,
+    ) {
+        let callback = lock_recover(&self.quit_callbacks)
+            .pop()
+            .expect("a successful spawn must retain its quit callback");
+        callback(pane_id, exit_status, command);
     }
     fn set_cwd(&self, pid: u32, path: PathBuf) {
         self.cwds.lock().unwrap().insert(pid, path);
@@ -106,7 +119,7 @@ impl ServerOsApi for MockOsApi {
     fn spawn_terminal(
         &self,
         _: TerminalAction,
-        _: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
+        quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
         _: Option<PathBuf>,
     ) -> anyhow::Result<(u32, Box<dyn AsyncReader>, Option<u32>)> {
         let call = self.spawn_terminal_calls.fetch_add(1, Ordering::Relaxed) + 1;
@@ -132,6 +145,7 @@ impl ServerOsApi for MockOsApi {
                     command: "injected-missing-command".to_owned(),
                 }))
             } else {
+                lock_recover(&self.quit_callbacks).push(quit_cb);
                 Ok((terminal_id, Box::new(NullAsyncReader), None))
             };
         resolve_reserved_terminal_spawn(terminal_id, spawn_result, |terminal_id| {
@@ -527,8 +541,21 @@ fn post_apply_layout_notification_failure_keeps_new_tab_allocations() {
     let (screen_instruction, _) = screen_rx
         .try_recv()
         .expect("ApplyLayout must transfer ownership before the optional notification");
-    match screen_instruction {
-        ScreenInstruction::ApplyLayout(_, _, terminal_ids, _, plugin_ids, ..) => {
+    let transaction_id = match screen_instruction {
+        ScreenInstruction::ApplyLayout(
+            _,
+            _,
+            terminal_ids,
+            _,
+            plugin_ids,
+            _,
+            _,
+            _,
+            _,
+            _,
+            _,
+            transaction_id,
+        ) => {
             assert_eq!(
                 terminal_ids.len(),
                 1,
@@ -543,23 +570,166 @@ fn post_apply_layout_notification_failure_keeps_new_tab_allocations() {
                 plugin_ids.values().flatten().copied().collect::<Vec<_>>(),
                 vec![77]
             );
+            transaction_id
         },
         other => panic!("expected ApplyLayout, got {other:?}"),
-    }
+    };
     assert!(
         screen_rx.try_recv().is_err(),
-        "the injected optional notification must not produce a partial second screen message"
+        "no held-terminal notification may run before Screen commits ownership"
     );
     assert!(
         probe.cleared_terminal_ids().is_empty(),
-        "screen-owned terminal must not be locally cleared or double-cleaned"
+        "pending terminal must not be cleared before the Screen resolution"
     );
     assert!(
         !plugin_rx
             .try_iter()
             .any(|(instruction, _)| matches!(instruction, PluginInstruction::Unload(77))),
-        "screen-owned plugin must not be rolled back after ApplyLayout"
+        "pending plugin must not be rolled back before the Screen resolution"
     );
+    pty.resolve_layout_commit(transaction_id, LayoutCommitOutcome::Committed)
+        .expect("the Screen commit must activate the held terminal");
+    assert!(
+        screen_rx.try_recv().is_err(),
+        "the injected optional notification must not produce a partial second screen message"
+    );
+    pty.resolve_layout_commit(transaction_id, LayoutCommitOutcome::Committed)
+        .expect("a duplicate Screen ACK must be a no-op");
+}
+
+#[test]
+fn fast_exit_callback_waits_for_screen_commit_for_unix_and_windows_backends() {
+    for backend_semantics in ["unix waiter", "windows waiter"] {
+        let mock = MockOsApi::new();
+        let callback_probe = mock.clone();
+        let (screen_tx, screen_rx) = channels::unbounded();
+        let mut bus: Bus<PtyInstruction> = Bus::empty();
+        bus.os_input = Some(Box::new(mock));
+        bus.senders.to_screen = Some(SenderWithContext::new(screen_tx));
+        bus.senders.should_silently_fail = false;
+        let mut pty = Pty::new(bus, false, None, None);
+        let command = RunCommand {
+            command: PathBuf::from("instant-exit"),
+            ..Default::default()
+        };
+
+        pty.spawn_terminals_for_layout(
+            None,
+            TiledPaneLayout {
+                run: Some(Run::Command(command.clone())),
+                ..Default::default()
+            },
+            vec![],
+            None,
+            HashMap::new(),
+            None,
+            7,
+            false,
+            true,
+            (1, false),
+            None,
+            None,
+        )
+        .expect("the fast process must reach the Screen ownership fence");
+
+        let (instruction, _) = screen_rx.try_recv().expect("ApplyLayout");
+        let transaction_id = match instruction {
+            ScreenInstruction::ApplyLayout(_, _, _, _, _, _, _, _, _, _, _, transaction_id) => {
+                transaction_id
+            },
+            other => panic!("{backend_semantics}: expected ApplyLayout, got {other:?}"),
+        };
+        callback_probe.fire_next_quit_callback(PaneId::Terminal(100), Some(0), command.clone());
+        assert!(
+            screen_rx.try_recv().is_err(),
+            "{backend_semantics}: a waiter callback must not race ahead of Screen ownership"
+        );
+
+        pty.resolve_layout_commit(transaction_id, LayoutCommitOutcome::Committed)
+            .expect("Screen commit must release the fast-exit callback");
+        assert!(matches!(
+            screen_rx.try_recv(),
+            Ok((ScreenInstruction::ClosePane(PaneId::Terminal(100), ..), _))
+        ));
+        pty.resolve_layout_commit(transaction_id, LayoutCommitOutcome::Committed)
+            .expect("duplicate ACK must be ignored");
+        assert!(
+            screen_rx.try_recv().is_err(),
+            "{backend_semantics}: a fast exit must fire exactly once"
+        );
+    }
+}
+
+#[test]
+fn rejected_screen_commit_cancels_fast_exit_and_rolls_back_union_exactly_once() {
+    let mock = MockOsApi::new();
+    let probe = mock.clone();
+    let (plugin_tx, plugin_rx) = channels::unbounded();
+    let (screen_tx, screen_rx) = channels::unbounded();
+    let mut bus: Bus<PtyInstruction> = Bus::empty();
+    bus.os_input = Some(Box::new(mock));
+    bus.senders.to_plugin = Some(SenderWithContext::new(plugin_tx));
+    bus.senders.to_screen = Some(SenderWithContext::new(screen_tx));
+    bus.senders.should_silently_fail = false;
+    let mut pty = Pty::new(bus, false, None, None);
+    let plugin =
+        RunPluginOrAlias::from_url("file:/screen-rejected.wasm", &None, None, None).unwrap();
+    let command = RunCommand {
+        command: PathBuf::from("instant-exit-before-rejection"),
+        ..Default::default()
+    };
+
+    pty.spawn_terminals_for_layout(
+        None,
+        TiledPaneLayout {
+            run: Some(Run::Command(command.clone())),
+            ..Default::default()
+        },
+        vec![],
+        None,
+        HashMap::from([(plugin, vec![77])]),
+        None,
+        7,
+        false,
+        true,
+        (1, false),
+        None,
+        None,
+    )
+    .expect("the prepared layout must reach Screen");
+    let (instruction, _) = screen_rx.try_recv().expect("ApplyLayout");
+    let transaction_id = match instruction {
+        ScreenInstruction::ApplyLayout(_, _, _, _, _, _, _, _, _, _, _, transaction_id) => {
+            transaction_id
+        },
+        other => panic!("expected ApplyLayout, got {other:?}"),
+    };
+    probe.fire_next_quit_callback(PaneId::Terminal(100), Some(0), command);
+    assert!(
+        screen_rx.try_recv().is_err(),
+        "the queued fast exit must remain behind the ownership fence"
+    );
+
+    pty.resolve_layout_commit(
+        transaction_id,
+        LayoutCommitOutcome::Rejected("injected Screen apply failure".to_owned()),
+    )
+    .expect_err("a rejected commit reports the Screen failure after cleanup");
+    assert_eq!(probe.cleared_terminal_ids(), vec![100]);
+    assert_eq!(unloaded_plugin_ids(&plugin_rx), vec![77]);
+    assert!(
+        screen_rx.try_recv().is_err(),
+        "rollback must cancel the queued quit callback instead of creating a ghost ClosePane"
+    );
+
+    pty.resolve_layout_commit(
+        transaction_id,
+        LayoutCommitOutcome::Rejected("duplicate".to_owned()),
+    )
+    .expect("a duplicate rejection ACK must be a no-op");
+    assert_eq!(probe.cleared_terminal_ids(), vec![100]);
+    assert!(unloaded_plugin_ids(&plugin_rx).is_empty());
 }
 
 #[test]
@@ -834,8 +1004,8 @@ fn override_between_notification_failure_is_nonfatal_after_final_commit() {
     let (screen_instruction, _) = screen_rx
         .try_recv()
         .expect("the prepared override must transfer to screen");
-    match screen_instruction {
-        ScreenInstruction::OverrideLayoutComplete(tab_results, ..) => {
+    let transaction_id = match screen_instruction {
+        ScreenInstruction::OverrideLayoutComplete(tab_results, _, _, _, _, _, transaction_id) => {
             assert_eq!(tab_results.len(), 1);
             assert_eq!(
                 tab_results[0].new_terminal_pids,
@@ -857,9 +1027,16 @@ fn override_between_notification_failure_is_nonfatal_after_final_commit() {
                     .collect::<Vec<_>>(),
                 vec![77]
             );
+            transaction_id
         },
         other => panic!("expected OverrideLayoutComplete, got {other:?}"),
-    }
+    };
+    assert!(
+        screen_rx.try_recv().is_err(),
+        "a prepared override must remain quiescent until Screen commits it"
+    );
+    pty.resolve_layout_commit(transaction_id, LayoutCommitOutcome::Committed)
+        .expect("the Screen commit must activate held override terminals");
     assert!(matches!(
         screen_rx.try_recv(),
         Ok((ScreenInstruction::PtyBytes(100, _), _))
@@ -1023,6 +1200,73 @@ fn override_final_send_failure_rolls_back_the_union_exactly_once() {
     assert!(format!("{error:#}").contains("failed to get screen sender"));
     assert_eq!(probe.cleared_terminal_ids(), vec![100, 101]);
     assert_eq!(unloaded_plugin_ids(&plugin_rx), vec![71, 72]);
+}
+
+#[test]
+fn rejected_multi_tab_override_ack_rolls_back_the_union_exactly_once() {
+    let mock = MockOsApi::new();
+    let probe = mock.clone();
+    let (plugin_tx, plugin_rx) = channels::unbounded();
+    let (screen_tx, screen_rx) = channels::unbounded();
+    let mut bus: Bus<PtyInstruction> = Bus::empty();
+    bus.os_input = Some(Box::new(mock));
+    bus.senders.to_plugin = Some(SenderWithContext::new(plugin_tx));
+    bus.senders.to_screen = Some(SenderWithContext::new(screen_tx));
+    bus.senders.should_silently_fail = false;
+    let mut pty = Pty::new(bus, false, None, None);
+
+    pty.override_layout_transaction(
+        None,
+        None,
+        vec![
+            (
+                override_tab(0, TiledPaneLayout::default(), vec![]),
+                override_plugin("file:/first-screen-rejected.wasm", 71),
+            ),
+            (
+                override_tab(1, TiledPaneLayout::default(), vec![]),
+                override_plugin("file:/second-screen-rejected.wasm", 72),
+            ),
+        ],
+        true,
+        true,
+        1,
+        None,
+        None,
+    )
+    .expect("the complete multi-tab payload must reach Screen");
+    let (instruction, _) = screen_rx.try_recv().expect("OverrideLayoutComplete");
+    let transaction_id = match instruction {
+        ScreenInstruction::OverrideLayoutComplete(tab_results, _, _, _, _, _, transaction_id) => {
+            assert_eq!(tab_results.len(), 2);
+            transaction_id
+        },
+        other => panic!("expected OverrideLayoutComplete, got {other:?}"),
+    };
+
+    probe.fire_next_quit_callback(PaneId::Terminal(101), Some(0), RunCommand::default());
+    probe.fire_next_quit_callback(PaneId::Terminal(100), Some(0), RunCommand::default());
+    assert!(
+        screen_rx.try_recv().is_err(),
+        "neither tab may emit a ghost callback before the shared commit"
+    );
+    pty.resolve_layout_commit(
+        transaction_id,
+        LayoutCommitOutcome::Rejected("second tab failed in Screen".to_owned()),
+    )
+    .expect_err("Screen rejection remains visible after exact cleanup");
+
+    assert_eq!(probe.cleared_terminal_ids(), vec![100, 101]);
+    assert_eq!(unloaded_plugin_ids(&plugin_rx), vec![71, 72]);
+    assert!(
+        screen_rx.try_recv().is_err(),
+        "rollback must cancel every tab's queued quit callback"
+    );
+
+    pty.resolve_layout_commit(transaction_id, LayoutCommitOutcome::Committed)
+        .expect("a stale contradictory ACK must be ignored");
+    assert_eq!(probe.cleared_terminal_ids(), vec![100, 101]);
+    assert!(unloaded_plugin_ids(&plugin_rx).is_empty());
 }
 
 #[test]

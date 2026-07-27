@@ -498,6 +498,7 @@ pub enum PtyContext {
     GetPaneCwd,
     UpdateAndReportCwds,
     NotifyCwdFromOsc7,
+    LayoutCommitResolved,
     Exit,
 }
 

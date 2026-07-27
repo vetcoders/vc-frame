@@ -228,14 +228,6 @@ fn handle_openpty(
     let pid_primary = open_pty_res.master;
     let pid_secondary = open_pty_res.slave;
 
-    if !command_exists(&cmd) {
-        return Err(ZellijError::CommandNotFound {
-            terminal_id,
-            command: cmd.command.to_string_lossy().to_string(),
-        })
-        .with_context(|| err_context(&cmd));
-    }
-
     let mut child = match unsafe {
         spawn_command_in_pty(&cmd, terminal_id, move || -> io::Result<()> {
             if libc::login_tty(pid_secondary) != 0 {
@@ -276,6 +268,18 @@ fn handle_terminal(
     terminal_id: u32,
 ) -> Result<(RawFd, RawFd)> {
     let err_context = || "failed to spawn child terminal".to_string();
+    if !command_exists(&cmd) {
+        return Err(ZellijError::CommandNotFound {
+            terminal_id,
+            command: cmd.command.to_string_lossy().to_string(),
+        })
+        .with_context(|| {
+            format!(
+                "failed to open PTY for command '{}'",
+                cmd.command.to_string_lossy()
+            )
+        });
+    }
 
     // Create a pipe to allow the child the communicate the shell's pid to its
     // parent.
@@ -486,6 +490,39 @@ mod tests {
     use nix::fcntl::{FcntlArg, OFlag, fcntl};
     use nix::sys::termios;
     use std::io::Read;
+
+    fn open_file_descriptor_count() -> usize {
+        let fd_directory = if std::path::Path::new("/proc/self/fd").is_dir() {
+            "/proc/self/fd"
+        } else {
+            "/dev/fd"
+        };
+        std::fs::read_dir(fd_directory)
+            .expect("open file descriptor directory")
+            .count()
+    }
+
+    #[test]
+    fn repeated_missing_commands_do_not_leak_pty_file_descriptors() {
+        let before = open_file_descriptor_count();
+        for terminal_id in 0..128 {
+            let command = RunCommand {
+                command: format!("/definitely/not/a/real/vc-frame-command-{terminal_id}").into(),
+                ..Default::default()
+            };
+            let error = handle_terminal(command, None, None, Box::new(|_, _, _| {}), terminal_id)
+                .expect_err("a missing executable must be rejected");
+            assert!(
+                error.downcast_ref::<ZellijError>().is_some(),
+                "the missing-command source must be preserved: {error:#}"
+            );
+        }
+        let after = open_file_descriptor_count();
+        assert!(
+            after <= before + 1,
+            "128 rejected commands leaked file descriptors: before={before}, after={after}"
+        );
+    }
 
     #[test]
     fn reservation_cleanup_recovers_a_poisoned_terminal_registry() {

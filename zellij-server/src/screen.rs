@@ -86,7 +86,10 @@ use crate::{
     panes::PaneId,
     panes::sixel::SixelImageStore,
     plugins::{DumpSessionLayoutResponse, PluginId, PluginInstruction, PluginRenderAsset},
-    pty::{ClientTabIndexOrPaneId, PtyInstruction, VteBytes, get_default_shell},
+    pty::{
+        ClientTabIndexOrPaneId, LayoutCommitOutcome, LayoutTransactionId, PtyInstruction, VteBytes,
+        get_default_shell,
+    },
     pty_writer::PtyWriteInstruction,
     tab::{SuppressedPanes, Tab},
     thread_bus::Bus,
@@ -550,6 +553,7 @@ pub enum ScreenInstruction {
         Option<NotificationEnd>,        // regular completion signal
         Option<(u32, NotificationEnd)>, // blocking_terminal (terminal_id, completion_tx)
         Option<Box<DurableTabLayoutGeneration>>,
+        LayoutTransactionId,
     ),
     SwitchTabNext(ClientId, Option<NotificationEnd>),
     SwitchTabPrev(ClientId, Option<NotificationEnd>),
@@ -676,6 +680,7 @@ pub enum ScreenInstruction {
         ClientId,
         Option<NotificationEnd>,
         Option<Box<DurableTabLayoutGeneration>>,
+        LayoutTransactionId,
     ),
     QueryTabNames(ClientId, Option<NotificationEnd>),
     NewTiledPluginPane(
@@ -2102,6 +2107,15 @@ impl Screen {
     }
 
     fn close_tab_by_id(&mut self, tab_id: usize) -> Result<()> {
+        self.close_tab_by_id_excluding_pty_resources(tab_id, &HashSet::new())
+            .map(|_| ())
+    }
+
+    fn close_tab_by_id_excluding_pty_resources(
+        &mut self,
+        tab_id: usize,
+        excluded_pty_resource_ids: &HashSet<PaneId>,
+    ) -> Result<Vec<PaneId>> {
         let err_context = || format!("failed to close tab at index {tab_id:?}");
 
         let mut tab_to_close = self.tabs.remove(&tab_id).with_context(err_context)?;
@@ -2131,16 +2145,23 @@ impl Screen {
         // below we don't check the result of sending the CloseTab instruction to the pty thread
         // because this might be happening when the app is closing, at which point the pty thread
         // has already closed and this would result in an error
-        self.bus
-            .senders
-            .send_to_pty(PtyInstruction::CloseTab(pane_ids))
-            .with_context(err_context)?;
+        let pty_resource_ids = pane_ids
+            .iter()
+            .copied()
+            .filter(|pane_id| !excluded_pty_resource_ids.contains(pane_id))
+            .collect::<Vec<_>>();
+        if !pty_resource_ids.is_empty() {
+            self.bus
+                .senders
+                .send_to_pty(PtyInstruction::CloseTab(pty_resource_ids))
+                .with_context(err_context)?;
+        }
         if self.tabs.is_empty() {
             self.active_tab_ids.clear();
             self.bus
                 .senders
                 .send_to_server(ServerInstruction::Render(None))
-                .with_context(err_context)
+                .with_context(err_context)?;
         } else {
             let client_mode_infos_in_closed_tab = tab_to_close.drain_connected_clients(None);
             self.move_clients_from_closed_tab(client_mode_infos_in_closed_tab)
@@ -2160,8 +2181,9 @@ impl Screen {
             }
             self.log_and_report_session_state()
                 .with_context(err_context)?;
-            self.render(None).with_context(err_context)
+            self.render(None).with_context(err_context)?;
         }
+        Ok(pane_ids)
     }
 
     fn tab_by_expected_identity(
@@ -3228,8 +3250,7 @@ impl Screen {
         if !self.tabs.contains_key(&tab_id) {
             // TODO: we should prevent this situation with a UI - eg. cannot close tabs with a
             // pending state
-            log::error!("Tab with index {tab_id} not found. Cannot apply layout!");
-            return Ok(());
+            bail!("Tab with index {tab_id} not found. Cannot apply layout!");
         }
         let (client_id, mut is_web_client) = client_id_and_is_web_client;
         let client_id = if self.get_active_tab(client_id).is_ok() {
@@ -5905,6 +5926,7 @@ pub(crate) fn reserve_durable_tab_layout_recovery(
 fn close_globally_stale_fenced_tab(
     screen: &mut Screen,
     generation: &DurableTabLayoutGeneration,
+    writer_resource_ids: &[PaneId],
 ) -> Result<Vec<PaneId>> {
     let exact_owner_resource_ids = screen
         .get_tab_by_id(generation.tab_id)
@@ -5916,7 +5938,10 @@ fn close_globally_stale_fenced_tab(
         })
         .map(Tab::get_all_pane_ids);
     if exact_owner_resource_ids.is_some() {
-        screen.close_tab_by_id(generation.tab_id)?;
+        screen.close_tab_by_id_excluding_pty_resources(
+            generation.tab_id,
+            &writer_resource_ids.iter().copied().collect(),
+        )?;
     }
     Ok(exact_owner_resource_ids.unwrap_or_default())
 }
@@ -5931,50 +5956,13 @@ fn verify_global_viewer_creation_fence(
     Ok(())
 }
 
-fn remove_stale_resources_from_exact_tab(
-    screen: &mut Screen,
-    generation: &DurableTabLayoutGeneration,
-    resource_ids: &[PaneId],
-) {
-    if let Some(tab) = screen.tabs.get_mut(&generation.tab_id)
-        && tab.name == generation.tab_name
-        && tab
-            .instance_id
-            .eq_ignore_ascii_case(&generation.tab_instance_id)
-    {
+fn remove_layout_resources_from_screen(screen: &mut Screen, resource_ids: &[PaneId]) {
+    for tab in screen.tabs.values_mut() {
         for resource_id in resource_ids {
-            tab.close_pane(*resource_id, true, None);
+            if tab.has_pane_with_pid(resource_id) {
+                tab.close_pane(*resource_id, true, None);
+            }
         }
-    }
-    if !resource_ids.is_empty() {
-        screen
-            .bus
-            .senders
-            .send_to_pty(PtyInstruction::CloseTab(resource_ids.to_vec()))
-            .non_fatal();
-    }
-}
-
-fn cleanup_writer_resources_not_in_closed_tab(
-    screen: &Screen,
-    writer_resource_ids: &[PaneId],
-    closed_tab_resource_ids: &[PaneId],
-) {
-    let closed_tab_resource_ids = closed_tab_resource_ids
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
-    let orphaned_writer_resource_ids = writer_resource_ids
-        .iter()
-        .copied()
-        .filter(|resource_id| !closed_tab_resource_ids.contains(resource_id))
-        .collect::<Vec<_>>();
-    if !orphaned_writer_resource_ids.is_empty() {
-        screen
-            .bus
-            .senders
-            .send_to_pty(PtyInstruction::CloseTab(orphaned_writer_resource_ids))
-            .non_fatal();
     }
 }
 
@@ -6127,6 +6115,7 @@ fn find_already_running_panes(
 // The box is here in order to make the
 // NewClient enum smaller
 #[allow(clippy::boxed_local)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn screen_thread_main(
     bus: Bus<ScreenInstruction>,
     max_panes: Option<usize>,
@@ -6135,6 +6124,7 @@ pub(crate) fn screen_thread_main(
     debug: bool,
     default_layout: Box<Layout>,
     has_clients_flag: Arc<AtomicBool>,
+    session_name_override: Option<String>,
 ) -> Result<()> {
     // Resolve `theme_dark` / `theme_light` to concrete `Styling` from the
     // bundled themes BEFORE `config.options` is moved out below. These
@@ -6219,21 +6209,26 @@ pub(crate) fn screen_thread_main(
     let focus_follows_mouse = config_options.focus_follows_mouse.unwrap_or(false);
     let mouse_click_through = config_options.mouse_click_through.unwrap_or(false);
 
+    let mut mode_info = get_mode_info(
+        config_options.default_mode.unwrap_or_default(),
+        &client_attributes,
+        PluginCapabilities {
+            //  ¯\_(ツ)_/¯
+            arrow_fonts: !arrow_fonts,
+        },
+        &config.keybinds,
+        config_options.default_mode,
+    );
+    if let Some(session_name_override) = session_name_override {
+        mode_info.session_name = Some(session_name_override);
+    }
+
     let thread_senders = bus.senders.clone();
     let mut screen = Screen::new(
         bus,
         &client_attributes,
         max_panes,
-        get_mode_info(
-            config_options.default_mode.unwrap_or_default(),
-            &client_attributes,
-            PluginCapabilities {
-                //  ¯\_(ツ)_/¯
-                arrow_fonts: !arrow_fonts,
-            },
-            &config.keybinds,
-            config_options.default_mode,
-        ),
+        mode_info,
         draw_pane_frames,
         auto_layout,
         session_is_mirrored,
@@ -7822,198 +7817,204 @@ pub(crate) fn screen_thread_main(
                 mut completion_tx,
                 mut blocking_terminal,
                 layout_generation,
+                transaction_id,
             ) => {
-                if let Some(layout_generation) = layout_generation.as_ref()
-                    && !durable_tab_layout_generation_is_current(
-                        &screen,
-                        &durable_tab_layout_generations,
-                        layout_generation,
-                    )
-                {
-                    let stale_resource_ids = layout_resource_ids(
-                        &new_pane_pids,
-                        &new_floating_pane_pids,
-                        &new_plugin_ids,
-                    );
-                    if !stale_resource_ids.is_empty() {
-                        screen
-                            .bus
-                            .senders
-                            .send_to_pty(PtyInstruction::CloseTab(stale_resource_ids))
-                            .non_fatal();
-                    }
-                    let message = format!(
-                        "discarded stale durable tab layout generation {} for tab {} '{}'",
-                        layout_generation.generation,
-                        layout_generation.tab_id,
-                        layout_generation.tab_name
-                    );
-                    if let Some(completion) = completion_tx.as_mut() {
-                        completion.set_exit_status(1);
-                        completion.set_error_message(message.clone());
-                    } else if let Some((_, completion)) = blocking_terminal.as_mut() {
-                        completion.set_exit_status(1);
-                        completion.set_error_message(message.clone());
-                    }
-                    log::warn!("{}", message);
-                    continue;
-                }
-                if let Some(layout_generation) = layout_generation.as_ref()
-                    && let Err(rejection) =
-                        verify_global_viewer_creation_fence(&screen, layout_generation)
-                {
-                    let stale_resource_ids = layout_resource_ids(
-                        &new_pane_pids,
-                        &new_floating_pane_pids,
-                        &new_plugin_ids,
-                    );
-                    if !stale_resource_ids.is_empty() {
-                        screen
-                            .bus
-                            .senders
-                            .send_to_pty(PtyInstruction::CloseTab(stale_resource_ids))
-                            .non_fatal();
-                    }
-                    if rejection.should_close_exact_tab() {
-                        close_globally_stale_fenced_tab(&mut screen, layout_generation)?;
-                        pending_tab_ids.remove(&layout_generation.tab_id);
-                    }
-                    let message = rejection.to_string();
-                    if let Some(completion) = completion_tx.as_mut() {
-                        completion.set_exit_status(1);
-                        completion.set_error_message(message.clone());
-                    } else if let Some((_, completion)) = blocking_terminal.as_mut() {
-                        completion.set_exit_status(1);
-                        completion.set_error_message(message.clone());
-                    }
-                    log::warn!("{}", message);
-                    continue;
-                }
-                log::info!(
-                    "ScreenInstruction::ApplyLayout: applying layout for tab {}",
-                    tab_id
-                );
-                // tab_id is a stable identifier from NewTab instruction
-                if let Some(first_terminal_pane) = new_pane_pids.first() {
-                    if let Some(c) = completion_tx.as_mut() {
-                        c.set_affected_pane_id(PaneId::Terminal(first_terminal_pane.0))
-                    }
-                } else if let Some(plugin_id) =
-                    new_plugin_ids.values().next().and_then(|v| v.first())
-                    && let Some(c) = completion_tx.as_mut()
-                {
-                    c.set_affected_pane_id(PaneId::Plugin(*plugin_id))
-                }
-                // Set the affected tab ID for plugin API return value
-                if let Some(c) = completion_tx.as_mut() {
-                    c.set_affected_tab_id(tab_id)
-                }
                 let installed_resource_ids =
                     layout_resource_ids(&new_pane_pids, &new_floating_pane_pids, &new_plugin_ids);
-                screen.apply_layout(
-                    layout,
-                    floating_panes_layout,
-                    new_pane_pids.clone(),
-                    new_floating_pane_pids,
-                    new_plugin_ids.clone(),
-                    tab_id,
-                    should_change_focus_to_new_tab,
-                    (client_id, is_web_client),
-                    blocking_terminal,
-                )?;
-                #[cfg(test)]
-                if let Some(layout_generation) = layout_generation.as_ref() {
-                    pause_after_viewer_creation_install_for_test(layout_generation);
-                }
-                if let Some(layout_generation) = layout_generation.as_ref()
-                    && let Err(rejection) =
-                        verify_global_viewer_creation_fence(&screen, layout_generation)
-                {
-                    if rejection.should_close_exact_tab() {
-                        let closed_tab_resource_ids =
-                            close_globally_stale_fenced_tab(&mut screen, layout_generation)?;
-                        cleanup_writer_resources_not_in_closed_tab(
+                // A newer generation of the same durable viewer will reuse and
+                // heal this empty tab. Keep it pending so render GC cannot
+                // delete the stable identity between the two writers.
+                let mut preserve_pending_tab_on_rejection = false;
+                let transaction_result: Result<()> = (|| {
+                    if let Some(layout_generation) = layout_generation.as_ref()
+                        && !durable_tab_layout_generation_is_current(
                             &screen,
-                            &installed_resource_ids,
-                            &closed_tab_resource_ids,
-                        );
-                        pending_tab_ids.remove(&layout_generation.tab_id);
-                    } else {
-                        remove_stale_resources_from_exact_tab(
-                            &mut screen,
+                            &durable_tab_layout_generations,
                             layout_generation,
-                            &installed_resource_ids,
+                        )
+                    {
+                        bail!(
+                            "discarded stale durable tab layout generation {} for tab {} '{}'",
+                            layout_generation.generation,
+                            layout_generation.tab_id,
+                            layout_generation.tab_name
                         );
                     }
-                    let message = rejection.to_string();
-                    if let Some(completion) = completion_tx.as_mut() {
-                        completion.set_exit_status(1);
-                        completion.set_error_message(message.clone());
-                    }
-                    log::warn!("{}", message);
-                    continue;
-                }
-                pending_tab_ids.remove(&tab_id);
-                if pending_tab_ids.is_empty() {
-                    for (tab_index, client_id) in pending_tab_switches.drain() {
-                        screen.go_to_tab(tab_index + 1, client_id)?;
-                    }
-                    if should_change_focus_to_new_tab {
-                        // Convert ID → position for go_to_tab (which expects 1-based position)
-                        if let Some(tab_position) = screen.get_tab_position_by_id(tab_id) {
-                            screen.go_to_tab(tab_position + 1, client_id)?;
+                    if let Some(layout_generation) = layout_generation.as_ref()
+                        && let Err(rejection) =
+                            verify_global_viewer_creation_fence(&screen, layout_generation)
+                    {
+                        if rejection.should_close_exact_tab() {
+                            close_globally_stale_fenced_tab(
+                                &mut screen,
+                                layout_generation,
+                                &installed_resource_ids,
+                            )?;
+                            pending_tab_ids.remove(&layout_generation.tab_id);
+                        } else {
+                            preserve_pending_tab_on_rejection = true;
                         }
+                        return Err(anyhow!(rejection.to_string()));
                     }
-                } else if should_change_focus_to_new_tab {
-                    let client_id_to_switch = if screen.active_tab_ids.contains_key(&client_id) {
-                        Some(client_id)
-                    } else {
-                        screen.active_tab_ids.keys().next().copied()
-                    };
-                    if let Some(client_id_to_switch) = client_id_to_switch {
-                        // Convert ID → position for pending_tab_switches (which stores positions)
-                        if let Some(tab_position) = screen.get_tab_position_by_id(tab_id) {
-                            pending_tab_switches.insert((tab_position, client_id_to_switch));
-                        }
-                    }
-                }
 
-                for plugin_ids in new_plugin_ids.values() {
-                    for plugin_id in plugin_ids {
-                        if let Some(loading_indication) =
-                            plugin_loading_message_cache.remove(plugin_id)
+                    log::info!(
+                        "ScreenInstruction::ApplyLayout: applying layout for tab {}",
+                        tab_id
+                    );
+                    // tab_id is a stable identifier from NewTab instruction
+                    if let Some(first_terminal_pane) = new_pane_pids.first() {
+                        if let Some(c) = completion_tx.as_mut() {
+                            c.set_affected_pane_id(PaneId::Terminal(first_terminal_pane.0))
+                        }
+                    } else if let Some(plugin_id) =
+                        new_plugin_ids.values().next().and_then(|v| v.first())
+                        && let Some(c) = completion_tx.as_mut()
+                    {
+                        c.set_affected_pane_id(PaneId::Plugin(*plugin_id))
+                    }
+                    // Set the affected tab ID for plugin API return value
+                    if let Some(c) = completion_tx.as_mut() {
+                        c.set_affected_tab_id(tab_id)
+                    }
+                    screen.apply_layout(
+                        layout,
+                        floating_panes_layout,
+                        new_pane_pids.clone(),
+                        new_floating_pane_pids,
+                        new_plugin_ids.clone(),
+                        tab_id,
+                        should_change_focus_to_new_tab,
+                        (client_id, is_web_client),
+                        blocking_terminal.take(),
+                    )?;
+                    #[cfg(test)]
+                    if let Some(layout_generation) = layout_generation.as_ref() {
+                        pause_after_viewer_creation_install_for_test(layout_generation);
+                    }
+                    if let Some(layout_generation) = layout_generation.as_ref()
+                        && let Err(rejection) =
+                            verify_global_viewer_creation_fence(&screen, layout_generation)
+                    {
+                        if rejection.should_close_exact_tab() {
+                            close_globally_stale_fenced_tab(
+                                &mut screen,
+                                layout_generation,
+                                &installed_resource_ids,
+                            )?;
+                            pending_tab_ids.remove(&layout_generation.tab_id);
+                        } else {
+                            preserve_pending_tab_on_rejection = true;
+                        }
+                        return Err(anyhow!(rejection.to_string()));
+                    }
+
+                    pending_tab_ids.remove(&tab_id);
+                    if pending_tab_ids.is_empty() {
+                        for (tab_index, client_id) in pending_tab_switches.drain() {
+                            screen.go_to_tab(tab_index + 1, client_id)?;
+                        }
+                        if should_change_focus_to_new_tab {
+                            // Convert ID → position for go_to_tab (which expects 1-based position)
+                            if let Some(tab_position) = screen.get_tab_position_by_id(tab_id) {
+                                screen.go_to_tab(tab_position + 1, client_id)?;
+                            }
+                        }
+                    } else if should_change_focus_to_new_tab {
+                        let client_id_to_switch = if screen.active_tab_ids.contains_key(&client_id)
                         {
-                            screen.update_plugin_loading_stage(*plugin_id, loading_indication);
-                            screen.render(None)?;
+                            Some(client_id)
+                        } else {
+                            screen.active_tab_ids.keys().next().copied()
+                        };
+                        if let Some(client_id_to_switch) = client_id_to_switch {
+                            // Convert ID → position for pending_tab_switches (which stores positions)
+                            if let Some(tab_position) = screen.get_tab_position_by_id(tab_id) {
+                                pending_tab_switches.insert((tab_position, client_id_to_switch));
+                            }
                         }
-                        screen.render_blocker.register_blocking_plugin(*plugin_id);
                     }
-                }
 
-                for event in pending_events_waiting_for_client.drain(..) {
-                    screen.bus.senders.send_to_screen(event).non_fatal();
-                }
+                    for plugin_ids in new_plugin_ids.values() {
+                        for plugin_id in plugin_ids {
+                            if let Some(loading_indication) =
+                                plugin_loading_message_cache.remove(plugin_id)
+                            {
+                                screen.update_plugin_loading_stage(*plugin_id, loading_indication);
+                                screen.render(None)?;
+                            }
+                            screen.render_blocker.register_blocking_plugin(*plugin_id);
+                        }
+                    }
 
-                for event in pending_events_waiting_for_tab.drain(..) {
-                    screen.bus.senders.send_to_screen(event).non_fatal();
-                }
+                    for event in pending_events_waiting_for_client.drain(..) {
+                        screen.bus.senders.send_to_screen(event).non_fatal();
+                    }
 
-                screen.render(None)?;
-                // we do this here in order to recover from a race condition on app start
-                // that sometimes causes Zellij to think the terminal window is a different size
-                // than it actually is - here, we query the client for its terminal size after
-                // we've finished the setup and handle it as we handle a normal resize,
-                // while this can affect other instances of a layout being applied, the query is
-                // very short and cheap and shouldn't cause any trouble
-                if let Some(os_input) = &mut screen.bus.os_input {
-                    for (client_id, _is_web_client) in screen.connected_clients.borrow().iter() {
-                        log::info!(
-                            "ApplyLayout: sending QueryTerminalSize to client {}",
-                            client_id
+                    for event in pending_events_waiting_for_tab.drain(..) {
+                        screen.bus.senders.send_to_screen(event).non_fatal();
+                    }
+
+                    screen.render(None)?;
+                    // we do this here in order to recover from a race condition on app start
+                    // that sometimes causes Zellij to think the terminal window is a different size
+                    // than it actually is - here, we query the client for its terminal size after
+                    // we've finished the setup and handle it as we handle a normal resize,
+                    // while this can affect other instances of a layout being applied, the query is
+                    // very short and cheap and shouldn't cause any trouble
+                    if let Some(os_input) = &mut screen.bus.os_input {
+                        for (client_id, _is_web_client) in screen.connected_clients.borrow().iter()
+                        {
+                            log::info!(
+                                "ApplyLayout: sending QueryTerminalSize to client {}",
+                                client_id
+                            );
+                            let _ = os_input
+                                .send_to_client(*client_id, ServerToClientMsg::QueryTerminalSize);
+                        }
+                    }
+                    Ok(())
+                })();
+
+                let outcome = match transaction_result {
+                    Ok(()) => LayoutCommitOutcome::Committed,
+                    Err(error) => {
+                        if !preserve_pending_tab_on_rejection
+                            && layout_generation.as_ref().is_none_or(|generation| {
+                                durable_tab_layout_generation_is_current(
+                                    &screen,
+                                    &durable_tab_layout_generations,
+                                    generation,
+                                )
+                            })
+                        {
+                            pending_tab_ids.remove(&tab_id);
+                        }
+                        remove_layout_resources_from_screen(&mut screen, &installed_resource_ids);
+                        let message = format!("{error:#}");
+                        if let Some(completion) = completion_tx.as_mut() {
+                            completion.set_exit_status(1);
+                            completion.set_error_message(message.clone());
+                        } else if let Some((_, completion)) = blocking_terminal.as_mut() {
+                            completion.set_exit_status(1);
+                            completion.set_error_message(message.clone());
+                        }
+                        log::warn!(
+                            "rejected layout transaction {}: {}",
+                            transaction_id,
+                            message
                         );
-                        let _ = os_input
-                            .send_to_client(*client_id, ServerToClientMsg::QueryTerminalSize);
-                    }
+                        LayoutCommitOutcome::Rejected(message)
+                    },
+                };
+                if transaction_id != 0 {
+                    screen
+                        .bus
+                        .senders
+                        .send_to_pty(PtyInstruction::LayoutCommitResolved(
+                            transaction_id,
+                            outcome,
+                        ))
+                        .non_fatal();
                 }
             },
             ScreenInstruction::GoToTab(
@@ -8653,97 +8654,8 @@ pub(crate) fn screen_thread_main(
                 client_id,
                 mut completion_tx,
                 layout_generation,
+                transaction_id,
             ) => {
-                let fenced_result_is_exact = layout_generation.as_ref().is_none_or(|generation| {
-                    durable_tab_layout_generation_is_current(
-                        &screen,
-                        &durable_tab_layout_generations,
-                        generation,
-                    ) && matches!(
-                        tab_results.as_slice(),
-                        [result]
-                            if result.tab_index == generation.tab_id
-                                && result
-                                    .tiled_layout
-                                    .tab_instance_id
-                                    .as_deref()
-                                    .is_some_and(|token| token.eq_ignore_ascii_case(
-                                        &generation.tab_instance_id
-                                    ))
-                    )
-                });
-                if !fenced_result_is_exact {
-                    let stale_resource_ids = tab_results
-                        .iter()
-                        .flat_map(|result| {
-                            layout_resource_ids(
-                                &result.new_terminal_pids,
-                                &result.new_floating_pane_pids,
-                                &result.plugin_ids,
-                            )
-                        })
-                        .collect::<HashSet<_>>()
-                        .into_iter()
-                        .collect::<Vec<_>>();
-                    if !stale_resource_ids.is_empty() {
-                        screen
-                            .bus
-                            .senders
-                            .send_to_pty(PtyInstruction::CloseTab(stale_resource_ids))
-                            .non_fatal();
-                    }
-                    let message = layout_generation.as_ref().map_or_else(
-                        || "discarded malformed fenced layout result".to_owned(),
-                        |generation| {
-                            format!(
-                                "discarded stale durable tab recovery generation {} for tab {} '{}'",
-                                generation.generation, generation.tab_id, generation.tab_name
-                            )
-                        },
-                    );
-                    if let Some(completion) = completion_tx.as_mut() {
-                        completion.set_exit_status(1);
-                        completion.set_error_message(message.clone());
-                    }
-                    log::warn!("{}", message);
-                    continue;
-                }
-                if let Some(layout_generation) = layout_generation.as_ref()
-                    && let Err(rejection) =
-                        verify_global_viewer_creation_fence(&screen, layout_generation)
-                {
-                    let stale_resource_ids = tab_results
-                        .iter()
-                        .flat_map(|result| {
-                            layout_resource_ids(
-                                &result.new_terminal_pids,
-                                &result.new_floating_pane_pids,
-                                &result.plugin_ids,
-                            )
-                        })
-                        .collect::<HashSet<_>>()
-                        .into_iter()
-                        .collect::<Vec<_>>();
-                    if !stale_resource_ids.is_empty() {
-                        screen
-                            .bus
-                            .senders
-                            .send_to_pty(PtyInstruction::CloseTab(stale_resource_ids))
-                            .non_fatal();
-                    }
-                    if rejection.should_close_exact_tab() {
-                        close_globally_stale_fenced_tab(&mut screen, layout_generation)?;
-                        pending_tab_ids.remove(&layout_generation.tab_id);
-                    }
-                    let message = rejection.to_string();
-                    if let Some(completion) = completion_tx.as_mut() {
-                        completion.set_exit_status(1);
-                        completion.set_error_message(message.clone());
-                    }
-                    log::warn!("{}", message);
-                    continue;
-                }
-
                 let installed_resource_ids = tab_results
                     .iter()
                     .flat_map(|result| {
@@ -8756,80 +8668,77 @@ pub(crate) fn screen_thread_main(
                     .collect::<HashSet<_>>()
                     .into_iter()
                     .collect::<Vec<_>>();
-                let mut override_succeeded = true;
-                // Process each tab result
-                for tab_result in tab_results {
-                    let tab_index = tab_result.tab_index;
-                    let restored_tab_instance_id = tab_result
-                        .tiled_layout
-                        .tab_instance_id
-                        .as_deref()
-                        .filter(|instance_id| {
-                            instance_id.len() == 32
-                                && instance_id.bytes().all(|byte| byte.is_ascii_hexdigit())
-                        })
-                        .map(str::to_ascii_lowercase);
-                    if let Some(tab) = screen.tabs.get_mut(&tab_result.tab_index) {
-                        if let Err(e) = tab.override_layout(
-                            tab_result.tiled_layout,
-                            tab_result.floating_layouts,
-                            tab_result.swap_tiled_layouts.clone(),
-                            tab_result.swap_floating_layouts.clone(),
-                            tab_result.new_terminal_pids,
-                            tab_result.new_floating_pane_pids,
-                            tab_result.plugin_ids,
-                            retain_existing_terminal_panes,
-                            retain_existing_plugin_panes,
-                            client_id,
-                            None,
-                        ) {
-                            override_succeeded = false;
-                            if let Some(completion) = completion_tx.as_mut() {
-                                completion.set_exit_status(1);
-                                completion.set_error_message(format!(
-                                    "failed to override layout for tab {}: {}",
-                                    tab_index, e
-                                ));
-                            }
-                            log::error!("Failed to override layout for tab {}: {:?}", tab_index, e);
-                        }
-                    } else {
-                        // Tab doesn't exist - create it
-                        let swap_layouts = (
-                            tab_result.swap_tiled_layouts.clone().unwrap_or_default(),
-                            tab_result.swap_floating_layouts.clone().unwrap_or_default(),
+                let mut created_tab_ids = vec![];
+                // See ApplyLayout: same-viewer supersession retires only this
+                // writer, not the stable empty tab awaited by the next writer.
+                let mut preserve_pending_tab_on_rejection = false;
+                let transaction_result: Result<()> = (|| {
+                    let fenced_result_is_exact =
+                        layout_generation.as_ref().is_none_or(|generation| {
+                            durable_tab_layout_generation_is_current(
+                                &screen,
+                                &durable_tab_layout_generations,
+                                generation,
+                            ) && matches!(
+                                tab_results.as_slice(),
+                                [result]
+                                    if result.tab_index == generation.tab_id
+                                        && result
+                                            .tiled_layout
+                                            .tab_instance_id
+                                            .as_deref()
+                                            .is_some_and(|token| token.eq_ignore_ascii_case(
+                                                &generation.tab_instance_id
+                                            ))
+                            )
+                        });
+                    if !fenced_result_is_exact {
+                        bail!(
+                            "{}",
+                            layout_generation.as_ref().map_or_else(
+                                || "discarded malformed fenced layout result".to_owned(),
+                                |generation| {
+                                    format!(
+                                        "discarded stale durable tab recovery generation {} for tab {} '{}'",
+                                        generation.generation,
+                                        generation.tab_id,
+                                        generation.tab_name
+                                    )
+                                },
+                            )
                         );
-                        if let Err(e) = screen.new_tab(
-                            tab_result.tab_index,
-                            swap_layouts,
-                            tab_result.tab_name.clone(),
-                            None,
-                            TabPlacement::Append,
-                        ) {
-                            override_succeeded = false;
-                            if let Some(completion) = completion_tx.as_mut() {
-                                completion.set_exit_status(1);
-                                completion.set_error_message(format!(
-                                    "failed to create tab {} during override completion: {}",
-                                    tab_index, e
-                                ));
-                            }
-                            log::error!(
-                                "Failed to create new tab {} during override completion: {:?}",
-                                tab_index,
-                                e
-                            );
-                            continue;
+                    }
+                    if let Some(layout_generation) = layout_generation.as_ref()
+                        && let Err(rejection) =
+                            verify_global_viewer_creation_fence(&screen, layout_generation)
+                    {
+                        if rejection.should_close_exact_tab() {
+                            close_globally_stale_fenced_tab(
+                                &mut screen,
+                                layout_generation,
+                                &installed_resource_ids,
+                            )?;
+                            pending_tab_ids.remove(&layout_generation.tab_id);
+                        } else {
+                            preserve_pending_tab_on_rejection = true;
                         }
-                        if let Some(restored_tab_instance_id) = restored_tab_instance_id
-                            && let Some(tab) = screen.tabs.get_mut(&tab_result.tab_index)
-                        {
-                            tab.instance_id = restored_tab_instance_id;
-                        }
+                        return Err(anyhow!(rejection.to_string()));
+                    }
 
-                        // Now override the newly created tab's layout
-                        if let Some(tab) = screen.tabs.get_mut(&tab_result.tab_index)
-                            && let Err(e) = tab.override_layout(
+                    // Process each tab result. A failure aborts the whole writer transaction.
+                    for tab_result in tab_results {
+                        let tab_index = tab_result.tab_index;
+                        let restored_tab_instance_id = tab_result
+                            .tiled_layout
+                            .tab_instance_id
+                            .as_deref()
+                            .filter(|instance_id| {
+                                instance_id.len() == 32
+                                    && instance_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+                            })
+                            .map(str::to_ascii_lowercase);
+                        if let Some(tab) = screen.tabs.get_mut(&tab_index) {
+                            tab.override_layout(
                                 tab_result.tiled_layout,
                                 tab_result.floating_layouts,
                                 tab_result.swap_tiled_layouts,
@@ -8842,78 +8751,155 @@ pub(crate) fn screen_thread_main(
                                 client_id,
                                 None,
                             )
-                        {
-                            override_succeeded = false;
-                            if let Some(completion) = completion_tx.as_mut() {
-                                completion.set_exit_status(1);
-                                completion.set_error_message(format!(
-                                    "failed to override layout for new tab {}: {}",
-                                    tab_index, e
-                                ));
-                            }
-                            log::error!(
-                                "Failed to override layout for new tab {}: {:?}",
-                                tab_index,
-                                e
+                            .with_context(|| {
+                                format!("failed to override layout for tab {tab_index}")
+                            })?;
+                        } else {
+                            // Tab doesn't exist - create it.
+                            let swap_layouts = (
+                                tab_result.swap_tiled_layouts.clone().unwrap_or_default(),
+                                tab_result.swap_floating_layouts.clone().unwrap_or_default(),
                             );
+                            screen
+                                .new_tab(
+                                    tab_index,
+                                    swap_layouts,
+                                    tab_result.tab_name.clone(),
+                                    None,
+                                    TabPlacement::Append,
+                                )
+                                .with_context(|| {
+                                    format!(
+                                        "failed to create tab {tab_index} during override completion"
+                                    )
+                                })?;
+                            created_tab_ids.push(tab_index);
+                            if let Some(restored_tab_instance_id) = restored_tab_instance_id
+                                && let Some(tab) = screen.tabs.get_mut(&tab_index)
+                            {
+                                tab.instance_id = restored_tab_instance_id;
+                            }
+
+                            screen
+                                .tabs
+                                .get_mut(&tab_index)
+                                .with_context(|| {
+                                    format!(
+                                        "new tab {tab_index} disappeared during override completion"
+                                    )
+                                })?
+                                .override_layout(
+                                    tab_result.tiled_layout,
+                                    tab_result.floating_layouts,
+                                    tab_result.swap_tiled_layouts,
+                                    tab_result.swap_floating_layouts,
+                                    tab_result.new_terminal_pids,
+                                    tab_result.new_floating_pane_pids,
+                                    tab_result.plugin_ids,
+                                    retain_existing_terminal_panes,
+                                    retain_existing_plugin_panes,
+                                    client_id,
+                                    None,
+                                )
+                                .with_context(|| {
+                                    format!("failed to override layout for new tab {tab_index}")
+                                })?;
                         }
                     }
-                }
 
-                #[cfg(test)]
-                if override_succeeded && let Some(layout_generation) = layout_generation.as_ref() {
-                    pause_after_viewer_creation_install_for_test(layout_generation);
-                }
-                if override_succeeded
-                    && let Some(layout_generation) = layout_generation.as_ref()
-                    && let Err(rejection) =
-                        verify_global_viewer_creation_fence(&screen, layout_generation)
-                {
-                    if rejection.should_close_exact_tab() {
-                        let closed_tab_resource_ids =
-                            close_globally_stale_fenced_tab(&mut screen, layout_generation)?;
-                        cleanup_writer_resources_not_in_closed_tab(
-                            &screen,
-                            &installed_resource_ids,
-                            &closed_tab_resource_ids,
-                        );
+                    #[cfg(test)]
+                    if let Some(layout_generation) = layout_generation.as_ref() {
+                        pause_after_viewer_creation_install_for_test(layout_generation);
+                    }
+                    if let Some(layout_generation) = layout_generation.as_ref()
+                        && let Err(rejection) =
+                            verify_global_viewer_creation_fence(&screen, layout_generation)
+                    {
+                        if rejection.should_close_exact_tab() {
+                            close_globally_stale_fenced_tab(
+                                &mut screen,
+                                layout_generation,
+                                &installed_resource_ids,
+                            )?;
+                            pending_tab_ids.remove(&layout_generation.tab_id);
+                        } else {
+                            preserve_pending_tab_on_rejection = true;
+                        }
+                        return Err(anyhow!(rejection.to_string()));
+                    }
+
+                    if let Some(layout_generation) = layout_generation.as_ref() {
                         pending_tab_ids.remove(&layout_generation.tab_id);
-                    } else {
-                        remove_stale_resources_from_exact_tab(
-                            &mut screen,
-                            layout_generation,
-                            &installed_resource_ids,
-                        );
-                    }
-                    let message = rejection.to_string();
-                    if let Some(completion) = completion_tx.as_mut() {
-                        completion.set_exit_status(1);
-                        completion.set_error_message(message.clone());
-                    }
-                    log::warn!("{}", message);
-                    continue;
-                }
-
-                if override_succeeded && let Some(layout_generation) = layout_generation.as_ref() {
-                    pending_tab_ids.remove(&layout_generation.tab_id);
-                    if pending_tab_ids.is_empty() {
-                        for (tab_index, pending_client_id) in pending_tab_switches.drain() {
-                            screen.go_to_tab(tab_index + 1, pending_client_id)?;
+                        if pending_tab_ids.is_empty() {
+                            for (tab_index, pending_client_id) in pending_tab_switches.drain() {
+                                screen.go_to_tab(tab_index + 1, pending_client_id)?;
+                            }
                         }
                     }
-                }
 
-                for event in pending_events_waiting_for_client.drain(..) {
-                    screen.bus.senders.send_to_screen(event).non_fatal();
-                }
+                    for event in pending_events_waiting_for_client.drain(..) {
+                        screen.bus.senders.send_to_screen(event).non_fatal();
+                    }
 
-                for event in pending_events_waiting_for_tab.drain(..) {
-                    screen.bus.senders.send_to_screen(event).non_fatal();
-                }
+                    for event in pending_events_waiting_for_tab.drain(..) {
+                        screen.bus.senders.send_to_screen(event).non_fatal();
+                    }
 
-                // Single render and log after all tabs are updated (performance optimization)
-                screen.log_and_report_session_state()?;
-                let _ = screen.render(None);
+                    // Single render and log after all tabs are updated (performance optimization).
+                    screen.log_and_report_session_state()?;
+                    screen.render(None).non_fatal();
+                    Ok(())
+                })();
+
+                let outcome = match transaction_result {
+                    Ok(()) => LayoutCommitOutcome::Committed,
+                    Err(error) => {
+                        if !preserve_pending_tab_on_rejection
+                            && let Some(layout_generation) = layout_generation.as_ref()
+                            && durable_tab_layout_generation_is_current(
+                                &screen,
+                                &durable_tab_layout_generations,
+                                layout_generation,
+                            )
+                        {
+                            pending_tab_ids.remove(&layout_generation.tab_id);
+                        }
+                        let excluded_pty_resource_ids =
+                            installed_resource_ids.iter().copied().collect();
+                        for created_tab_id in created_tab_ids.into_iter().rev() {
+                            if screen.tabs.contains_key(&created_tab_id) {
+                                screen
+                                    .close_tab_by_id_excluding_pty_resources(
+                                        created_tab_id,
+                                        &excluded_pty_resource_ids,
+                                    )
+                                    .non_fatal();
+                            }
+                        }
+                        remove_layout_resources_from_screen(&mut screen, &installed_resource_ids);
+                        let message = format!("{error:#}");
+                        if let Some(completion) = completion_tx.as_mut() {
+                            completion.set_exit_status(1);
+                            completion.set_error_message(message.clone());
+                        }
+                        log::warn!(
+                            "rejected layout transaction {}: {}",
+                            transaction_id,
+                            message
+                        );
+                        LayoutCommitOutcome::Rejected(message)
+                    },
+                };
+                if transaction_id != 0 {
+                    screen
+                        .bus
+                        .senders
+                        .send_to_pty(PtyInstruction::LayoutCommitResolved(
+                            transaction_id,
+                            outcome,
+                        ))
+                        .non_fatal();
+                }
                 drop(completion_tx); // action ends here, notify the action initiator
             },
             ScreenInstruction::QueryTabNames(client_id, completion_tx) => {
