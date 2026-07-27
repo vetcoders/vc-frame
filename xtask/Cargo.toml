@@ -15,6 +15,11 @@ xflags = { version = "0.3.2", default-features = false }
 #   <https://github.com/matklad/xshell/issues/63>
 xshell = { version = "= 0.2.2", default-features = false }
 
+[target.'cfg(unix)'.dependencies]
+# Safe fd-relative filesystem operations for atomic install publication.
+rustix = { version = "= 0.38.44", features = ["fs", "process"] }
+uuid = { workspace = true }
+
 [lints.rust]
 # Only required because we need to fix `xshell` to `=0.2.2`
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(trick_rust_analyzer_into_highlighting_interpolated_bits)'] }

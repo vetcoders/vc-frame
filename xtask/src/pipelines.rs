@@ -108,21 +108,10 @@ pub fn install(sh: &Shell, flags: flags::Install) -> anyhow::Result<()> {
 fn install_binary(_sh: &Shell, source: &Path, destination: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
-        install_binary_unix(source, destination, |source| {
-            // On macOS (Apple Silicon especially), `cargo build --release` with
-            // `strip = true` produces a stripped, ad-hoc "linker-signed" Mach-O.
-            // `codesign --force` can replace the inode it signs, so sign the
-            // private build output before reserving the publication inode. The
-            // signed bytes are copied into that protected inode afterwards.
-            #[cfg(target_os = "macos")]
-            cmd!(_sh, "codesign --force --sign - {source}")
-                .run()
-                .context("failed to sign vc-frame build output")?;
-
-            #[cfg(not(target_os = "macos"))]
-            let _ = source;
-            Ok(())
-        })
+        let mut hooks = ProductionInstallHooks { shell: _sh };
+        let outcome = install_binary_unix(source, destination, &mut hooks)?;
+        outcome.report(destination);
+        Ok(())
     }
 
     #[cfg(not(unix))]
@@ -136,34 +125,43 @@ fn install_binary(_sh: &Shell, source: &Path, destination: &Path) -> anyhow::Res
 }
 
 #[cfg(unix)]
-struct ResolvedInstallSource(PathBuf);
+struct ProductionInstallHooks<'a> {
+    shell: &'a Shell,
+}
 
 #[cfg(unix)]
-impl ResolvedInstallSource {
-    fn resolve(source: &Path) -> anyhow::Result<Self> {
-        let source = source.canonicalize().with_context(|| {
-            format!(
-                "failed to resolve vc-frame install source {}",
-                source.display()
-            )
-        })?;
-        let metadata = source.metadata().with_context(|| {
-            format!(
-                "failed to inspect vc-frame install source {}",
-                source.display()
-            )
-        })?;
-        if !metadata.is_file() {
-            anyhow::bail!(
-                "vc-frame install source is not a regular file: {}",
-                source.display()
-            );
+impl InstallHooks for ProductionInstallHooks<'_> {
+    fn prepare_staged(&mut self, staged: &Path) -> anyhow::Result<()> {
+        // On macOS (Apple Silicon especially), `cargo build --release` with
+        // `strip = true` produces a stripped, ad-hoc linker-signed Mach-O.
+        // codesign may replace its input inode, so it works only inside the
+        // private staging directory. The installer adopts that resulting inode
+        // through the retained directory descriptor before verification.
+        #[cfg(target_os = "macos")]
+        {
+            let shell = self.shell;
+            cmd!(shell, "/usr/bin/codesign --force --sign - {staged}")
+                .run()
+                .context("failed to sign staged vc-frame binary")?;
         }
-        Ok(Self(source))
+
+        #[cfg(not(target_os = "macos"))]
+        let _ = (self.shell, staged);
+        Ok(())
     }
 
-    fn path(&self) -> &Path {
-        &self.0
+    fn verify_staged(&mut self, staged: &Path) -> anyhow::Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            let shell = self.shell;
+            cmd!(shell, "/usr/bin/codesign --verify --strict {staged}")
+                .run()
+                .context("failed to verify staged vc-frame signature")?;
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        let _ = (self.shell, staged);
+        Ok(())
     }
 }
 
@@ -297,32 +295,614 @@ fn effective_install_destination(
 }
 
 #[cfg(unix)]
+trait InstallHooks {
+    fn after_source_open(&mut self, _source: &Path) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn prepare_staged(&mut self, _staged: &Path) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn verify_staged(&mut self, _staged: &Path) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn before_publish(&mut self, _staged: &Path, _destination: &Path) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn sync_parent(&mut self, parent: &std::fs::File) -> std::io::Result<()> {
+        parent.sync_all()
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+enum InstallDurability {
+    Confirmed,
+    Uncertain,
+}
+
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+struct InstallOutcome {
+    durability: InstallDurability,
+    warnings: Vec<String>,
+}
+
+#[cfg(unix)]
+impl InstallOutcome {
+    fn report(&self, destination: &Path) {
+        if self.durability == InstallDurability::Uncertain {
+            eprintln!(
+                "warning: vc-frame is published at {}, but directory durability is uncertain",
+                destination.display()
+            );
+        }
+        for warning in &self.warnings {
+            eprintln!("warning: {warning}");
+        }
+    }
+}
+
+#[cfg(unix)]
+struct OpenedInstallSource {
+    path: PathBuf,
+    file: std::fs::File,
+    mode: rustix::fs::Mode,
+}
+
+#[cfg(unix)]
+impl OpenedInstallSource {
+    fn open(source: &Path) -> anyhow::Result<Self> {
+        use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+
+        let file_name = source
+            .file_name()
+            .context("vc-frame install source has no file name")?;
+        let parent = source
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+            .canonicalize()
+            .with_context(|| {
+                format!(
+                    "failed to resolve vc-frame install source parent for {}",
+                    source.display()
+                )
+            })?;
+        let parent_directory = open_directory_no_follow(&parent).with_context(|| {
+            format!(
+                "failed to open vc-frame install source parent {}",
+                parent.display()
+            )
+        })?;
+        revalidate_absolute_path(&parent, &parent_directory, FileType::Directory)
+            .context("vc-frame install source parent changed identity while opening it")?;
+
+        let source_fd = rustix::fs::openat(
+            &parent_directory,
+            file_name,
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .with_context(|| {
+            format!(
+                "failed to open vc-frame install source without following symlinks: {}",
+                parent.join(file_name).display()
+            )
+        })?;
+        let file = std::fs::File::from(source_fd);
+        let source_stat =
+            rustix::fs::fstat(&file).context("failed to inspect open vc-frame install source")?;
+        if FileType::from_raw_mode(source_stat.st_mode) != FileType::RegularFile {
+            anyhow::bail!(
+                "vc-frame install source is not a regular file: {}",
+                parent.join(file_name).display()
+            );
+        }
+        let entry_stat =
+            rustix::fs::statat(&parent_directory, file_name, AtFlags::SYMLINK_NOFOLLOW)
+                .context("failed to revalidate vc-frame install source entry")?;
+        if !same_file_identity(&source_stat, &entry_stat)
+            || FileType::from_raw_mode(entry_stat.st_mode) != FileType::RegularFile
+        {
+            anyhow::bail!(
+                "vc-frame install source changed identity while it was being opened: {}",
+                parent.join(file_name).display()
+            );
+        }
+
+        Ok(Self {
+            path: parent.join(file_name),
+            file,
+            mode: Mode::from_raw_mode(source_stat.st_mode),
+        })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+#[cfg(unix)]
+enum DestinationEntryState {
+    Missing,
+    Existing(rustix::fs::Stat),
+}
+
+#[cfg(unix)]
+struct StagedInstall {
+    parent_path: PathBuf,
+    parent_directory: std::fs::File,
+    destination_name: std::ffi::OsString,
+    expected_destination: DestinationEntryState,
+    stage_name: std::ffi::OsString,
+    stage_path: PathBuf,
+    stage_directory: std::fs::File,
+    payload_path: PathBuf,
+    payload_file: Option<std::fs::File>,
+    expected_payload_mode: Option<rustix::fs::Mode>,
+    expected_owner: rustix::process::Uid,
+    payload_active: bool,
+    directory_active: bool,
+}
+
+#[cfg(unix)]
+impl StagedInstall {
+    fn reserve(destination: &ResolvedInstallDestination) -> anyhow::Result<Self> {
+        use rustix::fs::{FileType, Mode, OFlags};
+
+        let parent_path = destination.parent().to_path_buf();
+        let destination_name = destination
+            .path()
+            .file_name()
+            .context("vc-frame install destination has no file name")?
+            .to_os_string();
+        let parent_directory = open_directory_no_follow(&parent_path).with_context(|| {
+            format!("failed to open install directory {}", parent_path.display())
+        })?;
+        revalidate_absolute_path(&parent_path, &parent_directory, FileType::Directory)
+            .context("vc-frame install destination parent changed identity while opening it")?;
+        let expected_destination = match statat_optional(&parent_directory, &destination_name)? {
+            Some(stat) if FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile => {
+                DestinationEntryState::Existing(stat)
+            },
+            Some(_) => anyhow::bail!(
+                "vc-frame install destination is not a regular file: {}",
+                destination.path().display()
+            ),
+            None => DestinationEntryState::Missing,
+        };
+
+        // A random name plus mode 0700 prevents cross-user staging attacks and
+        // accidental installer collisions. A malicious process with the same
+        // effective uid remains inside the operator's trust boundary.
+        for attempt in 0..32 {
+            let stage_name = std::ffi::OsString::from(format!(
+                ".vc-frame.install-{}-{attempt}",
+                uuid::Uuid::new_v4().simple()
+            ));
+            match rustix::fs::mkdirat(&parent_directory, &stage_name, Mode::RWXU) {
+                Ok(()) => {
+                    let stage_fd = rustix::fs::openat(
+                        &parent_directory,
+                        &stage_name,
+                        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                        Mode::empty(),
+                    )
+                    .with_context(|| {
+                        format!(
+                            "failed to open newly created private install directory {}",
+                            parent_path.join(&stage_name).display()
+                        )
+                    })?;
+                    let stage_directory = std::fs::File::from(stage_fd);
+                    let stage_path = parent_path.join(&stage_name);
+                    let payload_path = stage_path.join("payload");
+                    let mut staged = Self {
+                        parent_path,
+                        parent_directory,
+                        destination_name,
+                        expected_destination,
+                        stage_name,
+                        stage_path,
+                        stage_directory,
+                        payload_path,
+                        payload_file: None,
+                        expected_payload_mode: None,
+                        expected_owner: rustix::process::geteuid(),
+                        payload_active: false,
+                        directory_active: true,
+                    };
+                    staged.harden_private_directory()?;
+                    staged.create_payload()?;
+                    return Ok(staged);
+                },
+                Err(rustix::io::Errno::EXIST) => {},
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "failed to reserve private install directory beside {}",
+                            destination.path().display()
+                        )
+                    });
+                },
+            }
+        }
+
+        anyhow::bail!(
+            "failed to reserve a private staged vc-frame install directory beside {}",
+            destination.path().display()
+        )
+    }
+
+    fn path(&self) -> &Path {
+        &self.payload_path
+    }
+
+    fn harden_private_directory(&mut self) -> anyhow::Result<()> {
+        use rustix::fs::Mode;
+
+        rustix::fs::fchmod(&self.stage_directory, Mode::RWXU).with_context(|| {
+            format!(
+                "failed to set private install directory mode on {}",
+                self.stage_path.display()
+            )
+        })?;
+        self.revalidate_stage_directory()
+    }
+
+    fn create_payload(&mut self) -> anyhow::Result<()> {
+        use rustix::fs::{Mode, OFlags};
+
+        let payload_fd = rustix::fs::openat(
+            &self.stage_directory,
+            "payload",
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::RWXU,
+        )
+        .with_context(|| {
+            format!(
+                "failed to reserve private staged install payload {}",
+                self.payload_path.display()
+            )
+        })?;
+        self.payload_file = Some(std::fs::File::from(payload_fd));
+        self.payload_active = true;
+        self.revalidate_payload()
+    }
+
+    fn copy_source(&mut self, source: &mut OpenedInstallSource) -> anyhow::Result<()> {
+        let payload_path = self.payload_path.clone();
+        let payload = self.payload_file_mut()?;
+        std::io::copy(&mut source.file, payload).with_context(|| {
+            format!(
+                "failed to copy vc-frame install source {}",
+                source.path().display()
+            )
+        })?;
+        rustix::fs::fchmod(payload, source.mode).with_context(|| {
+            format!(
+                "failed to set source permissions on {}",
+                payload_path.display()
+            )
+        })?;
+        self.expected_payload_mode = Some(source.mode);
+        self.revalidate_payload()?;
+        self.sync_payload()
+    }
+
+    fn adopt_payload_after_preparation(&mut self) -> anyhow::Result<()> {
+        use rustix::fs::{Mode, OFlags};
+
+        let payload_fd = rustix::fs::openat(
+            &self.stage_directory,
+            "payload",
+            OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .with_context(|| {
+            format!(
+                "failed to adopt prepared staged install payload {}",
+                self.payload_path.display()
+            )
+        })?;
+        self.payload_file = Some(std::fs::File::from(payload_fd));
+        self.revalidate_payload()
+            .context("prepared staged install payload failed identity validation")
+    }
+
+    fn payload_file(&self) -> anyhow::Result<&std::fs::File> {
+        self.payload_file
+            .as_ref()
+            .context("staged install payload file is not open")
+    }
+
+    fn payload_file_mut(&mut self) -> anyhow::Result<&mut std::fs::File> {
+        self.payload_file
+            .as_mut()
+            .context("staged install payload file is not open")
+    }
+
+    fn sync_payload(&self) -> anyhow::Result<()> {
+        self.payload_file()?
+            .sync_all()
+            .with_context(|| format!("failed to sync {}", self.payload_path.display()))
+    }
+
+    fn revalidate_payload(&self) -> anyhow::Result<()> {
+        use rustix::fs::{FileType, Mode};
+
+        match self.payload_entry_matches_open_file()? {
+            Some(true) => {},
+            Some(false) => anyhow::bail!(
+                "staged vc-frame install payload changed identity before publication: {}",
+                self.payload_path.display()
+            ),
+            None => anyhow::bail!(
+                "staged vc-frame install payload disappeared before publication: {}",
+                self.payload_path.display()
+            ),
+        };
+        let payload_stat = rustix::fs::fstat(self.payload_file()?)
+            .context("failed to inspect open staged install payload")?;
+        let stage_stat = rustix::fs::fstat(&self.stage_directory)
+            .context("failed to inspect open private install directory")?;
+        if FileType::from_raw_mode(payload_stat.st_mode) != FileType::RegularFile
+            || payload_stat.st_uid != self.expected_owner.as_raw()
+            || payload_stat.st_dev != stage_stat.st_dev
+            || payload_stat.st_nlink != 1
+        {
+            anyhow::bail!(
+                "staged vc-frame install payload is not a private, same-filesystem regular file owned by the installer: {}",
+                self.payload_path.display()
+            );
+        }
+        if let Some(expected_mode) = self.expected_payload_mode
+            && Mode::from_raw_mode(payload_stat.st_mode) != expected_mode
+        {
+            anyhow::bail!(
+                "prepared staged vc-frame install payload changed mode before publication: {}",
+                self.payload_path.display()
+            );
+        }
+        Ok(())
+    }
+
+    fn payload_entry_matches_open_file(&self) -> anyhow::Result<Option<bool>> {
+        use rustix::fs::FileType;
+
+        let Some(entry_stat) = statat_optional(&self.stage_directory, "payload")? else {
+            return Ok(None);
+        };
+        let payload_stat = rustix::fs::fstat(self.payload_file()?)
+            .context("failed to inspect open staged install payload")?;
+        Ok(Some(
+            FileType::from_raw_mode(entry_stat.st_mode) == FileType::RegularFile
+                && same_file_identity(&entry_stat, &payload_stat),
+        ))
+    }
+
+    fn revalidate_stage_directory(&self) -> anyhow::Result<()> {
+        use rustix::fs::{FileType, Mode};
+
+        let stage_stat = rustix::fs::fstat(&self.stage_directory)
+            .context("failed to inspect open private install directory")?;
+        let parent_stat = rustix::fs::fstat(&self.parent_directory)
+            .context("failed to inspect open install parent directory")?;
+        if FileType::from_raw_mode(stage_stat.st_mode) != FileType::Directory
+            || stage_stat.st_uid != self.expected_owner.as_raw()
+            || Mode::from_raw_mode(stage_stat.st_mode) != Mode::RWXU
+            || stage_stat.st_dev != parent_stat.st_dev
+        {
+            anyhow::bail!(
+                "private vc-frame install directory is not mode 0700, installer-owned, and on the destination filesystem: {}",
+                self.stage_path.display()
+            );
+        }
+        if !self.stage_entry_matches_open_directory()? {
+            anyhow::bail!(
+                "private vc-frame install directory changed identity: {}",
+                self.stage_path.display()
+            );
+        }
+        Ok(())
+    }
+
+    fn stage_entry_matches_open_directory(&self) -> anyhow::Result<bool> {
+        use rustix::fs::FileType;
+
+        let Some(entry_stat) = statat_optional(&self.parent_directory, &self.stage_name)? else {
+            return Ok(false);
+        };
+        let directory_stat = rustix::fs::fstat(&self.stage_directory)
+            .context("failed to inspect open private install directory")?;
+        Ok(
+            FileType::from_raw_mode(entry_stat.st_mode) == FileType::Directory
+                && same_file_identity(&entry_stat, &directory_stat),
+        )
+    }
+
+    fn revalidate_destination_entry(&self) -> anyhow::Result<()> {
+        use rustix::fs::FileType;
+
+        let current = statat_optional(&self.parent_directory, &self.destination_name)?;
+        let unchanged = match (&self.expected_destination, current) {
+            (DestinationEntryState::Missing, None) => true,
+            (DestinationEntryState::Existing(expected), Some(current)) => {
+                FileType::from_raw_mode(current.st_mode) == FileType::RegularFile
+                    && same_file_identity(expected, &current)
+            },
+            _ => false,
+        };
+        if !unchanged {
+            anyhow::bail!(
+                "vc-frame install destination changed identity before publication: {}",
+                self.parent_path.join(&self.destination_name).display()
+            )
+        }
+        Ok(())
+    }
+
+    fn publish(&mut self, hooks: &mut impl InstallHooks) -> anyhow::Result<InstallOutcome> {
+        use rustix::fs::AtFlags;
+
+        self.revalidate_payload()?;
+        revalidate_absolute_path(
+            &self.parent_path,
+            &self.parent_directory,
+            rustix::fs::FileType::Directory,
+        )
+        .context("vc-frame install destination directory changed identity before publication")?;
+        self.revalidate_stage_directory()?;
+        self.revalidate_destination_entry()?;
+
+        rustix::fs::renameat(
+            &self.stage_directory,
+            "payload",
+            &self.parent_directory,
+            &self.destination_name,
+        )
+        .with_context(|| {
+            format!(
+                "failed to atomically publish {} over {}",
+                self.payload_path.display(),
+                self.parent_path.join(&self.destination_name).display()
+            )
+        })?;
+        self.payload_active = false;
+
+        let mut warnings = Vec::new();
+        match self.stage_entry_matches_open_directory() {
+            Ok(true) => match rustix::fs::unlinkat(
+                &self.parent_directory,
+                &self.stage_name,
+                AtFlags::REMOVEDIR,
+            ) {
+                Ok(()) => self.directory_active = false,
+                Err(error) => warnings.push(format!(
+                    "vc-frame was published, but its empty private staging directory {} could not be removed: {error}",
+                    self.stage_path.display()
+                )),
+            },
+            Ok(false) => warnings.push(format!(
+                "vc-frame was published, but its private staging directory {} changed identity before cleanup",
+                self.stage_path.display()
+            )),
+            Err(error) => warnings.push(format!(
+                "vc-frame was published, but its private staging directory {} could not be revalidated for cleanup: {error:#}",
+                self.stage_path.display()
+            )),
+        }
+
+        let durability = match hooks.sync_parent(&self.parent_directory) {
+            Ok(()) => InstallDurability::Confirmed,
+            Err(error) => {
+                warnings.push(format!(
+                    "failed to sync install directory {} after publication: {error}",
+                    self.parent_path.display()
+                ));
+                InstallDurability::Uncertain
+            },
+        };
+
+        Ok(InstallOutcome {
+            durability,
+            warnings,
+        })
+    }
+
+    fn cleanup(&mut self) -> anyhow::Result<()> {
+        use rustix::fs::AtFlags;
+
+        if self.payload_active {
+            match self.payload_entry_matches_open_file()? {
+                Some(true) => {
+                    rustix::fs::unlinkat(&self.stage_directory, "payload", AtFlags::empty())
+                        .with_context(|| {
+                            format!(
+                                "failed to remove staged install payload {}",
+                                self.payload_path.display()
+                            )
+                        })?;
+                    self.payload_active = false;
+                },
+                Some(false) => anyhow::bail!(
+                    "refusing to remove staged install payload after its identity changed: {}",
+                    self.payload_path.display()
+                ),
+                None => self.payload_active = false,
+            }
+        }
+
+        if self.directory_active {
+            self.stage_directory.sync_all().with_context(|| {
+                format!(
+                    "failed to sync private install directory {} during cleanup",
+                    self.stage_path.display()
+                )
+            })?;
+            if !self.stage_entry_matches_open_directory()? {
+                anyhow::bail!(
+                    "refusing to remove private install directory after its identity changed: {}",
+                    self.stage_path.display()
+                );
+            }
+            rustix::fs::unlinkat(&self.parent_directory, &self.stage_name, AtFlags::REMOVEDIR)
+                .with_context(|| {
+                    format!(
+                        "failed to remove private install directory {}",
+                        self.stage_path.display()
+                    )
+                })?;
+            self.directory_active = false;
+            self.parent_directory.sync_all().with_context(|| {
+                format!(
+                    "failed to sync install directory {} after cleanup",
+                    self.parent_path.display()
+                )
+            })?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl Drop for StagedInstall {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
+    }
+}
+
+#[cfg(unix)]
 fn install_binary_unix(
     source: &Path,
     destination: &Path,
-    prepare_source: impl FnOnce(&Path) -> anyhow::Result<()>,
-) -> anyhow::Result<()> {
+    hooks: &mut impl InstallHooks,
+) -> anyhow::Result<InstallOutcome> {
     let destination = effective_install_destination(source, destination)?;
-    let source = ResolvedInstallSource::resolve(source)?;
-    prepare_source(source.path())?;
-    // Source preparation (notably macOS codesign) may atomically replace its
-    // inode. Resolve and type-check the resulting path before opening it for
-    // the protected publication copy.
-    let source = ResolvedInstallSource::resolve(source.path())?;
+    let mut source = OpenedInstallSource::open(source)?;
+    hooks.after_source_open(source.path())?;
     let mut staged = StagedInstall::reserve(&destination)?;
     let install_result = (|| {
-        staged.copy_source(&source)?;
-        staged.revalidate_path_identity()?;
-        staged.sync_file()?;
-        staged.publish(&destination)
+        staged.copy_source(&mut source)?;
+        hooks.prepare_staged(staged.path())?;
+        staged.adopt_payload_after_preparation()?;
+        hooks.verify_staged(staged.path())?;
+        staged.revalidate_payload()?;
+        staged.sync_payload()?;
+        hooks.before_publish(staged.path(), destination.path())?;
+        staged.publish(hooks)
     })();
 
     match install_result {
-        Ok(()) => Ok(()),
+        Ok(outcome) => Ok(outcome),
         Err(error) => {
             if let Err(cleanup_error) = staged.cleanup() {
                 return Err(error.context(format!(
-                    "also failed to clean staged vc-frame install {}: {cleanup_error:#}",
+                    "also failed to clean private staged vc-frame install {}: {cleanup_error:#}",
                     staged.path().display()
                 )));
             }
@@ -332,246 +912,114 @@ fn install_binary_unix(
 }
 
 #[cfg(unix)]
-struct StagedInstall {
-    path: PathBuf,
-    file: std::fs::File,
-    parent_path: PathBuf,
-    parent_directory: std::fs::File,
-    active: bool,
+fn open_directory_no_follow(path: &Path) -> anyhow::Result<std::fs::File> {
+    use rustix::fs::{Mode, OFlags};
+
+    let fd = rustix::fs::openat(
+        rustix::fs::CWD,
+        path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    Ok(std::fs::File::from(fd))
 }
 
 #[cfg(unix)]
-impl StagedInstall {
-    fn reserve(destination: &ResolvedInstallDestination) -> anyhow::Result<Self> {
-        use std::ffi::OsString;
-        use std::fs::OpenOptions;
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        let parent_path = destination.parent().to_path_buf();
-        let file_name = destination
-            .path()
-            .file_name()
-            .context("vc-frame install destination has no file name")?;
-        let parent_directory = std::fs::File::open(&parent_path).with_context(|| {
-            format!("failed to open install directory {}", parent_path.display())
-        })?;
-        if !parent_directory
-            .metadata()
-            .context("failed to inspect open install directory")?
-            .is_dir()
-        {
-            anyhow::bail!(
-                "vc-frame install destination parent is not a directory: {}",
-                parent_path.display()
-            );
-        }
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .context("system clock is before the Unix epoch")?
-            .as_nanos();
-
-        for attempt in 0..32 {
-            let mut staged_name = OsString::from(".");
-            staged_name.push(file_name);
-            staged_name.push(format!(".install-{}-{nonce}-{attempt}", std::process::id()));
-            let path = parent_path.join(staged_name);
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(file) => {
-                    return Ok(Self {
-                        path,
-                        file,
-                        parent_path,
-                        parent_directory,
-                        active: true,
-                    });
-                },
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {},
-                Err(error) => {
-                    return Err(error)
-                        .with_context(|| format!("failed to reserve {}", path.display()));
-                },
-            }
-        }
-
-        anyhow::bail!(
-            "failed to reserve a staged vc-frame install path beside {}",
-            destination.path().display()
-        )
+fn revalidate_absolute_path(
+    path: &Path,
+    file: &std::fs::File,
+    expected_type: rustix::fs::FileType,
+) -> anyhow::Result<()> {
+    let path_stat =
+        rustix::fs::statat(rustix::fs::CWD, path, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+            .with_context(|| format!("failed to inspect {}", path.display()))?;
+    let file_stat = rustix::fs::fstat(file)
+        .with_context(|| format!("failed to inspect open {}", path.display()))?;
+    if rustix::fs::FileType::from_raw_mode(path_stat.st_mode) != expected_type
+        || rustix::fs::FileType::from_raw_mode(file_stat.st_mode) != expected_type
+        || !same_file_identity(&path_stat, &file_stat)
+    {
+        anyhow::bail!("path changed identity while open: {}", path.display());
     }
+    Ok(())
+}
 
-    fn path(&self) -> &Path {
-        &self.path
-    }
-
-    fn copy_source(&mut self, source: &ResolvedInstallSource) -> anyhow::Result<()> {
-        let mut source_file = std::fs::File::open(source.path()).with_context(|| {
-            format!(
-                "failed to open vc-frame install source {}",
-                source.path().display()
-            )
-        })?;
-        let source_metadata = source_file.metadata().with_context(|| {
-            format!(
-                "failed to inspect vc-frame install source {}",
-                source.path().display()
-            )
-        })?;
-        if !source_metadata.is_file() {
-            anyhow::bail!(
-                "vc-frame install source is not a regular file: {}",
-                source.path().display()
-            );
-        }
-        std::io::copy(&mut source_file, &mut self.file).with_context(|| {
-            format!(
-                "failed to copy vc-frame install source {}",
-                source.path().display()
-            )
-        })?;
-        self.file
-            .set_permissions(source_metadata.permissions())
-            .with_context(|| format!("failed to set permissions on {}", self.path.display()))?;
-        self.sync_file()
-    }
-
-    fn sync_file(&self) -> anyhow::Result<()> {
-        self.file
-            .sync_all()
-            .with_context(|| format!("failed to sync {}", self.path.display()))
-    }
-
-    fn revalidate_path_identity(&self) -> anyhow::Result<()> {
-        match self.path_matches_open_file()? {
-            Some(true) => Ok(()),
-            Some(false) => anyhow::bail!(
-                "staged vc-frame install path changed inode before publication: {}",
-                self.path.display()
-            ),
-            None => anyhow::bail!(
-                "staged vc-frame install path disappeared before publication: {}",
-                self.path.display()
-            ),
-        }
-    }
-
-    fn path_matches_open_file(&self) -> anyhow::Result<Option<bool>> {
-        use std::os::unix::fs::MetadataExt;
-
-        let path_metadata = match std::fs::symlink_metadata(&self.path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!("failed to inspect staged install {}", self.path.display())
-                });
-            },
-        };
-        if !path_metadata.file_type().is_file() {
-            return Ok(Some(false));
-        }
-        let file_metadata = self
-            .file
-            .metadata()
-            .context("failed to inspect open staged install file")?;
-        Ok(Some(
-            path_metadata.dev() == file_metadata.dev()
-                && path_metadata.ino() == file_metadata.ino(),
-        ))
-    }
-
-    fn parent_path_matches_open_directory(&self) -> anyhow::Result<bool> {
-        use std::os::unix::fs::MetadataExt;
-
-        let path_metadata = match std::fs::symlink_metadata(&self.parent_path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!(
-                        "failed to inspect staged install directory {}",
-                        self.parent_path.display()
-                    )
-                });
-            },
-        };
-        let directory_metadata = self
-            .parent_directory
-            .metadata()
-            .context("failed to inspect open staged install directory")?;
-        Ok(path_metadata.file_type().is_dir()
-            && path_metadata.dev() == directory_metadata.dev()
-            && path_metadata.ino() == directory_metadata.ino())
-    }
-
-    fn publish(&mut self, destination: &ResolvedInstallDestination) -> anyhow::Result<()> {
-        self.revalidate_path_identity()?;
-        if !self.parent_path_matches_open_directory()? {
-            anyhow::bail!(
-                "vc-frame install destination directory changed identity before publication: {}",
-                self.parent_path.display()
-            );
-        }
-        std::fs::rename(&self.path, destination.path()).with_context(|| {
-            format!(
-                "failed to atomically publish {} over {}",
-                self.path.display(),
-                destination.path().display()
-            )
-        })?;
-        self.active = false;
-        self.parent_directory.sync_all().with_context(|| {
-            format!(
-                "failed to sync install directory {}",
-                self.parent_path.display()
-            )
-        })
-    }
-
-    fn cleanup(&mut self) -> anyhow::Result<()> {
-        if !self.active {
-            return Ok(());
-        }
-        let Some(path_matches) = self.path_matches_open_file()? else {
-            self.active = false;
-            return Ok(());
-        };
-        if !path_matches || !self.parent_path_matches_open_directory()? {
-            anyhow::bail!(
-                "refusing to remove staged install after its path or parent changed identity: {}",
-                self.path.display()
-            );
-        }
-        std::fs::remove_file(&self.path)
-            .with_context(|| format!("failed to remove staged install {}", self.path.display()))?;
-        self.active = false;
-        self.parent_directory.sync_all().with_context(|| {
-            format!(
-                "failed to sync install directory {} after cleanup",
-                self.parent_path.display()
-            )
-        })
+#[cfg(unix)]
+fn statat_optional(
+    directory: &std::fs::File,
+    name: impl rustix::path::Arg,
+) -> anyhow::Result<Option<rustix::fs::Stat>> {
+    match rustix::fs::statat(directory, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) => Ok(Some(stat)),
+        Err(rustix::io::Errno::NOENT) => Ok(None),
+        Err(error) => Err(error).context("failed to inspect fd-relative install entry"),
     }
 }
 
 #[cfg(unix)]
-impl Drop for StagedInstall {
-    fn drop(&mut self) {
-        if self.active
-            && self.path_matches_open_file().ok() == Some(Some(true))
-            && self.parent_path_matches_open_directory().ok() == Some(true)
-            && std::fs::remove_file(&self.path).is_ok()
-        {
-            let _ = self.parent_directory.sync_all();
-        }
-    }
+fn same_file_identity(left: &rustix::fs::Stat, right: &rustix::fs::Stat) -> bool {
+    left.st_dev == right.st_dev && left.st_ino == right.st_ino
 }
 
 #[cfg(all(test, unix))]
 mod install_tests {
     use super::*;
     use std::io::Read;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    };
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    type PathHook = Box<dyn FnMut(&Path) -> anyhow::Result<()>>;
+    type PublishHook = Box<dyn FnMut(&Path, &Path) -> anyhow::Result<()>>;
+
+    #[derive(Default)]
+    struct TestInstallHooks {
+        after_source_open: Option<PathHook>,
+        prepare_staged: Option<PathHook>,
+        verify_staged: Option<PathHook>,
+        before_publish: Option<PublishHook>,
+        fail_parent_sync: bool,
+    }
+
+    impl InstallHooks for TestInstallHooks {
+        fn after_source_open(&mut self, source: &Path) -> anyhow::Result<()> {
+            match &mut self.after_source_open {
+                Some(hook) => hook(source),
+                None => Ok(()),
+            }
+        }
+
+        fn prepare_staged(&mut self, staged: &Path) -> anyhow::Result<()> {
+            match &mut self.prepare_staged {
+                Some(hook) => hook(staged),
+                None => Ok(()),
+            }
+        }
+
+        fn verify_staged(&mut self, staged: &Path) -> anyhow::Result<()> {
+            match &mut self.verify_staged {
+                Some(hook) => hook(staged),
+                None => Ok(()),
+            }
+        }
+
+        fn before_publish(&mut self, staged: &Path, destination: &Path) -> anyhow::Result<()> {
+            match &mut self.before_publish {
+                Some(hook) => hook(staged, destination),
+                None => Ok(()),
+            }
+        }
+
+        fn sync_parent(&mut self, parent: &std::fs::File) -> std::io::Result<()> {
+            if self.fail_parent_sync {
+                Err(std::io::Error::other("injected parent sync failure"))
+            } else {
+                parent.sync_all()
+            }
+        }
+    }
 
     fn test_directory() -> PathBuf {
         static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
@@ -596,7 +1044,12 @@ mod install_tests {
     }
 
     fn install_for_test(source: &Path, destination: &Path) -> anyhow::Result<()> {
-        install_binary_unix(source, destination, |_| Ok(()))
+        let mut hooks = TestInstallHooks::default();
+        let outcome = install_binary_unix(source, destination, &mut hooks)?;
+        if outcome.durability != InstallDurability::Confirmed || !outcome.warnings.is_empty() {
+            anyhow::bail!("unexpected install outcome: {outcome:?}");
+        }
+        Ok(())
     }
 
     fn staged_entries(directory: &Path) -> Vec<PathBuf> {
@@ -605,7 +1058,7 @@ mod install_tests {
             .filter_map(|entry| {
                 let path = entry.expect("read test entry").path();
                 path.file_name()
-                    .is_some_and(|name| name.to_string_lossy().contains(".install-"))
+                    .is_some_and(|name| name.to_string_lossy().contains(".vc-frame.install-"))
                     .then_some(path)
             })
             .collect()
@@ -750,17 +1203,19 @@ mod install_tests {
     }
 
     #[test]
-    fn source_preparation_failure_preserves_destination_without_staging() {
+    fn staged_preparation_failure_preserves_destination_and_cleans_private_stage() {
         let directory = test_directory();
         let source = directory.join("new-vc-frame");
         let destination = directory.join("vc-frame");
         std::fs::write(&source, b"new runtime").expect("write source");
         std::fs::write(&destination, b"old runtime").expect("write destination");
 
-        let error = install_binary_unix(&source, &destination, |_| {
-            anyhow::bail!("injected signing failure")
-        })
-        .expect_err("signing failure must fail install");
+        let mut hooks = TestInstallHooks {
+            prepare_staged: Some(Box::new(|_| anyhow::bail!("injected signing failure"))),
+            ..TestInstallHooks::default()
+        };
+        let error = install_binary_unix(&source, &destination, &mut hooks)
+            .expect_err("signing failure must fail install");
 
         assert!(error.to_string().contains("injected signing failure"));
         assert_eq!(
@@ -772,23 +1227,75 @@ mod install_tests {
     }
 
     #[test]
-    fn source_preparation_may_replace_its_inode_before_staging() {
+    fn source_replacement_after_open_does_not_change_copied_bytes() {
         let directory = test_directory();
         let source = directory.join("new-vc-frame");
-        let replacement = directory.join("signed-vc-frame");
+        let replacement = directory.join("replacement-vc-frame");
         let destination = directory.join("vc-frame");
-        std::fs::write(&source, b"unsigned runtime").expect("write source");
-        std::fs::write(&replacement, b"signed runtime").expect("write signed replacement");
+        std::fs::write(&source, b"opened runtime").expect("write source");
+        std::fs::write(&replacement, b"path replacement").expect("write replacement");
         std::fs::write(&destination, b"old runtime").expect("write destination");
 
-        install_binary_unix(&source, &destination, |source| {
-            std::fs::rename(&replacement, source).expect("replace source inode like codesign");
-            Ok(())
-        })
-        .expect("source inode replacement before staging must install");
+        let replacement_for_hook = replacement.clone();
+        let mut hooks = TestInstallHooks {
+            after_source_open: Some(Box::new(move |source| {
+                std::fs::rename(&replacement_for_hook, source)
+                    .expect("replace source after retained fd is open");
+                Ok(())
+            })),
+            ..TestInstallHooks::default()
+        };
+        let outcome = install_binary_unix(&source, &destination, &mut hooks)
+            .expect("retained source fd must install opened bytes");
 
+        assert_eq!(outcome.durability, InstallDurability::Confirmed);
         assert_eq!(
             std::fs::read_to_string(&destination).expect("read published destination"),
+            "opened runtime"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&source).expect("read replaced source path"),
+            "path replacement"
+        );
+        assert!(staged_entries(&directory).is_empty());
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn staged_inode_replacement_is_adopted_and_verified_before_publication() {
+        let directory = test_directory();
+        let source = directory.join("new-vc-frame");
+        let destination = directory.join("vc-frame");
+        std::fs::write(&source, b"unsigned runtime").expect("write source");
+        std::fs::write(&destination, b"old runtime").expect("write destination");
+        let verified = Arc::new(AtomicBool::new(false));
+        let verified_for_hook = Arc::clone(&verified);
+        let mut hooks = TestInstallHooks {
+            prepare_staged: Some(Box::new(|staged| {
+                let replacement = staged.with_extension("codesign-replacement");
+                std::fs::write(&replacement, b"signed runtime").expect("write signed inode");
+                std::fs::rename(&replacement, staged)
+                    .expect("replace staged inode like codesign --force");
+                Ok(())
+            })),
+            verify_staged: Some(Box::new(move |staged| {
+                assert_eq!(
+                    std::fs::read_to_string(staged).expect("read adopted staged inode"),
+                    "signed runtime"
+                );
+                verified_for_hook.store(true, Ordering::SeqCst);
+                Ok(())
+            })),
+            ..TestInstallHooks::default()
+        };
+
+        let outcome = install_binary_unix(&source, &destination, &mut hooks)
+            .expect("adopt codesign replacement inode");
+
+        assert_eq!(outcome.durability, InstallDurability::Confirmed);
+        assert!(verified.load(Ordering::SeqCst));
+        assert_eq!(
+            std::fs::read_to_string(&destination).expect("read signed destination"),
             "signed runtime"
         );
         assert!(staged_entries(&directory).is_empty());
@@ -796,29 +1303,193 @@ mod install_tests {
     }
 
     #[test]
-    fn staged_path_replacement_is_rejected_without_deleting_the_replacement() {
-        let directory = test_directory();
-        let destination = directory.join("vc-frame");
-        let destination = effective_install_destination(Path::new("vc-frame"), &destination)
-            .expect("resolve destination");
-        let mut staged = StagedInstall::reserve(&destination).expect("reserve stage");
-        let staged_path = staged.path().to_path_buf();
-        std::fs::remove_file(&staged_path).expect("unlink owned stage");
-        std::fs::write(&staged_path, b"replacement").expect("write replacement");
+    fn private_stage_directory_is_mode_0700_and_installer_owned() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-        let identity_error = staged
-            .revalidate_path_identity()
-            .expect_err("replacement inode must fail revalidation");
-        assert!(identity_error.to_string().contains("changed inode"));
-        let cleanup_error = staged
-            .cleanup()
-            .expect_err("cleanup must not delete an unowned replacement");
-        assert!(cleanup_error.to_string().contains("refusing to remove"));
-        drop(staged);
+        let directory = test_directory();
+        let source = directory.join("new-vc-frame");
+        let destination = directory.join("vc-frame");
+        std::fs::write(&source, b"new runtime").expect("write source");
+        let inspected = Arc::new(AtomicBool::new(false));
+        let inspected_for_hook = Arc::clone(&inspected);
+        let mut hooks = TestInstallHooks {
+            prepare_staged: Some(Box::new(move |staged| {
+                let stage_directory = staged.parent().expect("staged payload parent");
+                let metadata = std::fs::metadata(stage_directory).expect("private stage metadata");
+                assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+                assert_eq!(metadata.uid(), rustix::process::geteuid().as_raw());
+                inspected_for_hook.store(true, Ordering::SeqCst);
+                Ok(())
+            })),
+            ..TestInstallHooks::default()
+        };
+
+        install_binary_unix(&source, &destination, &mut hooks).expect("private stage install");
+
+        assert!(inspected.load(Ordering::SeqCst));
+        assert!(staged_entries(&directory).is_empty());
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn staged_payload_replacement_before_publish_is_rejected_and_not_deleted() {
+        let directory = test_directory();
+        let source = directory.join("new-vc-frame");
+        let destination = directory.join("vc-frame");
+        std::fs::write(&source, b"new runtime").expect("write source");
+        std::fs::write(&destination, b"old runtime").expect("write destination");
+        let mut hooks = TestInstallHooks {
+            before_publish: Some(Box::new(|staged, _| {
+                std::fs::remove_file(staged).expect("unlink adopted staged payload");
+                std::fs::write(staged, b"unowned replacement").expect("replace staged payload");
+                Ok(())
+            })),
+            ..TestInstallHooks::default()
+        };
+
+        let error = install_binary_unix(&source, &destination, &mut hooks)
+            .expect_err("staged payload race must fail");
+
+        assert!(format!("{error:#}").contains("changed identity"));
         assert_eq!(
-            std::fs::read_to_string(&staged_path).expect("read retained replacement"),
-            "replacement"
+            std::fs::read_to_string(&destination).expect("read preserved destination"),
+            "old runtime"
         );
+        let stages = staged_entries(&directory);
+        assert_eq!(stages.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(stages[0].join("payload")).expect("read retained replacement"),
+            "unowned replacement"
+        );
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn parent_replacement_before_publish_is_rejected_and_old_destination_survives() {
+        let directory = test_directory();
+        let build_directory = directory.join("build");
+        let install_directory = directory.join("bin");
+        let moved_install_directory = directory.join("original-bin");
+        std::fs::create_dir(&build_directory).expect("create build directory");
+        std::fs::create_dir(&install_directory).expect("create install directory");
+        let source = build_directory.join("vc-frame");
+        let destination = install_directory.join("vc-frame");
+        std::fs::write(&source, b"new runtime").expect("write source");
+        std::fs::write(&destination, b"old runtime").expect("write destination");
+        let install_directory_for_hook = install_directory.clone();
+        let moved_install_directory_for_hook = moved_install_directory.clone();
+        let mut hooks = TestInstallHooks {
+            before_publish: Some(Box::new(move |_, _| {
+                std::fs::rename(
+                    &install_directory_for_hook,
+                    &moved_install_directory_for_hook,
+                )
+                .expect("replace install parent");
+                std::fs::create_dir(&install_directory_for_hook)
+                    .expect("create replacement install parent");
+                Ok(())
+            })),
+            ..TestInstallHooks::default()
+        };
+
+        let error = install_binary_unix(&source, &destination, &mut hooks)
+            .expect_err("parent replacement race must fail");
+
+        assert!(format!("{error:#}").contains("destination directory changed identity"));
+        assert!(!destination.exists());
+        assert_eq!(
+            std::fs::read_to_string(moved_install_directory.join("vc-frame"))
+                .expect("read old destination in original parent"),
+            "old runtime"
+        );
+        assert!(staged_entries(&moved_install_directory).is_empty());
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn destination_replacement_before_publish_is_rejected_without_overwriting_it() {
+        let directory = test_directory();
+        let source = directory.join("new-vc-frame");
+        let destination = directory.join("vc-frame");
+        std::fs::write(&source, b"new runtime").expect("write source");
+        std::fs::write(&destination, b"old runtime").expect("write destination");
+        let mut hooks = TestInstallHooks {
+            before_publish: Some(Box::new(|_, destination| {
+                let replacement = destination.with_extension("concurrent");
+                std::fs::write(&replacement, b"concurrent runtime")
+                    .expect("write concurrent destination");
+                std::fs::rename(&replacement, destination)
+                    .expect("replace destination before publish");
+                Ok(())
+            })),
+            ..TestInstallHooks::default()
+        };
+
+        let error = install_binary_unix(&source, &destination, &mut hooks)
+            .expect_err("destination replacement race must fail");
+
+        assert!(format!("{error:#}").contains("destination changed identity"));
+        assert_eq!(
+            std::fs::read_to_string(&destination).expect("read concurrent destination"),
+            "concurrent runtime"
+        );
+        assert!(staged_entries(&directory).is_empty());
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn parent_sync_failure_reports_published_but_durability_uncertain() {
+        let directory = test_directory();
+        let source = directory.join("new-vc-frame");
+        let destination = directory.join("vc-frame");
+        std::fs::write(&source, b"new runtime").expect("write source");
+        std::fs::write(&destination, b"old runtime").expect("write destination");
+        let mut hooks = TestInstallHooks {
+            fail_parent_sync: true,
+            ..TestInstallHooks::default()
+        };
+
+        let outcome = install_binary_unix(&source, &destination, &mut hooks)
+            .expect("publication remains successful after parent sync failure");
+
+        assert_eq!(outcome.durability, InstallDurability::Uncertain);
+        assert!(
+            outcome
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("failed to sync install directory"))
+        );
+        assert_eq!(
+            std::fs::read_to_string(&destination).expect("read published destination"),
+            "new runtime"
+        );
+        assert!(staged_entries(&directory).is_empty());
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_real_macho_is_signed_installed_and_strictly_verified() {
+        let directory = test_directory();
+        let source = directory.join("vc-frame-source");
+        let destination = directory.join("vc-frame");
+        std::fs::copy(
+            std::env::current_exe().expect("current test executable"),
+            &source,
+        )
+        .expect("copy real Mach-O test executable");
+        let shell = Shell::new().expect("create shell");
+
+        install_binary(&shell, &source, &destination)
+            .expect("sign and install real Mach-O executable");
+
+        let verification = std::process::Command::new("/usr/bin/codesign")
+            .args(["--verify", "--strict"])
+            .arg(&destination)
+            .status()
+            .expect("run codesign verification");
+        assert!(verification.success());
+        assert!(staged_entries(&directory).is_empty());
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 }

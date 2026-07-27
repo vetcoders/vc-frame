@@ -4801,8 +4801,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "prost-build",
+ "rustix 0.38.44",
  "serde_json",
  "toml 0.5.10",
+ "uuid",
  "which",
  "xflags",
  "xshell",
