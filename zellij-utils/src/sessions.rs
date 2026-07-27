@@ -379,6 +379,10 @@ pub fn get_active_session() -> ActiveSession {
 }
 
 pub fn kill_session(name: &str) {
+    if let Err(error) = validate_session_name(name) {
+        eprintln!("{error}");
+        process::exit(1);
+    }
     let path = &*ZELLIJ_SOCK_DIR.join(name);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
@@ -607,10 +611,45 @@ pub fn validate_session_name(name: &str) -> Result<(), String> {
     if name == "." || name == ".." {
         return Err(format!("Invalid session name: \"{}\".", name));
     }
-    if name.contains('/') {
-        return Err("Session name cannot contain '/'.".to_string());
+    if name.contains(['/', '\\']) {
+        return Err("Session name cannot contain path separators.".to_string());
+    }
+    let bytes = name.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return Err("Session name cannot contain a Windows drive prefix.".to_string());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod session_name_validation_tests {
+    use super::validate_session_name;
+
+    #[test]
+    fn session_name_cannot_escape_socket_root() {
+        for valid in ["work", "work.tree", "work-night", "work:night"] {
+            assert_eq!(validate_session_name(valid), Ok(()), "{valid}");
+        }
+
+        for invalid in [
+            "",
+            " ",
+            ".",
+            "..",
+            "../other",
+            "/tmp/other",
+            r"..\other",
+            r"\other",
+            r"C:\other",
+            "C:other",
+            r"\\server\share",
+        ] {
+            assert!(
+                validate_session_name(invalid).is_err(),
+                "{invalid:?} must not escape the session socket root"
+            );
+        }
+    }
 }
 
 pub fn assert_session_ne(name: &str) {

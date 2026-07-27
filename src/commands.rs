@@ -129,6 +129,10 @@ pub(crate) fn delete_all_sessions(yes: bool, force: bool) {
 pub(crate) fn kill_session(target_session: &Option<String>) {
     match target_session {
         Some(target_session) => {
+            if let Err(e) = validate_session_name(target_session) {
+                eprintln!("{}", e);
+                process::exit(1);
+            }
             // A live server can miss the short inventory probe while busy.
             // Let the exact socket transport decide whether shutdown can land.
             kill_session_impl(target_session);
