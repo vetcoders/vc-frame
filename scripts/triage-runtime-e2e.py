@@ -1705,35 +1705,68 @@ def validate_owned_process_group_leader(
 
 def validated_owned_process_group_members(
     process: subprocess.Popen[bytes],
+    *,
+    max_observations: int = 4,
+    observation_interval: float = 0.001,
 ) -> list[dict[str, object]]:
-    validate_owned_process_group_leader(process)
-    members = process_group_members(process.pid)
+    require(max_observations >= 2, "owned group validation needs re-inventory")
     expected_uid = os.geteuid()
-    leader = next(
-        (member for member in members if int(member["pid"]) == process.pid),
-        None,
-    )
-    invalid_members = [
-        member
-        for member in members
-        if int(member.get("pgid", -1)) != process.pid
-        or int(member.get("uid", -1)) != expected_uid
-        or (
-            member.get("sid") != process.pid
-            and not (
-                "Z" in str(member.get("state", ""))
-                and member.get("sid") is None
-                and member.get("sid_errno") == errno.ESRCH
+    observations: list[list[dict[str, object]]] = []
+    ambiguous_members: list[dict[str, object]] = []
+    for observation_number in range(max_observations):
+        validate_owned_process_group_leader(process)
+        members = process_group_members(process.pid)
+        observations.append(members)
+        leader = next(
+            (member for member in members if int(member["pid"]) == process.pid),
+            None,
+        )
+        ambiguous_members = [
+            member
+            for member in members
+            if member.get("sid") is None
+            and member.get("sid_errno") == errno.ESRCH
+            and "Z" not in str(member.get("state", ""))
+        ]
+        ambiguous_pids = {
+            int(member["pid"]) for member in ambiguous_members
+        }
+        invalid_members = [
+            member
+            for member in members
+            if int(member.get("pgid", -1)) != process.pid
+            or int(member.get("uid", -1)) != expected_uid
+            or (
+                member.get("sid") != process.pid
+                and int(member.get("pid", -1)) not in ambiguous_pids
+                and not (
+                    "Z" in str(member.get("state", ""))
+                    and member.get("sid") is None
+                    and member.get("sid_errno") == errno.ESRCH
+                )
             )
-        )
-    ]
-    if leader is None or invalid_members:
+        ]
+        if leader is None or invalid_members:
+            raise OwnedProcessGroupRefusal(
+                f"refusing to signal unresolved process group {process.pid}: "
+                f"expected_uid={expected_uid}, leader_present={leader is not None}, "
+                f"invalid_members={invalid_members!r}, members={members!r}"
+            )
+        if not ambiguous_members:
+            return members
+        if observation_number + 1 < max_observations:
+            if observation_interval > 0:
+                time.sleep(observation_interval)
+            continue
+        break
+    if ambiguous_members:
         raise OwnedProcessGroupRefusal(
-            f"refusing to signal unresolved process group {process.pid}: "
-            f"expected_uid={expected_uid}, leader_present={leader is not None}, "
-            f"invalid_members={invalid_members!r}, members={members!r}"
+            f"refusing to signal persistently ambiguous process group {process.pid}: "
+            f"expected_uid={expected_uid}, "
+            f"ambiguous_members={ambiguous_members!r}, "
+            f"observations={observations!r}"
         )
-    return members
+    raise AssertionError(f"owned process group {process.pid} validation fell through")
 
 
 def signal_exact_owned_group_member(
@@ -1756,6 +1789,8 @@ def signal_exact_owned_group_member(
             None,
         )
         if member is None:
+            return False
+        if "Z" in str(member.get("state", "")):
             return False
         try:
             os.kill(member_pid, signal_number)

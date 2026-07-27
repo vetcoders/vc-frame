@@ -750,6 +750,140 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                 member_snapshots,
             )
 
+    def test_transient_non_zombie_esrch_disappears_without_signal(self) -> None:
+        process = mock.Mock()
+        process.pid = 9_201
+        process.poll.return_value = None
+        leader = {
+            "pid": process.pid,
+            "ppid": 1,
+            "pgid": process.pid,
+            "uid": 501,
+            "sid": process.pid,
+            "sid_errno": None,
+            "sid_error": None,
+            "state": "T",
+            "command": "owned-leader",
+        }
+        exiting_child = {
+            "pid": 9_202,
+            "ppid": process.pid,
+            "pgid": process.pid,
+            "uid": 501,
+            "sid": None,
+            "sid_errno": errno.ESRCH,
+            "sid_error": "ProcessLookupError: gone",
+            "state": "S",
+            "command": "(vc-frame)",
+        }
+        with mock.patch.object(
+            MODULE.os,
+            "getpgid",
+            return_value=process.pid,
+        ), mock.patch.object(
+            MODULE.os,
+            "getsid",
+            return_value=process.pid,
+        ), mock.patch.object(
+            MODULE.os,
+            "geteuid",
+            return_value=501,
+        ), mock.patch.object(
+            MODULE,
+            "process_group_members",
+            side_effect=[[leader, exiting_child], [leader]],
+        ) as inventory, mock.patch.object(
+            MODULE.time,
+            "sleep",
+        ) as pause, mock.patch.object(
+            MODULE.os,
+            "kill",
+        ) as exact_kill, mock.patch.object(
+            MODULE.os,
+            "killpg",
+            side_effect=AssertionError("must not signal a process group"),
+        ):
+            signalled = MODULE.signal_exact_owned_group_member(
+                process,
+                9_202,
+                signal.SIGSTOP,
+                deadline=MODULE.time.monotonic() + 1,
+            )
+        self.assertFalse(signalled)
+        self.assertEqual(inventory.call_count, 2)
+        pause.assert_called_once_with(0.001)
+        exact_kill.assert_not_called()
+
+    def test_persistent_non_zombie_esrch_refuses_without_signal(self) -> None:
+        process = mock.Mock()
+        process.pid = 9_301
+        process.poll.return_value = None
+        members = [
+            {
+                "pid": process.pid,
+                "ppid": 1,
+                "pgid": process.pid,
+                "uid": 501,
+                "sid": process.pid,
+                "sid_errno": None,
+                "sid_error": None,
+                "state": "T",
+                "command": "owned-leader",
+            },
+            {
+                "pid": 9_302,
+                "ppid": process.pid,
+                "pgid": process.pid,
+                "uid": 501,
+                "sid": None,
+                "sid_errno": errno.ESRCH,
+                "sid_error": "ProcessLookupError: still unresolved",
+                "state": "S",
+                "command": "(vc-frame)",
+            },
+        ]
+        with mock.patch.object(
+            MODULE.os,
+            "getpgid",
+            return_value=process.pid,
+        ), mock.patch.object(
+            MODULE.os,
+            "getsid",
+            return_value=process.pid,
+        ), mock.patch.object(
+            MODULE.os,
+            "geteuid",
+            return_value=501,
+        ), mock.patch.object(
+            MODULE,
+            "process_group_members",
+            return_value=members,
+        ) as inventory, mock.patch.object(
+            MODULE.time,
+            "sleep",
+        ) as pause, mock.patch.object(
+            MODULE.os,
+            "kill",
+        ) as exact_kill, mock.patch.object(
+            MODULE.os,
+            "killpg",
+            side_effect=AssertionError("must not signal a process group"),
+        ):
+            with self.assertRaisesRegex(
+                MODULE.OwnedProcessGroupRefusal,
+                r"persistently ambiguous process group 9301: "
+                r".*ambiguous_members=.*9302.*observations=",
+            ):
+                MODULE.signal_exact_owned_group_member(
+                    process,
+                    9_302,
+                    signal.SIGSTOP,
+                    deadline=MODULE.time.monotonic() + 1,
+                )
+        self.assertEqual(inventory.call_count, 4)
+        self.assertEqual(pause.call_count, 3)
+        exact_kill.assert_not_called()
+
     def test_exact_owned_member_eperm_refuses_without_group_fallback(self) -> None:
         process = mock.Mock()
         process.pid = 9_001
