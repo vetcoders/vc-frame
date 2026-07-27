@@ -36,6 +36,8 @@ use std::rc::Rc;
 use std::str;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
 use crate::route::NotificationEnd;
@@ -57,6 +59,7 @@ use zellij_utils::input::mouse::{MouseEvent, MouseEventType};
 use zellij_utils::input::options::Clipboard;
 use zellij_utils::ipc::{ExitReason, ServerToClientMsg};
 use zellij_utils::pane_size::{PaneGeom, Size, SizeInPixels};
+use zellij_utils::run_triage::{ViewerCreationFence, ViewerCreationFenceRejection};
 use zellij_utils::shared::clean_string_from_control_and_linebreak;
 use zellij_utils::{
     consts::{ZELLIJ_SOCK_DIR, session_info_folder_for_session},
@@ -324,12 +327,29 @@ pub struct TabOverrideResult {
 /// name and durable token, then carried through plugin/PTY workers back to the
 /// screen. A newer retry replaces the current generation and makes every older
 /// completion stale.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DurableTabLayoutGeneration {
     pub tab_id: usize,
     pub tab_name: String,
     pub tab_instance_id: String,
     pub generation: u64,
+    pub viewer_creation_fence: Option<ViewerCreationFence>,
+}
+
+impl std::fmt::Debug for DurableTabLayoutGeneration {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DurableTabLayoutGeneration")
+            .field("tab_id", &self.tab_id)
+            .field("tab_name", &self.tab_name)
+            .field("tab_instance_id", &self.tab_instance_id)
+            .field("generation", &self.generation)
+            .field(
+                "has_viewer_creation_fence",
+                &self.viewer_creation_fence.is_some(),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2680,7 +2700,7 @@ impl Screen {
         Ok(())
     }
 
-    pub fn render_to_clients(&mut self) -> Result<()> {
+    pub fn render_to_clients(&mut self, pending_tab_ids: &HashSet<usize>) -> Result<()> {
         // this method does the actual rendering and is triggered by a debounced BackgroundJob (see
         // the render method for more details)
         let err_context = "failed to render screen";
@@ -2723,7 +2743,7 @@ impl Screen {
                 if tab.has_selectable_tiled_panes() {
                     // Pass None for normal client rendering
                     tab.render(&mut output, None).context(err_context)?;
-                } else if !tab.is_pending() {
+                } else if !tab.is_pending() && !pending_tab_ids.contains(tab_index) {
                     tabs_to_close.push(*tab_index);
                 }
             }
@@ -5841,6 +5861,7 @@ pub(crate) fn reserve_new_durable_tab_layout_generation(
     tab_id: usize,
     tab_name: &str,
     tab_instance_id: &str,
+    viewer_creation_fence: Option<ViewerCreationFence>,
 ) -> DurableTabLayoutGeneration {
     let normalized_token = tab_instance_id.to_ascii_lowercase();
     let generation = DurableTabLayoutGeneration {
@@ -5848,6 +5869,7 @@ pub(crate) fn reserve_new_durable_tab_layout_generation(
         tab_name: tab_name.to_owned(),
         tab_instance_id: normalized_token.clone(),
         generation: next_layout_generation(generations.get(&normalized_token)),
+        viewer_creation_fence,
     };
     generations.insert(normalized_token, generation.clone());
     generation
@@ -5858,6 +5880,7 @@ pub(crate) fn reserve_durable_tab_layout_recovery(
     tab_id: usize,
     tab_name: &str,
     tab_instance_id: &str,
+    viewer_creation_fence: Option<ViewerCreationFence>,
 ) -> Result<DurableTabLayoutGeneration, String> {
     let normalized_token = tab_instance_id.to_ascii_lowercase();
     if let Some(previous) = generations.get(&normalized_token)
@@ -5873,9 +5896,133 @@ pub(crate) fn reserve_durable_tab_layout_recovery(
         tab_name: tab_name.to_owned(),
         tab_instance_id: normalized_token.clone(),
         generation: next_layout_generation(generations.get(&normalized_token)),
+        viewer_creation_fence,
     };
     generations.insert(normalized_token, generation.clone());
     Ok(generation)
+}
+
+fn close_globally_stale_fenced_tab(
+    screen: &mut Screen,
+    generation: &DurableTabLayoutGeneration,
+) -> Result<Vec<PaneId>> {
+    let exact_owner_resource_ids = screen
+        .get_tab_by_id(generation.tab_id)
+        .filter(|tab| {
+            tab.name == generation.tab_name
+                && tab
+                    .instance_id
+                    .eq_ignore_ascii_case(&generation.tab_instance_id)
+        })
+        .map(Tab::get_all_pane_ids);
+    if exact_owner_resource_ids.is_some() {
+        screen.close_tab_by_id(generation.tab_id)?;
+    }
+    Ok(exact_owner_resource_ids.unwrap_or_default())
+}
+
+fn verify_global_viewer_creation_fence(
+    screen: &Screen,
+    generation: &DurableTabLayoutGeneration,
+) -> Result<(), ViewerCreationFenceRejection> {
+    if let Some(fence) = generation.viewer_creation_fence.as_ref() {
+        fence.verify_for_install(&screen.session_name, &generation.tab_name)?;
+    }
+    Ok(())
+}
+
+fn remove_stale_resources_from_exact_tab(
+    screen: &mut Screen,
+    generation: &DurableTabLayoutGeneration,
+    resource_ids: &[PaneId],
+) {
+    if let Some(tab) = screen.tabs.get_mut(&generation.tab_id)
+        && tab.name == generation.tab_name
+        && tab
+            .instance_id
+            .eq_ignore_ascii_case(&generation.tab_instance_id)
+    {
+        for resource_id in resource_ids {
+            tab.close_pane(*resource_id, true, None);
+        }
+    }
+    if !resource_ids.is_empty() {
+        screen
+            .bus
+            .senders
+            .send_to_pty(PtyInstruction::CloseTab(resource_ids.to_vec()))
+            .non_fatal();
+    }
+}
+
+fn cleanup_writer_resources_not_in_closed_tab(
+    screen: &Screen,
+    writer_resource_ids: &[PaneId],
+    closed_tab_resource_ids: &[PaneId],
+) {
+    let closed_tab_resource_ids = closed_tab_resource_ids
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let orphaned_writer_resource_ids = writer_resource_ids
+        .iter()
+        .copied()
+        .filter(|resource_id| !closed_tab_resource_ids.contains(resource_id))
+        .collect::<Vec<_>>();
+    if !orphaned_writer_resource_ids.is_empty() {
+        screen
+            .bus
+            .senders
+            .send_to_pty(PtyInstruction::CloseTab(orphaned_writer_resource_ids))
+            .non_fatal();
+    }
+}
+
+#[cfg(test)]
+struct ViewerCreationPostInstallTestHook {
+    installed: mpsc::Sender<()>,
+    resume: mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+static VIEWER_CREATION_POST_INSTALL_TEST_HOOKS: OnceLock<
+    Mutex<HashMap<String, ViewerCreationPostInstallTestHook>>,
+> = OnceLock::new();
+
+#[cfg(test)]
+pub(crate) fn register_viewer_creation_post_install_test_hook(
+    run_id: &str,
+) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+    let (installed_tx, installed_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    VIEWER_CREATION_POST_INSTALL_TEST_HOOKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .insert(
+            run_id.to_owned(),
+            ViewerCreationPostInstallTestHook {
+                installed: installed_tx,
+                resume: resume_rx,
+            },
+        );
+    (installed_rx, resume_tx)
+}
+
+#[cfg(test)]
+fn pause_after_viewer_creation_install_for_test(generation: &DurableTabLayoutGeneration) {
+    let Some(fence) = generation.viewer_creation_fence.as_ref() else {
+        return;
+    };
+    let hook = VIEWER_CREATION_POST_INSTALL_TEST_HOOKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .remove(&fence.run_id);
+    if let Some(hook) = hook {
+        hook.installed.send(()).unwrap();
+        hook.resume.recv().unwrap();
+    }
 }
 
 pub(crate) fn durable_tab_layout_generation_is_current(
@@ -6192,7 +6339,7 @@ pub(crate) fn screen_thread_main(
                 // (only those waiting for a new tab layout to be applied!) have been rendered or
                 // that a 100ms timeout has been reached (more info in the RenderBlocker comment)
                 if screen.render_blocker.can_render() {
-                    screen.render_to_clients()?;
+                    screen.render_to_clients(&pending_tab_ids)?;
                 } else {
                     screen.render(None)?;
                 }
@@ -7423,7 +7570,7 @@ pub(crate) fn screen_thread_main(
             ScreenInstruction::NewTab(
                 cwd,
                 default_shell,
-                layout,
+                mut layout,
                 floating_panes_layout,
                 tab_name,
                 (swap_tiled_layouts, swap_floating_layouts),
@@ -7434,9 +7581,56 @@ pub(crate) fn screen_thread_main(
                 (client_id, is_web_client),
                 mut completion_tx,
             ) => {
-                let restored_tab_instance_id = layout
+                let encoded_tab_instance_id = layout
                     .as_ref()
                     .and_then(|layout| layout.tab_instance_id.as_deref())
+                    .map(str::to_owned);
+                let decoded_tab_instance_id = encoded_tab_instance_id
+                    .as_deref()
+                    .map(ViewerCreationFence::decode_tab_instance_id)
+                    .transpose()
+                    .and_then(|decoded| {
+                        let Some((token, fence)) = decoded else {
+                            return Ok((None, None));
+                        };
+                        if let Some(fence) = fence.as_ref() {
+                            fence.verify_current(
+                                &screen.session_name,
+                                tab_name.as_deref().unwrap_or_default(),
+                            )?;
+                        }
+                        let durable_token = (token.len() == 32
+                            && token.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                        .then(|| token.to_ascii_lowercase());
+                        if fence.is_some() && durable_token.is_none() {
+                            return Err(
+                                "viewer creation fence has invalid durable token".to_owned()
+                            );
+                        }
+                        Ok((durable_token, fence))
+                    });
+                let (restored_tab_instance_id, viewer_creation_fence) =
+                    match decoded_tab_instance_id {
+                        Ok(decoded) => decoded,
+                        Err(message) => {
+                            if let Some(completion) = completion_tx.as_mut() {
+                                completion.set_exit_status(1);
+                                completion.set_error_message(message.clone());
+                            }
+                            log::error!("{}", message);
+                            continue;
+                        },
+                    };
+                if viewer_creation_fence.is_some()
+                    && let Some(layout) = layout.as_mut()
+                {
+                    // The receipt path is transport-only. From this point on,
+                    // every runtime and persistence surface sees only the
+                    // stable 32-hex durable token.
+                    layout.tab_instance_id = restored_tab_instance_id.clone();
+                }
+                let restored_tab_instance_id = restored_tab_instance_id
+                    .as_deref()
                     .filter(|instance_id| {
                         instance_id.len() == 32
                             && instance_id.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -7494,6 +7688,7 @@ pub(crate) fn screen_thread_main(
                                     existing_tab_id,
                                     &existing_tab_name,
                                     restored_tab_instance_id,
+                                    viewer_creation_fence.clone(),
                                 )?;
                                 let mut tab_layout_info = TabLayoutInfo {
                                     tab_index: existing_tab_id,
@@ -7584,6 +7779,7 @@ pub(crate) fn screen_thread_main(
                                     tab_index,
                                     &tab.name,
                                     &restored_tab_instance_id,
+                                    viewer_creation_fence.clone(),
                                 )))
                             } else {
                                 None
@@ -7662,6 +7858,37 @@ pub(crate) fn screen_thread_main(
                     log::warn!("{}", message);
                     continue;
                 }
+                if let Some(layout_generation) = layout_generation.as_ref()
+                    && let Err(rejection) =
+                        verify_global_viewer_creation_fence(&screen, layout_generation)
+                {
+                    let stale_resource_ids = layout_resource_ids(
+                        &new_pane_pids,
+                        &new_floating_pane_pids,
+                        &new_plugin_ids,
+                    );
+                    if !stale_resource_ids.is_empty() {
+                        screen
+                            .bus
+                            .senders
+                            .send_to_pty(PtyInstruction::CloseTab(stale_resource_ids))
+                            .non_fatal();
+                    }
+                    if rejection.should_close_exact_tab() {
+                        close_globally_stale_fenced_tab(&mut screen, layout_generation)?;
+                        pending_tab_ids.remove(&layout_generation.tab_id);
+                    }
+                    let message = rejection.to_string();
+                    if let Some(completion) = completion_tx.as_mut() {
+                        completion.set_exit_status(1);
+                        completion.set_error_message(message.clone());
+                    } else if let Some((_, completion)) = blocking_terminal.as_mut() {
+                        completion.set_exit_status(1);
+                        completion.set_error_message(message.clone());
+                    }
+                    log::warn!("{}", message);
+                    continue;
+                }
                 log::info!(
                     "ScreenInstruction::ApplyLayout: applying layout for tab {}",
                     tab_id
@@ -7681,6 +7908,8 @@ pub(crate) fn screen_thread_main(
                 if let Some(c) = completion_tx.as_mut() {
                     c.set_affected_tab_id(tab_id)
                 }
+                let installed_resource_ids =
+                    layout_resource_ids(&new_pane_pids, &new_floating_pane_pids, &new_plugin_ids);
                 screen.apply_layout(
                     layout,
                     floating_panes_layout,
@@ -7692,6 +7921,38 @@ pub(crate) fn screen_thread_main(
                     (client_id, is_web_client),
                     blocking_terminal,
                 )?;
+                #[cfg(test)]
+                if let Some(layout_generation) = layout_generation.as_ref() {
+                    pause_after_viewer_creation_install_for_test(layout_generation);
+                }
+                if let Some(layout_generation) = layout_generation.as_ref()
+                    && let Err(rejection) =
+                        verify_global_viewer_creation_fence(&screen, layout_generation)
+                {
+                    if rejection.should_close_exact_tab() {
+                        let closed_tab_resource_ids =
+                            close_globally_stale_fenced_tab(&mut screen, layout_generation)?;
+                        cleanup_writer_resources_not_in_closed_tab(
+                            &screen,
+                            &installed_resource_ids,
+                            &closed_tab_resource_ids,
+                        );
+                        pending_tab_ids.remove(&layout_generation.tab_id);
+                    } else {
+                        remove_stale_resources_from_exact_tab(
+                            &mut screen,
+                            layout_generation,
+                            &installed_resource_ids,
+                        );
+                    }
+                    let message = rejection.to_string();
+                    if let Some(completion) = completion_tx.as_mut() {
+                        completion.set_exit_status(1);
+                        completion.set_error_message(message.clone());
+                    }
+                    log::warn!("{}", message);
+                    continue;
+                }
                 pending_tab_ids.remove(&tab_id);
                 if pending_tab_ids.is_empty() {
                     for (tab_index, client_id) in pending_tab_switches.drain() {
@@ -8447,7 +8708,54 @@ pub(crate) fn screen_thread_main(
                     log::warn!("{}", message);
                     continue;
                 }
+                if let Some(layout_generation) = layout_generation.as_ref()
+                    && let Err(rejection) =
+                        verify_global_viewer_creation_fence(&screen, layout_generation)
+                {
+                    let stale_resource_ids = tab_results
+                        .iter()
+                        .flat_map(|result| {
+                            layout_resource_ids(
+                                &result.new_terminal_pids,
+                                &result.new_floating_pane_pids,
+                                &result.plugin_ids,
+                            )
+                        })
+                        .collect::<HashSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                    if !stale_resource_ids.is_empty() {
+                        screen
+                            .bus
+                            .senders
+                            .send_to_pty(PtyInstruction::CloseTab(stale_resource_ids))
+                            .non_fatal();
+                    }
+                    if rejection.should_close_exact_tab() {
+                        close_globally_stale_fenced_tab(&mut screen, layout_generation)?;
+                        pending_tab_ids.remove(&layout_generation.tab_id);
+                    }
+                    let message = rejection.to_string();
+                    if let Some(completion) = completion_tx.as_mut() {
+                        completion.set_exit_status(1);
+                        completion.set_error_message(message.clone());
+                    }
+                    log::warn!("{}", message);
+                    continue;
+                }
 
+                let installed_resource_ids = tab_results
+                    .iter()
+                    .flat_map(|result| {
+                        layout_resource_ids(
+                            &result.new_terminal_pids,
+                            &result.new_floating_pane_pids,
+                            &result.plugin_ids,
+                        )
+                    })
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>();
                 let mut override_succeeded = true;
                 // Process each tab result
                 for tab_result in tab_results {
@@ -8550,6 +8858,40 @@ pub(crate) fn screen_thread_main(
                             );
                         }
                     }
+                }
+
+                #[cfg(test)]
+                if override_succeeded && let Some(layout_generation) = layout_generation.as_ref() {
+                    pause_after_viewer_creation_install_for_test(layout_generation);
+                }
+                if override_succeeded
+                    && let Some(layout_generation) = layout_generation.as_ref()
+                    && let Err(rejection) =
+                        verify_global_viewer_creation_fence(&screen, layout_generation)
+                {
+                    if rejection.should_close_exact_tab() {
+                        let closed_tab_resource_ids =
+                            close_globally_stale_fenced_tab(&mut screen, layout_generation)?;
+                        cleanup_writer_resources_not_in_closed_tab(
+                            &screen,
+                            &installed_resource_ids,
+                            &closed_tab_resource_ids,
+                        );
+                        pending_tab_ids.remove(&layout_generation.tab_id);
+                    } else {
+                        remove_stale_resources_from_exact_tab(
+                            &mut screen,
+                            layout_generation,
+                            &installed_resource_ids,
+                        );
+                    }
+                    let message = rejection.to_string();
+                    if let Some(completion) = completion_tx.as_mut() {
+                        completion.set_exit_status(1);
+                        completion.set_error_message(message.clone());
+                    }
+                    log::warn!("{}", message);
+                    continue;
                 }
 
                 if override_succeeded && let Some(layout_generation) = layout_generation.as_ref() {

@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 use zellij_utils::consts::session_layout_cache_file_name;
 use zellij_utils::run_triage::{
     BucketKind, CaptureEvidence, CaptureSource, CloseOriginError, FinishedRun, OriginTabIdentity,
-    OriginTabState, RunMeta, TransferReceipt, TransferReport, TriageIo, capture_sha256,
-    control_plane_root, transfer_finished_run, transfer_receipt_path,
+    OriginTabState, RunMeta, TransferReceipt, TransferReport, TriageIo, ViewerCreationFence,
+    capture_sha256, control_plane_root, transfer_finished_run, transfer_receipt_path,
     verify_saved_layout_excludes_viewer,
 };
 use zellij_utils::sessions::session_exists;
@@ -1661,10 +1661,15 @@ impl TriageIo for CliTriageIo {
         session: &str,
         tab: &str,
         tab_instance_id: &str,
+        fence: &ViewerCreationFence,
         meta: &RunMeta,
     ) -> Result<(), String> {
         let scrollback = zellij_utils::run_triage::scrollback_path(&self.root, &meta.run);
-        let layout = bucket_tab_layout(&scrollback, tab_instance_id, meta);
+        if !fence.viewer_token.eq_ignore_ascii_case(tab_instance_id) {
+            return Err("viewer creation fence token does not match tab reservation".to_owned());
+        }
+        let wire_tab_instance_id = fence.clone().canonicalized()?.wire_tab_instance_id()?;
+        let layout = bucket_tab_layout(&scrollback, &wire_tab_instance_id, meta);
         let open_result = self.run_with_timeout(
             &[
                 "-s",
@@ -1714,7 +1719,7 @@ impl TriageIo for CliTriageIo {
         session: &str,
         tab: &str,
         identity: &OriginTabIdentity,
-        generation: u64,
+        fence: &ViewerCreationFence,
         meta: &RunMeta,
     ) -> Result<(), String> {
         let before = TriageIo::bucket_tab_identity(self, session, tab, Some(identity))?
@@ -1722,21 +1727,21 @@ impl TriageIo for CliTriageIo {
         if !before.is_same_live_tab(identity) {
             return Err(format!(
                 "pending viewer '{}' changed exact identity before generation {} recovery: expected {:?}, current {:?}",
-                tab, generation, identity, before
+                tab, fence.generation, identity, before
             ));
         }
 
         // Reissuing NewTab is intentional: the server recognizes the durable
         // token, keeps the same stable tab ID, and routes this request through
         // its generation-fenced single-tab OverrideLayout path.
-        TriageIo::open_bucket_tab(self, session, tab, &identity.tab_instance_id, meta)?;
+        TriageIo::open_bucket_tab(self, session, tab, &identity.tab_instance_id, fence, meta)?;
 
         let after = TriageIo::bucket_tab_identity(self, session, tab, Some(identity))?
             .ok_or_else(|| format!("pending viewer '{}' disappeared during recovery", tab))?;
         if !after.is_same_live_tab(identity) {
             return Err(format!(
                 "pending viewer '{}' changed exact identity during generation {} recovery: expected {:?}, current {:?}",
-                tab, generation, identity, after
+                tab, fence.generation, identity, after
             ));
         }
         Ok(())
@@ -2176,8 +2181,23 @@ mod tests {
             root: directory.path().join("control-plane"),
         };
 
-        io.open_bucket_tab("Finalized runs", &tab, tab_instance_id, &meta(vec![]))
-            .unwrap();
+        let receipt_path = directory.path().join("transfer.json");
+        std::fs::write(&receipt_path, "{}").unwrap();
+        let fence = ViewerCreationFence {
+            receipt_path: std::fs::canonicalize(receipt_path).unwrap(),
+            run_id: "impl-260720-120000-01000".to_owned(),
+            generation: 1,
+            viewer_token: tab_instance_id.to_owned(),
+            bucket: BucketKind::Finalized,
+        };
+        io.open_bucket_tab(
+            "Finalized runs",
+            &tab,
+            tab_instance_id,
+            &fence,
+            &meta(vec![]),
+        )
+        .unwrap();
         assert_eq!(
             std::fs::read_to_string(directory.path().join("new-tab-count"))
                 .unwrap()
@@ -2438,6 +2458,36 @@ mod tests {
         // one-keypress rerun, not an automatic one
         assert!(layout.contains("start_suspended=true"));
         assert!(layout.contains("cwd \"/repo\""));
+    }
+
+    #[test]
+    fn bucket_layout_carries_the_fence_through_kdl_without_changing_its_binding() {
+        let directory = tempfile::tempdir().unwrap();
+        let receipt_path = directory.path().join("receipt \"quoted\".json");
+        std::fs::write(&receipt_path, "{}").unwrap();
+        let fence = ViewerCreationFence {
+            receipt_path: std::fs::canonicalize(receipt_path).unwrap(),
+            run_id: "impl-260720-120000-01000".to_owned(),
+            generation: 7,
+            viewer_token: "0123456789abcdef0123456789abcdef".to_owned(),
+            bucket: BucketKind::NeedsAttention,
+        };
+        let encoded = fence.wire_tab_instance_id().unwrap();
+        let layout = bucket_tab_layout(Path::new("/cp/s.txt"), &encoded, &meta(vec![]));
+        let parsed = zellij_utils::input::layout::Layout::from_kdl(
+            &layout,
+            Some("fenced-viewer.kdl".to_owned()),
+            None,
+            None,
+        )
+        .unwrap();
+        let parsed_instance_id = parsed.tabs[0].1.tab_instance_id.as_deref().unwrap();
+
+        assert_eq!(parsed_instance_id, encoded);
+        assert_eq!(
+            ViewerCreationFence::decode_tab_instance_id(parsed_instance_id).unwrap(),
+            (fence.viewer_token.clone(), Some(fence))
+        );
     }
 
     #[test]

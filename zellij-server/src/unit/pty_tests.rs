@@ -6,7 +6,7 @@ use interprocess::local_socket::Stream as LocalSocketStream;
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use zellij_utils::channels::{self, SenderWithContext};
 use zellij_utils::data::{Event, Palette};
@@ -20,6 +20,10 @@ struct MockOsApi {
     cmds: Arc<Mutex<HashMap<u32, Vec<String>>>>,
     cmds_by_ppid: Arc<Mutex<HashMap<String, Vec<String>>>>,
     fail_spawn_terminal: Arc<AtomicBool>,
+    fail_on_spawn_call: Arc<AtomicUsize>,
+    spawn_terminal_calls: Arc<AtomicUsize>,
+    next_terminal_id: Arc<AtomicUsize>,
+    cleared_terminal_ids: Arc<Mutex<Vec<u32>>>,
 }
 
 impl MockOsApi {
@@ -29,10 +33,17 @@ impl MockOsApi {
             cmds: Arc::new(Mutex::new(HashMap::new())),
             cmds_by_ppid: Arc::new(Mutex::new(HashMap::new())),
             fail_spawn_terminal: Arc::new(AtomicBool::new(false)),
+            fail_on_spawn_call: Arc::new(AtomicUsize::new(0)),
+            spawn_terminal_calls: Arc::new(AtomicUsize::new(0)),
+            next_terminal_id: Arc::new(AtomicUsize::new(100)),
+            cleared_terminal_ids: Arc::new(Mutex::new(vec![])),
         }
     }
     fn fail_spawn_terminal(&self) {
         self.fail_spawn_terminal.store(true, Ordering::Relaxed);
+    }
+    fn fail_on_spawn_call(&self, call: usize) {
+        self.fail_on_spawn_call.store(call, Ordering::Relaxed);
     }
     fn set_cwd(&self, pid: u32, path: PathBuf) {
         self.cwds.lock().unwrap().insert(pid, path);
@@ -68,12 +79,16 @@ impl ServerOsApi for MockOsApi {
         _: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
         _: Option<PathBuf>,
     ) -> anyhow::Result<(u32, Box<dyn AsyncReader>, Option<u32>)> {
-        if self.fail_spawn_terminal.load(Ordering::Relaxed) {
+        let call = self.spawn_terminal_calls.fetch_add(1, Ordering::Relaxed) + 1;
+        if self.fail_spawn_terminal.load(Ordering::Relaxed)
+            || self.fail_on_spawn_call.load(Ordering::Relaxed) == call
+        {
             return Err(anyhow::Error::new(io::Error::other(
                 "injected EMFILE-like spawn failure",
             )));
         }
-        unimplemented!()
+        let terminal_id = self.next_terminal_id.fetch_add(1, Ordering::Relaxed) as u32;
+        Ok((terminal_id, Box::new(NullAsyncReader), None))
     }
     fn write_to_tty_stdin(&self, _: u32, buf: &[u8]) -> anyhow::Result<usize> {
         Ok(buf.len())
@@ -147,7 +162,8 @@ impl ServerOsApi for MockOsApi {
     ) -> anyhow::Result<(Box<dyn AsyncReader>, Option<u32>)> {
         unimplemented!()
     }
-    fn clear_terminal_id(&self, _: u32) -> anyhow::Result<()> {
+    fn clear_terminal_id(&self, terminal_id: u32) -> anyhow::Result<()> {
+        self.cleared_terminal_ids.lock().unwrap().push(terminal_id);
         Ok(())
     }
 }
@@ -244,6 +260,54 @@ fn new_tab_spawn_failure_does_not_terminate_pty_thread() {
     assert!(
         result.is_ok(),
         "new-tab spawn failures such as EMFILE must be logged and keep the pty thread alive"
+    );
+}
+
+#[test]
+fn partial_override_spawn_failure_releases_terminals_and_plugins() {
+    let mock = MockOsApi::new();
+    mock.fail_on_spawn_call(2);
+    let cleared_terminal_ids = mock.cleared_terminal_ids.clone();
+    let (mut pty, plugin_rx) = make_pty_with_plugin_receiver(mock);
+    let plugin =
+        RunPluginOrAlias::from_url("file:/partial-allocation.wasm", &None, None, None).unwrap();
+    let plugin_ids = HashMap::from([(plugin, vec![77])]);
+    let layout = TiledPaneLayout {
+        children: vec![TiledPaneLayout::default(), TiledPaneLayout::default()],
+        ..Default::default()
+    };
+    let default_shell = TerminalAction::RunCommand(RunCommand {
+        command: PathBuf::from("sh"),
+        ..Default::default()
+    });
+
+    let error = pty
+        .spawn_terminals_for_layout_override(
+            None,
+            layout,
+            vec![],
+            Some(default_shell),
+            plugin_ids,
+            7,
+            Some("Finalized runs".to_owned()),
+            1,
+            None,
+            None,
+            true,
+            true,
+        )
+        .expect_err("the second terminal spawn must fail");
+
+    assert!(
+        format!("{:#}", error).contains("injected EMFILE-like spawn failure"),
+        "the original spawn failure must remain in the error chain"
+    );
+    assert_eq!(*cleared_terminal_ids.lock().unwrap(), vec![100]);
+    assert!(
+        plugin_rx
+            .try_iter()
+            .any(|(instruction, _)| matches!(instruction, PluginInstruction::Unload(77))),
+        "every plugin allocated before the terminal failure must be unloaded"
     );
 }
 

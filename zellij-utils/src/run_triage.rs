@@ -29,6 +29,10 @@ pub const FINALIZED_RUNS_SESSION: &str = "Finalized runs";
 pub const FAILED_RUNS_SESSION: &str = "Failed runs";
 /// Canonical bucket session for runs whose signals disagree, or are missing.
 pub const NEEDS_ATTENTION_SESSION: &str = "Needs attention";
+const VIEWER_CREATION_FENCE_PREFIX: &str = "vcf1:";
+const MAX_VIEWER_CREATION_FENCE_BYTES: usize = 16 * 1024;
+const MAX_VIEWER_CREATION_RECEIPT_BYTES: u64 = 1024 * 1024;
+const MAX_VIEWER_CREATION_RECEIPT_READ_ATTEMPTS: usize = 3;
 
 /// Which drawer a finished run lands in.
 ///
@@ -503,6 +507,339 @@ pub struct TransferReceipt {
     pub updated_at: u64,
 }
 
+/// Durable owner fence carried by a triage viewer's one-shot layout request.
+///
+/// The wire representation temporarily occupies the internal
+/// `vc_tab_instance_id` layout property. The server must decode and validate
+/// it before allocating anything, then replace it with the bare durable token
+/// so the envelope can never enter public identity or saved-layout state.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewerCreationFence {
+    pub receipt_path: PathBuf,
+    pub run_id: String,
+    pub generation: u64,
+    pub viewer_token: String,
+    pub bucket: BucketKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewerCreationFenceRejection {
+    /// The receipt still owns the same durable tab, but this particular writer
+    /// is no longer current. Its resources must be discarded without closing
+    /// the stable tab that a newer same-token retry is healing.
+    SupersededSameViewer,
+    /// The receipt no longer owns this token/bucket/tab, or cannot be proven.
+    /// A locally-current old writer must retire its exact tab incarnation.
+    OwnershipLost,
+}
+
+impl ViewerCreationFenceRejection {
+    pub fn should_close_exact_tab(self) -> bool {
+        matches!(self, Self::OwnershipLost)
+    }
+}
+
+impl std::fmt::Display for ViewerCreationFenceRejection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SupersededSameViewer => {
+                formatter.write_str("viewer creation fence was superseded for the same viewer")
+            },
+            Self::OwnershipLost => formatter.write_str("viewer creation fence lost ownership"),
+        }
+    }
+}
+
+impl std::fmt::Debug for ViewerCreationFence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ViewerCreationFence")
+            .field("receipt_path", &"<redacted>")
+            .field("run_id", &self.run_id)
+            .field("generation", &self.generation)
+            .field("viewer_token", &self.viewer_token)
+            .field("bucket", &self.bucket)
+            .finish()
+    }
+}
+
+impl ViewerCreationFence {
+    pub fn new(receipt_path: PathBuf, receipt: &TransferReceipt) -> Self {
+        Self {
+            receipt_path,
+            run_id: receipt.run.clone(),
+            generation: receipt.viewer_creation_generation,
+            viewer_token: receipt.viewer_token.clone(),
+            bucket: receipt.bucket,
+        }
+    }
+
+    pub fn canonicalized(mut self) -> Result<Self, String> {
+        self.receipt_path = canonicalize_bound_receipt_path(&self.receipt_path)?;
+        Ok(self)
+    }
+
+    pub fn wire_tab_instance_id(&self) -> Result<String, String> {
+        let encoded = serde_json::to_string(self)
+            .map_err(|_| "viewer creation fence cannot be encoded".to_owned())?;
+        if encoded.len() > MAX_VIEWER_CREATION_FENCE_BYTES {
+            return Err("viewer creation fence is oversized".to_owned());
+        }
+        Ok(format!("{}{}", VIEWER_CREATION_FENCE_PREFIX, encoded))
+    }
+
+    pub fn decode_tab_instance_id(
+        value: &str,
+    ) -> Result<(String, Option<ViewerCreationFence>), String> {
+        if value.starts_with("vcf") {
+            let encoded = value
+                .strip_prefix(VIEWER_CREATION_FENCE_PREFIX)
+                .ok_or_else(|| "unknown viewer creation fence version".to_owned())?;
+            if encoded.is_empty() || encoded.len() > MAX_VIEWER_CREATION_FENCE_BYTES {
+                return Err("viewer creation fence is malformed or oversized".to_owned());
+            }
+            let fence = serde_json::from_str::<ViewerCreationFence>(encoded)
+                .map_err(|_| "viewer creation fence is malformed".to_owned())?;
+            if !valid_viewer_token(&fence.viewer_token)
+                || fence.run_id.is_empty()
+                || fence.generation == 0
+            {
+                return Err("viewer creation fence has invalid binding fields".to_owned());
+            }
+            return Ok((fence.viewer_token.to_ascii_lowercase(), Some(fence)));
+        }
+        Ok((value.to_owned(), None))
+    }
+
+    /// Fail closed unless the exact canonical receipt still owns this request.
+    pub fn verify_current(&self, session: &str, tab_name: &str) -> Result<(), String> {
+        self.verify_for_install(session, tab_name)
+            .map_err(|rejection| rejection.to_string())
+    }
+
+    pub fn verify_for_install(
+        &self,
+        session: &str,
+        tab_name: &str,
+    ) -> Result<(), ViewerCreationFenceRejection> {
+        self.verify_for_install_with_reader(session, tab_name, read_bound_receipt)
+    }
+
+    fn verify_for_install_with_reader<F>(
+        &self,
+        session: &str,
+        tab_name: &str,
+        read_receipt: F,
+    ) -> Result<(), ViewerCreationFenceRejection>
+    where
+        F: FnOnce(&Path) -> Result<Vec<u8>, String>,
+    {
+        let canonical = self
+            .clone()
+            .canonicalized()
+            .map_err(|_| ViewerCreationFenceRejection::OwnershipLost)?;
+        if canonical != *self {
+            return Err(ViewerCreationFenceRejection::OwnershipLost);
+        }
+        let bytes = read_receipt(&self.receipt_path)
+            .map_err(|_| ViewerCreationFenceRejection::OwnershipLost)?;
+        let receipt = serde_json::from_slice::<TransferReceipt>(&bytes)
+            .map_err(|_| ViewerCreationFenceRejection::OwnershipLost)?;
+        let same_viewer = receipt.version == 4
+            && receipt.run == self.run_id
+            && receipt.bucket == self.bucket
+            && receipt
+                .viewer_token
+                .eq_ignore_ascii_case(&self.viewer_token)
+            && receipt.bucket.session_name() == session
+            && receipt.viewer_tab_name() == tab_name;
+        if !same_viewer {
+            return Err(ViewerCreationFenceRejection::OwnershipLost);
+        }
+        if receipt.viewer_creation_generation != self.generation || !receipt.viewer_creation_pending
+        {
+            return Err(ViewerCreationFenceRejection::SupersededSameViewer);
+        }
+        Ok(())
+    }
+}
+
+fn validate_canonical_receipt_path(path: &Path) -> Result<PathBuf, String> {
+    if !path.is_absolute() {
+        return Err("viewer creation receipt path is not absolute".to_owned());
+    }
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|_| "viewer creation receipt is unreadable".to_owned())?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("viewer creation receipt is not a regular file".to_owned());
+    }
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|_| "viewer creation receipt cannot be canonicalized".to_owned())?;
+    if canonical != path {
+        return Err("viewer creation receipt path is not canonical".to_owned());
+    }
+    Ok(canonical)
+}
+
+fn open_receipt_no_follow(path: &Path) -> Result<std::fs::File, String> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(path)
+        .map_err(|_| "viewer creation receipt cannot be opened safely".to_owned())?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "viewer creation receipt metadata is unreadable".to_owned())?;
+    if !metadata.is_file() || metadata.len() > MAX_VIEWER_CREATION_RECEIPT_BYTES {
+        return Err("viewer creation receipt is not a bounded regular file".to_owned());
+    }
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn same_receipt_file(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(not(unix))]
+fn same_receipt_file(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    left.len() == right.len()
+        && left.modified().ok().is_some()
+        && left.modified().ok() == right.modified().ok()
+        && left.created().ok() == right.created().ok()
+}
+
+#[derive(Debug)]
+enum BoundReceiptReadError {
+    ReplacedDuringValidation,
+    Invalid(String),
+}
+
+impl std::fmt::Display for BoundReceiptReadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ReplacedDuringValidation => {
+                formatter.write_str("viewer creation receipt changed during validation")
+            },
+            Self::Invalid(message) => formatter.write_str(message),
+        }
+    }
+}
+
+fn canonicalize_bound_receipt_path(path: &Path) -> Result<PathBuf, String> {
+    for attempt in 0..MAX_VIEWER_CREATION_RECEIPT_READ_ATTEMPTS {
+        let canonical =
+            validate_canonical_receipt_path(path).map_err(BoundReceiptReadError::Invalid);
+        let result = canonical.and_then(|canonical| {
+            let file = open_receipt_no_follow(path).map_err(BoundReceiptReadError::Invalid)?;
+            let opened_metadata = file.metadata().map_err(|_| {
+                BoundReceiptReadError::Invalid(
+                    "viewer creation receipt metadata is unreadable".to_owned(),
+                )
+            })?;
+            ensure_path_still_refers_to_open_receipt(path, &opened_metadata)?;
+            Ok(canonical)
+        });
+        match result {
+            Err(BoundReceiptReadError::ReplacedDuringValidation)
+                if attempt + 1 < MAX_VIEWER_CREATION_RECEIPT_READ_ATTEMPTS =>
+            {
+                continue;
+            },
+            result => return result.map_err(|error| error.to_string()),
+        }
+    }
+    unreachable!("bounded viewer creation receipt canonicalization always returns")
+}
+
+fn ensure_path_still_refers_to_open_receipt(
+    path: &Path,
+    opened_metadata: &std::fs::Metadata,
+) -> Result<(), BoundReceiptReadError> {
+    let path_metadata = std::fs::symlink_metadata(path).map_err(|_| {
+        BoundReceiptReadError::Invalid("viewer creation receipt path disappeared".to_owned())
+    })?;
+    if path_metadata.file_type().is_symlink() || !path_metadata.is_file() {
+        return Err(BoundReceiptReadError::Invalid(
+            "viewer creation receipt is not a regular file".to_owned(),
+        ));
+    }
+    if !same_receipt_file(opened_metadata, &path_metadata) {
+        return Err(BoundReceiptReadError::ReplacedDuringValidation);
+    }
+    validate_canonical_receipt_path(path).map_err(BoundReceiptReadError::Invalid)?;
+    Ok(())
+}
+
+fn read_bound_receipt(path: &Path) -> Result<Vec<u8>, String> {
+    read_bound_receipt_with_retries(path, |_| {})
+}
+
+fn read_bound_receipt_with_retries<F>(path: &Path, mut after_open: F) -> Result<Vec<u8>, String>
+where
+    F: FnMut(usize),
+{
+    for attempt in 0..MAX_VIEWER_CREATION_RECEIPT_READ_ATTEMPTS {
+        match read_bound_receipt_once_with(path, || after_open(attempt)) {
+            Err(BoundReceiptReadError::ReplacedDuringValidation)
+                if attempt + 1 < MAX_VIEWER_CREATION_RECEIPT_READ_ATTEMPTS =>
+            {
+                continue;
+            },
+            result => return result.map_err(|error| error.to_string()),
+        }
+    }
+    unreachable!("bounded viewer creation receipt read always returns from the attempt loop")
+}
+
+#[cfg(test)]
+fn read_bound_receipt_with<F>(path: &Path, after_open: F) -> Result<Vec<u8>, String>
+where
+    F: FnOnce(),
+{
+    read_bound_receipt_once_with(path, after_open).map_err(|error| error.to_string())
+}
+
+fn read_bound_receipt_once_with<F>(
+    path: &Path,
+    after_open: F,
+) -> Result<Vec<u8>, BoundReceiptReadError>
+where
+    F: FnOnce(),
+{
+    validate_canonical_receipt_path(path).map_err(BoundReceiptReadError::Invalid)?;
+    let mut file = open_receipt_no_follow(path).map_err(BoundReceiptReadError::Invalid)?;
+    let opened_metadata = file.metadata().map_err(|_| {
+        BoundReceiptReadError::Invalid("viewer creation receipt metadata is unreadable".to_owned())
+    })?;
+    after_open();
+    ensure_path_still_refers_to_open_receipt(path, &opened_metadata)?;
+    let mut bytes = Vec::with_capacity(opened_metadata.len() as usize);
+    (&mut file)
+        .take(MAX_VIEWER_CREATION_RECEIPT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| {
+            BoundReceiptReadError::Invalid("viewer creation receipt is unreadable".to_owned())
+        })?;
+    if bytes.len() as u64 > MAX_VIEWER_CREATION_RECEIPT_BYTES {
+        return Err(BoundReceiptReadError::Invalid(
+            "viewer creation receipt is oversized".to_owned(),
+        ));
+    }
+    ensure_path_still_refers_to_open_receipt(path, &opened_metadata)?;
+    Ok(bytes)
+}
+
+fn valid_viewer_token(token: &str) -> bool {
+    token.len() == 32 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 /// Exact old viewer retained while a newer settlement is being materialized.
 ///
 /// The new drawer is confirmed first. Only then may this typed incarnation be
@@ -544,7 +881,7 @@ impl TransferReceipt {
         }
     }
 
-    fn viewer_tab_name(&self) -> String {
+    pub fn viewer_tab_name(&self) -> String {
         format!("{} [vc:{}]", self.run, self.viewer_token)
     }
 }
@@ -583,6 +920,7 @@ pub trait TriageIo {
         session: &str,
         tab: &str,
         tab_instance_id: &str,
+        fence: &ViewerCreationFence,
         meta: &RunMeta,
     ) -> Result<(), String>;
     /// Re-apply the viewer layout to the exact pending tab reservation. The
@@ -593,7 +931,7 @@ pub trait TriageIo {
         session: &str,
         tab: &str,
         identity: &OriginTabIdentity,
-        generation: u64,
+        fence: &ViewerCreationFence,
         meta: &RunMeta,
     ) -> Result<(), String>;
     /// Read back the target session and return the unique durable identity of
@@ -712,6 +1050,19 @@ fn persist_receipt<Io: TriageIo>(
         })
 }
 
+fn advance_viewer_creation_generation(receipt: &mut TransferReceipt) -> Result<(), TransferError> {
+    receipt.viewer_creation_generation = receipt
+        .viewer_creation_generation
+        .checked_add(1)
+        .ok_or_else(|| TransferError {
+            step: TransferStep::WriteReceipt,
+            message: "viewer creation generation overflow".to_owned(),
+            origin_tab_state: receipt.origin_tab_state,
+            capture_is_durable: receipt.capture_committed && receipt.metadata_committed,
+        })?;
+    Ok(())
+}
+
 /// Transfer one finished run into its status bucket.
 ///
 /// Capture happens before anything is torn down, and the origin tab is closed
@@ -782,67 +1133,23 @@ pub fn transfer_finished_run<Io: TriageIo>(
             let old_viewer_tab = receipt.viewer_tab_name();
             let old_viewer_identity = match receipt.viewer_tab_identity.clone() {
                 Some(identity) => Some(identity),
-                None if receipt.viewer_creation_pending => {
-                    let old_session = receipt.bucket.session_name();
-                    let expected_old_viewer = OriginTabIdentity {
-                        session: old_session.to_owned(),
+                None if receipt.viewer_creation_pending || receipt.viewer_confirmed => {
+                    Some(OriginTabIdentity {
+                        session: receipt.bucket.session_name().to_owned(),
                         name: old_viewer_tab.clone(),
                         id: 0,
                         session_incarnation: String::new(),
                         tab_instance_id: receipt.viewer_token.clone(),
-                    };
-                    io.ensure_bucket_session(old_session)
-                        .map_err(|message| TransferError {
-                            step: TransferStep::ConfirmBucketTab,
-                            message: format!(
-                                "cannot resurrect pending drawer '{}' before reclassification: {}",
-                                old_session, message
-                            ),
-                            origin_tab_state: receipt.origin_tab_state,
-                            capture_is_durable: receipt.capture_committed
-                                && receipt.metadata_committed,
-                        })?;
-                    let pending_identity = io
-                        .bucket_tab_identity(
-                            old_session,
-                            &old_viewer_tab,
-                            Some(&expected_old_viewer),
-                        )
-                        .map_err(|message| TransferError {
-                            step: TransferStep::ConfirmBucketTab,
-                            message,
-                            origin_tab_state: receipt.origin_tab_state,
-                            capture_is_durable: receipt.capture_committed
-                                && receipt.metadata_committed,
-                        })?;
-                    if pending_identity.is_none() {
-                        // Live state can be clean while its delayed
-                        // resurrection cache still contains this pending
-                        // viewer. Flush and prove the cache clean before the
-                        // receipt rotates its only durable reservation token.
-                        io.save_bucket_session(old_session, &expected_old_viewer)
-                            .map_err(|message| TransferError {
-                                step: TransferStep::SaveBucketSession,
-                                message: format!(
-                                    "cannot retire absent pending viewer '{}' from drawer '{}': {}",
-                                    old_viewer_tab, old_session, message
-                                ),
-                                origin_tab_state: receipt.origin_tab_state,
-                                capture_is_durable: receipt.capture_committed
-                                    && receipt.metadata_committed,
-                            })?;
-                    }
-                    pending_identity
+                    })
                 },
                 None => None,
             };
             if let Some(identity) = old_viewer_identity {
-                if !matches_viewer_reservation(
-                    &identity,
-                    receipt.bucket.session_name(),
-                    &old_viewer_tab,
-                    &receipt.viewer_token,
-                ) {
+                if !is_viewer_reservation(&identity)
+                    || identity.session != receipt.bucket.session_name()
+                    || identity.name != old_viewer_tab
+                    || identity.tab_instance_id != receipt.viewer_token
+                {
                     return Err(TransferError {
                         step: TransferStep::ConfirmBucketTab,
                         message: format!(
@@ -871,7 +1178,11 @@ pub fn transfer_finished_run<Io: TriageIo>(
             receipt.viewer_confirmed = false;
             receipt.viewer_tab_identity = None;
             receipt.viewer_creation_pending = false;
-            receipt.viewer_creation_generation = 0;
+            // Persist a new generation and the old token's tombstone before
+            // touching either drawer. This closes both possible orderings:
+            // an old request sees the tombstone before install, or it installs
+            // first and the durable superseded-viewer retirement finds it.
+            advance_viewer_creation_generation(&mut receipt)?;
             receipt.viewer_token = Uuid::new_v4().simple().to_string();
         }
         receipt.settlement_revision = run.settlement_revision;
@@ -1052,13 +1363,13 @@ pub fn transfer_finished_run<Io: TriageIo>(
             // durable pending marker.
             receipt.viewer_tab_identity = None;
             receipt.viewer_creation_pending = true;
-            receipt.viewer_creation_generation =
-                receipt.viewer_creation_generation.saturating_add(1);
+            advance_viewer_creation_generation(&mut receipt)?;
             persist_receipt(io, &receipt_dest, &mut receipt)?;
             if let Err(message) = io.open_bucket_tab(
                 bucket.session_name(),
                 &viewer_tab_name,
                 &receipt.viewer_token,
+                &ViewerCreationFence::new(receipt_dest.clone(), &receipt),
                 &meta,
             ) {
                 return Err(fail_transfer(
@@ -1148,13 +1459,13 @@ pub fn transfer_finished_run<Io: TriageIo>(
         // next generation before asking the server to re-drive only this tab.
         receipt.viewer_tab_identity = Some(confirmed_viewer_identity.clone());
         receipt.viewer_creation_pending = true;
-        receipt.viewer_creation_generation = receipt.viewer_creation_generation.saturating_add(1);
+        advance_viewer_creation_generation(&mut receipt)?;
         persist_receipt(io, &receipt_dest, &mut receipt)?;
         if let Err(message) = io.recover_bucket_tab(
             bucket.session_name(),
             &viewer_tab_name,
             &confirmed_viewer_identity,
-            receipt.viewer_creation_generation,
+            &ViewerCreationFence::new(receipt_dest.clone(), &receipt),
             &meta,
         ) {
             return Err(fail_transfer(
@@ -1470,6 +1781,158 @@ mod tests {
         }
     }
 
+    fn current_fence_fixture() -> (tempfile::TempDir, TransferReceipt, ViewerCreationFence) {
+        let directory = tempfile::tempdir().unwrap();
+        let receipt_path = directory.path().join("transfer.json");
+        let mut receipt = TransferReceipt::new(&finished(0), 1);
+        receipt.viewer_creation_generation = 7;
+        receipt.viewer_creation_pending = true;
+        std::fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+        let canonical_path = std::fs::canonicalize(receipt_path).unwrap();
+        let fence = ViewerCreationFence::new(canonical_path, &receipt);
+        (directory, receipt, fence)
+    }
+
+    #[test]
+    fn viewer_creation_fence_wire_roundtrip_preserves_binding_and_raw_tokens() {
+        let (_directory, _receipt, fence) = current_fence_fixture();
+        let encoded = fence.wire_tab_instance_id().unwrap();
+        let (token, decoded) = ViewerCreationFence::decode_tab_instance_id(&encoded).unwrap();
+
+        assert_eq!(token, fence.viewer_token);
+        assert_eq!(decoded.as_ref(), Some(&fence));
+        assert_eq!(
+            ViewerCreationFence::decode_tab_instance_id("0123456789abcdef0123456789abcdef")
+                .unwrap(),
+            ("0123456789abcdef0123456789abcdef".to_owned(), None)
+        );
+    }
+
+    #[test]
+    fn viewer_creation_fence_rejects_malformed_unknown_and_oversized_envelopes() {
+        assert!(ViewerCreationFence::decode_tab_instance_id("vcf2:{}").is_err());
+        assert!(ViewerCreationFence::decode_tab_instance_id("vcf1:not-json").is_err());
+        let oversized = format!("vcf1:{}", "x".repeat(MAX_VIEWER_CREATION_FENCE_BYTES + 1));
+        assert!(ViewerCreationFence::decode_tab_instance_id(&oversized).is_err());
+    }
+
+    #[test]
+    fn viewer_creation_fence_verifies_only_the_current_pending_receipt() {
+        let (_directory, receipt, fence) = current_fence_fixture();
+        let tab_name = receipt.viewer_tab_name();
+        fence
+            .verify_current(receipt.bucket.session_name(), &tab_name)
+            .unwrap();
+
+        let mut stale_generation = fence.clone();
+        stale_generation.generation += 1;
+        assert!(
+            stale_generation
+                .verify_current(receipt.bucket.session_name(), &tab_name)
+                .is_err()
+        );
+
+        let mut stale_token = fence.clone();
+        stale_token.viewer_token = "ffffffffffffffffffffffffffffffff".to_owned();
+        assert!(
+            stale_token
+                .verify_current(receipt.bucket.session_name(), &tab_name)
+                .is_err()
+        );
+        assert!(
+            fence
+                .verify_current(FAILED_RUNS_SESSION, &tab_name)
+                .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn viewer_creation_fence_rejects_symlink_and_noncanonical_receipt_paths() {
+        use std::os::unix::fs::symlink;
+
+        let (directory, receipt, fence) = current_fence_fixture();
+        let symlink_path = directory.path().join("receipt-link.json");
+        symlink(&fence.receipt_path, &symlink_path).unwrap();
+        let symlink_fence = ViewerCreationFence::new(symlink_path, &receipt);
+        assert!(symlink_fence.canonicalized().is_err());
+        assert!(read_bound_receipt(&directory.path().join("receipt-link.json")).is_err());
+
+        let noncanonical_path = directory.path().join(".").join("transfer.json");
+        let noncanonical_fence = ViewerCreationFence::new(noncanonical_path, &receipt);
+        assert!(noncanonical_fence.canonicalized().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn viewer_creation_receipt_read_rejects_an_atomic_inode_swap() {
+        let (directory, receipt, fence) = current_fence_fixture();
+        let replacement = directory.path().join("replacement.json");
+        std::fs::write(&replacement, serde_json::to_vec(&receipt).unwrap()).unwrap();
+
+        let error = read_bound_receipt_with(&fence.receipt_path, || {
+            std::fs::rename(&replacement, &fence.receipt_path).unwrap();
+        })
+        .expect_err("a rename after open must not let the old inode authorize the request");
+
+        assert!(error.contains("changed during validation"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn viewer_creation_fence_rereads_atomic_same_viewer_replacement_before_classifying() {
+        let (directory, mut replacement_receipt, fence) = current_fence_fixture();
+        let tab_name = replacement_receipt.viewer_tab_name();
+        replacement_receipt.viewer_creation_generation += 1;
+        let replacement = directory.path().join("replacement.json");
+        std::fs::write(
+            &replacement,
+            serde_json::to_vec(&replacement_receipt).unwrap(),
+        )
+        .unwrap();
+        let mut replacement = Some(replacement);
+
+        let rejection = fence
+            .verify_for_install_with_reader(
+                replacement_receipt.bucket.session_name(),
+                &tab_name,
+                |receipt_path| {
+                    read_bound_receipt_with_retries(receipt_path, |attempt| {
+                        if attempt == 0 {
+                            std::fs::rename(
+                                replacement.take().expect("replacement is consumed once"),
+                                receipt_path,
+                            )
+                            .unwrap();
+                        }
+                    })
+                },
+            )
+            .expect_err("a newer generation cannot authorize the old writer");
+
+        assert_eq!(
+            rejection,
+            ViewerCreationFenceRejection::SupersededSameViewer
+        );
+    }
+
+    #[test]
+    fn viewer_creation_fence_keeps_malformed_or_unreadable_receipts_fail_closed() {
+        let (_directory, receipt, fence) = current_fence_fixture();
+        let tab_name = receipt.viewer_tab_name();
+        std::fs::write(&fence.receipt_path, b"{not-json").unwrap();
+        assert_eq!(
+            fence.verify_for_install(receipt.bucket.session_name(), &tab_name),
+            Err(ViewerCreationFenceRejection::OwnershipLost)
+        );
+
+        std::fs::remove_file(&fence.receipt_path).unwrap();
+        assert_eq!(
+            fence.verify_for_install(receipt.bucket.session_name(), &tab_name),
+            Err(ViewerCreationFenceRejection::OwnershipLost)
+        );
+    }
+
     #[test]
     fn saved_layout_proof_rejects_exact_or_legacy_same_name_viewers() {
         let viewer = typed_viewer("run--rev-1");
@@ -1664,6 +2127,7 @@ mod tests {
             _session: &str,
             tab: &str,
             tab_instance_id: &str,
+            _fence: &ViewerCreationFence,
             _meta: &RunMeta,
         ) -> Result<(), String> {
             self.guard(TransferStep::OpenBucketTab, "open")?;
@@ -1679,7 +2143,7 @@ mod tests {
             _session: &str,
             tab: &str,
             identity: &OriginTabIdentity,
-            generation: u64,
+            fence: &ViewerCreationFence,
             _meta: &RunMeta,
         ) -> Result<(), String> {
             self.guard(TransferStep::OpenBucketTab, "recover")?;
@@ -1689,7 +2153,7 @@ mod tests {
             if !current.is_same_live_tab(identity) {
                 return Err("pending viewer changed identity before recovery".to_owned());
             }
-            self.recovered_generation = Some(generation);
+            self.recovered_generation = Some(fence.generation);
             self.viewer_ready = Some(true);
             Ok(())
         }
@@ -2103,7 +2567,7 @@ mod tests {
     }
 
     #[test]
-    fn reclassification_cannot_drop_an_absent_pending_viewer_before_cache_proof() {
+    fn reclassification_persists_the_old_reservation_before_cache_cleanup() {
         let root = tempfile::tempdir().unwrap();
         let mut first_run = with_verdict(0, BucketKind::Finalized);
         first_run.settlement_revision = 1;
@@ -2125,10 +2589,15 @@ mod tests {
 
         assert_eq!(error.step, TransferStep::SaveBucketSession);
         let retained = second_process.receipt.unwrap();
-        assert_eq!(retained.viewer_token, original_token);
-        assert_eq!(retained.bucket, BucketKind::Finalized);
-        assert_eq!(retained.settlement_revision, 1);
-        assert!(retained.viewer_creation_pending);
+        assert_ne!(retained.viewer_token, original_token);
+        assert_eq!(retained.bucket, BucketKind::Failed);
+        assert_eq!(retained.settlement_revision, 2);
+        assert!(retained.viewer_confirmed);
+        assert_eq!(retained.superseded_viewers.len(), 1);
+        assert_eq!(
+            retained.superseded_viewers[0].identity.tab_instance_id,
+            original_token
+        );
     }
 
     #[test]
@@ -2340,6 +2809,11 @@ mod tests {
 
         transfer_finished_run(&mut retry, &revised_run, root.path(), 2).unwrap();
 
+        let reclassification_receipt = retry
+            .calls
+            .iter()
+            .position(|call| *call == "receipt")
+            .unwrap();
         let first_ensure = retry
             .calls
             .iter()
@@ -2351,8 +2825,8 @@ mod tests {
             .position(|call| *call == "confirm")
             .unwrap();
         assert!(
-            first_ensure < first_confirm,
-            "the offline pending drawer must be resurrected before its identity is queried"
+            reclassification_receipt < first_ensure && first_ensure < first_confirm,
+            "the old reservation tombstone must be durable before the offline drawer is queried"
         );
         let receipt = retry.receipt.unwrap();
         assert_eq!(receipt.bucket, BucketKind::Failed);

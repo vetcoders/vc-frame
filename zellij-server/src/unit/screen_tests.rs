@@ -1,5 +1,6 @@
 use super::{
-    CopyOptions, Screen, ScreenInstruction, TabOverrideResult, reserve_durable_tab_layout_recovery,
+    CopyOptions, DurableTabLayoutGeneration, Screen, ScreenInstruction, TabOverrideResult,
+    register_viewer_creation_post_install_test_hook, reserve_durable_tab_layout_recovery,
     reserve_new_durable_tab_layout_generation, screen_thread_main,
 };
 use crate::panes::PaneId;
@@ -25,6 +26,7 @@ use zellij_utils::input::options::Options;
 use zellij_utils::ipc::IpcReceiverWithContext;
 use zellij_utils::pane_size::{Size, SizeInPixels};
 use zellij_utils::position::Position;
+use zellij_utils::run_triage::{BucketKind, ViewerCreationFence, ViewerCreationFenceRejection};
 
 use crate::background_jobs::BackgroundJob;
 use crate::os_input_output::AsyncReader;
@@ -498,6 +500,7 @@ struct MockScreen {
     pub config: Config,
     advanced_mouse_actions: bool,
     last_opened_tab_index: Option<usize>,
+    session_name: String,
 }
 
 impl MockScreen {
@@ -525,12 +528,13 @@ impl MockScreen {
         )
         .should_silently_fail();
         let debug = false;
+        let session_name = self.session_name.clone();
         let screen_thread = std::thread::Builder::new()
             .name("screen_thread".to_string())
             .spawn(move || {
                 // SAFETY: test threads set this process-wide env var before reading it; no
                 // concurrent unsynchronized env access in these single-purpose test harnesses.
-                unsafe { set_var("ZELLIJ_SESSION_NAME", "zellij-test") };
+                unsafe { set_var("ZELLIJ_SESSION_NAME", session_name) };
                 screen_thread_main(
                     screen_bus,
                     None,
@@ -912,6 +916,7 @@ impl MockScreen {
             last_opened_tab_index: None,
             config: Config::default(),
             advanced_mouse_actions: true,
+            session_name: "zellij-test".to_owned(),
         }
     }
     pub fn set_advanced_hover_effects(&mut self, advanced_mouse_actions: bool) {
@@ -5817,12 +5822,17 @@ pub fn durable_tab_instance_reuse_requires_one_same_named_owner() {
 pub fn durable_tab_layout_generation_rejects_name_and_id_aba() {
     let token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let mut generations = HashMap::new();
-    let original =
-        reserve_new_durable_tab_layout_generation(&mut generations, 7, "Finalized runs", token);
+    let original = reserve_new_durable_tab_layout_generation(
+        &mut generations,
+        7,
+        "Finalized runs",
+        token,
+        None,
+    );
     let original_state = generations.clone();
 
     let wrong_id =
-        reserve_durable_tab_layout_recovery(&mut generations, 8, "Finalized runs", token)
+        reserve_durable_tab_layout_recovery(&mut generations, 8, "Finalized runs", token, None)
             .expect_err("a reused token must not move to another numeric tab ID");
     assert!(wrong_id.contains("ABA replacement"));
     assert_eq!(
@@ -5831,7 +5841,7 @@ pub fn durable_tab_layout_generation_rejects_name_and_id_aba() {
     );
 
     let wrong_name =
-        reserve_durable_tab_layout_recovery(&mut generations, 7, "Needs attention", token)
+        reserve_durable_tab_layout_recovery(&mut generations, 7, "Needs attention", token, None)
             .expect_err("a reused token must not move to another exact tab name");
     assert!(wrong_name.contains("ABA replacement"));
     assert_eq!(
@@ -5839,6 +5849,971 @@ pub fn durable_tab_layout_generation_rejects_name_and_id_aba() {
         "a rejected name replacement must not advance or replace the reservation"
     );
     assert_eq!(generations.get(token), Some(&original));
+}
+
+fn persist_test_viewer_receipt(
+    receipt_path: &std::path::Path,
+    run_id: &str,
+    bucket: BucketKind,
+    generation: u64,
+    viewer_token: &str,
+) -> ViewerCreationFence {
+    let receipt = serde_json::json!({
+        "version": 4,
+        "run": run_id,
+        "bucket": bucket,
+        "exit_code": 0,
+        "settlement_revision": generation,
+        "capture": null,
+        "capture_committed": true,
+        "metadata_committed": true,
+        "viewer_confirmed": false,
+        "viewer_creation_pending": true,
+        "viewer_creation_generation": generation,
+        "viewer_token": viewer_token,
+        "superseded_viewers": [],
+        "origin_tab_state": "preserved",
+        "fault": null,
+        "updated_at": generation,
+    });
+    std::fs::write(receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+    ViewerCreationFence {
+        receipt_path: std::fs::canonicalize(receipt_path).unwrap(),
+        run_id: run_id.to_owned(),
+        generation,
+        viewer_token: viewer_token.to_owned(),
+        bucket,
+    }
+}
+
+fn fenced_viewer_layout(fence: &ViewerCreationFence) -> TiledPaneLayout {
+    TiledPaneLayout {
+        tab_instance_id: Some(fence.wire_tab_instance_id().unwrap()),
+        ..Default::default()
+    }
+}
+
+fn dispatch_test_fenced_new_tab(
+    mock_screen: &MockScreen,
+    plugin_receiver: &Receiver<(PluginInstruction, ErrorContext)>,
+    fence: &ViewerCreationFence,
+    tab_name: &str,
+) -> (usize, TiledPaneLayout, Box<DurableTabLayoutGeneration>) {
+    let _ = mock_screen.to_screen.send(ScreenInstruction::NewTab(
+        None,
+        None,
+        Some(fenced_viewer_layout(fence)),
+        vec![],
+        Some(tab_name.to_owned()),
+        (Some(vec![]), Some(vec![])),
+        None,
+        false,
+        false,
+        TabPlacement::Append,
+        (1, false),
+        None,
+    ));
+    loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("fenced new tab must dispatch");
+        if let PluginInstruction::NewTab(
+            _,
+            _,
+            Some(layout),
+            _,
+            tab_id,
+            _,
+            _,
+            _,
+            _,
+            _,
+            Some(generation),
+        ) = instruction
+        {
+            return (tab_id, layout, generation);
+        }
+    }
+}
+
+fn dispatch_test_fenced_recovery(
+    mock_screen: &MockScreen,
+    plugin_receiver: &Receiver<(PluginInstruction, ErrorContext)>,
+    fence: &ViewerCreationFence,
+    tab_name: &str,
+) -> (usize, TiledPaneLayout, Box<DurableTabLayoutGeneration>) {
+    let _ = mock_screen.to_screen.send(ScreenInstruction::NewTab(
+        None,
+        None,
+        Some(fenced_viewer_layout(fence)),
+        vec![],
+        Some(tab_name.to_owned()),
+        (Some(vec![]), Some(vec![])),
+        None,
+        false,
+        false,
+        TabPlacement::Append,
+        (1, false),
+        None,
+    ));
+    loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("fenced empty-tab recovery must dispatch");
+        if let PluginInstruction::OverrideLayout(_, _, layouts, _, _, _, _, Some(generation)) =
+            instruction
+            && let [layout] = layouts.as_slice()
+        {
+            return (layout.tab_index, layout.tiled_layout.clone(), generation);
+        }
+    }
+}
+
+#[test]
+pub fn newer_receipt_generation_rejects_an_old_request_before_allocation() {
+    let directory = tempfile::tempdir().unwrap();
+    let receipt_path = directory.path().join("transfer.json");
+    let run_id = "impl-260727-120000-01000";
+    let old_token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let new_token = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let new_fence =
+        persist_test_viewer_receipt(&receipt_path, run_id, BucketKind::Finalized, 2, new_token);
+    let old_fence = ViewerCreationFence {
+        receipt_path: new_fence.receipt_path.clone(),
+        run_id: run_id.to_owned(),
+        generation: 1,
+        viewer_token: old_token.to_owned(),
+        bucket: BucketKind::Finalized,
+    };
+    let old_name = format!("{} [vc:{}]", run_id, old_token);
+    let new_name = format!("{} [vc:{}]", run_id, new_token);
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut mock_screen = MockScreen::new(size);
+    mock_screen.session_name = "Finalized runs".to_owned();
+    let screen_thread = mock_screen.run(None, vec![]);
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+
+    for (name, encoded) in [
+        ("unknown-fence", "vcf2:{}".to_owned()),
+        ("malformed-fence", "vcf1:not-json".to_owned()),
+        (
+            "oversized-fence",
+            format!("vcf1:{}", "x".repeat(16 * 1024 + 1)),
+        ),
+    ] {
+        let _ = mock_screen.to_screen.send(ScreenInstruction::NewTab(
+            None,
+            None,
+            Some(TiledPaneLayout {
+                tab_instance_id: Some(encoded),
+                ..Default::default()
+            }),
+            vec![],
+            Some(name.to_owned()),
+            (Some(vec![]), Some(vec![])),
+            None,
+            false,
+            false,
+            TabPlacement::Append,
+            (1, false),
+            None,
+        ));
+    }
+    let _ = mock_screen.to_screen.send(ScreenInstruction::NewTab(
+        None,
+        None,
+        Some(fenced_viewer_layout(&old_fence)),
+        vec![],
+        Some(old_name.clone()),
+        (Some(vec![]), Some(vec![])),
+        None,
+        false,
+        false,
+        TabPlacement::Append,
+        (1, false),
+        None,
+    ));
+    let (tabs_tx, tabs_rx) = crossbeam::channel::bounded(1);
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ListTabs {
+        client_id: 1,
+        response_channel: tabs_tx,
+    });
+    let tabs = tabs_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("old-request rejection barrier must answer");
+    assert!(
+        tabs.tabs.iter().all(|tab| tab.name != old_name
+            && tab.name != "unknown-fence"
+            && tab.name != "malformed-fence"
+            && tab.name != "oversized-fence"),
+        "malformed or tombstoned fences must not allocate even an empty tab"
+    );
+    while let Ok((instruction, _)) = plugin_receiver.try_recv() {
+        assert!(
+            !matches!(
+                instruction,
+                PluginInstruction::NewTab(..) | PluginInstruction::OverrideLayout(..)
+            ),
+            "a stale receipt fence must fail before plugin or PTY allocation"
+        );
+    }
+
+    let _ = mock_screen.to_screen.send(ScreenInstruction::NewTab(
+        None,
+        None,
+        Some(fenced_viewer_layout(&new_fence)),
+        vec![],
+        Some(new_name.clone()),
+        (Some(vec![]), Some(vec![])),
+        None,
+        false,
+        false,
+        TabPlacement::Append,
+        (1, false),
+        None,
+    ));
+    let generation = loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("the current generation must dispatch");
+        if let PluginInstruction::NewTab(
+            _,
+            _,
+            Some(layout),
+            _,
+            _,
+            _,
+            _,
+            _,
+            _,
+            _,
+            Some(generation),
+        ) = instruction
+        {
+            assert_eq!(layout.tab_instance_id.as_deref(), Some(new_token));
+            break generation;
+        }
+    };
+    assert_eq!(generation.viewer_creation_fence.as_ref(), Some(&new_fence));
+    assert!(
+        !format!("{:?}", generation).contains(&receipt_path.display().to_string()),
+        "receipt paths must not leak into generation logs"
+    );
+
+    let (final_tabs_tx, final_tabs_rx) = crossbeam::channel::bounded(1);
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ListTabs {
+        client_id: 1,
+        response_channel: final_tabs_tx,
+    });
+    let final_tabs = final_tabs_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("current-generation tab barrier must answer");
+    let viewer = final_tabs
+        .tabs
+        .iter()
+        .find(|tab| tab.name == new_name)
+        .expect("the current generation must own one tab");
+    assert_eq!(
+        final_tabs
+            .tab_instance_ids
+            .get(&viewer.tab_id)
+            .map(String::as_str),
+        Some(new_token),
+        "public identity must expose only the bare token"
+    );
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+pub fn old_request_that_finishes_after_reclassification_self_cleans_exact_resources() {
+    let directory = tempfile::tempdir().unwrap();
+    let receipt_path = directory.path().join("transfer.json");
+    let run_id = "impl-260727-130000-01000";
+    let old_token = "cccccccccccccccccccccccccccccccc";
+    let new_token = "dddddddddddddddddddddddddddddddd";
+    let old_fence =
+        persist_test_viewer_receipt(&receipt_path, run_id, BucketKind::Finalized, 1, old_token);
+    let old_name = format!("{} [vc:{}]", run_id, old_token);
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut old_drawer = MockScreen::new(size);
+    old_drawer.session_name = "Finalized runs".to_owned();
+    let old_screen_thread = old_drawer.run(None, vec![]);
+    let plugin_receiver = old_drawer.plugin_receiver.take().unwrap();
+    let pty_receiver = old_drawer.pty_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+    while pty_receiver.try_recv().is_ok() {}
+
+    let _ = old_drawer.to_screen.send(ScreenInstruction::NewTab(
+        None,
+        None,
+        Some(fenced_viewer_layout(&old_fence)),
+        vec![],
+        Some(old_name.clone()),
+        (Some(vec![]), Some(vec![])),
+        None,
+        false,
+        false,
+        TabPlacement::Append,
+        (1, false),
+        None,
+    ));
+    let (old_tab_id, old_layout, old_generation) = loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("old generation must dispatch before reclassification");
+        if let PluginInstruction::NewTab(
+            _,
+            _,
+            Some(layout),
+            _,
+            tab_id,
+            _,
+            _,
+            _,
+            _,
+            _,
+            Some(generation),
+        ) = instruction
+        {
+            break (tab_id, layout, generation);
+        }
+    };
+
+    let new_fence =
+        persist_test_viewer_receipt(&receipt_path, run_id, BucketKind::Failed, 2, new_token);
+    let stale_plugin =
+        RunPluginOrAlias::from_url("file:/late-old-viewer.wasm", &None, None, None).unwrap();
+    let _ = old_drawer.to_screen.send(ScreenInstruction::ApplyLayout(
+        old_layout,
+        vec![],
+        vec![(410, None)],
+        vec![],
+        HashMap::from([(stale_plugin, vec![411])]),
+        old_tab_id,
+        false,
+        (1, false),
+        None,
+        None,
+        Some(old_generation),
+    ));
+    let (tabs_tx, tabs_rx) = crossbeam::channel::bounded(1);
+    let _ = old_drawer.to_screen.send(ScreenInstruction::ListTabs {
+        client_id: 1,
+        response_channel: tabs_tx,
+    });
+    let tabs = tabs_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("old completion cleanup barrier must answer");
+    assert!(
+        tabs.tabs.iter().all(|tab| tab.name != old_name),
+        "a globally stale cross-drawer writer must close only its exact placeholder"
+    );
+    let mut cleaned = HashSet::new();
+    while !cleaned.contains(&PaneId::Terminal(410)) || !cleaned.contains(&PaneId::Plugin(411)) {
+        let (instruction, _) = pty_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("late old resources must be returned to PTY cleanup");
+        if let PtyInstruction::CloseTab(ids) = instruction {
+            cleaned.extend(ids);
+        }
+    }
+    old_drawer.teardown(vec![old_screen_thread]);
+
+    let new_name = format!("{} [vc:{}]", run_id, new_token);
+    let mut new_drawer = MockScreen::new(size);
+    new_drawer.session_name = "Failed runs".to_owned();
+    let new_screen_thread = new_drawer.run(None, vec![]);
+    let new_plugin_receiver = new_drawer.plugin_receiver.take().unwrap();
+    while new_plugin_receiver.try_recv().is_ok() {}
+    let _ = new_drawer.to_screen.send(ScreenInstruction::NewTab(
+        None,
+        None,
+        Some(fenced_viewer_layout(&new_fence)),
+        vec![],
+        Some(new_name),
+        (Some(vec![]), Some(vec![])),
+        None,
+        false,
+        false,
+        TabPlacement::Append,
+        (1, false),
+        None,
+    ));
+    loop {
+        let (instruction, _) = new_plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("new drawer owner must dispatch after old self-cleanup");
+        if let PluginInstruction::NewTab(_, _, Some(layout), _, _, _, _, _, _, _, Some(_)) =
+            instruction
+        {
+            assert_eq!(layout.tab_instance_id.as_deref(), Some(new_token));
+            break;
+        }
+    }
+    new_drawer.teardown(vec![new_screen_thread]);
+}
+
+#[test]
+pub fn newer_same_viewer_generation_discards_apply_writer_without_closing_stable_tab() {
+    let directory = tempfile::tempdir().unwrap();
+    let receipt_path = directory.path().join("transfer.json");
+    let run_id = "impl-260727-133000-01000";
+    let token = "abababababababababababababababab";
+    let fence = persist_test_viewer_receipt(&receipt_path, run_id, BucketKind::Finalized, 1, token);
+    let tab_name = format!("{} [vc:{}]", run_id, token);
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut drawer = MockScreen::new(size);
+    drawer.session_name = "Finalized runs".to_owned();
+    let screen_thread = drawer.run(None, vec![]);
+    let plugin_receiver = drawer.plugin_receiver.take().unwrap();
+    let pty_receiver = drawer.pty_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+    while pty_receiver.try_recv().is_ok() {}
+
+    let (tab_id, layout, generation) =
+        dispatch_test_fenced_new_tab(&drawer, &plugin_receiver, &fence, &tab_name);
+    persist_test_viewer_receipt(&receipt_path, run_id, BucketKind::Finalized, 2, token);
+    let plugin =
+        RunPluginOrAlias::from_url("file:/same-viewer-pre-install.wasm", &None, None, None)
+            .unwrap();
+    let _ = drawer.to_screen.send(ScreenInstruction::ApplyLayout(
+        layout,
+        vec![],
+        vec![(420, None)],
+        vec![],
+        HashMap::from([(plugin, vec![421])]),
+        tab_id,
+        false,
+        (1, false),
+        None,
+        None,
+        Some(generation),
+    ));
+    let _ = drawer.to_screen.send(ScreenInstruction::RenderToClients);
+
+    let (tabs_tx, tabs_rx) = crossbeam::channel::bounded(1);
+    let _ = drawer.to_screen.send(ScreenInstruction::ListTabs {
+        client_id: 1,
+        response_channel: tabs_tx,
+    });
+    let tabs = tabs_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("same-viewer pre-install cleanup barrier must answer");
+    let stable_tab = tabs
+        .tabs
+        .iter()
+        .find(|tab| tab.name == tab_name)
+        .expect("a newer generation of the same viewer must retain the stable tab");
+    assert_eq!(stable_tab.tab_id, tab_id);
+    assert_eq!(
+        tabs.tab_instance_ids.get(&tab_id).map(String::as_str),
+        Some(token)
+    );
+    assert_eq!(
+        stable_tab.selectable_tiled_panes_count, 0,
+        "the superseded writer must not install resources"
+    );
+
+    let mut cleaned = HashSet::new();
+    while !cleaned.contains(&PaneId::Terminal(420)) || !cleaned.contains(&PaneId::Plugin(421)) {
+        let (instruction, _) = pty_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("same-viewer superseded resources must return to PTY cleanup");
+        if let PtyInstruction::CloseTab(ids) = instruction {
+            cleaned.extend(ids);
+        }
+    }
+    assert_eq!(
+        cleaned,
+        HashSet::from([PaneId::Terminal(420), PaneId::Plugin(421)])
+    );
+
+    drawer.teardown(vec![screen_thread]);
+}
+
+#[test]
+pub fn receipt_change_after_install_is_caught_by_the_final_fence() {
+    let directory = tempfile::tempdir().unwrap();
+    let receipt_path = directory.path().join("transfer.json");
+    let run_id = "impl-260727-140000-01000";
+    let old_token = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    let new_token = "ffffffffffffffffffffffffffffffff";
+    let old_fence =
+        persist_test_viewer_receipt(&receipt_path, run_id, BucketKind::Finalized, 1, old_token);
+    let old_name = format!("{} [vc:{}]", run_id, old_token);
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut drawer = MockScreen::new(size);
+    drawer.session_name = "Finalized runs".to_owned();
+    let screen_thread = drawer.run(None, vec![]);
+    let plugin_receiver = drawer.plugin_receiver.take().unwrap();
+    let pty_receiver = drawer.pty_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+    while pty_receiver.try_recv().is_ok() {}
+    let plugin =
+        RunPluginOrAlias::from_url("file:/post-install-old-viewer.wasm", &None, None, None)
+            .unwrap();
+    let mut old_layout = fenced_viewer_layout(&old_fence);
+    old_layout.children = vec![
+        TiledPaneLayout::default(),
+        TiledPaneLayout {
+            run: Some(Run::Plugin(plugin.clone())),
+            ..Default::default()
+        },
+    ];
+
+    let _ = drawer.to_screen.send(ScreenInstruction::NewTab(
+        None,
+        None,
+        Some(old_layout),
+        vec![],
+        Some(old_name.clone()),
+        (Some(vec![]), Some(vec![])),
+        None,
+        false,
+        false,
+        TabPlacement::Append,
+        (1, false),
+        None,
+    ));
+    let (tab_id, layout, generation) = loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("generation one must pass pre-dispatch verification");
+        if let PluginInstruction::NewTab(
+            _,
+            _,
+            Some(layout),
+            _,
+            tab_id,
+            _,
+            _,
+            _,
+            _,
+            _,
+            Some(generation),
+        ) = instruction
+        {
+            break (tab_id, layout, generation);
+        }
+    };
+
+    let (installed_rx, resume_tx) = register_viewer_creation_post_install_test_hook(run_id);
+    let _ = drawer.to_screen.send(ScreenInstruction::ApplyLayout(
+        layout,
+        vec![],
+        vec![(510, None)],
+        vec![],
+        HashMap::from([(plugin, vec![511])]),
+        tab_id,
+        false,
+        (1, false),
+        None,
+        None,
+        Some(generation),
+    ));
+    installed_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("the test barrier must observe resources installed before final verification");
+
+    // This is the decisive ordering: the old writer passed pre-install
+    // verification and mutated the tab, while the owner's earlier query could
+    // have observed no tab. The durable tombstone lands before final verify.
+    persist_test_viewer_receipt(&receipt_path, run_id, BucketKind::Failed, 2, new_token);
+    resume_tx.send(()).unwrap();
+
+    let (tabs_tx, tabs_rx) = crossbeam::channel::bounded(1);
+    let _ = drawer.to_screen.send(ScreenInstruction::ListTabs {
+        client_id: 1,
+        response_channel: tabs_tx,
+    });
+    let tabs = tabs_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("post-install verification barrier must answer");
+    assert!(
+        tabs.tabs.iter().all(|tab| tab.name != old_name),
+        "final verification must exact-close a writer invalidated after install"
+    );
+    let mut cleaned = HashSet::new();
+    while !cleaned.contains(&PaneId::Terminal(510)) || !cleaned.contains(&PaneId::Plugin(511)) {
+        let (instruction, _) = pty_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("post-install stale resources must be returned to PTY cleanup");
+        if let PtyInstruction::CloseTab(ids) = instruction {
+            cleaned.extend(ids);
+        }
+    }
+
+    drawer.teardown(vec![screen_thread]);
+}
+
+#[test]
+pub fn same_viewer_reclassification_after_apply_install_removes_only_writer_resources() {
+    let directory = tempfile::tempdir().unwrap();
+    let receipt_path = directory.path().join("transfer.json");
+    let run_id = "impl-260727-143000-01000";
+    let token = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
+    let fence = persist_test_viewer_receipt(&receipt_path, run_id, BucketKind::Finalized, 1, token);
+    let tab_name = format!("{} [vc:{}]", run_id, token);
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut drawer = MockScreen::new(size);
+    drawer.session_name = "Finalized runs".to_owned();
+    let screen_thread = drawer.run(None, vec![]);
+    let plugin_receiver = drawer.plugin_receiver.take().unwrap();
+    let pty_receiver = drawer.pty_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+    while pty_receiver.try_recv().is_ok() {}
+
+    let (tab_id, layout, generation) =
+        dispatch_test_fenced_new_tab(&drawer, &plugin_receiver, &fence, &tab_name);
+    let plugin =
+        RunPluginOrAlias::from_url("file:/same-viewer-post-install.wasm", &None, None, None)
+            .unwrap();
+    let (installed_rx, resume_tx) = register_viewer_creation_post_install_test_hook(run_id);
+    let _ = drawer.to_screen.send(ScreenInstruction::ApplyLayout(
+        layout,
+        vec![],
+        vec![(520, None)],
+        vec![],
+        HashMap::from([(plugin, vec![521])]),
+        tab_id,
+        false,
+        (1, false),
+        None,
+        None,
+        Some(generation),
+    ));
+    installed_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("same-viewer test must pause after resource install");
+
+    persist_test_viewer_receipt(&receipt_path, run_id, BucketKind::Finalized, 2, token);
+    assert_eq!(
+        fence.verify_for_install("Finalized runs", &tab_name),
+        Err(ViewerCreationFenceRejection::SupersededSameViewer)
+    );
+    resume_tx.send(()).unwrap();
+    let _ = drawer.to_screen.send(ScreenInstruction::RenderToClients);
+
+    let (tabs_tx, tabs_rx) = crossbeam::channel::bounded(1);
+    let _ = drawer.to_screen.send(ScreenInstruction::ListTabs {
+        client_id: 1,
+        response_channel: tabs_tx,
+    });
+    let tabs = tabs_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("same-viewer post-install cleanup barrier must answer");
+    let stable_tab = tabs
+        .tabs
+        .iter()
+        .find(|tab| tab.tab_id == tab_id)
+        .unwrap_or_else(|| {
+            panic!(
+                "post-install supersession must preserve tab {tab_id}; observed tabs: {:?}",
+                tabs.tabs
+            )
+        });
+    assert_eq!(stable_tab.tab_id, tab_id);
+    assert_eq!(stable_tab.name, tab_name);
+    assert_eq!(
+        tabs.tab_instance_ids.get(&tab_id).map(String::as_str),
+        Some(token)
+    );
+    assert_eq!(
+        stable_tab.selectable_tiled_panes_count, 0,
+        "only the superseded writer's installed panes must be removed"
+    );
+
+    let mut cleaned = HashSet::new();
+    while !cleaned.contains(&PaneId::Terminal(520)) || !cleaned.contains(&PaneId::Plugin(521)) {
+        let (instruction, _) = pty_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("post-install same-viewer resources must return to PTY cleanup");
+        if let PtyInstruction::CloseTab(ids) = instruction {
+            cleaned.extend(ids);
+        }
+    }
+    assert_eq!(
+        cleaned,
+        HashSet::from([PaneId::Terminal(520), PaneId::Plugin(521)])
+    );
+
+    drawer.teardown(vec![screen_thread]);
+}
+
+fn assert_override_preinstall_rejection_cleanup(same_viewer: bool) {
+    let directory = tempfile::tempdir().unwrap();
+    let receipt_path = directory.path().join("transfer.json");
+    let run_id = if same_viewer {
+        "impl-260727-150000-01000"
+    } else {
+        "impl-260727-151000-01000"
+    };
+    let old_token = "12121212121212121212121212121212";
+    let replacement_token = if same_viewer {
+        old_token
+    } else {
+        "34343434343434343434343434343434"
+    };
+    let replacement_bucket = if same_viewer {
+        BucketKind::Finalized
+    } else {
+        BucketKind::Failed
+    };
+    let fence =
+        persist_test_viewer_receipt(&receipt_path, run_id, BucketKind::Finalized, 1, old_token);
+    let tab_name = format!("{} [vc:{}]", run_id, old_token);
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut drawer = MockScreen::new(size);
+    drawer.session_name = "Finalized runs".to_owned();
+    let screen_thread = drawer.run(None, vec![]);
+    let plugin_receiver = drawer.plugin_receiver.take().unwrap();
+    let pty_receiver = drawer.pty_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+    while pty_receiver.try_recv().is_ok() {}
+
+    let (tab_id, _, _) = dispatch_test_fenced_new_tab(&drawer, &plugin_receiver, &fence, &tab_name);
+    let (recovery_tab_id, recovery_layout, recovery_generation) =
+        dispatch_test_fenced_recovery(&drawer, &plugin_receiver, &fence, &tab_name);
+    assert_eq!(recovery_tab_id, tab_id);
+    persist_test_viewer_receipt(
+        &receipt_path,
+        run_id,
+        replacement_bucket,
+        2,
+        replacement_token,
+    );
+
+    let plugin = RunPluginOrAlias::from_url(
+        "file:/override-pre-install-rejection.wasm",
+        &None,
+        None,
+        None,
+    )
+    .unwrap();
+    let _ = drawer
+        .to_screen
+        .send(ScreenInstruction::OverrideLayoutComplete(
+            vec![TabOverrideResult {
+                tab_index: tab_id,
+                tab_name: None,
+                tiled_layout: recovery_layout,
+                floating_layouts: vec![],
+                swap_tiled_layouts: Some(vec![]),
+                swap_floating_layouts: Some(vec![]),
+                new_terminal_pids: vec![(610, None)],
+                new_floating_pane_pids: vec![],
+                plugin_ids: HashMap::from([(plugin, vec![611])]),
+            }],
+            true,
+            true,
+            1,
+            None,
+            Some(recovery_generation),
+        ));
+    let _ = drawer.to_screen.send(ScreenInstruction::RenderToClients);
+
+    let (tabs_tx, tabs_rx) = crossbeam::channel::bounded(1);
+    let _ = drawer.to_screen.send(ScreenInstruction::ListTabs {
+        client_id: 1,
+        response_channel: tabs_tx,
+    });
+    let tabs = tabs_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("override pre-install cleanup barrier must answer");
+    let stable_tab = tabs.tabs.iter().find(|tab| tab.name == tab_name);
+    if same_viewer {
+        let stable_tab =
+            stable_tab.expect("same-viewer supersession must preserve the recovered tab");
+        assert_eq!(stable_tab.tab_id, tab_id);
+        assert_eq!(stable_tab.selectable_tiled_panes_count, 0);
+        assert_eq!(
+            tabs.tab_instance_ids.get(&tab_id).map(String::as_str),
+            Some(old_token)
+        );
+    } else {
+        assert!(
+            stable_tab.is_none(),
+            "cross-token/bucket ownership loss must exact-close the stale tab"
+        );
+    }
+
+    let mut cleaned = HashSet::new();
+    while !cleaned.contains(&PaneId::Terminal(610)) || !cleaned.contains(&PaneId::Plugin(611)) {
+        let (instruction, _) = pty_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("override pre-install resources must return to PTY cleanup");
+        if let PtyInstruction::CloseTab(ids) = instruction {
+            cleaned.extend(ids);
+        }
+    }
+    assert_eq!(
+        cleaned,
+        HashSet::from([PaneId::Terminal(610), PaneId::Plugin(611)])
+    );
+
+    drawer.teardown(vec![screen_thread]);
+}
+
+#[test]
+pub fn newer_same_viewer_generation_rejects_override_before_install_without_closing_tab() {
+    assert_override_preinstall_rejection_cleanup(true);
+}
+
+#[test]
+pub fn cross_viewer_tombstone_rejects_override_before_install_and_exact_closes_tab() {
+    assert_override_preinstall_rejection_cleanup(false);
+}
+
+fn assert_override_postinstall_rejection_cleanup(same_viewer: bool) {
+    let directory = tempfile::tempdir().unwrap();
+    let receipt_path = directory.path().join("transfer.json");
+    let run_id = if same_viewer {
+        "impl-260727-152000-01000"
+    } else {
+        "impl-260727-153000-01000"
+    };
+    let old_token = "56565656565656565656565656565656";
+    let replacement_token = if same_viewer {
+        old_token
+    } else {
+        "78787878787878787878787878787878"
+    };
+    let replacement_bucket = if same_viewer {
+        BucketKind::Finalized
+    } else {
+        BucketKind::NeedsAttention
+    };
+    let fence =
+        persist_test_viewer_receipt(&receipt_path, run_id, BucketKind::Finalized, 1, old_token);
+    let tab_name = format!("{} [vc:{}]", run_id, old_token);
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut drawer = MockScreen::new(size);
+    drawer.session_name = "Finalized runs".to_owned();
+    let screen_thread = drawer.run(None, vec![]);
+    let plugin_receiver = drawer.plugin_receiver.take().unwrap();
+    let pty_receiver = drawer.pty_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+    while pty_receiver.try_recv().is_ok() {}
+
+    let (tab_id, _, _) = dispatch_test_fenced_new_tab(&drawer, &plugin_receiver, &fence, &tab_name);
+    let (recovery_tab_id, recovery_layout, recovery_generation) =
+        dispatch_test_fenced_recovery(&drawer, &plugin_receiver, &fence, &tab_name);
+    assert_eq!(recovery_tab_id, tab_id);
+    let plugin = RunPluginOrAlias::from_url(
+        "file:/override-post-install-rejection.wasm",
+        &None,
+        None,
+        None,
+    )
+    .unwrap();
+    let (installed_rx, resume_tx) = register_viewer_creation_post_install_test_hook(run_id);
+    let _ = drawer
+        .to_screen
+        .send(ScreenInstruction::OverrideLayoutComplete(
+            vec![TabOverrideResult {
+                tab_index: tab_id,
+                tab_name: None,
+                tiled_layout: recovery_layout,
+                floating_layouts: vec![],
+                swap_tiled_layouts: Some(vec![]),
+                swap_floating_layouts: Some(vec![]),
+                new_terminal_pids: vec![(710, None)],
+                new_floating_pane_pids: vec![],
+                plugin_ids: HashMap::from([(plugin, vec![711])]),
+            }],
+            true,
+            true,
+            1,
+            None,
+            Some(recovery_generation),
+        ));
+    installed_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("override test must pause after resources are installed");
+
+    persist_test_viewer_receipt(
+        &receipt_path,
+        run_id,
+        replacement_bucket,
+        2,
+        replacement_token,
+    );
+    resume_tx.send(()).unwrap();
+    let _ = drawer.to_screen.send(ScreenInstruction::RenderToClients);
+
+    let (tabs_tx, tabs_rx) = crossbeam::channel::bounded(1);
+    let _ = drawer.to_screen.send(ScreenInstruction::ListTabs {
+        client_id: 1,
+        response_channel: tabs_tx,
+    });
+    let tabs = tabs_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("override post-install cleanup barrier must answer");
+    let stable_tab = tabs.tabs.iter().find(|tab| tab.name == tab_name);
+    if same_viewer {
+        let stable_tab = stable_tab
+            .expect("same-viewer post-install supersession must preserve the recovered tab");
+        assert_eq!(stable_tab.tab_id, tab_id);
+        assert_eq!(stable_tab.selectable_tiled_panes_count, 0);
+        assert_eq!(
+            tabs.tab_instance_ids.get(&tab_id).map(String::as_str),
+            Some(old_token)
+        );
+    } else {
+        assert!(
+            stable_tab.is_none(),
+            "cross-token/bucket post-install ownership loss must exact-close the stale tab"
+        );
+    }
+
+    let mut cleaned = HashSet::new();
+    while !cleaned.contains(&PaneId::Terminal(710)) || !cleaned.contains(&PaneId::Plugin(711)) {
+        let (instruction, _) = pty_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("override post-install resources must return to PTY cleanup");
+        if let PtyInstruction::CloseTab(ids) = instruction {
+            cleaned.extend(ids);
+        }
+    }
+    assert_eq!(
+        cleaned,
+        HashSet::from([PaneId::Terminal(710), PaneId::Plugin(711)])
+    );
+
+    drawer.teardown(vec![screen_thread]);
+}
+
+#[test]
+pub fn newer_same_viewer_generation_after_override_install_removes_only_writer_resources() {
+    assert_override_postinstall_rejection_cleanup(true);
+}
+
+#[test]
+pub fn cross_viewer_tombstone_after_override_install_exact_closes_tab_and_resources() {
+    assert_override_postinstall_rejection_cleanup(false);
 }
 
 #[test]

@@ -12,7 +12,10 @@ use crate::{
     thread_bus::{Bus, ThreadSenders},
 };
 use std::sync::Arc;
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 use tokio::task::JoinHandle;
 use zellij_utils::{
     data::{
@@ -1490,11 +1493,26 @@ impl Pty {
                 }
             });
             let mut terminal_id = None;
-            if let Some(new_pane_data) =
-                self.apply_run_instruction(run_instruction, default_shell.clone())?
-            {
-                terminal_id = Some(new_pane_data.0);
-                new_pane_pids.push(new_pane_data);
+            match self.apply_run_instruction(run_instruction, default_shell.clone()) {
+                Ok(Some(new_pane_data)) => {
+                    terminal_id = Some(new_pane_data.0);
+                    new_pane_pids.push(new_pane_data);
+                },
+                Ok(None) => {},
+                Err(error) => {
+                    if let Err(cleanup_error) = self.cleanup_partial_layout_override_allocations(
+                        &plugin_ids,
+                        &new_pane_pids,
+                        &new_floating_panes_pids,
+                    ) {
+                        return Err(anyhow!(
+                            "{}; partial layout allocation cleanup failed: {}",
+                            error,
+                            cleanup_error
+                        ));
+                    }
+                    return Err(error);
+                },
             }
             if let (Some(originating_plugin), Some(terminal_id)) = (originating_plugin, terminal_id)
             {
@@ -1510,11 +1528,26 @@ impl Pty {
                 }
             });
             let mut terminal_id = None;
-            if let Some(new_pane_data) =
-                self.apply_run_instruction(run_instruction, default_shell.clone())?
-            {
-                terminal_id = Some(new_pane_data.0);
-                new_floating_panes_pids.push(new_pane_data);
+            match self.apply_run_instruction(run_instruction, default_shell.clone()) {
+                Ok(Some(new_pane_data)) => {
+                    terminal_id = Some(new_pane_data.0);
+                    new_floating_panes_pids.push(new_pane_data);
+                },
+                Ok(None) => {},
+                Err(error) => {
+                    if let Err(cleanup_error) = self.cleanup_partial_layout_override_allocations(
+                        &plugin_ids,
+                        &new_pane_pids,
+                        &new_floating_panes_pids,
+                    ) {
+                        return Err(anyhow!(
+                            "{}; partial layout allocation cleanup failed: {}",
+                            error,
+                            cleanup_error
+                        ));
+                    }
+                    return Err(error);
+                },
             }
             if let (Some(originating_plugin), Some(terminal_id)) = (originating_plugin, terminal_id)
             {
@@ -1611,6 +1644,43 @@ impl Pty {
             self.inform_originating_plugin_of_open(terminal_id, originating_plugin);
         }
         Ok(tab_result)
+    }
+    fn cleanup_partial_layout_override_allocations(
+        &mut self,
+        plugin_ids: &HashMap<RunPluginOrAlias, Vec<u32>>,
+        new_pane_pids: &[(u32, bool, Option<RunCommand>, Result<Box<dyn AsyncReader>>)],
+        new_floating_pane_pids: &[(u32, bool, Option<RunCommand>, Result<Box<dyn AsyncReader>>)],
+    ) -> Result<()> {
+        let mut allocated_ids = plugin_ids
+            .values()
+            .flatten()
+            .copied()
+            .map(PaneId::Plugin)
+            .collect::<HashSet<_>>();
+        allocated_ids.extend(
+            new_pane_pids
+                .iter()
+                .map(|(terminal_id, _, _, _)| PaneId::Terminal(*terminal_id)),
+        );
+        allocated_ids.extend(
+            new_floating_pane_pids
+                .iter()
+                .map(|(terminal_id, _, _, _)| PaneId::Terminal(*terminal_id)),
+        );
+        let mut cleanup_errors = Vec::new();
+        for pane_id in allocated_ids {
+            if let Err(error) = self.close_pane(pane_id) {
+                cleanup_errors.push(format!("{pane_id:?}: {error}"));
+            }
+        }
+        if cleanup_errors.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "failed to release one or more partial layout allocations: {}",
+                cleanup_errors.join("; ")
+            ))
+        }
     }
     fn inform_originating_plugin_of_open(
         &mut self,
