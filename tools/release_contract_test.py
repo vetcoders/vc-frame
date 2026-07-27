@@ -87,6 +87,35 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn("(INSTALLER, transform_installer)", release_sync)
         self.assertIn("INSTALLER_DEFAULT_RE", release_sync)
 
+    def test_installer_pins_actual_signer_and_release_identity(self) -> None:
+        installer = read("tools/install.sh")
+        installer_test = read("tools/install_test.sh")
+        for required in (
+            "--status-fd 3",
+            '"VALIDSIG"',
+            "signed_primary_fingerprints",
+            "verify_binary_release_identity",
+            'reported_semver="${reported_version%%+*}"',
+            'if [ "$build_version" != "$VERSION" ]',
+            'if [ "$build_git_sha" != "$expected_git_sha" ]',
+            'verify_gpg_signature "$manifest_file"',
+            "MANIFEST_GIT_SHA",
+        ):
+            self.assertIn(required, installer)
+        self.assertLess(
+            installer.index('verify_gpg_signature "$manifest_file"'),
+            installer.index('validate_manifest "$manifest_file"'),
+            "the manifest signature must be pinned before any field is trusted",
+        )
+        for dynamic_case in (
+            "pinned signing subkey installs",
+            "foreign signer in imported bundle fails closed",
+            "missing manifest signature fails closed",
+            "pinned signed old-binary replay preserves existing install",
+            "pinned signed wrong-commit binary preserves existing install",
+        ):
+            self.assertIn(dynamic_case, installer_test)
+
     def test_release_targets_are_canonical_and_fail_closed(self) -> None:
         makefile = read("Makefile")
         preflight = makefile.split("\nrelease-preflight:\n", 1)[1].split(
@@ -643,29 +672,52 @@ class ReleaseContractTests(unittest.TestCase):
             "Cold-install exact downloaded release",
             "env -u GH_TOKEN -u GITHUB_TOKEN",
             'sh "$release_dir/install.sh"',
+            "manifest.json.sig",
+            'printf \'  "git_sha": "%s",\\n\' "$git_sha"',
+            "manifest_primary_fingerprint",
+            'test "${#signatures[@]}" -eq 9',
+            'test "$manifest_git_sha" = "$GITHUB_SHA"',
         ):
             self.assertIn(required, workflow)
+        self.assertEqual(
+            workflow.count('--local-user "$expected_fingerprint"'),
+            4,
+            "canary, both Unix artifact lanes, and manifest must select the pinned key",
+        )
+        self.assertGreaterEqual(
+            workflow.count("--status-fd 1"),
+            5,
+            "canary, artifact lanes, manifest, and final verification must expose VALIDSIG",
+        )
+        self.assertIn("canary_primary_fingerprint", workflow)
+        self.assertIn("signature_primary_fingerprint", workflow)
 
         release_docs = read("docs/RELEASE.md")
         self.assertIn("make release-preflight", release_docs)
         self.assertIn("make release-tag", release_docs)
         self.assertIn("make release-push", release_docs)
+        self.assertIn("manifest.json.sig", release_docs)
+        self.assertIn("byte-for-byte untouched", release_docs)
         self.assertNotIn('git tag -a "v$version"', release_docs)
         self.assertIn("workflow_dispatch", workflow)
         self.assertIn("./scripts/release-provenance.zsh guard", workflow)
         self.assertNotIn("release-preflight", workflow)
 
     def test_workflows_use_pinned_protoc_without_release_api_discovery(self) -> None:
-        workflows = "\n".join(
-            read(path)
-            for path in (
-                ".github/workflows/e2e.yml",
-                ".github/workflows/release.yml",
-                ".github/workflows/rust.yml",
-            )
+        workflow_paths = (
+            ".github/workflows/e2e.yml",
+            ".github/workflows/release.yml",
+            ".github/workflows/rust.yml",
         )
+        workflows = "\n".join(read(path) for path in workflow_paths)
+        rust_workflow = read(".github/workflows/rust.yml")
         action = read(".github/actions/setup-protoc/action.yml")
 
+        self.assertIn(
+            "name: triage-runtime-e2e-${{ github.run_id }}-"
+            "${{ github.run_attempt }}-${{ matrix.os }}",
+            rust_workflow,
+        )
         self.assertNotIn("arduino/setup-protoc", workflows)
         self.assertEqual(
             workflows.count("uses: ./.github/actions/setup-protoc"),

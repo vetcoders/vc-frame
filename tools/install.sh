@@ -16,8 +16,9 @@
 #                          public key MUST match it. Strict mode rejects an
 #                          empty fingerprint.
 #   VCFRAME_REQUIRE_GPG=1  fail if the GPG key or .sig sidecar is unavailable
-#                          (default: 1). Set 0 to allow install without a
-#                          signature (still enforces the SHA256 sidecar).
+#                          (default: 1; exact enum: 0 or 1). Set 0 to allow
+#                          install without a signature (still enforces the
+#                          SHA256 sidecar and manifest/binary consistency).
 #   VCFRAME_NO_PROFILE_UPDATE=1  do not edit ~/.zshrc when PATH is missing
 #
 # Design notes (mirrors the loctree 0.12 installer hardening):
@@ -27,8 +28,10 @@
 #     always enforced.
 #   - manifest.json is MANDATORY and is the only source of the archive name.
 #     A missing, malformed, foreign or version-mismatched manifest aborts the
-#     install; there is no guessed-filename fallback. A guessed name can only
-#     ever agree with the release by luck, and "by luck" is not provenance.
+#     install; strict mode authenticates it before parsing via manifest.json.sig.
+#     Its full git_sha must match the binary's embedded build provenance. There
+#     is no guessed-filename fallback. A guessed name can only ever agree with
+#     the release by luck, and "by luck" is not provenance.
 #   - Linux targets resolve to the musl-static build (`-unknown-linux-musl`),
 #     which is the maximally-portable choice for this standalone binary — the
 #     name MUST match what .github/workflows/release.yml uploads.
@@ -45,15 +48,30 @@ umask 022
 VERSION="${VCFRAME_VERSION:-0.47.0}"
 INSTALL_DIR="${INSTALL_DIR:-"$HOME/.local/bin"}"
 BASE_URL="${VCFRAME_BASE_URL:-https://github.com/vetcoders/vc-frame/releases/download}"
-REQUIRE_GPG="${VCFRAME_REQUIRE_GPG:-1}"
+if [ "${VCFRAME_REQUIRE_GPG+x}" = x ]; then
+  REQUIRE_GPG="$VCFRAME_REQUIRE_GPG"
+else
+  REQUIRE_GPG=1
+fi
 DEFAULT_GPG_FINGERPRINT=""
 GPG_FINGERPRINT="${VCFRAME_GPG_FINGERPRINT:-$DEFAULT_GPG_FINGERPRINT}"
 BIN_NAME="vc-frame"
+MANIFEST_GIT_SHA=""
 
 red() { printf '\033[0;31m%s\033[0m\n' "$*"; }
 green() { printf '\033[0;32m%s\033[0m\n' "$*"; }
 yellow() { printf '\033[0;33m%s\033[0m\n' "$*"; }
 blue() { printf '\033[0;34m%s\033[0m\n' "$*"; }
+
+validate_configuration() {
+  case "$REQUIRE_GPG" in
+    0|1) ;;
+    *)
+      red "VCFRAME_REQUIRE_GPG must be exactly 0 or 1 (got: ${REQUIRE_GPG:-<empty>})"
+      exit 1
+      ;;
+  esac
+}
 
 need_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -150,7 +168,21 @@ validate_manifest() {
     exit 1
   fi
 
-  green "manifest ok: vc-frame $mf_version"
+  mf_git_sha="$(manifest_string_field "$manifest_file" git_sha)"
+  mf_git_sha="$(printf '%s' "$mf_git_sha" | tr '[:upper:]' '[:lower:]')"
+  case "$mf_git_sha" in
+    ""|*[!0-9a-f]*)
+      red "release manifest does not declare a hexadecimal git_sha"
+      exit 1
+      ;;
+  esac
+  if [ "${#mf_git_sha}" -ne 40 ]; then
+    red "release manifest git_sha is not a full 40-character commit identity"
+    exit 1
+  fi
+  MANIFEST_GIT_SHA="$mf_git_sha"
+
+  green "manifest ok: vc-frame $mf_version ($MANIFEST_GIT_SHA)"
 }
 
 # GPG verification — the trust root under strict mode.
@@ -162,6 +194,7 @@ verify_gpg_signature() {
   sig_file="$file.sig"
   pub_file="$tmp/vc-frame-signing.asc"
   gnupg_home="$tmp/gnupg"
+  expected_fingerprint=""
 
   if [ "$REQUIRE_GPG" = "1" ] && [ -z "$GPG_FINGERPRINT" ]; then
     red "strict mode requires a pinned VCFRAME_GPG_FINGERPRINT"
@@ -179,18 +212,40 @@ verify_gpg_signature() {
 
   if [ -n "$GPG_FINGERPRINT" ]; then
     expected_fingerprint="$(normalize_fingerprint "$GPG_FINGERPRINT")"
-    actual_fingerprint="$(gpg --batch --with-colons --import-options show-only --import "$pub_file" 2>/dev/null | awk -F: '$1 == "fpr" {print $10; exit}')"
-    actual_fingerprint="$(normalize_fingerprint "$actual_fingerprint")"
-    if [ -z "$actual_fingerprint" ]; then
-      red "GPG signing key fingerprint could not be read"
+    case "$expected_fingerprint" in
+      ""|*[!A-F0-9]*)
+        red "VCFRAME_GPG_FINGERPRINT is not a hexadecimal GPG fingerprint"
+        exit 1
+        ;;
+    esac
+    published_primary_fingerprints="$(
+      gpg --batch --with-colons --import-options show-only \
+        --import "$pub_file" 2>/dev/null |
+        awk -F: '
+          $1 == "pub" { want_primary_fingerprint = 1; next }
+          want_primary_fingerprint && $1 == "fpr" {
+            print toupper($10)
+            want_primary_fingerprint = 0
+          }
+        '
+    )"
+    matching_primary_count="$(
+      printf '%s\n' "$published_primary_fingerprints" |
+        awk -v expected="$expected_fingerprint" '
+          $0 == expected { count += 1 }
+          END { print count + 0 }
+        '
+    )"
+    if [ "$matching_primary_count" -ne 1 ]; then
+      red "GPG signing key bundle does not contain exactly one pinned primary key"
+      printf 'expected: %s\n' "$expected_fingerprint"
       exit 1
     fi
-    if [ "$actual_fingerprint" != "$expected_fingerprint" ]; then
-      red "GPG signing key fingerprint mismatch"
-      printf 'expected: %s\nactual:   %s\n' "$expected_fingerprint" "$actual_fingerprint"
+    if [ -z "$published_primary_fingerprints" ]; then
+      red "GPG signing key primary fingerprint could not be read"
       exit 1
     fi
-    green "GPG key fingerprint ok: $actual_fingerprint"
+    green "GPG key bundle contains pinned primary: $expected_fingerprint"
   fi
 
   if ! curl -fsSL "$base_url/$(basename "$sig_file")" -o "$sig_file" 2>/dev/null; then
@@ -199,13 +254,101 @@ verify_gpg_signature() {
   fi
   mkdir -p "$gnupg_home"
   chmod 700 "$gnupg_home"
-  if GNUPGHOME="$gnupg_home" gpg --batch --quiet --import "$pub_file" >/dev/null 2>&1 \
-    && GNUPGHOME="$gnupg_home" gpg --batch --quiet --verify "$sig_file" "$file" >/dev/null 2>&1; then
-    green "GPG signature ok"
-  else
+  if ! GNUPGHOME="$gnupg_home" gpg --batch --quiet \
+    --import "$pub_file" >/dev/null 2>&1; then
+    red "GPG signing key import failed"
+    exit 1
+  fi
+
+  status_file="$tmp/gpg-verify.status"
+  if ! GNUPGHOME="$gnupg_home" gpg --batch --quiet --status-fd 3 \
+    --verify "$sig_file" "$file" 3>"$status_file" >/dev/null 2>&1; then
     red "signature verification failed for $(basename "$file")"
     exit 1
   fi
+
+  if [ -n "$expected_fingerprint" ]; then
+    signed_primary_fingerprints="$(
+      awk '
+        $1 == "[GNUPG:]" && $2 == "VALIDSIG" {
+          print toupper($NF)
+        }
+      ' "$status_file"
+    )"
+    if [ "$signed_primary_fingerprints" != "$expected_fingerprint" ]; then
+      red "signature signer does not match the pinned GPG primary fingerprint for $(basename "$file")"
+      printf 'expected: %s\nactual:   %s\n' \
+        "$expected_fingerprint" "${signed_primary_fingerprints:-<missing>}"
+      exit 1
+    fi
+    green "GPG signature signer pinned: $expected_fingerprint"
+  else
+    green "GPG signature cryptographically valid (unpinned non-strict mode)"
+  fi
+}
+
+verify_binary_release_identity() {
+  binary="$1"
+  description="$2"
+  expected_git_sha="$3"
+
+  if ! version_output="$("$binary" --version 2>&1)"; then
+    smoke_fail "$description --version exited non-zero" "$version_output"
+  fi
+  case "$version_output" in
+    "$BIN_NAME "[![:space:]]*) reported_version="${version_output#"$BIN_NAME "}" ;;
+    *) smoke_fail "$description reported an invalid product/version" "$version_output" ;;
+  esac
+  case "$reported_version" in
+    *[[:space:]]*) smoke_fail "$description reported an ambiguous version" "$version_output" ;;
+  esac
+  reported_semver="${reported_version%%+*}"
+  if [ "$reported_semver" != "$VERSION" ]; then
+    smoke_fail "$description semantic version does not match the requested release" \
+      "requested: $VERSION" "reported:  $reported_version"
+  fi
+
+  if ! build_info="$("$binary" --build-info 2>&1)"; then
+    smoke_fail "$description --build-info exited non-zero" "$build_info"
+  fi
+  build_product="$(
+    printf '%s\n' "$build_info" | tr ',{}' '\n\n\n' |
+      sed -n 's/^[[:space:]]*"product"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
+      head -n 1
+  )"
+  build_version="$(
+    printf '%s\n' "$build_info" | tr ',{}' '\n\n\n' |
+      sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
+      head -n 1
+  )"
+  build_git_sha="$(
+    printf '%s\n' "$build_info" | tr ',{}' '\n\n\n' |
+      sed -n 's/^[[:space:]]*"git_sha"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
+      head -n 1
+  )"
+  if [ "$build_product" != "$BIN_NAME" ]; then
+    smoke_fail "$description build provenance names a foreign product" "$build_info"
+  fi
+  if [ "$build_version" != "$VERSION" ]; then
+    smoke_fail "$description build provenance version does not match the requested release" \
+      "requested: $VERSION" "build:     ${build_version:-<missing>}"
+  fi
+  build_git_sha="$(printf '%s' "$build_git_sha" | tr '[:upper:]' '[:lower:]')"
+  case "$build_git_sha" in
+    ""|*[!0-9a-f]*)
+      smoke_fail "$description build provenance has no hexadecimal git SHA" "$build_info"
+      ;;
+  esac
+  if [ "${#build_git_sha}" -ne 40 ]; then
+    smoke_fail "$description build provenance has no full 40-character git SHA" \
+      "$build_info"
+  fi
+  if [ "$build_git_sha" != "$expected_git_sha" ]; then
+    smoke_fail "$description commit does not match the authenticated manifest" \
+      "manifest: $expected_git_sha" "build:    $build_git_sha"
+  fi
+
+  green "$description identity: $BIN_NAME $reported_version ($build_git_sha)"
 }
 
 install_prebuilt() {
@@ -225,6 +368,10 @@ install_prebuilt() {
     red "vc-frame will not install from a guessed artifact name."
     exit 1
   fi
+  # Authenticate the version, commit and artifact map before parsing or using
+  # any manifest field. Non-strict opt-out retains identity consistency checks,
+  # but deliberately gives up signer authentication.
+  verify_gpg_signature "$manifest_file" "$artifact_base" "$tmp" "$key_url"
   validate_manifest "$manifest_file"
 
   if ! archive="$(manifest_artifact_name "$manifest_file" "$target")"; then
@@ -271,6 +418,9 @@ install_prebuilt() {
     red "release bundle layout unexpected: no '$BIN_NAME' binary found in archive"
     exit 1
   fi
+  # Verify identity before touching INSTALL_DIR. A valid signature authenticates
+  # bytes, not that an old signed bundle was not replayed under a newer URL.
+  verify_binary_release_identity "$bin_src" "release bundle" "$MANIFEST_GIT_SHA"
   mkdir -p "$INSTALL_DIR"
   install -m 0755 "$bin_src" "$INSTALL_DIR/$BIN_NAME"
   printf '  %s -> %s\n' "$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
@@ -314,22 +464,8 @@ post_install_check() {
     smoke_fail "$bin is missing or not executable"
   fi
 
-  # 1. The binary runs and reports a version.
-  if ! version_output="$("$bin" --version 2>&1)"; then
-    smoke_fail "$bin --version exited non-zero" "$version_output"
-  fi
-  green "$BIN_NAME --version: $version_output"
-
-  # 2. Provenance is embedded — an installed binary must know what it is
-  #    without a repository anywhere near it.
-  if ! build_info="$("$bin" --build-info 2>&1)"; then
-    smoke_fail "$bin --build-info exited non-zero" "$build_info"
-  fi
-  case "$build_info" in
-    *'"git_sha"'*) ;;
-    *) smoke_fail "$bin --build-info carries no commit provenance" "$build_info" ;;
-  esac
-  green "$BIN_NAME --build-info: provenance embedded"
+  # 1-2. Recheck exact version + embedded provenance after the copy.
+  verify_binary_release_identity "$bin" "installed binary" "$MANIFEST_GIT_SHA"
 
   # 3. Config/setup subsystem resolves.
   if ! setup_output="$("$bin" setup --check 2>&1)"; then
@@ -359,6 +495,9 @@ post_install_check() {
 }
 
 main() {
+  # Reject configuration typos before resolving a platform or touching network.
+  validate_configuration
+
   printf '\n'
   blue "vc-frame installer"
   printf 'version: %s\ninstall: %s\nsource:  %s\n\n' "$VERSION" "$INSTALL_DIR" "$BASE_URL"

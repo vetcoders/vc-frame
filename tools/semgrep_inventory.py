@@ -39,6 +39,7 @@ CURRENT_EXE_PATHS = {
     "zellij-client/src/web_client/mod.rs",
 }
 TRANSFER_LOCK_PATH = "src/run_triage_cli.rs"
+XTASK_INSTALL_PATH = "xtask/src/pipelines.rs"
 
 
 class InventoryError(RuntimeError):
@@ -130,6 +131,33 @@ def require_terminal_cfg_test(path: str, lines: list[str], line: int) -> None:
     require_temp_dir_call(path, lines, line)
 
 
+def require_xtask_install_test(path: str, lines: list[str], line: int) -> None:
+    declaration = ["#[cfg(all(test, unix))]", "mod install_tests {"]
+    module_starts = [
+        index
+        for index in range(len(lines) - 1)
+        if lines[index:index + len(declaration)] == declaration
+    ]
+    if len(module_starts) != 1:
+        raise InventoryError(
+            f"expected one cfg(test, unix) install module in {path}; "
+            f"found {len(module_starts)}"
+        )
+    module_start = module_starts[0]
+    try:
+        module_end = lines.index("/// Run vc-frame debug build.", module_start + 2)
+    except ValueError as error:
+        raise InventoryError(f"xtask install test module has no reviewed end marker in {path}") from error
+    if not module_start + 1 < line - 1 < module_end:
+        raise InventoryError(f"temp-dir finding is outside xtask install tests at {path}:{line}")
+    require_temp_dir_call(path, lines, line)
+    nearby = [candidate.strip() for candidate in lines[line - 1:line + 12]]
+    if not any(candidate.startswith("match std::fs::create_dir(&directory)") for candidate in nearby):
+        raise InventoryError(
+            f"xtask temp directory lost atomic create_dir reservation at {path}:{line}"
+        )
+
+
 def require_web_client_test_parent(root: Path) -> None:
     try:
         parent_lines = (root / WEB_CLIENT_PARENT_PATH).read_text(encoding="utf-8").splitlines()
@@ -158,6 +186,9 @@ def require_temp_dir_policy(
 ) -> None:
     if path in TERMINAL_CFG_TEST_MODULES:
         require_terminal_cfg_test(path, lines, line)
+        return
+    if path == XTASK_INSTALL_PATH:
+        require_xtask_install_test(path, lines, line)
         return
     if path == WEB_CLIENT_TEST_PATH:
         require_web_client_test_parent(root)
@@ -277,6 +308,54 @@ def require_transfer_lock_fd_policy(path: str, lines: list[str], line: int) -> N
     ):
         raise InventoryError(
             f"transfer-lock unsafe source shape changed at {path}:{line}"
+        )
+
+
+def require_xtask_install_path_policy(path: str, lines: list[str], line: int) -> None:
+    if path != XTASK_INSTALL_PATH:
+        raise InventoryError(f"xtask install traversal policy used for {path}:{line}")
+    source_line = lines[line - 1].strip()
+    reviewed_sinks = {
+        "let parent_directory = std::fs::File::open(&parent_path).with_context(|| {",
+        "let mut source_file = std::fs::File::open(source.path()).with_context(|| {",
+    }
+    if source_line not in reviewed_sinks:
+        raise InventoryError(
+            f"xtask install traversal source shape changed at {path}:{line}"
+        )
+    nearby = [candidate.strip() for candidate in lines[max(0, line - 14):line]]
+    if (
+        source_line.startswith("let parent_directory")
+        and "fn reserve(destination: &ResolvedInstallDestination) -> anyhow::Result<Self> {"
+        not in nearby
+    ) or (
+        source_line.startswith("let mut source_file")
+        and "fn copy_source(&mut self, source: &ResolvedInstallSource) -> anyhow::Result<()> {"
+        not in nearby
+    ):
+        raise InventoryError(
+            f"xtask install traversal sink moved outside its reviewed helper at {path}:{line}"
+        )
+    contract_fragments = {
+        "struct ResolvedInstallSource(PathBuf);",
+        "let source = source.canonicalize().with_context(|| {",
+        "if !metadata.is_file() {",
+        "struct ResolvedInstallDestination {",
+        "let parent = parent.canonicalize().with_context(|| {",
+        ".create_new(true)",
+        "staged.revalidate_path_identity()?;",
+        "path_metadata.dev() == file_metadata.dev()",
+        "&& path_metadata.ino() == file_metadata.ino(),",
+    }
+    stripped_lines = [candidate.strip() for candidate in lines]
+    missing = sorted(
+        fragment
+        for fragment in contract_fragments
+        if not any(fragment in candidate for candidate in stripped_lines)
+    )
+    if missing:
+        raise InventoryError(
+            f"xtask install path invariant changed at {path}:{line}: missing {missing}"
         )
 
 
@@ -554,6 +633,7 @@ def adjudicate(
         )
     if rule == "rust.actix.path-traversal.tainted-path.tainted-path":
         policies = {
+            XTASK_INSTALL_PATH: ("Atomic binary installer", "The source and destination are local operator-selected CLI paths; source and parent are canonicalized and type-checked, staging uses create_new, and the retained file descriptor is matched by device and inode before publication or cleanup."),
             "zellij-server/src/plugins/plugin_loader.rs": ("Plugin filesystem capability", "The path is a host-selected WASI preopen, not an HTTP parameter."),
             "zellij-server/src/plugins/watch_filesystem.rs": ("Plugin filesystem capability", "The hit only converts an authorized host cwd before a local watcher is registered."),
             "zellij-utils/src/consts.rs": ("Runtime directories", "Source and target are fixed legacy/current ProjectDirs owned by the local OS user."),
@@ -564,6 +644,8 @@ def adjudicate(
         }
         if path not in policies:
             raise InventoryError(f"traversal finding has no policy: {path}")
+        if path == XTASK_INSTALL_PATH:
+            require_xtask_install_path_policy(path, lines, line)
         owner, invariant = policies[path]
         return (
             "scoped_false_positive",

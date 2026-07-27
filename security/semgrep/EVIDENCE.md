@@ -67,9 +67,10 @@ return values are checked at the boundary and converted to owned safe types.
 
 ## Temporary paths
 
-The three plugin findings are under `cfg(test)`. The four production scrollback
-findings append a new UUID v4 to the system temp directory and contain only the
-current user's terminal dump; no fixed authority filename is used.
+The three plugin findings and the xtask atomic-install finding are under
+`cfg(test)`. The xtask helper atomically reserves a process-unique directory;
+the four production scrollback findings append a new UUID v4 to the system
+temp directory and contain only the current user's terminal dump.
 
 ## Current executable
 
@@ -86,11 +87,14 @@ command-specific validation. It is input parsing, not authorization.
 
 ## Path traversal
 
-The nine Actix taint findings are outside an Actix HTTP source-to-sink flow:
+The eleven Actix taint findings are outside an Actix HTTP source-to-sink flow:
 WASI preopens and watchers receive host-authorized paths; legacy migration uses
 fixed current-user ProjectDirs; plugin loading is the explicit operator plugin
 capability; protobuf hits only construct data; installer symlinks use a
-validated framework root; webserver IPC uses locally discovered sockets.
+validated framework root; webserver IPC uses locally discovered sockets. The
+xtask installer receives local operator-selected paths, canonicalizes and
+type-checks the source and parent, reserves staging with `create_new`, and
+revalidates the retained descriptor by device and inode before publish/cleanup.
 
 ## Vendored browser assets
 

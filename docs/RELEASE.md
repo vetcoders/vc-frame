@@ -17,7 +17,7 @@ critical path.
 | Ownership | One source repo and one GitHub Release | Suite orchestrates crates, thin repos, npm, bundles and taps | One source repo and one GitHub Release |
 | Trigger | Version tag or manual draft | Several manual/tag workflows and downstream releases | Version tag or manual candidate draft |
 | Platform builds | One normal/no-web matrix | Several matrices across binary, package and bundle channels | One normal/no-web matrix |
-| Trust | Checksums; limited signing policy | GPG sidecars, Apple signing/notarization, cross-channel gates | SHA256, mandatory GPG for Unix archives, and GitHub OIDC provenance for every archive/MSI |
+| Trust | Checksums; limited signing policy | GPG sidecars, Apple signing/notarization, cross-channel gates | SHA256, mandatory GPG for the commit-bound manifest and Unix archives, and GitHub OIDC provenance for every archive/MSI |
 | Atomicity | Release is assembled directly | Cascade is powerful but has more partial-failure boundaries | Draft first, publish only after every required asset exists |
 | Installer | Release assets are primary | Multiple package/install channels | Versionless `install.sh` asset points to the tagged assets |
 | Complexity | Low | High, justified by a product suite | Low until vc-frame has real downstream channels |
@@ -39,7 +39,10 @@ Every supported target publishes a full build and a `no-web` build:
 
 The release also contains:
 
-- `manifest.json`, the installer's target-to-archive map
+- `manifest.json`, the installer's target-to-archive map plus the exact full
+  release `git_sha`
+- `manifest.json.sig`, the pinned-key signature authenticated before the
+  installer parses or uses any manifest field
 - `vc-frame-signing.asc`, the public release key
 - `install.sh`, the versionless canonical installer
 
@@ -66,7 +69,10 @@ bypass. Every job that reads signing material is bound to that environment.
 Candidates and tags fail before building if the private or public key is
 missing. `tools/install.sh` defaults to strict GPG verification and also
 requires a pinned `VCFRAME_GPG_FINGERPRINT`; downloading a key and signature
-from the same untrusted location is not treated as proof of identity.
+from the same untrusted location is not treated as proof of identity. The
+installer authenticates `manifest.json.sig` first, then requires the extracted
+binary's embedded full `git_sha` to equal the signed manifest. A valid old
+archive signature therefore cannot be replayed as a newer release.
 
 GPG and OIDC have different jobs. GPG gives users a stable, offline-compatible
 VetCoders trust root. GitHub OIDC gives each CI build a short-lived identity
@@ -103,8 +109,9 @@ Run **Actions → Release → Run workflow**. The workflow:
 3. runs `make semgrep` and `make ci`;
 4. creates draft `candidate-<run-id>`;
 5. builds, signs, and OIDC-attests the full matrix;
-6. verifies the complete asset list, all 12 checksums, all 8 Unix signatures,
-   the published key fingerprint, and every attestation;
+6. verifies the complete asset list, all 12 checksums, all 8 Unix archive
+   signatures plus the signed manifest, the published key fingerprint, the
+   manifest's exact `GITHUB_SHA`, and every attestation;
 7. leaves the candidate as a draft.
 
 Candidate runs never become `latest` and never publish a production release.
@@ -236,16 +243,23 @@ make install-test
 It builds synthetic release trees, serves them over `file://`, and asserts the
 installer **rejects** every one of: missing manifest, malformed manifest,
 foreign-product manifest, version-mismatched manifest, manifest without this
-target, missing archive, missing checksum sidecar, checksum mismatch, strict
-mode without a pinned fingerprint, strict mode with no published key, and a
-binary that fails any part of the post-install smoke contract (`--version`,
-`--build-info`, `setup --check`, or a session command). The positive control
-additionally asserts the resulting prefix holds `vc-frame` and no `zellij`
-alias.
+target or full commit identity, missing manifest signature, missing archive,
+missing checksum sidecar, checksum mismatch, strict mode without a pinned
+fingerprint, strict mode with no published key, a foreign signer included in
+the imported key bundle, an old signed binary replay, a current-version binary
+from the wrong commit, and a binary that fails any part of the post-install
+smoke contract (`--version`, `--build-info`, `setup --check`, or a session
+command). Replay failures additionally prove an existing `vc-frame` remains
+byte-for-byte untouched with no staging debris. The positive control asserts
+that a pinned signing subkey succeeds and that the resulting prefix holds
+`vc-frame` with no `zellij` alias.
 
 `manifest.json` is **mandatory**. There is no guessed-filename fallback: a
 guessed name can only agree with the release by luck, and luck is not
-provenance.
+provenance. In strict mode its pinned signature is mandatory and verified
+before parsing. Explicit `VCFRAME_REQUIRE_GPG=0` gives up authentication, but
+still requires the manifest version and full commit to agree with the binary's
+embedded build information.
 
 The candidate and final release must additionally prove strict GPG
 verification against the selected pinned fingerprint. A downloaded subject can
