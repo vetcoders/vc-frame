@@ -1684,9 +1684,11 @@ def process_group_members(group_id: int) -> list[dict[str, object]]:
 def validate_owned_process_group_leader(
     process: subprocess.Popen[bytes],
 ) -> None:
-    if process.poll() is not None:
-        raise OwnedProcessGroupRefusal(
-            f"owned process-group leader {process.pid} is no longer live and unreaped"
+    returncode = process.poll()
+    if returncode is not None:
+        raise AssertionError(
+            f"owned process-group leader {process.pid} exited with "
+            f"returncode {returncode}"
         )
     try:
         leader_group = os.getpgid(process.pid)
@@ -1775,6 +1777,7 @@ def signal_exact_owned_group_member(
     signal_number: int,
     *,
     deadline: float,
+    require_stopped: bool = False,
 ) -> bool:
     signal_name = signal.Signals(signal_number).name
     last_members: list[dict[str, object]] = []
@@ -1790,8 +1793,15 @@ def signal_exact_owned_group_member(
         )
         if member is None:
             return False
-        if "Z" in str(member.get("state", "")):
+        member_state = str(member.get("state", ""))
+        if "Z" in member_state:
             return False
+        if require_stopped and "T" not in member_state:
+            raise OwnedProcessGroupRefusal(
+                f"refusing {signal_name} for exact owned member {member_pid}: "
+                f"revalidated state is {member_state!r}, expected stopped; "
+                f"member={member!r}, members={last_members!r}"
+            )
         try:
             os.kill(member_pid, signal_number)
             return True
@@ -1852,9 +1862,10 @@ def continue_owned_process_group(
 ) -> None:
     deadline = time.monotonic() + timeout
     members = validated_owned_process_group_members(process)
-    # Resume the leader first so no descendant advances behind a stopped
-    # leader. Every resumed member remains inside the deliberate time slice.
-    members.sort(key=lambda member: int(member["pid"]) != process.pid)
+    # Resume each descendant only after revalidating that exact PID is still
+    # stopped, then never address it again. Resume the leader last so it cannot
+    # reap a descendant and expose that PID to reuse before its SIGCONT.
+    members.sort(key=lambda member: int(member["pid"]) == process.pid)
     for member in members:
         if "Z" in str(member.get("state", "")):
             continue
@@ -1863,6 +1874,7 @@ def continue_owned_process_group(
             int(member["pid"]),
             signal.SIGCONT,
             deadline=deadline,
+            require_stopped=True,
         )
 
 
@@ -1932,6 +1944,12 @@ def wait_for_process_stop(
     deadline = time.monotonic() + timeout
     last_state: object = None
     if reassert_stop and signal_process_group:
+        returncode = process.poll()
+        if returncode is not None:
+            raise AssertionError(
+                f"killpoint process {process.pid} exited before SIGSTOP: "
+                f"returncode={returncode}"
+            )
         stop_owned_process_group(
             process,
             timeout=max(deadline - time.monotonic(), 0.001),

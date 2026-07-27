@@ -750,6 +750,151 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                 member_snapshots,
             )
 
+    def test_group_continue_resumes_revalidated_descendants_before_leader(
+        self,
+    ) -> None:
+        process = mock.Mock()
+        process.pid = 9_401
+        process.poll.return_value = None
+        members = [
+            {
+                "pid": process.pid,
+                "ppid": 1,
+                "pgid": process.pid,
+                "uid": 501,
+                "sid": process.pid,
+                "sid_errno": None,
+                "sid_error": None,
+                "state": "T",
+                "command": "owned-leader",
+            },
+            {
+                "pid": 9_402,
+                "ppid": process.pid,
+                "pgid": process.pid,
+                "uid": 501,
+                "sid": process.pid,
+                "sid_errno": None,
+                "sid_error": None,
+                "state": "T",
+                "command": "owned-child-a",
+            },
+            {
+                "pid": 9_403,
+                "ppid": process.pid,
+                "pgid": process.pid,
+                "uid": 501,
+                "sid": process.pid,
+                "sid_errno": None,
+                "sid_error": None,
+                "state": "T",
+                "command": "owned-child-b",
+            },
+        ]
+        with mock.patch.object(
+            MODULE,
+            "validated_owned_process_group_members",
+            return_value=members,
+        ) as inventory, mock.patch.object(
+            MODULE.os,
+            "kill",
+        ) as exact_kill, mock.patch.object(
+            MODULE.os,
+            "killpg",
+            side_effect=AssertionError("must not signal a process group"),
+        ):
+            MODULE.continue_owned_process_group(process)
+        self.assertEqual(inventory.call_count, 4)
+        self.assertEqual(
+            exact_kill.call_args_list,
+            [
+                mock.call(9_402, signal.SIGCONT),
+                mock.call(9_403, signal.SIGCONT),
+                mock.call(process.pid, signal.SIGCONT),
+            ],
+        )
+
+    def test_group_continue_refuses_unstopped_revalidated_target_without_signal(
+        self,
+    ) -> None:
+        process = mock.Mock()
+        process.pid = 9_501
+        process.poll.return_value = None
+        leader = {
+            "pid": process.pid,
+            "ppid": 1,
+            "pgid": process.pid,
+            "uid": 501,
+            "sid": process.pid,
+            "sid_errno": None,
+            "sid_error": None,
+            "state": "T",
+            "command": "owned-leader",
+        }
+        stopped_child = {
+            "pid": 9_502,
+            "ppid": process.pid,
+            "pgid": process.pid,
+            "uid": 501,
+            "sid": process.pid,
+            "sid_errno": None,
+            "sid_error": None,
+            "state": "T",
+            "command": "owned-child",
+        }
+        running_child = {**stopped_child, "state": "S"}
+        with mock.patch.object(
+            MODULE,
+            "validated_owned_process_group_members",
+            side_effect=[
+                [leader, stopped_child],
+                [leader, running_child],
+            ],
+        ) as inventory, mock.patch.object(
+            MODULE.os,
+            "kill",
+        ) as exact_kill, mock.patch.object(
+            MODULE.os,
+            "killpg",
+            side_effect=AssertionError("must not signal a process group"),
+        ):
+            with self.assertRaisesRegex(
+                MODULE.OwnedProcessGroupRefusal,
+                r"refusing SIGCONT for exact owned member 9502: "
+                r"revalidated state is 'S'",
+            ):
+                MODULE.continue_owned_process_group(process)
+        self.assertEqual(inventory.call_count, 2)
+        exact_kill.assert_not_called()
+
+    def test_group_stop_observes_owned_leader_exit_before_signalling(self) -> None:
+        process = mock.Mock()
+        process.pid = 9_601
+        process.poll.return_value = 0
+        with mock.patch.object(
+            MODULE,
+            "stop_owned_process_group",
+        ) as stop_group, mock.patch.object(
+            MODULE.os,
+            "kill",
+        ) as exact_kill, mock.patch.object(
+            MODULE.os,
+            "killpg",
+            side_effect=AssertionError("must not signal a process group"),
+        ):
+            with self.assertRaisesRegex(
+                AssertionError,
+                r"killpoint process 9601 exited before SIGSTOP: returncode=0",
+            ):
+                MODULE.wait_for_process_stop(
+                    process,
+                    reassert_stop=True,
+                    signal_process_group=True,
+                )
+        process.poll.assert_called_once_with()
+        stop_group.assert_not_called()
+        exact_kill.assert_not_called()
+
     def test_transient_non_zombie_esrch_disappears_without_signal(self) -> None:
         process = mock.Mock()
         process.pid = 9_201
