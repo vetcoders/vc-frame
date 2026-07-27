@@ -208,6 +208,9 @@ fn async_kill_session_requires_normal_exit_ack() {
         let (message, _) = receiver.recv_client_msg().expect("kill request");
         assert!(matches!(message, ClientToServerMsg::KillSession));
         sender
+            .send_server_msg(ServerToClientMsg::UnblockInputThread)
+            .expect("send transport prelude");
+        sender
             .send_server_msg(ServerToClientMsg::Exit {
                 exit_reason: ExitReason::Normal,
             })

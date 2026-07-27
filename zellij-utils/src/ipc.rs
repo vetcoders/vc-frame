@@ -521,23 +521,28 @@ pub async fn async_send_kill_and_await(path: &std::path::Path) -> io::Result<()>
     stream.write_all(&encoded).await?;
     stream.flush().await?;
 
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).await?;
-    let len = u32::from_le_bytes(len_buf) as usize;
-    if len > MAX_KILL_ACK_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("kill-session acknowledgement is too large: {len} bytes"),
-        ));
+    loop {
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).await?;
+        let len = u32::from_le_bytes(len_buf) as usize;
+        if len > MAX_KILL_ACK_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("kill-session acknowledgement is too large: {len} bytes"),
+            ));
+        }
+        let mut encoded_ack = vec![0u8; len];
+        stream.read_exact(&mut encoded_ack).await?;
+        let proto_ack = ProtoServerToClientMsg::decode(encoded_ack.as_slice())
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+        let ack = proto_ack.try_into().map_err(|error: anyhow::Error| {
+            io::Error::new(io::ErrorKind::InvalidData, error.to_string())
+        })?;
+        if matches!(ack, ServerToClientMsg::UnblockInputThread) {
+            continue;
+        }
+        return validate_kill_session_ack(ack);
     }
-    let mut encoded_ack = vec![0u8; len];
-    stream.read_exact(&mut encoded_ack).await?;
-    let proto_ack = ProtoServerToClientMsg::decode(encoded_ack.as_slice())
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
-    let ack = proto_ack.try_into().map_err(|error: anyhow::Error| {
-        io::Error::new(io::ErrorKind::InvalidData, error.to_string())
-    })?;
-    validate_kill_session_ack(ack)
 }
 
 #[cfg(windows)]
@@ -559,13 +564,18 @@ pub async fn async_send_kill_and_await(path: &std::path::Path) -> io::Result<()>
                     .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?;
                 let mut receiver: IpcReceiverWithContext<ServerToClientMsg> =
                     IpcReceiverWithContext::new(reply_stream);
-                let (ack, _) = receiver.recv_server_msg().ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "kill-session reply pipe closed without acknowledgement",
-                    )
-                })?;
-                validate_kill_session_ack(ack)
+                loop {
+                    let (ack, _) = receiver.recv_server_msg().ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "kill-session reply pipe closed without acknowledgement",
+                        )
+                    })?;
+                    if matches!(ack, ServerToClientMsg::UnblockInputThread) {
+                        continue;
+                    }
+                    break validate_kill_session_ack(ack);
+                }
             })();
             let _ = result_tx.send(result);
         })
