@@ -659,6 +659,11 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                 )
             self.assertEqual(result.returncode, -signal.SIGKILL)
             self.assertEqual(result.observed_state, {"marker": "ready"})
+            self.assertEqual(result.cleanup_proof["status"], "passed")
+            self.assertEqual(
+                result.cleanup_proof["group_proof"]["status"],
+                "empty",
+            )
 
     def test_group_interruption_signals_only_its_fresh_owned_group(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -748,6 +753,88 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                     for member in members
                 ),
                 member_snapshots,
+            )
+            self.assertEqual(result.cleanup_proof["status"], "passed")
+            self.assertEqual(
+                result.cleanup_proof["group_proof"]["status"],
+                "empty",
+            )
+
+    def test_group_kill_failure_still_reaps_leader_and_proves_residue(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            process = mock.Mock()
+            process.pid = 9_801
+            process.poll.return_value = None
+            process.wait.return_value = -signal.SIGKILL
+            primary_error = AssertionError("primary group kill failed")
+            cleanup_error = AssertionError("cleanup group kill failed")
+            residue_error = AssertionError("group residue remained")
+            cleanup_proofs: list[dict[str, object]] = []
+
+            with mock.patch.object(
+                MODULE.subprocess,
+                "Popen",
+                return_value=process,
+            ), mock.patch.object(
+                MODULE,
+                "wait_for_process_stop",
+            ), mock.patch.object(
+                MODULE,
+                "continue_owned_process_group",
+            ), mock.patch.object(
+                MODULE,
+                "kill_owned_process_group",
+                side_effect=[primary_error, cleanup_error],
+            ) as kill_group, mock.patch.object(
+                MODULE,
+                "wait_for_process_group_gone",
+                side_effect=residue_error,
+            ) as prove_group, mock.patch.object(
+                MODULE.os,
+                "kill",
+                side_effect=AssertionError("must not send a real exact signal"),
+            ), mock.patch.object(
+                MODULE.os,
+                "killpg",
+                side_effect=AssertionError("must not signal a process group"),
+            ):
+                with self.assertRaises(AssertionError) as caught:
+                    MODULE.interrupt_process_at_state(
+                        pathlib.Path("/bin/false"),
+                        dict(os.environ),
+                        [],
+                        scenario="unit-group-cleanup-failure",
+                        artifact_root=pathlib.Path(temporary),
+                        observe=lambda: {"ready": True},
+                        signal_process_group=True,
+                        cleanup_proofs=cleanup_proofs,
+                        slice_seconds=0,
+                        max_slices=1,
+                    )
+
+            self.assertIs(caught.exception, primary_error)
+            self.assertEqual(kill_group.call_count, 2)
+            process.kill.assert_called_once_with()
+            process.wait.assert_called_once_with(timeout=5)
+            prove_group.assert_called_once_with(process.pid, timeout=5)
+            self.assertEqual(
+                getattr(caught.exception, "interruption_cleanup_errors"),
+                [cleanup_error, residue_error],
+            )
+            notes = "\n".join(getattr(caught.exception, "__notes__", []))
+            self.assertIn("cleanup group kill failed", notes)
+            self.assertIn("group residue remained", notes)
+            self.assertEqual(len(cleanup_proofs), 1)
+            proof = cleanup_proofs[0]
+            self.assertEqual(proof["status"], "failed")
+            self.assertTrue(proof["leader_exact_kill_attempted"])
+            self.assertTrue(proof["leader_reaped"])
+            self.assertEqual(proof["group_proof"]["status"], "proof_failed")
+            self.assertEqual(
+                MODULE.interruption_cleanup_receipt(cleanup_proofs)["status"],
+                "failed",
             )
 
     def test_group_continue_resumes_revalidated_descendants_before_leader(
@@ -1276,6 +1363,28 @@ class EvidenceAndCleanupTests(unittest.TestCase):
             [entry["pid"] for entry in MODULE.server_processes_from_ps(raw, root)],
             [101, 102],
         )
+
+    def test_server_process_cleanup_requires_stable_empty_observations(self) -> None:
+        snapshots = [
+            [],
+            [{"pid": 42, "command": "vc-frame --server /tmp/proof"}],
+            [],
+            [],
+            [],
+        ]
+        with mock.patch.object(
+            MODULE,
+            "server_processes_for_socket_root",
+            side_effect=snapshots,
+        ) as inspect_processes:
+            result = MODULE.wait_for_no_server_processes(
+                pathlib.Path("/tmp/proof"),
+                timeout=1,
+                stable_empty_observations=3,
+                poll_interval=0,
+            )
+        self.assertEqual(result, [])
+        self.assertEqual(inspect_processes.call_count, 5)
 
     def test_write_error_has_exact_category(self) -> None:
         self.assertEqual(

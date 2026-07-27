@@ -31,7 +31,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, cast
 
 
 DRAWER_BY_BUCKET = {
@@ -104,6 +104,10 @@ class OwnedProcessGroupRefusal(AssertionError):
     """The harness cannot prove an exact process-group member is safe to signal."""
 
 
+class InterruptionCleanupError(AssertionError):
+    """An interrupted child could not be proven fully reaped and residue-free."""
+
+
 @dataclass(frozen=True)
 class InterruptedProcess:
     pid: int
@@ -115,6 +119,7 @@ class InterruptedProcess:
     stdout: str
     stderr: str
     returncode: int
+    cleanup_proof: dict[str, object]
 
 
 class EvidenceRecorder:
@@ -814,16 +819,31 @@ def wait_for_no_server_processes(
     socket_root: pathlib.Path,
     *,
     timeout: float = 15,
+    stable_empty_observations: int = 3,
+    poll_interval: float = 0.1,
 ) -> list[dict[str, object]]:
+    require(
+        stable_empty_observations >= 2,
+        "server cleanup proof needs multiple empty observations",
+    )
     deadline = time.monotonic() + timeout
     last: list[dict[str, object]] = []
+    consecutive_empty = 0
     while time.monotonic() < deadline:
         last = server_processes_for_socket_root(socket_root)
         if not last:
-            return []
-        time.sleep(0.1)
+            consecutive_empty += 1
+            if consecutive_empty >= stable_empty_observations:
+                return []
+        else:
+            consecutive_empty = 0
+        if poll_interval > 0:
+            time.sleep(poll_interval)
     raise AssertionError(
-        f"isolated vc-frame server process residue remained for {socket_root}: {last!r}"
+        f"isolated vc-frame server process residue or unstable empty inventory "
+        f"remained for {socket_root}: last={last!r}, "
+        f"consecutive_empty={consecutive_empty}, "
+        f"required_empty={stable_empty_observations}"
     )
 
 
@@ -1927,17 +1947,191 @@ def kill_owned_process_group(
     )
 
 
-def wait_for_process_group_gone(group_id: int, timeout: float = 5) -> None:
+def wait_for_process_group_gone(
+    group_id: int,
+    timeout: float = 5,
+    *,
+    stable_empty_observations: int = 3,
+    poll_interval: float = 0.01,
+) -> dict[str, object]:
+    require(
+        stable_empty_observations >= 2,
+        "interruption group proof needs multiple empty observations",
+    )
     deadline = time.monotonic() + timeout
     last_members: list[dict[str, object]] = []
+    observations = 0
+    consecutive_empty = 0
     while time.monotonic() < deadline:
         last_members = process_group_members(group_id)
-        if not last_members:
-            return
-        time.sleep(0.01)
-    raise AssertionError(
-        f"owned interrupted process group {group_id} left members: {last_members!r}"
+        observations += 1
+        if last_members:
+            consecutive_empty = 0
+        else:
+            consecutive_empty += 1
+            if consecutive_empty >= stable_empty_observations:
+                return {
+                    "group_id": group_id,
+                    "status": "empty",
+                    "residue": [],
+                    "observations": observations,
+                    "consecutive_empty": consecutive_empty,
+                }
+        if poll_interval > 0:
+            time.sleep(poll_interval)
+    proof: dict[str, object] = {
+        "group_id": group_id,
+        "status": "residue",
+        "residue": last_members,
+        "observations": observations,
+        "consecutive_empty": consecutive_empty,
+    }
+    error = InterruptionCleanupError(
+        f"owned interrupted process group {group_id} left residue or lacked "
+        f"a stable empty proof: {proof!r}"
     )
+    error.cleanup_proof = proof
+    raise error
+
+
+def cleanup_error_evidence(error: BaseException) -> dict[str, str]:
+    return {
+        "type": type(error).__name__,
+        "message": str(error),
+    }
+
+
+def teardown_interrupted_process(
+    process: subprocess.Popen[bytes],
+    *,
+    scenario: str,
+    signal_process_group: bool,
+    timeout: float = 5,
+) -> tuple[dict[str, object], list[BaseException]]:
+    """Terminate/reap the exact Popen leader and prove its fresh group empty."""
+    errors: list[BaseException] = []
+    proof: dict[str, object] = {
+        "scenario": scenario,
+        "pid": process.pid,
+        "group_id": process.pid,
+        "signal_process_group": signal_process_group,
+        "owned_group_kill_attempted": False,
+        "leader_exact_kill_attempted": False,
+        "leader_reap_attempted": False,
+        "leader_reaped": False,
+        "leader_returncode": None,
+        "group_proof": {
+            "group_id": process.pid,
+            "status": "pending",
+            "residue": [],
+        },
+    }
+    try:
+        leader_alive = process.poll() is None
+    except BaseException as error:
+        errors.append(error)
+        proof["leader_poll_error"] = cleanup_error_evidence(error)
+        leader_alive = True
+
+    if leader_alive and signal_process_group:
+        proof["owned_group_kill_attempted"] = True
+        try:
+            kill_owned_process_group(process, timeout=timeout)
+        except ProcessLookupError:
+            proof["owned_group_kill_result"] = "leader_already_exited"
+        except BaseException as error:
+            errors.append(error)
+            proof["owned_group_kill_result"] = "failed"
+            proof["owned_group_kill_error"] = cleanup_error_evidence(error)
+        else:
+            proof["owned_group_kill_result"] = "completed"
+
+    if leader_alive:
+        try:
+            leader_alive = process.poll() is None
+        except BaseException as error:
+            errors.append(error)
+            proof["leader_recheck_error"] = cleanup_error_evidence(error)
+            leader_alive = True
+    if leader_alive:
+        proof["leader_exact_kill_attempted"] = True
+        try:
+            # Popen still owns this unreaped direct child, so this exact-PID
+            # fallback cannot address a reused PID.
+            process.kill()
+        except ProcessLookupError:
+            proof["leader_exact_kill_result"] = "already_exited"
+        except BaseException as error:
+            errors.append(error)
+            proof["leader_exact_kill_result"] = "failed"
+            proof["leader_exact_kill_error"] = cleanup_error_evidence(error)
+        else:
+            proof["leader_exact_kill_result"] = "sent"
+
+    proof["leader_reap_attempted"] = True
+    try:
+        returncode = process.wait(timeout=timeout)
+    except BaseException as error:
+        errors.append(error)
+        proof["leader_reap_error"] = cleanup_error_evidence(error)
+    else:
+        proof["leader_reaped"] = True
+        proof["leader_returncode"] = returncode
+
+    try:
+        group_proof = wait_for_process_group_gone(process.pid, timeout=timeout)
+    except BaseException as error:
+        errors.append(error)
+        attached_proof = getattr(error, "cleanup_proof", None)
+        proof["group_proof"] = (
+            attached_proof
+            if isinstance(attached_proof, dict)
+            else {
+                "group_id": process.pid,
+                "status": "proof_failed",
+                "residue": [],
+                "error": cleanup_error_evidence(error),
+            }
+        )
+    else:
+        proof["group_proof"] = (
+            group_proof
+            if isinstance(group_proof, dict)
+            else {
+                "group_id": process.pid,
+                "status": "empty",
+                "residue": [],
+            }
+        )
+
+    group_status = str(
+        cast(dict[str, object], proof["group_proof"]).get("status", "")
+    )
+    if group_status != "empty" and not errors:
+        errors.append(
+            InterruptionCleanupError(
+                f"{scenario} interruption group proof was not empty: "
+                f"{proof['group_proof']!r}"
+            )
+        )
+    proof["errors"] = [cleanup_error_evidence(error) for error in errors]
+    proof["status"] = (
+        "passed"
+        if not errors and proof["leader_reaped"] is True and group_status == "empty"
+        else "failed"
+    )
+    return proof, errors
+
+
+def interruption_cleanup_receipt(
+    proofs: list[dict[str, object]],
+) -> dict[str, object]:
+    failed = [proof for proof in proofs if proof.get("status") != "passed"]
+    return {
+        "status": "failed" if failed else ("passed" if proofs else "not_started"),
+        "proofs": proofs,
+        "failed": failed,
+    }
 
 
 def wait_for_process_stop(
@@ -2011,6 +2205,7 @@ def interrupt_process_at_state(
     observe: Callable[[], dict[str, object] | None],
     before_interrupt: Callable[[dict[str, object]], dict[str, object]] | None = None,
     signal_process_group: bool = False,
+    cleanup_proofs: list[dict[str, object]] | None = None,
     slice_seconds: float = 0.0005,
     max_slices: int = 20_000,
 ) -> InterruptedProcess:
@@ -2025,6 +2220,10 @@ def interrupt_process_at_state(
     process: subprocess.Popen[bytes] | None = None
     observed: dict[str, object] | None = None
     slices = 0
+    returncode: int | None = None
+    primary_error: BaseException | None = None
+    cleanup_proof: dict[str, object] = {}
+    cleanup_errors: list[BaseException] = []
     with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
         process = subprocess.Popen(
             [
@@ -2077,18 +2276,33 @@ def interrupt_process_at_state(
                     f"{scenario} exited before its killpoint: exit={returncode}"
                 )
             returncode = process.wait(timeout=5)
+        except BaseException as error:
+            primary_error = error
         finally:
-            if process.poll() is None:
-                try:
-                    if signal_process_group:
-                        kill_owned_process_group(process)
-                    else:
-                        process.kill()
-                except ProcessLookupError:
-                    pass
-                process.wait(timeout=5)
-    if signal_process_group:
-        wait_for_process_group_gone(process.pid)
+            cleanup_proof, cleanup_errors = teardown_interrupted_process(
+                process,
+                scenario=scenario,
+                signal_process_group=signal_process_group,
+            )
+            if cleanup_proofs is not None:
+                cleanup_proofs.append(cleanup_proof)
+    if cleanup_errors:
+        cleanup_summary = "; ".join(
+            f"{type(error).__name__}: {error}" for error in cleanup_errors
+        )
+        if primary_error is None:
+            primary_error = InterruptionCleanupError(
+                f"{scenario} interruption cleanup failed: {cleanup_summary}"
+            )
+            primary_error.__cause__ = cleanup_errors[0]
+        else:
+            primary_error.add_note(
+                f"{scenario} interruption cleanup errors: {cleanup_summary}"
+            )
+        primary_error.interruption_cleanup_errors = cleanup_errors
+        primary_error.interruption_cleanup_proof = cleanup_proof
+    if primary_error is not None:
+        raise primary_error
     stdout_text = stdout_path.read_text(encoding="utf-8", errors="replace")
     stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")
     require(
@@ -2105,6 +2319,7 @@ def interrupt_process_at_state(
         stdout=stdout_text,
         stderr=stderr_text,
         returncode=returncode,
+        cleanup_proof=cleanup_proof,
     )
 
 
@@ -2339,6 +2554,7 @@ def interrupted_process_evidence(result: InterruptedProcess) -> dict[str, object
         "stdout": result.stdout,
         "stderr": result.stderr,
         "returncode": result.returncode,
+        "cleanup_proof": result.cleanup_proof,
     }
 
 
@@ -2729,6 +2945,7 @@ def main() -> int:
             "socket_path_budget": {},
             "negative_probes": [],
             "interruption_probes": [],
+            "interruption_cleanup_proofs": [],
             "transfers": [],
             "restart": {},
             "cleanup": {},
@@ -2794,6 +3011,7 @@ def main() -> int:
     caught: BaseException | None = None
     cleanup_errors: list[str] = []
     cleanup_receipts: dict[str, object] = {}
+    interruption_cleanup_proofs: list[dict[str, object]] = []
     mutation_started = False
 
     try:
@@ -3114,6 +3332,7 @@ def main() -> int:
             observe=lambda: capture_receipt_killpoint_state(
                 control_plane, capture_interrupt_run
             ),
+            cleanup_proofs=interruption_cleanup_proofs,
         )
         require(
             typed_tab_identity(
@@ -3229,6 +3448,7 @@ def main() -> int:
                 drawer="Needs attention",
             ),
             signal_process_group=True,
+            cleanup_proofs=interruption_cleanup_proofs,
             slice_seconds=0.00025,
         )
         require(
@@ -3383,6 +3603,7 @@ def main() -> int:
             observe=lambda: viewer_confirmation_killpoint_state(
                 control_plane, viewer_interrupt_run
             ),
+            cleanup_proofs=interruption_cleanup_proofs,
             slice_seconds=0.00025,
         )
         require(
@@ -3918,6 +4139,23 @@ def main() -> int:
     except BaseException as error:
         caught = error
     finally:
+        interruption_receipt = interruption_cleanup_receipt(
+            interruption_cleanup_proofs
+        )
+        cleanup_receipts["interruption_processes"] = interruption_receipt
+        recorder.set(
+            "interruption_cleanup_proofs",
+            interruption_cleanup_proofs,
+        )
+        if interruption_receipt["status"] == "failed":
+            cleanup_errors.append(
+                "interruption_processes: exact leader/group cleanup proof failed: "
+                + json.dumps(
+                    interruption_receipt["failed"],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
         if mutation_started:
             for label, cleanup_env, targets in (
                 ("primary", env, primary_targets),
@@ -4006,6 +4244,7 @@ def main() -> int:
             {
                 "type": type(caught).__name__,
                 "message": str(caught),
+                "notes": list(getattr(caught, "__notes__", [])),
                 "cleanup_errors": cleanup_errors,
             },
         )
