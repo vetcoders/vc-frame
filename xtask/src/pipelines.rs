@@ -108,19 +108,19 @@ pub fn install(sh: &Shell, flags: flags::Install) -> anyhow::Result<()> {
 fn install_binary(_sh: &Shell, source: &Path, destination: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
-        install_binary_unix(source, destination, |staged| {
+        install_binary_unix(source, destination, |source| {
             // On macOS (Apple Silicon especially), `cargo build --release` with
             // `strip = true` produces a stripped, ad-hoc "linker-signed" Mach-O.
-            // Sign the staged inode before publication so neither existing
-            // servers nor a concurrent new launch can observe a half-signed
-            // executable.
+            // `codesign --force` can replace the inode it signs, so sign the
+            // private build output before reserving the publication inode. The
+            // signed bytes are copied into that protected inode afterwards.
             #[cfg(target_os = "macos")]
-            cmd!(_sh, "codesign --force --sign - {staged}")
+            cmd!(_sh, "codesign --force --sign - {source}")
                 .run()
-                .context("failed to sign staged vc-frame binary")?;
+                .context("failed to sign vc-frame build output")?;
 
             #[cfg(not(target_os = "macos"))]
-            let _ = staged;
+            let _ = source;
             Ok(())
         })
     }
@@ -300,16 +300,18 @@ fn effective_install_destination(
 fn install_binary_unix(
     source: &Path,
     destination: &Path,
-    sign_staged: impl FnOnce(&Path) -> anyhow::Result<()>,
+    prepare_source: impl FnOnce(&Path) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let destination = effective_install_destination(source, destination)?;
     let source = ResolvedInstallSource::resolve(source)?;
+    prepare_source(source.path())?;
+    // Source preparation (notably macOS codesign) may atomically replace its
+    // inode. Resolve and type-check the resulting path before opening it for
+    // the protected publication copy.
+    let source = ResolvedInstallSource::resolve(source.path())?;
     let mut staged = StagedInstall::reserve(&destination)?;
     let install_result = (|| {
         staged.copy_source(&source)?;
-        sign_staged(staged.path())?;
-        // `codesign` must have modified the inode we reserved, rather than
-        // swapping the path to a different file before publication.
         staged.revalidate_path_identity()?;
         staged.sync_file()?;
         staged.publish(&destination)
@@ -748,7 +750,7 @@ mod install_tests {
     }
 
     #[test]
-    fn signing_failure_preserves_destination_and_removes_the_stage() {
+    fn source_preparation_failure_preserves_destination_without_staging() {
         let directory = test_directory();
         let source = directory.join("new-vc-frame");
         let destination = directory.join("vc-frame");
@@ -764,6 +766,30 @@ mod install_tests {
         assert_eq!(
             std::fs::read_to_string(&destination).expect("read preserved destination"),
             "old runtime"
+        );
+        assert!(staged_entries(&directory).is_empty());
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn source_preparation_may_replace_its_inode_before_staging() {
+        let directory = test_directory();
+        let source = directory.join("new-vc-frame");
+        let replacement = directory.join("signed-vc-frame");
+        let destination = directory.join("vc-frame");
+        std::fs::write(&source, b"unsigned runtime").expect("write source");
+        std::fs::write(&replacement, b"signed runtime").expect("write signed replacement");
+        std::fs::write(&destination, b"old runtime").expect("write destination");
+
+        install_binary_unix(&source, &destination, |source| {
+            std::fs::rename(&replacement, source).expect("replace source inode like codesign");
+            Ok(())
+        })
+        .expect("source inode replacement before staging must install");
+
+        assert_eq!(
+            std::fs::read_to_string(&destination).expect("read published destination"),
+            "signed runtime"
         );
         assert!(staged_entries(&directory).is_empty());
         std::fs::remove_dir_all(directory).expect("remove test directory");
