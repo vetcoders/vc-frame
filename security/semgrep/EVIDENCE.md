@@ -1,8 +1,8 @@
 # Semgrep adjudication evidence
 
 Receiver baseline: Semgrep 1.164.0, explicit registry pack `p/rust`, 60 resolved
-rules, 57 rules executed over 373 targets, 318 blocking findings and zero scan
-errors at `9f8a67b0`. Raw JSON is preserved beside the W0-B delivery report;
+rules, 57 rules executed over 376 targets, 319 blocking findings and zero scan
+errors at `5557bf16`. The exact raw JSON hash is pinned in `baseline.json`;
 `findings.jsonl` is the checked-in machine-verifiable verdict surface.
 The gate also hashes Semgrep's normalized resolved rule representation, so a
 registry rule-body change fails even when rule IDs stay the same. Scanner
