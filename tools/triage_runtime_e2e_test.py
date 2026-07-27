@@ -886,6 +886,7 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                 "T",
                 MODULE.kill_owned_process_group,
                 [
+                    (leader_pid, signal.SIGSTOP),
                     (grandchild_pid, signal.SIGKILL),
                     (child_pid, signal.SIGKILL),
                     (leader_pid, signal.SIGKILL),
@@ -947,6 +948,10 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                     "geteuid",
                     return_value=501,
                 ), mock.patch.object(
+                    MODULE,
+                    "process_state",
+                    side_effect=lambda pid: states.get(pid),
+                ), mock.patch.object(
                     MODULE.os,
                     "kill",
                     side_effect=transition,
@@ -957,6 +962,143 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                 ):
                     action(process, timeout=1)
                 self.assertEqual(signals, expected)
+
+    def test_group_stop_freezes_owned_leader_before_descendant_inventory(
+        self,
+    ) -> None:
+        leader_pid = 9_811
+        child_pid = 9_812
+        process = mock.Mock()
+        process.pid = leader_pid
+        process.poll.return_value = None
+        leader_state = "S"
+        pre_stop_inventory_pids: list[int] = []
+        events: list[tuple[str, int]] = []
+
+        def validate_group(pid: int) -> int:
+            events.append(("getpgid", pid))
+            return leader_pid
+
+        def validate_session(pid: int) -> int:
+            events.append(("getsid", pid))
+            return leader_pid
+
+        def stop_leader(signal_number: int) -> None:
+            nonlocal leader_state
+            events.append(("leader-signal", signal_number))
+            self.assertEqual(signal_number, signal.SIGSTOP)
+            if sum(event[0] == "leader-signal" for event in events) >= 2:
+                leader_state = "T"
+
+        def inventory(_group_id: int) -> list[dict[str, object]]:
+            if "T" not in leader_state:
+                churn_pid = 9_900 + len(pre_stop_inventory_pids)
+                pre_stop_inventory_pids.append(churn_pid)
+                return [
+                    {
+                        "pid": leader_pid,
+                        "ppid": 1,
+                        "pgid": leader_pid,
+                        "uid": 501,
+                        "sid": leader_pid,
+                        "sid_errno": None,
+                        "sid_error": None,
+                        "state": leader_state,
+                        "command": "owned-leader",
+                    },
+                    {
+                        "pid": churn_pid,
+                        "ppid": leader_pid,
+                        "pgid": leader_pid,
+                        "uid": 501,
+                        "sid": None,
+                        "sid_errno": errno.ESRCH,
+                        "sid_error": "ProcessLookupError: gone",
+                        "state": "S",
+                        "command": "churning-child",
+                    },
+                ]
+            events.append(("inventory", child_pid))
+            return [
+                {
+                    "pid": leader_pid,
+                    "ppid": 1,
+                    "pgid": leader_pid,
+                    "uid": 501,
+                    "sid": leader_pid,
+                    "sid_errno": None,
+                    "sid_error": None,
+                    "state": leader_state,
+                    "command": "owned-leader",
+                },
+                {
+                    "pid": child_pid,
+                    "ppid": leader_pid,
+                    "pgid": leader_pid,
+                    "uid": 501,
+                    "sid": leader_pid,
+                    "sid_errno": None,
+                    "sid_error": None,
+                    "state": "T",
+                    "command": "owned-child",
+                },
+            ]
+
+        process.send_signal.side_effect = stop_leader
+        with mock.patch.object(
+            MODULE.os,
+            "getpgid",
+            side_effect=validate_group,
+        ), mock.patch.object(
+            MODULE.os,
+            "getsid",
+            side_effect=validate_session,
+        ), mock.patch.object(
+            MODULE.os,
+            "geteuid",
+            return_value=501,
+        ), mock.patch.object(
+            MODULE,
+            "process_state",
+            side_effect=lambda pid: leader_state if pid == leader_pid else None,
+        ), mock.patch.object(
+            MODULE,
+            "process_group_members",
+            side_effect=inventory,
+        ) as inspect_group, mock.patch.object(
+            MODULE.os,
+            "kill",
+            side_effect=AssertionError("must not send a descendant signal"),
+        ), mock.patch.object(
+            MODULE.os,
+            "killpg",
+            side_effect=AssertionError("must not signal a process group"),
+        ):
+            stopped = MODULE.stop_owned_process_group(process, timeout=1)
+
+        self.assertEqual(pre_stop_inventory_pids, [])
+        self.assertEqual(
+            events,
+            [
+                ("getpgid", leader_pid),
+                ("getsid", leader_pid),
+                ("leader-signal", signal.SIGSTOP),
+                ("getpgid", leader_pid),
+                ("getsid", leader_pid),
+                ("leader-signal", signal.SIGSTOP),
+                ("getpgid", leader_pid),
+                ("getsid", leader_pid),
+                ("inventory", child_pid),
+                ("getpgid", leader_pid),
+                ("getsid", leader_pid),
+                ("inventory", child_pid),
+            ],
+        )
+        self.assertEqual(inspect_group.call_count, 2)
+        self.assertEqual(
+            [(member["pid"], member["state"]) for member in stopped],
+            [(leader_pid, "T"), (child_pid, "T")],
+        )
 
     def test_group_continue_resumes_revalidated_descendants_before_leader(
         self,

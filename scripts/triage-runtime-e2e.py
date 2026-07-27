@@ -2068,6 +2068,34 @@ def stop_owned_process_group(
     timeout: float = 5,
 ) -> list[dict[str, object]]:
     deadline = time.monotonic() + timeout
+    # The owned unreaped Popen leader is the only PID that is safe to address
+    # before freezing its fork/reap churn. Do not inventory descendants until
+    # this exact root has independently reached T.
+    validate_owned_process_group_leader(process)
+    process.send_signal(signal.SIGSTOP)
+    leader_state: str | None = None
+    while time.monotonic() < deadline:
+        returncode = process.poll()
+        if returncode is not None:
+            raise OwnedProcessGroupRefusal(
+                f"owned leader {process.pid} exited during root-only STOP: "
+                f"returncode={returncode}"
+            )
+        leader_state = process_state(process.pid)
+        if leader_state is not None and "T" in leader_state:
+            break
+        # A just-issued SIGCONT can race the first exact STOP while the
+        # time-sliced leader is crossing exec. The unreaped Popen identity is
+        # still pinned, so revalidate it and reassert only that exact PID.
+        validate_owned_process_group_leader(process)
+        process.send_signal(signal.SIGSTOP)
+        time.sleep(0.001)
+    else:
+        raise OwnedProcessGroupRefusal(
+            f"owned leader {process.pid} did not reach root-only stopped state: "
+            f"last_state={leader_state!r}"
+        )
+
     last_members: list[dict[str, object]] = []
     quiesced_signature: tuple[tuple[object, ...], ...] | None = None
     while time.monotonic() < deadline:
