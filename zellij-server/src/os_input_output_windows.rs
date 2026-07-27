@@ -21,7 +21,7 @@ use windows_sys::Win32::Foundation::{
     CloseHandle, HANDLE, INVALID_HANDLE_VALUE, S_OK, WAIT_FAILED,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_FLAG_OVERLAPPED, FlushFileBuffers, OPEN_EXISTING, WriteFile,
+    CreateFileW, FILE_FLAG_OVERLAPPED, FlushFileBuffers, OPEN_EXISTING, SYNCHRONIZE, WriteFile,
 };
 use windows_sys::Win32::System::Console::{
     COORD, CTRL_C_EVENT, ClosePseudoConsole, CreatePseudoConsole, GenerateConsoleCtrlEvent, HPCON,
@@ -31,7 +31,7 @@ use windows_sys::Win32::System::Pipes::{CreateNamedPipeW, CreatePipe};
 use windows_sys::Win32::System::Threading::{
     CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
     EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList,
-    OpenProcess, PROCESS_INFORMATION, PROCESS_TERMINATE, STARTUPINFOEXW, STARTUPINFOW, SYNCHRONIZE,
+    OpenProcess, PROCESS_INFORMATION, PROCESS_TERMINATE, STARTUPINFOEXW, STARTUPINFOW,
     TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
