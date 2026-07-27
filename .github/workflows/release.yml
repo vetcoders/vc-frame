@@ -868,6 +868,7 @@ jobs:
           persist-credentials: false
 
       - name: Verify the complete release asset contract
+        shell: bash
         run: |
           if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
             tag="candidate-${GITHUB_RUN_ID}"
@@ -913,12 +914,19 @@ jobs:
           vc-frame-no-web-x86_64-pc-windows-msvc-installer.msi
           vc-frame-no-web-x86_64-pc-windows-msvc-installer.sha256sum
           "
-          for asset in $required; do
-            printf '%s\n' "$assets" | grep -Fx "$asset" >/dev/null || {
-              echo "missing release asset: $asset" >&2
-              exit 1
-            }
-          done
+          asset_contract_dir="$(mktemp -d)"
+          trap 'rm -rf "$asset_contract_dir"' EXIT
+          printf '%s\n' "$required" |
+            awk 'NF { print $1 }' |
+            LC_ALL=C sort > "$asset_contract_dir/expected"
+          printf '%s\n' "$assets" |
+            sed '/^[[:space:]]*$/d' |
+            LC_ALL=C sort > "$asset_contract_dir/actual"
+          if ! cmp -s "$asset_contract_dir/expected" "$asset_contract_dir/actual"; then
+            echo "release asset set does not exactly match the canonical contract" >&2
+            diff -u "$asset_contract_dir/expected" "$asset_contract_dir/actual" || true
+            exit 1
+          fi
 
       - name: Verify GitHub OIDC attestations
         shell: bash
@@ -987,23 +995,39 @@ jobs:
               "$verification_dir/install.sh" |
               tr '[:lower:]' '[:upper:]'
           )"
-          secret_fingerprint="$(
+          secret_primary_fingerprints="$(
             printf '%s\n' "$GPG_PUBLIC_KEY" |
               gpg --homedir "$verify_home" --batch --with-colons \
                 --import-options show-only --import 2>/dev/null |
-              awk -F: '$1 == "fpr" { print $10; exit }'
+              awk -F: '
+                $1 == "pub" { want_primary_fingerprint = 1; next }
+                want_primary_fingerprint && $1 == "fpr" {
+                  print toupper($10)
+                  want_primary_fingerprint = 0
+                }
+              '
           )"
-          published_fingerprint="$(
+          published_primary_fingerprints="$(
             gpg --homedir "$verify_home" --batch --with-colons \
               --import-options show-only --import \
                 "$verification_dir/vc-frame-signing.asc" 2>/dev/null |
-              awk -F: '$1 == "fpr" { print $10; exit }'
+              awk -F: '
+                $1 == "pub" { want_primary_fingerprint = 1; next }
+                want_primary_fingerprint && $1 == "fpr" {
+                  print toupper($10)
+                  want_primary_fingerprint = 0
+                }
+              '
           )"
           test -n "$expected_fingerprint"
-          test "$(printf '%s' "$secret_fingerprint" | tr '[:lower:]' '[:upper:]')" = \
-            "$(printf '%s' "$expected_fingerprint" | tr '[:lower:]' '[:upper:]')"
-          test "$(printf '%s' "$published_fingerprint" | tr '[:lower:]' '[:upper:]')" = \
-            "$(printf '%s' "$expected_fingerprint" | tr '[:lower:]' '[:upper:]')"
+          test "$secret_primary_fingerprints" = "$expected_fingerprint" || {
+            echo "GPG_PUBLIC_KEY must contain exactly the pinned primary trust root" >&2
+            exit 1
+          }
+          test "$published_primary_fingerprints" = "$expected_fingerprint" || {
+            echo "published key bundle must contain exactly the pinned primary trust root" >&2
+            exit 1
+          }
 
           shopt -s nullglob
           subjects=(
@@ -1035,12 +1059,12 @@ jobs:
               echo "signature verification failed for $(basename "$subject")" >&2
               exit 1
             }
-            signature_primary_fingerprint="$(
+            signature_primary_fingerprints="$(
               printf '%s\n' "$signature_verification" |
                 awk '$1 == "[GNUPG:]" && $2 == "VALIDSIG" { print toupper($NF) }'
             )"
-            test "$signature_primary_fingerprint" = "$expected_fingerprint" || {
-              echo "signature signer does not match the pinned trust root: $(basename "$subject")" >&2
+            test "$signature_primary_fingerprints" = "$expected_fingerprint" || {
+              echo "signature must have exactly one pinned signer: $(basename "$subject")" >&2
               exit 1
             }
           done
