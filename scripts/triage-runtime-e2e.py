@@ -249,15 +249,17 @@ def validate_build_info(
     )
 
 
-# Nested CLI budgets in src/run_triage_cli.rs (must stay strictly larger here):
+# Ordinary inventory / attach / kill-session probes stay short so a stalled
+# session CLI fails closed inside helper budgets (15s wait loops, etc.).
+COMMAND_TIMEOUT_SECS = 30
+# Nested CLI budgets in src/run_triage_cli.rs for a full triage-run transfer:
 #   CLI_COMMAND_TIMEOUT = 10s (inventory / capture / close chain)
 #   NEW_TAB_COMMAND_TIMEOUT = 30s
 #   VIEWER_CREATION_RECONCILIATION_TIMEOUT = 30s
-# A full triage-run can spend a new-tab wait plus reconciliation plus several
-# 10s CLI calls. Matching the outer harness to 30s races the inner budgets and
-# kills transfers mid-viewer-creation on slower Linux runners (see ops-linux
-# TimeoutExpired on triage-run for the exit-2 case).
-COMMAND_TIMEOUT_SECS = 120
+# Matching the outer harness to 30s races those inner budgets and kills
+# transfers mid-viewer-creation on slower Linux runners (ops-linux
+# TimeoutExpired on triage-run for the exit-2 case). Only triage() uses this.
+TRIAGE_COMMAND_TIMEOUT_SECS = 120
 
 
 def command(
@@ -1608,7 +1610,13 @@ def triage(
         pane_id=pane_id,
         transcript=transcript,
     )
-    return command(binary, env, *args, expect_success=expect_success)
+    return command(
+        binary,
+        env,
+        *args,
+        expect_success=expect_success,
+        timeout=TRIAGE_COMMAND_TIMEOUT_SECS,
+    )
 
 
 def write_runtime_transcript_manifest(
