@@ -943,19 +943,16 @@ impl Tab {
                 self.tiled_panes.reapply_pane_frames();
                 self.is_pending = false;
                 self.apply_buffered_instructions().non_fatal();
+                Ok(())
             },
             Err(e) => {
-                // TODO: this should only happen due to an erroneous layout created by user
-                // configuration that was somehow not caught in our KDL layout parser
-                // we should still be able to properly recover from this with a useful error
-                // message though
                 log::error!("Failed to apply layout: {}", e);
                 self.tiled_panes.reapply_pane_frames();
                 self.is_pending = false;
                 self.apply_buffered_instructions().non_fatal();
+                Err(e)
             },
         }
-        Ok(())
     }
     pub fn override_layout(
         &mut self,
@@ -1039,16 +1036,16 @@ impl Tab {
                 );
 
                 self.apply_buffered_instructions().non_fatal();
+                Ok(())
             },
             Err(e) => {
-                // TODO: this should only happen due to an erroneous layout created by user
-                // configuration that was somehow not caught in our KDL layout parser
-                // we should still be able to properly recover from this with a useful error
-                // message though
-                log::error!("Failed to apply layout: {}", e);
+                log::error!("Failed to override layout: {}", e);
+                self.tiled_panes.reapply_pane_frames();
+                self.is_pending = false;
+                self.apply_buffered_instructions().non_fatal();
+                Err(e)
             },
         }
-        Ok(())
     }
     pub fn swap_layout_info(&self) -> (Option<String>, bool) {
         if self.floating_panes.panes_are_visible() {

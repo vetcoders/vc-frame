@@ -6244,6 +6244,200 @@ pub fn missing_apply_target_rejects_transaction_without_direct_writer_cleanup() 
 }
 
 #[test]
+pub fn apply_layout_partial_mutation_is_rejected_and_exactly_compensated() {
+    let size = Size { cols: 80, rows: 20 };
+    let mut mock_screen = MockScreen::new(size);
+    let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
+    let pty_receiver = mock_screen.pty_receiver.take().unwrap();
+    while pty_receiver.try_recv().is_ok() {}
+    let (baseline_tx, baseline_rx) = crossbeam::channel::bounded(1);
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ListPanes {
+        show_all: true,
+        response_channel: baseline_tx,
+    });
+    let baseline_resource_ids = baseline_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("the baseline pane inventory must answer")
+        .into_iter()
+        .map(|pane| {
+            if pane.pane_info.is_plugin {
+                PaneId::Plugin(pane.pane_info.id)
+            } else {
+                PaneId::Terminal(pane.pane_info.id)
+            }
+        })
+        .collect::<HashSet<_>>();
+    let missing_plugin =
+        RunPluginOrAlias::from_url("file:/missing-partial-apply.wasm", &None, None, None).unwrap();
+    let provided_plugin =
+        RunPluginOrAlias::from_url("file:/provided-partial-apply.wasm", &None, None, None).unwrap();
+    let writer_resource_ids = [PaneId::Terminal(920), PaneId::Plugin(921)];
+
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ApplyLayout(
+        TiledPaneLayout::default(),
+        vec![FloatingPaneLayout {
+            run: Some(Run::Plugin(missing_plugin)),
+            ..Default::default()
+        }],
+        vec![(920, None)],
+        vec![],
+        HashMap::from([(provided_plugin, vec![921])]),
+        0,
+        false,
+        (1, false),
+        None,
+        None,
+        None,
+        920,
+    ));
+    let rejection = assert_layout_transaction_rejected(&pty_receiver, 920, &writer_resource_ids);
+    assert!(
+        rejection.contains("Failed to create new floating plugin pane"),
+        "the partial floating-phase failure must reach the transaction ACK: {rejection}"
+    );
+
+    let (panes_tx, panes_rx) = crossbeam::channel::bounded(1);
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ListPanes {
+        show_all: true,
+        response_channel: panes_tx,
+    });
+    let panes = panes_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("screen must remain alive after compensating the partial apply");
+    assert!(
+        panes.iter().all(|pane| {
+            !writer_resource_ids.contains(&if pane.pane_info.is_plugin {
+                PaneId::Plugin(pane.pane_info.id)
+            } else {
+                PaneId::Terminal(pane.pane_info.id)
+            })
+        }),
+        "Screen compensation must remove only the writer resources after rejection: {panes:?}"
+    );
+    let surviving_resource_ids = panes
+        .iter()
+        .map(|pane| {
+            if pane.pane_info.is_plugin {
+                PaneId::Plugin(pane.pane_info.id)
+            } else {
+                PaneId::Terminal(pane.pane_info.id)
+            }
+        })
+        .collect::<HashSet<_>>();
+    assert!(
+        baseline_resource_ids.is_subset(&surviving_resource_ids),
+        "compensation must preserve every baseline resource: baseline={baseline_resource_ids:?}, surviving={surviving_resource_ids:?}"
+    );
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+pub fn override_layout_partial_mutation_is_rejected_and_exactly_compensated() {
+    let size = Size { cols: 80, rows: 20 };
+    let mut mock_screen = MockScreen::new(size);
+    let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
+    let pty_receiver = mock_screen.pty_receiver.take().unwrap();
+    while pty_receiver.try_recv().is_ok() {}
+    let (baseline_tx, baseline_rx) = crossbeam::channel::bounded(1);
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ListPanes {
+        show_all: true,
+        response_channel: baseline_tx,
+    });
+    let baseline_resource_ids = baseline_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("the baseline pane inventory must answer")
+        .into_iter()
+        .map(|pane| {
+            if pane.pane_info.is_plugin {
+                PaneId::Plugin(pane.pane_info.id)
+            } else {
+                PaneId::Terminal(pane.pane_info.id)
+            }
+        })
+        .collect::<HashSet<_>>();
+    let missing_plugin =
+        RunPluginOrAlias::from_url("file:/missing-partial-override.wasm", &None, None, None)
+            .unwrap();
+    let provided_plugin =
+        RunPluginOrAlias::from_url("file:/provided-partial-override.wasm", &None, None, None)
+            .unwrap();
+    let writer_resource_ids = [PaneId::Terminal(930), PaneId::Plugin(931)];
+    let replacement_layout = TiledPaneLayout {
+        run: Some(Run::Command(RunCommand {
+            command: PathBuf::from("partial-override-writer"),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+
+    let _ = mock_screen
+        .to_screen
+        .send(ScreenInstruction::OverrideLayoutComplete(
+            vec![TabOverrideResult {
+                tab_index: 0,
+                tab_name: None,
+                tiled_layout: replacement_layout,
+                floating_layouts: vec![FloatingPaneLayout {
+                    run: Some(Run::Plugin(missing_plugin)),
+                    ..Default::default()
+                }],
+                swap_tiled_layouts: Some(vec![]),
+                swap_floating_layouts: Some(vec![]),
+                new_terminal_pids: vec![(930, None)],
+                new_floating_pane_pids: vec![],
+                plugin_ids: HashMap::from([(provided_plugin, vec![931])]),
+            }],
+            true,
+            true,
+            1,
+            None,
+            None,
+            930,
+        ));
+    let rejection = assert_layout_transaction_rejected(&pty_receiver, 930, &writer_resource_ids);
+    assert!(
+        rejection.contains("Failed to create new floating plugin pane"),
+        "the partial floating-phase failure must reach the transaction ACK: {rejection}"
+    );
+
+    let (panes_tx, panes_rx) = crossbeam::channel::bounded(1);
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ListPanes {
+        show_all: true,
+        response_channel: panes_tx,
+    });
+    let panes = panes_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("screen must remain alive after compensating the partial override");
+    assert!(
+        panes.iter().all(|pane| {
+            !writer_resource_ids.contains(&if pane.pane_info.is_plugin {
+                PaneId::Plugin(pane.pane_info.id)
+            } else {
+                PaneId::Terminal(pane.pane_info.id)
+            })
+        }),
+        "Screen compensation must remove only the writer resources after rejection: {panes:?}"
+    );
+    let surviving_resource_ids = panes
+        .iter()
+        .map(|pane| {
+            if pane.pane_info.is_plugin {
+                PaneId::Plugin(pane.pane_info.id)
+            } else {
+                PaneId::Terminal(pane.pane_info.id)
+            }
+        })
+        .collect::<HashSet<_>>();
+    assert!(
+        baseline_resource_ids.is_subset(&surviving_resource_ids),
+        "compensation must preserve every baseline resource: baseline={baseline_resource_ids:?}, surviving={surviving_resource_ids:?}"
+    );
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
 pub fn old_request_that_finishes_after_reclassification_self_cleans_exact_resources() {
     let directory = tempfile::tempdir().unwrap();
     let receipt_path = directory.path().join("transfer.json");

@@ -130,6 +130,122 @@ fn parse_kdl_layout(kdl_str: &str) -> (TiledPaneLayout, Vec<FloatingPaneLayout>)
     layout.new_tab()
 }
 
+fn assert_floating_failure_happens_after_tiled_writer_install(override_layout: bool) {
+    let missing_plugin =
+        RunPluginOrAlias::from_url("file:///missing-partial-layout.wasm", &None, None, None)
+            .unwrap();
+    let provided_plugin =
+        RunPluginOrAlias::from_url("file:///provided-partial-layout.wasm", &None, None, None)
+            .unwrap();
+    let tiled_layout = TiledPaneLayout::default();
+    let floating_layouts = vec![FloatingPaneLayout {
+        run: Some(Run::Plugin(missing_plugin)),
+        ..Default::default()
+    }];
+    let writer_terminal_id = if override_layout { 902 } else { 901 };
+    let writer_plugin_id = if override_layout { 912 } else { 911 };
+    let size = Size {
+        cols: 100,
+        rows: 50,
+    };
+    let (
+        viewport,
+        senders,
+        sixel_image_store,
+        link_handler,
+        terminal_emulator_colors,
+        terminal_emulator_color_codes,
+        character_cell_size,
+        connected_clients,
+        style,
+        display_area,
+        mut tiled_panes,
+        mut floating_panes,
+        draw_pane_frames,
+        mut focus_pane_id,
+        os_api,
+        debug,
+        arrow_fonts,
+        styled_underlines,
+        osc8_hyperlinks,
+        explicitly_disable_kitty_keyboard_protocol,
+    ) = create_layout_applier_fixtures(size);
+
+    let mut applier = LayoutApplier::new(
+        &viewport,
+        &senders,
+        &sixel_image_store,
+        &link_handler,
+        &terminal_emulator_colors,
+        &terminal_emulator_color_codes,
+        &character_cell_size,
+        &connected_clients,
+        &style,
+        &display_area,
+        &mut tiled_panes,
+        &mut floating_panes,
+        draw_pane_frames,
+        &mut focus_pane_id,
+        &*os_api,
+        debug,
+        arrow_fonts,
+        styled_underlines,
+        osc8_hyperlinks,
+        explicitly_disable_kitty_keyboard_protocol,
+        None,
+    );
+    let writer_plugin_ids = HashMap::from([(provided_plugin, vec![writer_plugin_id])]);
+
+    let result = if override_layout {
+        applier.override_layout(
+            tiled_layout,
+            floating_layouts,
+            vec![(writer_terminal_id, None)],
+            vec![],
+            writer_plugin_ids,
+            true,
+            true,
+            1,
+        )
+    } else {
+        applier.apply_layout(
+            tiled_layout,
+            floating_layouts,
+            vec![(writer_terminal_id, None)],
+            vec![],
+            writer_plugin_ids,
+            1,
+        )
+    };
+
+    let error = result.expect_err("the missing floating plugin ID must reject the layout");
+    assert!(
+        format!("{error:#}").contains("Failed to create new floating plugin pane"),
+        "the failure must come from the floating phase after tiled application: {error:#}"
+    );
+    assert!(
+        tiled_panes
+            .get_panes()
+            .any(|(pane_id, _)| *pane_id == PaneId::Terminal(writer_terminal_id)),
+        "the writer terminal must already be installed when the floating phase fails"
+    );
+    assert_eq!(
+        floating_panes.pane_ids().count(),
+        0,
+        "the rejected floating pane must never be installed"
+    );
+}
+
+#[test]
+fn apply_layout_failure_exposes_partial_tiled_writer_for_transaction_cleanup() {
+    assert_floating_failure_happens_after_tiled_writer_install(false);
+}
+
+#[test]
+fn override_layout_failure_exposes_partial_tiled_writer_for_transaction_cleanup() {
+    assert_floating_failure_happens_after_tiled_writer_install(true);
+}
+
 /// Creates all the fixtures needed for LayoutApplier tests
 #[allow(clippy::type_complexity)]
 fn create_layout_applier_fixtures(

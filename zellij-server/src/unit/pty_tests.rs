@@ -599,66 +599,64 @@ fn post_apply_layout_notification_failure_keeps_new_tab_allocations() {
 }
 
 #[test]
-fn fast_exit_callback_waits_for_screen_commit_for_unix_and_windows_backends() {
-    for backend_semantics in ["unix waiter", "windows waiter"] {
-        let mock = MockOsApi::new();
-        let callback_probe = mock.clone();
-        let (screen_tx, screen_rx) = channels::unbounded();
-        let mut bus: Bus<PtyInstruction> = Bus::empty();
-        bus.os_input = Some(Box::new(mock));
-        bus.senders.to_screen = Some(SenderWithContext::new(screen_tx));
-        bus.senders.should_silently_fail = false;
-        let mut pty = Pty::new(bus, false, None, None);
-        let command = RunCommand {
-            command: PathBuf::from("instant-exit"),
+fn fast_exit_callback_waits_for_screen_commit_at_the_common_pty_fence() {
+    let mock = MockOsApi::new();
+    let callback_probe = mock.clone();
+    let (screen_tx, screen_rx) = channels::unbounded();
+    let mut bus: Bus<PtyInstruction> = Bus::empty();
+    bus.os_input = Some(Box::new(mock));
+    bus.senders.to_screen = Some(SenderWithContext::new(screen_tx));
+    bus.senders.should_silently_fail = false;
+    let mut pty = Pty::new(bus, false, None, None);
+    let command = RunCommand {
+        command: PathBuf::from("instant-exit"),
+        ..Default::default()
+    };
+
+    pty.spawn_terminals_for_layout(
+        None,
+        TiledPaneLayout {
+            run: Some(Run::Command(command.clone())),
             ..Default::default()
-        };
+        },
+        vec![],
+        None,
+        HashMap::new(),
+        None,
+        7,
+        false,
+        true,
+        (1, false),
+        None,
+        None,
+    )
+    .expect("the fast process must reach the Screen ownership fence");
 
-        pty.spawn_terminals_for_layout(
-            None,
-            TiledPaneLayout {
-                run: Some(Run::Command(command.clone())),
-                ..Default::default()
-            },
-            vec![],
-            None,
-            HashMap::new(),
-            None,
-            7,
-            false,
-            true,
-            (1, false),
-            None,
-            None,
-        )
-        .expect("the fast process must reach the Screen ownership fence");
+    let (instruction, _) = screen_rx.try_recv().expect("ApplyLayout");
+    let transaction_id = match instruction {
+        ScreenInstruction::ApplyLayout(_, _, _, _, _, _, _, _, _, _, _, transaction_id) => {
+            transaction_id
+        },
+        other => panic!("expected ApplyLayout, got {other:?}"),
+    };
+    callback_probe.fire_next_quit_callback(PaneId::Terminal(100), Some(0), command);
+    assert!(
+        screen_rx.try_recv().is_err(),
+        "a backend waiter callback must not race ahead of Screen ownership"
+    );
 
-        let (instruction, _) = screen_rx.try_recv().expect("ApplyLayout");
-        let transaction_id = match instruction {
-            ScreenInstruction::ApplyLayout(_, _, _, _, _, _, _, _, _, _, _, transaction_id) => {
-                transaction_id
-            },
-            other => panic!("{backend_semantics}: expected ApplyLayout, got {other:?}"),
-        };
-        callback_probe.fire_next_quit_callback(PaneId::Terminal(100), Some(0), command.clone());
-        assert!(
-            screen_rx.try_recv().is_err(),
-            "{backend_semantics}: a waiter callback must not race ahead of Screen ownership"
-        );
-
-        pty.resolve_layout_commit(transaction_id, LayoutCommitOutcome::Committed)
-            .expect("Screen commit must release the fast-exit callback");
-        assert!(matches!(
-            screen_rx.try_recv(),
-            Ok((ScreenInstruction::ClosePane(PaneId::Terminal(100), ..), _))
-        ));
-        pty.resolve_layout_commit(transaction_id, LayoutCommitOutcome::Committed)
-            .expect("duplicate ACK must be ignored");
-        assert!(
-            screen_rx.try_recv().is_err(),
-            "{backend_semantics}: a fast exit must fire exactly once"
-        );
-    }
+    pty.resolve_layout_commit(transaction_id, LayoutCommitOutcome::Committed)
+        .expect("Screen commit must release the fast-exit callback");
+    assert!(matches!(
+        screen_rx.try_recv(),
+        Ok((ScreenInstruction::ClosePane(PaneId::Terminal(100), ..), _))
+    ));
+    pty.resolve_layout_commit(transaction_id, LayoutCommitOutcome::Committed)
+        .expect("duplicate ACK must be ignored");
+    assert!(
+        screen_rx.try_recv().is_err(),
+        "a fast exit must fire exactly once"
+    );
 }
 
 #[test]
