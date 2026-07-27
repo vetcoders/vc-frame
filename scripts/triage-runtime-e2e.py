@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import errno
 import hashlib
 import json
 import os
@@ -97,6 +98,10 @@ class SessionQuery:
 
 class AmbiguousSessionError(AssertionError):
     """The exact session query cannot yet prove a valid live/absent state."""
+
+
+class OwnedProcessGroupRefusal(AssertionError):
+    """The harness cannot prove an exact process-group member is safe to signal."""
 
 
 @dataclass(frozen=True)
@@ -1629,7 +1634,7 @@ def process_state(pid: int) -> str | None:
 
 def process_group_members(group_id: int) -> list[dict[str, object]]:
     result = subprocess.run(
-        ["ps", "-axo", "pid=,pgid=,state=,command="],
+        ["ps", "-axo", "pid=,ppid=,pgid=,uid=,state=,command="],
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -1641,24 +1646,232 @@ def process_group_members(group_id: int) -> list[dict[str, object]]:
     )
     members: list[dict[str, object]] = []
     for raw_line in result.stdout.splitlines():
-        fields = raw_line.strip().split(maxsplit=3)
-        if len(fields) < 3:
+        fields = raw_line.strip().split(maxsplit=5)
+        if len(fields) < 5:
             continue
         try:
             pid = int(fields[0])
-            pgid = int(fields[1])
+            ppid = int(fields[1])
+            pgid = int(fields[2])
+            uid = int(fields[3])
         except ValueError:
             continue
         if pgid == group_id:
+            try:
+                session_id: int | None = os.getsid(pid)
+                session_errno: int | None = None
+                session_error: str | None = None
+            except OSError as error:
+                session_id = None
+                session_errno = error.errno
+                session_error = f"{type(error).__name__}: {error}"
             members.append(
                 {
                     "pid": pid,
+                    "ppid": ppid,
                     "pgid": pgid,
-                    "state": fields[2],
-                    "command": fields[3] if len(fields) == 4 else "",
+                    "uid": uid,
+                    "sid": session_id,
+                    "sid_errno": session_errno,
+                    "sid_error": session_error,
+                    "state": fields[4],
+                    "command": fields[5] if len(fields) == 6 else "",
                 }
             )
+    return sorted(members, key=lambda member: int(member["pid"]))
+
+
+def validate_owned_process_group_leader(
+    process: subprocess.Popen[bytes],
+) -> None:
+    if process.poll() is not None:
+        raise OwnedProcessGroupRefusal(
+            f"owned process-group leader {process.pid} is no longer live and unreaped"
+        )
+    try:
+        leader_group = os.getpgid(process.pid)
+        leader_session = os.getsid(process.pid)
+    except OSError as error:
+        raise OwnedProcessGroupRefusal(
+            f"cannot validate owned process-group leader {process.pid}: "
+            f"{type(error).__name__}: {error}"
+        ) from error
+    if leader_group != process.pid or leader_session != process.pid:
+        raise OwnedProcessGroupRefusal(
+            f"owned process-group leader {process.pid} lost fresh-session identity: "
+            f"pgid={leader_group}, sid={leader_session}"
+        )
+
+
+def validated_owned_process_group_members(
+    process: subprocess.Popen[bytes],
+) -> list[dict[str, object]]:
+    validate_owned_process_group_leader(process)
+    members = process_group_members(process.pid)
+    expected_uid = os.geteuid()
+    leader = next(
+        (member for member in members if int(member["pid"]) == process.pid),
+        None,
+    )
+    invalid_members = [
+        member
+        for member in members
+        if int(member.get("pgid", -1)) != process.pid
+        or int(member.get("uid", -1)) != expected_uid
+        or (
+            member.get("sid") != process.pid
+            and not (
+                "Z" in str(member.get("state", ""))
+                and member.get("sid") is None
+                and member.get("sid_errno") == errno.ESRCH
+            )
+        )
+    ]
+    if leader is None or invalid_members:
+        raise OwnedProcessGroupRefusal(
+            f"refusing to signal unresolved process group {process.pid}: "
+            f"expected_uid={expected_uid}, leader_present={leader is not None}, "
+            f"invalid_members={invalid_members!r}, members={members!r}"
+        )
     return members
+
+
+def signal_exact_owned_group_member(
+    process: subprocess.Popen[bytes],
+    member_pid: int,
+    signal_number: int,
+    *,
+    deadline: float,
+) -> bool:
+    signal_name = signal.Signals(signal_number).name
+    last_members: list[dict[str, object]] = []
+    while True:
+        last_members = validated_owned_process_group_members(process)
+        member = next(
+            (
+                current
+                for current in last_members
+                if int(current["pid"]) == member_pid
+            ),
+            None,
+        )
+        if member is None:
+            return False
+        try:
+            os.kill(member_pid, signal_number)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError as error:
+            if error.errno != errno.EPERM or time.monotonic() >= deadline:
+                raise OwnedProcessGroupRefusal(
+                    f"exact owned member {member_pid} refused {signal_name}: "
+                    f"{type(error).__name__}: {error}; members={last_members!r}"
+                ) from error
+            time.sleep(0.001)
+
+
+def stop_owned_process_group(
+    process: subprocess.Popen[bytes],
+    *,
+    timeout: float = 5,
+) -> list[dict[str, object]]:
+    deadline = time.monotonic() + timeout
+    validate_owned_process_group_leader(process)
+    signal_exact_owned_group_member(
+        process,
+        process.pid,
+        signal.SIGSTOP,
+        deadline=deadline,
+    )
+    last_members: list[dict[str, object]] = []
+    while time.monotonic() < deadline:
+        last_members = validated_owned_process_group_members(process)
+        for member in last_members:
+            state = str(member.get("state", ""))
+            if "T" not in state and "Z" not in state:
+                signal_exact_owned_group_member(
+                    process,
+                    int(member["pid"]),
+                    signal.SIGSTOP,
+                    deadline=deadline,
+                )
+        last_members = validated_owned_process_group_members(process)
+        if last_members and all(
+            "T" in str(member.get("state", ""))
+            or "Z" in str(member.get("state", ""))
+            for member in last_members
+        ):
+            return last_members
+        time.sleep(0.001)
+    raise OwnedProcessGroupRefusal(
+        f"owned process group {process.pid} did not reach a quiesced fixed point: "
+        f"members={last_members!r}"
+    )
+
+
+def continue_owned_process_group(
+    process: subprocess.Popen[bytes],
+    *,
+    timeout: float = 5,
+) -> None:
+    deadline = time.monotonic() + timeout
+    members = validated_owned_process_group_members(process)
+    # Resume the leader first so no descendant advances behind a stopped
+    # leader. Every resumed member remains inside the deliberate time slice.
+    members.sort(key=lambda member: int(member["pid"]) != process.pid)
+    for member in members:
+        if "Z" in str(member.get("state", "")):
+            continue
+        signal_exact_owned_group_member(
+            process,
+            int(member["pid"]),
+            signal.SIGCONT,
+            deadline=deadline,
+        )
+
+
+def kill_owned_process_group(
+    process: subprocess.Popen[bytes],
+    *,
+    timeout: float = 5,
+) -> None:
+    deadline = time.monotonic() + timeout
+    last_members = stop_owned_process_group(
+        process,
+        timeout=max(deadline - time.monotonic(), 0.001),
+    )
+    while time.monotonic() < deadline:
+        descendants = [
+            member for member in last_members if int(member["pid"]) != process.pid
+        ]
+        live_descendants = [
+            member
+            for member in descendants
+            if "Z" not in str(member.get("state", ""))
+        ]
+        if not live_descendants:
+            signal_exact_owned_group_member(
+                process,
+                process.pid,
+                signal.SIGKILL,
+                deadline=deadline,
+            )
+            return
+        for member in live_descendants:
+            signal_exact_owned_group_member(
+                process,
+                int(member["pid"]),
+                signal.SIGKILL,
+                deadline=deadline,
+            )
+        time.sleep(0.001)
+        last_members = validated_owned_process_group_members(process)
+    raise OwnedProcessGroupRefusal(
+        f"owned process group {process.pid} retained live descendants before "
+        f"leader kill: "
+        f"members={last_members!r}"
+    )
 
 
 def wait_for_process_group_gone(group_id: int, timeout: float = 5) -> None:
@@ -1683,6 +1896,12 @@ def wait_for_process_stop(
 ) -> None:
     deadline = time.monotonic() + timeout
     last_state: object = None
+    if reassert_stop and signal_process_group:
+        stop_owned_process_group(
+            process,
+            timeout=max(deadline - time.monotonic(), 0.001),
+        )
+        return
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise AssertionError(
@@ -1690,27 +1909,22 @@ def wait_for_process_stop(
             )
         if reassert_stop:
             try:
-                if signal_process_group:
-                    # The leader is still an owned, unreaped Popen child and
-                    # start_new_session made its PID the fresh group ID.
-                    os.killpg(process.pid, signal.SIGSTOP)
-                else:
-                    # Signal only the still-owned, unreaped Popen child. A
-                    # group keyed by a dead PID can later identify unrelated
-                    # work, so group signalling is explicit and opt-in.
-                    process.send_signal(signal.SIGSTOP)
+                # Signal only the still-owned, unreaped Popen child. A group
+                # keyed by a dead PID can later identify unrelated work, so
+                # group handling uses separately validated exact PIDs.
+                process.send_signal(signal.SIGSTOP)
             except ProcessLookupError as error:
                 raise AssertionError(
                     f"killpoint process {process.pid} exited before SIGSTOP"
                 ) from error
         if signal_process_group:
-            members = process_group_members(process.pid)
-            if not members:
-                raise AssertionError(
-                    f"killpoint process group {process.pid} disappeared before SIGSTOP"
-                )
+            members = validated_owned_process_group_members(process)
             last_state = members
-            if all("T" in str(member.get("state", "")) for member in members):
+            if all(
+                "T" in str(member.get("state", ""))
+                or "Z" in str(member.get("state", ""))
+                for member in members
+            ):
                 return
         else:
             state = process_state(process.pid)
@@ -1743,8 +1957,8 @@ def interrupt_process_at_state(
 ) -> InterruptedProcess:
     """Time-slice one owned child and interrupt only after durable state is seen.
 
-    Group signalling is opt-in and safe only because ``start_new_session``
-    creates a fresh group whose still-live leader is the owned ``Popen`` child.
+    Group handling is opt-in and uses exact per-PID signals only after proving
+    every fresh-session member belongs to the harness UID and session.
     """
     artifact_root.mkdir(parents=True, exist_ok=True)
     stdout_path = artifact_root / f"{scenario}.stdout.log"
@@ -1772,7 +1986,7 @@ def interrupt_process_at_state(
             wait_for_process_stop(process)
             for slices in range(1, max_slices + 1):
                 if signal_process_group:
-                    os.killpg(process.pid, signal.SIGCONT)
+                    continue_owned_process_group(process)
                 else:
                     process.send_signal(signal.SIGCONT)
                 time.sleep(slice_seconds)
@@ -1790,7 +2004,7 @@ def interrupt_process_at_state(
                     if before_interrupt is not None:
                         observed = before_interrupt(observed)
                     if signal_process_group:
-                        os.killpg(process.pid, signal.SIGKILL)
+                        kill_owned_process_group(process)
                     else:
                         process.kill()
                     break
@@ -1808,7 +2022,7 @@ def interrupt_process_at_state(
             if process.poll() is None:
                 try:
                     if signal_process_group:
-                        os.killpg(process.pid, signal.SIGKILL)
+                        kill_owned_process_group(process)
                     else:
                         process.kill()
                 except ProcessLookupError:

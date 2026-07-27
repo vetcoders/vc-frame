@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import errno
 import importlib.util
 import json
 import os
@@ -664,20 +665,30 @@ class EvidenceAndCleanupTests(unittest.TestCase):
             root = pathlib.Path(temporary)
             marker = root / "ready"
             script = (
-                f"/bin/sleep 300 & child=$!; "
-                f"printf %s \"$child\" > {shlex.quote(str(marker))}; wait"
+                "import pathlib, subprocess, time; "
+                "child = subprocess.Popen(['/bin/sleep', '300']); "
+                f"pathlib.Path({str(marker)!r}).write_text("
+                "str(child.pid), encoding='utf-8'); "
+                "time.sleep(300)"
             )
-            real_killpg = os.killpg
-            signalled_groups: list[int] = []
+            real_kill = os.kill
+            real_process_group_members = MODULE.process_group_members
+            exact_signals: list[tuple[int, int]] = []
+            member_snapshots: list[list[dict[str, object]]] = []
 
             def observe() -> dict[str, object] | None:
                 if not marker.is_file():
                     return None
                 return {"marker": marker.read_text(encoding="utf-8")}
 
-            def kill_owned_group(group: int, signal_number: int) -> None:
-                signalled_groups.append(group)
-                real_killpg(group, signal_number)
+            def signal_exact_process(pid: int, signal_number: int) -> None:
+                exact_signals.append((pid, signal_number))
+                real_kill(pid, signal_number)
+
+            def inspect_owned_group(group: int) -> list[dict[str, object]]:
+                members = real_process_group_members(group)
+                member_snapshots.append([dict(member) for member in members])
+                return members
 
             def record_stopped_child(
                 state: dict[str, object],
@@ -692,10 +703,18 @@ class EvidenceAndCleanupTests(unittest.TestCase):
             with mock.patch.object(
                 MODULE.os,
                 "killpg",
-                side_effect=kill_owned_group,
+                side_effect=AssertionError("must not signal a process group"),
+            ), mock.patch.object(
+                MODULE.os,
+                "kill",
+                side_effect=signal_exact_process,
+            ), mock.patch.object(
+                MODULE,
+                "process_group_members",
+                side_effect=inspect_owned_group,
             ):
                 result = MODULE.interrupt_process_at_state(
-                    pathlib.Path("/bin/sh"),
+                    pathlib.Path(sys.executable),
                     dict(os.environ),
                     ["-c", script],
                     scenario="unit-owned-group-killpoint",
@@ -712,8 +731,142 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                 "T",
                 str(result.observed_state.get("child_state")),
             )
-            self.assertTrue(signalled_groups)
-            self.assertEqual(set(signalled_groups), {result.pid})
+            child_pid = int(result.observed_state["child_pid"])
+            self.assertTrue(exact_signals)
+            self.assertEqual(
+                {pid for pid, _signal_number in exact_signals},
+                {result.pid, child_pid},
+            )
+            self.assertIn((child_pid, signal.SIGSTOP), exact_signals)
+            self.assertIn((child_pid, signal.SIGKILL), exact_signals)
+            self.assertIn((result.pid, signal.SIGKILL), exact_signals)
+            self.assertTrue(
+                any(
+                    int(member["pid"]) == child_pid
+                    and "Z" in str(member.get("state", ""))
+                    for members in member_snapshots
+                    for member in members
+                ),
+                member_snapshots,
+            )
+
+    def test_exact_owned_member_eperm_refuses_without_group_fallback(self) -> None:
+        process = mock.Mock()
+        process.pid = 9_001
+        process.poll.return_value = None
+        members = [
+            {
+                "pid": process.pid,
+                "ppid": 1,
+                "pgid": process.pid,
+                "uid": 501,
+                "sid": process.pid,
+                "sid_error": None,
+                "state": "T",
+                "command": "owned-leader",
+            },
+            {
+                "pid": 9_002,
+                "ppid": process.pid,
+                "pgid": process.pid,
+                "uid": 501,
+                "sid": process.pid,
+                "sid_error": None,
+                "state": "S",
+                "command": "owned-child",
+            },
+        ]
+        permission_error = PermissionError(errno.EPERM, "Operation not permitted")
+        with mock.patch.object(
+            MODULE.os,
+            "getpgid",
+            return_value=process.pid,
+        ), mock.patch.object(
+            MODULE.os,
+            "getsid",
+            return_value=process.pid,
+        ), mock.patch.object(
+            MODULE.os,
+            "geteuid",
+            return_value=501,
+        ), mock.patch.object(
+            MODULE,
+            "process_group_members",
+            return_value=members,
+        ), mock.patch.object(
+            MODULE.os,
+            "kill",
+            side_effect=permission_error,
+        ) as exact_kill, mock.patch.object(
+            MODULE.os,
+            "killpg",
+            side_effect=AssertionError("must not signal a process group"),
+        ):
+            with self.assertRaisesRegex(
+                MODULE.OwnedProcessGroupRefusal,
+                r"exact owned member 9002 refused SIGSTOP: .*members=",
+            ):
+                MODULE.signal_exact_owned_group_member(
+                    process,
+                    9_002,
+                    signal.SIGSTOP,
+                    deadline=MODULE.time.monotonic(),
+                )
+        exact_kill.assert_called_once_with(9_002, signal.SIGSTOP)
+
+    def test_foreign_uid_group_member_refuses_before_any_signal(self) -> None:
+        process = mock.Mock()
+        process.pid = 9_101
+        process.poll.return_value = None
+        members = [
+            {
+                "pid": process.pid,
+                "ppid": 1,
+                "pgid": process.pid,
+                "uid": 501,
+                "sid": process.pid,
+                "sid_error": None,
+                "state": "T",
+                "command": "owned-leader",
+            },
+            {
+                "pid": 9_102,
+                "ppid": process.pid,
+                "pgid": process.pid,
+                "uid": 502,
+                "sid": process.pid,
+                "sid_error": None,
+                "state": "S",
+                "command": "foreign-child",
+            },
+        ]
+        with mock.patch.object(
+            MODULE.os,
+            "getpgid",
+            return_value=process.pid,
+        ), mock.patch.object(
+            MODULE.os,
+            "getsid",
+            return_value=process.pid,
+        ), mock.patch.object(
+            MODULE.os,
+            "geteuid",
+            return_value=501,
+        ), mock.patch.object(
+            MODULE,
+            "process_group_members",
+            return_value=members,
+        ), mock.patch.object(MODULE.os, "kill") as exact_kill, mock.patch.object(
+            MODULE.os,
+            "killpg",
+            side_effect=AssertionError("must not signal a process group"),
+        ):
+            with self.assertRaisesRegex(
+                MODULE.OwnedProcessGroupRefusal,
+                r"expected_uid=501.*invalid_members=.*9102",
+            ):
+                MODULE.validated_owned_process_group_members(process)
+        exact_kill.assert_not_called()
 
     def test_early_exit_never_signals_process_group(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
