@@ -793,9 +793,21 @@ class EvidenceAndCleanupTests(unittest.TestCase):
         ]
         with mock.patch.object(
             MODULE,
-            "validated_owned_process_group_members",
+            "process_group_members",
             return_value=members,
         ) as inventory, mock.patch.object(
+            MODULE.os,
+            "getpgid",
+            return_value=process.pid,
+        ), mock.patch.object(
+            MODULE.os,
+            "getsid",
+            return_value=process.pid,
+        ), mock.patch.object(
+            MODULE.os,
+            "geteuid",
+            return_value=501,
+        ), mock.patch.object(
             MODULE.os,
             "kill",
         ) as exact_kill, mock.patch.object(
@@ -813,6 +825,86 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                 mock.call(process.pid, signal.SIGCONT),
             ],
         )
+
+    def test_group_topology_rejects_grandchild_and_orphan_before_signal(
+        self,
+    ) -> None:
+        process = mock.Mock()
+        process.pid = 9_701
+        process.poll.return_value = None
+        leader = {
+            "pid": process.pid,
+            "ppid": 1,
+            "pgid": process.pid,
+            "uid": 501,
+            "sid": process.pid,
+            "sid_errno": None,
+            "sid_error": None,
+            "state": "T",
+            "command": "owned-leader",
+        }
+        direct_child = {
+            "pid": 9_702,
+            "ppid": process.pid,
+            "pgid": process.pid,
+            "uid": 501,
+            "sid": process.pid,
+            "sid_errno": None,
+            "sid_error": None,
+            "state": "T",
+            "command": "owned-child",
+        }
+        for topology, invalid_member in (
+            (
+                "grandchild",
+                {
+                    **direct_child,
+                    "pid": 9_703,
+                    "ppid": direct_child["pid"],
+                    "command": "owned-grandchild",
+                },
+            ),
+            (
+                "orphan",
+                {
+                    **direct_child,
+                    "pid": 9_704,
+                    "ppid": 1,
+                    "command": "owned-orphan",
+                },
+            ),
+        ):
+            with self.subTest(topology=topology), mock.patch.object(
+                MODULE.os,
+                "getpgid",
+                return_value=process.pid,
+            ), mock.patch.object(
+                MODULE.os,
+                "getsid",
+                return_value=process.pid,
+            ), mock.patch.object(
+                MODULE.os,
+                "geteuid",
+                return_value=501,
+            ), mock.patch.object(
+                MODULE,
+                "process_group_members",
+                return_value=[leader, direct_child, invalid_member],
+            ), mock.patch.object(
+                MODULE.os,
+                "kill",
+            ) as exact_kill, mock.patch.object(
+                MODULE.os,
+                "killpg",
+                side_effect=AssertionError("must not signal a process group"),
+            ):
+                with self.assertRaisesRegex(
+                    MODULE.OwnedProcessGroupRefusal,
+                    rf"invalid_members=.*{invalid_member['pid']}.*"
+                    rf"'ppid': {invalid_member['ppid']}",
+                ):
+                    MODULE.continue_owned_process_group(process)
+            exact_kill.assert_not_called()
 
     def test_group_continue_refuses_unstopped_revalidated_target_without_signal(
         self,

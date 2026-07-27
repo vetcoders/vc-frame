@@ -1733,11 +1733,17 @@ def validated_owned_process_group_members(
         ambiguous_pids = {
             int(member["pid"]) for member in ambiguous_members
         }
+        # The triage runtime spawns command helpers directly. A deeper or
+        # orphaned topology has no PID-safe resume order without pidfds.
         invalid_members = [
             member
             for member in members
             if int(member.get("pgid", -1)) != process.pid
             or int(member.get("uid", -1)) != expected_uid
+            or (
+                int(member.get("pid", -1)) != process.pid
+                and int(member.get("ppid", -1)) != process.pid
+            )
             or (
                 member.get("sid") != process.pid
                 and int(member.get("pid", -1)) not in ambiguous_pids
