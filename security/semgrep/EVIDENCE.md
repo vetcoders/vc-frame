@@ -78,7 +78,9 @@ temp directory and contain only the current user's terminal dump.
 binary. It establishes no identity, trust, privilege or update provenance.
 The triage transfer-lock tests additionally re-enter the same test executable
 under fixed test names with only the selected isolated scenario or the lock
-path and expected lock state.
+path and expected lock state. The macOS-only xtask installer test copies its
+own real Mach-O test executable into a process-private fixture directory so it
+can prove signing and strict verification; it does not execute that copy.
 
 ## CLI arguments
 
@@ -87,14 +89,11 @@ command-specific validation. It is input parsing, not authorization.
 
 ## Path traversal
 
-The eleven Actix taint findings are outside an Actix HTTP source-to-sink flow:
+The nine Actix taint findings are outside an Actix HTTP source-to-sink flow:
 WASI preopens and watchers receive host-authorized paths; legacy migration uses
 fixed current-user ProjectDirs; plugin loading is the explicit operator plugin
 capability; protobuf hits only construct data; installer symlinks use a
-validated framework root; webserver IPC uses locally discovered sockets. The
-xtask installer receives local operator-selected paths, canonicalizes and
-type-checks the source and parent, reserves staging with `create_new`, and
-revalidates the retained descriptor by device and inode before publish/cleanup.
+validated framework root; webserver IPC uses locally discovered sockets.
 
 ## Vendored browser assets
 

@@ -100,25 +100,19 @@ class SemgrepInventoryTests(unittest.TestCase):
                 with self.subTest(path=path, line=line):
                     MODULE.adjudicate(self.finding(rule, path, line))
 
-    def test_live_xtask_install_paths_are_explicitly_allowed(self) -> None:
-        path = MODULE.XTASK_INSTALL_PATH
-        lines = self.live_lines(path, r"std::fs::File::open\((?:&parent_path|source\.path\(\))\)")
-        self.assertEqual(len(lines), 2)
-        for line in lines:
-            with self.subTest(line=line):
-                MODULE.adjudicate(self.finding(
-                    "rust.actix.path-traversal.tainted-path.tainted-path",
-                    path,
-                    line,
-                ))
-
-    def test_changed_xtask_install_path_shape_fails(self) -> None:
-        with self.assertRaisesRegex(MODULE.InventoryError, "source shape"):
-            MODULE.require_xtask_install_path_policy(
-                MODULE.XTASK_INSTALL_PATH,
-                ["let file = std::fs::File::open(unreviewed_path)?;"],
-                1,
-            )
+    def test_xtask_install_uses_descriptor_relative_no_follow_paths(self) -> None:
+        source = (MODULE.ROOT / MODULE.XTASK_INSTALL_PATH).read_text(encoding="utf-8")
+        for required in (
+            "open_directory_no_follow",
+            "OFlags::NOFOLLOW",
+            "rustix::fs::openat",
+            "rustix::fs::statat",
+            "rustix::fs::renameat",
+            "same_file_identity",
+            "revalidate_absolute_path",
+        ):
+            self.assertIn(required, source)
+        self.assertNotIn("std::fs::File::open(&parent_path)", source)
 
     def test_live_current_exe_sources_are_explicitly_allowed(self) -> None:
         rule = "rust.lang.security.current-exe.current-exe"

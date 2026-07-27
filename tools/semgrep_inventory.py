@@ -35,6 +35,7 @@ WEB_CLIENT_TEST_PATH = "zellij-client/src/web_client/unit/web_client_tests.rs"
 WEB_CLIENT_PARENT_PATH = "zellij-client/src/web_client/mod.rs"
 CURRENT_EXE_PATHS = {
     "src/run_triage_cli.rs",
+    "xtask/src/pipelines.rs",
     "zellij-client/src/lib.rs",
     "zellij-client/src/web_client/mod.rs",
 }
@@ -217,16 +218,25 @@ def require_current_exe_policy(path: str, lines: list[str], line: int) -> None:
     source_line = lines[line - 1].strip()
     if path == "src/run_triage_cli.rs":
         nearby = [candidate.strip() for candidate in lines[line - 1:line + 8]]
-        if nearby[:3] == [
+        production_shape = [
+            candidate.strip() for candidate in lines[line - 1:line + 10]
+        ]
+        if production_shape == [
             "let executable = std::env::current_exe()",
             '.map_err(|e| format!("cannot resolve the vc-frame executable: {}", e))?;',
             "Ok(CliTriageIo { executable, root })",
-        ] and any(
-            candidate.startswith(
-                "let output = run_command_with_timeout(&self.executable, args,"
-            )
-            for candidate in nearby
-        ):
+            "}",
+            "",
+            "fn run(&self, args: &[&str]) -> Result<String, String> {",
+            "self.run_with_timeout(args, CLI_COMMAND_TIMEOUT)",
+            "}",
+            "",
+            (
+                "fn run_with_timeout(&self, args: &[&str], timeout: Duration) "
+                "-> Result<String, String> {"
+            ),
+            "let output = run_command_with_timeout(&self.executable, args, timeout)?;",
+        ]:
             return
         require_terminal_cfg_test_location(path, lines, line, "current-exe")
         if nearby[:6] == [
@@ -256,6 +266,37 @@ def require_current_exe_policy(path: str, lines: list[str], line: int) -> None:
         ):
             raise InventoryError(
                 f"current-exe test probe source shape changed at {path}:{line}"
+            )
+        return
+    if path == XTASK_INSTALL_PATH:
+        source_line = lines[line - 1].strip()
+        declaration = ["#[cfg(all(test, unix))]", "mod install_tests {"]
+        module_starts = [
+            index
+            for index in range(len(lines) - 1)
+            if lines[index:index + len(declaration)] == declaration
+        ]
+        if len(module_starts) != 1:
+            raise InventoryError(
+                f"expected one cfg(test, unix) install module in {path}; "
+                f"found {len(module_starts)}"
+            )
+        module_start = module_starts[0]
+        try:
+            module_end = lines.index("/// Run vc-frame debug build.", module_start + 2)
+        except ValueError as error:
+            raise InventoryError(
+                f"xtask install test module has no reviewed end marker in {path}"
+            ) from error
+        nearby = [candidate.strip() for candidate in lines[max(0, line - 10):line + 2]]
+        if (
+            not module_start + 1 < line - 1 < module_end
+            or source_line != 'std::env::current_exe().expect("current test executable"),'
+            or "#[cfg(target_os = \"macos\")]" not in nearby
+            or "fn macos_real_macho_is_signed_installed_and_strictly_verified() {" not in nearby
+        ):
+            raise InventoryError(
+                f"xtask current-exe test source shape changed at {path}:{line}"
             )
         return
     if path == "zellij-client/src/lib.rs":
@@ -308,54 +349,6 @@ def require_transfer_lock_fd_policy(path: str, lines: list[str], line: int) -> N
     ):
         raise InventoryError(
             f"transfer-lock unsafe source shape changed at {path}:{line}"
-        )
-
-
-def require_xtask_install_path_policy(path: str, lines: list[str], line: int) -> None:
-    if path != XTASK_INSTALL_PATH:
-        raise InventoryError(f"xtask install traversal policy used for {path}:{line}")
-    source_line = lines[line - 1].strip()
-    reviewed_sinks = {
-        "let parent_directory = std::fs::File::open(&parent_path).with_context(|| {",
-        "let mut source_file = std::fs::File::open(source.path()).with_context(|| {",
-    }
-    if source_line not in reviewed_sinks:
-        raise InventoryError(
-            f"xtask install traversal source shape changed at {path}:{line}"
-        )
-    nearby = [candidate.strip() for candidate in lines[max(0, line - 14):line]]
-    if (
-        source_line.startswith("let parent_directory")
-        and "fn reserve(destination: &ResolvedInstallDestination) -> anyhow::Result<Self> {"
-        not in nearby
-    ) or (
-        source_line.startswith("let mut source_file")
-        and "fn copy_source(&mut self, source: &ResolvedInstallSource) -> anyhow::Result<()> {"
-        not in nearby
-    ):
-        raise InventoryError(
-            f"xtask install traversal sink moved outside its reviewed helper at {path}:{line}"
-        )
-    contract_fragments = {
-        "struct ResolvedInstallSource(PathBuf);",
-        "let source = source.canonicalize().with_context(|| {",
-        "if !metadata.is_file() {",
-        "struct ResolvedInstallDestination {",
-        "let parent = parent.canonicalize().with_context(|| {",
-        ".create_new(true)",
-        "staged.revalidate_path_identity()?;",
-        "path_metadata.dev() == file_metadata.dev()",
-        "&& path_metadata.ino() == file_metadata.ino(),",
-    }
-    stripped_lines = [candidate.strip() for candidate in lines]
-    missing = sorted(
-        fragment
-        for fragment in contract_fragments
-        if not any(fragment in candidate for candidate in stripped_lines)
-    )
-    if missing:
-        raise InventoryError(
-            f"xtask install path invariant changed at {path}:{line}: missing {missing}"
         )
 
 
@@ -472,7 +465,7 @@ def validate_results(
         raise InventoryError("resolved p/rust rules drifted; refresh and re-adjudicate")
     results = payload.get("results", [])
     for result in results:
-        validated_source_location(result)
+        adjudicate(result)
     current = {result["extra"]["fingerprint"]: result for result in results}
     if len(current) != len(results):
         raise InventoryError("Semgrep produced duplicate result fingerprints")
@@ -618,6 +611,14 @@ def adjudicate(
         )
     if rule == "rust.lang.security.current-exe.current-exe":
         require_current_exe_policy(path, lines, line)
+        if path == XTASK_INSTALL_PATH:
+            return (
+                "scoped_false_positive",
+                "The macOS-only installer test copies its own real Mach-O test executable as local fixture bytes.",
+                "The executable path remains inside cfg(test), is copied into a process-private test directory, and is never executed with elevated trust.",
+                "Rust test harness",
+                ["security/semgrep/EVIDENCE.md#current-executable", path],
+            )
         return (
             "scoped_false_positive",
             "current_exe only spawns another mode of the running vc-frame binary; it establishes no trust.",
@@ -633,7 +634,6 @@ def adjudicate(
         )
     if rule == "rust.actix.path-traversal.tainted-path.tainted-path":
         policies = {
-            XTASK_INSTALL_PATH: ("Atomic binary installer", "The source and destination are local operator-selected CLI paths; source and parent are canonicalized and type-checked, staging uses create_new, and the retained file descriptor is matched by device and inode before publication or cleanup."),
             "zellij-server/src/plugins/plugin_loader.rs": ("Plugin filesystem capability", "The path is a host-selected WASI preopen, not an HTTP parameter."),
             "zellij-server/src/plugins/watch_filesystem.rs": ("Plugin filesystem capability", "The hit only converts an authorized host cwd before a local watcher is registered."),
             "zellij-utils/src/consts.rs": ("Runtime directories", "Source and target are fixed legacy/current ProjectDirs owned by the local OS user."),
@@ -644,8 +644,6 @@ def adjudicate(
         }
         if path not in policies:
             raise InventoryError(f"traversal finding has no policy: {path}")
-        if path == XTASK_INSTALL_PATH:
-            require_xtask_install_path_policy(path, lines, line)
         owner, invariant = policies[path]
         return (
             "scoped_false_positive",
