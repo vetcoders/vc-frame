@@ -107,11 +107,25 @@ fn wait_for_action_completion_with_timeout(
 // dropping this struct sends a notification through the oneshot channel to the receiver, letting
 // it know the action is ended and thus releasing it
 //
-// Note: Cloning this struct DOES NOT clone that internal receiver, it only implements Clone so
+// Note: Cloning this struct DOES NOT clone that internal sender, it only implements Clone so
 // that it can be included in various other larger structs - DO NOT RELY ON CLONING IT!
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotificationResolution {
+    Pending,
+    Success,
+    Failure,
+}
+
+const PENDING_NOTIFICATION_DROPPED_ERROR: &str =
+    "action completion dropped before explicit success or failure resolution";
+
 #[derive(Debug)]
 pub struct NotificationEnd {
     channel: Option<oneshot::Sender<ActionCompletionResult>>,
+    // `None` preserves the legacy drop-as-success contract for callers that
+    // have not migrated to explicit completion yet. Once a caller opts in via
+    // `require_explicit_resolution`, dropping while Pending is always failure.
+    resolution: Option<NotificationResolution>,
     exit_status: Option<i32>,
     unblock_condition: Option<UnblockCondition>,
     affected_pane_id: Option<PaneId>, // optional payload of the pane id affected by this action
@@ -125,6 +139,7 @@ impl Clone for NotificationEnd {
         // Always clone as None - only the original holder should signal completion
         NotificationEnd {
             channel: None,
+            resolution: self.resolution,
             exit_status: self.exit_status,
             unblock_condition: self.unblock_condition,
             affected_pane_id: self.affected_pane_id,
@@ -139,6 +154,7 @@ impl NotificationEnd {
     pub fn new(sender: oneshot::Sender<ActionCompletionResult>) -> Self {
         NotificationEnd {
             channel: Some(sender),
+            resolution: None,
             exit_status: None,
             unblock_condition: None,
             affected_pane_id: None,
@@ -154,6 +170,7 @@ impl NotificationEnd {
     ) -> Self {
         NotificationEnd {
             channel: Some(sender),
+            resolution: None,
             exit_status: None,
             unblock_condition: Some(unblock_condition),
             affected_pane_id: None,
@@ -165,6 +182,20 @@ impl NotificationEnd {
 
     pub fn set_exit_status(&mut self, exit_status: i32) {
         self.exit_status = Some(exit_status);
+        if self
+            .unblock_condition
+            .is_some_and(|condition| !condition.is_met(exit_status))
+        {
+            // A blocking terminal can be rerun until its requested condition
+            // is met. An intermediate exit updates the eventual payload but
+            // must not poison the still-pending completion.
+            return;
+        }
+        if exit_status == 0 {
+            self.mark_success();
+        } else {
+            self.resolution = Some(NotificationResolution::Failure);
+        }
     }
 
     pub fn set_affected_pane_id(&mut self, pane_id: PaneId) {
@@ -177,6 +208,10 @@ impl NotificationEnd {
 
     pub fn set_error_message(&mut self, message: String) {
         self.error_message = Some(message);
+        if self.exit_status.is_none_or(|exit_status| exit_status == 0) {
+            self.exit_status = Some(1);
+        }
+        self.resolution = Some(NotificationResolution::Failure);
     }
 
     pub fn set_stdout_message(&mut self, message: String) {
@@ -186,11 +221,36 @@ impl NotificationEnd {
     pub fn unblock_condition(&self) -> Option<UnblockCondition> {
         self.unblock_condition
     }
+
+    pub fn require_explicit_resolution(&mut self) {
+        if self.resolution.is_none() {
+            self.resolution = Some(NotificationResolution::Pending);
+        }
+    }
+
+    pub fn mark_success(&mut self) {
+        if self.resolution != Some(NotificationResolution::Failure) {
+            self.resolution = Some(NotificationResolution::Success);
+        }
+    }
+
+    pub fn mark_failure(&mut self, message: impl Into<String>) {
+        self.set_error_message(message.into());
+    }
 }
 
 impl Drop for NotificationEnd {
     fn drop(&mut self) {
         if let Some(tx) = self.channel.take() {
+            if self.resolution == Some(NotificationResolution::Pending) {
+                self.exit_status = Some(1);
+                self.error_message = Some(PENDING_NOTIFICATION_DROPPED_ERROR.to_string());
+                self.resolution = Some(NotificationResolution::Failure);
+            } else if self.resolution == Some(NotificationResolution::Failure)
+                && self.exit_status.is_none_or(|exit_status| exit_status == 0)
+            {
+                self.exit_status = Some(1);
+            }
             let result = ActionCompletionResult {
                 exit_status: self.exit_status,
                 affected_pane_id: self.affected_pane_id,
@@ -204,7 +264,9 @@ impl Drop for NotificationEnd {
 }
 
 fn complete_action_immediately(sender: oneshot::Sender<ActionCompletionResult>) {
-    drop(NotificationEnd::new(sender));
+    let mut completion = NotificationEnd::new(sender);
+    completion.require_explicit_resolution();
+    completion.mark_success();
 }
 
 // `route_action` must not borrow from the `session_data` read guard.
@@ -1053,7 +1115,7 @@ pub(crate) fn route_action(
             let is_web_client = false; // actions cannot be initiated directly from the web
 
             // Construct completion_tx conditionally
-            let (completion_tx, block_on_first_terminal) = if let Some(condition) =
+            let (mut completion_tx, block_on_first_terminal) = if let Some(condition) =
                 first_pane_unblock_condition
             {
                 let notification = NotificationEnd::new_with_condition(completion_tx, condition);
@@ -1062,6 +1124,10 @@ pub(crate) fn route_action(
             } else {
                 (NotificationEnd::new(completion_tx), false)
             };
+            // NewTab spans Route -> Screen -> Plugin -> PTY -> Screen -> PTY.
+            // Opt in before the first handoff so losing ownership anywhere in
+            // that chain can never look like a successful commit.
+            completion_tx.require_explicit_resolution();
 
             senders
                 .send_to_screen(ScreenInstruction::NewTab(
@@ -3260,6 +3326,8 @@ mod tests {
 
         let result = rx.blocking_recv().unwrap();
         assert_eq!(result.affected_tab_id, None);
+        assert_eq!(result.exit_status, None);
+        assert_eq!(result.error_message, None);
     }
 
     #[test]
@@ -3426,6 +3494,167 @@ mod tests {
 
         assert_eq!(result.exit_status, None);
         assert_eq!(result.error_message, None);
+    }
+
+    #[test]
+    fn pending_notification_drop_is_an_explicit_failure() {
+        let (tx, rx) = oneshot::channel();
+        let mut completion = NotificationEnd::new(tx);
+        completion.require_explicit_resolution();
+
+        drop(completion);
+
+        let result = rx.blocking_recv().unwrap();
+        assert_eq!(result.exit_status, Some(1));
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some(PENDING_NOTIFICATION_DROPPED_ERROR)
+        );
+    }
+
+    #[test]
+    fn explicitly_successful_notification_is_success() {
+        let (tx, rx) = oneshot::channel();
+        let mut completion = NotificationEnd::new(tx);
+        completion.require_explicit_resolution();
+        completion.mark_success();
+
+        drop(completion);
+
+        let result = rx.blocking_recv().unwrap();
+        assert_eq!(result.exit_status, None);
+        assert_eq!(result.error_message, None);
+    }
+
+    #[test]
+    fn explicit_zero_exit_status_resolves_success() {
+        let (tx, rx) = oneshot::channel();
+        let mut completion = NotificationEnd::new(tx);
+        completion.require_explicit_resolution();
+        completion.set_exit_status(0);
+
+        drop(completion);
+
+        let result = rx.blocking_recv().unwrap();
+        assert_eq!(result.exit_status, Some(0));
+        assert_eq!(result.error_message, None);
+    }
+
+    #[test]
+    fn unmet_blocking_exit_does_not_poison_a_later_success() {
+        let (tx, rx) = oneshot::channel();
+        let mut completion =
+            NotificationEnd::new_with_condition(tx, UnblockCondition::OnExitSuccess);
+        completion.require_explicit_resolution();
+        completion.set_exit_status(7);
+        assert_eq!(completion.resolution, Some(NotificationResolution::Pending));
+        completion.set_exit_status(0);
+
+        drop(completion);
+
+        let result = rx.blocking_recv().unwrap();
+        assert_eq!(result.exit_status, Some(0));
+        assert_eq!(result.error_message, None);
+    }
+
+    #[test]
+    fn unmet_blocking_success_waits_for_a_later_failure() {
+        let (tx, rx) = oneshot::channel();
+        let mut completion =
+            NotificationEnd::new_with_condition(tx, UnblockCondition::OnExitFailure);
+        completion.require_explicit_resolution();
+        completion.set_exit_status(0);
+        assert_eq!(completion.resolution, Some(NotificationResolution::Pending));
+        completion.set_exit_status(9);
+
+        drop(completion);
+
+        let result = rx.blocking_recv().unwrap();
+        assert_eq!(result.exit_status, Some(9));
+        assert_eq!(result.error_message, None);
+    }
+
+    #[test]
+    fn explicitly_failed_notification_preserves_the_exact_failure() {
+        let (tx, rx) = oneshot::channel();
+        let mut completion = NotificationEnd::new(tx);
+        completion.require_explicit_resolution();
+        completion.mark_failure("layout commit rejected");
+
+        drop(completion);
+
+        let result = rx.blocking_recv().unwrap();
+        assert_eq!(result.exit_status, Some(1));
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some("layout commit rejected")
+        );
+    }
+
+    #[test]
+    fn explicit_nonzero_exit_status_preserves_the_exact_status() {
+        let (tx, rx) = oneshot::channel();
+        let mut completion = NotificationEnd::new(tx);
+        completion.require_explicit_resolution();
+        completion.set_exit_status(7);
+
+        drop(completion);
+
+        let result = rx.blocking_recv().unwrap();
+        assert_eq!(result.exit_status, Some(7));
+        assert_eq!(result.error_message, None);
+    }
+
+    #[test]
+    fn explicit_failure_cannot_be_overwritten_by_late_success() {
+        let (tx, rx) = oneshot::channel();
+        let mut completion = NotificationEnd::new(tx);
+        completion.require_explicit_resolution();
+        completion.mark_failure("commit activation failed");
+        completion.mark_success();
+
+        drop(completion);
+
+        let result = rx.blocking_recv().unwrap();
+        assert_eq!(result.exit_status, Some(1));
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some("commit activation failed")
+        );
+    }
+
+    #[test]
+    fn notification_clone_cannot_resolve_the_owning_channel() {
+        let (tx, mut rx) = oneshot::channel();
+        let mut owner = NotificationEnd::new(tx);
+        owner.require_explicit_resolution();
+        let mut cloned = owner.clone();
+
+        cloned.mark_success();
+        drop(cloned);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+
+        drop(owner);
+        let result = rx.blocking_recv().unwrap();
+        assert_eq!(result.exit_status, Some(1));
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some(PENDING_NOTIFICATION_DROPPED_ERROR)
+        );
+    }
+
+    #[test]
+    fn notification_drop_tolerates_a_disconnected_receiver() {
+        let (tx, rx) = oneshot::channel();
+        drop(rx);
+        let mut completion = NotificationEnd::new(tx);
+        completion.require_explicit_resolution();
+        completion.mark_success();
+
+        drop(completion);
     }
 
     #[test]

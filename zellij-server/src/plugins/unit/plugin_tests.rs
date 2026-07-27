@@ -1,4 +1,5 @@
 use super::plugin_thread_main;
+use crate::route::NotificationEnd;
 use crate::screen::ScreenInstruction;
 use crate::{
     ServerInstruction,
@@ -19,6 +20,7 @@ use zellij_utils::input::actions::Action;
 use zellij_utils::input::keybinds::Keybinds;
 use zellij_utils::input::layout::{
     PluginAlias, PluginUserConfiguration, RunPlugin, RunPluginLocation, RunPluginOrAlias,
+    TiledPaneLayout,
 };
 use zellij_utils::input::permission::PermissionCache;
 use zellij_utils::input::plugins::PluginAliases;
@@ -28,6 +30,7 @@ use crate::background_jobs::BackgroundJob;
 use crate::pty_writer::PtyWriteInstruction;
 use std::env::set_var;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::{plugins::PluginInstruction, pty::PtyInstruction};
 
@@ -712,6 +715,69 @@ lazy_static! {
             .unwrap()
             .to_string_lossy()
     );
+}
+
+#[test]
+fn new_tab_pty_handoff_failure_preserves_completion_and_rejects_once() {
+    let (plugin_sender, pty_receiver, screen_receiver, teardown) =
+        create_plugin_thread_with_pty_receiver(None, None, None);
+    drop(pty_receiver);
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    let mut completion = NotificationEnd::new(completion_tx);
+    completion.require_explicit_resolution();
+
+    plugin_sender
+        .send(PluginInstruction::NewTab(
+            None,
+            None,
+            Some(TiledPaneLayout::default()),
+            vec![],
+            7,
+            701,
+            None,
+            false,
+            true,
+            (1, false),
+            Some(completion),
+            None,
+        ))
+        .unwrap();
+
+    let (instruction, _) = screen_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the failed Plugin to PTY handoff must reject through Screen");
+    let recovered_completion = match instruction {
+        ScreenInstruction::LayoutPreparationFailed {
+            transaction_id,
+            tab_id,
+            completion_tx,
+            message,
+            ..
+        } => {
+            assert_eq!(transaction_id, 701);
+            assert_eq!(tab_id, Some(7));
+            assert!(message.contains("failed Plugin -> PTY handoff"));
+            completion_tx
+        },
+        other => panic!("expected LayoutPreparationFailed, got {other:?}"),
+    };
+    assert!(
+        screen_receiver.try_recv().is_err(),
+        "one failed handoff must emit exactly one terminal rejection"
+    );
+    drop(recovered_completion);
+    let completion = completion_rx
+        .blocking_recv()
+        .expect("the original action completion must remain owned");
+    assert_eq!(completion.exit_status, Some(1));
+    assert!(
+        completion
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("failed Plugin -> PTY handoff"))
+    );
+
+    teardown();
 }
 
 #[test]

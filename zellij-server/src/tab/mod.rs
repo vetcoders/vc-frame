@@ -31,7 +31,7 @@ use crate::pane_groups::PaneGroups;
 use crate::pty_writer::PtyWriteInstruction;
 use crate::screen::{CopyOptions, ScreenInstruction};
 use crate::ui::{loading_indication::LoadingIndication, pane_boundaries_frame::FrameParams};
-use layout_applier::LayoutApplier;
+use layout_applier::{LayoutApplier, LayoutSideEffects, LayoutTransactionParts};
 use swap_layouts::SwapLayouts;
 
 use self::clipboard::ClipboardProvider;
@@ -43,7 +43,7 @@ use crate::{
     panes::floating_panes::floating_pane_grid::half_size_middle_geom,
     panes::grid::namespace_notification_id,
     panes::sixel::SixelImageStore,
-    panes::{FloatingPanes, TiledPanes},
+    panes::{FloatingPanes, FloatingPanesLayoutSnapshot, TiledPanes, TiledPanesLayoutSnapshot},
     panes::{LinkHandler, PaneId, PluginPane, TerminalPane},
     plugins::PluginInstruction,
     pty::{ClientTabIndexOrPaneId, PtyInstruction, VteBytes},
@@ -53,7 +53,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Instant;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     str,
 };
 use zellij_utils::{
@@ -155,10 +155,105 @@ const VIEWER_GC_PLUGIN_SURFACES: &[&str] = &[
 type HoldForCommand = Option<RunCommand>;
 pub type SuppressedPanes = HashMap<PaneId, (bool, Box<dyn Pane>)>; // bool => is scrollback editor
 
+#[derive(Clone)]
 enum BufferedTabInstruction {
     SetPaneSelectable(PaneId, bool),
     HandlePtyBytes(u32, VteBytes),
     HoldPane(PaneId, Option<i32>, bool, RunCommand), // Option<i32> is the exit status, bool is is_first_run
+}
+
+#[derive(Clone)]
+struct PaneLayoutSnapshot {
+    geom: PaneGeom,
+    geom_override: Option<PaneGeom>,
+    title: String,
+    borderless: bool,
+    selectable: bool,
+    should_render: bool,
+    active_at: Instant,
+    content_offset: Offset,
+    exclude_from_sync: bool,
+    default_colors: (Option<String>, Option<String>),
+    unfocus_event: Option<String>,
+}
+
+impl PaneLayoutSnapshot {
+    fn capture(pane: &dyn Pane) -> Self {
+        PaneLayoutSnapshot {
+            geom: pane.position_and_size(),
+            geom_override: pane.geom_override(),
+            title: pane.layout_title(),
+            borderless: pane.borderless(),
+            selectable: pane.selectable(),
+            should_render: pane.should_render(),
+            active_at: pane.active_at(),
+            content_offset: pane.get_content_offset(),
+            exclude_from_sync: pane.exclude_from_sync(),
+            default_colors: pane.get_pane_default_colors(),
+            unfocus_event: pane.unfocus_event(),
+        }
+    }
+
+    fn restore(self, pane: &mut dyn Pane) {
+        pane.set_geom(self.geom);
+        match self.geom_override {
+            Some(geom_override) => pane.set_geom_override(geom_override),
+            None => pane.reset_size_and_position_override(),
+        }
+        pane.set_title(self.title);
+        pane.set_borderless(self.borderless);
+        pane.set_selectable(self.selectable);
+        pane.set_content_offset(self.content_offset);
+        pane.set_exclude_from_sync(self.exclude_from_sync);
+        pane.set_pane_default_colors(self.default_colors.0, self.default_colors.1);
+        pane.set_active_at(self.active_at);
+        pane.set_should_render(self.should_render);
+    }
+}
+
+struct TabLayoutSnapshot {
+    tiled_panes: TiledPanesLayoutSnapshot,
+    floating_panes: FloatingPanesLayoutSnapshot,
+    pane_states: BTreeMap<PaneId, PaneLayoutSnapshot>,
+    tiled_pane_ids: HashSet<PaneId>,
+    viewport: Viewport,
+    display_area: Size,
+    focus_pane_id: Option<PaneId>,
+    is_pending: bool,
+    pending_instructions: Vec<BufferedTabInstruction>,
+    swap_layouts: SwapLayouts,
+    name: String,
+    prev_name: String,
+    size: Size,
+    should_clear_display_before_rendering: bool,
+    effective_focused_panes: HashMap<ClientId, PaneId>,
+}
+
+#[derive(Clone, Copy)]
+enum LayoutTransactionKind {
+    Apply,
+    Override,
+}
+
+pub(crate) struct TabLayoutTransaction {
+    snapshot: TabLayoutSnapshot,
+    side_effects: LayoutSideEffects,
+    deferred_closed_panes: BTreeMap<PaneId, Box<dyn Pane>>,
+    rollback_panes: BTreeMap<PaneId, Box<dyn Pane>>,
+    should_show_floating_panes: bool,
+    client_id: ClientId,
+    kind: LayoutTransactionKind,
+    blocking_terminal: Option<(u32, NotificationEnd)>,
+    deferred_pane_initial_bytes: Vec<(PaneId, Vec<u8>)>,
+}
+
+pub(crate) struct TabLayoutCommitEffects {
+    side_effects: LayoutSideEffects,
+    should_show_floating_panes: bool,
+    client_id: ClientId,
+    focus_events: Vec<(u32, String)>,
+    deferred_pane_initial_bytes: Vec<(PaneId, Vec<u8>)>,
+    blocking_terminal: Option<(u32, NotificationEnd)>,
 }
 
 pub(crate) struct Tab {
@@ -625,6 +720,18 @@ pub trait Pane {
     fn frame_color_override(&self) -> Option<PaletteColor>;
     fn invoked_with(&self) -> &Option<Run>;
     fn set_title(&mut self, title: String);
+    fn layout_title(&self) -> String {
+        self.current_title()
+    }
+    fn begin_layout_transaction(&mut self) {}
+    fn commit_layout_transaction(&mut self) {}
+    fn rollback_layout_transaction(&mut self) {}
+    fn attach_blocking_completion(
+        &mut self,
+        completion: NotificationEnd,
+    ) -> std::result::Result<(), NotificationEnd> {
+        Err(completion)
+    }
     fn update_loading_indication(&mut self, _loading_indication: LoadingIndication) {} // only relevant for plugins
     fn start_loading_indication(&mut self, _loading_indication: LoadingIndication) {} // only relevant for plugins
     fn progress_animation_offset(&mut self) {} // only relevant for plugins
@@ -730,7 +837,285 @@ pub fn get_next_terminal_position(
     tiled_panes_count + floating_panes_count + 1
 }
 
+impl TabLayoutSnapshot {
+    fn capture(tab: &Tab) -> Self {
+        let mut pane_states = BTreeMap::new();
+        let mut tiled_pane_ids = HashSet::new();
+        for (pane_id, pane) in tab.tiled_panes.get_panes() {
+            tiled_pane_ids.insert(*pane_id);
+            pane_states.insert(*pane_id, PaneLayoutSnapshot::capture(&**pane));
+        }
+        for (pane_id, pane) in tab.floating_panes.get_panes() {
+            pane_states.insert(*pane_id, PaneLayoutSnapshot::capture(&**pane));
+        }
+        TabLayoutSnapshot {
+            tiled_panes: tab.tiled_panes.layout_snapshot(),
+            floating_panes: tab.floating_panes.layout_snapshot(),
+            pane_states,
+            tiled_pane_ids,
+            viewport: *tab.viewport.borrow(),
+            display_area: *tab.display_area.borrow(),
+            focus_pane_id: tab.focus_pane_id,
+            is_pending: tab.is_pending,
+            pending_instructions: tab.pending_instructions.clone(),
+            swap_layouts: tab.swap_layouts.clone(),
+            name: tab.name.clone(),
+            prev_name: tab.prev_name.clone(),
+            size: tab.size,
+            should_clear_display_before_rendering: tab.should_clear_display_before_rendering,
+            effective_focused_panes: tab.layout_focused_panes(),
+        }
+    }
+}
+
+impl TabLayoutTransaction {
+    pub(crate) fn rollback(self, tab: &mut Tab, rejection_message: &str) {
+        let TabLayoutTransaction {
+            snapshot,
+            side_effects: _,
+            mut deferred_closed_panes,
+            mut rollback_panes,
+            mut blocking_terminal,
+            deferred_pane_initial_bytes: _,
+            ..
+        } = self;
+        if let Some((_, completion)) = blocking_terminal.as_mut() {
+            completion.set_exit_status(1);
+            completion.set_error_message(rejection_message.to_owned());
+        }
+        let mut panes = tab.tiled_panes.take_panes_for_layout_rollback();
+        panes.append(&mut tab.floating_panes.take_panes_for_layout_rollback());
+        panes.append(&mut deferred_closed_panes);
+        panes.append(&mut rollback_panes);
+
+        let mut tiled_panes = BTreeMap::new();
+        let mut floating_panes = BTreeMap::new();
+        for pane_id in snapshot.pane_states.keys() {
+            match panes.remove(pane_id) {
+                Some(pane) if snapshot.tiled_pane_ids.contains(pane_id) => {
+                    tiled_panes.insert(*pane_id, pane);
+                },
+                Some(pane) => {
+                    floating_panes.insert(*pane_id, pane);
+                },
+                None => {
+                    log::error!(
+                        "layout rollback could not recover baseline pane {:?} in tab {}",
+                        pane_id,
+                        tab.id
+                    );
+                },
+            }
+        }
+
+        *tab.viewport.borrow_mut() = snapshot.viewport;
+        *tab.display_area.borrow_mut() = snapshot.display_area;
+        tab.tiled_panes
+            .restore_layout_snapshot(snapshot.tiled_panes, tiled_panes);
+        tab.floating_panes
+            .restore_layout_snapshot(snapshot.floating_panes, floating_panes);
+        for (pane_id, pane_state) in snapshot.pane_states {
+            if let Some(pane) = tab.tiled_panes.get_pane_mut(pane_id) {
+                pane_state.restore(&mut **pane);
+                pane.rollback_layout_transaction();
+            } else if let Some(pane) = tab.floating_panes.get_pane_mut(pane_id) {
+                pane_state.restore(&mut **pane);
+                pane.rollback_layout_transaction();
+            }
+        }
+        tab.focus_pane_id = snapshot.focus_pane_id;
+        tab.is_pending = snapshot.is_pending;
+        tab.pending_instructions = snapshot.pending_instructions;
+        tab.swap_layouts = snapshot.swap_layouts;
+        tab.name = snapshot.name;
+        tab.prev_name = snapshot.prev_name;
+        tab.size = snapshot.size;
+        tab.should_clear_display_before_rendering = snapshot.should_clear_display_before_rendering;
+    }
+
+    pub(crate) fn commit_state(self, tab: &mut Tab) -> TabLayoutCommitEffects {
+        let TabLayoutTransaction {
+            snapshot,
+            mut side_effects,
+            deferred_closed_panes: _,
+            rollback_panes: _,
+            should_show_floating_panes,
+            client_id,
+            kind,
+            blocking_terminal,
+            deferred_pane_initial_bytes,
+        } = self;
+        let should_show_floating_panes =
+            should_show_floating_panes && tab.floating_panes.pane_ids().next().is_some();
+        if should_show_floating_panes != tab.floating_panes.panes_are_visible() {
+            if should_show_floating_panes {
+                tab.show_floating_panes();
+                if let Some(last_selectable_floating_pane_id) =
+                    tab.floating_panes.last_selectable_floating_pane_id()
+                    && !tab.floating_panes.active_panes_contain(&client_id)
+                {
+                    tab.floating_panes
+                        .focus_pane(last_selectable_floating_pane_id, client_id);
+                }
+                tab.floating_panes.set_force_render();
+            } else {
+                tab.hide_floating_panes();
+            }
+        }
+        tab.tiled_panes.reapply_pane_frames();
+        tab.is_pending = false;
+        if matches!(kind, LayoutTransactionKind::Override) {
+            tab.swap_layouts.set_is_tiled_damaged();
+            tab.swap_layouts.set_is_floating_damaged();
+            tab.relayout_tiled_panes(false).non_fatal();
+            tab.relayout_floating_panes(false).non_fatal();
+            LayoutApplier::offset_viewport(
+                tab.viewport.clone(),
+                tab.display_area.clone(),
+                &mut tab.tiled_panes,
+                tab.draw_pane_frames,
+            );
+        }
+        let baseline_focus = snapshot.effective_focused_panes;
+        let baseline_pane_states = snapshot.pane_states;
+        for pane_id in baseline_pane_states.keys() {
+            if let Some(pane) = tab.tiled_panes.get_pane_mut(*pane_id) {
+                pane.commit_layout_transaction();
+            } else if let Some(pane) = tab.floating_panes.get_pane_mut(*pane_id) {
+                pane.commit_layout_transaction();
+            }
+        }
+        side_effects.clear_resize_effects();
+        for (_, pane) in tab.tiled_panes.get_panes() {
+            side_effects.resize_pane(&**pane, &tab.character_cell_size);
+        }
+        for (_, pane) in tab.floating_panes.get_panes() {
+            side_effects.resize_pane(&**pane, &tab.character_cell_size);
+        }
+        let final_focus = tab.layout_focused_panes();
+        let mut clients = BTreeSet::new();
+        clients.extend(baseline_focus.keys().copied());
+        clients.extend(final_focus.keys().copied());
+        let mut focus_events = vec![];
+        for client_id in clients {
+            let previous = baseline_focus.get(&client_id).copied();
+            let current = final_focus.get(&client_id).copied();
+            if previous == current {
+                continue;
+            }
+            if let Some(PaneId::Terminal(terminal_id)) = previous
+                && let Some(unfocus_event) = baseline_pane_states
+                    .get(&PaneId::Terminal(terminal_id))
+                    .and_then(|state| state.unfocus_event.clone())
+            {
+                focus_events.push((terminal_id, unfocus_event));
+            }
+            if let Some(PaneId::Terminal(terminal_id)) = current
+                && let Some(focus_event) = tab
+                    .tiled_panes
+                    .get_pane(PaneId::Terminal(terminal_id))
+                    .or_else(|| tab.floating_panes.get_pane(PaneId::Terminal(terminal_id)))
+                    .and_then(|pane| pane.focus_event())
+            {
+                focus_events.push((terminal_id, focus_event));
+            }
+        }
+        tab.tiled_panes.set_layout_io_enabled(true);
+        tab.floating_panes.set_layout_io_enabled(true);
+        TabLayoutCommitEffects {
+            side_effects,
+            should_show_floating_panes,
+            client_id,
+            focus_events,
+            deferred_pane_initial_bytes,
+            blocking_terminal,
+        }
+    }
+}
+
+impl TabLayoutCommitEffects {
+    pub(crate) fn reject_blocking_completion(&mut self, message: &str) {
+        if let Some((_, completion)) = self.blocking_terminal.as_mut() {
+            completion.mark_failure(message);
+        }
+    }
+
+    pub(crate) fn emit(mut self, tab: &mut Tab) -> Result<()> {
+        let blocking_attachment_error = if let Some((terminal_id, completion)) =
+            self.blocking_terminal.take()
+        {
+            let pane_id = PaneId::Terminal(terminal_id);
+            let pane = tab
+                .tiled_panes
+                .get_pane_mut(pane_id)
+                .or_else(|| tab.floating_panes.get_pane_mut(pane_id));
+            if let Some(pane) = pane {
+                match pane.attach_blocking_completion(completion) {
+                    Ok(()) => None,
+                    Err(mut completion) => {
+                        let message = format!(
+                            "terminal {terminal_id} already owned a blocking completion after layout activation"
+                        );
+                        completion.mark_failure(message.clone());
+                        Some(message)
+                    },
+                }
+            } else {
+                let mut completion = completion;
+                let message = format!(
+                    "terminal {terminal_id} disappeared before post-activation completion attachment"
+                );
+                completion.mark_failure(message.clone());
+                Some(message)
+            }
+        } else {
+            None
+        };
+        if let Some(message) = blocking_attachment_error {
+            bail!(message);
+        }
+        self.side_effects.emit(&tab.senders)?;
+        for (terminal_id, focus_event) in self.focus_events {
+            tab.os_api
+                .write_to_tty_stdin(terminal_id, focus_event.as_bytes())
+                .with_context(|| {
+                    format!("failed to emit committed focus transition to terminal {terminal_id}")
+                })?;
+        }
+        for (pane_id, bytes) in self.deferred_pane_initial_bytes {
+            if let Some(pane) = tab.get_pane_with_id_mut(pane_id) {
+                pane.handle_pty_bytes(bytes);
+            }
+        }
+        tab.apply_buffered_instructions()?;
+        let _ = (self.should_show_floating_panes, self.client_id);
+        Ok(())
+    }
+}
+
 impl Tab {
+    fn layout_focused_panes(&self) -> HashMap<ClientId, PaneId> {
+        if self.floating_panes.panes_are_visible() {
+            self.floating_panes.layout_focused_panes()
+        } else {
+            self.tiled_panes.layout_focused_panes()
+        }
+    }
+
+    fn begin_layout_transaction(&mut self) {
+        self.tiled_panes.set_layout_io_enabled(false);
+        self.floating_panes.set_layout_io_enabled(false);
+        for pane in self.tiled_panes.panes.values_mut() {
+            pane.begin_layout_transaction();
+        }
+        let floating_pane_ids: Vec<PaneId> = self.floating_panes.pane_ids().copied().collect();
+        for pane_id in floating_pane_ids {
+            if let Some(pane) = self.floating_panes.get_pane_mut(pane_id) {
+                pane.begin_layout_transaction();
+            }
+        }
+    }
+
     // FIXME: Still too many arguments for clippy to be happy...
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -892,6 +1277,7 @@ impl Tab {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn apply_layout(
         &mut self,
         layout: TiledPaneLayout,
@@ -902,9 +1288,35 @@ impl Tab {
         client_id: ClientId,
         blocking_terminal: Option<(u32, NotificationEnd)>,
     ) -> Result<()> {
+        let transaction = self.begin_apply_layout(
+            layout,
+            floating_panes_layout,
+            new_terminal_ids,
+            new_floating_terminal_ids,
+            new_plugin_ids,
+            client_id,
+            blocking_terminal,
+        )?;
+        let effects = transaction.commit_state(self);
+        effects.emit(self)?;
+        Ok(())
+    }
+
+    pub(crate) fn begin_apply_layout(
+        &mut self,
+        layout: TiledPaneLayout,
+        floating_panes_layout: Vec<FloatingPaneLayout>,
+        new_terminal_ids: Vec<(u32, HoldForCommand)>,
+        new_floating_terminal_ids: Vec<(u32, HoldForCommand)>,
+        new_plugin_ids: HashMap<RunPluginOrAlias, Vec<u32>>,
+        client_id: ClientId,
+        blocking_terminal: Option<(u32, NotificationEnd)>,
+    ) -> Result<TabLayoutTransaction> {
+        let snapshot = TabLayoutSnapshot::capture(self);
+        self.begin_layout_transaction();
         self.swap_layouts
             .set_base_layout((layout.clone(), floating_panes_layout.clone()));
-        match LayoutApplier::new(
+        let mut layout_applier = LayoutApplier::new(
             &self.viewport,
             &self.senders,
             &self.sixel_image_store,
@@ -927,39 +1339,50 @@ impl Tab {
             self.explicitly_disable_kitty_keyboard_protocol,
             blocking_terminal,
         )
-        .apply_layout(
+        .defer_side_effects();
+        let application_result = layout_applier.apply_layout(
             layout,
             floating_panes_layout,
             new_terminal_ids,
             new_floating_terminal_ids,
             new_plugin_ids,
             client_id,
-        ) {
-            Ok(should_show_floating_panes) => {
-                if should_show_floating_panes != self.floating_panes.panes_are_visible() {
-                    self.toggle_floating_panes(Some(client_id), None, None)
-                        .non_fatal();
-                }
-                self.tiled_panes.reapply_pane_frames();
-                self.is_pending = false;
-                self.apply_buffered_instructions().non_fatal();
-                Ok(())
-            },
-            Err(e) => {
-                log::error!("Failed to apply layout: {}", e);
-                self.tiled_panes.reapply_pane_frames();
-                self.is_pending = false;
-                self.apply_buffered_instructions().non_fatal();
-                Err(e)
+        );
+        let LayoutTransactionParts {
+            side_effects,
+            deferred_closed_panes,
+            rollback_panes,
+            blocking_terminal,
+            deferred_pane_initial_bytes,
+        } = layout_applier.take_transaction_parts();
+        drop(layout_applier);
+        let transaction = |should_show_floating_panes| TabLayoutTransaction {
+            snapshot,
+            side_effects,
+            deferred_closed_panes,
+            rollback_panes,
+            should_show_floating_panes,
+            client_id,
+            kind: LayoutTransactionKind::Apply,
+            blocking_terminal,
+            deferred_pane_initial_bytes,
+        };
+        match application_result {
+            Ok(should_show_floating_panes) => Ok(transaction(should_show_floating_panes)),
+            Err(error) => {
+                log::error!("Failed to apply layout: {}", error);
+                transaction(false).rollback(self, &format!("{error:#}"));
+                Err(error)
             },
         }
     }
-    pub fn override_layout(
+
+    pub(crate) fn begin_override_layout(
         &mut self,
         layout: TiledPaneLayout,
         floating_panes_layout: Vec<FloatingPaneLayout>,
-        mut new_swap_tiled_layouts: Option<Vec<SwapTiledLayout>>,
-        mut new_swap_floating_layouts: Option<Vec<SwapFloatingLayout>>,
+        new_swap_tiled_layouts: Option<Vec<SwapTiledLayout>>,
+        new_swap_floating_layouts: Option<Vec<SwapFloatingLayout>>,
         new_terminal_ids: Vec<(u32, HoldForCommand)>,
         new_floating_terminal_ids: Vec<(u32, HoldForCommand)>,
         new_plugin_ids: HashMap<RunPluginOrAlias, Vec<u32>>,
@@ -967,16 +1390,18 @@ impl Tab {
         retain_existing_plugin_panes: bool,
         client_id: ClientId,
         blocking_terminal: Option<(u32, NotificationEnd)>,
-    ) -> Result<()> {
-        let new_swap_tiled_layouts = new_swap_tiled_layouts.take().unwrap_or_default();
-        let new_swap_floating_layouts = new_swap_floating_layouts.take().unwrap_or_default();
+    ) -> Result<TabLayoutTransaction> {
+        let snapshot = TabLayoutSnapshot::capture(self);
+        self.begin_layout_transaction();
+        let new_swap_tiled_layouts = new_swap_tiled_layouts.unwrap_or_default();
+        let new_swap_floating_layouts = new_swap_floating_layouts.unwrap_or_default();
         self.swap_layouts
             .set_swap_tiled_layouts(new_swap_tiled_layouts);
         self.swap_layouts
             .set_swap_floating_layouts(new_swap_floating_layouts);
         self.swap_layouts
             .set_base_layout((layout.clone(), floating_panes_layout.clone()));
-        match LayoutApplier::new(
+        let mut layout_applier = LayoutApplier::new(
             &self.viewport,
             &self.senders,
             &self.sixel_image_store,
@@ -999,7 +1424,8 @@ impl Tab {
             self.explicitly_disable_kitty_keyboard_protocol,
             blocking_terminal,
         )
-        .override_layout(
+        .defer_side_effects();
+        let application_result = layout_applier.override_layout(
             layout,
             floating_panes_layout,
             new_terminal_ids,
@@ -1008,42 +1434,32 @@ impl Tab {
             retain_existing_terminal_panes,
             retain_existing_plugin_panes,
             client_id,
-        ) {
-            Ok(should_show_floating_panes) => {
-                if should_show_floating_panes != self.floating_panes.panes_are_visible() {
-                    self.toggle_floating_panes(Some(client_id), None, None)
-                        .non_fatal();
-                }
-
-                // this is essentially another pass of the layout applier
-                // we do this because the layout applier does not know about swap layouts, and in
-                // this case we might have had to re-add existing panes that were not in the
-                // overridden layout (eg. if we had more panes than were in the layout). In such a
-                // case, we would like to make sure these extra panes fit the current swap layout
-                self.swap_layouts.set_is_tiled_damaged();
-                self.swap_layouts.set_is_floating_damaged();
-                let _ = self.relayout_tiled_panes(false);
-                let _ = self.relayout_floating_panes(false);
-
-                self.tiled_panes.reapply_pane_frames();
-                self.is_pending = false;
-
-                LayoutApplier::offset_viewport(
-                    self.viewport.clone(),
-                    self.display_area.clone(),
-                    &mut self.tiled_panes,
-                    self.draw_pane_frames,
-                );
-
-                self.apply_buffered_instructions().non_fatal();
-                Ok(())
-            },
-            Err(e) => {
-                log::error!("Failed to override layout: {}", e);
-                self.tiled_panes.reapply_pane_frames();
-                self.is_pending = false;
-                self.apply_buffered_instructions().non_fatal();
-                Err(e)
+        );
+        let LayoutTransactionParts {
+            side_effects,
+            deferred_closed_panes,
+            rollback_panes,
+            blocking_terminal,
+            deferred_pane_initial_bytes,
+        } = layout_applier.take_transaction_parts();
+        drop(layout_applier);
+        let transaction = |should_show_floating_panes| TabLayoutTransaction {
+            snapshot,
+            side_effects,
+            deferred_closed_panes,
+            rollback_panes,
+            should_show_floating_panes,
+            client_id,
+            kind: LayoutTransactionKind::Override,
+            blocking_terminal,
+            deferred_pane_initial_bytes,
+        };
+        match application_result {
+            Ok(should_show_floating_panes) => Ok(transaction(should_show_floating_panes)),
+            Err(error) => {
+                log::error!("Failed to override layout: {}", error);
+                transaction(false).rollback(self, &format!("{error:#}"));
+                Err(error)
             },
         }
     }
@@ -1093,9 +1509,11 @@ impl Tab {
             .non_fatal();
         }
         self.set_force_render();
-        self.senders
-            .send_to_pty_writer(PtyWriteInstruction::ApplyCachedResizes)
-            .with_context(|| "failed to apply cached resizes".to_string())?;
+        if self.tiled_panes.layout_io_enabled() {
+            self.senders
+                .send_to_pty_writer(PtyWriteInstruction::ApplyCachedResizes)
+                .with_context(|| "failed to apply cached resizes".to_string())?;
+        }
         Ok(())
     }
     fn relayout_tiled_panes(&mut self, search_backwards: bool) -> Result<()> {
@@ -1142,9 +1560,11 @@ impl Tab {
         // we do this so that the new swap layout has a chance to pass through the constraint system
         self.tiled_panes.resize(display_area);
         self.set_should_clear_display_before_rendering();
-        self.senders
-            .send_to_pty_writer(PtyWriteInstruction::ApplyCachedResizes)
-            .with_context(|| "failed to apply cached resizes".to_string())?;
+        if self.tiled_panes.layout_io_enabled() {
+            self.senders
+                .send_to_pty_writer(PtyWriteInstruction::ApplyCachedResizes)
+                .with_context(|| "failed to apply cached resizes".to_string())?;
+        }
         Ok(())
     }
     pub fn previous_swap_layout(&mut self) -> Result<()> {
@@ -1243,7 +1663,15 @@ impl Tab {
         Ok(())
     }
     pub fn add_client(&mut self, client_id: ClientId, mode_info: Option<ModeInfo>) -> Result<()> {
-        let other_clients_exist_in_tab = { !self.connected_clients.borrow().is_empty() };
+        // A newly-created pending tab can already carry this same client in
+        // `connected_clients` before its first layout has panes. Counting that
+        // client as an "other" viewer skips the initial-pane fallback below
+        // and leaves the committed tab with no active pane.
+        let other_clients_exist_in_tab = self
+            .connected_clients
+            .borrow()
+            .iter()
+            .any(|existing_client_id| *existing_client_id != client_id);
         if other_clients_exist_in_tab {
             if let Some(first_active_floating_pane_id) =
                 self.floating_panes.first_active_floating_pane_id()
@@ -1262,21 +1690,26 @@ impl Tab {
             );
         } else {
             let mut pane_ids: Vec<PaneId> = self.tiled_panes.pane_ids().copied().collect();
-            if pane_ids.is_empty() {
+            let has_floating_panes = self.floating_panes.pane_ids().next().is_some();
+            if pane_ids.is_empty() && !has_floating_panes {
                 // no panes here, bye bye
                 return Ok(());
             }
-            let focus_pane_id = if let Some(id) = self.focus_pane_id {
-                id
-            } else {
+            if !pane_ids.is_empty() {
                 pane_ids.sort(); // TODO: make this predictable
                 pane_ids.retain(|p| !self.tiled_panes.panes_to_hide_contains(*p));
-                *(pane_ids.first().with_context(|| {
-                    format!("failed to acquire id of focused pane while adding client {client_id}",)
-                })?)
-            };
-            self.tiled_panes
-                .focus_pane_if_client_not_focused(focus_pane_id, client_id);
+                let focus_pane_id = self
+                    .focus_pane_id
+                    .filter(|pane_id| pane_ids.contains(pane_id))
+                    .or_else(|| pane_ids.first().copied())
+                    .with_context(|| {
+                        format!(
+                            "failed to acquire id of focused pane while adding client {client_id}",
+                        )
+                    })?;
+                self.tiled_panes
+                    .focus_pane_if_client_not_focused(focus_pane_id, client_id);
+            }
             self.floating_panes
                 .focus_first_pane_if_client_not_focused(client_id);
             self.connected_clients.borrow_mut().insert(client_id);
@@ -5080,6 +5513,18 @@ impl Tab {
 
     pub fn is_pending(&self) -> bool {
         self.is_pending
+    }
+    pub(crate) fn activate_degraded_pending_layout(&mut self) -> Result<()> {
+        if !self.is_pending {
+            bail!(
+                "refusing to activate tab {} as degraded because it is already committed",
+                self.id
+            );
+        }
+        self.tiled_panes.set_layout_io_enabled(true);
+        self.floating_panes.set_layout_io_enabled(true);
+        self.is_pending = false;
+        self.apply_buffered_instructions()
     }
 
     pub fn add_red_pane_frame_color_override(

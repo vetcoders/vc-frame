@@ -153,6 +153,7 @@ pub struct TerminalPane {
     #[allow(dead_code)]
     arrow_fonts: bool,
     notification_end: Option<NotificationEnd>,
+    layout_reflow_deferred: bool,
     /// `true` while a host-terminal forward initiated by this pane is
     /// outstanding. While set, processing of `pending_pty_input` is
     /// suspended so that the async host reply lands on the pane's
@@ -331,6 +332,9 @@ impl Pane for TerminalPane {
         self.grid.should_render = should_render;
     }
     fn render_full_viewport(&mut self) {
+        if self.layout_reflow_deferred {
+            return;
+        }
         // this marks the pane for a full re-render, rather than just rendering the
         // diff as it usually does with the OutputBuffer
         self.frame.clear();
@@ -700,7 +704,9 @@ impl Pane for TerminalPane {
     }
 
     fn set_frame(&mut self, _frame: bool) {
-        self.frame.clear();
+        if !self.layout_reflow_deferred {
+            self.frame.clear();
+        }
     }
 
     fn set_content_offset(&mut self, offset: Offset) {
@@ -890,6 +896,41 @@ impl Pane for TerminalPane {
     }
     fn set_title(&mut self, title: String) {
         self.pane_title = title;
+    }
+    fn layout_title(&self) -> String {
+        self.pane_title.clone()
+    }
+    fn begin_layout_transaction(&mut self) {
+        self.layout_reflow_deferred = true;
+    }
+    fn commit_layout_transaction(&mut self) {
+        self.layout_reflow_deferred = false;
+        self.reflow_lines();
+        self.render_full_viewport();
+    }
+    fn rollback_layout_transaction(&mut self) {
+        self.layout_reflow_deferred = false;
+    }
+    fn attach_blocking_completion(
+        &mut self,
+        mut completion: NotificationEnd,
+    ) -> std::result::Result<(), NotificationEnd> {
+        if self.notification_end.is_some() {
+            Err(completion)
+        } else {
+            if let Some((Some(exit_status), _, _)) = self.is_held.as_ref() {
+                completion.set_exit_status(*exit_status);
+                if completion
+                    .unblock_condition()
+                    .is_some_and(|condition| condition.is_met(*exit_status))
+                {
+                    drop(completion);
+                    return Ok(());
+                }
+            }
+            self.notification_end = Some(completion);
+            Ok(())
+        }
     }
     fn current_title(&self) -> String {
         if self.pane_name.is_empty() {
@@ -1144,6 +1185,7 @@ impl TerminalPane {
             invoked_with,
             arrow_fonts,
             notification_end,
+            layout_reflow_deferred: false,
             forward_paused: false,
             pending_pty_input: VecDeque::new(),
         }
@@ -1173,6 +1215,9 @@ impl TerminalPane {
         }
     }
     fn reflow_lines(&mut self) {
+        if self.layout_reflow_deferred {
+            return;
+        }
         let rows = self.get_content_rows();
         let cols = self.get_content_columns();
         self.grid.force_change_size(rows, cols);

@@ -8,6 +8,24 @@ use crate::{
 use zellij_utils::errors::prelude::*;
 use zellij_utils::{channels, channels::SenderWithContext, errors::ErrorContext};
 
+pub struct RecoverableSendError<T> {
+    instruction: Box<T>,
+    error: anyhow::Error,
+}
+
+impl<T> RecoverableSendError<T> {
+    fn new(instruction: T, error: anyhow::Error) -> Self {
+        Self {
+            instruction: Box::new(instruction),
+            error,
+        }
+    }
+
+    pub fn into_parts(self) -> (T, anyhow::Error) {
+        (*self.instruction, self.error)
+    }
+}
+
 /// A container for senders to the different threads in zellij on the server side
 #[derive(Default, Clone)]
 pub struct ThreadSenders {
@@ -39,6 +57,35 @@ impl ThreadSenders {
         }
     }
 
+    /// Send a layout-critical instruction to Screen without discarding the
+    /// instruction when the receiver has gone away.
+    ///
+    /// `NotificationEnd` is intentionally not meaningfully cloneable: the
+    /// original instruction owns the only completion channel.  The ordinary
+    /// helpers erase `SendError<T>` into `anyhow::Error`, which is appropriate
+    /// for best-effort traffic but would turn a failed layout handoff into a
+    /// false-success completion.  Callers of this helper can recover the
+    /// original instruction, mark its completion as failed, and run the
+    /// transaction cleanup path.
+    pub fn send_to_screen_recover(
+        &self,
+        instruction: ScreenInstruction,
+    ) -> std::result::Result<(), RecoverableSendError<ScreenInstruction>> {
+        let Some(sender) = self.to_screen.as_ref() else {
+            return Err(RecoverableSendError::new(
+                instruction,
+                anyhow!("failed to get screen sender"),
+            ));
+        };
+        sender.send(instruction).map_err(|error| {
+            let (instruction, _) = error.0;
+            RecoverableSendError::new(
+                instruction,
+                anyhow!("failed to send layout-critical message to screen"),
+            )
+        })
+    }
+
     pub fn send_to_pty(&self, instruction: PtyInstruction) -> Result<()> {
         if self.should_silently_fail {
             if let Some(sender) = &self.to_pty {
@@ -55,6 +102,30 @@ impl ThreadSenders {
         }
     }
 
+    /// The PTY counterpart to [`Self::send_to_screen_recover`].
+    ///
+    /// This path deliberately ignores `should_silently_fail`: a missing
+    /// layout-transaction handoff is never safe to report as success, even in
+    /// a test bus configured to tolerate unrelated background traffic.
+    pub fn send_to_pty_recover(
+        &self,
+        instruction: PtyInstruction,
+    ) -> std::result::Result<(), RecoverableSendError<PtyInstruction>> {
+        let Some(sender) = self.to_pty.as_ref() else {
+            return Err(RecoverableSendError::new(
+                instruction,
+                anyhow!("failed to get pty sender"),
+            ));
+        };
+        sender.send(instruction).map_err(|error| {
+            let (instruction, _) = error.0;
+            RecoverableSendError::new(
+                instruction,
+                anyhow!("failed to send layout-critical message to pty"),
+            )
+        })
+    }
+
     pub fn send_to_plugin(&self, instruction: PluginInstruction) -> Result<()> {
         if self.should_silently_fail {
             if let Some(sender) = &self.to_plugin {
@@ -69,6 +140,31 @@ impl ThreadSenders {
                 .to_anyhow()
                 .context("failed to send message to plugin")
         }
+    }
+
+    /// The Plugin counterpart to [`Self::send_to_screen_recover`].
+    ///
+    /// Screen uses this for the first transaction handoff, while it still owns
+    /// the pending-tab rollback state and the sole action completion channel.
+    /// Recovering the instruction lets Screen reject that exact transaction
+    /// instead of losing both owners in an erased channel error.
+    pub fn send_to_plugin_recover(
+        &self,
+        instruction: PluginInstruction,
+    ) -> std::result::Result<(), RecoverableSendError<PluginInstruction>> {
+        let Some(sender) = self.to_plugin.as_ref() else {
+            return Err(RecoverableSendError::new(
+                instruction,
+                anyhow!("failed to get plugin sender"),
+            ));
+        };
+        sender.send(instruction).map_err(|error| {
+            let (instruction, _) = error.0;
+            RecoverableSendError::new(
+                instruction,
+                anyhow!("failed to send layout-critical message to plugin"),
+            )
+        })
     }
 
     pub fn send_to_server(&self, instruction: ServerInstruction) -> Result<()> {

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use zellij_utils::channels::{self, SenderWithContext};
-use zellij_utils::data::{Event, Palette};
+use zellij_utils::data::{Event, OriginatingPlugin, Palette};
 use zellij_utils::errors::ErrorContext;
 use zellij_utils::input::command::RunCommand;
 use zellij_utils::ipc::{ClientToServerMsg, IpcReceiverWithContext, ServerToClientMsg};
@@ -313,6 +313,7 @@ fn new_tab_spawn_failure_does_not_terminate_pty_thread() {
             Box::new(Some(TiledPaneLayout::default())),
             vec![],
             0,
+            1,
             HashMap::new(),
             None,
             false,
@@ -333,11 +334,95 @@ fn new_tab_spawn_failure_does_not_terminate_pty_thread() {
 }
 
 #[test]
+fn pty_channel_disconnect_rolls_back_and_rejects_every_pending_layout() {
+    let mock = MockOsApi::new();
+    let probe = mock.clone();
+    let (pty_tx, pty_rx) = channels::unbounded();
+    let pty_sender = SenderWithContext::new(pty_tx);
+    let (screen_tx, screen_rx) = channels::unbounded();
+    let bus = Bus::new(
+        vec![pty_rx],
+        ThreadSenders {
+            to_screen: Some(SenderWithContext::new(screen_tx)),
+            should_silently_fail: false,
+            ..Default::default()
+        },
+        Some(Box::new(mock)),
+    );
+    let pty = Pty::new(bus, false, None, None);
+
+    pty_sender
+        .send(PtyInstruction::NewTab(
+            None,
+            None,
+            Box::new(Some(TiledPaneLayout::default())),
+            vec![],
+            7,
+            61,
+            HashMap::new(),
+            None,
+            false,
+            true,
+            (0, false),
+            None,
+            None,
+        ))
+        .unwrap();
+    drop(pty_sender);
+
+    let result = pty_thread_main(pty, Box::<Layout>::default());
+    assert!(
+        result.is_ok(),
+        "a disconnected producer must close PTY cleanly instead of panicking"
+    );
+    assert_eq!(
+        probe.cleared_terminal_ids(),
+        vec![100],
+        "the unresolved terminal ledger must be released exactly once"
+    );
+    let instructions = screen_rx
+        .try_iter()
+        .map(|(instruction, _)| instruction)
+        .collect::<Vec<_>>();
+    assert_eq!(instructions.len(), 2);
+    assert!(matches!(
+        instructions.first(),
+        Some(ScreenInstruction::ApplyLayout(
+            _,
+            _,
+            _,
+            _,
+            _,
+            _,
+            _,
+            _,
+            _,
+            _,
+            _,
+            61
+        ))
+    ));
+    assert!(matches!(
+        instructions.get(1),
+        Some(ScreenInstruction::LayoutPreparationFailed {
+            transaction_id: 61,
+            tab_id: Some(7),
+            ..
+        })
+    ));
+}
+
+#[test]
 fn partial_new_tab_spawn_failure_releases_terminals_and_plugins() {
     let mock = MockOsApi::new();
     mock.fail_on_spawn_call(2);
     let probe = mock.clone();
     let (mut pty, plugin_rx) = make_pty_with_plugin_receiver(mock);
+    let (screen_tx, screen_rx) = channels::unbounded();
+    pty.bus.senders.to_screen = Some(SenderWithContext::new(screen_tx));
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    let mut completion = NotificationEnd::new(completion_tx);
+    completion.require_explicit_resolution();
     let plugin =
         RunPluginOrAlias::from_url("file:/partial-new-tab.wasm", &None, None, None).unwrap();
     let plugin_ids = HashMap::from([(plugin, vec![77])]);
@@ -359,10 +444,11 @@ fn partial_new_tab_spawn_failure_releases_terminals_and_plugins() {
             plugin_ids,
             None,
             7,
+            1,
             false,
             true,
             (1, false),
-            None,
+            Some(completion),
             None,
         )
         .expect_err("the second terminal spawn must fail");
@@ -388,6 +474,37 @@ fn partial_new_tab_spawn_failure_releases_terminals_and_plugins() {
         vec![77],
         "every plugin loaded for the failed tab must be unloaded exactly once"
     );
+    let failures = screen_rx
+        .try_iter()
+        .filter_map(|(instruction, _)| match instruction {
+            ScreenInstruction::LayoutPreparationFailed {
+                transaction_id,
+                tab_id,
+                completion_tx,
+                ..
+            } => Some((transaction_id, tab_id, completion_tx)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        failures.len(),
+        1,
+        "one failed preparation must emit one terminal Screen rejection"
+    );
+    let (transaction_id, tab_id, completion) = failures.into_iter().next().unwrap();
+    assert_eq!(transaction_id, 1);
+    assert_eq!(tab_id, Some(7));
+    drop(completion);
+    let completion = completion_rx
+        .blocking_recv()
+        .expect("the original action completion must be resolved");
+    assert_eq!(completion.exit_status, Some(1));
+    assert!(
+        completion
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("injected EMFILE-like spawn failure"))
+    );
 }
 
 #[test]
@@ -411,6 +528,7 @@ fn floating_nth_spawn_failure_releases_every_prior_allocation_exactly_once() {
             HashMap::from([(plugin, vec![77])]),
             None,
             7,
+            2,
             false,
             true,
             (1, false),
@@ -465,6 +583,7 @@ fn new_tab_apply_layout_failure_releases_terminals_and_plugins() {
             plugin_ids,
             None,
             7,
+            3,
             false,
             true,
             (1, false),
@@ -530,6 +649,7 @@ fn post_apply_layout_notification_failure_keeps_new_tab_allocations() {
         plugin_ids,
         None,
         7,
+        4,
         false,
         true,
         (1, false),
@@ -588,14 +708,17 @@ fn post_apply_layout_notification_failure_keeps_new_tab_allocations() {
             .any(|(instruction, _)| matches!(instruction, PluginInstruction::Unload(77))),
         "pending plugin must not be rolled back before the Screen resolution"
     );
-    pty.resolve_layout_commit(transaction_id, LayoutCommitOutcome::Committed)
+    pty.resolve_layout_commit_with_ack(transaction_id, LayoutCommitOutcome::Committed)
+        .0
         .expect("the Screen commit must activate the held terminal");
     assert!(
         screen_rx.try_recv().is_err(),
         "the injected optional notification must not produce a partial second screen message"
     );
-    pty.resolve_layout_commit(transaction_id, LayoutCommitOutcome::Committed)
-        .expect("a duplicate Screen ACK must be a no-op");
+    let (replayed_resolution, replayed_ack) =
+        pty.resolve_layout_commit_with_ack(transaction_id, LayoutCommitOutcome::Committed);
+    replayed_resolution.expect("a lost ACK retry must replay the committed receipt");
+    assert_eq!(replayed_ack, Ok(()));
 }
 
 #[test]
@@ -624,6 +747,7 @@ fn fast_exit_callback_waits_for_screen_commit_at_the_common_pty_fence() {
         HashMap::new(),
         None,
         7,
+        5,
         false,
         true,
         (1, false),
@@ -645,14 +769,17 @@ fn fast_exit_callback_waits_for_screen_commit_at_the_common_pty_fence() {
         "a backend waiter callback must not race ahead of Screen ownership"
     );
 
-    pty.resolve_layout_commit(transaction_id, LayoutCommitOutcome::Committed)
+    pty.resolve_layout_commit_with_ack(transaction_id, LayoutCommitOutcome::Committed)
+        .0
         .expect("Screen commit must release the fast-exit callback");
     assert!(matches!(
         screen_rx.try_recv(),
         Ok((ScreenInstruction::ClosePane(PaneId::Terminal(100), ..), _))
     ));
-    pty.resolve_layout_commit(transaction_id, LayoutCommitOutcome::Committed)
-        .expect("duplicate ACK must be ignored");
+    let (replayed_resolution, replayed_ack) =
+        pty.resolve_layout_commit_with_ack(transaction_id, LayoutCommitOutcome::Committed);
+    replayed_resolution.expect("a lost ACK retry must replay without reactivation");
+    assert_eq!(replayed_ack, Ok(()));
     assert!(
         screen_rx.try_recv().is_err(),
         "a fast exit must fire exactly once"
@@ -689,6 +816,7 @@ fn rejected_screen_commit_cancels_fast_exit_and_rolls_back_union_exactly_once() 
         HashMap::from([(plugin, vec![77])]),
         None,
         7,
+        6,
         false,
         true,
         (1, false),
@@ -709,11 +837,16 @@ fn rejected_screen_commit_cancels_fast_exit_and_rolls_back_union_exactly_once() 
         "the queued fast exit must remain behind the ownership fence"
     );
 
-    pty.resolve_layout_commit(
-        transaction_id,
-        LayoutCommitOutcome::Rejected("injected Screen apply failure".to_owned()),
-    )
-    .expect_err("a rejected commit reports the Screen failure after cleanup");
+    let rejected_outcome =
+        LayoutCommitOutcome::Rejected("injected Screen apply failure".to_owned());
+    let (resolution, ack) =
+        pty.resolve_layout_commit_with_ack(transaction_id, rejected_outcome.clone());
+    resolution.expect_err("a rejected commit reports the Screen failure after cleanup");
+    assert_eq!(
+        ack,
+        Ok(()),
+        "a business rejection ACK certifies that PTY cleanup completed"
+    );
     assert_eq!(probe.cleared_terminal_ids(), vec![100]);
     assert_eq!(unloaded_plugin_ids(&plugin_rx), vec![77]);
     assert!(
@@ -721,13 +854,269 @@ fn rejected_screen_commit_cancels_fast_exit_and_rolls_back_union_exactly_once() 
         "rollback must cancel the queued quit callback instead of creating a ghost ClosePane"
     );
 
-    pty.resolve_layout_commit(
+    let (replayed_resolution, replayed_ack) =
+        pty.resolve_layout_commit_with_ack(transaction_id, rejected_outcome);
+    replayed_resolution.expect_err("the cached business rejection remains a local diagnostic");
+    assert_eq!(
+        replayed_ack,
+        Ok(()),
+        "retry must replay the successful cleanup receipt"
+    );
+    pty.resolve_layout_commit_with_ack(
         transaction_id,
-        LayoutCommitOutcome::Rejected("duplicate".to_owned()),
+        LayoutCommitOutcome::Rejected("conflicting reason".to_owned()),
     )
-    .expect("a duplicate rejection ACK must be a no-op");
+    .0
+    .expect_err("a conflicting rejection must not reuse another outcome's receipt");
     assert_eq!(probe.cleared_terminal_ids(), vec![100]);
     assert!(unloaded_plugin_ids(&plugin_rx).is_empty());
+}
+
+#[test]
+fn rejected_layout_ack_reports_only_real_cleanup_failure() {
+    let mock = MockOsApi::new();
+    mock.fail_clear_terminal_id(100);
+    let (screen_tx, screen_rx) = channels::unbounded();
+    let mut bus: Bus<PtyInstruction> = Bus::empty();
+    bus.os_input = Some(Box::new(mock));
+    bus.senders.to_screen = Some(SenderWithContext::new(screen_tx));
+    bus.senders.should_silently_fail = false;
+    let mut pty = Pty::new(bus, false, None, None);
+
+    pty.spawn_terminals_for_layout(
+        None,
+        TiledPaneLayout::default(),
+        vec![],
+        None,
+        HashMap::new(),
+        None,
+        7,
+        60,
+        false,
+        true,
+        (1, false),
+        None,
+        None,
+    )
+    .expect("the layout must reach the Screen ownership fence");
+    let transaction_id = match screen_rx.try_recv().expect("ApplyLayout").0 {
+        ScreenInstruction::ApplyLayout(_, _, _, _, _, _, _, _, _, _, _, transaction_id) => {
+            transaction_id
+        },
+        other => panic!("expected ApplyLayout, got {other:?}"),
+    };
+
+    let (resolution, ack) = pty.resolve_layout_commit_with_ack(
+        transaction_id,
+        LayoutCommitOutcome::Rejected("injected Screen failure".to_owned()),
+    );
+    let resolution_error = resolution.expect_err("the rejection remains a local diagnostic");
+    let ack_error = ack.expect_err("failed terminal cleanup must fail the PTY ACK");
+    assert!(
+        ack_error.contains("injected clear failure for terminal 100"),
+        "unexpected cleanup ACK: {ack_error}"
+    );
+    assert!(format!("{resolution_error:#}").contains("injected clear failure for terminal 100"));
+}
+
+#[test]
+fn partial_activation_failure_keeps_guard_armed_and_rolls_back_every_allocation() {
+    let mock = MockOsApi::new();
+    let probe = mock.clone();
+    let (screen_tx, screen_rx) = channels::unbounded();
+    let mut bus: Bus<PtyInstruction> = Bus::empty();
+    bus.os_input = Some(Box::new(mock));
+    bus.senders.to_screen = Some(SenderWithContext::new(screen_tx));
+    bus.senders.should_silently_fail = false;
+    let mut pty = Pty::new(bus, false, None, None);
+
+    pty.spawn_terminals_for_layout(
+        None,
+        TiledPaneLayout {
+            run: Some(Run::Command(RunCommand {
+                command: PathBuf::from("originating-plugin-command"),
+                originating_plugin: Some(OriginatingPlugin::new(77, 1, Default::default())),
+                ..Default::default()
+            })),
+            ..Default::default()
+        },
+        vec![],
+        None,
+        HashMap::new(),
+        None,
+        7,
+        63,
+        false,
+        true,
+        (1, false),
+        None,
+        None,
+    )
+    .expect("the prepared layout must reach Screen");
+    let transaction_id = match screen_rx.try_recv().expect("ApplyLayout").0 {
+        ScreenInstruction::ApplyLayout(_, _, _, _, _, _, _, _, _, _, _, transaction_id) => {
+            transaction_id
+        },
+        other => panic!("expected ApplyLayout, got {other:?}"),
+    };
+    pty.id_to_child_pid.insert(100, 4242);
+    pty.terminal_cwds
+        .insert(100, PathBuf::from("/tmp/partial-activation"));
+    pty.terminal_cmds
+        .insert(100, vec!["originating-plugin-command".to_owned()]);
+    pty.terminal_foreground_cmds
+        .insert(100, vec!["originating-plugin-command".to_owned()]);
+
+    let (resolution, ack) =
+        pty.resolve_layout_commit_with_ack(transaction_id, LayoutCommitOutcome::Committed);
+    let resolution_error =
+        resolution.expect_err("the missing Plugin receiver must fail full activation");
+    let ack_error = ack.expect_err("partial activation must not ACK success");
+    assert!(ack_error.contains("failed to get plugin sender"));
+    assert!(format!("{resolution_error:#}").contains("failed to get plugin sender"));
+    assert_eq!(
+        probe.cleared_terminal_ids(),
+        vec![100],
+        "the still-armed ledger must release the already-activated terminal"
+    );
+    assert!(!pty.task_handles.contains_key(&100));
+    assert!(!pty.pane_activity_flags.contains_key(&100));
+    assert!(!pty.originating_plugins.contains_key(&100));
+    assert!(!pty.id_to_child_pid.contains_key(&100));
+    assert!(!pty.terminal_cwds.contains_key(&100));
+    assert!(!pty.terminal_cmds.contains_key(&100));
+    assert!(!pty.terminal_foreground_cmds.contains_key(&100));
+}
+
+#[test]
+fn duplicate_and_late_layout_resolutions_never_replace_the_live_ledger() {
+    let mut pty = Pty::new(Bus::empty(), false, None, None);
+    let mut first_ledger = LayoutAllocationLedger::default();
+    first_ledger.track_terminal(100);
+    assert!(
+        pty.begin_layout_commit(
+            62,
+            PendingLayoutCommit {
+                allocation_ledger: first_ledger,
+                terminals: vec![],
+                originating_plugins_to_inform: vec![],
+                tab_id: Some(7),
+            },
+        )
+        .is_ok(),
+        "the first transaction must reserve the identity"
+    );
+
+    let mut duplicate_ledger = LayoutAllocationLedger::default();
+    duplicate_ledger.track_terminal(101);
+    let duplicate_failure = pty
+        .begin_layout_commit(
+            62,
+            PendingLayoutCommit {
+                allocation_ledger: duplicate_ledger,
+                terminals: vec![],
+                originating_plugins_to_inform: vec![],
+                tab_id: Some(8),
+            },
+        )
+        .expect_err("a duplicate identity must not replace the live transaction");
+    let (duplicate_error, duplicate_commit) = duplicate_failure.into_parts();
+    assert!(format!("{duplicate_error:#}").contains("duplicate pending layout transaction id 62"));
+    assert!(
+        duplicate_commit
+            .allocation_ledger
+            .allocated_ids
+            .contains(&PaneId::Terminal(101))
+    );
+    let live_commit = pty.pending_layout_commits.get(&62).unwrap();
+    assert!(
+        live_commit
+            .allocation_ledger
+            .allocated_ids
+            .contains(&PaneId::Terminal(100))
+    );
+    assert!(
+        !live_commit
+            .allocation_ledger
+            .allocated_ids
+            .contains(&PaneId::Terminal(101))
+    );
+
+    let (resolution, ack) = pty.resolve_layout_commit_with_ack(62, LayoutCommitOutcome::Committed);
+    assert!(resolution.is_ok());
+    assert_eq!(ack, Ok(()));
+    let (replayed_resolution, replayed_ack) =
+        pty.resolve_layout_commit_with_ack(62, LayoutCommitOutcome::Committed);
+    assert!(
+        replayed_resolution.is_ok(),
+        "same-outcome retry must replay the receipt"
+    );
+    assert_eq!(replayed_ack, Ok(()));
+    let mut reused_ledger = LayoutAllocationLedger::default();
+    reused_ledger.track_terminal(102);
+    let reuse_failure = pty
+        .begin_layout_commit(
+            62,
+            PendingLayoutCommit {
+                allocation_ledger: reused_ledger,
+                terminals: vec![],
+                originating_plugins_to_inform: vec![],
+                tab_id: Some(9),
+            },
+        )
+        .expect_err("a resolved transaction identity must not be reused");
+    let (reuse_error, reused_commit) = reuse_failure.into_parts();
+    assert!(format!("{reuse_error:#}").contains("layout transaction id 62 is already resolved"));
+    assert!(
+        reused_commit
+            .allocation_ledger
+            .allocated_ids
+            .contains(&PaneId::Terminal(102))
+    );
+    let (late_resolution, late_ack) = pty.resolve_layout_commit_with_ack(
+        62,
+        LayoutCommitOutcome::Rejected("late duplicate".to_owned()),
+    );
+    assert!(
+        late_resolution.is_err(),
+        "a late contradictory resolution must not certify a missing ledger"
+    );
+    assert!(
+        late_ack
+            .expect_err("late transaction ACK must fail")
+            .contains("conflicting resolution for layout transaction 62")
+    );
+    let (unknown_resolution, unknown_ack) =
+        pty.resolve_layout_commit_with_ack(999, LayoutCommitOutcome::Committed);
+    assert!(unknown_resolution.is_err());
+    assert!(
+        unknown_ack
+            .expect_err("unknown transaction ACK must fail")
+            .contains("cannot resolve unknown layout transaction 999")
+    );
+}
+
+#[test]
+fn layout_resolution_receipts_are_strictly_bounded() {
+    let mut pty = Pty::new(Bus::empty(), false, None, None);
+    for transaction_id in 1..=(MAX_LAYOUT_COMMIT_RECEIPTS as u64 + 1) {
+        let resolution = (Ok(()), Ok(()));
+        pty.record_layout_commit_receipt(
+            transaction_id,
+            LayoutCommitOutcome::Committed,
+            &resolution,
+        );
+    }
+
+    assert_eq!(
+        pty.resolved_layout_commits.len(),
+        MAX_LAYOUT_COMMIT_RECEIPTS
+    );
+    assert!(!pty.resolved_layout_commits.contains_key(&1));
+    assert!(
+        pty.resolved_layout_commits
+            .contains_key(&(MAX_LAYOUT_COMMIT_RECEIPTS as u64 + 1))
+    );
 }
 
 #[test]
@@ -779,6 +1168,7 @@ fn command_not_found_without_explicit_hold_never_enters_a_layout() {
                 HashMap::new(),
                 None,
                 7,
+                7,
                 false,
                 true,
                 (1, false),
@@ -796,9 +1186,29 @@ fn command_not_found_without_explicit_hold_never_enters_a_layout() {
             vec![100],
             "{label}: the retained reservation must roll back before transfer"
         );
+        let screen_instructions = screen_rx
+            .try_iter()
+            .map(|(instruction, _)| instruction)
+            .collect::<Vec<_>>();
         assert!(
-            screen_rx.try_recv().is_err(),
+            !screen_instructions
+                .iter()
+                .any(|instruction| matches!(instruction, ScreenInstruction::ApplyLayout(..))),
             "{label}: ApplyLayout must never be sent"
+        );
+        assert_eq!(
+            screen_instructions
+                .iter()
+                .filter(|instruction| matches!(
+                    instruction,
+                    ScreenInstruction::LayoutPreparationFailed {
+                        transaction_id: 7,
+                        ..
+                    }
+                ))
+                .count(),
+            1,
+            "{label}: the failed transaction must reach one terminal rejection"
         );
     }
 }
@@ -829,6 +1239,7 @@ fn hold_on_start_is_an_explicit_held_terminal_without_notification() {
         HashMap::new(),
         None,
         7,
+        8,
         false,
         true,
         (1, false),
@@ -884,6 +1295,7 @@ fn mismatched_command_not_found_never_transfers_or_clears_the_foreign_payload_id
             HashMap::from([(plugin, vec![77])]),
             None,
             7,
+            9,
             false,
             true,
             (1, false),
@@ -906,9 +1318,28 @@ fn mismatched_command_not_found_never_transfers_or_clears_the_foreign_payload_id
         "only the real reservation is cleared"
     );
     assert!(!probe.cleared_terminal_ids().contains(&999));
+    let screen_instructions = screen_rx
+        .try_iter()
+        .map(|(instruction, _)| instruction)
+        .collect::<Vec<_>>();
     assert!(
-        screen_rx.try_recv().is_err(),
+        !screen_instructions
+            .iter()
+            .any(|instruction| matches!(instruction, ScreenInstruction::ApplyLayout(..))),
         "the foreign payload id must never reach ApplyLayout"
+    );
+    assert_eq!(
+        screen_instructions
+            .iter()
+            .filter(|instruction| matches!(
+                instruction,
+                ScreenInstruction::LayoutPreparationFailed {
+                    transaction_id: 9,
+                    ..
+                }
+            ))
+            .count(),
+        1
     );
     assert_eq!(
         plugin_rx
@@ -991,6 +1422,7 @@ fn override_between_notification_failure_is_nonfatal_after_final_commit() {
             },
             plugin_ids,
         )],
+        10,
         true,
         true,
         1,
@@ -1033,7 +1465,8 @@ fn override_between_notification_failure_is_nonfatal_after_final_commit() {
         screen_rx.try_recv().is_err(),
         "a prepared override must remain quiescent until Screen commits it"
     );
-    pty.resolve_layout_commit(transaction_id, LayoutCommitOutcome::Committed)
+    pty.resolve_layout_commit_with_ack(transaction_id, LayoutCommitOutcome::Committed)
+        .0
         .expect("the Screen commit must activate held override terminals");
     assert!(matches!(
         screen_rx.try_recv(),
@@ -1088,6 +1521,7 @@ fn partial_override_spawn_failure_releases_terminals_and_plugins() {
                 },
                 plugin_ids,
             )],
+            11,
             true,
             true,
             1,
@@ -1141,6 +1575,7 @@ fn override_per_tab_failure_rolls_back_current_and_all_prior_tabs() {
                     override_plugin("file:/second-tab.wasm", 72),
                 ),
             ],
+            12,
             true,
             true,
             1,
@@ -1156,9 +1591,29 @@ fn override_per_tab_failure_rolls_back_current_and_all_prior_tabs() {
         "failed reservation plus prior/current prepared terminals are cleared exactly once"
     );
     assert_eq!(unloaded_plugin_ids(&plugin_rx), vec![71, 72]);
+    let screen_instructions = screen_rx
+        .try_iter()
+        .map(|(instruction, _)| instruction)
+        .collect::<Vec<_>>();
     assert!(
-        screen_rx.try_recv().is_err(),
+        !screen_instructions.iter().any(|instruction| matches!(
+            instruction,
+            ScreenInstruction::OverrideLayoutComplete(..)
+        )),
         "no partial OverrideLayoutComplete may be sent"
+    );
+    assert_eq!(
+        screen_instructions
+            .iter()
+            .filter(|instruction| matches!(
+                instruction,
+                ScreenInstruction::LayoutPreparationFailed {
+                    transaction_id: 12,
+                    ..
+                }
+            ))
+            .count(),
+        1
     );
 }
 
@@ -1187,6 +1642,7 @@ fn override_final_send_failure_rolls_back_the_union_exactly_once() {
                     override_plugin("file:/second-final-send.wasm", 72),
                 ),
             ],
+            13,
             true,
             true,
             1,
@@ -1226,6 +1682,7 @@ fn rejected_multi_tab_override_ack_rolls_back_the_union_exactly_once() {
                 override_plugin("file:/second-screen-rejected.wasm", 72),
             ),
         ],
+        14,
         true,
         true,
         1,
@@ -1248,10 +1705,11 @@ fn rejected_multi_tab_override_ack_rolls_back_the_union_exactly_once() {
         screen_rx.try_recv().is_err(),
         "neither tab may emit a ghost callback before the shared commit"
     );
-    pty.resolve_layout_commit(
+    pty.resolve_layout_commit_with_ack(
         transaction_id,
         LayoutCommitOutcome::Rejected("second tab failed in Screen".to_owned()),
     )
+    .0
     .expect_err("Screen rejection remains visible after exact cleanup");
 
     assert_eq!(probe.cleared_terminal_ids(), vec![100, 101]);
@@ -1261,8 +1719,9 @@ fn rejected_multi_tab_override_ack_rolls_back_the_union_exactly_once() {
         "rollback must cancel every tab's queued quit callback"
     );
 
-    pty.resolve_layout_commit(transaction_id, LayoutCommitOutcome::Committed)
-        .expect("a stale contradictory ACK must be ignored");
+    pty.resolve_layout_commit_with_ack(transaction_id, LayoutCommitOutcome::Committed)
+        .0
+        .expect_err("a stale contradictory ACK must expose the missing ledger");
     assert_eq!(probe.cleared_terminal_ids(), vec![100, 101]);
     assert!(unloaded_plugin_ids(&plugin_rx).is_empty());
 }
@@ -1308,6 +1767,25 @@ fn rollback_aggregates_cleanup_errors_in_stable_order_and_preserves_source() {
         vec![1, 2],
         "every terminal cleanup is attempted once despite failures"
     );
+}
+
+#[test]
+fn armed_layout_ledger_drop_is_a_last_resort_exact_cleanup_guard() {
+    let mock = MockOsApi::new();
+    let probe = mock.clone();
+    let (plugin_tx, plugin_rx) = channels::unbounded();
+    let mut bus: Bus<PtyInstruction> = Bus::empty();
+    bus.os_input = Some(Box::new(mock));
+    bus.senders.to_plugin = Some(SenderWithContext::new(plugin_tx));
+    bus.senders.should_silently_fail = false;
+    let mut allocation_ledger = LayoutAllocationLedger::armed_for_bus(&bus);
+    allocation_ledger.track_terminal(100);
+    allocation_ledger.track_plugin_ids(&override_plugin("file:/guarded.wasm", 77));
+
+    drop(allocation_ledger);
+
+    assert_eq!(probe.cleared_terminal_ids(), vec![100]);
+    assert_eq!(unloaded_plugin_ids(&plugin_rx), vec![77]);
 }
 
 #[test]

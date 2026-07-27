@@ -1,6 +1,6 @@
 use crate::background_jobs::{BackgroundJob, SessionLayoutSnapshot, write_session_state_to_disk};
 use crate::global_async_runtime::get_tokio_runtime as async_runtime;
-use crate::os_input_output::AsyncReader;
+use crate::os_input_output::{AsyncReader, ServerOsApi};
 use crate::route::NotificationEnd;
 use crate::terminal_bytes::TerminalBytes;
 use crate::{
@@ -12,7 +12,7 @@ use crate::{
     thread_bus::{Bus, ThreadSenders},
 };
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -39,6 +39,7 @@ pub type VteBytes = Vec<u8>;
 pub type TabIndex = u32;
 /// Zero is reserved for legacy/test Screen instructions without a PTY owner.
 pub type LayoutTransactionId = u64;
+const MAX_LAYOUT_COMMIT_RECEIPTS: usize = 256;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LayoutCommitOutcome {
@@ -182,6 +183,7 @@ pub enum PtyInstruction {
         Box<Option<TiledPaneLayout>>,
         Vec<FloatingPaneLayout>,
         usize,                               // tab_index
+        LayoutTransactionId,                 // allocated by Screen before any layout resource
         HashMap<RunPluginOrAlias, Vec<u32>>, // plugin_ids
         Option<Vec<CommandOrPlugin>>,        // initial_panes
         bool,                                // block_on_first_terminal
@@ -194,8 +196,9 @@ pub enum PtyInstruction {
         Option<PathBuf>,                                           // CWD
         Option<TerminalAction>,                                    // Default Shell
         Vec<(TabLayoutInfo, HashMap<RunPluginOrAlias, Vec<u32>>)>, // (layout, plugin_ids) per tab
-        bool,                                                      // retain_existing_terminal_panes
-        bool,                                                      // retain_existing_plugin_panes
+        LayoutTransactionId, // allocated by Screen before any layout resource
+        bool,                // retain_existing_terminal_panes
+        bool,                // retain_existing_plugin_panes
         ClientId,
         Option<NotificationEnd>,
         Option<Box<DurableTabLayoutGeneration>>,
@@ -274,7 +277,11 @@ pub enum PtyInstruction {
     },
     UpdateAndReportCwds,
     NotifyCwdFromOsc7(u32, PathBuf),
-    LayoutCommitResolved(LayoutTransactionId, LayoutCommitOutcome),
+    LayoutCommitResolved {
+        transaction_id: LayoutTransactionId,
+        outcome: LayoutCommitOutcome,
+        ack: zellij_utils::channels::Sender<std::result::Result<(), String>>,
+    },
     Exit,
 }
 
@@ -308,7 +315,7 @@ impl From<&PtyInstruction> for PtyContext {
             PtyInstruction::GetPaneCwd { .. } => PtyContext::GetPaneCwd,
             PtyInstruction::UpdateAndReportCwds => PtyContext::UpdateAndReportCwds,
             PtyInstruction::NotifyCwdFromOsc7(..) => PtyContext::NotifyCwdFromOsc7,
-            PtyInstruction::LayoutCommitResolved(..) => PtyContext::LayoutCommitResolved,
+            PtyInstruction::LayoutCommitResolved { .. } => PtyContext::LayoutCommitResolved,
             PtyInstruction::Exit => PtyContext::Exit,
         }
     }
@@ -318,9 +325,26 @@ impl From<&PtyInstruction> for PtyContext {
 struct LayoutAllocationLedger {
     allocated_ids: BTreeSet<PaneId>,
     quit_callback_fences: Vec<QuitCallbackFence>,
+    drop_cleanup: Option<LayoutAllocationCleanup>,
+}
+
+struct LayoutAllocationCleanup {
+    senders: ThreadSenders,
+    os_input: Option<Box<dyn ServerOsApi>>,
 }
 
 impl LayoutAllocationLedger {
+    fn armed_for_bus(bus: &Bus<PtyInstruction>) -> Self {
+        Self {
+            allocated_ids: BTreeSet::new(),
+            quit_callback_fences: vec![],
+            drop_cleanup: Some(LayoutAllocationCleanup {
+                senders: bus.senders.clone(),
+                os_input: bus.os_input.as_ref().map(|os_input| os_input.box_clone()),
+            }),
+        }
+    }
+
     fn track_plugin_ids(&mut self, plugin_ids: &HashMap<RunPluginOrAlias, Vec<u32>>) {
         self.allocated_ids
             .extend(plugin_ids.values().flatten().copied().map(PaneId::Plugin));
@@ -334,7 +358,38 @@ impl LayoutAllocationLedger {
         self.quit_callback_fences.push(fence);
     }
 
-    fn disarm(self) {}
+    fn disarm(mut self) {
+        self.drop_cleanup.take();
+        self.allocated_ids.clear();
+        self.quit_callback_fences.clear();
+    }
+}
+
+impl Drop for LayoutAllocationLedger {
+    fn drop(&mut self) {
+        let Some(cleanup) = self.drop_cleanup.take() else {
+            return;
+        };
+        for quit_callback_fence in self.quit_callback_fences.drain(..) {
+            quit_callback_fence.cancel();
+        }
+        while let Some(pane_id) = self.allocated_ids.pop_first() {
+            let result = match pane_id {
+                PaneId::Terminal(terminal_id) => cleanup
+                    .os_input
+                    .as_ref()
+                    .context("layout allocation guard has no OS interface")
+                    .and_then(|os_input| os_input.clear_terminal_id(terminal_id)),
+                PaneId::Plugin(plugin_id) => cleanup
+                    .senders
+                    .send_to_plugin_recover(PluginInstruction::Unload(plugin_id))
+                    .map_err(|send_failure| send_failure.into_parts().1),
+            };
+            if let Err(error) = result {
+                log::error!("layout allocation guard failed to release {pane_id:?}: {error:#}");
+            }
+        }
+    }
 }
 
 enum PreparedTerminal {
@@ -380,6 +435,42 @@ struct PendingLayoutCommit {
     allocation_ledger: LayoutAllocationLedger,
     terminals: Vec<PreparedTerminal>,
     originating_plugins_to_inform: Vec<(u32, OriginatingPlugin)>,
+    tab_id: Option<usize>,
+}
+
+struct LayoutCommitStartError {
+    error: anyhow::Error,
+    pending_commit: Box<PendingLayoutCommit>,
+}
+
+impl LayoutCommitStartError {
+    fn new(error: anyhow::Error, pending_commit: PendingLayoutCommit) -> Self {
+        Self {
+            error,
+            pending_commit: Box::new(pending_commit),
+        }
+    }
+
+    fn into_parts(self) -> (anyhow::Error, PendingLayoutCommit) {
+        (self.error, *self.pending_commit)
+    }
+}
+
+#[derive(Clone)]
+struct LayoutCommitReceipt {
+    outcome: LayoutCommitOutcome,
+    local_error: Option<String>,
+    ack_result: std::result::Result<(), String>,
+}
+
+impl LayoutCommitReceipt {
+    fn replay(&self) -> (Result<()>, std::result::Result<(), String>) {
+        let local_result = self
+            .local_error
+            .as_ref()
+            .map_or_else(|| Ok(()), |message| Err(anyhow!(message.clone())));
+        (local_result, self.ack_result.clone())
+    }
 }
 
 pub(crate) struct Pty {
@@ -397,12 +488,30 @@ pub(crate) struct Pty {
     terminal_cmds: HashMap<u32, Vec<String>>,
     terminal_foreground_cmds: HashMap<u32, Vec<String>>,
     pending_layout_commits: HashMap<LayoutTransactionId, PendingLayoutCommit>,
-    next_layout_transaction_id: LayoutTransactionId,
+    resolved_layout_commits: BTreeMap<LayoutTransactionId, LayoutCommitReceipt>,
 }
 
 pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
+    let result = pty_thread_main_loop(&mut pty, layout);
+    // This is intentionally unconditional: any `?` in the instruction loop is
+    // another thread-exit path. Draining here makes those failures obey the
+    // same transaction rollback contract as explicit Exit and channel
+    // disconnect. Explicit paths may already have drained the map; a second
+    // drain is a no-op.
+    pty.rollback_pending_layout_commits_on_exit();
+    result
+}
+
+fn pty_thread_main_loop(pty: &mut Pty, layout: Box<Layout>) -> Result<()> {
     loop {
-        let (event, mut err_ctx) = pty.bus.recv().expect("failed to receive event on channel");
+        let (event, mut err_ctx) = match pty.bus.recv() {
+            Ok(event) => event,
+            Err(error) => {
+                log::error!("PTY instruction channel disconnected: {error}");
+                pty.rollback_pending_layout_commits_on_exit();
+                break;
+            },
+        };
         err_ctx.add_call(ContextType::Pty((&event).into()));
         match event {
             PtyInstruction::SpawnTerminal(
@@ -680,6 +789,7 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
                 tab_layout,
                 floating_panes_layout,
                 tab_index,
+                transaction_id,
                 plugin_ids,
                 initial_panes,
                 block_on_first_terminal,
@@ -707,6 +817,7 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
                     plugin_ids,
                     initial_panes,
                     tab_index,
+                    transaction_id,
                     block_on_first_terminal,
                     should_change_focus_to_new_tab,
                     client_id_and_is_web_client,
@@ -720,6 +831,7 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
                 cwd,
                 default_shell,
                 tab_layouts_with_plugin_ids,
+                transaction_id,
                 retain_existing_terminal_panes,
                 retain_existing_plugin_panes,
                 client_id,
@@ -731,6 +843,7 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
                     cwd,
                     default_shell,
                     tab_layouts_with_plugin_ids,
+                    transaction_id,
                     retain_existing_terminal_panes,
                     retain_existing_plugin_panes,
                     client_id,
@@ -1104,9 +1217,15 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
             PtyInstruction::NotifyCwdFromOsc7(terminal_id, path) => {
                 pty.notify_cwd_from_osc7(terminal_id, path);
             },
-            PtyInstruction::LayoutCommitResolved(transaction_id, outcome) => {
-                pty.resolve_layout_commit(transaction_id, outcome)
-                    .non_fatal();
+            PtyInstruction::LayoutCommitResolved {
+                transaction_id,
+                outcome,
+                ack,
+            } => {
+                let (resolution, ack_result) =
+                    pty.resolve_layout_commit_with_ack(transaction_id, outcome);
+                let _ = ack.send(ack_result);
+                resolution.non_fatal();
             },
             PtyInstruction::Exit => {
                 pty.rollback_pending_layout_commits_on_exit();
@@ -1139,64 +1258,181 @@ impl Pty {
             terminal_cmds: HashMap::new(),
             terminal_foreground_cmds: HashMap::new(),
             pending_layout_commits: HashMap::new(),
-            next_layout_transaction_id: 1,
+            resolved_layout_commits: BTreeMap::new(),
         }
     }
 
-    fn begin_layout_commit(&mut self, pending_commit: PendingLayoutCommit) -> LayoutTransactionId {
-        loop {
-            let transaction_id = self.next_layout_transaction_id;
-            self.next_layout_transaction_id = self.next_layout_transaction_id.wrapping_add(1);
-            if transaction_id != 0 && !self.pending_layout_commits.contains_key(&transaction_id) {
-                self.pending_layout_commits
-                    .insert(transaction_id, pending_commit);
-                return transaction_id;
-            }
+    fn begin_layout_commit(
+        &mut self,
+        transaction_id: LayoutTransactionId,
+        pending_commit: PendingLayoutCommit,
+    ) -> std::result::Result<(), LayoutCommitStartError> {
+        if transaction_id == 0 {
+            return Err(LayoutCommitStartError::new(
+                anyhow!("layout transaction id 0 is reserved"),
+                pending_commit,
+            ));
+        }
+        if self.resolved_layout_commits.contains_key(&transaction_id) {
+            return Err(LayoutCommitStartError::new(
+                anyhow!("layout transaction id {transaction_id} is already resolved"),
+                pending_commit,
+            ));
+        }
+        match self.pending_layout_commits.entry(transaction_id) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(pending_commit);
+                Ok(())
+            },
+            std::collections::hash_map::Entry::Occupied(_) => Err(LayoutCommitStartError::new(
+                anyhow!("duplicate pending layout transaction id {transaction_id}"),
+                pending_commit,
+            )),
         }
     }
 
-    fn resolve_layout_commit(
+    fn resolve_layout_commit_with_ack(
         &mut self,
         transaction_id: LayoutTransactionId,
         outcome: LayoutCommitOutcome,
-    ) -> Result<()> {
-        let Some(pending_commit) = self.pending_layout_commits.remove(&transaction_id) else {
-            log::debug!(
-                "ignoring duplicate or stale layout commit resolution for transaction {}",
-                transaction_id
+    ) -> (Result<()>, std::result::Result<(), String>) {
+        if let Some(receipt) = self.resolved_layout_commits.get(&transaction_id) {
+            if receipt.outcome == outcome {
+                return receipt.replay();
+            }
+            let failure = format!(
+                "conflicting resolution for layout transaction {transaction_id}: recorded {:?}, received {:?}",
+                receipt.outcome, outcome
             );
-            return Ok(());
+            return (Err(anyhow!(failure.clone())), Err(failure));
+        }
+        let Some(pending_commit) = self.pending_layout_commits.remove(&transaction_id) else {
+            let failure = format!("cannot resolve unknown layout transaction {transaction_id}");
+            log::error!("{failure}");
+            return (Err(anyhow!(failure.clone())), Err(failure));
         };
 
-        match outcome {
+        let recorded_outcome = outcome.clone();
+        let resolution = match outcome {
             LayoutCommitOutcome::Committed => {
-                pending_commit.allocation_ledger.disarm();
+                let allocation_ledger = pending_commit.allocation_ledger;
                 for prepared_terminal in pending_commit.terminals {
-                    self.activate_prepared_terminal(prepared_terminal);
+                    if let Err(error) = self.activate_prepared_terminal(prepared_terminal) {
+                        let resolution = self.layout_activation_failure(
+                            transaction_id,
+                            error,
+                            allocation_ledger,
+                        );
+                        self.record_layout_commit_receipt(
+                            transaction_id,
+                            recorded_outcome,
+                            &resolution,
+                        );
+                        return resolution;
+                    }
                 }
                 for (terminal_id, originating_plugin) in
                     pending_commit.originating_plugins_to_inform
                 {
-                    self.inform_originating_plugin_of_open(terminal_id, originating_plugin);
+                    if let Err(error) =
+                        self.inform_originating_plugin_of_open(terminal_id, originating_plugin)
+                    {
+                        let resolution = self.layout_activation_failure(
+                            transaction_id,
+                            error,
+                            allocation_ledger,
+                        );
+                        self.record_layout_commit_receipt(
+                            transaction_id,
+                            recorded_outcome,
+                            &resolution,
+                        );
+                        return resolution;
+                    }
                 }
-                Ok(())
+                // Keep the allocation ledger armed until every prepared
+                // runtime surface has crossed its activation fence. The
+                // suspended-allocation checkpoint will make activation
+                // fallible; this ordering is the invariant it relies on.
+                allocation_ledger.disarm();
+                (Ok(()), Ok(()))
             },
-            LayoutCommitOutcome::Rejected(message) => Err(self
-                .rollback_partial_layout_allocations(
-                    anyhow!("screen rejected layout transaction {transaction_id}: {message}"),
-                    pending_commit.allocation_ledger,
-                )),
+            LayoutCommitOutcome::Rejected(message) => {
+                let business_failure =
+                    format!("screen rejected layout transaction {transaction_id}: {message}");
+                let cleanup_errors =
+                    self.cleanup_layout_allocations(pending_commit.allocation_ledger);
+                if cleanup_errors.is_empty() {
+                    // Rejection is the expected business outcome. The ACK only
+                    // certifies that PTY resolved its ledger, so a successful
+                    // cleanup must ACK Ok even though the local diagnostic
+                    // remains an Err for logs and direct tests.
+                    (Err(anyhow!(business_failure)), Ok(()))
+                } else {
+                    let failure = format!(
+                        "{business_failure}: failed to release one or more partial layout allocations: {}",
+                        cleanup_errors.join("; ")
+                    );
+                    (Err(anyhow!(failure.clone())), Err(failure))
+                }
+            },
+        };
+        self.record_layout_commit_receipt(transaction_id, recorded_outcome, &resolution);
+        resolution
+    }
+
+    fn record_layout_commit_receipt(
+        &mut self,
+        transaction_id: LayoutTransactionId,
+        outcome: LayoutCommitOutcome,
+        resolution: &(Result<()>, std::result::Result<(), String>),
+    ) {
+        let receipt = LayoutCommitReceipt {
+            outcome,
+            local_error: resolution
+                .0
+                .as_ref()
+                .err()
+                .map(|error| format!("{error:#}")),
+            ack_result: resolution.1.clone(),
+        };
+        self.resolved_layout_commits.insert(transaction_id, receipt);
+        while self.resolved_layout_commits.len() > MAX_LAYOUT_COMMIT_RECEIPTS {
+            let Some(oldest_transaction_id) = self.resolved_layout_commits.keys().next().copied()
+            else {
+                break;
+            };
+            self.resolved_layout_commits.remove(&oldest_transaction_id);
         }
+    }
+
+    fn layout_activation_failure(
+        &mut self,
+        transaction_id: LayoutTransactionId,
+        error: anyhow::Error,
+        allocation_ledger: LayoutAllocationLedger,
+    ) -> (Result<()>, std::result::Result<(), String>) {
+        let error = self.rollback_partial_layout_allocations(
+            error.context(format!(
+                "failed to activate committed layout transaction {transaction_id}"
+            )),
+            allocation_ledger,
+        );
+        let ack_error = format!("{error:#}");
+        (Err(error), Err(ack_error))
     }
 
     fn rollback_pending_layout_commits_on_exit(&mut self) {
         let pending_layout_commits = std::mem::take(&mut self.pending_layout_commits);
         for (transaction_id, pending_commit) in pending_layout_commits {
-            Err::<(), _>(self.rollback_partial_layout_allocations(
+            let tab_id = pending_commit.tab_id;
+            let error = self.rollback_partial_layout_allocations(
                 anyhow!("PTY exited with layout transaction {transaction_id} unresolved"),
                 pending_commit.allocation_ledger,
-            ))
-            .non_fatal();
+            );
+            let rejection =
+                self.reject_layout_preparation(transaction_id, tab_id, None, None, error);
+            Err::<(), _>(rejection).non_fatal();
         }
     }
 
@@ -1211,6 +1447,38 @@ impl Pty {
             ));
         };
         self.rollback_partial_layout_allocations(error, pending_commit.allocation_ledger)
+    }
+
+    fn reject_layout_preparation(
+        &mut self,
+        transaction_id: LayoutTransactionId,
+        tab_id: Option<usize>,
+        mut completion_tx: Option<NotificationEnd>,
+        layout_generation: Option<Box<DurableTabLayoutGeneration>>,
+        error: anyhow::Error,
+    ) -> anyhow::Error {
+        let message = format!("{error:#}");
+        if let Some(completion) = completion_tx.as_mut() {
+            completion.mark_failure(message.clone());
+        }
+        let instruction = ScreenInstruction::LayoutPreparationFailed {
+            transaction_id,
+            tab_id,
+            completion_tx,
+            layout_generation,
+            message: message.clone(),
+        };
+        if let Err(send_failure) = self.bus.senders.send_to_screen_recover(instruction) {
+            let (recovered_instruction, send_error) = send_failure.into_parts();
+            // The recovered instruction still owns the sole NotificationEnd
+            // channel. It is already marked failed, so dropping it cannot
+            // report a false success even though Screen is unavailable.
+            drop(recovered_instruction);
+            return error.context(format!(
+                "failed to report rejected layout transaction {transaction_id} to Screen: {send_error:#}"
+            ));
+        }
+        error
     }
 
     pub fn get_default_terminal(
@@ -1450,13 +1718,31 @@ impl Pty {
         plugin_ids: HashMap<RunPluginOrAlias, Vec<u32>>,
         initial_panes: Option<Vec<CommandOrPlugin>>,
         tab_index: usize,
+        transaction_id: LayoutTransactionId,
         block_on_first_terminal: bool,
         should_change_focus_to_new_tab: bool,
         client_id_and_is_web_client: (ClientId, bool),
-        completion_tx: Option<NotificationEnd>,
-        layout_generation: Option<Box<DurableTabLayoutGeneration>>,
+        mut completion_tx: Option<NotificationEnd>,
+        mut layout_generation: Option<Box<DurableTabLayoutGeneration>>,
     ) -> Result<()> {
         let err_context = || "failed to spawn terminals for layout for".to_string();
+        if transaction_id == 0
+            || self.pending_layout_commits.contains_key(&transaction_id)
+            || self.resolved_layout_commits.contains_key(&transaction_id)
+        {
+            let error =
+                anyhow!("layout transaction id {transaction_id} is reserved or already pending");
+            let mut allocation_ledger = LayoutAllocationLedger::armed_for_bus(&self.bus);
+            allocation_ledger.track_plugin_ids(&plugin_ids);
+            let error = self.rollback_partial_layout_allocations(error, allocation_ledger);
+            return Err(self.reject_layout_preparation(
+                transaction_id,
+                Some(tab_index),
+                completion_tx,
+                layout_generation,
+                error,
+            ));
+        }
 
         let mut default_shell =
             default_shell.unwrap_or_else(|| self.get_default_terminal(cwd, None));
@@ -1496,7 +1782,7 @@ impl Pty {
         let mut new_floating_panes_pids = Vec::new();
 
         let mut originating_plugins_to_inform = vec![];
-        let mut allocation_ledger = LayoutAllocationLedger::default();
+        let mut allocation_ledger = LayoutAllocationLedger::armed_for_bus(&self.bus);
         allocation_ledger.track_plugin_ids(&plugin_ids);
 
         for run_instruction in extracted_run_instructions {
@@ -1519,7 +1805,14 @@ impl Pty {
                 },
                 Ok(None) => {},
                 Err(error) => {
-                    return Err(self.rollback_partial_layout_allocations(error, allocation_ledger));
+                    let error = self.rollback_partial_layout_allocations(error, allocation_ledger);
+                    return Err(self.reject_layout_preparation(
+                        transaction_id,
+                        Some(tab_index),
+                        completion_tx,
+                        layout_generation,
+                        error,
+                    ));
                 },
             }
             if let (Some(originating_plugin), Some(terminal_id)) = (originating_plugin, terminal_id)
@@ -1547,7 +1840,14 @@ impl Pty {
                 },
                 Ok(None) => {},
                 Err(error) => {
-                    return Err(self.rollback_partial_layout_allocations(error, allocation_ledger));
+                    let error = self.rollback_partial_layout_allocations(error, allocation_ledger);
+                    return Err(self.reject_layout_preparation(
+                        transaction_id,
+                        Some(tab_index),
+                        completion_tx,
+                        layout_generation,
+                        error,
+                    ));
                 },
             }
             if let (Some(originating_plugin), Some(terminal_id)) = (originating_plugin, terminal_id)
@@ -1573,46 +1873,103 @@ impl Pty {
             None
         };
 
-        // Prepare blocking_terminal for ApplyLayout
-        let (direct_completion_tx, blocking_terminal) =
-            if let Some(terminal_id) = first_initial_pane_terminal_id {
-                (None, completion_tx.map(|tx| (terminal_id, tx)))
-            } else {
-                (completion_tx, None)
-            };
         let mut terminals = new_pane_pids;
         terminals.extend(new_floating_panes_pids);
-        let transaction_id = self.begin_layout_commit(PendingLayoutCommit {
+        let pending_commit = PendingLayoutCommit {
             allocation_ledger,
             terminals,
             originating_plugins_to_inform,
-        });
+            tab_id: Some(tab_index),
+        };
+        if let Err(start_failure) = self.begin_layout_commit(transaction_id, pending_commit) {
+            let (error, pending_commit) = start_failure.into_parts();
+            let error =
+                self.rollback_partial_layout_allocations(error, pending_commit.allocation_ledger);
+            return Err(self.reject_layout_preparation(
+                transaction_id,
+                Some(tab_index),
+                completion_tx,
+                layout_generation,
+                error,
+            ));
+        }
+
+        // Prepare blocking_terminal for ApplyLayout only after the PTY ledger
+        // owns every allocation.  Until then the original completion remains
+        // recoverable by the preparation-failure path.
+        let (direct_completion_tx, blocking_terminal) =
+            if let Some(terminal_id) = first_initial_pane_terminal_id {
+                (None, completion_tx.take().map(|tx| (terminal_id, tx)))
+            } else {
+                (completion_tx.take(), None)
+            };
 
         log::info!(
             "spawn_terminals_for_layout: {} tiled + {} floating panes created, sending ApplyLayout",
             new_tab_pane_ids.len(),
             new_tab_floating_pane_ids.len()
         );
-        let apply_layout_result = self
-            .bus
-            .senders
-            .send_to_screen(ScreenInstruction::ApplyLayout(
-                layout,
-                floating_panes_layout,
-                new_tab_pane_ids.clone(),
-                new_tab_floating_pane_ids.clone(),
-                plugin_ids,
-                tab_index,
-                should_change_focus_to_new_tab,
-                (client_id, is_web_client),
+        let instruction = ScreenInstruction::ApplyLayout(
+            layout,
+            floating_panes_layout,
+            new_tab_pane_ids.clone(),
+            new_tab_floating_pane_ids.clone(),
+            plugin_ids,
+            tab_index,
+            should_change_focus_to_new_tab,
+            (client_id, is_web_client),
+            direct_completion_tx,
+            blocking_terminal,
+            layout_generation.take(),
+            transaction_id,
+        );
+        if let Err(send_failure) = self.bus.senders.send_to_screen_recover(instruction) {
+            let (instruction, send_error) = send_failure.into_parts();
+            let (
                 direct_completion_tx,
                 blocking_terminal,
-                layout_generation,
+                recovered_layout_generation,
+                recovered_expected_kind,
+            ) = match instruction {
+                ScreenInstruction::ApplyLayout(
+                    _,
+                    _,
+                    _,
+                    _,
+                    _,
+                    _,
+                    _,
+                    _,
+                    direct_completion_tx,
+                    blocking_terminal,
+                    recovered_layout_generation,
+                    _,
+                ) => (
+                    direct_completion_tx,
+                    blocking_terminal,
+                    recovered_layout_generation,
+                    true,
+                ),
+                _ => (None, None, None, false),
+            };
+            completion_tx = direct_completion_tx
+                .or_else(|| blocking_terminal.map(|(_, completion)| completion));
+            layout_generation = recovered_layout_generation;
+            let handoff_error = if recovered_expected_kind {
+                send_error.context(err_context())
+            } else {
+                send_error.context(format!(
+                    "Screen handoff returned an unexpected instruction for Apply layout transaction {transaction_id}"
+                ))
+            };
+            let error = self.reject_pending_layout_send(transaction_id, handoff_error);
+            return Err(self.reject_layout_preparation(
                 transaction_id,
-            ))
-            .with_context(err_context);
-        if let Err(error) = apply_layout_result {
-            return Err(self.reject_pending_layout_send(transaction_id, error));
+                Some(tab_index),
+                completion_tx,
+                layout_generation,
+                error,
+            ));
         }
         Ok(())
     }
@@ -1621,13 +1978,38 @@ impl Pty {
         cwd: Option<PathBuf>,
         default_shell: Option<TerminalAction>,
         tab_layouts_with_plugin_ids: Vec<(TabLayoutInfo, HashMap<RunPluginOrAlias, Vec<u32>>)>,
+        transaction_id: LayoutTransactionId,
         retain_existing_terminal_panes: bool,
         retain_existing_plugin_panes: bool,
         client_id: ClientId,
         mut completion_tx: Option<NotificationEnd>,
-        layout_generation: Option<Box<DurableTabLayoutGeneration>>,
+        mut layout_generation: Option<Box<DurableTabLayoutGeneration>>,
     ) -> Result<()> {
-        let mut allocation_ledger = LayoutAllocationLedger::default();
+        let mut allocation_ledger = LayoutAllocationLedger::armed_for_bus(&self.bus);
+        for (_, plugin_ids) in &tab_layouts_with_plugin_ids {
+            allocation_ledger.track_plugin_ids(plugin_ids);
+        }
+        if transaction_id == 0
+            || self.pending_layout_commits.contains_key(&transaction_id)
+            || self.resolved_layout_commits.contains_key(&transaction_id)
+        {
+            let error =
+                anyhow!("layout transaction id {transaction_id} is reserved or already pending");
+            let error = self.rollback_partial_layout_allocations(error, allocation_ledger);
+            return Err(self.reject_layout_preparation(
+                transaction_id,
+                layout_generation
+                    .as_ref()
+                    .map(|generation| generation.tab_id),
+                completion_tx,
+                layout_generation,
+                error,
+            ));
+        }
+        // Keep the preflight ledger armed while each tab is prepared.
+        // `track_plugin_ids` writes into a BTreeSet, so revisiting the same IDs
+        // is idempotent and must not create a short-lived second guard whose
+        // Drop would unload valid plugins before the Screen handoff.
         let mut all_tab_results = Vec::new();
         let mut all_prepared_terminals = Vec::new();
         let mut all_originating_plugins_to_inform = Vec::new();
@@ -1654,41 +2036,87 @@ impl Pty {
                         .append(&mut prepared_tab.originating_plugins_to_inform);
                 },
                 Err(error) => {
-                    if let Some(completion) = completion_tx.as_mut() {
-                        completion.set_exit_status(1);
-                        completion.set_error_message(format!(
-                            "failed to prepare recovered layout for tab {tab_index}: {error}"
-                        ));
-                    }
                     let error = error.context(format!(
                         "failed to prepare recovered layout tab {tab_index}"
                     ));
-                    return Err(self.rollback_partial_layout_allocations(error, allocation_ledger));
+                    let error = self.rollback_partial_layout_allocations(error, allocation_ledger);
+                    return Err(self.reject_layout_preparation(
+                        transaction_id,
+                        layout_generation
+                            .as_ref()
+                            .map(|generation| generation.tab_id),
+                        completion_tx,
+                        layout_generation,
+                        error,
+                    ));
                 },
             }
         }
 
-        let transaction_id = self.begin_layout_commit(PendingLayoutCommit {
+        let pending_commit = PendingLayoutCommit {
             allocation_ledger,
             terminals: all_prepared_terminals,
             originating_plugins_to_inform: all_originating_plugins_to_inform,
-        });
-        let final_send_result =
-            self.bus
-                .senders
-                .send_to_screen(ScreenInstruction::OverrideLayoutComplete(
-                    all_tab_results,
-                    retain_existing_terminal_panes,
-                    retain_existing_plugin_panes,
-                    client_id,
-                    completion_tx,
-                    layout_generation,
-                    transaction_id,
-                ));
-        if let Err(error) = final_send_result {
-            return Err(self.reject_pending_layout_send(
+            tab_id: layout_generation
+                .as_ref()
+                .map(|generation| generation.tab_id),
+        };
+        if let Err(start_failure) = self.begin_layout_commit(transaction_id, pending_commit) {
+            let (error, pending_commit) = start_failure.into_parts();
+            let error =
+                self.rollback_partial_layout_allocations(error, pending_commit.allocation_ledger);
+            return Err(self.reject_layout_preparation(
                 transaction_id,
-                error.context("failed to commit recovered layout"),
+                layout_generation
+                    .as_ref()
+                    .map(|generation| generation.tab_id),
+                completion_tx,
+                layout_generation,
+                error,
+            ));
+        }
+        let instruction = ScreenInstruction::OverrideLayoutComplete(
+            all_tab_results,
+            retain_existing_terminal_panes,
+            retain_existing_plugin_panes,
+            client_id,
+            completion_tx.take(),
+            layout_generation.take(),
+            transaction_id,
+        );
+        if let Err(send_failure) = self.bus.senders.send_to_screen_recover(instruction) {
+            let (instruction, send_error) = send_failure.into_parts();
+            let (recovered_completion_tx, recovered_layout_generation, recovered_expected_kind) =
+                match instruction {
+                    ScreenInstruction::OverrideLayoutComplete(
+                        _,
+                        _,
+                        _,
+                        _,
+                        recovered_completion_tx,
+                        recovered_layout_generation,
+                        _,
+                    ) => (recovered_completion_tx, recovered_layout_generation, true),
+                    _ => (None, None, false),
+                };
+            completion_tx = recovered_completion_tx;
+            layout_generation = recovered_layout_generation;
+            let handoff_error = if recovered_expected_kind {
+                send_error.context("failed to commit recovered layout")
+            } else {
+                send_error.context(format!(
+                    "Screen handoff returned an unexpected instruction for Override layout transaction {transaction_id}"
+                ))
+            };
+            let error = self.reject_pending_layout_send(transaction_id, handoff_error);
+            return Err(self.reject_layout_preparation(
+                transaction_id,
+                layout_generation
+                    .as_ref()
+                    .map(|generation| generation.tab_id),
+                completion_tx,
+                layout_generation,
+                error,
             ));
         }
         Ok(())
@@ -1810,15 +2238,7 @@ impl Pty {
         original_error: anyhow::Error,
         allocation_ledger: LayoutAllocationLedger,
     ) -> anyhow::Error {
-        let mut cleanup_errors = Vec::new();
-        for quit_callback_fence in &allocation_ledger.quit_callback_fences {
-            quit_callback_fence.cancel();
-        }
-        for pane_id in allocation_ledger.allocated_ids {
-            if let Err(error) = self.close_pane(pane_id) {
-                cleanup_errors.push(format!("{pane_id:?}: {error}"));
-            }
-        }
+        let cleanup_errors = self.cleanup_layout_allocations(allocation_ledger);
         if cleanup_errors.is_empty() {
             original_error
         } else {
@@ -1829,7 +2249,27 @@ impl Pty {
         }
     }
 
-    fn activate_prepared_terminal(&mut self, prepared_terminal: PreparedTerminal) {
+    fn cleanup_layout_allocations(
+        &mut self,
+        mut allocation_ledger: LayoutAllocationLedger,
+    ) -> Vec<String> {
+        let mut cleanup_errors = Vec::new();
+        for quit_callback_fence in allocation_ledger.quit_callback_fences.drain(..) {
+            quit_callback_fence.cancel();
+        }
+        while let Some(pane_id) = allocation_ledger.allocated_ids.pop_first() {
+            if let Err(error) = self.close_pane(pane_id) {
+                cleanup_errors.push(format!("{error:#}"));
+            }
+        }
+        // Every tracked allocation was attempted exactly once above. Disable
+        // the unwind guard even when an individual close failed so Drop does
+        // not issue a second, ambiguous cleanup attempt.
+        allocation_ledger.disarm();
+        cleanup_errors
+    }
+
+    fn activate_prepared_terminal(&mut self, prepared_terminal: PreparedTerminal) -> Result<()> {
         match prepared_terminal {
             PreparedTerminal::Runnable {
                 terminal_id,
@@ -1875,23 +2315,33 @@ impl Pty {
                 }
             },
         }
+        Ok(())
     }
     fn inform_originating_plugin_of_open(
         &mut self,
         terminal_id: u32,
         originating_plugin: OriginatingPlugin,
-    ) {
+    ) -> Result<()> {
         self.originating_plugins
             .insert(terminal_id, originating_plugin.clone());
         let update_event = Event::CommandPaneOpened(terminal_id, originating_plugin.context);
-        let _ = self
-            .bus
-            .senders
-            .send_to_plugin(PluginInstruction::Update(vec![(
-                Some(originating_plugin.plugin_id),
-                Some(originating_plugin.client_id),
-                update_event,
-            )]));
+        if let Err(send_failure) =
+            self.bus
+                .senders
+                .send_to_plugin_recover(PluginInstruction::Update(vec![(
+                    Some(originating_plugin.plugin_id),
+                    Some(originating_plugin.client_id),
+                    update_event,
+                )]))
+        {
+            let (_, error) = send_failure.into_parts();
+            self.originating_plugins.remove(&terminal_id);
+            return Err(error.context(format!(
+                "failed to report terminal {terminal_id} activation to originating plugin {}",
+                originating_plugin.plugin_id
+            )));
+        }
+        Ok(())
     }
 
     fn apply_run_instruction(

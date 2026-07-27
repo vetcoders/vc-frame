@@ -33,6 +33,16 @@ use zellij_utils::{
 const RESIZE_INCREMENT_WIDTH: usize = 5;
 const RESIZE_INCREMENT_HEIGHT: usize = 2;
 
+macro_rules! resize_pty_if_layout_io_enabled {
+    ($enabled:expr, $($args:tt)*) => {{
+        if $enabled {
+            resize_pty!($($args)*)
+        } else {
+            Ok::<(), anyhow::Error>(())
+        }
+    }};
+}
+
 pub struct FloatingPanes {
     panes: BTreeMap<PaneId, Box<dyn Pane>>,
     display_area: Rc<RefCell<Size>>,
@@ -53,6 +63,16 @@ pub struct FloatingPanes {
     // last_position)
     senders: ThreadSenders,
     window_title: Option<String>,
+    layout_resizes_enabled: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct FloatingPanesLayoutSnapshot {
+    desired_pane_positions: HashMap<PaneId, PaneGeom>,
+    z_indices: Vec<PaneId>,
+    active_panes: ActivePanes,
+    show_panes: bool,
+    layout_resizes_enabled: bool,
 }
 
 #[allow(clippy::borrowed_box)]
@@ -89,7 +109,48 @@ impl FloatingPanes {
             pane_being_moved_with_mouse: None,
             senders,
             window_title: None,
+            layout_resizes_enabled: true,
         }
+    }
+
+    pub(crate) fn layout_snapshot(&self) -> FloatingPanesLayoutSnapshot {
+        FloatingPanesLayoutSnapshot {
+            desired_pane_positions: self.desired_pane_positions.clone(),
+            z_indices: self.z_indices.clone(),
+            active_panes: self.active_panes.clone(),
+            show_panes: self.show_panes,
+            layout_resizes_enabled: self.layout_resizes_enabled,
+        }
+    }
+
+    pub(crate) fn take_panes_for_layout_rollback(&mut self) -> BTreeMap<PaneId, Box<dyn Pane>> {
+        std::mem::take(&mut self.panes)
+    }
+
+    pub(crate) fn restore_layout_snapshot(
+        &mut self,
+        snapshot: FloatingPanesLayoutSnapshot,
+        panes: BTreeMap<PaneId, Box<dyn Pane>>,
+    ) {
+        self.panes = panes;
+        self.desired_pane_positions = snapshot.desired_pane_positions;
+        self.z_indices = snapshot.z_indices;
+        self.active_panes = snapshot.active_panes;
+        self.show_panes = snapshot.show_panes;
+        self.layout_resizes_enabled = snapshot.layout_resizes_enabled;
+    }
+
+    pub(crate) fn set_layout_io_enabled(&mut self, enabled: bool) {
+        self.active_panes.set_focus_events_enabled(enabled);
+        self.layout_resizes_enabled = enabled;
+    }
+
+    pub(crate) fn layout_io_enabled(&self) -> bool {
+        self.layout_resizes_enabled
+    }
+
+    pub(crate) fn layout_focused_panes(&self) -> HashMap<ClientId, PaneId> {
+        self.active_panes.clone_active_panes()
     }
     pub fn stack(&self) -> Option<FloatingPanesStack> {
         if self.panes_are_visible() {
@@ -369,8 +430,14 @@ impl FloatingPanes {
             } else {
                 pane.set_content_offset(Offset::default());
             }
-            resize_pty!(pane, os_api, self.senders, self.character_cell_size)
-                .with_context(|| err_context(&pane.pid()))?;
+            resize_pty_if_layout_io_enabled!(
+                self.layout_resizes_enabled,
+                pane,
+                os_api,
+                self.senders,
+                self.character_cell_size
+            )
+            .with_context(|| err_context(&pane.pid()))?;
         }
         Ok(())
     }
@@ -522,8 +589,14 @@ impl FloatingPanes {
 
     pub fn resize_pty_all_panes(&mut self, _os_api: &mut Box<dyn ServerOsApi>) -> Result<()> {
         for pane in self.panes.values_mut() {
-            resize_pty!(pane, os_api, self.senders, self.character_cell_size)
-                .with_context(|| format!("failed to resize PTY in pane {:?}", pane.pid()))?;
+            resize_pty_if_layout_io_enabled!(
+                self.layout_resizes_enabled,
+                pane,
+                os_api,
+                self.senders,
+                self.character_cell_size
+            )
+            .with_context(|| format!("failed to resize PTY in pane {:?}", pane.pid()))?;
         }
         Ok(())
     }
@@ -564,8 +637,14 @@ impl FloatingPanes {
             .with_context(err_context)?;
 
         for pane in self.panes.values_mut() {
-            resize_pty!(pane, os_api, self.senders, self.character_cell_size)
-                .with_context(err_context)?;
+            resize_pty_if_layout_io_enabled!(
+                self.layout_resizes_enabled,
+                pane,
+                os_api,
+                self.senders,
+                self.character_cell_size
+            )
+            .with_context(err_context)?;
         }
         self.set_force_render();
         Ok(true)
@@ -595,8 +674,14 @@ impl FloatingPanes {
         }
 
         for pane in self.panes.values_mut() {
-            resize_pty!(pane, os_api, self.senders, self.character_cell_size)
-                .with_context(err_context)?;
+            resize_pty_if_layout_io_enabled!(
+                self.layout_resizes_enabled,
+                pane,
+                os_api,
+                self.senders,
+                self.character_cell_size
+            )
+            .with_context(err_context)?;
         }
         self.set_force_render();
         Ok(())
@@ -1207,7 +1292,14 @@ impl FloatingPanes {
             if let Some(geom) = prev_geom_override {
                 new_position.set_geom_override(geom);
             }
-            resize_pty!(new_position, os_api, self.senders, self.character_cell_size).non_fatal();
+            resize_pty_if_layout_io_enabled!(
+                self.layout_resizes_enabled,
+                new_position,
+                os_api,
+                self.senders,
+                self.character_cell_size
+            )
+            .non_fatal();
             new_position.set_should_render(true);
 
             let Some(current_position) = self.panes.get_mut(&active_pane_id) else {
@@ -1218,7 +1310,8 @@ impl FloatingPanes {
             if let Some(geom) = next_geom_override {
                 current_position.set_geom_override(geom);
             }
-            resize_pty!(
+            resize_pty_if_layout_io_enabled!(
+                self.layout_resizes_enabled,
                 current_position,
                 os_api,
                 self.senders,

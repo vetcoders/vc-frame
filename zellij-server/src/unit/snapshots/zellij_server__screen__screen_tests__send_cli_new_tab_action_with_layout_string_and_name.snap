@@ -1,6 +1,5 @@
 ---
 source: zellij-server/src/./unit/screen_tests.rs
-assertion_line: 10095
 expression: output
 ---
 NewTab(
@@ -99,6 +98,7 @@ NewTab(
     ),
     [],
     1,
+    2,
     None,
     false,
     true,
@@ -109,6 +109,9 @@ NewTab(
     Some(
         NotificationEnd {
             channel: None,
+            resolution: Some(
+                Pending,
+            ),
             exit_status: None,
             unblock_condition: None,
             affected_pane_id: None,

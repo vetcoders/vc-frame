@@ -107,6 +107,7 @@ pub(crate) struct PluginPane {
     should_be_suppressed: bool,
     text_being_pasted: Option<Vec<u8>>,
     supports_mouse_selection: bool,
+    layout_reflow_deferred: bool,
 }
 
 impl PluginPane {
@@ -164,6 +165,7 @@ impl PluginPane {
             should_be_suppressed: false,
             text_being_pasted: None,
             supports_mouse_selection: false,
+            layout_reflow_deferred: false,
         };
         for client_id in currently_connected_clients {
             plugin.handle_plugin_bytes(client_id, initial_loading_message.as_bytes().to_vec());
@@ -365,6 +367,9 @@ impl Pane for PluginPane {
             .for_each(|v| *v = should_render);
     }
     fn render_full_viewport(&mut self) {
+        if self.layout_reflow_deferred {
+            return;
+        }
         // this marks the pane for a full re-render, rather than just rendering the
         // diff as it usually does with the OutputBuffer
         self.frame.clear();
@@ -674,7 +679,9 @@ impl Pane for PluginPane {
         self.active_at = time;
     }
     fn set_frame(&mut self, _frame: bool) {
-        self.frame.clear();
+        if !self.layout_reflow_deferred {
+            self.frame.clear();
+        }
     }
     fn set_content_offset(&mut self, offset: Offset) {
         self.content_offset = offset;
@@ -747,6 +754,20 @@ impl Pane for PluginPane {
     }
     fn set_title(&mut self, title: String) {
         self.pane_title = title;
+    }
+    fn layout_title(&self) -> String {
+        self.pane_title.clone()
+    }
+    fn begin_layout_transaction(&mut self) {
+        self.layout_reflow_deferred = true;
+    }
+    fn commit_layout_transaction(&mut self) {
+        self.layout_reflow_deferred = false;
+        self.resize_grids();
+        self.render_full_viewport();
+    }
+    fn rollback_layout_transaction(&mut self) {
+        self.layout_reflow_deferred = false;
     }
     fn update_loading_indication(&mut self, loading_indication: LoadingIndication) {
         if self.loading_indication.ended && !loading_indication.is_error() {
@@ -903,6 +924,9 @@ impl Pane for PluginPane {
 
 impl PluginPane {
     fn resize_grids(&mut self) {
+        if self.layout_reflow_deferred {
+            return;
+        }
         let content_rows = self.get_content_rows();
         let content_columns = self.get_content_columns();
         for grid in self.grids.values_mut() {
