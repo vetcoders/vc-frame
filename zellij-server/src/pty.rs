@@ -13,7 +13,7 @@ use crate::{
 };
 use std::sync::Arc;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap},
     path::PathBuf,
 };
 use tokio::task::JoinHandle;
@@ -1284,6 +1284,12 @@ impl Pty {
         // new_pane_pids
 
         let mut originating_plugins_to_inform = vec![];
+        let mut allocated_ids = plugin_ids
+            .values()
+            .flatten()
+            .copied()
+            .map(PaneId::Plugin)
+            .collect::<BTreeSet<_>>();
 
         for run_instruction in extracted_run_instructions {
             let originating_plugin = run_instruction.as_ref().and_then(|r| {
@@ -1294,11 +1300,16 @@ impl Pty {
                 }
             });
             let mut terminal_id = None;
-            if let Some(new_pane_data) =
-                self.apply_run_instruction(run_instruction, default_shell.clone())?
-            {
-                terminal_id = Some(new_pane_data.0);
-                new_pane_pids.push(new_pane_data);
+            match self.apply_run_instruction(run_instruction, default_shell.clone()) {
+                Ok(Some(new_pane_data)) => {
+                    terminal_id = Some(new_pane_data.0);
+                    allocated_ids.insert(PaneId::Terminal(new_pane_data.0));
+                    new_pane_pids.push(new_pane_data);
+                },
+                Ok(None) => {},
+                Err(error) => {
+                    return Err(self.rollback_partial_layout_allocations(error, &allocated_ids));
+                },
             }
             if let (Some(originating_plugin), Some(terminal_id)) = (originating_plugin, terminal_id)
             {
@@ -1314,11 +1325,16 @@ impl Pty {
                 }
             });
             let mut terminal_id = None;
-            if let Some(new_pane_data) =
-                self.apply_run_instruction(run_instruction, default_shell.clone())?
-            {
-                terminal_id = Some(new_pane_data.0);
-                new_floating_panes_pids.push(new_pane_data);
+            match self.apply_run_instruction(run_instruction, default_shell.clone()) {
+                Ok(Some(new_pane_data)) => {
+                    terminal_id = Some(new_pane_data.0);
+                    allocated_ids.insert(PaneId::Terminal(new_pane_data.0));
+                    new_floating_panes_pids.push(new_pane_data);
+                },
+                Ok(None) => {},
+                Err(error) => {
+                    return Err(self.rollback_partial_layout_allocations(error, &allocated_ids));
+                },
             }
             if let (Some(originating_plugin), Some(terminal_id)) = (originating_plugin, terminal_id)
             {
@@ -1369,7 +1385,8 @@ impl Pty {
             new_tab_pane_ids.len(),
             new_tab_floating_pane_ids.len()
         );
-        self.bus
+        let apply_layout_result = self
+            .bus
             .senders
             .send_to_screen(ScreenInstruction::ApplyLayout(
                 layout,
@@ -1384,7 +1401,10 @@ impl Pty {
                 blocking_terminal,
                 layout_generation,
             ))
-            .with_context(err_context)?;
+            .with_context(err_context);
+        if let Err(error) = apply_layout_result {
+            return Err(self.rollback_partial_layout_allocations(error, &allocated_ids));
+        }
         let mut terminals_to_start = vec![];
 
         terminals_to_start.append(&mut new_pane_pids);
@@ -1426,7 +1446,8 @@ impl Pty {
                             terminal_id,
                             run_command.clone(),
                         )
-                        .with_context(err_context)?;
+                        .with_context(err_context)
+                        .non_fatal();
                     },
                     Some(_) => {},
                     None => {
@@ -1483,6 +1504,12 @@ impl Pty {
         // new_pane_pids
 
         let mut originating_plugins_to_inform = vec![];
+        let mut allocated_ids = plugin_ids
+            .values()
+            .flatten()
+            .copied()
+            .map(PaneId::Plugin)
+            .collect::<BTreeSet<_>>();
 
         for run_instruction in extracted_run_instructions {
             let originating_plugin = run_instruction.as_ref().and_then(|r| {
@@ -1496,22 +1523,12 @@ impl Pty {
             match self.apply_run_instruction(run_instruction, default_shell.clone()) {
                 Ok(Some(new_pane_data)) => {
                     terminal_id = Some(new_pane_data.0);
+                    allocated_ids.insert(PaneId::Terminal(new_pane_data.0));
                     new_pane_pids.push(new_pane_data);
                 },
                 Ok(None) => {},
                 Err(error) => {
-                    if let Err(cleanup_error) = self.cleanup_partial_layout_override_allocations(
-                        &plugin_ids,
-                        &new_pane_pids,
-                        &new_floating_panes_pids,
-                    ) {
-                        return Err(anyhow!(
-                            "{}; partial layout allocation cleanup failed: {}",
-                            error,
-                            cleanup_error
-                        ));
-                    }
-                    return Err(error);
+                    return Err(self.rollback_partial_layout_allocations(error, &allocated_ids));
                 },
             }
             if let (Some(originating_plugin), Some(terminal_id)) = (originating_plugin, terminal_id)
@@ -1531,22 +1548,12 @@ impl Pty {
             match self.apply_run_instruction(run_instruction, default_shell.clone()) {
                 Ok(Some(new_pane_data)) => {
                     terminal_id = Some(new_pane_data.0);
+                    allocated_ids.insert(PaneId::Terminal(new_pane_data.0));
                     new_floating_panes_pids.push(new_pane_data);
                 },
                 Ok(None) => {},
                 Err(error) => {
-                    if let Err(cleanup_error) = self.cleanup_partial_layout_override_allocations(
-                        &plugin_ids,
-                        &new_pane_pids,
-                        &new_floating_panes_pids,
-                    ) {
-                        return Err(anyhow!(
-                            "{}; partial layout allocation cleanup failed: {}",
-                            error,
-                            cleanup_error
-                        ));
-                    }
-                    return Err(error);
+                    return Err(self.rollback_partial_layout_allocations(error, &allocated_ids));
                 },
             }
             if let (Some(originating_plugin), Some(terminal_id)) = (originating_plugin, terminal_id)
@@ -1630,7 +1637,8 @@ impl Pty {
                             terminal_id,
                             run_command.clone(),
                         )
-                        .with_context(err_context)?;
+                        .with_context(err_context)
+                        .non_fatal();
                     },
                     Some(_) => {},
                     None => {
@@ -1645,38 +1653,21 @@ impl Pty {
         }
         Ok(tab_result)
     }
-    fn cleanup_partial_layout_override_allocations(
+    fn rollback_partial_layout_allocations(
         &mut self,
-        plugin_ids: &HashMap<RunPluginOrAlias, Vec<u32>>,
-        new_pane_pids: &[(u32, bool, Option<RunCommand>, Result<Box<dyn AsyncReader>>)],
-        new_floating_pane_pids: &[(u32, bool, Option<RunCommand>, Result<Box<dyn AsyncReader>>)],
-    ) -> Result<()> {
-        let mut allocated_ids = plugin_ids
-            .values()
-            .flatten()
-            .copied()
-            .map(PaneId::Plugin)
-            .collect::<HashSet<_>>();
-        allocated_ids.extend(
-            new_pane_pids
-                .iter()
-                .map(|(terminal_id, _, _, _)| PaneId::Terminal(*terminal_id)),
-        );
-        allocated_ids.extend(
-            new_floating_pane_pids
-                .iter()
-                .map(|(terminal_id, _, _, _)| PaneId::Terminal(*terminal_id)),
-        );
+        original_error: anyhow::Error,
+        allocated_ids: &BTreeSet<PaneId>,
+    ) -> anyhow::Error {
         let mut cleanup_errors = Vec::new();
         for pane_id in allocated_ids {
-            if let Err(error) = self.close_pane(pane_id) {
+            if let Err(error) = self.close_pane(*pane_id) {
                 cleanup_errors.push(format!("{pane_id:?}: {error}"));
             }
         }
         if cleanup_errors.is_empty() {
-            Ok(())
+            original_error
         } else {
-            Err(anyhow!(
+            original_error.context(format!(
                 "failed to release one or more partial layout allocations: {}",
                 cleanup_errors.join("; ")
             ))
@@ -2482,11 +2473,28 @@ impl Drop for Pty {
     }
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static FAIL_NEXT_COMMAND_NOT_FOUND_NOTIFICATION: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn fail_next_command_not_found_notification() {
+    FAIL_NEXT_COMMAND_NOT_FOUND_NOTIFICATION.with(|fail_next| fail_next.set(true));
+}
+
 fn send_command_not_found_to_screen(
     senders: ThreadSenders,
     terminal_id: u32,
     run_command: RunCommand,
 ) -> Result<()> {
+    #[cfg(test)]
+    if FAIL_NEXT_COMMAND_NOT_FOUND_NOTIFICATION.with(|fail_next| fail_next.replace(false)) {
+        return Err(anyhow!(
+            "injected post-transfer command-not-found notification failure"
+        ));
+    }
     let err_context = || format!("failed to send command_not_fount for terminal {terminal_id}");
     senders
         .send_to_screen(ScreenInstruction::PtyBytes(

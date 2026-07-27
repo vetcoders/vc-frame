@@ -136,6 +136,29 @@ fn build_command(
     (cmd, failover_cmd)
 }
 
+fn resolve_reserved_terminal_spawn<T>(
+    terminal_id: u32,
+    spawn_result: Result<T>,
+    clear_terminal_id: impl FnOnce(u32),
+) -> Result<T> {
+    match spawn_result {
+        Ok(spawned_terminal) => Ok(spawned_terminal),
+        Err(error) => {
+            let command_not_found_owns_reservation = matches!(
+                error.downcast_ref::<ZellijError>(),
+                Some(ZellijError::CommandNotFound {
+                    terminal_id: missing_command_terminal_id,
+                    ..
+                }) if *missing_command_terminal_id == terminal_id
+            );
+            if !command_not_found_owns_reservation {
+                clear_terminal_id(terminal_id);
+            }
+            Err(error)
+        },
+    }
+}
+
 // The ClientSender is in charge of sending messages to the client on a special thread
 // This is done so that when the unix socket buffer is full, we won't block the entire router
 // thread
@@ -322,9 +345,13 @@ impl ServerOsApi for ServerOsInputOutput {
 
         let (cmd, failover_cmd) = build_command(terminal_action, default_editor);
 
-        let (async_reader, child_fd) = self
+        let spawn_result = self
             .pty_backend
-            .spawn_terminal(cmd, failover_cmd, quit_cb, terminal_id)
+            .spawn_terminal(cmd, failover_cmd, quit_cb, terminal_id);
+        let (async_reader, child_fd) =
+            resolve_reserved_terminal_spawn(terminal_id, spawn_result, |terminal_id| {
+                self.pty_backend.clear_terminal_id(terminal_id)
+            })
             .with_context(err_context)?;
 
         Ok((terminal_id, async_reader, Some(child_fd as u32)))

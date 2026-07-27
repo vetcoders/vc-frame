@@ -74,6 +74,63 @@ fn get_cwd() {
     );
 }
 
+#[test]
+fn failed_spawn_releases_reservation_except_command_not_found() {
+    let mut cleared_terminal_ids = Vec::new();
+
+    let ordinary_failure = resolve_reserved_terminal_spawn(
+        41,
+        Err::<(), _>(anyhow::Error::new(std::io::Error::other(
+            "injected backend spawn failure",
+        ))),
+        |terminal_id| cleared_terminal_ids.push(terminal_id),
+    )
+    .expect_err("ordinary spawn failures must remain errors");
+    assert!(
+        ordinary_failure
+            .to_string()
+            .contains("injected backend spawn failure")
+    );
+    assert_eq!(cleared_terminal_ids, vec![41]);
+
+    let command_not_found = resolve_reserved_terminal_spawn(
+        42,
+        Err::<(), _>(anyhow::Error::new(ZellijError::CommandNotFound {
+            terminal_id: 42,
+            command: "missing-command".to_owned(),
+        })),
+        |terminal_id| cleared_terminal_ids.push(terminal_id),
+    )
+    .expect_err("CommandNotFound remains an error for the pane hold path");
+    assert!(matches!(
+        command_not_found.downcast_ref::<ZellijError>(),
+        Some(ZellijError::CommandNotFound {
+            terminal_id: 42,
+            ..
+        })
+    ));
+    assert_eq!(
+        cleared_terminal_ids,
+        vec![41],
+        "CommandNotFound deliberately transfers its reserved id to the pane hold path"
+    );
+
+    resolve_reserved_terminal_spawn(
+        43,
+        Err::<(), _>(anyhow::Error::new(ZellijError::CommandNotFound {
+            terminal_id: 99,
+            command: "mismatched-command".to_owned(),
+        })),
+        |terminal_id| cleared_terminal_ids.push(terminal_id),
+    )
+    .expect_err("a mismatched CommandNotFound id remains an error");
+    assert_eq!(
+        cleared_terminal_ids,
+        vec![41, 43],
+        "only CommandNotFound for the exact reservation may retain ownership"
+    );
+}
+
 // --- Signal delivery tests ---
 
 #[cfg(not(windows))]

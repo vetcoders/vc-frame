@@ -21,6 +21,7 @@ struct MockOsApi {
     cmds_by_ppid: Arc<Mutex<HashMap<String, Vec<String>>>>,
     fail_spawn_terminal: Arc<AtomicBool>,
     fail_on_spawn_call: Arc<AtomicUsize>,
+    command_not_found_on_spawn_call: Arc<AtomicUsize>,
     spawn_terminal_calls: Arc<AtomicUsize>,
     next_terminal_id: Arc<AtomicUsize>,
     cleared_terminal_ids: Arc<Mutex<Vec<u32>>>,
@@ -34,6 +35,7 @@ impl MockOsApi {
             cmds_by_ppid: Arc::new(Mutex::new(HashMap::new())),
             fail_spawn_terminal: Arc::new(AtomicBool::new(false)),
             fail_on_spawn_call: Arc::new(AtomicUsize::new(0)),
+            command_not_found_on_spawn_call: Arc::new(AtomicUsize::new(0)),
             spawn_terminal_calls: Arc::new(AtomicUsize::new(0)),
             next_terminal_id: Arc::new(AtomicUsize::new(100)),
             cleared_terminal_ids: Arc::new(Mutex::new(vec![])),
@@ -44,6 +46,10 @@ impl MockOsApi {
     }
     fn fail_on_spawn_call(&self, call: usize) {
         self.fail_on_spawn_call.store(call, Ordering::Relaxed);
+    }
+    fn command_not_found_on_spawn_call(&self, call: usize) {
+        self.command_not_found_on_spawn_call
+            .store(call, Ordering::Relaxed);
     }
     fn set_cwd(&self, pid: u32, path: PathBuf) {
         self.cwds.lock().unwrap().insert(pid, path);
@@ -88,6 +94,12 @@ impl ServerOsApi for MockOsApi {
             )));
         }
         let terminal_id = self.next_terminal_id.fetch_add(1, Ordering::Relaxed) as u32;
+        if self.command_not_found_on_spawn_call.load(Ordering::Relaxed) == call {
+            return Err(anyhow::Error::new(ZellijError::CommandNotFound {
+                terminal_id,
+                command: "injected-missing-command".to_owned(),
+            }));
+        }
         Ok((terminal_id, Box::new(NullAsyncReader), None))
     }
     fn write_to_tty_stdin(&self, _: u32, buf: &[u8]) -> anyhow::Result<usize> {
@@ -260,6 +272,265 @@ fn new_tab_spawn_failure_does_not_terminate_pty_thread() {
     assert!(
         result.is_ok(),
         "new-tab spawn failures such as EMFILE must be logged and keep the pty thread alive"
+    );
+}
+
+#[test]
+fn partial_new_tab_spawn_failure_releases_terminals_and_plugins() {
+    let mock = MockOsApi::new();
+    mock.fail_on_spawn_call(2);
+    let cleared_terminal_ids = mock.cleared_terminal_ids.clone();
+    let (mut pty, plugin_rx) = make_pty_with_plugin_receiver(mock);
+    let plugin =
+        RunPluginOrAlias::from_url("file:/partial-new-tab.wasm", &None, None, None).unwrap();
+    let plugin_ids = HashMap::from([(plugin, vec![77])]);
+    let layout = TiledPaneLayout {
+        children: vec![TiledPaneLayout::default(), TiledPaneLayout::default()],
+        ..Default::default()
+    };
+    let default_shell = TerminalAction::RunCommand(RunCommand {
+        command: PathBuf::from("sh"),
+        ..Default::default()
+    });
+
+    let error = pty
+        .spawn_terminals_for_layout(
+            None,
+            layout,
+            vec![],
+            Some(default_shell),
+            plugin_ids,
+            None,
+            7,
+            false,
+            true,
+            (1, false),
+            None,
+            None,
+        )
+        .expect_err("the second terminal spawn must fail");
+
+    assert!(
+        format!("{:#}", error).contains("injected EMFILE-like spawn failure"),
+        "the original spawn failure must remain in the error chain"
+    );
+    assert_eq!(
+        *cleared_terminal_ids.lock().unwrap(),
+        vec![100],
+        "the terminal allocated before the failure must not remain reserved"
+    );
+    let unloaded_plugin_ids = plugin_rx
+        .try_iter()
+        .filter_map(|(instruction, _)| match instruction {
+            PluginInstruction::Unload(plugin_id) => Some(plugin_id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        unloaded_plugin_ids,
+        vec![77],
+        "every plugin loaded for the failed tab must be unloaded exactly once"
+    );
+}
+
+#[test]
+fn new_tab_apply_layout_failure_releases_terminals_and_plugins() {
+    let mock = MockOsApi::new();
+    let cleared_terminal_ids = mock.cleared_terminal_ids.clone();
+    let (plugin_tx, plugin_rx) = channels::unbounded();
+    let plugin_sender = SenderWithContext::new(plugin_tx);
+    let mut bus: Bus<PtyInstruction> = Bus::empty();
+    bus.os_input = Some(Box::new(mock));
+    bus.senders.to_plugin = Some(plugin_sender);
+    bus.senders.should_silently_fail = false;
+    let mut pty = Pty::new(bus, false, None, None);
+    let plugin =
+        RunPluginOrAlias::from_url("file:/rejected-new-tab.wasm", &None, None, None).unwrap();
+    let plugin_ids = HashMap::from([(plugin, vec![77])]);
+    let default_shell = TerminalAction::RunCommand(RunCommand {
+        command: PathBuf::from("sh"),
+        ..Default::default()
+    });
+
+    let error = pty
+        .spawn_terminals_for_layout(
+            None,
+            TiledPaneLayout::default(),
+            vec![],
+            Some(default_shell),
+            plugin_ids,
+            None,
+            7,
+            false,
+            true,
+            (1, false),
+            None,
+            None,
+        )
+        .expect_err("a missing screen receiver must reject ApplyLayout");
+
+    assert!(
+        format!("{:#}", error).contains("failed to get screen sender"),
+        "the ApplyLayout delivery failure must remain in the error chain"
+    );
+    assert_eq!(
+        *cleared_terminal_ids.lock().unwrap(),
+        vec![100],
+        "the terminal allocated before ApplyLayout must not remain reserved"
+    );
+    let unloaded_plugin_ids = plugin_rx
+        .try_iter()
+        .filter_map(|(instruction, _)| match instruction {
+            PluginInstruction::Unload(plugin_id) => Some(plugin_id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        unloaded_plugin_ids,
+        vec![77],
+        "every plugin loaded for the rejected tab must be unloaded exactly once"
+    );
+}
+
+#[test]
+fn post_apply_layout_notification_failure_keeps_new_tab_allocations() {
+    let mock = MockOsApi::new();
+    mock.command_not_found_on_spawn_call(1);
+    let cleared_terminal_ids = mock.cleared_terminal_ids.clone();
+    let (plugin_tx, plugin_rx) = channels::unbounded();
+    let (screen_tx, screen_rx) = channels::unbounded();
+    let mut bus: Bus<PtyInstruction> = Bus::empty();
+    bus.os_input = Some(Box::new(mock));
+    bus.senders.to_plugin = Some(SenderWithContext::new(plugin_tx));
+    bus.senders.to_screen = Some(SenderWithContext::new(screen_tx));
+    bus.senders.should_silently_fail = false;
+    let mut pty = Pty::new(bus, false, None, None);
+    let plugin =
+        RunPluginOrAlias::from_url("file:/transferred-new-tab.wasm", &None, None, None).unwrap();
+    let plugin_ids = HashMap::from([(plugin, vec![77])]);
+    let layout = TiledPaneLayout {
+        run: Some(Run::Command(RunCommand {
+            command: PathBuf::from("missing-command"),
+            hold_on_close: true,
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    fail_next_command_not_found_notification();
+
+    pty.spawn_terminals_for_layout(
+        None,
+        layout,
+        vec![],
+        None,
+        plugin_ids,
+        None,
+        7,
+        false,
+        true,
+        (1, false),
+        None,
+        None,
+    )
+    .expect("optional notification failure must not revoke a transferred ApplyLayout");
+
+    let (screen_instruction, _) = screen_rx
+        .try_recv()
+        .expect("ApplyLayout must transfer ownership before the optional notification");
+    match screen_instruction {
+        ScreenInstruction::ApplyLayout(_, _, terminal_ids, _, plugin_ids, ..) => {
+            assert_eq!(
+                terminal_ids
+                    .iter()
+                    .map(|(terminal_id, _)| *terminal_id)
+                    .collect::<Vec<_>>(),
+                vec![100]
+            );
+            assert_eq!(
+                plugin_ids.values().flatten().copied().collect::<Vec<_>>(),
+                vec![77]
+            );
+        },
+        other => panic!("expected ApplyLayout, got {other:?}"),
+    }
+    assert!(
+        screen_rx.try_recv().is_err(),
+        "the injected optional notification must not produce a partial second screen message"
+    );
+    assert!(
+        cleared_terminal_ids.lock().unwrap().is_empty(),
+        "screen-owned terminal must not be locally cleared or double-cleaned"
+    );
+    assert!(
+        !plugin_rx
+            .try_iter()
+            .any(|(instruction, _)| matches!(instruction, PluginInstruction::Unload(77))),
+        "screen-owned plugin must not be rolled back after ApplyLayout"
+    );
+}
+
+#[test]
+fn post_prepare_notification_failure_keeps_override_allocations() {
+    let mock = MockOsApi::new();
+    mock.command_not_found_on_spawn_call(1);
+    let cleared_terminal_ids = mock.cleared_terminal_ids.clone();
+    let (mut pty, plugin_rx) = make_pty_with_plugin_receiver(mock);
+    let plugin =
+        RunPluginOrAlias::from_url("file:/prepared-override.wasm", &None, None, None).unwrap();
+    let plugin_ids = HashMap::from([(plugin, vec![77])]);
+    let layout = TiledPaneLayout {
+        run: Some(Run::Command(RunCommand {
+            command: PathBuf::from("missing-command"),
+            hold_on_close: true,
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    fail_next_command_not_found_notification();
+
+    let tab_result = pty
+        .spawn_terminals_for_layout_override(
+            None,
+            layout,
+            vec![],
+            None,
+            plugin_ids,
+            7,
+            Some("Recovered tab".to_owned()),
+            1,
+            None,
+            None,
+            true,
+            true,
+        )
+        .expect("optional notification failure must not discard a prepared override result");
+
+    assert_eq!(
+        tab_result
+            .new_terminal_pids
+            .iter()
+            .map(|(terminal_id, _)| *terminal_id)
+            .collect::<Vec<_>>(),
+        vec![100]
+    );
+    assert_eq!(
+        tab_result
+            .plugin_ids
+            .values()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![77]
+    );
+    assert!(
+        cleared_terminal_ids.lock().unwrap().is_empty(),
+        "caller-owned override terminal must not be cleared or double-cleaned"
+    );
+    assert!(
+        !plugin_rx
+            .try_iter()
+            .any(|(instruction, _)| matches!(instruction, PluginInstruction::Unload(77))),
+        "caller-owned override plugin must not be rolled back"
     );
 }
 
