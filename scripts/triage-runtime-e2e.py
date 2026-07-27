@@ -249,11 +249,23 @@ def validate_build_info(
     )
 
 
+# Nested CLI budgets in src/run_triage_cli.rs (must stay strictly larger here):
+#   CLI_COMMAND_TIMEOUT = 10s (inventory / capture / close chain)
+#   NEW_TAB_COMMAND_TIMEOUT = 30s
+#   VIEWER_CREATION_RECONCILIATION_TIMEOUT = 30s
+# A full triage-run can spend a new-tab wait plus reconciliation plus several
+# 10s CLI calls. Matching the outer harness to 30s races the inner budgets and
+# kills transfers mid-viewer-creation on slower Linux runners (see ops-linux
+# TimeoutExpired on triage-run for the exit-2 case).
+COMMAND_TIMEOUT_SECS = 120
+
+
 def command(
     binary: pathlib.Path,
     env: dict[str, str],
     *args: str,
     expect_success: bool | None = True,
+    timeout: float = COMMAND_TIMEOUT_SECS,
 ) -> subprocess.CompletedProcess[str]:
     try:
         result = subprocess.run(
@@ -263,7 +275,7 @@ def command(
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=30,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired as error:
         raise AssertionError(f"command timed out: {binary} {' '.join(args)}") from error
