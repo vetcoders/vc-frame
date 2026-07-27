@@ -148,18 +148,67 @@ fn failed_spawn_releases_reservation_except_command_not_found() {
 #[cfg(not(windows))]
 #[test]
 fn kill_sends_sighup_to_process() {
-    let mut child = long_running_cmd()
+    let child = long_running_cmd()
         .spawn()
         .expect("failed to spawn long-running process");
     let pid = child.id();
+    let waiter = std::thread::spawn(move || child.wait_with_output());
 
     let server = make_server();
 
     server.kill(pid).expect("kill should succeed");
+    waiter
+        .join()
+        .expect("child waiter must not panic")
+        .expect("child must be reaped after SIGHUP");
+}
 
-    // Give the signal time to be delivered
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    let _ = child.wait();
+#[cfg(not(windows))]
+#[test]
+fn kill_escalates_to_sigkill_and_confirms_exit_when_child_ignores_sighup() {
+    let ready_file = tempfile::NamedTempFile::new().expect("create child readiness file");
+    let ready_path = ready_file.path().to_path_buf();
+    let child = Command::new("sh")
+        .args([
+            "-c",
+            "trap '' HUP; printf ready > \"$1\"; exec sleep 60",
+            "vc-frame-test-shell",
+        ])
+        .arg(&ready_path)
+        .spawn()
+        .expect("spawn SIGHUP-ignoring child");
+    for _ in 0..100 {
+        if std::fs::metadata(&ready_path)
+            .map(|metadata| metadata.len() > 0)
+            .unwrap_or(false)
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(
+        std::fs::metadata(&ready_path)
+            .map(|metadata| metadata.len() > 0)
+            .unwrap_or(false),
+        "child must install its SIGHUP disposition before the probe"
+    );
+
+    let pid = child.id();
+    let waiter = std::thread::spawn(move || child.wait_with_output());
+    let server = make_server();
+    server
+        .kill(pid)
+        .expect("ignored SIGHUP must escalate and confirm exact process exit");
+    let output = waiter
+        .join()
+        .expect("child waiter must not panic")
+        .expect("child waiter must reap the escalated process");
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(
+        output.status.signal(),
+        Some(libc::SIGKILL),
+        "a child ignoring SIGHUP must be terminated by the bounded SIGKILL escalation"
+    );
 }
 
 #[cfg(not(windows))]

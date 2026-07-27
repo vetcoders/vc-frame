@@ -46,17 +46,18 @@ use crate::{
     panes::{FloatingPanes, FloatingPanesLayoutSnapshot, TiledPanes, TiledPanesLayoutSnapshot},
     panes::{LinkHandler, PaneId, PluginPane, TerminalPane},
     plugins::PluginInstruction,
-    pty::{ClientTabIndexOrPaneId, PtyInstruction, VteBytes},
+    pty::{ClientTabIndexOrPaneId, LayoutTransactionId, PtyInstruction, VteBytes},
     thread_bus::ThreadSenders,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     str,
 };
 use zellij_utils::{
+    channels,
     data::{Event, FloatingPaneCoordinates, InputMode, ModeInfo, Palette, PaletteColor, Styling},
     input::{
         command::TerminalAction,
@@ -243,17 +244,33 @@ pub(crate) struct TabLayoutTransaction {
     should_show_floating_panes: bool,
     client_id: ClientId,
     kind: LayoutTransactionKind,
+    deferred_name: Option<String>,
     blocking_terminal: Option<(u32, NotificationEnd)>,
     deferred_pane_initial_bytes: Vec<(PaneId, Vec<u8>)>,
 }
 
+pub(crate) struct TabTopologyTransaction {
+    snapshot: TabLayoutSnapshot,
+}
+
 pub(crate) struct TabLayoutCommitEffects {
     side_effects: LayoutSideEffects,
+    pending_cleanup: PendingTabLayoutCleanup,
     should_show_floating_panes: bool,
     client_id: ClientId,
     focus_events: Vec<(u32, String)>,
     deferred_pane_initial_bytes: Vec<(PaneId, Vec<u8>)>,
     blocking_terminal: Option<(u32, NotificationEnd)>,
+}
+
+#[derive(Default)]
+pub(crate) struct PendingTabLayoutCleanup {
+    panes: BTreeMap<PaneId, Option<Box<dyn Pane>>>,
+}
+
+pub(crate) struct LayoutCleanupProbe {
+    acknowledged_ids: Vec<PaneId>,
+    failures: Vec<String>,
 }
 
 pub(crate) struct Tab {
@@ -732,6 +749,9 @@ pub trait Pane {
     ) -> std::result::Result<(), NotificationEnd> {
         Err(completion)
     }
+    fn can_attach_blocking_completion(&self) -> bool {
+        false
+    }
     fn update_loading_indication(&mut self, _loading_indication: LoadingIndication) {} // only relevant for plugins
     fn start_loading_indication(&mut self, _loading_indication: LoadingIndication) {} // only relevant for plugins
     fn progress_animation_offset(&mut self) {} // only relevant for plugins
@@ -869,6 +889,16 @@ impl TabLayoutSnapshot {
 }
 
 impl TabLayoutTransaction {
+    pub(crate) fn defer_tab_name(&mut self, name: Option<String>) {
+        self.deferred_name = name;
+    }
+
+    pub(crate) fn mark_blocking_completion_failed(&mut self, message: &str) {
+        if let Some((_, mut completion)) = self.blocking_terminal.take() {
+            completion.mark_failure(message);
+        }
+    }
+
     pub(crate) fn rollback(self, tab: &mut Tab, rejection_message: &str) {
         let TabLayoutTransaction {
             snapshot,
@@ -933,15 +963,36 @@ impl TabLayoutTransaction {
         tab.should_clear_display_before_rendering = snapshot.should_clear_display_before_rendering;
     }
 
+    pub(crate) fn preflight_commit(&self, tab: &Tab) -> Result<()> {
+        let Some((terminal_id, _)) = self.blocking_terminal.as_ref() else {
+            return Ok(());
+        };
+        let pane_id = PaneId::Terminal(*terminal_id);
+        let pane = tab
+            .tiled_panes
+            .get_pane(pane_id)
+            .or_else(|| tab.floating_panes.get_pane(pane_id))
+            .with_context(|| {
+                format!(
+                    "blocking terminal {terminal_id} disappeared before layout commit preflight"
+                )
+            })?;
+        if !pane.can_attach_blocking_completion() {
+            bail!("blocking terminal {terminal_id} already owns a completion before layout commit");
+        }
+        Ok(())
+    }
+
     pub(crate) fn commit_state(self, tab: &mut Tab) -> TabLayoutCommitEffects {
         let TabLayoutTransaction {
             snapshot,
             mut side_effects,
-            deferred_closed_panes: _,
-            rollback_panes: _,
+            deferred_closed_panes,
+            rollback_panes,
             should_show_floating_panes,
             client_id,
             kind,
+            deferred_name,
             blocking_terminal,
             deferred_pane_initial_bytes,
         } = self;
@@ -964,6 +1015,9 @@ impl TabLayoutTransaction {
         }
         tab.tiled_panes.reapply_pane_frames();
         tab.is_pending = false;
+        if let Some(name) = deferred_name {
+            tab.prev_name = std::mem::replace(&mut tab.name, name);
+        }
         if matches!(kind, LayoutTransactionKind::Override) {
             tab.swap_layouts.set_is_tiled_damaged();
             tab.swap_layouts.set_is_floating_damaged();
@@ -1022,8 +1076,14 @@ impl TabLayoutTransaction {
         }
         tab.tiled_panes.set_layout_io_enabled(true);
         tab.floating_panes.set_layout_io_enabled(true);
+        let pending_cleanup = PendingTabLayoutCleanup::new(
+            side_effects.take_cleanup_panes(),
+            deferred_closed_panes,
+            rollback_panes,
+        );
         TabLayoutCommitEffects {
             side_effects,
+            pending_cleanup,
             should_show_floating_panes,
             client_id,
             focus_events,
@@ -1033,67 +1093,369 @@ impl TabLayoutTransaction {
     }
 }
 
-impl TabLayoutCommitEffects {
-    pub(crate) fn reject_blocking_completion(&mut self, message: &str) {
-        if let Some((_, completion)) = self.blocking_terminal.as_mut() {
-            completion.mark_failure(message);
+impl TabTopologyTransaction {
+    pub(crate) fn begin(tab: &mut Tab) -> Self {
+        let snapshot = TabLayoutSnapshot::capture(tab);
+        tab.begin_layout_transaction();
+        Self { snapshot }
+    }
+
+    pub(crate) fn rollback(
+        self,
+        tab: &mut Tab,
+        mut recovered_panes: BTreeMap<PaneId, Box<dyn Pane>>,
+    ) {
+        let snapshot = self.snapshot;
+        let mut panes = tab.tiled_panes.take_panes_for_layout_rollback();
+        panes.append(&mut tab.floating_panes.take_panes_for_layout_rollback());
+        panes.append(&mut recovered_panes);
+
+        let mut tiled_panes = BTreeMap::new();
+        let mut floating_panes = BTreeMap::new();
+        for pane_id in snapshot.pane_states.keys() {
+            match panes.remove(pane_id) {
+                Some(pane) if snapshot.tiled_pane_ids.contains(pane_id) => {
+                    tiled_panes.insert(*pane_id, pane);
+                },
+                Some(pane) => {
+                    floating_panes.insert(*pane_id, pane);
+                },
+                None => {
+                    log::error!(
+                        "topology rollback could not recover baseline pane {:?} in tab {}",
+                        pane_id,
+                        tab.id
+                    );
+                },
+            }
+        }
+
+        *tab.viewport.borrow_mut() = snapshot.viewport;
+        *tab.display_area.borrow_mut() = snapshot.display_area;
+        tab.tiled_panes
+            .restore_layout_snapshot(snapshot.tiled_panes, tiled_panes);
+        tab.floating_panes
+            .restore_layout_snapshot(snapshot.floating_panes, floating_panes);
+        for (pane_id, pane_state) in snapshot.pane_states {
+            if let Some(pane) = tab.tiled_panes.get_pane_mut(pane_id) {
+                pane_state.restore(&mut **pane);
+                pane.rollback_layout_transaction();
+            } else if let Some(pane) = tab.floating_panes.get_pane_mut(pane_id) {
+                pane_state.restore(&mut **pane);
+                pane.rollback_layout_transaction();
+            }
+        }
+        tab.focus_pane_id = snapshot.focus_pane_id;
+        tab.is_pending = snapshot.is_pending;
+        tab.pending_instructions = snapshot.pending_instructions;
+        tab.swap_layouts = snapshot.swap_layouts;
+        tab.name = snapshot.name;
+        tab.prev_name = snapshot.prev_name;
+        tab.size = snapshot.size;
+        tab.should_clear_display_before_rendering = snapshot.should_clear_display_before_rendering;
+    }
+
+    pub(crate) fn commit(self, tab: &mut Tab) {
+        for pane_id in self.snapshot.pane_states.keys() {
+            if let Some(pane) = tab.tiled_panes.get_pane_mut(*pane_id) {
+                pane.commit_layout_transaction();
+            } else if let Some(pane) = tab.floating_panes.get_pane_mut(*pane_id) {
+                pane.commit_layout_transaction();
+            }
+        }
+        tab.tiled_panes.set_layout_io_enabled(true);
+        tab.floating_panes.set_layout_io_enabled(true);
+        tab.relayout_tiled_panes(false).non_fatal();
+        tab.relayout_floating_panes(false).non_fatal();
+    }
+}
+
+impl PendingTabLayoutCleanup {
+    fn new(
+        mut cleanup_pane_ids: BTreeSet<PaneId>,
+        mut deferred_closed_panes: BTreeMap<PaneId, Box<dyn Pane>>,
+        rollback_panes: BTreeMap<PaneId, Box<dyn Pane>>,
+    ) -> Self {
+        cleanup_pane_ids.extend(deferred_closed_panes.keys().copied());
+        cleanup_pane_ids.extend(rollback_panes.keys().copied());
+        deferred_closed_panes.extend(rollback_panes);
+        let panes = cleanup_pane_ids
+            .into_iter()
+            .map(|pane_id| (pane_id, deferred_closed_panes.remove(&pane_id)))
+            .collect();
+        Self { panes }
+    }
+
+    pub(crate) fn from_owned_panes(
+        cleanup_pane_ids: impl IntoIterator<Item = PaneId>,
+        mut owned_panes: BTreeMap<PaneId, Box<dyn Pane>>,
+    ) -> Self {
+        let mut panes = cleanup_pane_ids
+            .into_iter()
+            .map(|pane_id| (pane_id, owned_panes.remove(&pane_id)))
+            .collect::<BTreeMap<_, _>>();
+        // Cleanup ownership follows every remaining pane object even if a
+        // caller's derived ID list was incomplete. Dropping an unlisted Box
+        // here would leave the worker-side resource orphaned.
+        for (pane_id, pane) in owned_panes {
+            panes.entry(pane_id).or_insert(Some(pane));
+        }
+        Self { panes }
+    }
+
+    pub(crate) fn append(&mut self, other: Self) {
+        for (pane_id, pane) in other.panes {
+            match self.panes.entry(pane_id) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(pane);
+                },
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    if entry.get().is_none() && pane.is_some() {
+                        entry.insert(pane);
+                    }
+                },
+            }
         }
     }
 
-    pub(crate) fn emit(mut self, tab: &mut Tab) -> Result<()> {
-        let blocking_attachment_error = if let Some((terminal_id, completion)) =
-            self.blocking_terminal.take()
-        {
-            let pane_id = PaneId::Terminal(terminal_id);
-            let pane = tab
-                .tiled_panes
-                .get_pane_mut(pane_id)
-                .or_else(|| tab.floating_panes.get_pane_mut(pane_id));
-            if let Some(pane) = pane {
-                match pane.attach_blocking_completion(completion) {
-                    Ok(()) => None,
-                    Err(mut completion) => {
-                        let message = format!(
-                            "terminal {terminal_id} already owned a blocking completion after layout activation"
-                        );
-                        completion.mark_failure(message.clone());
-                        Some(message)
+    pub(crate) fn flush(
+        &mut self,
+        transaction_id: LayoutTransactionId,
+        senders: &ThreadSenders,
+        ack_timeout: Duration,
+        attempts: usize,
+    ) -> Vec<String> {
+        let probe = Self::probe(
+            transaction_id,
+            self.pane_ids(),
+            senders,
+            ack_timeout,
+            attempts,
+        );
+        let (acknowledged_ids, failures) = probe.into_parts();
+        self.acknowledge(acknowledged_ids);
+        failures
+    }
+
+    pub(crate) fn probe(
+        transaction_id: LayoutTransactionId,
+        pane_ids: Vec<PaneId>,
+        senders: &ThreadSenders,
+        ack_timeout: Duration,
+        attempts: usize,
+    ) -> LayoutCleanupProbe {
+        let mut failures = vec![];
+        if transaction_id == 0 {
+            failures.push(
+                "layout cleanup transaction id 0 is reserved; retained every cleanup owner"
+                    .to_owned(),
+            );
+            return LayoutCleanupProbe {
+                acknowledged_ids: vec![],
+                failures,
+            };
+        }
+        #[cfg(test)]
+        if senders.should_silently_fail {
+            return LayoutCleanupProbe {
+                acknowledged_ids: pane_ids,
+                failures,
+            };
+        }
+
+        let terminal_ids = pane_ids
+            .iter()
+            .filter_map(|pane_id| match pane_id {
+                PaneId::Terminal(terminal_id) => Some(*terminal_id),
+                PaneId::Plugin(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let mut acknowledged_ids = vec![];
+        if !terminal_ids.is_empty() {
+            let mut attempt_failures = vec![];
+            let mut exact_receipt = false;
+            for attempt in 1..=attempts {
+                let (ack, ack_rx) = channels::bounded(1);
+                let instruction = PtyInstruction::CleanupLayoutTerminals {
+                    transaction_id,
+                    terminal_ids: terminal_ids.clone(),
+                    ack,
+                };
+                if let Err(send_failure) = senders.send_to_pty_recover(instruction) {
+                    let (_instruction, error) = send_failure.into_parts();
+                    attempt_failures.push(format!("attempt {attempt} delivery: {error:#}"));
+                    continue;
+                }
+                match ack_rx.recv_timeout(ack_timeout) {
+                    Ok(Ok(mut receipt_ids)) => {
+                        receipt_ids.sort_unstable();
+                        if receipt_ids == terminal_ids {
+                            exact_receipt = true;
+                            break;
+                        }
+                        attempt_failures.push(format!(
+                            "attempt {attempt} returned terminal ids {receipt_ids:?}, expected {terminal_ids:?}"
+                        ));
+                    },
+                    Ok(Err(message)) => {
+                        attempt_failures
+                            .push(format!("attempt {attempt} worker rejection: {message}"));
+                    },
+                    Err(channels::RecvTimeoutError::Timeout) => {
+                        attempt_failures.push(format!("attempt {attempt} ACK timeout"));
+                    },
+                    Err(channels::RecvTimeoutError::Disconnected) => {
+                        attempt_failures.push(format!("attempt {attempt} ACK disconnect"));
                     },
                 }
-            } else {
-                let mut completion = completion;
-                let message = format!(
-                    "terminal {terminal_id} disappeared before post-activation completion attachment"
-                );
-                completion.mark_failure(message.clone());
-                Some(message)
             }
-        } else {
-            None
-        };
-        if let Some(message) = blocking_attachment_error {
-            bail!(message);
+            if exact_receipt {
+                acknowledged_ids.extend(terminal_ids.into_iter().map(PaneId::Terminal));
+            } else {
+                failures.push(format!(
+                    "terminal cleanup was not certified: {}",
+                    attempt_failures.join("; ")
+                ));
+            }
         }
-        self.side_effects.emit(&tab.senders)?;
+
+        let plugin_ids = pane_ids
+            .iter()
+            .filter_map(|pane_id| match pane_id {
+                PaneId::Plugin(plugin_id) => Some(*plugin_id),
+                PaneId::Terminal(_) => None,
+            })
+            .collect::<Vec<_>>();
+        if !plugin_ids.is_empty() {
+            let mut attempt_failures = vec![];
+            let mut exact_receipt = false;
+            for attempt in 1..=attempts {
+                let (ack, ack_rx) = channels::bounded(1);
+                let instruction = PluginInstruction::CleanupLayoutPlugins {
+                    transaction_id,
+                    plugin_ids: plugin_ids.clone(),
+                    ack,
+                };
+                if let Err(send_failure) = senders.send_to_plugin_recover(instruction) {
+                    let (_instruction, error) = send_failure.into_parts();
+                    attempt_failures.push(format!("attempt {attempt} delivery: {error:#}"));
+                    continue;
+                }
+                match ack_rx.recv_timeout(ack_timeout) {
+                    Ok(Ok(mut receipt_ids)) => {
+                        receipt_ids.sort_unstable();
+                        if receipt_ids == plugin_ids {
+                            exact_receipt = true;
+                            break;
+                        }
+                        attempt_failures.push(format!(
+                            "attempt {attempt} returned plugin ids {receipt_ids:?}, expected {plugin_ids:?}"
+                        ));
+                    },
+                    Ok(Err(message)) => {
+                        attempt_failures
+                            .push(format!("attempt {attempt} worker rejection: {message}"));
+                    },
+                    Err(channels::RecvTimeoutError::Timeout) => {
+                        attempt_failures.push(format!("attempt {attempt} ACK timeout"));
+                    },
+                    Err(channels::RecvTimeoutError::Disconnected) => {
+                        attempt_failures.push(format!("attempt {attempt} ACK disconnect"));
+                    },
+                }
+            }
+            if exact_receipt {
+                acknowledged_ids.extend(plugin_ids.into_iter().map(PaneId::Plugin));
+            } else {
+                failures.push(format!(
+                    "plugin cleanup was not certified: {}",
+                    attempt_failures.join("; ")
+                ));
+            }
+        }
+        LayoutCleanupProbe {
+            acknowledged_ids,
+            failures,
+        }
+    }
+
+    pub(crate) fn acknowledge(&mut self, pane_ids: impl IntoIterator<Item = PaneId>) {
+        for pane_id in pane_ids {
+            self.panes.remove(&pane_id);
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.panes.is_empty()
+    }
+
+    pub(crate) fn pane_ids(&self) -> Vec<PaneId> {
+        self.panes.keys().copied().collect()
+    }
+}
+
+impl LayoutCleanupProbe {
+    pub(crate) fn into_parts(self) -> (Vec<PaneId>, Vec<String>) {
+        (self.acknowledged_ids, self.failures)
+    }
+}
+
+impl TabLayoutCommitEffects {
+    pub(crate) fn take_pending_cleanup(&mut self) -> PendingTabLayoutCleanup {
+        std::mem::take(&mut self.pending_cleanup)
+    }
+
+    pub(crate) fn take_blocking_terminal(&mut self) -> Option<(u32, NotificationEnd)> {
+        self.blocking_terminal.take()
+    }
+
+    pub(crate) fn emit(mut self, tab: &mut Tab) -> Option<(u32, NotificationEnd)> {
+        let blocking_terminal = self.blocking_terminal.take();
+        self.side_effects.emit_best_effort(&tab.senders);
         for (terminal_id, focus_event) in self.focus_events {
-            tab.os_api
+            if let Err(error) = tab
+                .os_api
                 .write_to_tty_stdin(terminal_id, focus_event.as_bytes())
-                .with_context(|| {
-                    format!("failed to emit committed focus transition to terminal {terminal_id}")
-                })?;
+            {
+                log::error!(
+                    "failed to emit committed focus transition to terminal {terminal_id}: {error:#}"
+                );
+            }
         }
         for (pane_id, bytes) in self.deferred_pane_initial_bytes {
             if let Some(pane) = tab.get_pane_with_id_mut(pane_id) {
                 pane.handle_pty_bytes(bytes);
             }
         }
-        tab.apply_buffered_instructions()?;
+        tab.apply_buffered_instructions().non_fatal();
         let _ = (self.should_show_floating_panes, self.client_id);
-        Ok(())
+        blocking_terminal
     }
 }
 
 impl Tab {
+    pub(crate) fn attach_blocking_layout_completion(
+        &mut self,
+        terminal_id: u32,
+        completion: NotificationEnd,
+    ) -> std::result::Result<(), NotificationEnd> {
+        let pane_id = PaneId::Terminal(terminal_id);
+        let Some(pane) = self
+            .tiled_panes
+            .get_pane_mut(pane_id)
+            .or_else(|| self.floating_panes.get_pane_mut(pane_id))
+        else {
+            return Err(completion);
+        };
+        pane.attach_blocking_completion(completion)
+    }
+
+    pub(crate) fn take_panes_for_cleanup(&mut self) -> BTreeMap<PaneId, Box<dyn Pane>> {
+        let mut panes = self.tiled_panes.take_panes_for_layout_rollback();
+        panes.append(&mut self.floating_panes.take_panes_for_layout_rollback());
+        panes
+    }
+
     fn layout_focused_panes(&self) -> HashMap<ClientId, PaneId> {
         if self.floating_panes.panes_are_visible() {
             self.floating_panes.layout_focused_panes()
@@ -1277,7 +1639,7 @@ impl Tab {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn apply_layout(
         &mut self,
         layout: TiledPaneLayout,
@@ -1297,8 +1659,32 @@ impl Tab {
             client_id,
             blocking_terminal,
         )?;
-        let effects = transaction.commit_state(self);
-        effects.emit(self)?;
+        transaction.preflight_commit(self)?;
+        let mut effects = transaction.commit_state(self);
+        let mut cleanup = effects.take_pending_cleanup();
+        let blocking_terminal = effects.emit(self);
+        let cleanup_failures =
+            cleanup.flush(u64::MAX, &self.senders, Duration::from_millis(250), 2);
+        if !cleanup.is_empty() {
+            let message = format!(
+                "direct Tab layout commit retained cleanup ownership after failed worker handoff: {}",
+                cleanup_failures.join("; ")
+            );
+            if let Some((_, mut completion)) = blocking_terminal {
+                completion.mark_failure(message.clone());
+            }
+            bail!("{message}");
+        }
+        if let Some((terminal_id, completion)) = blocking_terminal
+            && let Err(mut completion) =
+                self.attach_blocking_layout_completion(terminal_id, completion)
+        {
+            let message = format!(
+                "terminal {terminal_id} disappeared before direct layout completion attachment"
+            );
+            completion.mark_failure(message.clone());
+            bail!("{message}");
+        }
         Ok(())
     }
 
@@ -1364,6 +1750,7 @@ impl Tab {
             should_show_floating_panes,
             client_id,
             kind: LayoutTransactionKind::Apply,
+            deferred_name: None,
             blocking_terminal,
             deferred_pane_initial_bytes,
         };
@@ -1451,6 +1838,7 @@ impl Tab {
             should_show_floating_panes,
             client_id,
             kind: LayoutTransactionKind::Override,
+            deferred_name: None,
             blocking_terminal,
             deferred_pane_initial_bytes,
         };
@@ -1588,13 +1976,16 @@ impl Tab {
     pub fn apply_buffered_instructions(&mut self) -> Result<()> {
         let buffered_instructions: Vec<BufferedTabInstruction> =
             self.pending_instructions.drain(..).collect();
+        let mut failures = vec![];
         for buffered_instruction in buffered_instructions {
             match buffered_instruction {
                 BufferedTabInstruction::SetPaneSelectable(pane_id, selectable) => {
                     self.set_pane_selectable(pane_id, selectable);
                 },
                 BufferedTabInstruction::HandlePtyBytes(terminal_id, bytes) => {
-                    self.handle_pty_bytes(terminal_id, bytes)?;
+                    if let Err(error) = self.handle_pty_bytes(terminal_id, bytes) {
+                        failures.push(format!("terminal {terminal_id}: {error:#}"));
+                    }
                 },
                 BufferedTabInstruction::HoldPane(
                     terminal_id,
@@ -1605,6 +1996,12 @@ impl Tab {
                     self.hold_pane(terminal_id, exit_status, is_first_run, run_command);
                 },
             }
+        }
+        if !failures.is_empty() {
+            bail!(
+                "failed to apply one or more buffered tab instructions after layout commit: {}",
+                failures.join("; ")
+            );
         }
         Ok(())
     }
@@ -6024,6 +6421,70 @@ impl Tab {
             self.relayout_tiled_panes(false)?;
         }
         Ok(())
+    }
+
+    /// Insert a tiled pane without surrendering its Screen owner when the
+    /// destination cannot accept another pane. `Ok(Some(pane))` means no
+    /// mutation occurred and the caller must restore or otherwise retain the
+    /// returned pane. This is the ownership-safe primitive for cross-tab pane
+    /// moves; the legacy `add_tiled_pane` contract remains unchanged for
+    /// ordinary spawn paths.
+    pub(crate) fn try_add_tiled_pane_retaining_ownership(
+        &mut self,
+        mut pane: Box<dyn Pane>,
+        pane_id: PaneId,
+        without_relayout: bool,
+        client_id: Option<ClientId>,
+    ) -> Result<Option<Box<dyn Pane>>> {
+        if self.tiled_panes.fullscreen_is_active() {
+            self.tiled_panes.unset_fullscreen();
+        }
+        let should_auto_layout =
+            self.auto_layout && !self.swap_layouts.is_tiled_damaged() && !without_relayout;
+        if !self.tiled_panes.has_room_for_new_pane() {
+            return Ok(Some(pane));
+        }
+
+        pane.set_active_at(Instant::now());
+        if should_auto_layout {
+            self.tiled_panes
+                .insert_pane_without_relayout(pane_id, pane, client_id);
+        } else {
+            self.tiled_panes.insert_pane(pane_id, pane, client_id);
+        }
+        self.set_should_clear_display_before_rendering();
+        if let Some(client_id) = client_id {
+            self.tiled_panes.focus_pane(pane_id, client_id);
+        }
+        if should_auto_layout {
+            self.swap_layouts.set_is_tiled_damaged();
+            self.relayout_tiled_panes(false)?;
+        }
+        Ok(None)
+    }
+
+    /// Restore a pane that was just extracted from this tab after an aborted
+    /// cross-tab move. The pane already fit this exact tab incarnation, so the
+    /// rollback path bypasses admission checks and cannot consume-and-drop the
+    /// owner on a second capacity decision.
+    pub(crate) fn restore_extracted_pane(
+        &mut self,
+        mut pane: Box<dyn Pane>,
+        pane_id: PaneId,
+        was_floating: bool,
+        original_geom: PaneGeom,
+    ) {
+        pane.set_geom(original_geom);
+        if was_floating {
+            self.floating_panes.add_pane(pane_id, pane);
+            self.floating_panes.set_force_render();
+        } else {
+            self.tiled_panes
+                .insert_pane_without_relayout(pane_id, pane, None);
+            self.tiled_panes.set_force_render();
+        }
+        self.set_should_clear_display_before_rendering();
+        self.set_force_render();
     }
     pub fn add_stacked_pane_to_pane_id(
         &mut self,

@@ -14,7 +14,7 @@ use crate::{
     thread_bus::ThreadSenders,
 };
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 use zellij_utils::{
     data::{Palette, Style},
@@ -25,9 +25,9 @@ use zellij_utils::{
 #[derive(Default)]
 pub(crate) struct LayoutSideEffects {
     immediate_senders: Option<ThreadSenders>,
-    pty: Vec<PtyInstruction>,
     plugin: Vec<PluginInstruction>,
     pty_writer: Vec<PtyWriteInstruction>,
+    cleanup_panes: BTreeSet<PaneId>,
 }
 
 impl LayoutSideEffects {
@@ -44,14 +44,6 @@ impl LayoutSideEffects {
 
     fn is_deferred(&self) -> bool {
         self.immediate_senders.is_none()
-    }
-
-    fn push_pty(&mut self, instruction: PtyInstruction) {
-        if let Some(senders) = &self.immediate_senders {
-            senders.send_to_pty(instruction).non_fatal();
-        } else {
-            self.pty.push(instruction);
-        }
     }
 
     fn push_plugin(&mut self, instruction: PluginInstruction) {
@@ -113,38 +105,41 @@ impl LayoutSideEffects {
     }
 
     fn close_pane(&mut self, pane_id: PaneId) {
-        match pane_id {
-            PaneId::Terminal(_) => self.push_pty(PtyInstruction::ClosePane(pane_id, None)),
-            PaneId::Plugin(plugin_id) => {
-                self.push_plugin(PluginInstruction::Unload(plugin_id));
-            },
+        if let Some(senders) = &self.immediate_senders {
+            match pane_id {
+                PaneId::Terminal(_) => senders
+                    .send_to_pty(PtyInstruction::ClosePane(pane_id, None))
+                    .non_fatal(),
+                PaneId::Plugin(plugin_id) => senders
+                    .send_to_plugin(PluginInstruction::Unload(plugin_id))
+                    .non_fatal(),
+            }
+        } else {
+            self.cleanup_panes.insert(pane_id);
         }
     }
 
-    pub(crate) fn emit(self, senders: &ThreadSenders) -> Result<()> {
-        let mut failures = vec![];
+    pub(crate) fn take_cleanup_panes(&mut self) -> BTreeSet<PaneId> {
+        std::mem::take(&mut self.cleanup_panes)
+    }
+
+    pub(crate) fn emit_best_effort(self, senders: &ThreadSenders) {
         for instruction in self.pty_writer {
             if let Err(error) = senders.send_to_pty_writer(instruction) {
-                failures.push(format!("PTY writer: {error:#}"));
+                log::error!("failed to emit committed layout resize to PTY writer: {error:#}");
             }
         }
         for instruction in self.plugin {
             if let Err(error) = senders.send_to_plugin(instruction) {
-                failures.push(format!("Plugin: {error:#}"));
+                log::error!("failed to emit committed layout resize to Plugin: {error:#}");
             }
         }
-        for instruction in self.pty {
-            if let Err(error) = senders.send_to_pty(instruction) {
-                failures.push(format!("PTY: {error:#}"));
-            }
-        }
-        if !failures.is_empty() {
-            bail!(
-                "failed to emit one or more committed layout side effects: {}",
-                failures.join("; ")
+        if !self.cleanup_panes.is_empty() {
+            log::error!(
+                "committed layout cleanup panes {:?} were not transferred into the Screen cleanup outbox",
+                self.cleanup_panes
             );
         }
-        Ok(())
     }
 }
 

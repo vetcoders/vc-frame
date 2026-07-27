@@ -1,4 +1,6 @@
-use super::{PinnedExecutor, PluginId, PluginInstruction};
+use super::{
+    LayoutPluginReceipt, LayoutPluginResolution, PinnedExecutor, PluginId, PluginInstruction,
+};
 use crate::global_async_runtime::get_tokio_runtime;
 use crate::plugins::pipes::{
     PendingPipes, PipeStateChange, apply_pipe_message_to_plugin, pipes_to_block_or_unblock,
@@ -12,13 +14,20 @@ use crate::plugins::zellij_exports::{wasi_read_string, wasi_write_object};
 use highway::{HighwayHash, PortableHash};
 use log::info;
 use notify_debouncer_full::{Debouncer, FileIdMap, notify::RecommendedWatcher};
+#[cfg(test)]
+use std::sync::{
+    Barrier,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    path::PathBuf,
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    path::{Path, PathBuf},
     str::FromStr,
-    sync::{Arc, Mutex},
+    sync::{Arc, Condvar, Mutex},
+    time::{Duration, Instant},
 };
 use tokio::sync::mpsc::Sender;
+use tokio_util::sync::CancellationToken;
 use url::Url;
 use wasmi::{Engine, Module};
 use zellij_utils::consts::{ZELLIJ_CACHE_DIR, ZELLIJ_SESSION_CACHE_DIR, ZELLIJ_TMP_DIR};
@@ -36,8 +45,8 @@ use prost::Message;
 use crate::panes::PaneId;
 use crate::plugins::plugin_map::RunningPluginAndSubscriptions;
 use crate::{
-    ClientId, ServerInstruction, background_jobs::BackgroundJob, route::NotificationEnd,
-    screen::ScreenInstruction, thread_bus::ThreadSenders,
+    ClientId, ServerInstruction, background_jobs::BackgroundJob, pty::LayoutTransactionId,
+    route::NotificationEnd, screen::ScreenInstruction, thread_bus::ThreadSenders,
     ui::loading_indication::LoadingIndication,
 };
 use zellij_utils::{
@@ -168,6 +177,230 @@ impl LoadingContext {
 
 pub type PluginCache = Arc<Mutex<HashMap<PathBuf, Module>>>;
 
+const MAX_LAYOUT_PLUGIN_RECEIPT_TRANSACTIONS: usize = 512;
+const MAX_LAYOUT_PLUGIN_CLEANUP_RECEIPTS: usize = 512;
+const LAYOUT_PLUGIN_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+enum LayoutPluginResolutionKind {
+    Activate,
+    Release,
+    Compensate,
+}
+
+impl LayoutPluginResolution {
+    fn kind(&self) -> LayoutPluginResolutionKind {
+        match self {
+            Self::Activate => LayoutPluginResolutionKind::Activate,
+            Self::Release { .. } => LayoutPluginResolutionKind::Release,
+            Self::Compensate { .. } => LayoutPluginResolutionKind::Compensate,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct LayoutPluginReservationRequest {
+    pub run_plugin: RunPlugin,
+    pub tab_index: Option<usize>,
+    pub size: Size,
+    pub cwd: Option<PathBuf>,
+    pub skip_cache: bool,
+    pub client_id: ClientId,
+}
+
+#[derive(Clone)]
+struct ReservedLayoutPlugin {
+    plugin_id: PluginId,
+    run_plugin: RunPlugin,
+    plugin_config: PluginConfig,
+    tab_index: Option<usize>,
+    size: Size,
+    cwd: Option<PathBuf>,
+    skip_cache: bool,
+    client_id: ClientId,
+    cancellation: CancellationToken,
+    activation_tracker: Arc<LayoutPluginActivationTracker>,
+}
+
+struct LayoutPluginActivationJob {
+    plugin_executor: Arc<PinnedExecutor>,
+    senders: ThreadSenders,
+    plugin_map_for_cleanup: Arc<Mutex<PluginMap>>,
+    transaction_id: LayoutTransactionId,
+    plugin: ReservedLayoutPlugin,
+    loading_context: LoadingContext,
+    group_plugin_ids: Vec<PluginId>,
+    cancellation: CancellationToken,
+    activation_gate: Arc<LayoutPluginActivationGate>,
+    activation_guards: LayoutPluginActivationGuards,
+    #[cfg(test)]
+    test_hooks: LayoutPluginTestHooks,
+}
+
+#[cfg(test)]
+#[derive(Clone, Default)]
+struct LayoutPluginTestHooks {
+    load_starts: Arc<AtomicUsize>,
+    before_load_gate: Option<Arc<LayoutPluginLoadTestGate>>,
+}
+
+#[cfg(test)]
+struct LayoutPluginLoadTestGate {
+    entered: Barrier,
+    release: Barrier,
+}
+
+#[cfg(test)]
+impl LayoutPluginLoadTestGate {
+    fn new() -> Self {
+        Self {
+            entered: Barrier::new(2),
+            release: Barrier::new(2),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LayoutPluginTransactionState {
+    Reserved,
+    Activated,
+    ActivationFailed,
+}
+
+#[derive(Default)]
+struct LayoutPluginActivationTracker {
+    active: Mutex<usize>,
+    idle: Condvar,
+}
+
+impl LayoutPluginActivationTracker {
+    fn begin(self: &Arc<Self>) -> LayoutPluginActivationGuard {
+        *self
+            .active
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) += 1;
+        LayoutPluginActivationGuard {
+            tracker: self.clone(),
+        }
+    }
+
+    fn wait_for_idle(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        while *active != 0 {
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            let (next_active, result) = self
+                .idle
+                .wait_timeout(active, deadline.saturating_duration_since(now))
+                .unwrap_or_else(|poison| poison.into_inner());
+            active = next_active;
+            if result.timed_out() && *active != 0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn is_idle(&self) -> bool {
+        *self
+            .active
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            == 0
+    }
+
+    #[cfg(test)]
+    fn active_count(&self) -> usize {
+        *self
+            .active
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+}
+
+struct LayoutPluginActivationGuard {
+    tracker: Arc<LayoutPluginActivationTracker>,
+}
+
+impl Drop for LayoutPluginActivationGuard {
+    fn drop(&mut self) {
+        let mut active = self
+            .tracker
+            .active
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        *active = active.saturating_sub(1);
+        if *active == 0 {
+            self.tracker.idle.notify_all();
+        }
+    }
+}
+
+struct LayoutPluginActivationGuards {
+    _plugin: LayoutPluginActivationGuard,
+    _group: LayoutPluginActivationGuard,
+}
+
+impl LayoutPluginActivationGuards {
+    fn begin(
+        plugin_tracker: &Arc<LayoutPluginActivationTracker>,
+        group_tracker: &Arc<LayoutPluginActivationTracker>,
+    ) -> Self {
+        Self {
+            _plugin: plugin_tracker.begin(),
+            _group: group_tracker.begin(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct LayoutPluginActivationGate {
+    open: Mutex<bool>,
+    opened: Condvar,
+}
+
+impl LayoutPluginActivationGate {
+    fn wait(&self) {
+        let mut open = self
+            .open
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        while !*open {
+            open = self
+                .opened
+                .wait(open)
+                .unwrap_or_else(|poison| poison.into_inner());
+        }
+    }
+
+    fn open(&self) {
+        *self
+            .open
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = true;
+        self.opened.notify_all();
+    }
+}
+
+struct LayoutPluginReservation {
+    plugins: Vec<ReservedLayoutPlugin>,
+    state: LayoutPluginTransactionState,
+    cancellation: CancellationToken,
+    tracker: Arc<LayoutPluginActivationTracker>,
+    activation_gate: Arc<LayoutPluginActivationGate>,
+}
+
+struct LayoutPluginCleanupDebt {
+    requested_plugin_ids: Vec<PluginId>,
+    remaining_plugin_ids: BTreeSet<PluginId>,
+}
+
 pub struct WasmBridge {
     connected_clients: Arc<Mutex<Vec<ClientId>>>,
     senders: ThreadSenders,
@@ -202,6 +435,17 @@ pub struct WasmBridge {
     downloader: Downloader,
     previous_pane_render_report: Option<PaneRenderReport>,
     pub last_session_save_time: Arc<Mutex<Option<u64>>>, // milliseconds since UNIX epoch
+    layout_plugin_reservations: HashMap<LayoutTransactionId, LayoutPluginReservation>,
+    layout_plugin_owners: HashMap<PluginId, LayoutTransactionId>,
+    layout_plugin_receipts:
+        BTreeMap<(LayoutTransactionId, LayoutPluginResolutionKind), LayoutPluginReceipt>,
+    layout_plugin_cleanup_debts: HashMap<LayoutTransactionId, LayoutPluginCleanupDebt>,
+    layout_plugin_cleanup_receipts: BTreeMap<LayoutTransactionId, Vec<PluginId>>,
+    plugin_unload_debts: HashMap<PluginId, u32>,
+    #[cfg(test)]
+    layout_plugin_test_hooks: LayoutPluginTestHooks,
+    #[cfg(test)]
+    rejected_layout_plugin_releases: HashSet<LayoutTransactionId>,
 }
 
 impl WasmBridge {
@@ -264,8 +508,1029 @@ impl WasmBridge {
             downloader,
             previous_pane_render_report: None,
             last_session_save_time: Arc::new(Mutex::new(None)),
+            layout_plugin_reservations: HashMap::new(),
+            layout_plugin_owners: HashMap::new(),
+            layout_plugin_receipts: BTreeMap::new(),
+            layout_plugin_cleanup_debts: HashMap::new(),
+            layout_plugin_cleanup_receipts: BTreeMap::new(),
+            plugin_unload_debts: HashMap::new(),
+            #[cfg(test)]
+            layout_plugin_test_hooks: LayoutPluginTestHooks::default(),
+            #[cfg(test)]
+            rejected_layout_plugin_releases: HashSet::new(),
         }
     }
+
+    pub fn reserve_layout_plugins(
+        &mut self,
+        transaction_id: LayoutTransactionId,
+        requests: Vec<LayoutPluginReservationRequest>,
+    ) -> std::result::Result<Vec<PluginId>, String> {
+        if self
+            .layout_plugin_reservations
+            .contains_key(&transaction_id)
+            || self
+                .layout_plugin_receipts
+                .keys()
+                .any(|(receipt_transaction_id, _)| receipt_transaction_id == &transaction_id)
+            || self
+                .layout_plugin_cleanup_debts
+                .contains_key(&transaction_id)
+            || self
+                .layout_plugin_cleanup_receipts
+                .contains_key(&transaction_id)
+        {
+            return Err(format!(
+                "layout plugin transaction {transaction_id} is already reserved or resolved"
+            ));
+        }
+
+        let mut plugins = Vec::with_capacity(requests.len());
+        for (offset, request) in requests.into_iter().enumerate() {
+            let plugin_config =
+                PluginConfig::from_run_plugin(&request.run_plugin).ok_or_else(|| {
+                    format!(
+                        "failed to resolve layout plugin {} for transaction {transaction_id}",
+                        request.run_plugin.location
+                    )
+                })?;
+            let offset = u32::try_from(offset)
+                .map_err(|_| format!("too many layout plugins in transaction {transaction_id}"))?;
+            let plugin_id = self.next_plugin_id.checked_add(offset).ok_or_else(|| {
+                format!("plugin id space exhausted for layout transaction {transaction_id}")
+            })?;
+            plugins.push(ReservedLayoutPlugin {
+                plugin_id,
+                run_plugin: request.run_plugin,
+                plugin_config,
+                tab_index: request.tab_index,
+                size: request.size,
+                cwd: request.cwd,
+                skip_cache: request.skip_cache,
+                client_id: request.client_id,
+                cancellation: CancellationToken::new(),
+                activation_tracker: Arc::new(LayoutPluginActivationTracker::default()),
+            });
+        }
+
+        self.next_plugin_id =
+            self.next_plugin_id
+                .checked_add(u32::try_from(plugins.len()).map_err(|_| {
+                    format!("too many layout plugins in transaction {transaction_id}")
+                })?)
+                .ok_or_else(|| {
+                    format!("plugin id space exhausted for layout transaction {transaction_id}")
+                })?;
+        let plugin_ids = plugins
+            .iter()
+            .map(|plugin| plugin.plugin_id)
+            .collect::<Vec<_>>();
+        for plugin_id in &plugin_ids {
+            self.layout_plugin_owners.insert(*plugin_id, transaction_id);
+        }
+        self.layout_plugin_reservations.insert(
+            transaction_id,
+            LayoutPluginReservation {
+                plugins,
+                state: LayoutPluginTransactionState::Reserved,
+                cancellation: CancellationToken::new(),
+                tracker: Arc::new(LayoutPluginActivationTracker::default()),
+                activation_gate: Arc::new(LayoutPluginActivationGate::default()),
+            },
+        );
+        Ok(plugin_ids)
+    }
+
+    pub fn resolve_layout_plugins(
+        &mut self,
+        transaction_id: LayoutTransactionId,
+        resolution: LayoutPluginResolution,
+        expected_plugin_ids: Vec<PluginId>,
+    ) -> std::result::Result<LayoutPluginReceipt, String> {
+        let kind = resolution.kind();
+        let mut expected_plugin_ids = expected_plugin_ids;
+        expected_plugin_ids.sort_unstable();
+
+        #[cfg(test)]
+        if kind == LayoutPluginResolutionKind::Release
+            && self.rejected_layout_plugin_releases.remove(&transaction_id)
+        {
+            return Err(format!(
+                "injected layout plugin release failure for transaction {transaction_id}"
+            ));
+        }
+
+        if let Some(receipt) = self
+            .layout_plugin_receipts
+            .get(&(transaction_id, kind))
+            .cloned()
+        {
+            let mut receipt_plugin_ids = layout_plugin_receipt_ids(&receipt).to_vec();
+            receipt_plugin_ids.sort_unstable();
+            if receipt_plugin_ids == expected_plugin_ids {
+                return Ok(receipt);
+            }
+            return Err(format!(
+                "layout plugin transaction {transaction_id} replay conflict for {kind:?}: expected ids {expected_plugin_ids:?}, recorded ids {receipt_plugin_ids:?}"
+            ));
+        }
+
+        let Some(reservation) = self.layout_plugin_reservations.get(&transaction_id) else {
+            let compensates_retired_empty_activation = kind
+                == LayoutPluginResolutionKind::Compensate
+                && expected_plugin_ids.is_empty()
+                && self
+                    .layout_plugin_receipts
+                    .get(&(transaction_id, LayoutPluginResolutionKind::Activate))
+                    .is_some_and(|receipt| layout_plugin_receipt_ids(receipt).is_empty());
+            if compensates_retired_empty_activation {
+                let receipt = LayoutPluginReceipt::Compensated { plugin_ids: vec![] };
+                self.record_layout_plugin_receipt(transaction_id, kind, receipt.clone());
+                return Ok(receipt);
+            }
+            let resolved_kinds = self
+                .layout_plugin_receipts
+                .keys()
+                .filter_map(|(receipt_transaction_id, receipt_kind)| {
+                    (receipt_transaction_id == &transaction_id).then_some(*receipt_kind)
+                })
+                .collect::<Vec<_>>();
+            return if resolved_kinds.is_empty() {
+                Err(format!(
+                    "unknown layout plugin transaction {transaction_id}"
+                ))
+            } else {
+                Err(format!(
+                    "layout plugin transaction {transaction_id} resolution conflict: already resolved as {resolved_kinds:?}, cannot resolve as {kind:?}"
+                ))
+            };
+        };
+        let mut reserved_plugin_ids = reservation
+            .plugins
+            .iter()
+            .map(|plugin| plugin.plugin_id)
+            .collect::<Vec<_>>();
+        reserved_plugin_ids.sort_unstable();
+        if reserved_plugin_ids != expected_plugin_ids {
+            return Err(format!(
+                "layout plugin transaction {transaction_id} id conflict: expected {expected_plugin_ids:?}, reserved {reserved_plugin_ids:?}"
+            ));
+        }
+
+        let receipt = match resolution {
+            LayoutPluginResolution::Activate => match reservation.state {
+                LayoutPluginTransactionState::Reserved => {
+                    self.activate_layout_plugins(transaction_id)?
+                },
+                LayoutPluginTransactionState::Activated => LayoutPluginReceipt::Activated {
+                    plugin_ids: reserved_plugin_ids.clone(),
+                },
+                LayoutPluginTransactionState::ActivationFailed => {
+                    return Err(format!(
+                        "layout plugin transaction {transaction_id} cannot Activate from {:?}",
+                        reservation.state
+                    ));
+                },
+            },
+            LayoutPluginResolution::Release { reason } => {
+                if !matches!(
+                    reservation.state,
+                    LayoutPluginTransactionState::Reserved
+                        | LayoutPluginTransactionState::ActivationFailed
+                ) {
+                    return Err(format!(
+                        "layout plugin transaction {transaction_id} cannot Release from {:?}: {reason}",
+                        reservation.state
+                    ));
+                }
+                self.release_reserved_layout_plugins(transaction_id, reason)?
+            },
+            LayoutPluginResolution::Compensate { reason } => {
+                if !matches!(
+                    reservation.state,
+                    LayoutPluginTransactionState::Activated
+                        | LayoutPluginTransactionState::ActivationFailed
+                ) {
+                    return Err(format!(
+                        "layout plugin transaction {transaction_id} cannot Compensate from {:?}: {reason}",
+                        reservation.state
+                    ));
+                }
+                self.compensate_layout_plugins(transaction_id, reason)?
+            },
+        };
+        self.record_layout_plugin_receipt(transaction_id, kind, receipt.clone());
+        Ok(receipt)
+    }
+
+    pub fn release_layout_plugins_by_transaction(
+        &mut self,
+        transaction_id: LayoutTransactionId,
+        reason: String,
+    ) -> std::result::Result<LayoutPluginReceipt, String> {
+        if let Some(receipt) = self
+            .layout_plugin_receipts
+            .get(&(transaction_id, LayoutPluginResolutionKind::Release))
+            .cloned()
+        {
+            return Ok(receipt);
+        }
+
+        let exact_plugin_ids = self
+            .layout_plugin_reservations
+            .get(&transaction_id)
+            .map(|reservation| {
+                reservation
+                    .plugins
+                    .iter()
+                    .map(|plugin| plugin.plugin_id)
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.resolve_layout_plugins(
+            transaction_id,
+            LayoutPluginResolution::Release { reason },
+            exact_plugin_ids,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn reject_next_layout_plugin_release_for_test(
+        &mut self,
+        transaction_id: LayoutTransactionId,
+    ) {
+        self.rejected_layout_plugin_releases.insert(transaction_id);
+    }
+
+    pub fn cleanup_layout_plugins(
+        &mut self,
+        transaction_id: LayoutTransactionId,
+        mut plugin_ids: Vec<PluginId>,
+    ) -> std::result::Result<Vec<PluginId>, String> {
+        plugin_ids.sort_unstable();
+        plugin_ids.dedup();
+
+        if let Some(receipt_plugin_ids) = self.layout_plugin_cleanup_receipts.get(&transaction_id) {
+            if receipt_plugin_ids == &plugin_ids {
+                return Ok(receipt_plugin_ids.clone());
+            }
+            return Err(format!(
+                "layout plugin cleanup transaction {transaction_id} replay conflict: requested ids {plugin_ids:?}, recorded ids {receipt_plugin_ids:?}"
+            ));
+        }
+
+        if let Some(debt) = self.layout_plugin_cleanup_debts.get(&transaction_id) {
+            if debt.requested_plugin_ids != plugin_ids {
+                return Err(format!(
+                    "layout plugin cleanup transaction {transaction_id} retry conflict: requested ids {plugin_ids:?}, pending ids {:?}",
+                    debt.requested_plugin_ids
+                ));
+            }
+        } else {
+            self.layout_plugin_cleanup_debts.insert(
+                transaction_id,
+                LayoutPluginCleanupDebt {
+                    requested_plugin_ids: plugin_ids.clone(),
+                    remaining_plugin_ids: plugin_ids.iter().copied().collect(),
+                },
+            );
+        }
+        self.cancel_complete_layout_plugin_groups_for_cleanup(transaction_id, &plugin_ids)?;
+
+        let remaining_plugin_ids = self
+            .layout_plugin_cleanup_debts
+            .get(&transaction_id)
+            .map(|debt| {
+                debt.remaining_plugin_ids
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for plugin_id in remaining_plugin_ids {
+            self.cleanup_layout_plugin(transaction_id, plugin_id)
+                .map_err(|error| {
+                    format!(
+                        "layout plugin cleanup transaction {transaction_id} retained debt for plugin {plugin_id}: {error}"
+                    )
+                })?;
+            if let Some(debt) = self.layout_plugin_cleanup_debts.get_mut(&transaction_id) {
+                debt.remaining_plugin_ids.remove(&plugin_id);
+            }
+        }
+
+        let debt = self
+            .layout_plugin_cleanup_debts
+            .get(&transaction_id)
+            .ok_or_else(|| {
+                format!(
+                    "layout plugin cleanup transaction {transaction_id} lost its cleanup debt before receipt"
+                )
+            })?;
+        if !debt.remaining_plugin_ids.is_empty() {
+            return Err(format!(
+                "layout plugin cleanup transaction {transaction_id} remains incomplete for ids {:?}",
+                debt.remaining_plugin_ids
+            ));
+        }
+        if self
+            .layout_plugin_owners
+            .keys()
+            .any(|plugin_id| plugin_ids.contains(plugin_id))
+        {
+            return Err(format!(
+                "layout plugin cleanup transaction {transaction_id} still has layout ownership after cleanup"
+            ));
+        }
+        let runtime_plugin_ids = self
+            .plugin_map
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .plugin_ids();
+        self.plugin_map.clear_poison();
+        if plugin_ids
+            .iter()
+            .any(|plugin_id| runtime_plugin_ids.contains(plugin_id))
+        {
+            return Err(format!(
+                "layout plugin cleanup transaction {transaction_id} still has runtime plugins after cleanup"
+            ));
+        }
+        if plugin_ids
+            .iter()
+            .any(|plugin_id| self.plugin_executor.has_assignment(*plugin_id))
+        {
+            return Err(format!(
+                "layout plugin cleanup transaction {transaction_id} still has executor assignments after cleanup"
+            ));
+        }
+
+        self.layout_plugin_cleanup_debts.remove(&transaction_id);
+        self.record_layout_plugin_cleanup_receipt(transaction_id, plugin_ids.clone());
+        Ok(plugin_ids)
+    }
+
+    fn cancel_complete_layout_plugin_groups_for_cleanup(
+        &self,
+        cleanup_transaction_id: LayoutTransactionId,
+        requested_plugin_ids: &[PluginId],
+    ) -> std::result::Result<(), String> {
+        let owner_transaction_ids = requested_plugin_ids
+            .iter()
+            .filter_map(|plugin_id| self.layout_plugin_owners.get(plugin_id).copied())
+            .collect::<BTreeSet<_>>();
+        for owner_transaction_id in owner_transaction_ids {
+            let reservation = self
+                .layout_plugin_reservations
+                .get(&owner_transaction_id)
+                .ok_or_else(|| {
+                    format!(
+                        "layout plugin owner transaction {owner_transaction_id} is missing reservation metadata"
+                    )
+                })?;
+            if owner_transaction_id != cleanup_transaction_id
+                && reservation.state == LayoutPluginTransactionState::Reserved
+            {
+                return Err(format!(
+                    "plugins belong to active foreign layout transaction {owner_transaction_id}, which is still Reserved"
+                ));
+            }
+            if reservation.tracker.is_idle() {
+                continue;
+            }
+            let live_owner_ids = self
+                .layout_plugin_owners
+                .iter()
+                .filter_map(|(plugin_id, transaction_id)| {
+                    (transaction_id == &owner_transaction_id).then_some(*plugin_id)
+                })
+                .collect::<BTreeSet<_>>();
+            if live_owner_ids
+                .iter()
+                .all(|plugin_id| requested_plugin_ids.contains(plugin_id))
+            {
+                reservation.cancellation.cancel();
+                reservation.activation_gate.open();
+            }
+        }
+        Ok(())
+    }
+
+    fn cleanup_layout_plugin(
+        &mut self,
+        cleanup_transaction_id: LayoutTransactionId,
+        plugin_id: PluginId,
+    ) -> std::result::Result<(), String> {
+        let owner_transaction_id = self.layout_plugin_owners.get(&plugin_id).copied();
+        let reserved_plugin = if let Some(owner_transaction_id) = owner_transaction_id {
+            let reservation = self
+                .layout_plugin_reservations
+                .get(&owner_transaction_id)
+                .ok_or_else(|| {
+                    format!(
+                        "plugin {plugin_id} has owner transaction {owner_transaction_id} without reservation metadata"
+                    )
+                })?;
+            let reserved_plugin = reservation
+                .plugins
+                .iter()
+                .find(|plugin| plugin.plugin_id == plugin_id)
+                .cloned()
+                .ok_or_else(|| {
+                    format!(
+                        "plugin {plugin_id} is missing from owner transaction {owner_transaction_id}"
+                    )
+                })?;
+            if owner_transaction_id != cleanup_transaction_id
+                && reservation.state == LayoutPluginTransactionState::Reserved
+            {
+                return Err(format!(
+                    "plugin {plugin_id} belongs to active foreign layout transaction {owner_transaction_id}"
+                ));
+            }
+            let activation_gate = reservation.activation_gate.clone();
+            let tracker = reserved_plugin.activation_tracker.clone();
+            reserved_plugin.cancellation.cancel();
+            activation_gate.open();
+            if !tracker.wait_for_idle(LAYOUT_PLUGIN_CLEANUP_TIMEOUT) {
+                return Err(format!(
+                    "plugin {plugin_id} owner transaction {owner_transaction_id} did not quiesce within {:?}",
+                    LAYOUT_PLUGIN_CLEANUP_TIMEOUT
+                ));
+            }
+            Some(reserved_plugin)
+        } else {
+            None
+        };
+
+        let has_runtime_plugin = self
+            .plugin_map
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .plugin_ids()
+            .contains(&plugin_id);
+        self.plugin_map.clear_poison();
+        let has_executor_assignment = self.plugin_executor.has_assignment(plugin_id);
+        if has_runtime_plugin && !has_executor_assignment {
+            return Err(format!(
+                "plugin {plugin_id} has runtime state without an executor assignment; engine-affine BeforeClose cannot be certified"
+            ));
+        }
+
+        if has_executor_assignment {
+            let completion = self
+                .plugin_executor
+                .try_execute_plugin_unload_with_completion(
+                    plugin_id,
+                    move |senders, plugin_map, _connected_clients, _plugin_cache, _engine| {
+                        let plugins_to_cleanup = {
+                            let mut plugin_map = plugin_map
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner());
+                            plugin_map
+                                .remove_plugins(plugin_id)
+                                .into_iter()
+                                .collect::<Vec<_>>()
+                        };
+                        plugin_map.clear_poison();
+                        for ((plugin_id, client_id), (running_plugin, subscriptions, workers)) in
+                            plugins_to_cleanup
+                        {
+                            if running_plugin
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner())
+                                .intercepting_key_presses()
+                            {
+                                let _ = senders.send_to_screen(
+                                    ScreenInstruction::ClearKeyPressesIntercepts(client_id),
+                                );
+                            }
+                            let _ = senders.send_to_screen(
+                                ScreenInstruction::ClearAllPluginHighlights(plugin_id),
+                            );
+                            for worker_sender in workers.into_values() {
+                                let _ = worker_sender.send(MessageToWorker::Exit);
+                            }
+
+                            let needs_before_close = subscriptions
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner())
+                                .contains(&EventType::BeforeClose);
+                            if needs_before_close {
+                                let mut running_plugin = running_plugin
+                                    .lock()
+                                    .unwrap_or_else(|poison| poison.into_inner());
+                                if let Err(error) = apply_before_close_event_to_plugin(
+                                    plugin_id,
+                                    &mut running_plugin,
+                                ) {
+                                    log::error!("{error:?}");
+                                    handle_plugin_crash(
+                                        plugin_id,
+                                        format!("{error:?}").replace("\n", "\n\r"),
+                                        senders.clone(),
+                                    );
+                                }
+                            }
+                            let cache_dir = running_plugin
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner())
+                                .store
+                                .data()
+                                .plugin_own_data_dir
+                                .clone();
+                            if let Err(error) = std::fs::remove_dir_all(&cache_dir) {
+                                log::error!(
+                                    "Failed to remove cache dir for plugin {plugin_id}: {error:?}"
+                                );
+                            }
+                        }
+                    },
+                )?;
+            match completion.recv_timeout(LAYOUT_PLUGIN_CLEANUP_TIMEOUT) {
+                Ok(Ok(())) => {},
+                Ok(Err(error)) => return Err(error),
+                Err(error) => {
+                    return Err(format!(
+                        "plugin {plugin_id} unload did not complete within {:?}: {error}",
+                        LAYOUT_PLUGIN_CLEANUP_TIMEOUT
+                    ));
+                },
+            }
+        }
+
+        let runtime_plugin_remains = self
+            .plugin_map
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .plugin_ids()
+            .contains(&plugin_id);
+        self.plugin_map.clear_poison();
+        if runtime_plugin_remains {
+            return Err(format!(
+                "plugin {plugin_id} unload completed without removing runtime state"
+            ));
+        }
+        if self.plugin_executor.has_assignment(plugin_id) {
+            return Err(format!(
+                "plugin {plugin_id} unload completed without removing its executor assignment"
+            ));
+        }
+
+        self.cached_events_for_pending_plugins.remove(&plugin_id);
+        self.cached_resizes_for_pending_plugins.remove(&plugin_id);
+        self.cached_worker_messages.remove(&plugin_id);
+        self.plugin_ids_waiting_for_permission_request
+            .remove(&plugin_id);
+        self.loading_plugins
+            .retain(|(loading_plugin_id, _)| loading_plugin_id != &plugin_id);
+        self.cached_plugin_map.clear();
+        let mut pipes_to_unblock = self.pending_pipes.unload_plugin(&plugin_id);
+        for pipe_name in pipes_to_unblock.drain(..) {
+            let _ = self
+                .senders
+                .send_to_server(ServerInstruction::UnblockCliPipeInput(pipe_name))
+                .context("failed to unblock input pipe");
+        }
+        if let Some(reserved_plugin) = reserved_plugin {
+            let loading_context = LoadingContext::new(
+                self,
+                reserved_plugin.cwd,
+                reserved_plugin.plugin_config,
+                reserved_plugin.plugin_id,
+                reserved_plugin.client_id,
+                reserved_plugin.tab_index,
+                reserved_plugin.size,
+            );
+            remove_layout_plugin_data_dir(&loading_context.plugin_own_data_dir);
+        }
+        let _ = self
+            .senders
+            .send_to_background_jobs(BackgroundJob::StopPluginLoadingAnimation(plugin_id));
+        if let Some(owner_transaction_id) = owner_transaction_id {
+            if self.layout_plugin_owners.get(&plugin_id) != Some(&owner_transaction_id) {
+                return Err(format!(
+                    "plugin {plugin_id} changed owner before cleanup could retire transaction {owner_transaction_id}"
+                ));
+            }
+            self.layout_plugin_owners.remove(&plugin_id);
+            let has_live_owner = self
+                .layout_plugin_owners
+                .values()
+                .any(|candidate_owner| candidate_owner == &owner_transaction_id);
+            if !has_live_owner {
+                self.layout_plugin_reservations
+                    .remove(&owner_transaction_id);
+            }
+        }
+
+        let plugin_list = self
+            .plugin_map
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .list_plugins();
+        self.plugin_map.clear_poison();
+        let _ = self
+            .senders
+            .send_to_background_jobs(BackgroundJob::ReportPluginList(plugin_list));
+        self.notify_screen_of_ansi_subscription_change();
+        Ok(())
+    }
+
+    fn record_layout_plugin_cleanup_receipt(
+        &mut self,
+        transaction_id: LayoutTransactionId,
+        plugin_ids: Vec<PluginId>,
+    ) {
+        self.layout_plugin_cleanup_receipts
+            .insert(transaction_id, plugin_ids);
+        while self.layout_plugin_cleanup_receipts.len() > MAX_LAYOUT_PLUGIN_CLEANUP_RECEIPTS {
+            let Some(oldest_transaction_id) =
+                self.layout_plugin_cleanup_receipts.keys().next().copied()
+            else {
+                break;
+            };
+            self.layout_plugin_cleanup_receipts
+                .remove(&oldest_transaction_id);
+        }
+    }
+
+    fn cleanup_owned_layout_plugin_ids(
+        &mut self,
+        transaction_id: LayoutTransactionId,
+        plugin_ids: &[PluginId],
+    ) -> std::result::Result<(), String> {
+        for plugin_id in plugin_ids {
+            self.cleanup_layout_plugin(transaction_id, *plugin_id)
+                .map_err(|error| {
+                    format!(
+                        "layout plugin transaction {transaction_id} retained cleanup debt for plugin {plugin_id}: {error}"
+                    )
+                })?;
+        }
+        Ok(())
+    }
+
+    fn activate_layout_plugins(
+        &mut self,
+        transaction_id: LayoutTransactionId,
+    ) -> std::result::Result<LayoutPluginReceipt, String> {
+        let reservation = self
+            .layout_plugin_reservations
+            .get(&transaction_id)
+            .ok_or_else(|| format!("unknown layout plugin transaction {transaction_id}"))?;
+        let plugins = reservation.plugins.clone();
+        let cancellation = reservation.cancellation.clone();
+        let tracker = reservation.tracker.clone();
+        let activation_gate = reservation.activation_gate.clone();
+        let plugin_ids = plugins
+            .iter()
+            .map(|plugin| plugin.plugin_id)
+            .collect::<Vec<_>>();
+
+        for plugin in &plugins {
+            self.cached_events_for_pending_plugins
+                .insert(plugin.plugin_id, vec![]);
+            self.cached_resizes_for_pending_plugins
+                .insert(plugin.plugin_id, (plugin.size.rows, plugin.size.cols));
+            self.loading_plugins
+                .insert((plugin.plugin_id, plugin.run_plugin.clone()));
+            let loading_indication = LoadingIndication::new(plugin.run_plugin.location.to_string());
+            self.start_plugin_loading_indication(&[plugin.plugin_id], &loading_indication);
+
+            if let Err(message) = self.schedule_reserved_layout_plugin(
+                transaction_id,
+                plugin.clone(),
+                plugin_ids.clone(),
+                cancellation.clone(),
+                tracker.clone(),
+                activation_gate.clone(),
+            ) {
+                cancellation.cancel();
+                activation_gate.open();
+                let cleanup_complete = tracker.wait_for_idle(LAYOUT_PLUGIN_CLEANUP_TIMEOUT);
+                if !cleanup_complete {
+                    if let Some(reservation) =
+                        self.layout_plugin_reservations.get_mut(&transaction_id)
+                    {
+                        reservation.state = LayoutPluginTransactionState::ActivationFailed;
+                    }
+                    return Err(format!(
+                        "layout plugin transaction {transaction_id} activation failed and cleanup did not quiesce: {message}"
+                    ));
+                }
+                if let Err(cleanup_error) =
+                    self.cleanup_owned_layout_plugin_ids(transaction_id, &plugin_ids)
+                {
+                    if let Some(reservation) =
+                        self.layout_plugin_reservations.get_mut(&transaction_id)
+                    {
+                        reservation.state = LayoutPluginTransactionState::ActivationFailed;
+                    }
+                    return Err(format!(
+                        "layout plugin transaction {transaction_id} activation failed and cleanup could not be certified: {message}; {cleanup_error}"
+                    ));
+                }
+                return Ok(LayoutPluginReceipt::ActivationRolledBack {
+                    plugin_ids,
+                    message,
+                });
+            }
+        }
+
+        activation_gate.open();
+        if plugin_ids.is_empty() {
+            self.layout_plugin_reservations.remove(&transaction_id);
+        } else if let Some(reservation) = self.layout_plugin_reservations.get_mut(&transaction_id) {
+            reservation.state = LayoutPluginTransactionState::Activated;
+        }
+        Ok(LayoutPluginReceipt::Activated { plugin_ids })
+    }
+
+    fn release_reserved_layout_plugins(
+        &mut self,
+        transaction_id: LayoutTransactionId,
+        reason: String,
+    ) -> std::result::Result<LayoutPluginReceipt, String> {
+        let (plugin_ids, cancellation, tracker, activation_gate) = {
+            let reservation = self
+                .layout_plugin_reservations
+                .get(&transaction_id)
+                .ok_or_else(|| format!("unknown layout plugin transaction {transaction_id}"))?;
+            (
+                reservation
+                    .plugins
+                    .iter()
+                    .map(|plugin| plugin.plugin_id)
+                    .collect::<Vec<_>>(),
+                reservation.cancellation.clone(),
+                reservation.tracker.clone(),
+                reservation.activation_gate.clone(),
+            )
+        };
+        cancellation.cancel();
+        activation_gate.open();
+        if !tracker.wait_for_idle(LAYOUT_PLUGIN_CLEANUP_TIMEOUT) {
+            return Err(format!(
+                "layout plugin transaction {transaction_id} release did not quiesce within {:?}: {reason}",
+                LAYOUT_PLUGIN_CLEANUP_TIMEOUT
+            ));
+        }
+        self.cleanup_owned_layout_plugin_ids(transaction_id, &plugin_ids)?;
+        if plugin_ids.is_empty() {
+            self.layout_plugin_reservations.remove(&transaction_id);
+        }
+        log::debug!("released suspended layout plugins for transaction {transaction_id}: {reason}");
+        Ok(LayoutPluginReceipt::Released { plugin_ids })
+    }
+
+    fn compensate_layout_plugins(
+        &mut self,
+        transaction_id: LayoutTransactionId,
+        reason: String,
+    ) -> std::result::Result<LayoutPluginReceipt, String> {
+        let (plugin_ids, cancellation, tracker, activation_gate) = {
+            let reservation = self
+                .layout_plugin_reservations
+                .get(&transaction_id)
+                .ok_or_else(|| format!("unknown layout plugin transaction {transaction_id}"))?;
+            (
+                reservation
+                    .plugins
+                    .iter()
+                    .map(|plugin| plugin.plugin_id)
+                    .collect::<Vec<_>>(),
+                reservation.cancellation.clone(),
+                reservation.tracker.clone(),
+                reservation.activation_gate.clone(),
+            )
+        };
+        cancellation.cancel();
+        activation_gate.open();
+        if !tracker.wait_for_idle(LAYOUT_PLUGIN_CLEANUP_TIMEOUT) {
+            return Err(format!(
+                "layout plugin transaction {transaction_id} compensation did not quiesce within {:?}: {reason}",
+                LAYOUT_PLUGIN_CLEANUP_TIMEOUT
+            ));
+        }
+        self.cleanup_owned_layout_plugin_ids(transaction_id, &plugin_ids)?;
+        log::debug!("compensated layout plugins for transaction {transaction_id}: {reason}");
+        Ok(LayoutPluginReceipt::Compensated { plugin_ids })
+    }
+
+    pub fn handle_layout_plugin_activation_failure(
+        &mut self,
+        transaction_id: LayoutTransactionId,
+        mut plugin_ids: Vec<PluginId>,
+        message: String,
+    ) {
+        plugin_ids.sort_unstable();
+        let Some(reservation) = self.layout_plugin_reservations.get_mut(&transaction_id) else {
+            return;
+        };
+        let mut reserved_plugin_ids = reservation
+            .plugins
+            .iter()
+            .map(|plugin| plugin.plugin_id)
+            .collect::<Vec<_>>();
+        reserved_plugin_ids.sort_unstable();
+        if reserved_plugin_ids != plugin_ids {
+            log::error!(
+                "ignored layout plugin activation failure for transaction {transaction_id}: ids {plugin_ids:?} do not match reserved ids {reserved_plugin_ids:?}"
+            );
+            return;
+        }
+        reservation.cancellation.cancel();
+        reservation.activation_gate.open();
+        reservation.state = LayoutPluginTransactionState::ActivationFailed;
+        let tracker = reservation.tracker.clone();
+        if !tracker.wait_for_idle(LAYOUT_PLUGIN_CLEANUP_TIMEOUT) {
+            log::error!(
+                "layout plugin transaction {transaction_id} failed but did not quiesce for cleanup: {message}"
+            );
+            return;
+        }
+        if let Err(error) = self.cleanup_owned_layout_plugin_ids(transaction_id, &plugin_ids) {
+            log::error!(
+                "layout plugin transaction {transaction_id} activation failure retained cleanup debt: {message}; {error}"
+            );
+            return;
+        }
+        self.record_layout_plugin_receipt(
+            transaction_id,
+            LayoutPluginResolutionKind::Compensate,
+            LayoutPluginReceipt::Compensated {
+                plugin_ids: plugin_ids.clone(),
+            },
+        );
+        log::error!(
+            "layout plugin transaction {transaction_id} activation failed and was fully compensated: {message}"
+        );
+    }
+
+    fn record_layout_plugin_receipt(
+        &mut self,
+        transaction_id: LayoutTransactionId,
+        kind: LayoutPluginResolutionKind,
+        receipt: LayoutPluginReceipt,
+    ) {
+        self.layout_plugin_receipts
+            .insert((transaction_id, kind), receipt);
+        while self
+            .layout_plugin_receipts
+            .keys()
+            .map(|(transaction_id, _)| *transaction_id)
+            .collect::<BTreeSet<_>>()
+            .len()
+            > MAX_LAYOUT_PLUGIN_RECEIPT_TRANSACTIONS
+        {
+            let Some(oldest_transaction_id) = self
+                .layout_plugin_receipts
+                .keys()
+                .next()
+                .map(|(transaction_id, _)| *transaction_id)
+            else {
+                break;
+            };
+            self.layout_plugin_receipts
+                .retain(|(transaction_id, _), _| transaction_id != &oldest_transaction_id);
+        }
+    }
+
+    fn schedule_reserved_layout_plugin(
+        &self,
+        transaction_id: LayoutTransactionId,
+        plugin: ReservedLayoutPlugin,
+        group_plugin_ids: Vec<PluginId>,
+        cancellation: CancellationToken,
+        tracker: Arc<LayoutPluginActivationTracker>,
+        activation_gate: Arc<LayoutPluginActivationGate>,
+    ) -> std::result::Result<(), String> {
+        if cancellation.is_cancelled() {
+            return Err(format!(
+                "layout plugin transaction {transaction_id} was cancelled before enqueue"
+            ));
+        }
+
+        let mut loading_context = LoadingContext::new(
+            self,
+            plugin.cwd.clone(),
+            plugin.plugin_config.clone(),
+            plugin.plugin_id,
+            plugin.client_id,
+            plugin.tab_index,
+            plugin.size,
+        );
+        let needs_download = matches!(plugin.plugin_config.location, RunPluginLocation::Remote(_));
+        let activation_guards =
+            LayoutPluginActivationGuards::begin(&plugin.activation_tracker, &tracker);
+        #[cfg(test)]
+        let test_hooks = self.layout_plugin_test_hooks.clone();
+
+        if needs_download {
+            let plugin_cancellation = plugin.cancellation.clone();
+            let downloader = self.downloader.clone();
+            let plugin_executor = self.plugin_executor.clone();
+            let senders = self.senders.clone();
+            let plugin_map = self.plugin_map.clone();
+            get_tokio_runtime().spawn(async move {
+                activation_gate.wait();
+                if cancellation.is_cancelled() || plugin_cancellation.is_cancelled() {
+                    return;
+                }
+                let mut loading_indication =
+                    LoadingIndication::new(plugin.run_plugin.location.to_string());
+                let RunPluginLocation::Remote(url) = &plugin.plugin_config.location else {
+                    return;
+                };
+                let file_name: String = PortableHash::default()
+                    .hash128(url.as_bytes())
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect();
+                let plugin_data_dir = loading_context.plugin_own_data_dir.clone();
+                let download_result = tokio::select! {
+                    _ = cancellation.cancelled() => return,
+                    _ = plugin_cancellation.cancelled() => return,
+                    result = downloader.download(url, Some(&file_name)) => result,
+                };
+                match download_result {
+                    Ok(_) => loading_context.update_plugin_path(ZELLIJ_CACHE_DIR.join(&file_name)),
+                    Err(error) => {
+                        cancellation.cancel();
+                        let plugin_list =
+                            remove_layout_plugin_group_from_map(&plugin_map, &group_plugin_ids);
+                        remove_layout_plugin_data_dir(&plugin_data_dir);
+                        drop(activation_guards);
+                        notify_layout_plugin_group_cleanup(
+                            &senders,
+                            &group_plugin_ids,
+                            plugin_list,
+                        );
+                        handle_plugin_loading_failure(
+                            &senders,
+                            plugin.plugin_id,
+                            &mut loading_indication,
+                            &error,
+                            Some(plugin.client_id),
+                        );
+                        report_layout_plugin_activation_failure(
+                            &senders,
+                            transaction_id,
+                            group_plugin_ids,
+                            format!("remote plugin download failed: {error:#}"),
+                        );
+                        return;
+                    },
+                }
+                if cancellation.is_cancelled() || plugin_cancellation.is_cancelled() {
+                    return;
+                }
+                let result = enqueue_reserved_layout_plugin(LayoutPluginActivationJob {
+                    plugin_executor,
+                    senders: senders.clone(),
+                    plugin_map_for_cleanup: plugin_map.clone(),
+                    transaction_id,
+                    plugin,
+                    loading_context,
+                    group_plugin_ids: group_plugin_ids.clone(),
+                    cancellation: cancellation.clone(),
+                    activation_gate,
+                    activation_guards,
+                    #[cfg(test)]
+                    test_hooks,
+                });
+                if let Err(message) = result {
+                    cancellation.cancel();
+                    remove_layout_plugin_data_dir(&plugin_data_dir);
+                    cleanup_layout_plugin_group_shared(&senders, &plugin_map, &group_plugin_ids);
+                    report_layout_plugin_activation_failure(
+                        &senders,
+                        transaction_id,
+                        group_plugin_ids,
+                        message,
+                    );
+                }
+            });
+            Ok(())
+        } else {
+            enqueue_reserved_layout_plugin(LayoutPluginActivationJob {
+                plugin_executor: self.plugin_executor.clone(),
+                senders: self.senders.clone(),
+                plugin_map_for_cleanup: self.plugin_map.clone(),
+                transaction_id,
+                plugin,
+                loading_context,
+                group_plugin_ids,
+                cancellation,
+                activation_gate,
+                activation_guards,
+                #[cfg(test)]
+                test_hooks,
+            })
+        }
+    }
+
     pub fn load_plugin(
         &mut self,
         run: &Option<RunPlugin>,
@@ -491,112 +1756,53 @@ impl WasmBridge {
         }
         Ok((plugin_id, client_id))
     }
-    pub fn unload_plugin(&mut self, pid: PluginId) -> Result<()> {
-        info!("Bye from plugin {}", &pid);
+    pub fn unload_plugin(&mut self, plugin_id: PluginId) -> Result<()> {
+        info!("Bye from plugin {}", &plugin_id);
+        let cleanup_transaction_id = self
+            .layout_plugin_owners
+            .get(&plugin_id)
+            .copied()
+            .unwrap_or_default();
+        self.plugin_unload_debts.entry(plugin_id).or_insert(0);
 
-        // Remove from plugin_map on main thread
-        let plugins_to_cleanup: Vec<_> = {
-            let mut plugin_map = self.plugin_map.lock().unwrap();
-            plugin_map.remove_plugins(pid).into_iter().collect()
-        };
-
-        // Check if any removed plugin was subscribed to ANSI pane render
-        let was_subscribed_to_ansi =
-            plugins_to_cleanup
-                .iter()
-                .any(|((_, _), (_, subscriptions, _))| {
-                    subscriptions
-                        .lock()
-                        .unwrap()
-                        .contains(&EventType::PaneRenderReportWithAnsi)
-                });
-
-        // Schedule cleanup on each plugin's pinned thread
-        for ((plugin_id, client_id), (running_plugin, subscriptions, workers)) in plugins_to_cleanup
-        {
-            // Clear key intercepts if needed (on main thread is OK)
-            if running_plugin.lock().unwrap().intercepting_key_presses() {
-                let _ = self
-                    .senders
-                    .send_to_screen(ScreenInstruction::ClearKeyPressesIntercepts(client_id));
-            }
-            // Clear any regex highlights this plugin registered across all panes
-            let _ = self
-                .senders
-                .send_to_screen(ScreenInstruction::ClearAllPluginHighlights(plugin_id));
-
-            // Send worker exit messages
-            for (_worker_name, worker_sender) in workers {
-                drop(worker_sender.send(MessageToWorker::Exit));
-            }
-
-            self.plugin_executor.execute_plugin_unload(
-                plugin_id,
-                move |senders, _plugin_map, _connected_clients, _plugin_cache, _engine| {
-                    let subscriptions_guard = subscriptions.lock().unwrap();
-                    let needs_before_close = subscriptions_guard.contains(&EventType::BeforeClose);
-                    drop(subscriptions_guard); // Release lock before calling plugin
-
-                    if needs_before_close {
-                        let mut rp = running_plugin.lock().unwrap();
-                        match apply_before_close_event_to_plugin(
-                            plugin_id,
-                            client_id,
-                            &mut rp,
-                            senders.clone(),
-                        ) {
-                            Ok(()) => {},
-                            Err(e) => {
-                                log::error!("{:?}", e);
-                                let stringified_error = format!("{:?}", e).replace("\n", "\n\r");
-                                handle_plugin_crash(plugin_id, stringified_error, senders.clone());
-                            },
-                        }
-                        let cache_dir = rp.store.data().plugin_own_data_dir.clone();
-                        drop(rp); // Release lock before filesystem operation
-                        if let Err(e) = std::fs::remove_dir_all(&cache_dir) {
-                            log::error!("Failed to remove cache dir for plugin: {:?}", e);
-                        }
-                    } else {
-                        let cache_dir = running_plugin
-                            .lock()
-                            .unwrap()
-                            .store
-                            .data()
-                            .plugin_own_data_dir
-                            .clone();
-                        if let Err(e) = std::fs::remove_dir_all(&cache_dir) {
-                            log::error!("Failed to remove cache dir for plugin: {:?}", e);
-                        }
-                    }
-
-                    drop(running_plugin);
-                    drop(subscriptions);
-                },
-            );
+        match self.cleanup_layout_plugin(cleanup_transaction_id, plugin_id) {
+            Ok(()) => {
+                self.plugin_unload_debts.remove(&plugin_id);
+            },
+            Err(error) => {
+                let attempt = self
+                    .plugin_unload_debts
+                    .get(&plugin_id)
+                    .copied()
+                    .unwrap_or_default()
+                    .saturating_add(1);
+                self.plugin_unload_debts.insert(plugin_id, attempt);
+                self.schedule_plugin_unload_retry(plugin_id, attempt);
+                log::error!(
+                    "plugin {plugin_id} unload retained completion debt after attempt {attempt}: {error}"
+                );
+            },
         }
-
-        // Main thread cleanup
-        self.cached_plugin_map.clear();
-        let mut pipes_to_unblock = self.pending_pipes.unload_plugin(&pid);
-        for pipe_name in pipes_to_unblock.drain(..) {
-            let _ = self
-                .senders
-                .send_to_server(ServerInstruction::UnblockCliPipeInput(pipe_name))
-                .context("failed to unblock input pipe");
-        }
-        let plugin_list = self.plugin_map.lock().unwrap().list_plugins();
-        let _ = self
-            .senders
-            .send_to_background_jobs(BackgroundJob::ReportPluginList(plugin_list));
-
-        // If any unloaded plugin was subscribed to ANSI pane content, re-check remaining plugins
-        if was_subscribed_to_ansi {
-            self.notify_screen_of_ansi_subscription_change();
-        }
-
+        // An unload failure is durable debt, not a reason to terminate the Plugin
+        // instruction loop. The retry keeps the exact plugin id and its layout
+        // ownership remains intact until completion-aware cleanup succeeds.
         Ok(())
     }
+
+    fn schedule_plugin_unload_retry(&self, plugin_id: PluginId, attempt: u32) {
+        let exponent = attempt.saturating_sub(1).min(5);
+        let delay = Duration::from_millis(50_u64.saturating_mul(1_u64 << exponent));
+        let senders = self.senders.clone();
+        get_tokio_runtime().spawn(async move {
+            tokio::time::sleep(delay).await;
+            if let Err(error) = senders.send_to_plugin(PluginInstruction::Unload(plugin_id)) {
+                log::error!(
+                    "failed to schedule retry for plugin {plugin_id} unload completion debt: {error:#}"
+                );
+            }
+        });
+    }
+
     pub fn reload_plugin_with_id(&mut self, plugin_id: u32) -> Result<()> {
         let Some(run_plugin) = self.run_plugin_of_plugin_id(plugin_id) else {
             log::error!("Failed to find plugin with id: {}", plugin_id);
@@ -2019,6 +3225,299 @@ impl WasmBridge {
     }
 }
 
+fn layout_plugin_receipt_ids(receipt: &LayoutPluginReceipt) -> &[PluginId] {
+    match receipt {
+        LayoutPluginReceipt::Activated { plugin_ids }
+        | LayoutPluginReceipt::Released { plugin_ids }
+        | LayoutPluginReceipt::Compensated { plugin_ids }
+        | LayoutPluginReceipt::ActivationRolledBack { plugin_ids, .. } => plugin_ids,
+    }
+}
+
+fn enqueue_reserved_layout_plugin(
+    activation_job: LayoutPluginActivationJob,
+) -> std::result::Result<(), String> {
+    #[cfg(test)]
+    let test_hooks = activation_job.test_hooks.clone();
+    let LayoutPluginActivationJob {
+        plugin_executor,
+        senders,
+        plugin_map_for_cleanup,
+        transaction_id,
+        plugin,
+        loading_context,
+        group_plugin_ids,
+        cancellation,
+        activation_gate,
+        activation_guards,
+        ..
+    } = activation_job;
+    let plugin_cancellation = plugin.cancellation.clone();
+    if cancellation.is_cancelled() || plugin_cancellation.is_cancelled() {
+        return Err(format!(
+            "layout plugin transaction {transaction_id} was cancelled before enqueue"
+        ));
+    }
+
+    let plugin_id = plugin.plugin_id;
+    let client_id = plugin.client_id;
+    let skip_cache = plugin.skip_cache;
+    let plugin_name = plugin.run_plugin.location.to_string();
+    let panic_senders = senders.clone();
+    let panic_plugin_map = plugin_map_for_cleanup.clone();
+    let panic_group_plugin_ids = group_plugin_ids.clone();
+    let panic_cancellation = cancellation.clone();
+    let plugin_data_dir = loading_context.plugin_own_data_dir.clone();
+    let panic_plugin_data_dir = plugin_data_dir.clone();
+    plugin_executor.try_execute_plugin_load(
+        plugin_id,
+        move |senders, plugin_map, connected_clients, plugin_cache, engine| {
+            let activation_guards = activation_guards;
+            activation_gate.wait();
+            if cancellation.is_cancelled() || plugin_cancellation.is_cancelled() {
+                remove_layout_plugin_data_dir(&plugin_data_dir);
+                drop(activation_guards);
+                return;
+            }
+
+            let mut loading_indication = LoadingIndication::new(plugin_name);
+            let load_result = {
+                let mut plugin_map = plugin_map
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                if cancellation.is_cancelled() || plugin_cancellation.is_cancelled() {
+                    None
+                } else {
+                    #[cfg(test)]
+                    if let Some(gate) = &test_hooks.before_load_gate {
+                        gate.entered.wait();
+                        gate.release.wait();
+                    }
+                    if cancellation.is_cancelled() || plugin_cancellation.is_cancelled() {
+                        None
+                    } else {
+                        #[cfg(test)]
+                        test_hooks.load_starts.fetch_add(1, Ordering::SeqCst);
+                        let result = PluginLoader::new(
+                            skip_cache,
+                            loading_context,
+                            senders.clone(),
+                            engine,
+                            plugin_cache,
+                            &mut plugin_map,
+                            connected_clients,
+                        )
+                        .start_plugin();
+                        if result.is_err()
+                            || cancellation.is_cancelled()
+                            || plugin_cancellation.is_cancelled()
+                        {
+                            let ids_to_remove = if cancellation.is_cancelled() {
+                                group_plugin_ids.as_slice()
+                            } else {
+                                std::slice::from_ref(&plugin_id)
+                            };
+                            for plugin_id in ids_to_remove {
+                                plugin_map.remove_plugins(*plugin_id);
+                            }
+                        }
+                        Some(result)
+                    }
+                }
+            };
+            plugin_map.clear_poison();
+
+            if load_result.is_none()
+                || cancellation.is_cancelled()
+                || plugin_cancellation.is_cancelled()
+            {
+                let ids_to_remove = if cancellation.is_cancelled() {
+                    group_plugin_ids.as_slice()
+                } else {
+                    std::slice::from_ref(&plugin_id)
+                };
+                let plugin_list = remove_layout_plugin_group_from_map(&plugin_map, ids_to_remove);
+                remove_layout_plugin_data_dir(&plugin_data_dir);
+                drop(activation_guards);
+                notify_layout_plugin_group_cleanup(&senders, ids_to_remove, plugin_list);
+                return;
+            }
+
+            match load_result.expect("checked as Some above") {
+                Ok(()) => {
+                    if cancellation.is_cancelled() || plugin_cancellation.is_cancelled() {
+                        let ids_to_remove = if cancellation.is_cancelled() {
+                            group_plugin_ids.as_slice()
+                        } else {
+                            std::slice::from_ref(&plugin_id)
+                        };
+                        let plugin_list =
+                            remove_layout_plugin_group_from_map(&plugin_map, ids_to_remove);
+                        remove_layout_plugin_data_dir(&plugin_data_dir);
+                        drop(activation_guards);
+                        notify_layout_plugin_group_cleanup(&senders, ids_to_remove, plugin_list);
+                        return;
+                    }
+                    let plugin_list = plugin_map
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .list_plugins();
+                    plugin_map.clear_poison();
+                    drop(activation_guards);
+                    if cancellation.is_cancelled() || plugin_cancellation.is_cancelled() {
+                        let ids_to_remove = if cancellation.is_cancelled() {
+                            group_plugin_ids.as_slice()
+                        } else {
+                            std::slice::from_ref(&plugin_id)
+                        };
+                        cleanup_layout_plugin_group_shared(&senders, &plugin_map, ids_to_remove);
+                        remove_layout_plugin_data_dir(&plugin_data_dir);
+                        return;
+                    }
+                    handle_plugin_successful_loading(&senders, plugin_id, plugin_list);
+                    let mut followup_instructions =
+                        vec![PluginInstruction::RequestStateUpdateForPlugin(plugin_id)];
+                    if !cancellation.is_cancelled() && !plugin_cancellation.is_cancelled() {
+                        followup_instructions.push(PluginInstruction::ApplyCachedEvents {
+                            plugin_ids: vec![plugin_id],
+                            done_receiving_permissions: false,
+                        });
+                    }
+                    send_plugin_instructions_off_pinned_executor(&senders, followup_instructions);
+                },
+                Err(error) => {
+                    cancellation.cancel();
+                    let plugin_list =
+                        remove_layout_plugin_group_from_map(&plugin_map, &group_plugin_ids);
+                    remove_layout_plugin_data_dir(&plugin_data_dir);
+                    drop(activation_guards);
+                    notify_layout_plugin_group_cleanup(&senders, &group_plugin_ids, plugin_list);
+                    handle_plugin_loading_failure(
+                        &senders,
+                        plugin_id,
+                        &mut loading_indication,
+                        &error,
+                        Some(client_id),
+                    );
+                    report_layout_plugin_activation_failure(
+                        &senders,
+                        transaction_id,
+                        group_plugin_ids,
+                        format!("plugin load failed: {error:#}"),
+                    );
+                },
+            }
+        },
+        move |panic_message| {
+            panic_cancellation.cancel();
+            remove_layout_plugin_data_dir(&panic_plugin_data_dir);
+            cleanup_layout_plugin_group_shared(
+                &panic_senders,
+                &panic_plugin_map,
+                &panic_group_plugin_ids,
+            );
+            let mut loading_indication =
+                LoadingIndication::new(format!("layout plugin {plugin_id}"));
+            handle_plugin_loading_failure(
+                &panic_senders,
+                plugin_id,
+                &mut loading_indication,
+                &panic_message,
+                Some(client_id),
+            );
+            report_layout_plugin_activation_failure(
+                &panic_senders,
+                transaction_id,
+                panic_group_plugin_ids,
+                format!("plugin executor panicked: {panic_message}"),
+            );
+        },
+    )
+}
+
+fn cleanup_layout_plugin_group_shared(
+    senders: &ThreadSenders,
+    plugin_map: &Arc<Mutex<PluginMap>>,
+    plugin_ids: &[PluginId],
+) {
+    let plugin_list = remove_layout_plugin_group_from_map(plugin_map, plugin_ids);
+    notify_layout_plugin_group_cleanup(senders, plugin_ids, plugin_list);
+}
+
+fn remove_layout_plugin_group_from_map(
+    plugin_map: &Arc<Mutex<PluginMap>>,
+    plugin_ids: &[PluginId],
+) -> BTreeMap<PluginId, RunPlugin> {
+    let plugin_list = {
+        let mut plugin_map_guard = plugin_map
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        for plugin_id in plugin_ids {
+            plugin_map_guard.remove_plugins(*plugin_id);
+        }
+        plugin_map_guard.list_plugins()
+    };
+    plugin_map.clear_poison();
+    plugin_list
+}
+
+fn notify_layout_plugin_group_cleanup(
+    senders: &ThreadSenders,
+    plugin_ids: &[PluginId],
+    plugin_list: BTreeMap<PluginId, RunPlugin>,
+) {
+    for plugin_id in plugin_ids {
+        let _ =
+            senders.send_to_background_jobs(BackgroundJob::StopPluginLoadingAnimation(*plugin_id));
+    }
+    let _ = senders.send_to_background_jobs(BackgroundJob::ReportPluginList(plugin_list));
+    let _ = senders.send_to_screen(ScreenInstruction::RequestStateUpdateForPlugins);
+}
+
+fn remove_layout_plugin_data_dir(path: &Path) {
+    if let Err(error) = std::fs::remove_dir_all(path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        log::error!(
+            "failed to remove layout plugin data dir {}: {error}",
+            path.display()
+        );
+    }
+}
+
+fn report_layout_plugin_activation_failure(
+    senders: &ThreadSenders,
+    transaction_id: LayoutTransactionId,
+    plugin_ids: Vec<PluginId>,
+    message: String,
+) {
+    send_plugin_instructions_off_pinned_executor(
+        senders,
+        vec![PluginInstruction::LayoutPluginActivationFailed {
+            transaction_id,
+            plugin_ids,
+            message,
+        }],
+    );
+}
+
+fn send_plugin_instructions_off_pinned_executor(
+    senders: &ThreadSenders,
+    instructions: Vec<PluginInstruction>,
+) {
+    let senders = senders.clone();
+    get_tokio_runtime().spawn_blocking(move || {
+        for instruction in instructions {
+            if let Err(error) = senders.send_to_plugin(instruction) {
+                log::error!(
+                    "failed to deliver layout plugin follow-up outside the pinned executor: {error:#}"
+                );
+                break;
+            }
+        }
+    });
+}
+
 fn handle_plugin_successful_loading(
     senders: &ThreadSenders,
     plugin_id: PluginId,
@@ -2027,7 +3526,6 @@ fn handle_plugin_successful_loading(
     let _ = senders.send_to_background_jobs(BackgroundJob::StopPluginLoadingAnimation(plugin_id));
     let _ = senders.send_to_screen(ScreenInstruction::RequestStateUpdateForPlugins);
     let _ = senders.send_to_background_jobs(BackgroundJob::ReportPluginList(plugin_list));
-    let _ = senders.send_to_plugin(PluginInstruction::RequestStateUpdateForPlugin(plugin_id));
 }
 
 fn handle_plugin_loading_failure(
@@ -2211,9 +3709,7 @@ pub fn handle_plugin_crash(plugin_id: PluginId, message: String, senders: Thread
 
 pub fn apply_before_close_event_to_plugin(
     plugin_id: PluginId,
-    client_id: ClientId,
     running_plugin: &mut RunningPlugin,
-    senders: ThreadSenders,
 ) -> Result<()> {
     let instance = &running_plugin.instance;
 
@@ -2231,13 +3727,1413 @@ pub fn apply_before_close_event_to_plugin(
     let _should_render = update
         .call(&mut running_plugin.store, ())
         .with_context(err_context)?;
-    let pipes_to_block_or_unblock = pipes_to_block_or_unblock(running_plugin, None);
-    let plugin_render_asset =
-        PluginRenderAsset::new(plugin_id, client_id, vec![]).with_pipes(pipes_to_block_or_unblock);
-    let _ = senders
-        .send_to_plugin(PluginInstruction::UnblockCliPipes(vec![
-            plugin_render_asset,
-        ]))
-        .context("failed to unblock input pipe");
+    // Terminal cleanup unblocks all pending pipes for this plugin directly on
+    // the WasmBridge thread after this executor receipt resolves. Sending a
+    // message back into the bounded Plugin channel here could deadlock the
+    // pinned executor behind its own full input queue.
     Ok(())
+}
+
+#[cfg(test)]
+mod layout_plugin_transaction_tests {
+    use super::*;
+    use zellij_utils::input::layout::RunPlugin;
+
+    fn test_bridge(max_threads: usize) -> WasmBridge {
+        test_bridge_with_senders(max_threads, ThreadSenders::default())
+    }
+
+    fn test_bridge_with_senders(max_threads: usize, senders: ThreadSenders) -> WasmBridge {
+        let engine = Engine::default();
+        let plugin_dir = tempfile::tempdir().unwrap().path().to_path_buf();
+        let zellij_cwd = tempfile::tempdir().unwrap().path().to_path_buf();
+        let mut bridge = WasmBridge::new(
+            senders,
+            engine.clone(),
+            plugin_dir,
+            PathBuf::from("/bin/sh"),
+            zellij_cwd,
+            BTreeMap::new(),
+            None,
+            None,
+            vec![],
+            vec![],
+            InputMode::Normal,
+            Keybinds::default(),
+        );
+        let plugin_cache = Arc::new(Mutex::new(HashMap::new()));
+        bridge.plugin_executor = Arc::new(PinnedExecutor::new(
+            max_threads,
+            &bridge.senders,
+            &bridge.plugin_map,
+            &bridge.connected_clients,
+            &plugin_cache,
+            &engine,
+        ));
+        bridge
+    }
+
+    fn local_request(client_id: ClientId) -> LayoutPluginReservationRequest {
+        let run_plugin = RunPlugin::from_url(&format!(
+            "file:{}/vc-frame-missing-layout-plugin-{client_id}.wasm",
+            std::env::temp_dir().display()
+        ))
+        .unwrap();
+        LayoutPluginReservationRequest {
+            run_plugin,
+            tab_index: Some(1),
+            size: Size::default(),
+            cwd: None,
+            skip_cache: false,
+            client_id,
+        }
+    }
+
+    fn remote_request(client_id: ClientId) -> LayoutPluginReservationRequest {
+        LayoutPluginReservationRequest {
+            run_plugin: RunPlugin::from_url(
+                "https://10.255.255.1/vc-frame-cancelled-layout-plugin.wasm",
+            )
+            .unwrap(),
+            tab_index: Some(1),
+            size: Size::default(),
+            cwd: None,
+            skip_cache: false,
+            client_id,
+        }
+    }
+
+    #[test]
+    fn reservation_allocates_exact_ids_without_runtime_work() {
+        let mut bridge = test_bridge(1);
+        let request = local_request(9101);
+        let plugin_config = PluginConfig::from_run_plugin(&request.run_plugin).unwrap();
+        let ids = bridge
+            .reserve_layout_plugins(1001, vec![request.clone()])
+            .unwrap();
+
+        assert_eq!(ids, vec![0]);
+        assert!(bridge.plugin_map.lock().unwrap().plugin_ids().is_empty());
+        assert!(bridge.cached_events_for_pending_plugins.is_empty());
+        assert!(bridge.cached_resizes_for_pending_plugins.is_empty());
+        assert!(bridge.loading_plugins.is_empty());
+        assert!(!bridge.plugin_executor.has_assignment(0));
+        let loading_context = LoadingContext::new(
+            &bridge,
+            None,
+            plugin_config,
+            0,
+            request.client_id,
+            request.tab_index,
+            request.size,
+        );
+        assert!(
+            !loading_context.plugin_own_data_dir.exists(),
+            "reservation must not create plugin filesystem state"
+        );
+        assert_eq!(
+            bridge
+                .layout_plugin_reservations
+                .get(&1001)
+                .unwrap()
+                .tracker
+                .active_count(),
+            0
+        );
+    }
+
+    #[test]
+    fn exact_cleanup_waits_for_unload_completion_and_removes_all_ownership() {
+        let mut bridge = test_bridge(1);
+        let transaction_id = 1101;
+        let ids = bridge
+            .reserve_layout_plugins(
+                transaction_id,
+                vec![local_request(9201), local_request(9202)],
+            )
+            .unwrap();
+        for plugin_id in &ids {
+            bridge.plugin_executor.register_plugin(*plugin_id);
+        }
+
+        let receipt = bridge
+            .cleanup_layout_plugins(transaction_id, vec![ids[1], ids[0]])
+            .unwrap();
+
+        assert_eq!(receipt, ids);
+        assert!(
+            receipt
+                .iter()
+                .all(|plugin_id| !bridge.layout_plugin_owners.contains_key(plugin_id))
+        );
+        assert!(
+            !bridge
+                .layout_plugin_reservations
+                .contains_key(&transaction_id)
+        );
+        assert!(
+            !bridge
+                .layout_plugin_cleanup_debts
+                .contains_key(&transaction_id)
+        );
+        assert!(
+            receipt
+                .iter()
+                .all(|plugin_id| !bridge.plugin_executor.has_assignment(*plugin_id))
+        );
+        assert!(bridge.plugin_map.lock().unwrap().plugin_ids().is_empty());
+    }
+
+    #[test]
+    fn foreign_active_owner_and_conflicting_retry_preserve_cleanup_debt() {
+        let mut bridge = test_bridge(1);
+        let owner_transaction_id = 1102;
+        let cleanup_transaction_id = 2102;
+        let ids = bridge
+            .reserve_layout_plugins(
+                owner_transaction_id,
+                vec![local_request(9203), local_request(9204)],
+            )
+            .unwrap();
+
+        assert!(
+            bridge
+                .cleanup_layout_plugins(cleanup_transaction_id, ids.clone())
+                .unwrap_err()
+                .contains("active foreign layout transaction")
+        );
+        assert!(
+            bridge
+                .cleanup_layout_plugins(cleanup_transaction_id, vec![ids[0]])
+                .unwrap_err()
+                .contains("retry conflict")
+        );
+        assert!(
+            bridge
+                .cleanup_layout_plugins(cleanup_transaction_id, vec![ids[0], 999])
+                .unwrap_err()
+                .contains("retry conflict")
+        );
+        assert!(
+            bridge
+                .layout_plugin_reservations
+                .contains_key(&owner_transaction_id)
+        );
+        assert_eq!(
+            bridge
+                .layout_plugin_cleanup_debts
+                .get(&cleanup_transaction_id)
+                .unwrap()
+                .remaining_plugin_ids,
+            ids.iter().copied().collect::<BTreeSet<_>>()
+        );
+        assert!(
+            ids.iter()
+                .all(|plugin_id| bridge.layout_plugin_owners.get(plugin_id)
+                    == Some(&owner_transaction_id))
+        );
+
+        bridge
+            .layout_plugin_reservations
+            .get_mut(&owner_transaction_id)
+            .unwrap()
+            .state = LayoutPluginTransactionState::Activated;
+        assert_eq!(
+            bridge
+                .cleanup_layout_plugins(cleanup_transaction_id, ids.clone())
+                .unwrap(),
+            ids
+        );
+        assert!(
+            !bridge
+                .layout_plugin_reservations
+                .contains_key(&owner_transaction_id)
+        );
+    }
+
+    #[test]
+    fn foreign_activated_cleanup_cancels_before_waiting_for_quiescence() {
+        let mut bridge = test_bridge(1);
+        let owner_transaction_id = 1106;
+        let cleanup_transaction_id = 2106;
+        let ids = bridge
+            .reserve_layout_plugins(owner_transaction_id, vec![local_request(9209)])
+            .unwrap();
+        let (tracker, cancellation) = {
+            let reservation = bridge
+                .layout_plugin_reservations
+                .get_mut(&owner_transaction_id)
+                .unwrap();
+            reservation.state = LayoutPluginTransactionState::Activated;
+            (
+                reservation.tracker.clone(),
+                reservation.plugins[0].cancellation.clone(),
+            )
+        };
+        let activation_guard = tracker.begin();
+        let release_after_cancellation = std::thread::spawn(move || {
+            for _ in 0..500 {
+                if cancellation.is_cancelled() {
+                    drop(activation_guard);
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            panic!("cleanup did not cancel the foreign activation before waiting");
+        });
+
+        assert_eq!(
+            bridge
+                .cleanup_layout_plugins(cleanup_transaction_id, ids.clone())
+                .unwrap(),
+            ids
+        );
+        release_after_cancellation.join().unwrap();
+        assert!(!bridge.layout_plugin_owners.contains_key(&ids[0]));
+    }
+
+    #[test]
+    fn foreign_group_cleanup_cancels_all_loaders_before_group_wait() {
+        let mut bridge = test_bridge(1);
+        let owner_transaction_id = 1107;
+        let cleanup_transaction_id = 2107;
+        let ids = bridge
+            .reserve_layout_plugins(
+                owner_transaction_id,
+                vec![local_request(9210), local_request(9211)],
+            )
+            .unwrap();
+        let (tracker, cancellation) = {
+            let reservation = bridge
+                .layout_plugin_reservations
+                .get_mut(&owner_transaction_id)
+                .unwrap();
+            reservation.state = LayoutPluginTransactionState::Activated;
+            (
+                reservation.tracker.clone(),
+                reservation.cancellation.clone(),
+            )
+        };
+        let first_guard = tracker.begin();
+        let second_guard = tracker.begin();
+        let first_cancellation = cancellation.clone();
+        let first_loader = std::thread::spawn(move || {
+            for _ in 0..500 {
+                if first_cancellation.is_cancelled() {
+                    drop(first_guard);
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            panic!("first loader was not cancelled before group wait");
+        });
+        let second_loader = std::thread::spawn(move || {
+            for _ in 0..500 {
+                if cancellation.is_cancelled() {
+                    drop(second_guard);
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            panic!("second loader was not cancelled before group wait");
+        });
+
+        assert_eq!(
+            bridge
+                .cleanup_layout_plugins(cleanup_transaction_id, ids.clone())
+                .unwrap(),
+            ids
+        );
+        first_loader.join().unwrap();
+        second_loader.join().unwrap();
+        assert!(
+            !bridge
+                .layout_plugin_reservations
+                .contains_key(&owner_transaction_id)
+        );
+    }
+
+    #[test]
+    fn cleanup_accepts_general_non_reserved_runtime_plugin() {
+        let mut bridge = test_bridge(1);
+        let cleanup_transaction_id = 2105;
+        let plugin_id = 777;
+        let request = local_request(9208);
+        bridge.plugin_executor.register_plugin(plugin_id);
+        bridge
+            .cached_events_for_pending_plugins
+            .insert(plugin_id, vec![]);
+        bridge
+            .cached_resizes_for_pending_plugins
+            .insert(plugin_id, (10, 20));
+        bridge
+            .loading_plugins
+            .insert((plugin_id, request.run_plugin));
+
+        assert_eq!(
+            bridge
+                .cleanup_layout_plugins(cleanup_transaction_id, vec![plugin_id])
+                .unwrap(),
+            vec![plugin_id]
+        );
+        assert!(!bridge.plugin_executor.has_assignment(plugin_id));
+        assert!(!bridge.layout_plugin_owners.contains_key(&plugin_id));
+        assert!(
+            !bridge
+                .cached_events_for_pending_plugins
+                .contains_key(&plugin_id)
+        );
+        assert!(
+            !bridge
+                .cached_resizes_for_pending_plugins
+                .contains_key(&plugin_id)
+        );
+        assert!(
+            bridge
+                .loading_plugins
+                .iter()
+                .all(|(loading_plugin_id, _)| loading_plugin_id != &plugin_id)
+        );
+    }
+
+    #[test]
+    fn partial_cleanup_error_retains_only_unfinished_debt_for_retry() {
+        let mut bridge = test_bridge(1);
+        let transaction_id = 1103;
+        let ids = bridge
+            .reserve_layout_plugins(
+                transaction_id,
+                vec![local_request(9205), local_request(9206)],
+            )
+            .unwrap();
+        for plugin_id in &ids {
+            bridge.plugin_executor.register_plugin(*plugin_id);
+        }
+        bridge
+            .plugin_executor
+            .reject_next_enqueue_for_plugin(ids[1]);
+
+        let error = bridge
+            .cleanup_layout_plugins(transaction_id, ids.clone())
+            .unwrap_err();
+
+        assert!(error.contains(&format!("retained debt for plugin {}", ids[1])));
+        assert!(!bridge.layout_plugin_owners.contains_key(&ids[0]));
+        assert_eq!(
+            bridge.layout_plugin_owners.get(&ids[1]),
+            Some(&transaction_id)
+        );
+        assert!(!bridge.plugin_executor.has_assignment(ids[0]));
+        assert!(bridge.plugin_executor.has_assignment(ids[1]));
+        assert_eq!(
+            bridge
+                .layout_plugin_cleanup_debts
+                .get(&transaction_id)
+                .unwrap()
+                .remaining_plugin_ids,
+            BTreeSet::from([ids[1]])
+        );
+
+        assert_eq!(
+            bridge
+                .cleanup_layout_plugins(transaction_id, ids.clone())
+                .unwrap(),
+            ids
+        );
+        assert!(
+            !bridge
+                .layout_plugin_cleanup_debts
+                .contains_key(&transaction_id)
+        );
+        assert!(
+            !bridge
+                .layout_plugin_reservations
+                .contains_key(&transaction_id)
+        );
+    }
+
+    #[test]
+    fn duplicate_ids_and_lost_cleanup_ack_replay_the_same_bounded_receipt() {
+        let mut bridge = test_bridge(1);
+        let transaction_id = 1104;
+        let ids = bridge
+            .reserve_layout_plugins(transaction_id, vec![local_request(9207)])
+            .unwrap();
+        bridge.plugin_executor.register_plugin(ids[0]);
+
+        let first_receipt = bridge
+            .cleanup_layout_plugins(transaction_id, vec![ids[0], ids[0]])
+            .unwrap();
+        let replayed_receipt = bridge
+            .cleanup_layout_plugins(transaction_id, vec![ids[0], ids[0]])
+            .unwrap();
+
+        assert_eq!(first_receipt, ids);
+        assert_eq!(replayed_receipt, first_receipt);
+        assert_eq!(
+            bridge.layout_plugin_cleanup_receipts.get(&transaction_id),
+            Some(&first_receipt)
+        );
+        assert!(
+            bridge
+                .cleanup_layout_plugins(transaction_id, vec![ids[0], 999])
+                .unwrap_err()
+                .contains("replay conflict")
+        );
+    }
+
+    #[test]
+    fn cleanup_receipt_cache_is_bounded_to_512_transactions() {
+        let mut bridge = test_bridge(1);
+        for transaction_id in 1..=513 {
+            bridge
+                .cleanup_layout_plugins(transaction_id, vec![])
+                .unwrap();
+        }
+
+        assert_eq!(
+            bridge.layout_plugin_cleanup_receipts.len(),
+            MAX_LAYOUT_PLUGIN_CLEANUP_RECEIPTS
+        );
+        assert!(!bridge.layout_plugin_cleanup_receipts.contains_key(&1));
+        assert!(bridge.layout_plugin_cleanup_receipts.contains_key(&513));
+    }
+
+    #[test]
+    fn release_is_side_effect_free_replayable_and_conflicts_with_activate() {
+        let mut bridge = test_bridge(1);
+        let ids = bridge
+            .reserve_layout_plugins(1002, vec![local_request(9102)])
+            .unwrap();
+        let resolution = LayoutPluginResolution::Release {
+            reason: "PTY rejected prepare".to_owned(),
+        };
+        let receipt = bridge
+            .resolve_layout_plugins(1002, resolution.clone(), ids.clone())
+            .unwrap();
+        assert_eq!(
+            receipt,
+            LayoutPluginReceipt::Released {
+                plugin_ids: ids.clone()
+            }
+        );
+        assert_eq!(
+            bridge
+                .resolve_layout_plugins(1002, resolution, ids.clone())
+                .unwrap(),
+            receipt
+        );
+        assert!(
+            bridge
+                .resolve_layout_plugins(1002, LayoutPluginResolution::Activate, ids)
+                .unwrap_err()
+                .contains("resolution conflict")
+        );
+        assert!(bridge.plugin_map.lock().unwrap().plugin_ids().is_empty());
+        assert!(bridge.cached_events_for_pending_plugins.is_empty());
+        assert!(bridge.loading_plugins.is_empty());
+    }
+
+    #[test]
+    fn activation_failed_can_be_released_with_a_terminal_receipt() {
+        let mut bridge = test_bridge(1);
+        let transaction_id = 1013;
+        let ids = bridge
+            .reserve_layout_plugins(transaction_id, vec![local_request(9114)])
+            .unwrap();
+        bridge
+            .layout_plugin_reservations
+            .get_mut(&transaction_id)
+            .unwrap()
+            .state = LayoutPluginTransactionState::ActivationFailed;
+        bridge.plugin_executor.register_plugin(ids[0]);
+
+        assert_eq!(
+            bridge
+                .resolve_layout_plugins(
+                    transaction_id,
+                    LayoutPluginResolution::Release {
+                        reason: "activation enqueue failed".to_owned(),
+                    },
+                    ids.clone(),
+                )
+                .unwrap(),
+            LayoutPluginReceipt::Released {
+                plugin_ids: ids.clone()
+            }
+        );
+        assert!(
+            !bridge
+                .layout_plugin_reservations
+                .contains_key(&transaction_id)
+        );
+        assert!(!bridge.layout_plugin_owners.contains_key(&ids[0]));
+        assert!(!bridge.plugin_executor.has_assignment(ids[0]));
+    }
+
+    #[test]
+    fn async_activation_failure_fully_compensates_and_retires_owner() {
+        let mut bridge = test_bridge(1);
+        let transaction_id = 1014;
+        let ids = bridge
+            .reserve_layout_plugins(transaction_id, vec![local_request(9115)])
+            .unwrap();
+        bridge
+            .layout_plugin_reservations
+            .get_mut(&transaction_id)
+            .unwrap()
+            .state = LayoutPluginTransactionState::Activated;
+        bridge.plugin_executor.register_plugin(ids[0]);
+        bridge
+            .cached_events_for_pending_plugins
+            .insert(ids[0], vec![]);
+        bridge
+            .cached_resizes_for_pending_plugins
+            .insert(ids[0], (10, 20));
+
+        bridge.handle_layout_plugin_activation_failure(
+            transaction_id,
+            ids.clone(),
+            "async loader failed".to_owned(),
+        );
+
+        assert!(
+            !bridge
+                .layout_plugin_reservations
+                .contains_key(&transaction_id)
+        );
+        assert!(!bridge.layout_plugin_owners.contains_key(&ids[0]));
+        assert!(!bridge.plugin_executor.has_assignment(ids[0]));
+        assert!(
+            !bridge
+                .cached_events_for_pending_plugins
+                .contains_key(&ids[0])
+        );
+        assert!(
+            !bridge
+                .cached_resizes_for_pending_plugins
+                .contains_key(&ids[0])
+        );
+        assert_eq!(
+            bridge
+                .resolve_layout_plugins(
+                    transaction_id,
+                    LayoutPluginResolution::Compensate {
+                        reason: "Screen observed PTY rollback".to_owned(),
+                    },
+                    ids.clone(),
+                )
+                .unwrap(),
+            LayoutPluginReceipt::Compensated { plugin_ids: ids }
+        );
+    }
+
+    #[test]
+    fn expected_id_mismatch_is_rejected_without_resolving_reservation() {
+        let mut bridge = test_bridge(1);
+        let ids = bridge
+            .reserve_layout_plugins(1003, vec![local_request(9103)])
+            .unwrap();
+        let error = bridge
+            .resolve_layout_plugins(
+                1003,
+                LayoutPluginResolution::Release {
+                    reason: "mismatch".to_owned(),
+                },
+                vec![99],
+            )
+            .unwrap_err();
+        assert!(error.contains("id conflict"));
+        assert!(bridge.layout_plugin_reservations.contains_key(&1003));
+        assert!(bridge.layout_plugin_receipts.is_empty());
+        assert!(
+            bridge
+                .resolve_layout_plugins(
+                    1003,
+                    LayoutPluginResolution::Release {
+                        reason: "correct retry".to_owned(),
+                    },
+                    ids,
+                )
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn release_by_transaction_recovers_from_a_wrong_hint_and_replays_exact_owner_ids() {
+        let mut bridge = test_bridge(1);
+        let transaction_id = 1019;
+        let ids = bridge
+            .reserve_layout_plugins(
+                transaction_id,
+                vec![local_request(9122), local_request(9123)],
+            )
+            .unwrap();
+        let wrong_external_plugin_hint = vec![u32::MAX];
+
+        assert!(
+            bridge
+                .resolve_layout_plugins(
+                    transaction_id,
+                    LayoutPluginResolution::Release {
+                        reason: "mismatched preparation hint".to_owned(),
+                    },
+                    wrong_external_plugin_hint,
+                )
+                .unwrap_err()
+                .contains("id conflict")
+        );
+
+        let released = bridge
+            .release_layout_plugins_by_transaction(
+                transaction_id,
+                "release exact owner reservation".to_owned(),
+            )
+            .unwrap();
+        assert_eq!(
+            released,
+            LayoutPluginReceipt::Released {
+                plugin_ids: ids.clone()
+            }
+        );
+        assert_eq!(
+            bridge
+                .release_layout_plugins_by_transaction(
+                    transaction_id,
+                    "idempotent replay with a different reason".to_owned(),
+                )
+                .unwrap(),
+            released
+        );
+        assert!(
+            ids.iter()
+                .all(|plugin_id| !bridge.layout_plugin_owners.contains_key(plugin_id))
+        );
+        assert!(
+            !bridge
+                .layout_plugin_reservations
+                .contains_key(&transaction_id)
+        );
+    }
+
+    #[test]
+    fn release_by_transaction_rejects_activated_reservation_without_compensating_it() {
+        let mut bridge = test_bridge(1);
+        let transaction_id = 1020;
+        let ids = bridge
+            .reserve_layout_plugins(transaction_id, vec![local_request(9124)])
+            .unwrap();
+        let cancellation = {
+            let reservation = bridge
+                .layout_plugin_reservations
+                .get_mut(&transaction_id)
+                .unwrap();
+            reservation.state = LayoutPluginTransactionState::Activated;
+            reservation.cancellation.clone()
+        };
+
+        let error = bridge
+            .release_layout_plugins_by_transaction(
+                transaction_id,
+                "preparation failure arrived after activation".to_owned(),
+            )
+            .unwrap_err();
+
+        assert!(error.contains("cannot Release from Activated"));
+        assert!(!cancellation.is_cancelled());
+        assert_eq!(
+            bridge.layout_plugin_owners.get(&ids[0]),
+            Some(&transaction_id)
+        );
+        assert!(
+            bridge
+                .layout_plugin_reservations
+                .contains_key(&transaction_id)
+        );
+        assert!(
+            !bridge
+                .layout_plugin_receipts
+                .contains_key(&(transaction_id, LayoutPluginResolutionKind::Release,))
+        );
+    }
+
+    #[test]
+    fn activate_and_compensate_replay_while_cross_kind_resolution_conflicts() {
+        let mut bridge = test_bridge(1);
+        bridge.reserve_layout_plugins(1008, vec![]).unwrap();
+        let activated = bridge
+            .resolve_layout_plugins(1008, LayoutPluginResolution::Activate, vec![])
+            .unwrap();
+        assert_eq!(
+            bridge
+                .resolve_layout_plugins(1008, LayoutPluginResolution::Activate, vec![])
+                .unwrap(),
+            activated
+        );
+        assert!(
+            !bridge.layout_plugin_reservations.contains_key(&1008),
+            "empty activation must retire its ownerless reservation"
+        );
+        assert!(
+            bridge
+                .resolve_layout_plugins(
+                    1008,
+                    LayoutPluginResolution::Release {
+                        reason: "invalid after activation".to_owned(),
+                    },
+                    vec![],
+                )
+                .unwrap_err()
+                .contains("resolution conflict")
+        );
+        let compensate = LayoutPluginResolution::Compensate {
+            reason: "empty activated transaction".to_owned(),
+        };
+        let compensated = bridge
+            .resolve_layout_plugins(1008, compensate.clone(), vec![])
+            .unwrap();
+        assert_eq!(
+            bridge
+                .resolve_layout_plugins(1008, compensate, vec![])
+                .unwrap(),
+            compensated
+        );
+    }
+
+    #[test]
+    fn receipt_cache_retains_all_kinds_for_512_transactions() {
+        let mut bridge = test_bridge(1);
+        for transaction_id in 1..=513 {
+            bridge
+                .reserve_layout_plugins(transaction_id, vec![])
+                .unwrap();
+            bridge
+                .resolve_layout_plugins(transaction_id, LayoutPluginResolution::Activate, vec![])
+                .unwrap();
+            bridge
+                .resolve_layout_plugins(
+                    transaction_id,
+                    LayoutPluginResolution::Compensate {
+                        reason: "bounded receipt test".to_owned(),
+                    },
+                    vec![],
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            bridge.layout_plugin_receipts.len(),
+            MAX_LAYOUT_PLUGIN_RECEIPT_TRANSACTIONS * 2
+        );
+        assert!(
+            bridge
+                .layout_plugin_receipts
+                .keys()
+                .all(|(transaction_id, _)| transaction_id != &1)
+        );
+    }
+
+    #[test]
+    fn live_activated_reservation_reconstructs_an_evicted_activation_receipt() {
+        let mut bridge = test_bridge(1);
+        let transaction_id = 1016;
+        let ids = bridge
+            .reserve_layout_plugins(transaction_id, vec![local_request(9117)])
+            .unwrap();
+        bridge
+            .layout_plugin_reservations
+            .get_mut(&transaction_id)
+            .unwrap()
+            .state = LayoutPluginTransactionState::Activated;
+        bridge.record_layout_plugin_receipt(
+            transaction_id,
+            LayoutPluginResolutionKind::Activate,
+            LayoutPluginReceipt::Activated {
+                plugin_ids: ids.clone(),
+            },
+        );
+        bridge
+            .layout_plugin_receipts
+            .remove(&(transaction_id, LayoutPluginResolutionKind::Activate));
+
+        assert_eq!(
+            bridge
+                .resolve_layout_plugins(
+                    transaction_id,
+                    LayoutPluginResolution::Activate,
+                    ids.clone(),
+                )
+                .unwrap(),
+            LayoutPluginReceipt::Activated { plugin_ids: ids }
+        );
+        assert!(
+            bridge
+                .layout_plugin_receipts
+                .contains_key(&(transaction_id, LayoutPluginResolutionKind::Activate))
+        );
+    }
+
+    #[test]
+    fn partial_enqueue_failure_rolls_back_only_after_all_work_quiesces() {
+        let mut bridge = test_bridge(1);
+        let ids = bridge
+            .reserve_layout_plugins(1004, vec![local_request(9104), local_request(9105)])
+            .unwrap();
+        let tracker = bridge
+            .layout_plugin_reservations
+            .get(&1004)
+            .unwrap()
+            .tracker
+            .clone();
+        bridge
+            .plugin_executor
+            .reject_next_enqueue_for_plugin(ids[1]);
+
+        let receipt = bridge
+            .resolve_layout_plugins(1004, LayoutPluginResolution::Activate, ids.clone())
+            .unwrap();
+        assert!(matches!(
+            receipt,
+            LayoutPluginReceipt::ActivationRolledBack { .. }
+        ));
+        assert_eq!(tracker.active_count(), 0);
+        assert!(bridge.plugin_map.lock().unwrap().plugin_ids().is_empty());
+        assert!(bridge.cached_events_for_pending_plugins.is_empty());
+        assert!(bridge.loading_plugins.is_empty());
+        assert!(
+            ids.iter()
+                .all(|plugin_id| !bridge.plugin_executor.has_assignment(*plugin_id))
+        );
+        assert!(!bridge.layout_plugin_reservations.contains_key(&1004));
+    }
+
+    #[test]
+    fn compensation_cancels_job_waiting_for_plugin_map_before_loader_starts() {
+        let mut bridge = test_bridge(1);
+        let gate = Arc::new(LayoutPluginLoadTestGate::new());
+        bridge.layout_plugin_test_hooks.before_load_gate = Some(gate.clone());
+        let load_starts = bridge.layout_plugin_test_hooks.load_starts.clone();
+        let ids = bridge
+            .reserve_layout_plugins(1010, vec![local_request(9111)])
+            .unwrap();
+
+        assert!(matches!(
+            bridge
+                .resolve_layout_plugins(1010, LayoutPluginResolution::Activate, ids.clone())
+                .unwrap(),
+            LayoutPluginReceipt::Activated { .. }
+        ));
+        gate.entered.wait();
+        let release_gate = gate.clone();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            release_gate.release.wait();
+        });
+
+        assert_eq!(
+            bridge
+                .resolve_layout_plugins(
+                    1010,
+                    LayoutPluginResolution::Compensate {
+                        reason: "cancel while waiting for plugin map".to_owned(),
+                    },
+                    ids,
+                )
+                .unwrap(),
+            LayoutPluginReceipt::Compensated {
+                plugin_ids: vec![0]
+            }
+        );
+        release.join().unwrap();
+        assert_eq!(
+            load_starts.load(Ordering::SeqCst),
+            0,
+            "cancelled job must re-check its token immediately before PluginLoader"
+        );
+        assert!(bridge.plugin_map.lock().unwrap().plugin_ids().is_empty());
+    }
+
+    #[test]
+    fn ordinary_unload_during_in_flight_activation_removes_all_residue() {
+        let mut bridge = test_bridge(1);
+        let gate = Arc::new(LayoutPluginLoadTestGate::new());
+        bridge.layout_plugin_test_hooks.before_load_gate = Some(gate.clone());
+        let load_starts = bridge.layout_plugin_test_hooks.load_starts.clone();
+        let transaction_id = 1011;
+        let ids = bridge
+            .reserve_layout_plugins(transaction_id, vec![local_request(9112)])
+            .unwrap();
+        let (tracker, plugin_data_dir) = {
+            let reservation = bridge
+                .layout_plugin_reservations
+                .get(&transaction_id)
+                .unwrap();
+            let plugin = &reservation.plugins[0];
+            let loading_context = LoadingContext::new(
+                &bridge,
+                plugin.cwd.clone(),
+                plugin.plugin_config.clone(),
+                plugin.plugin_id,
+                plugin.client_id,
+                plugin.tab_index,
+                plugin.size,
+            );
+            (
+                reservation.tracker.clone(),
+                loading_context.plugin_own_data_dir,
+            )
+        };
+        std::fs::create_dir_all(&plugin_data_dir).unwrap();
+        std::fs::write(plugin_data_dir.join("in-flight-residue"), b"must disappear").unwrap();
+
+        bridge
+            .resolve_layout_plugins(
+                transaction_id,
+                LayoutPluginResolution::Activate,
+                ids.clone(),
+            )
+            .unwrap();
+        gate.entered.wait();
+        let release_gate = gate.clone();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            release_gate.release.wait();
+        });
+
+        bridge.unload_plugin(ids[0]).unwrap();
+
+        release.join().unwrap();
+        assert!(tracker.wait_for_idle(Duration::from_secs(2)));
+        assert_eq!(load_starts.load(Ordering::SeqCst), 0);
+        assert!(!plugin_data_dir.exists());
+        assert!(bridge.plugin_map.lock().unwrap().plugin_ids().is_empty());
+        assert!(bridge.cached_events_for_pending_plugins.is_empty());
+        assert!(bridge.cached_resizes_for_pending_plugins.is_empty());
+        assert!(bridge.cached_worker_messages.is_empty());
+        assert!(bridge.loading_plugins.is_empty());
+        assert!(!bridge.layout_plugin_owners.contains_key(&ids[0]));
+        assert!(
+            !bridge
+                .layout_plugin_reservations
+                .contains_key(&transaction_id)
+        );
+        assert!(!bridge.plugin_executor.has_assignment(ids[0]));
+    }
+
+    #[test]
+    fn full_plugin_self_channel_cannot_block_compensation_quiescence() {
+        let (plugin_sender, plugin_receiver) = zellij_utils::channels::bounded(1);
+        let senders = ThreadSenders {
+            to_plugin: Some(zellij_utils::channels::SenderWithContext::new(
+                plugin_sender,
+            )),
+            ..Default::default()
+        };
+        let mut bridge = test_bridge_with_senders(1, senders);
+        bridge
+            .senders
+            .send_to_plugin(PluginInstruction::Exit)
+            .unwrap();
+        let ids = bridge
+            .reserve_layout_plugins(1012, vec![local_request(9113)])
+            .unwrap();
+        let tracker = bridge
+            .layout_plugin_reservations
+            .get(&1012)
+            .unwrap()
+            .tracker
+            .clone();
+
+        bridge
+            .resolve_layout_plugins(1012, LayoutPluginResolution::Activate, ids.clone())
+            .unwrap();
+        assert!(
+            tracker.wait_for_idle(Duration::from_secs(2)),
+            "tracker must quiesce before a bounded self-send"
+        );
+        let compensation_started = Instant::now();
+        assert!(matches!(
+            bridge
+                .resolve_layout_plugins(
+                    1012,
+                    LayoutPluginResolution::Compensate {
+                        reason: "full self channel".to_owned(),
+                    },
+                    ids,
+                )
+                .unwrap(),
+            LayoutPluginReceipt::Compensated { .. }
+        ));
+        assert!(
+            compensation_started.elapsed() < Duration::from_secs(1),
+            "compensation must not wait for a worker blocked on its own channel"
+        );
+        drop(plugin_receiver);
+    }
+
+    #[test]
+    fn remote_activation_can_be_compensated_without_late_resurrection() {
+        let mut bridge = test_bridge(1);
+        let ids = bridge
+            .reserve_layout_plugins(1005, vec![remote_request(9106)])
+            .unwrap();
+        assert_eq!(
+            bridge
+                .resolve_layout_plugins(1005, LayoutPluginResolution::Activate, ids.clone())
+                .unwrap(),
+            LayoutPluginReceipt::Activated {
+                plugin_ids: ids.clone()
+            }
+        );
+        assert_eq!(
+            bridge
+                .resolve_layout_plugins(
+                    1005,
+                    LayoutPluginResolution::Compensate {
+                        reason: "screen commit failed".to_owned(),
+                    },
+                    ids.clone(),
+                )
+                .unwrap(),
+            LayoutPluginReceipt::Compensated {
+                plugin_ids: ids.clone()
+            }
+        );
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(bridge.plugin_map.lock().unwrap().plugin_ids().is_empty());
+        assert!(
+            ids.iter()
+                .all(|plugin_id| !bridge.plugin_executor.has_assignment(*plugin_id))
+        );
+        assert!(!bridge.layout_plugin_reservations.contains_key(&1005));
+    }
+
+    #[test]
+    fn queued_activation_is_cancelled_before_load_and_never_resurrects() {
+        let mut bridge = test_bridge(1);
+        let blocker = Arc::new(std::sync::Barrier::new(2));
+        let blocker_in_job = blocker.clone();
+        bridge.plugin_executor.register_plugin(999);
+        bridge
+            .plugin_executor
+            .try_execute_for_plugin(999, move |_s, _p, _c, _ca, _e| {
+                blocker_in_job.wait();
+            })
+            .unwrap();
+        for _ in 0..100 {
+            if bridge.plugin_executor.jobs_in_flight_for_plugin(999) == Some(1) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let ids = bridge
+            .reserve_layout_plugins(1007, vec![local_request(9108)])
+            .unwrap();
+        assert!(matches!(
+            bridge
+                .resolve_layout_plugins(1007, LayoutPluginResolution::Activate, ids.clone())
+                .unwrap(),
+            LayoutPluginReceipt::Activated { .. }
+        ));
+        let release_blocker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            blocker.wait();
+        });
+        assert!(matches!(
+            bridge
+                .resolve_layout_plugins(
+                    1007,
+                    LayoutPluginResolution::Compensate {
+                        reason: "cancel queued activation".to_owned(),
+                    },
+                    ids.clone(),
+                )
+                .unwrap(),
+            LayoutPluginReceipt::Compensated { .. }
+        ));
+        release_blocker.join().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(bridge.plugin_map.lock().unwrap().plugin_ids().is_empty());
+        assert!(
+            ids.iter()
+                .all(|plugin_id| !bridge.plugin_executor.has_assignment(*plugin_id))
+        );
+    }
+
+    #[test]
+    fn ordinary_unload_retires_only_its_owner_and_last_owner_retires_transaction() {
+        let mut bridge = test_bridge(1);
+        let transaction_id = 1009;
+        let ids = bridge
+            .reserve_layout_plugins(
+                transaction_id,
+                vec![local_request(9109), local_request(9110)],
+            )
+            .unwrap();
+        let (first_cancellation, sibling_cancellation) = {
+            let reservation = bridge
+                .layout_plugin_reservations
+                .get_mut(&transaction_id)
+                .unwrap();
+            reservation.state = LayoutPluginTransactionState::Activated;
+            (
+                reservation.plugins[0].cancellation.clone(),
+                reservation.plugins[1].cancellation.clone(),
+            )
+        };
+
+        bridge.unload_plugin(ids[0]).unwrap();
+
+        assert!(first_cancellation.is_cancelled());
+        assert!(!sibling_cancellation.is_cancelled());
+        assert!(!bridge.layout_plugin_owners.contains_key(&ids[0]));
+        assert_eq!(
+            bridge.layout_plugin_owners.get(&ids[1]),
+            Some(&transaction_id)
+        );
+        assert!(
+            bridge
+                .layout_plugin_reservations
+                .contains_key(&transaction_id)
+        );
+
+        bridge.unload_plugin(ids[1]).unwrap();
+
+        assert!(sibling_cancellation.is_cancelled());
+        assert!(!bridge.layout_plugin_owners.contains_key(&ids[1]));
+        assert!(
+            !bridge
+                .layout_plugin_reservations
+                .contains_key(&transaction_id)
+        );
+    }
+
+    #[test]
+    fn partial_cleanup_uses_per_plugin_tracker_without_waiting_for_active_sibling() {
+        let mut bridge = test_bridge(1);
+        let owner_transaction_id = 1017;
+        let cleanup_transaction_id = 2106;
+        let ids = bridge
+            .reserve_layout_plugins(
+                owner_transaction_id,
+                vec![local_request(9118), local_request(9119)],
+            )
+            .unwrap();
+        let (
+            target_cancellation,
+            sibling_cancellation,
+            target_tracker,
+            sibling_tracker,
+            group_tracker,
+        ) = {
+            let reservation = bridge
+                .layout_plugin_reservations
+                .get_mut(&owner_transaction_id)
+                .unwrap();
+            reservation.state = LayoutPluginTransactionState::Activated;
+            (
+                reservation.plugins[0].cancellation.clone(),
+                reservation.plugins[1].cancellation.clone(),
+                reservation.plugins[0].activation_tracker.clone(),
+                reservation.plugins[1].activation_tracker.clone(),
+                reservation.tracker.clone(),
+            )
+        };
+        let sibling_plugin_guard = sibling_tracker.begin();
+        let sibling_group_guard = group_tracker.begin();
+
+        let cleanup_started = Instant::now();
+        assert_eq!(
+            bridge
+                .cleanup_layout_plugins(cleanup_transaction_id, vec![ids[0]])
+                .unwrap(),
+            vec![ids[0]]
+        );
+        assert!(
+            cleanup_started.elapsed() < Duration::from_secs(1),
+            "cleanup of one plugin must not wait for an unrelated sibling activation"
+        );
+        assert!(target_cancellation.is_cancelled());
+        assert!(!sibling_cancellation.is_cancelled());
+        assert_eq!(target_tracker.active_count(), 0);
+        assert_eq!(sibling_tracker.active_count(), 1);
+        assert_eq!(group_tracker.active_count(), 1);
+        assert!(!bridge.layout_plugin_owners.contains_key(&ids[0]));
+        assert_eq!(
+            bridge.layout_plugin_owners.get(&ids[1]),
+            Some(&owner_transaction_id)
+        );
+
+        drop(sibling_plugin_guard);
+        drop(sibling_group_guard);
+        bridge.unload_plugin(ids[1]).unwrap();
+        assert!(!bridge.layout_plugin_owners.contains_key(&ids[1]));
+        assert!(
+            !bridge
+                .layout_plugin_reservations
+                .contains_key(&owner_transaction_id)
+        );
+    }
+
+    #[test]
+    fn group_compensation_cancels_and_waits_for_every_plugin_tracker() {
+        let mut bridge = test_bridge(1);
+        let transaction_id = 1018;
+        let ids = bridge
+            .reserve_layout_plugins(
+                transaction_id,
+                vec![local_request(9120), local_request(9121)],
+            )
+            .unwrap();
+        let (group_cancellation, group_tracker, plugin_trackers) = {
+            let reservation = bridge
+                .layout_plugin_reservations
+                .get_mut(&transaction_id)
+                .unwrap();
+            reservation.state = LayoutPluginTransactionState::Activated;
+            (
+                reservation.cancellation.clone(),
+                reservation.tracker.clone(),
+                reservation
+                    .plugins
+                    .iter()
+                    .map(|plugin| plugin.activation_tracker.clone())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let group_guards = (0..ids.len())
+            .map(|_| group_tracker.begin())
+            .collect::<Vec<_>>();
+        let plugin_guards = plugin_trackers
+            .iter()
+            .map(|tracker| tracker.begin())
+            .collect::<Vec<_>>();
+        let cancellation_for_worker = group_cancellation.clone();
+        let release_guards = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while !cancellation_for_worker.is_cancelled() {
+                assert!(
+                    Instant::now() < deadline,
+                    "group compensation never cancelled the active jobs"
+                );
+                std::thread::yield_now();
+            }
+            drop(plugin_guards);
+            drop(group_guards);
+        });
+
+        assert_eq!(
+            bridge
+                .resolve_layout_plugins(
+                    transaction_id,
+                    LayoutPluginResolution::Compensate {
+                        reason: "test whole-group cancellation".to_owned(),
+                    },
+                    ids.clone(),
+                )
+                .unwrap(),
+            LayoutPluginReceipt::Compensated {
+                plugin_ids: ids.clone()
+            }
+        );
+        release_guards.join().unwrap();
+        assert!(group_cancellation.is_cancelled());
+        assert_eq!(group_tracker.active_count(), 0);
+        assert!(
+            plugin_trackers
+                .iter()
+                .all(|tracker| tracker.active_count() == 0)
+        );
+        assert!(
+            ids.iter()
+                .all(|plugin_id| !bridge.layout_plugin_owners.contains_key(plugin_id))
+        );
+        assert!(
+            !bridge
+                .layout_plugin_reservations
+                .contains_key(&transaction_id)
+        );
+    }
+
+    #[test]
+    fn ordinary_unload_enqueue_failure_retains_owner_and_retries_exact_debt() {
+        let mut bridge = test_bridge(1);
+        let transaction_id = 1015;
+        let ids = bridge
+            .reserve_layout_plugins(transaction_id, vec![local_request(9116)])
+            .unwrap();
+        bridge
+            .layout_plugin_reservations
+            .get_mut(&transaction_id)
+            .unwrap()
+            .state = LayoutPluginTransactionState::Activated;
+        bridge.plugin_executor.register_plugin(ids[0]);
+        bridge
+            .plugin_executor
+            .reject_next_enqueue_for_plugin(ids[0]);
+
+        bridge.unload_plugin(ids[0]).unwrap();
+
+        assert_eq!(
+            bridge.layout_plugin_owners.get(&ids[0]),
+            Some(&transaction_id),
+            "an enqueue failure must not retire layout ownership"
+        );
+        assert!(
+            bridge
+                .layout_plugin_reservations
+                .contains_key(&transaction_id)
+        );
+        assert!(bridge.plugin_executor.has_assignment(ids[0]));
+        assert_eq!(bridge.plugin_unload_debts.get(&ids[0]), Some(&1));
+
+        bridge.unload_plugin(ids[0]).unwrap();
+
+        assert!(!bridge.plugin_unload_debts.contains_key(&ids[0]));
+        assert!(!bridge.layout_plugin_owners.contains_key(&ids[0]));
+        assert!(
+            !bridge
+                .layout_plugin_reservations
+                .contains_key(&transaction_id)
+        );
+        assert!(!bridge.plugin_executor.has_assignment(ids[0]));
+    }
+
+    #[test]
+    fn failed_in_flight_load_cancels_group_and_never_publishes_plugin() {
+        let mut bridge = test_bridge(1);
+        let ids = bridge
+            .reserve_layout_plugins(1006, vec![local_request(9107)])
+            .unwrap();
+        let tracker = bridge
+            .layout_plugin_reservations
+            .get(&1006)
+            .unwrap()
+            .tracker
+            .clone();
+        assert!(matches!(
+            bridge
+                .resolve_layout_plugins(1006, LayoutPluginResolution::Activate, ids.clone())
+                .unwrap(),
+            LayoutPluginReceipt::Activated { .. }
+        ));
+        assert!(tracker.wait_for_idle(Duration::from_secs(5)));
+        assert!(bridge.plugin_map.lock().unwrap().plugin_ids().is_empty());
+        assert_eq!(
+            bridge
+                .resolve_layout_plugins(
+                    1006,
+                    LayoutPluginResolution::Compensate {
+                        reason: "load failure cleanup".to_owned(),
+                    },
+                    ids.clone(),
+                )
+                .unwrap(),
+            LayoutPluginReceipt::Compensated {
+                plugin_ids: ids.clone()
+            }
+        );
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(bridge.plugin_map.lock().unwrap().plugin_ids().is_empty());
+    }
 }

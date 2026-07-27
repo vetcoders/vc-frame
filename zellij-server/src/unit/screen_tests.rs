@@ -1,5 +1,6 @@
 use super::{
-    CopyOptions, DurableTabLayoutGeneration, Screen, ScreenInstruction, TabOverrideResult,
+    ActiveLayoutTransaction, CopyOptions, DurableTabLayoutGeneration, LayoutPreparationCleanup,
+    LayoutTabOwner, Screen, ScreenInstruction, ScreenLayoutTransactionKind, TabOverrideResult,
     register_viewer_creation_post_install_test_hook, reject_after_apply_prepare_for_test,
     reserve_durable_tab_layout_recovery, reserve_new_durable_tab_layout_generation,
     screen_thread_main,
@@ -37,13 +38,13 @@ use zellij_utils::run_triage::{BucketKind, ViewerCreationFence, ViewerCreationFe
 use crate::background_jobs::BackgroundJob;
 use crate::os_input_output::AsyncReader;
 use crate::pty_writer::PtyWriteInstruction;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    plugins::PluginInstruction,
-    pty::{ClientTabIndexOrPaneId, LayoutCommitOutcome, PtyInstruction},
+    plugins::{LayoutPluginReceipt, LayoutPluginResolution, PluginInstruction},
+    pty::{ClientTabIndexOrPaneId, LayoutCommitAck, LayoutCommitOutcome, PtyInstruction},
 };
 use zellij_utils::ipc::PixelDimensions;
 
@@ -73,10 +74,49 @@ fn normalize_layout_debug(output: String) -> String {
 }
 
 fn assert_layout_transaction_rejected(
+    plugin_receiver: &Receiver<(PluginInstruction, ErrorContext)>,
     pty_receiver: &Receiver<(PtyInstruction, ErrorContext)>,
     transaction_id: u64,
     writer_resource_ids: &[PaneId],
 ) -> String {
+    let mut writer_plugin_ids = writer_resource_ids
+        .iter()
+        .filter_map(|resource_id| match resource_id {
+            PaneId::Plugin(plugin_id) => Some(*plugin_id),
+            PaneId::Terminal(_) => None,
+        })
+        .collect::<Vec<_>>();
+    writer_plugin_ids.sort_unstable();
+    writer_plugin_ids.dedup();
+    loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("Screen must resolve Plugin before rejecting a layout transaction");
+        if let PluginInstruction::ResolveLayoutPlugins {
+            transaction_id: received_transaction_id,
+            resolution,
+            expected_plugin_ids,
+            ack,
+        } = instruction
+            && received_transaction_id == transaction_id
+        {
+            assert_eq!(
+                expected_plugin_ids, writer_plugin_ids,
+                "Plugin resolution must carry the exact writer-owned plugin ids"
+            );
+            let receipt = match resolution {
+                LayoutPluginResolution::Release { .. } => LayoutPluginReceipt::Released {
+                    plugin_ids: expected_plugin_ids,
+                },
+                unexpected => panic!(
+                    "a Screen-side rejection must Release Plugin reservations before PTY rejection, got {unexpected:?}"
+                ),
+            };
+            ack.send(Ok(receipt))
+                .expect("Screen must retain the Plugin resolution ACK receiver");
+            break;
+        }
+    }
     let writer_resource_ids = writer_resource_ids.iter().copied().collect::<HashSet<_>>();
     loop {
         let (instruction, _) = pty_receiver
@@ -88,7 +128,7 @@ fn assert_layout_transaction_rejected(
                 outcome: LayoutCommitOutcome::Rejected(message),
                 ack,
             } if received_transaction_id == transaction_id => {
-                ack.send(Ok(()))
+                ack.send(Ok(LayoutCommitAck::Resolved))
                     .expect("Screen must retain the PTY rejection ACK receiver");
                 return message;
             },
@@ -97,7 +137,7 @@ fn assert_layout_transaction_rejected(
                 outcome: LayoutCommitOutcome::Committed,
                 ack,
             } if received_transaction_id == transaction_id => {
-                ack.send(Ok(()))
+                ack.send(Ok(LayoutCommitAck::Resolved))
                     .expect("Screen must retain the PTY commit ACK receiver");
                 panic!("rejected layout transaction {transaction_id} was falsely committed")
             },
@@ -115,9 +155,30 @@ fn assert_layout_transaction_rejected(
 }
 
 fn assert_layout_transaction_committed(
+    plugin_receiver: &Receiver<(PluginInstruction, ErrorContext)>,
     pty_receiver: &Receiver<(PtyInstruction, ErrorContext)>,
     transaction_id: u64,
 ) {
+    loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("Screen must resolve Plugin before committing a layout transaction");
+        if let PluginInstruction::ResolveLayoutPlugins {
+            transaction_id: received_transaction_id,
+            resolution,
+            expected_plugin_ids,
+            ack,
+        } = instruction
+            && received_transaction_id == transaction_id
+        {
+            assert_eq!(resolution, LayoutPluginResolution::Activate);
+            ack.send(Ok(LayoutPluginReceipt::Activated {
+                plugin_ids: expected_plugin_ids,
+            }))
+            .expect("Screen must retain the Plugin activation ACK receiver");
+            break;
+        }
+    }
     loop {
         let (instruction, _) = pty_receiver
             .recv_timeout(std::time::Duration::from_secs(1))
@@ -128,7 +189,7 @@ fn assert_layout_transaction_committed(
                 outcome: LayoutCommitOutcome::Committed,
                 ack,
             } if received_transaction_id == transaction_id => {
-                ack.send(Ok(()))
+                ack.send(Ok(LayoutCommitAck::Resolved))
                     .expect("Screen must retain the PTY commit ACK receiver");
                 return;
             },
@@ -137,7 +198,7 @@ fn assert_layout_transaction_committed(
                 outcome: LayoutCommitOutcome::Rejected(message),
                 ack,
             } if received_transaction_id == transaction_id => {
-                ack.send(Ok(()))
+                ack.send(Ok(LayoutCommitAck::Resolved))
                     .expect("Screen must retain the PTY rejection ACK receiver");
                 panic!("layout transaction {transaction_id} was falsely rejected: {message}")
             },
@@ -250,6 +311,10 @@ fn install_transactional_baseline_tab(
         layout_transaction_id,
     ));
     assert_layout_transaction_committed(
+        mock_screen
+            .plugin_receiver
+            .as_ref()
+            .expect("mock Plugin receiver must exist while installing a baseline tab"),
         mock_screen
             .pty_receiver
             .as_ref()
@@ -5095,7 +5160,7 @@ pub fn send_cli_launch_or_focus_plugin_action_when_plugin_is_already_loaded_for_
     );
     let snapshot_count = snapshots.len();
     assert_eq!(
-        snapshot_count, 3,
+        snapshot_count, 2,
         "Another render was sent for focusing the already loaded plugin"
     );
     for (cursor_coordinates, _snapshot) in snapshots.iter().skip(1) {
@@ -5163,6 +5228,7 @@ pub fn screen_can_break_pane_to_a_new_tab() {
     std::thread::sleep(std::time::Duration::from_millis(100)); // give time for the async render
     let screen_thread = mock_screen.run(Some(initial_layout), vec![]);
     std::thread::sleep(std::time::Duration::from_millis(100)); // give time for the async render
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
     let received_server_instructions = Arc::new(Mutex::new(vec![]));
     let server_receiver = mock_screen.server_receiver.take().unwrap();
     let server_thread = log_actions_in_thread!(
@@ -5174,7 +5240,7 @@ pub fn screen_can_break_pane_to_a_new_tab() {
     let _ = mock_screen
         .to_screen
         .send(ScreenInstruction::BreakPane(Default::default(), 1, None));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    let layout_transaction_id = await_new_tab_layout_transaction(&plugin_receiver, 1);
     // we send ApplyLayout, because in prod this is eventually received after the message traverses
     // through the plugin and pty threads (to open extra stuff we need in the layout, eg. the
     // default plugins)
@@ -5190,8 +5256,16 @@ pub fn screen_can_break_pane_to_a_new_tab() {
         None,
         None,
         None,
-        0,
+        layout_transaction_id,
     ));
+    assert_layout_transaction_committed(
+        &plugin_receiver,
+        mock_screen.pty_receiver.as_ref().unwrap(),
+        layout_transaction_id,
+    );
+    // Render delivery is intentionally debounced. Wait for the committed
+    // destination to become observable before issuing the next focus change,
+    // otherwise the debounce may legitimately coalesce both states.
     std::thread::sleep(std::time::Duration::from_millis(100));
     // move back to make sure the other pane is in the previous tab
     let _ = mock_screen
@@ -5305,6 +5379,7 @@ pub fn screen_can_break_floating_pane_to_a_new_tab() {
         layout_transaction_id,
     ));
     assert_layout_transaction_committed(
+        &plugin_receiver,
         mock_screen.pty_receiver.as_ref().unwrap(),
         layout_transaction_id,
     );
@@ -5370,6 +5445,7 @@ pub fn screen_can_break_multiple_stacked_panes_to_a_new_tab() {
     std::thread::sleep(std::time::Duration::from_millis(100)); // give time for the async render
     let screen_thread = mock_screen.run(Some(initial_layout), vec![]);
     std::thread::sleep(std::time::Duration::from_millis(100)); // give time for the async render
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
 
     let received_server_instructions = Arc::new(Mutex::new(vec![]));
     let server_receiver = mock_screen.server_receiver.take().unwrap();
@@ -5389,7 +5465,7 @@ pub fn screen_can_break_multiple_stacked_panes_to_a_new_tab() {
             client_id: 1,
             completion_tx: None,
         });
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    let layout_transaction_id = await_new_tab_layout_transaction(&plugin_receiver, 1);
     // we send ApplyLayout, because in prod this is eventually received after the message traverses
     // through the plugin and pty threads (to open extra stuff we need in the layout, eg. the
     // default plugins)
@@ -5405,8 +5481,13 @@ pub fn screen_can_break_multiple_stacked_panes_to_a_new_tab() {
         None,
         None,
         None,
-        0,
+        layout_transaction_id,
     ));
+    assert_layout_transaction_committed(
+        &plugin_receiver,
+        mock_screen.pty_receiver.as_ref().unwrap(),
+        layout_transaction_id,
+    );
     std::thread::sleep(std::time::Duration::from_millis(100));
     // move back to make sure the other pane is in the previous tab
     let _ = mock_screen
@@ -5450,6 +5531,7 @@ pub fn screen_can_break_plugin_pane_to_a_new_tab() {
             configuration: Default::default(),
             ..Default::default()
         }))),
+        focus: Some(true),
         ..Default::default()
     };
 
@@ -5463,6 +5545,7 @@ pub fn screen_can_break_plugin_pane_to_a_new_tab() {
     std::thread::sleep(std::time::Duration::from_millis(100)); // give time for the async render
     let screen_thread = mock_screen.run(Some(initial_layout), vec![]);
     std::thread::sleep(std::time::Duration::from_millis(100)); // give time for the async render
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
     let received_server_instructions = Arc::new(Mutex::new(vec![]));
     let server_receiver = mock_screen.server_receiver.take().unwrap();
     let server_thread = log_actions_in_thread!(
@@ -5474,7 +5557,43 @@ pub fn screen_can_break_plugin_pane_to_a_new_tab() {
     let _ = mock_screen
         .to_screen
         .send(ScreenInstruction::BreakPane(Default::default(), 1, None));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    let layout_transaction_id = await_new_tab_layout_transaction(&plugin_receiver, 1);
+    let (state_tx, state_rx) = channels::bounded(1);
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::QueryLayoutTransactionStateForTest {
+            transaction_id: layout_transaction_id,
+            response_channel: state_tx,
+        })
+        .unwrap();
+    assert_eq!(
+        state_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap(),
+        (true, false, true),
+        "BreakPane must hide its destination behind the pending layout gate"
+    );
+    // Plugin renders can be blocked for 100ms. Cross that boundary before
+    // activating the destination so the source extraction is observable.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (break_panes, break_tabs) = observable_layout_state(&mock_screen);
+    assert!(
+        break_panes.iter().any(|pane| {
+            pane.tab_id == 0 && pane.pane_info.id == 0 && !pane.pane_info.is_plugin
+        })
+    );
+    assert!(
+        break_panes
+            .iter()
+            .any(|pane| { pane.tab_id == 1 && pane.pane_info.id == 1 && pane.pane_info.is_plugin })
+    );
+    assert!(
+        break_tabs
+            .tabs
+            .iter()
+            .any(|tab| tab.tab_id == 0 && tab.active),
+        "the source tab must remain active until BreakPane commits"
+    );
     // we send ApplyLayout, because in prod this is eventually received after the message traverses
     // through the plugin and pty threads (to open extra stuff we need in the layout, eg. the
     // default plugins)
@@ -5490,19 +5609,39 @@ pub fn screen_can_break_plugin_pane_to_a_new_tab() {
         None,
         None,
         None,
-        0,
+        layout_transaction_id,
     ));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_layout_transaction_committed(
+        &plugin_receiver,
+        mock_screen.pty_receiver.as_ref().unwrap(),
+        layout_transaction_id,
+    );
+    std::thread::sleep(std::time::Duration::from_millis(200));
     // move back to make sure the other pane is in the previous tab
     let _ = mock_screen
         .to_screen
         .send(ScreenInstruction::MoveFocusLeftOrPreviousTab(1, None));
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    // move forward to make sure the broken pane is in the previous tab
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (_, tabs_after_return) = observable_layout_state(&mock_screen);
+    assert!(
+        tabs_after_return
+            .tabs
+            .iter()
+            .any(|tab| tab.tab_id == 0 && tab.active),
+        "moving left from the committed plugin destination must return to the source tab"
+    );
     let _ = mock_screen
         .to_screen
         .send(ScreenInstruction::MoveFocusRightOrNextTab(1, None));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (_, tabs_after_forward) = observable_layout_state(&mock_screen);
+    assert!(
+        tabs_after_forward
+            .tabs
+            .iter()
+            .any(|tab| tab.tab_id == 1 && tab.active),
+        "moving right from the source must return to the committed plugin destination"
+    );
 
     mock_screen.teardown(vec![server_thread, screen_thread]);
 
@@ -5510,11 +5649,22 @@ pub fn screen_can_break_plugin_pane_to_a_new_tab() {
         received_server_instructions.lock().unwrap().iter(),
         size,
     );
-    let snapshot_count = snapshots.len();
-    for (_cursor_coordinates, snapshot) in snapshots {
-        assert_snapshot!(format!("{}", snapshot));
-    }
-    assert_snapshot!(format!("{}", snapshot_count));
+    let rendered_frames = snapshots
+        .into_iter()
+        .map(|(_, snapshot)| snapshot.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        rendered_frames.iter().any(|frame| {
+            frame.contains("pane_to_stay") && !frame.contains("plugin_pane_to_break_free")
+        }),
+        "the render stream must expose the committed source pane without the pending destination"
+    );
+    assert!(
+        rendered_frames.iter().any(|frame| {
+            frame.contains("plugin_pane_to_break_free") && !frame.contains("pane_to_stay")
+        }),
+        "the render stream must expose the committed plugin destination after activation"
+    );
 }
 
 #[test]
@@ -5537,6 +5687,7 @@ pub fn screen_can_break_floating_plugin_pane_to_a_new_tab() {
             configuration: Default::default(),
             ..Default::default()
         }))),
+        focus: Some(true),
         ..Default::default()
     };
 
@@ -5560,6 +5711,53 @@ pub fn screen_can_break_floating_plugin_pane_to_a_new_tab() {
         .to_screen
         .send(ScreenInstruction::BreakPane(Default::default(), 1, None));
     let layout_transaction_id = await_new_tab_layout_transaction(&plugin_receiver, 1);
+    let (state_tx, state_rx) = channels::bounded(1);
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::QueryLayoutTransactionStateForTest {
+            transaction_id: layout_transaction_id,
+            response_channel: state_tx,
+        })
+        .unwrap();
+    assert_eq!(
+        state_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap(),
+        (true, false, true),
+        "floating BreakPane must hide its destination behind the pending layout gate"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (break_panes, break_tabs) = observable_layout_state(&mock_screen);
+    assert!(
+        break_panes.iter().any(|pane| {
+            pane.tab_id == 0 && pane.pane_info.id == 0 && !pane.pane_info.is_plugin
+        })
+    );
+    assert!(
+        break_panes
+            .iter()
+            .any(|pane| { pane.tab_id == 1 && pane.pane_info.id == 1 && pane.pane_info.is_plugin })
+    );
+    assert!(
+        break_tabs
+            .tabs
+            .iter()
+            .any(|tab| tab.tab_id == 0 && tab.active),
+        "the source tab must remain active until floating BreakPane commits"
+    );
+    let precommit_frames = take_snapshots_and_cursor_coordinates_from_render_events(
+        received_server_instructions.lock().unwrap().iter(),
+        size,
+    )
+    .into_iter()
+    .map(|(_, snapshot)| snapshot.to_string())
+    .collect::<Vec<_>>();
+    assert!(
+        !precommit_frames.iter().any(|frame| {
+            frame.contains("floating_plugin_pane_to_eject") && !frame.contains("tiled_pane")
+        }),
+        "the pending floating plugin destination must never render before commit"
+    );
     // we send ApplyLayout, because in prod this is eventually received after the message traverses
     // through the plugin and pty threads (to open extra stuff we need in the layout, eg. the
     // default plugins)
@@ -5579,26 +5777,51 @@ pub fn screen_can_break_floating_plugin_pane_to_a_new_tab() {
         layout_transaction_id,
     ));
     assert_layout_transaction_committed(
+        &plugin_receiver,
         mock_screen.pty_receiver.as_ref().unwrap(),
         layout_transaction_id,
     );
-    let (panes, _) = observable_layout_state(&mock_screen);
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (panes, tabs_after_commit) = observable_layout_state(&mock_screen);
     assert!(
         panes
             .iter()
             .any(|pane| pane.tab_id == 1 && pane.pane_info.is_focused),
         "the committed break destination must focus its moved plugin pane"
     );
+    assert!(
+        tabs_after_commit
+            .tabs
+            .iter()
+            .any(|tab| tab.tab_id == 1 && tab.active),
+        "floating BreakPane must activate its destination only after commit"
+    );
     // move back to make sure the other pane is in the previous tab
     let _ = mock_screen
         .to_screen
         .send(ScreenInstruction::MoveFocusLeftOrPreviousTab(1, None));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (_, tabs_after_return) = observable_layout_state(&mock_screen);
+    assert!(
+        tabs_after_return
+            .tabs
+            .iter()
+            .any(|tab| tab.tab_id == 0 && tab.active),
+        "moving left from the floating plugin destination must return to the source tab"
+    );
     // move forward to make sure the broken pane is in the previous tab
     let _ = mock_screen
         .to_screen
         .send(ScreenInstruction::MoveFocusRightOrNextTab(1, None));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (_, tabs_after_forward) = observable_layout_state(&mock_screen);
+    assert!(
+        tabs_after_forward
+            .tabs
+            .iter()
+            .any(|tab| tab.tab_id == 1 && tab.active),
+        "moving right from the source must return to the floating plugin destination"
+    );
 
     mock_screen.teardown(vec![server_thread, screen_thread]);
 
@@ -5606,11 +5829,22 @@ pub fn screen_can_break_floating_plugin_pane_to_a_new_tab() {
         received_server_instructions.lock().unwrap().iter(),
         size,
     );
-    let snapshot_count = snapshots.len();
-    for (_cursor_coordinates, snapshot) in snapshots {
-        assert_snapshot!(format!("{}", snapshot));
-    }
-    assert_snapshot!(format!("{}", snapshot_count));
+    let rendered_frames = snapshots
+        .into_iter()
+        .map(|(_, snapshot)| snapshot.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        rendered_frames.iter().any(|frame| {
+            frame.contains("tiled_pane") && !frame.contains("floating_plugin_pane_to_eject")
+        }),
+        "the render stream must expose the committed source without the moved floating plugin"
+    );
+    assert!(
+        rendered_frames.iter().any(|frame| {
+            frame.contains("floating_plugin_pane_to_eject") && !frame.contains("tiled_pane")
+        }),
+        "the render stream must expose the committed floating plugin destination"
+    );
 }
 
 #[test]
@@ -5633,6 +5867,7 @@ pub fn screen_can_move_pane_to_a_new_tab_right() {
     initial_layout.children = vec![pane_to_break_free, pane_to_stay];
     let mut mock_screen = MockScreen::new(size);
     let screen_thread = mock_screen.run(Some(initial_layout), vec![]);
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
     let received_server_instructions = Arc::new(Mutex::new(vec![]));
     let server_receiver = mock_screen.server_receiver.take().unwrap();
     let server_thread = log_actions_in_thread!(
@@ -5645,7 +5880,7 @@ pub fn screen_can_move_pane_to_a_new_tab_right() {
         .to_screen
         .send(ScreenInstruction::BreakPane(Default::default(), 1, None));
 
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    let layout_transaction_id = await_new_tab_layout_transaction(&plugin_receiver, 1);
     let _ = mock_screen.to_screen.send(ScreenInstruction::ApplyLayout(
         TiledPaneLayout::default(),
         Default::default(),
@@ -5658,17 +5893,64 @@ pub fn screen_can_move_pane_to_a_new_tab_right() {
         None,
         None,
         None,
-        0,
+        layout_transaction_id,
     ));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_layout_transaction_committed(
+        &plugin_receiver,
+        mock_screen.pty_receiver.as_ref().unwrap(),
+        layout_transaction_id,
+    );
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (panes_after_commit, tabs_after_commit) = observable_layout_state(&mock_screen);
+    assert!(
+        panes_after_commit
+            .iter()
+            .any(|pane| pane.tab_id == 0 && pane.pane_info.id == 1)
+    );
+    assert!(
+        panes_after_commit
+            .iter()
+            .any(|pane| pane.tab_id == 1 && pane.pane_info.id == 0)
+    );
+    assert!(
+        tabs_after_commit
+            .tabs
+            .iter()
+            .any(|tab| tab.tab_id == 1 && tab.active),
+        "the initial transactional break must activate its committed destination"
+    );
     let _ = mock_screen
         .to_screen
         .send(ScreenInstruction::MoveFocusLeftOrPreviousTab(1, None));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (_, tabs_before_move) = observable_layout_state(&mock_screen);
+    assert!(
+        tabs_before_move
+            .tabs
+            .iter()
+            .any(|tab| tab.tab_id == 0 && tab.active),
+        "the source tab must be active before moving its pane right"
+    );
     let _ = mock_screen
         .to_screen
         .send(ScreenInstruction::BreakPaneRight(1, None));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (panes_after_move, tabs_after_move) = observable_layout_state(&mock_screen);
+    assert!(
+        [0, 1].into_iter().all(|pane_id| {
+            panes_after_move
+                .iter()
+                .any(|pane| pane.tab_id == 1 && pane.pane_info.id == pane_id)
+        }),
+        "moving right must place both panes in the adjacent committed tab"
+    );
+    assert!(
+        tabs_after_move
+            .tabs
+            .iter()
+            .any(|tab| tab.tab_id == 1 && tab.active),
+        "moving right must leave the adjacent destination active"
+    );
 
     mock_screen.teardown(vec![server_thread, screen_thread]);
 
@@ -5676,11 +5958,16 @@ pub fn screen_can_move_pane_to_a_new_tab_right() {
         received_server_instructions.lock().unwrap().iter(),
         size,
     );
-    let snapshot_count = snapshots.len();
-    for (_cursor_coordinates, snapshot) in snapshots {
-        assert_snapshot!(format!("{}", snapshot));
-    }
-    assert_snapshot!(format!("{}", snapshot_count));
+    let rendered_frames = snapshots
+        .into_iter()
+        .map(|(_, snapshot)| snapshot.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        rendered_frames.iter().any(|frame| {
+            frame.contains("pane_to_break_free") && frame.contains("pane_to_stay")
+        }),
+        "the render stream must expose both panes in the destination after moving right"
+    );
 }
 
 #[test]
@@ -5703,6 +5990,7 @@ pub fn screen_can_move_pane_to_a_new_tab_left() {
     initial_layout.children = vec![pane_to_break_free, pane_to_stay];
     let mut mock_screen = MockScreen::new(size);
     let screen_thread = mock_screen.run(Some(initial_layout), vec![]);
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
     let received_server_instructions = Arc::new(Mutex::new(vec![]));
     let server_receiver = mock_screen.server_receiver.take().unwrap();
     let server_thread = log_actions_in_thread!(
@@ -5714,6 +6002,7 @@ pub fn screen_can_move_pane_to_a_new_tab_left() {
     let _ = mock_screen
         .to_screen
         .send(ScreenInstruction::BreakPane(Default::default(), 1, None));
+    let layout_transaction_id = await_new_tab_layout_transaction(&plugin_receiver, 1);
     let _ = mock_screen.to_screen.send(ScreenInstruction::ApplyLayout(
         TiledPaneLayout::default(),
         Default::default(),
@@ -5726,17 +6015,64 @@ pub fn screen_can_move_pane_to_a_new_tab_left() {
         None,
         None,
         None,
-        0,
+        layout_transaction_id,
     ));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_layout_transaction_committed(
+        &plugin_receiver,
+        mock_screen.pty_receiver.as_ref().unwrap(),
+        layout_transaction_id,
+    );
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (panes_after_commit, tabs_after_commit) = observable_layout_state(&mock_screen);
+    assert!(
+        panes_after_commit
+            .iter()
+            .any(|pane| pane.tab_id == 0 && pane.pane_info.id == 1)
+    );
+    assert!(
+        panes_after_commit
+            .iter()
+            .any(|pane| pane.tab_id == 1 && pane.pane_info.id == 0)
+    );
+    assert!(
+        tabs_after_commit
+            .tabs
+            .iter()
+            .any(|tab| tab.tab_id == 1 && tab.active),
+        "the initial transactional break must activate its committed destination"
+    );
     let _ = mock_screen
         .to_screen
         .send(ScreenInstruction::MoveFocusLeftOrPreviousTab(1, None));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (_, tabs_before_move) = observable_layout_state(&mock_screen);
+    assert!(
+        tabs_before_move
+            .tabs
+            .iter()
+            .any(|tab| tab.tab_id == 0 && tab.active),
+        "the source tab must be active before moving its pane left"
+    );
     let _ = mock_screen
         .to_screen
         .send(ScreenInstruction::BreakPaneLeft(1, None));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (panes_after_move, tabs_after_move) = observable_layout_state(&mock_screen);
+    assert!(
+        [0, 1].into_iter().all(|pane_id| {
+            panes_after_move
+                .iter()
+                .any(|pane| pane.tab_id == 1 && pane.pane_info.id == pane_id)
+        }),
+        "moving left must place both panes in the adjacent committed tab"
+    );
+    assert!(
+        tabs_after_move
+            .tabs
+            .iter()
+            .any(|tab| tab.tab_id == 1 && tab.active),
+        "moving left must leave the adjacent destination active"
+    );
 
     mock_screen.teardown(vec![server_thread, screen_thread]);
 
@@ -5744,11 +6080,16 @@ pub fn screen_can_move_pane_to_a_new_tab_left() {
         received_server_instructions.lock().unwrap().iter(),
         size,
     );
-    let snapshot_count = snapshots.len();
-    for (_cursor_coordinates, snapshot) in snapshots {
-        assert_snapshot!(format!("{}", snapshot));
-    }
-    assert_snapshot!(format!("{}", snapshot_count));
+    let rendered_frames = snapshots
+        .into_iter()
+        .map(|(_, snapshot)| snapshot.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        rendered_frames.iter().any(|frame| {
+            frame.contains("pane_to_break_free") && frame.contains("pane_to_stay")
+        }),
+        "the render stream must expose both panes in the destination after moving left"
+    );
 }
 
 #[test]
@@ -6243,6 +6584,136 @@ fn await_new_tab_layout_transaction(
     }
 }
 
+fn await_layout_plugin_resolution(
+    plugin_receiver: &Receiver<(PluginInstruction, ErrorContext)>,
+    expected_transaction_id: u64,
+) -> (
+    LayoutPluginResolution,
+    Vec<u32>,
+    channels::Sender<std::result::Result<LayoutPluginReceipt, String>>,
+) {
+    loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .expect("layout Plugin resolution must arrive");
+        if let PluginInstruction::ResolveLayoutPlugins {
+            transaction_id,
+            resolution,
+            expected_plugin_ids,
+            ack,
+        } = instruction
+            && transaction_id == expected_transaction_id
+        {
+            return (resolution, expected_plugin_ids, ack);
+        }
+    }
+}
+
+fn await_layout_plugin_by_owner_release(
+    plugin_receiver: &Receiver<(PluginInstruction, ErrorContext)>,
+    expected_transaction_id: u64,
+) -> (
+    String,
+    channels::Sender<std::result::Result<LayoutPluginReceipt, String>>,
+) {
+    loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .expect("layout Plugin by-owner release must arrive");
+        if let PluginInstruction::ReleaseLayoutPluginsByTransaction {
+            transaction_id,
+            reason,
+            ack,
+        } = instruction
+            && transaction_id == expected_transaction_id
+        {
+            return (reason, ack);
+        }
+    }
+}
+
+fn await_layout_pty_resolution(
+    pty_receiver: &Receiver<(PtyInstruction, ErrorContext)>,
+    expected_transaction_id: u64,
+) -> (
+    LayoutCommitOutcome,
+    channels::Sender<std::result::Result<LayoutCommitAck, String>>,
+) {
+    loop {
+        let (instruction, _) = pty_receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("layout PTY resolution must arrive");
+        if let PtyInstruction::LayoutCommitResolved {
+            transaction_id,
+            outcome,
+            ack,
+        } = instruction
+            && transaction_id == expected_transaction_id
+        {
+            return (outcome, ack);
+        }
+    }
+}
+
+fn dispatch_transactional_new_tab(
+    mock_screen: &MockScreen,
+    plugin_receiver: &Receiver<(PluginInstruction, ErrorContext)>,
+) -> (usize, TiledPaneLayout, u64) {
+    let layout = transactional_baseline_layout();
+    let _ = mock_screen.to_screen.send(ScreenInstruction::NewTab(
+        None,
+        None,
+        Some(layout),
+        vec![],
+        Some("dual-ack-test".to_owned()),
+        (Some(vec![]), Some(vec![])),
+        None,
+        false,
+        false,
+        TabPlacement::Append,
+        (mock_screen.main_client_id, false),
+        None,
+    ));
+    loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("transactional NewTab must reach Plugin");
+        if let PluginInstruction::NewTab(_, _, Some(layout), _, tab_id, transaction_id, ..) =
+            instruction
+        {
+            return (tab_id, layout, transaction_id);
+        }
+    }
+}
+
+fn send_transactional_apply(
+    mock_screen: &MockScreen,
+    tab_id: usize,
+    layout: TiledPaneLayout,
+    transaction_id: u64,
+    terminal_id: u32,
+    plugin_id: u32,
+    completion: Option<NotificationEnd>,
+    blocking_completion: Option<NotificationEnd>,
+) {
+    let plugin =
+        RunPluginOrAlias::from_url("file:/path/to/fake/plugin", &None, None, None).unwrap();
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ApplyLayout(
+        layout,
+        vec![],
+        vec![(terminal_id, None)],
+        vec![],
+        HashMap::from([(plugin, vec![plugin_id])]),
+        tab_id,
+        false,
+        (mock_screen.main_client_id, false),
+        completion,
+        blocking_completion.map(|completion| (terminal_id, completion)),
+        None,
+        transaction_id,
+    ));
+}
+
 fn dispatch_test_fenced_new_tab(
     mock_screen: &MockScreen,
     plugin_receiver: &Receiver<(PluginInstruction, ErrorContext)>,
@@ -6332,6 +6803,886 @@ fn dispatch_test_fenced_recovery(
             );
         }
     }
+}
+
+#[test]
+fn layout_commit_waits_for_plugin_and_retries_the_same_transaction() {
+    let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 20 });
+    let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    let pty_receiver = mock_screen.pty_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+    while pty_receiver.try_recv().is_ok() {}
+
+    let (tab_id, layout, transaction_id) =
+        dispatch_transactional_new_tab(&mock_screen, &plugin_receiver);
+    let (completion_tx, completion_rx) = oneshot::channel();
+    send_transactional_apply(
+        &mock_screen,
+        tab_id,
+        layout,
+        transaction_id,
+        901,
+        902,
+        Some(NotificationEnd::new(completion_tx)),
+        None,
+    );
+
+    let (first_resolution, first_ids, first_ack) =
+        await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+    assert_eq!(first_resolution, LayoutPluginResolution::Activate);
+    assert_eq!(first_ids, vec![902]);
+    if let Ok((
+        PtyInstruction::LayoutCommitResolved {
+            transaction_id: premature_transaction_id,
+            ..
+        },
+        _,
+    )) = pty_receiver.recv_timeout(std::time::Duration::from_millis(100))
+    {
+        assert_ne!(
+            premature_transaction_id, transaction_id,
+            "Screen must not ask PTY to commit before Plugin activation is acknowledged"
+        );
+    }
+
+    drop(first_ack);
+    let (retry_resolution, retry_ids, retry_ack) =
+        await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+    assert_eq!(retry_resolution, first_resolution);
+    assert_eq!(retry_ids, first_ids);
+    retry_ack
+        .send(Ok(LayoutPluginReceipt::Activated {
+            plugin_ids: retry_ids,
+        }))
+        .unwrap();
+
+    let (outcome, pty_ack) = await_layout_pty_resolution(&pty_receiver, transaction_id);
+    assert_eq!(outcome, LayoutCommitOutcome::Committed);
+    pty_ack.send(Ok(LayoutCommitAck::Resolved)).unwrap();
+    let completion = completion_rx
+        .blocking_recv()
+        .expect("dual-ACK commit completion must resolve");
+    assert_eq!(completion.exit_status, None);
+    assert_eq!(completion.error_message, None);
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+fn exact_apply_replay_uses_screen_receipt_without_reactivating_workers() {
+    let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 20 });
+    let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    let pty_receiver = mock_screen.pty_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+    while pty_receiver.try_recv().is_ok() {}
+
+    let (tab_id, layout, transaction_id) =
+        dispatch_transactional_new_tab(&mock_screen, &plugin_receiver);
+    let (completion_tx, completion_rx) = oneshot::channel();
+    send_transactional_apply(
+        &mock_screen,
+        tab_id,
+        layout.clone(),
+        transaction_id,
+        911,
+        912,
+        Some(NotificationEnd::new(completion_tx)),
+        None,
+    );
+    let (resolution, plugin_ids, plugin_ack) =
+        await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+    assert_eq!(resolution, LayoutPluginResolution::Activate);
+    plugin_ack
+        .send(Ok(LayoutPluginReceipt::Activated { plugin_ids }))
+        .unwrap();
+    let (outcome, pty_ack) = await_layout_pty_resolution(&pty_receiver, transaction_id);
+    assert_eq!(outcome, LayoutCommitOutcome::Committed);
+    pty_ack.send(Ok(LayoutCommitAck::Resolved)).unwrap();
+    let first_completion = completion_rx
+        .blocking_recv()
+        .expect("initial completion must resolve");
+    assert_eq!(first_completion.exit_status, None);
+    let committed_state = observable_layout_state(&mock_screen);
+
+    let (replay_tx, replay_rx) = oneshot::channel();
+    send_transactional_apply(
+        &mock_screen,
+        tab_id,
+        layout,
+        transaction_id,
+        911,
+        912,
+        Some(NotificationEnd::new(replay_tx)),
+        None,
+    );
+    let replay_completion = replay_rx
+        .blocking_recv()
+        .expect("exact Screen receipt replay must resolve");
+    assert_eq!(replay_completion.exit_status, None);
+    assert_eq!(replay_completion.affected_tab_id, Some(tab_id));
+    assert_eq!(observable_layout_state(&mock_screen), committed_state);
+
+    let (conflict_tx, conflict_rx) = oneshot::channel();
+    send_transactional_apply(
+        &mock_screen,
+        tab_id,
+        transactional_baseline_layout(),
+        transaction_id,
+        913,
+        912,
+        Some(NotificationEnd::new(conflict_tx)),
+        None,
+    );
+    let conflict = conflict_rx
+        .blocking_recv()
+        .expect("conflicting replay must resolve as failure");
+    assert_eq!(conflict.exit_status, Some(1));
+    assert!(
+        conflict
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("conflicting replay"))
+    );
+    assert_eq!(observable_layout_state(&mock_screen), committed_state);
+
+    while let Ok((instruction, _)) =
+        plugin_receiver.recv_timeout(std::time::Duration::from_millis(100))
+    {
+        assert!(
+            !matches!(
+                instruction,
+                PluginInstruction::ResolveLayoutPlugins {
+                    transaction_id: replayed_transaction_id,
+                    ..
+                } if replayed_transaction_id == transaction_id
+            ),
+            "exact Screen receipt replay must not reactivate Plugin"
+        );
+    }
+    while let Ok((instruction, _)) =
+        pty_receiver.recv_timeout(std::time::Duration::from_millis(100))
+    {
+        assert!(
+            !matches!(
+                instruction,
+                PtyInstruction::LayoutCommitResolved {
+                    transaction_id: replayed_transaction_id,
+                    ..
+                } if replayed_transaction_id == transaction_id
+            ),
+            "exact Screen receipt replay must not re-resolve PTY"
+        );
+    }
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+fn unknown_pty_commit_ack_reconciles_exactly_and_releases_screen_owner() {
+    let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 20 });
+    let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    let pty_receiver = mock_screen.pty_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+    while pty_receiver.try_recv().is_ok() {}
+
+    let (tab_id, layout, transaction_id) =
+        dispatch_transactional_new_tab(&mock_screen, &plugin_receiver);
+    let (completion_tx, completion_rx) = oneshot::channel();
+    let (blocking_tx, blocking_rx) = oneshot::channel();
+    send_transactional_apply(
+        &mock_screen,
+        tab_id,
+        layout.clone(),
+        transaction_id,
+        911,
+        912,
+        Some(NotificationEnd::new(completion_tx)),
+        Some(NotificationEnd::new(blocking_tx)),
+    );
+
+    let (resolution, plugin_ids, plugin_ack) =
+        await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+    assert_eq!(resolution, LayoutPluginResolution::Activate);
+    assert_eq!(plugin_ids, vec![912]);
+    plugin_ack
+        .send(Ok(LayoutPluginReceipt::Activated {
+            plugin_ids: plugin_ids.clone(),
+        }))
+        .unwrap();
+
+    let (first_outcome, first_pty_ack) = await_layout_pty_resolution(&pty_receiver, transaction_id);
+    assert_eq!(first_outcome, LayoutCommitOutcome::Committed);
+    drop(first_pty_ack);
+    let (retry_outcome, retry_pty_ack) = await_layout_pty_resolution(&pty_receiver, transaction_id);
+    assert_eq!(retry_outcome, first_outcome);
+    drop(retry_pty_ack);
+
+    let direct_failure = await_layout_failure(completion_rx);
+    assert!(direct_failure.contains("PTY commit remained unknown"));
+    let blocking_failure = await_layout_failure(blocking_rx);
+    assert!(blocking_failure.contains("PTY commit remained unknown"));
+
+    let (state_tx, state_rx) = channels::bounded(1);
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::QueryLayoutTransactionStateForTest {
+            transaction_id,
+            response_channel: state_tx,
+        })
+        .unwrap();
+    assert_eq!(
+        state_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap(),
+        (true, true, false),
+        "an unknown external commit must retain both owners without wedging the pending gate"
+    );
+
+    let (panes, tabs) = observable_layout_state(&mock_screen);
+    assert!(
+        panes.iter().any(|pane| {
+            pane.tab_id == tab_id && pane.pane_info.id == 911 && !pane.pane_info.is_plugin
+        }),
+        "unknown PTY outcome must not fake-rollback the prepared terminal"
+    );
+    assert!(
+        panes.iter().any(|pane| {
+            pane.tab_id == tab_id && pane.pane_info.id == 912 && pane.pane_info.is_plugin
+        }),
+        "unknown PTY outcome must preserve the activated plugin resource"
+    );
+    assert!(
+        tabs.tabs.iter().any(|tab| tab.tab_id == tab_id),
+        "unknown PTY outcome must preserve the exact owned tab topology"
+    );
+
+    let (replay_resolution, replay_plugin_ids, replay_plugin_ack) =
+        await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+    assert_eq!(replay_resolution, LayoutPluginResolution::Activate);
+    assert_eq!(replay_plugin_ids, plugin_ids);
+    replay_plugin_ack
+        .send(Ok(LayoutPluginReceipt::Activated {
+            plugin_ids: replay_plugin_ids,
+        }))
+        .unwrap();
+    let (replayed_outcome, replayed_pty_ack) =
+        await_layout_pty_resolution(&pty_receiver, transaction_id);
+    assert_eq!(replayed_outcome, LayoutCommitOutcome::Committed);
+    replayed_pty_ack
+        .send(Ok(LayoutCommitAck::Resolved))
+        .unwrap();
+
+    let reconciliation_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let (state_tx, state_rx) = channels::bounded(1);
+        mock_screen
+            .to_screen
+            .send(ScreenInstruction::QueryLayoutTransactionStateForTest {
+                transaction_id,
+                response_channel: state_tx,
+            })
+            .unwrap();
+        let state = state_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        if state == (false, false, false) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < reconciliation_deadline,
+            "exact background receipts must retire both the active owner and indeterminate prepared topology, got {state:?}"
+        );
+    }
+
+    let (replay_completion_tx, replay_completion_rx) = oneshot::channel();
+    send_transactional_apply(
+        &mock_screen,
+        tab_id,
+        layout,
+        transaction_id,
+        911,
+        912,
+        Some(NotificationEnd::new(replay_completion_tx)),
+        None,
+    );
+    let replay_completion = replay_completion_rx
+        .blocking_recv()
+        .expect("resolved Screen receipt replay must complete");
+    assert_eq!(replay_completion.exit_status, None);
+    assert_eq!(replay_completion.error_message, None);
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+fn unknown_preprepare_rejection_reconciles_without_losing_resolution_owner() {
+    let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 20 });
+    let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
+    let baseline = observable_layout_state(&mock_screen);
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    let pty_receiver = mock_screen.pty_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+    while pty_receiver.try_recv().is_ok() {}
+
+    let (tab_id, layout, transaction_id) =
+        dispatch_transactional_new_tab(&mock_screen, &plugin_receiver);
+    let (deferred_move_tx, deferred_move_rx) = oneshot::channel();
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::MoveTabWithTabId(
+            tab_id,
+            Direction::Left,
+            Some(NotificationEnd::new(deferred_move_tx)),
+        ))
+        .unwrap();
+    let duplicate_terminal_id = 919;
+    let (completion_tx, completion_rx) = oneshot::channel();
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::ApplyLayout(
+            layout,
+            vec![],
+            vec![(duplicate_terminal_id, None), (duplicate_terminal_id, None)],
+            vec![],
+            HashMap::new(),
+            tab_id,
+            false,
+            (1, false),
+            Some(NotificationEnd::new(completion_tx)),
+            None,
+            None,
+            transaction_id,
+        ))
+        .unwrap();
+
+    for _ in 0..2 {
+        let (resolution, plugin_ids, ack) =
+            await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+        assert!(matches!(resolution, LayoutPluginResolution::Release { .. }));
+        assert!(plugin_ids.is_empty());
+        drop(ack);
+    }
+    let direct_failure = await_layout_failure(completion_rx);
+    assert!(direct_failure.contains("duplicate Apply resource ids"));
+    assert!(direct_failure.contains("Plugin release remained unknown"));
+    let deferred_move_completion = deferred_move_rx
+        .blocking_recv()
+        .expect("retiring the pending gate must replay and complete queued tab events");
+    assert_eq!(deferred_move_completion.exit_status, None);
+    assert_eq!(deferred_move_completion.error_message, None);
+
+    let (state_tx, state_rx) = channels::bounded(1);
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::QueryLayoutTransactionStateForTest {
+            transaction_id,
+            response_channel: state_tx,
+        })
+        .unwrap();
+    assert_eq!(
+        state_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap(),
+        (true, true, false),
+        "a rejection that loses ACK before local prepare must retain a resolution-only owner without wedging the pending gate"
+    );
+
+    let (resolution, plugin_ids, plugin_ack) =
+        await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+    assert!(matches!(resolution, LayoutPluginResolution::Release { .. }));
+    assert!(plugin_ids.is_empty());
+    plugin_ack
+        .send(Ok(LayoutPluginReceipt::Released { plugin_ids }))
+        .unwrap();
+    let (outcome, pty_ack) = await_layout_pty_resolution(&pty_receiver, transaction_id);
+    assert!(matches!(
+        outcome,
+        LayoutCommitOutcome::Rejected(ref message)
+            if message.contains("duplicate Apply resource ids")
+    ));
+    pty_ack.send(Ok(LayoutCommitAck::Resolved)).unwrap();
+
+    let reconciliation_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let (state_tx, state_rx) = channels::bounded(1);
+        mock_screen
+            .to_screen
+            .send(ScreenInstruction::QueryLayoutTransactionStateForTest {
+                transaction_id,
+                response_channel: state_tx,
+            })
+            .unwrap();
+        let state = state_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        if state == (false, false, false) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < reconciliation_deadline,
+            "background rejection receipts must retire the resolution-only owner, got {state:?}"
+        );
+    }
+    assert_eq!(
+        observable_layout_state(&mock_screen),
+        baseline,
+        "reconciled preprepare rejection must discard the pending tab without mutating baseline topology"
+    );
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+fn pty_activation_rollback_compensates_plugins_before_screen_rollback() {
+    let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 20 });
+    let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
+    let baseline = observable_layout_state(&mock_screen);
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    let pty_receiver = mock_screen.pty_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+    while pty_receiver.try_recv().is_ok() {}
+
+    let (tab_id, layout, transaction_id) =
+        dispatch_transactional_new_tab(&mock_screen, &plugin_receiver);
+    let (completion_tx, completion_rx) = oneshot::channel();
+    send_transactional_apply(
+        &mock_screen,
+        tab_id,
+        layout,
+        transaction_id,
+        921,
+        922,
+        Some(NotificationEnd::new(completion_tx)),
+        None,
+    );
+
+    let (resolution, plugin_ids, plugin_ack) =
+        await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+    assert_eq!(resolution, LayoutPluginResolution::Activate);
+    assert_eq!(plugin_ids, vec![922]);
+    plugin_ack
+        .send(Ok(LayoutPluginReceipt::Activated {
+            plugin_ids: plugin_ids.clone(),
+        }))
+        .unwrap();
+    let (outcome, pty_ack) = await_layout_pty_resolution(&pty_receiver, transaction_id);
+    assert_eq!(outcome, LayoutCommitOutcome::Committed);
+    pty_ack
+        .send(Ok(LayoutCommitAck::ActivationRolledBack(
+            "injected PTY activation failure".to_owned(),
+        )))
+        .unwrap();
+
+    let (compensation, compensation_ids, compensation_ack) =
+        await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+    assert!(matches!(
+        compensation,
+        LayoutPluginResolution::Compensate { .. }
+    ));
+    assert_eq!(compensation_ids, plugin_ids);
+    compensation_ack
+        .send(Ok(LayoutPluginReceipt::Compensated {
+            plugin_ids: compensation_ids,
+        }))
+        .unwrap();
+
+    let failure = await_layout_failure(completion_rx);
+    assert!(failure.contains("PTY activation rolled back"));
+    assert_eq!(
+        observable_layout_state(&mock_screen),
+        baseline,
+        "Screen may rollback only after exact Plugin compensation is certified"
+    );
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+fn plugin_activation_rollback_rejects_pty_before_screen_rollback() {
+    let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 20 });
+    let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
+    let baseline = observable_layout_state(&mock_screen);
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    let pty_receiver = mock_screen.pty_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+    while pty_receiver.try_recv().is_ok() {}
+
+    let (tab_id, layout, transaction_id) =
+        dispatch_transactional_new_tab(&mock_screen, &plugin_receiver);
+    let (completion_tx, completion_rx) = oneshot::channel();
+    send_transactional_apply(
+        &mock_screen,
+        tab_id,
+        layout,
+        transaction_id,
+        931,
+        932,
+        Some(NotificationEnd::new(completion_tx)),
+        None,
+    );
+
+    let (resolution, plugin_ids, plugin_ack) =
+        await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+    assert_eq!(resolution, LayoutPluginResolution::Activate);
+    assert_eq!(plugin_ids, vec![932]);
+    plugin_ack
+        .send(Ok(LayoutPluginReceipt::ActivationRolledBack {
+            plugin_ids,
+            message: "injected Plugin activation failure".to_owned(),
+        }))
+        .unwrap();
+
+    let (outcome, pty_ack) = await_layout_pty_resolution(&pty_receiver, transaction_id);
+    assert!(
+        matches!(
+            outcome,
+            LayoutCommitOutcome::Rejected(ref message)
+                if message.contains("Plugin activation rolled back")
+        ),
+        "Plugin rollback must be durably mirrored as a PTY rejection: {outcome:?}"
+    );
+    pty_ack.send(Ok(LayoutCommitAck::Resolved)).unwrap();
+    let failure = await_layout_failure(completion_rx);
+    assert!(failure.contains("Plugin activation rolled back"));
+    assert_eq!(
+        observable_layout_state(&mock_screen),
+        baseline,
+        "Screen may rollback only after Plugin rollback and PTY rejection are both certified"
+    );
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+fn multi_tab_override_activates_the_exact_plugin_union() {
+    let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 20 });
+    let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
+    install_transactional_baseline_tab(&mock_screen, 1, 10, 11);
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    let pty_receiver = mock_screen.pty_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+    while pty_receiver.try_recv().is_ok() {}
+
+    let first_plugin =
+        RunPluginOrAlias::from_url("file:/override-union-first.wasm", &None, None, None).unwrap();
+    let second_plugin =
+        RunPluginOrAlias::from_url("file:/override-union-second.wasm", &None, None, None).unwrap();
+    let make_layout = |tab_index, plugin: RunPluginOrAlias| TabLayoutInfo {
+        tab_index,
+        tab_name: None,
+        tiled_layout: TiledPaneLayout {
+            run: Some(Run::Plugin(plugin)),
+            ..Default::default()
+        },
+        floating_layouts: vec![],
+        swap_tiled_layouts: Some(vec![]),
+        swap_floating_layouts: Some(vec![]),
+    };
+    let (completion_tx, completion_rx) = oneshot::channel();
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::OverrideLayout(
+            None,
+            None,
+            vec![
+                make_layout(0, first_plugin.clone()),
+                make_layout(1, second_plugin.clone()),
+            ],
+            true,
+            true,
+            false,
+            mock_screen.main_client_id,
+            Some(NotificationEnd::new(completion_tx)),
+        ))
+        .unwrap();
+    let (
+        processed_layouts,
+        transaction_id,
+        retain_terminals,
+        retain_plugins,
+        client_id,
+        completion,
+    ) = loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("Override must reach Plugin");
+        if let PluginInstruction::OverrideLayout(
+            _,
+            _,
+            processed_layouts,
+            transaction_id,
+            retain_terminals,
+            retain_plugins,
+            client_id,
+            completion,
+            None,
+        ) = instruction
+        {
+            break (
+                processed_layouts,
+                transaction_id,
+                retain_terminals,
+                retain_plugins,
+                client_id,
+                completion,
+            );
+        }
+    };
+    let override_results = processed_layouts
+        .into_iter()
+        .map(|layout| {
+            let (plugin, plugin_id) = if layout.tab_index == 0 {
+                (first_plugin.clone(), 952)
+            } else {
+                (second_plugin.clone(), 951)
+            };
+            TabOverrideResult {
+                tab_index: layout.tab_index,
+                tab_name: layout.tab_name,
+                tiled_layout: layout.tiled_layout,
+                floating_layouts: layout.floating_layouts,
+                swap_tiled_layouts: layout.swap_tiled_layouts,
+                swap_floating_layouts: layout.swap_floating_layouts,
+                new_terminal_pids: vec![],
+                new_floating_pane_pids: vec![],
+                plugin_ids: HashMap::from([(plugin, vec![plugin_id])]),
+            }
+        })
+        .collect();
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::OverrideLayoutComplete(
+            override_results,
+            retain_terminals,
+            retain_plugins,
+            client_id,
+            completion,
+            None,
+            transaction_id,
+        ))
+        .unwrap();
+
+    let (resolution, plugin_ids, plugin_ack) =
+        await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+    assert_eq!(resolution, LayoutPluginResolution::Activate);
+    assert_eq!(
+        plugin_ids,
+        vec![951, 952],
+        "Override must activate the sorted exact union across every target tab"
+    );
+    plugin_ack
+        .send(Ok(LayoutPluginReceipt::Activated {
+            plugin_ids: plugin_ids.clone(),
+        }))
+        .unwrap();
+    let (outcome, pty_ack) = await_layout_pty_resolution(&pty_receiver, transaction_id);
+    assert_eq!(outcome, LayoutCommitOutcome::Committed);
+    pty_ack.send(Ok(LayoutCommitAck::Resolved)).unwrap();
+    let completion = completion_rx
+        .blocking_recv()
+        .expect("Override dual-ACK completion must resolve");
+    assert_eq!(completion.exit_status, None);
+    assert_eq!(completion.error_message, None);
+
+    let (panes, _) = observable_layout_state(&mock_screen);
+    assert!(
+        panes
+            .iter()
+            .any(|pane| pane.pane_info.is_plugin && pane.pane_info.id == 951)
+    );
+    assert!(
+        panes
+            .iter()
+            .any(|pane| pane.pane_info.is_plugin && pane.pane_info.id == 952)
+    );
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+fn override_lost_ack_keeps_existing_tab_render_fenced_and_name_deferred() {
+    let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 20 });
+    let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
+    let (_, baseline_tabs) = observable_layout_state(&mock_screen);
+    let baseline_name = baseline_tabs.tabs[0].name.clone();
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    let pty_receiver = mock_screen.pty_receiver.take().unwrap();
+    let server_receiver = mock_screen.server_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+    while pty_receiver.try_recv().is_ok() {}
+    while server_receiver.try_recv().is_ok() {}
+
+    let deferred_name = "visible-only-after-dual-ack".to_owned();
+    let (completion_tx, completion_rx) = oneshot::channel();
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::OverrideLayout(
+            None,
+            None,
+            vec![TabLayoutInfo {
+                tab_index: 0,
+                tab_name: Some(deferred_name.clone()),
+                tiled_layout: TiledPaneLayout::default(),
+                floating_layouts: vec![],
+                swap_tiled_layouts: Some(vec![]),
+                swap_floating_layouts: Some(vec![]),
+            }],
+            true,
+            true,
+            false,
+            mock_screen.main_client_id,
+            Some(NotificationEnd::new(completion_tx)),
+        ))
+        .unwrap();
+    let (
+        mut processed_layouts,
+        transaction_id,
+        retain_terminals,
+        retain_plugins,
+        client_id,
+        completion,
+    ) = loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("Override must reach Plugin");
+        if let PluginInstruction::OverrideLayout(
+            _,
+            _,
+            processed_layouts,
+            transaction_id,
+            retain_terminals,
+            retain_plugins,
+            client_id,
+            completion,
+            None,
+        ) = instruction
+        {
+            break (
+                processed_layouts,
+                transaction_id,
+                retain_terminals,
+                retain_plugins,
+                client_id,
+                completion,
+            );
+        }
+    };
+    let processed = processed_layouts.pop().unwrap();
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::OverrideLayoutComplete(
+            vec![TabOverrideResult {
+                tab_index: processed.tab_index,
+                tab_name: processed.tab_name,
+                tiled_layout: processed.tiled_layout,
+                floating_layouts: processed.floating_layouts,
+                swap_tiled_layouts: processed.swap_tiled_layouts,
+                swap_floating_layouts: processed.swap_floating_layouts,
+                new_terminal_pids: vec![],
+                new_floating_pane_pids: vec![],
+                plugin_ids: HashMap::new(),
+            }],
+            retain_terminals,
+            retain_plugins,
+            client_id,
+            completion,
+            None,
+            transaction_id,
+        ))
+        .unwrap();
+
+    for _ in 0..2 {
+        let (resolution, plugin_ids, ack) =
+            await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+        assert_eq!(resolution, LayoutPluginResolution::Activate);
+        assert!(plugin_ids.is_empty());
+        drop(ack);
+    }
+    assert!(
+        await_layout_failure(completion_rx).contains("remained unknown"),
+        "the direct completion must report the lost Plugin ACK"
+    );
+
+    let (state_tx, state_rx) = channels::bounded(1);
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::QueryLayoutTransactionStateForTest {
+            transaction_id,
+            response_channel: state_tx,
+        })
+        .unwrap();
+    assert_eq!(
+        state_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap(),
+        (true, true, true),
+        "indeterminate Override must retain its active owner, prepared state and render fence"
+    );
+    let (_, fenced_tabs) = observable_layout_state(&mock_screen);
+    assert_eq!(
+        fenced_tabs.tabs[0].name, baseline_name,
+        "the new tab name must remain invisible before Plugin and PTY ACK"
+    );
+    while server_receiver.try_recv().is_ok() {}
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::RenderToClients)
+        .unwrap();
+    let (render_barrier_tx, render_barrier_rx) = channels::bounded(1);
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::QueryLayoutTransactionStateForTest {
+            transaction_id,
+            response_channel: render_barrier_tx,
+        })
+        .unwrap();
+    render_barrier_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .unwrap();
+    assert_no_rejected_layout_render(&server_receiver);
+
+    let (resolution, plugin_ids, plugin_ack) =
+        await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+    assert_eq!(resolution, LayoutPluginResolution::Activate);
+    assert!(plugin_ids.is_empty());
+    plugin_ack
+        .send(Ok(LayoutPluginReceipt::Activated { plugin_ids }))
+        .unwrap();
+    let (outcome, pty_ack) = await_layout_pty_resolution(&pty_receiver, transaction_id);
+    assert_eq!(outcome, LayoutCommitOutcome::Committed);
+    pty_ack.send(Ok(LayoutCommitAck::Resolved)).unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let (state_tx, state_rx) = channels::bounded(1);
+        mock_screen
+            .to_screen
+            .send(ScreenInstruction::QueryLayoutTransactionStateForTest {
+                transaction_id,
+                response_channel: state_tx,
+            })
+            .unwrap();
+        let state = state_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        if state == (false, false, false) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "dual ACK replay must retire Override owner and fence, got {state:?}"
+        );
+    }
+    let (_, committed_tabs) = observable_layout_state(&mock_screen);
+    assert_eq!(
+        committed_tabs.tabs[0].name, deferred_name,
+        "the deferred tab name must become visible only after exact commit"
+    );
+
+    mock_screen.teardown(vec![screen_thread]);
 }
 
 #[test]
@@ -6541,7 +7892,7 @@ pub fn missing_apply_target_rejects_transaction_without_direct_writer_cleanup() 
 }
 
 #[test]
-pub fn mismatched_preparation_failure_retires_owner_and_unblocks_pending_gate() {
+pub fn mismatched_preparation_failure_reconciles_exact_worker_owners() {
     let size = Size { cols: 80, rows: 20 };
     let mut mock_screen = MockScreen::new(size);
     let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
@@ -6581,82 +7932,392 @@ pub fn mismatched_preparation_failure_retires_owner_and_unblocks_pending_gate() 
             completion_tx: Some(NotificationEnd::new(failure_tx)),
             layout_generation: None,
             message: "injected mismatched preparation failure".to_owned(),
+            cleanup: LayoutPreparationCleanup::ReleasePluginReservation {
+                plugin_ids: vec![991],
+                pty_cleanup_succeeded: true,
+            },
         });
     assert!(
         await_layout_failure(failure_rx).contains("mismatched preparation failure"),
         "mismatched terminal result must fail its direct completion"
     );
 
-    // A late Apply for the same ID now has to be rejected as unknown. This is
-    // the observable proof that the mismatched result retired the registry
-    // owner rather than leaking it forever.
-    let (late_tx, late_rx) = oneshot::channel();
-    let _ = mock_screen.to_screen.send(ScreenInstruction::ApplyLayout(
-        TiledPaneLayout::default(),
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        quarantined_tab_id,
-        false,
-        (1, false),
-        Some(NotificationEnd::new(late_tx)),
-        None,
-        None,
-        mismatched_transaction_id,
-    ));
-    let late_rejection =
-        assert_layout_transaction_rejected(&pty_receiver, mismatched_transaction_id, &[]);
-    assert!(late_rejection.contains("unknown or already resolved"));
-    assert!(await_layout_failure(late_rx).contains("unknown or already resolved"));
-
-    // A fresh transaction must still be able to finish its requested focus
-    // switch. If the old pending gate leaked, this switch would remain queued.
-    let _ = mock_screen.to_screen.send(ScreenInstruction::NewTab(
-        None,
-        None,
-        Some(TiledPaneLayout::default()),
-        vec![],
-        Some("fresh-after-mismatch".to_owned()),
-        (Some(vec![]), Some(vec![])),
-        None,
-        false,
-        true,
-        TabPlacement::Append,
-        (1, false),
-        None,
-    ));
-    let (fresh_layout, fresh_tab_id, fresh_transaction_id) = loop {
-        let (instruction, _) = plugin_receiver
+    let (state_tx, state_rx) = channels::bounded(1);
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::QueryLayoutTransactionStateForTest {
+            transaction_id: mismatched_transaction_id,
+            response_channel: state_tx,
+        })
+        .unwrap();
+    assert_eq!(
+        state_rx
             .recv_timeout(std::time::Duration::from_secs(1))
-            .expect("fresh NewTab must reach Plugin");
-        if let PluginInstruction::NewTab(_, _, Some(layout), _, tab_id, transaction_id, ..) =
-            instruction
-        {
-            break (layout, tab_id, transaction_id);
+            .unwrap(),
+        (true, true, true),
+        "mismatched metadata must retain ownership and its visibility fence until exact workers reject it"
+    );
+
+    let (release_reason, plugin_ack) =
+        await_layout_plugin_by_owner_release(&plugin_receiver, mismatched_transaction_id);
+    assert!(release_reason.contains("mismatched preparation failure"));
+    plugin_ack
+        .send(Ok(LayoutPluginReceipt::Released {
+            plugin_ids: vec![741, 742],
+        }))
+        .unwrap();
+    let (outcome, pty_ack) = await_layout_pty_resolution(&pty_receiver, mismatched_transaction_id);
+    assert!(
+        matches!(outcome, LayoutCommitOutcome::Rejected(ref reason) if reason.contains("mismatched preparation failure"))
+    );
+    pty_ack.send(Ok(LayoutCommitAck::Resolved)).unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let (state_tx, state_rx) = channels::bounded(1);
+        mock_screen
+            .to_screen
+            .send(ScreenInstruction::QueryLayoutTransactionStateForTest {
+                transaction_id: mismatched_transaction_id,
+                response_channel: state_tx,
+            })
+            .unwrap();
+        let state = state_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        if state == (false, false, false) {
+            break;
         }
-    };
-    let _ = mock_screen.to_screen.send(ScreenInstruction::ApplyLayout(
-        fresh_layout,
-        vec![],
-        vec![(777, None)],
-        vec![],
-        HashMap::new(),
-        fresh_tab_id,
-        true,
-        (1, false),
-        None,
-        None,
-        None,
-        fresh_transaction_id,
-    ));
-    assert_layout_transaction_committed(&pty_receiver, fresh_transaction_id);
+        assert!(
+            std::time::Instant::now() < deadline,
+            "exact Plugin and PTY rejection must retire every Screen owner and gate, got {state:?}"
+        );
+    }
     let (_, tabs) = observable_layout_state(&mock_screen);
     assert!(
-        tabs.tabs
-            .iter()
-            .any(|tab| tab.tab_id == fresh_tab_id && tab.active),
-        "fresh committed tab focus was blocked by a leaked pending transaction"
+        tabs.tabs.iter().all(|tab| tab.tab_id != quarantined_tab_id),
+        "the rejected pending tab must be discarded after exact worker ACKs"
+    );
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+pub fn new_tab_pty_preparation_failure_releases_exact_plugins_before_retiring_owner() {
+    let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 20 });
+    let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+
+    let (completion_tx, completion_rx) = oneshot::channel();
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::NewTab(
+            None,
+            None,
+            Some(TiledPaneLayout::default()),
+            vec![],
+            Some("pty-preparation-failure".to_owned()),
+            (Some(vec![]), Some(vec![])),
+            None,
+            false,
+            false,
+            TabPlacement::Append,
+            (1, false),
+            Some(NotificationEnd::new(completion_tx)),
+        ))
+        .unwrap();
+    let (tab_id, transaction_id, forwarded_completion) = loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("NewTab must reach Plugin");
+        if let PluginInstruction::NewTab(
+            _,
+            _,
+            _,
+            _,
+            tab_id,
+            transaction_id,
+            _,
+            _,
+            _,
+            _,
+            completion,
+            _,
+        ) = instruction
+        {
+            break (tab_id, transaction_id, completion);
+        }
+    };
+
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::LayoutPreparationFailed {
+            transaction_id,
+            tab_id: Some(tab_id),
+            completion_tx: forwarded_completion,
+            layout_generation: None,
+            message: "injected PTY preparation failure".to_owned(),
+            cleanup: LayoutPreparationCleanup::ReleasePluginReservation {
+                plugin_ids: vec![801, 802],
+                pty_cleanup_succeeded: true,
+            },
+        })
+        .unwrap();
+    let (resolution, plugin_ids, cleanup_ack) =
+        await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+    assert!(matches!(resolution, LayoutPluginResolution::Release { .. }));
+    assert_eq!(plugin_ids, vec![801, 802]);
+    cleanup_ack
+        .send(Ok(LayoutPluginReceipt::Released {
+            plugin_ids: plugin_ids.clone(),
+        }))
+        .unwrap();
+    assert!(
+        await_layout_failure(completion_rx).contains("PTY preparation failure"),
+        "the original caller must receive the preparation failure"
+    );
+
+    let (state_tx, state_rx) = channels::bounded(1);
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::QueryLayoutTransactionStateForTest {
+            transaction_id,
+            response_channel: state_tx,
+        })
+        .unwrap();
+    assert_eq!(
+        state_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap(),
+        (false, false, false),
+        "Screen may retire the owner only after exact Plugin release"
+    );
+    let (_, tabs) = observable_layout_state(&mock_screen);
+    assert!(
+        tabs.tabs.iter().all(|tab| tab.tab_id != tab_id),
+        "the released failed NewTab must not remain pending"
+    );
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+pub fn lost_preparation_release_ack_reconciles_exactly_without_wedging_gate() {
+    let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 20 });
+    let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+
+    let (completion_tx, completion_rx) = oneshot::channel();
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::NewTab(
+            None,
+            None,
+            Some(TiledPaneLayout::default()),
+            vec![],
+            Some("lost-preparation-release-ack".to_owned()),
+            (Some(vec![]), Some(vec![])),
+            None,
+            false,
+            false,
+            TabPlacement::Append,
+            (1, false),
+            Some(NotificationEnd::new(completion_tx)),
+        ))
+        .unwrap();
+    let (tab_id, transaction_id, forwarded_completion) = loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("NewTab must reach Plugin");
+        if let PluginInstruction::NewTab(
+            _,
+            _,
+            _,
+            _,
+            tab_id,
+            transaction_id,
+            _,
+            _,
+            _,
+            _,
+            completion,
+            _,
+        ) = instruction
+        {
+            break (tab_id, transaction_id, completion);
+        }
+    };
+
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::LayoutPreparationFailed {
+            transaction_id,
+            tab_id: Some(tab_id),
+            completion_tx: forwarded_completion,
+            layout_generation: None,
+            message: "injected preparation failure with lost Plugin ACK".to_owned(),
+            cleanup: LayoutPreparationCleanup::ReleasePluginReservation {
+                plugin_ids: vec![821, 822],
+                pty_cleanup_succeeded: true,
+            },
+        })
+        .unwrap();
+
+    for _ in 0..2 {
+        let (resolution, plugin_ids, ack) =
+            await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+        assert!(matches!(resolution, LayoutPluginResolution::Release { .. }));
+        assert_eq!(plugin_ids, vec![821, 822]);
+        drop(ack);
+    }
+    assert!(
+        await_layout_failure(completion_rx).contains("lost Plugin ACK"),
+        "the original completion must fail even while cleanup is being reconciled"
+    );
+
+    let (state_tx, state_rx) = channels::bounded(1);
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::QueryLayoutTransactionStateForTest {
+            transaction_id,
+            response_channel: state_tx,
+        })
+        .unwrap();
+    assert_eq!(
+        state_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap(),
+        (true, true, false),
+        "lost cleanup ACK must retain exact reconciliation ownership without wedging the pending gate"
+    );
+
+    let (resolution, plugin_ids, ack) =
+        await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+    assert!(matches!(resolution, LayoutPluginResolution::Release { .. }));
+    assert_eq!(plugin_ids, vec![821, 822]);
+    ack.send(Ok(LayoutPluginReceipt::Released {
+        plugin_ids: plugin_ids.clone(),
+    }))
+    .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let (state_tx, state_rx) = channels::bounded(1);
+        mock_screen
+            .to_screen
+            .send(ScreenInstruction::QueryLayoutTransactionStateForTest {
+                transaction_id,
+                response_channel: state_tx,
+            })
+            .unwrap();
+        let state = state_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        if state == (false, false, false) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "certified background release must retire all Screen ownership, got {state:?}"
+        );
+    }
+    let (_, tabs) = observable_layout_state(&mock_screen);
+    assert!(
+        tabs.tabs.iter().all(|tab| tab.tab_id != tab_id),
+        "the failed pending tab must be discarded after exact release is certified"
+    );
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+pub fn override_pty_preparation_failure_releases_exact_plugin_union() {
+    let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 20 });
+    let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
+    let baseline = observable_layout_state(&mock_screen);
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+
+    let (completion_tx, completion_rx) = oneshot::channel();
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::OverrideLayout(
+            None,
+            None,
+            vec![TabLayoutInfo {
+                tab_index: 0,
+                tab_name: None,
+                tiled_layout: TiledPaneLayout::default(),
+                floating_layouts: vec![],
+                swap_tiled_layouts: Some(vec![]),
+                swap_floating_layouts: Some(vec![]),
+            }],
+            true,
+            true,
+            false,
+            1,
+            Some(NotificationEnd::new(completion_tx)),
+        ))
+        .unwrap();
+    let (transaction_id, forwarded_completion) = loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("Override must reach Plugin");
+        if let PluginInstruction::OverrideLayout(_, _, _, transaction_id, _, _, _, completion, _) =
+            instruction
+        {
+            break (transaction_id, completion);
+        }
+    };
+
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::LayoutPreparationFailed {
+            transaction_id,
+            tab_id: None,
+            completion_tx: forwarded_completion,
+            layout_generation: None,
+            message: "injected Override PTY preparation failure".to_owned(),
+            cleanup: LayoutPreparationCleanup::ReleasePluginReservation {
+                plugin_ids: vec![811, 812],
+                pty_cleanup_succeeded: true,
+            },
+        })
+        .unwrap();
+    let (resolution, plugin_ids, cleanup_ack) =
+        await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+    assert!(matches!(resolution, LayoutPluginResolution::Release { .. }));
+    assert_eq!(plugin_ids, vec![811, 812]);
+    cleanup_ack
+        .send(Ok(LayoutPluginReceipt::Released {
+            plugin_ids: plugin_ids.clone(),
+        }))
+        .unwrap();
+    assert!(
+        await_layout_failure(completion_rx).contains("Override PTY preparation failure"),
+        "the original Override caller must receive the preparation failure"
+    );
+
+    let (state_tx, state_rx) = channels::bounded(1);
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::QueryLayoutTransactionStateForTest {
+            transaction_id,
+            response_channel: state_tx,
+        })
+        .unwrap();
+    assert_eq!(
+        state_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap(),
+        (false, false, false)
+    );
+    assert_eq!(
+        observable_layout_state(&mock_screen),
+        baseline,
+        "failed Override preparation must preserve the exact baseline"
     );
 
     mock_screen.teardown(vec![screen_thread]);
@@ -6766,7 +8427,18 @@ pub fn break_pane_preparation_failure_preserves_live_pane_as_degraded_tab() {
             completion_tx: forwarded_completion,
             layout_generation: None,
             message: "injected break-pane preparation failure".to_owned(),
+            cleanup: LayoutPreparationCleanup::ReleasePluginReservation {
+                plugin_ids: vec![],
+                pty_cleanup_succeeded: true,
+            },
         });
+    let (resolution, plugin_ids, cleanup_ack) =
+        await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+    assert!(matches!(resolution, LayoutPluginResolution::Release { .. }));
+    assert!(plugin_ids.is_empty());
+    cleanup_ack
+        .send(Ok(LayoutPluginReceipt::Released { plugin_ids }))
+        .unwrap();
     assert!(
         await_layout_failure(completion_rx).contains("preparation failure"),
         "the caller must receive the preparation failure"
@@ -6888,7 +8560,8 @@ pub fn break_pane_apply_rejection_preserves_live_pane_after_cleanup_ack() {
         None,
         transaction_id,
     ));
-    let rejection = assert_layout_transaction_rejected(&pty_receiver, transaction_id, &[]);
+    let rejection =
+        assert_layout_transaction_rejected(&plugin_receiver, &pty_receiver, transaction_id, &[]);
     assert!(rejection.contains("injected rejection"));
     assert!(await_layout_failure(completion_rx).contains("injected rejection"));
 
@@ -6970,6 +8643,7 @@ pub fn late_apply_rejection_fails_blocking_completion_and_removes_pending_tab() 
         transaction_id,
     ));
     let rejection = assert_layout_transaction_rejected(
+        &plugin_receiver,
         &pty_receiver,
         transaction_id,
         &[PaneId::Terminal(terminal_id)],
@@ -7162,6 +8836,87 @@ pub fn rejected_override_with_default_retain_restores_exact_baseline() {
         "rejected Override must restore panes, focus, visibility, viewport and swap metadata exactly"
     );
 
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+fn override_rejects_duplicate_tab_results_before_mutating_topology() {
+    let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 20 });
+    let screen_thread = mock_screen.run(Some(transactional_baseline_layout()), vec![]);
+    let baseline_state = observable_layout_state(&mock_screen);
+    let result = |terminal_id| TabOverrideResult {
+        tab_index: 0,
+        tab_name: None,
+        tiled_layout: TiledPaneLayout::default(),
+        floating_layouts: vec![],
+        swap_tiled_layouts: Some(vec![]),
+        swap_floating_layouts: Some(vec![]),
+        new_terminal_pids: vec![(terminal_id, None)],
+        new_floating_pane_pids: vec![],
+        plugin_ids: HashMap::new(),
+    };
+    let (completion_tx, completion_rx) = oneshot::channel();
+
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::OverrideLayoutComplete(
+            vec![result(930), result(931)],
+            false,
+            false,
+            1,
+            Some(NotificationEnd::new(completion_tx)),
+            None,
+            0,
+        ))
+        .unwrap();
+
+    let rejection = await_layout_failure(completion_rx);
+    assert!(
+        rejection.contains("duplicate Override tab results"),
+        "duplicate target cardinality must be rejected explicitly: {rejection}"
+    );
+    assert_eq!(observable_layout_state(&mock_screen), baseline_state);
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+fn override_rejects_duplicate_resource_ids_across_distinct_tabs() {
+    let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 20 });
+    let screen_thread = mock_screen.run(Some(transactional_baseline_layout()), vec![]);
+    install_transactional_baseline_tab(&mock_screen, 1, 10, 11);
+    let baseline_state = observable_layout_state(&mock_screen);
+    let result = |tab_index| TabOverrideResult {
+        tab_index,
+        tab_name: None,
+        tiled_layout: TiledPaneLayout::default(),
+        floating_layouts: vec![],
+        swap_tiled_layouts: Some(vec![]),
+        swap_floating_layouts: Some(vec![]),
+        new_terminal_pids: vec![(930, None)],
+        new_floating_pane_pids: vec![],
+        plugin_ids: HashMap::new(),
+    };
+    let (completion_tx, completion_rx) = oneshot::channel();
+
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::OverrideLayoutComplete(
+            vec![result(0), result(1)],
+            false,
+            false,
+            1,
+            Some(NotificationEnd::new(completion_tx)),
+            None,
+            0,
+        ))
+        .unwrap();
+
+    let rejection = await_layout_failure(completion_rx);
+    assert!(
+        rejection.contains("duplicate Override resource ids"),
+        "duplicate resource ownership must be rejected explicitly: {rejection}"
+    );
+    assert_eq!(observable_layout_state(&mock_screen), baseline_state);
     mock_screen.teardown(vec![screen_thread]);
 }
 
@@ -7444,6 +9199,7 @@ pub fn old_request_that_finishes_after_reclassification_self_cleans_exact_resour
         old_transaction_id,
     ));
     assert_layout_transaction_rejected(
+        &plugin_receiver,
         &pty_receiver,
         old_transaction_id,
         &[PaneId::Terminal(410), PaneId::Plugin(411)],
@@ -7537,6 +9293,7 @@ pub fn newer_same_viewer_generation_discards_apply_writer_without_closing_stable
         transaction_id,
     ));
     assert_layout_transaction_rejected(
+        &plugin_receiver,
         &pty_receiver,
         transaction_id,
         &[PaneId::Terminal(420), PaneId::Plugin(421)],
@@ -7664,6 +9421,7 @@ pub fn receipt_change_after_install_is_caught_by_the_final_fence() {
     persist_test_viewer_receipt(&receipt_path, run_id, BucketKind::Failed, 2, new_token);
     resume_tx.send(()).unwrap();
     assert_layout_transaction_rejected(
+        &plugin_receiver,
         &pty_receiver,
         transaction_id,
         &[PaneId::Terminal(510), PaneId::Plugin(511)],
@@ -7736,6 +9494,7 @@ pub fn same_viewer_reclassification_after_apply_install_removes_only_writer_reso
     resume_tx.send(()).unwrap();
     let _ = drawer.to_screen.send(ScreenInstruction::RenderToClients);
     let rejection = assert_layout_transaction_rejected(
+        &plugin_receiver,
         &pty_receiver,
         transaction_id,
         &[PaneId::Terminal(520), PaneId::Plugin(521)],
@@ -7853,6 +9612,7 @@ fn assert_override_preinstall_rejection_cleanup(same_viewer: bool) {
             recovery_transaction_id,
         ));
     assert_layout_transaction_rejected(
+        &plugin_receiver,
         &pty_receiver,
         recovery_transaction_id,
         &[PaneId::Terminal(610), PaneId::Plugin(611)],
@@ -7979,6 +9739,7 @@ fn assert_override_postinstall_rejection_cleanup(same_viewer: bool) {
     resume_tx.send(()).unwrap();
     let _ = drawer.to_screen.send(ScreenInstruction::RenderToClients);
     let rejection = assert_layout_transaction_rejected(
+        &plugin_receiver,
         &pty_receiver,
         recovery_transaction_id,
         &[PaneId::Terminal(710), PaneId::Plugin(711)],
@@ -8200,7 +9961,7 @@ pub fn durable_empty_tab_retry_is_generation_fenced_and_does_not_duplicate_resou
             Some(generation_two.clone()),
             transaction_two,
         ));
-    assert_layout_transaction_committed(&pty_receiver, transaction_two);
+    assert_layout_transaction_committed(&plugin_receiver, &pty_receiver, transaction_two);
 
     let (ready_panes_tx, ready_panes_rx) = crossbeam::channel::bounded(1);
     let _ = mock_screen.to_screen.send(ScreenInstruction::ListPanes {
@@ -8236,6 +9997,7 @@ pub fn durable_empty_tab_retry_is_generation_fenced_and_does_not_duplicate_resou
         transaction_one,
     ));
     assert_layout_transaction_rejected(
+        &plugin_receiver,
         &pty_receiver,
         transaction_one,
         &[PaneId::Terminal(100), PaneId::Plugin(300)],
@@ -13320,6 +15082,207 @@ fn break_multiple_plugin_handoff_failure_keeps_all_extracted_processes() {
             "moved pane {pane_id:?} must have exactly one owner"
         );
     }
+}
+
+#[test]
+fn break_pane_preflight_conflict_leaves_exact_source_untouched() {
+    let mut screen = create_non_mirrored_screen(Size {
+        cols: 120,
+        rows: 30,
+    });
+    new_tab(&mut screen, 1, 0);
+    let moved_pane_id = PaneId::Terminal(99);
+    screen
+        .get_active_tab_mut(1)
+        .unwrap()
+        .new_pane(
+            moved_pane_id,
+            None,
+            None,
+            false,
+            true,
+            NewPanePlacement::default(),
+            Some(1),
+            None,
+        )
+        .unwrap();
+    let baseline_active = screen.tabs.get(&0).unwrap().get_active_pane_id(1);
+    let baseline_geoms = [PaneId::Terminal(1), moved_pane_id]
+        .map(|pane_id| {
+            (
+                pane_id,
+                screen
+                    .tabs
+                    .get(&0)
+                    .unwrap()
+                    .get_pane_with_id(pane_id)
+                    .unwrap()
+                    .position_and_size(),
+            )
+        })
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+    let blocker_id = screen.reserve_layout_transaction_id();
+    let source_owner = LayoutTabOwner::capture(&screen, 0);
+    screen
+        .register_layout_transaction(
+            blocker_id,
+            ActiveLayoutTransaction {
+                kind: ScreenLayoutTransactionKind::Override,
+                targets: vec![source_owner],
+                created_pending_tabs: vec![],
+                render_fenced_tabs: vec![],
+                tabs_to_close_after_commit: vec![],
+                moved_original_panes: vec![],
+                generation: None,
+            },
+        )
+        .unwrap();
+
+    let error = screen
+        .break_pane(None, screen.default_layout.clone(), 1, None)
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("cannot start break-pane transaction"));
+    assert_eq!(
+        screen.tabs.len(),
+        1,
+        "failed registration must discard the unowned pending destination"
+    );
+    assert!(
+        screen
+            .tabs
+            .get(&0)
+            .is_some_and(|tab| tab.has_pane_with_pid(&moved_pane_id)),
+        "failed registration must restore the moved pane to its exact source"
+    );
+    assert_eq!(
+        screen.tabs.get(&0).unwrap().get_active_pane_id(1),
+        baseline_active,
+        "preflight rejection must not perturb source focus"
+    );
+    for (pane_id, baseline_geom) in baseline_geoms {
+        assert_eq!(
+            screen
+                .tabs
+                .get(&0)
+                .unwrap()
+                .get_pane_with_id(pane_id)
+                .unwrap()
+                .position_and_size(),
+            baseline_geom,
+            "preflight rejection changed source geometry for {pane_id:?}"
+        );
+    }
+    assert_eq!(
+        screen.active_layout_transactions.len(),
+        1,
+        "only the pre-existing blocker may retain transaction ownership"
+    );
+}
+
+#[test]
+fn break_multiple_preflight_conflict_leaves_every_source_owner_untouched() {
+    let mut screen = create_non_mirrored_screen(Size {
+        cols: 120,
+        rows: 30,
+    });
+    new_tab(&mut screen, 1, 0);
+    for terminal_id in [98, 99] {
+        screen
+            .get_active_tab_mut(1)
+            .unwrap()
+            .new_pane(
+                PaneId::Terminal(terminal_id),
+                None,
+                None,
+                false,
+                true,
+                NewPanePlacement::default(),
+                Some(1),
+                None,
+            )
+            .unwrap();
+    }
+    let baseline_active = screen.tabs.get(&0).unwrap().get_active_pane_id(1);
+    let baseline_geoms = [
+        PaneId::Terminal(1),
+        PaneId::Terminal(98),
+        PaneId::Terminal(99),
+    ]
+    .map(|pane_id| {
+        (
+            pane_id,
+            screen
+                .tabs
+                .get(&0)
+                .unwrap()
+                .get_pane_with_id(pane_id)
+                .unwrap()
+                .position_and_size(),
+        )
+    })
+    .into_iter()
+    .collect::<BTreeMap<_, _>>();
+    let blocker_id = screen.reserve_layout_transaction_id();
+    let source_owner = LayoutTabOwner::capture(&screen, 0);
+    screen
+        .register_layout_transaction(
+            blocker_id,
+            ActiveLayoutTransaction {
+                kind: ScreenLayoutTransactionKind::Override,
+                targets: vec![source_owner],
+                created_pending_tabs: vec![],
+                render_fenced_tabs: vec![],
+                tabs_to_close_after_commit: vec![],
+                moved_original_panes: vec![],
+                generation: None,
+            },
+        )
+        .unwrap();
+
+    let error = screen
+        .break_multiple_panes_to_new_tab(
+            vec![PaneId::Terminal(98), PaneId::Terminal(99)],
+            None,
+            false,
+            Some("must-not-survive".to_owned()),
+            1,
+            None,
+        )
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("cannot start break-multiple transaction"));
+    assert_eq!(
+        screen.tabs.len(),
+        1,
+        "failed registration must discard the unowned pending destination"
+    );
+    for pane_id in [PaneId::Terminal(98), PaneId::Terminal(99)] {
+        assert!(
+            screen
+                .tabs
+                .get(&0)
+                .is_some_and(|tab| tab.has_pane_with_pid(&pane_id)),
+            "failed registration lost exact source owner for {pane_id:?}"
+        );
+    }
+    assert_eq!(
+        screen.tabs.get(&0).unwrap().get_active_pane_id(1),
+        baseline_active
+    );
+    for (pane_id, baseline_geom) in baseline_geoms {
+        assert_eq!(
+            screen
+                .tabs
+                .get(&0)
+                .unwrap()
+                .get_pane_with_id(pane_id)
+                .unwrap()
+                .position_and_size(),
+            baseline_geom,
+            "preflight rejection changed source geometry for {pane_id:?}"
+        );
+    }
+    assert_eq!(screen.active_layout_transactions.len(), 1);
 }
 
 #[test]

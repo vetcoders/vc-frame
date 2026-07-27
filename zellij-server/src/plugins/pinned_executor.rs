@@ -3,8 +3,9 @@ use crate::ThreadSenders;
 use crate::plugins::plugin_map::PluginMap;
 use crate::plugins::wasm_bridge::PluginCache;
 use std::collections::{HashMap, HashSet};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{Sender, channel};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use wasmi::Engine;
@@ -14,6 +15,7 @@ pub type WorkFn = Box<
         + Send
         + 'static,
 >;
+type PanicFn = Box<dyn FnOnce(String) + Send + 'static>;
 
 /// A dynamic thread pool that pins jobs to specific threads based on plugin_id
 /// Starts with 1 thread and expands when threads are busy, shrinks when plugins unload
@@ -39,6 +41,9 @@ pub struct PinnedExecutor {
     connected_clients: Arc<Mutex<Vec<ClientId>>>,
     plugin_cache: PluginCache,
     engine: Engine,
+
+    #[cfg(test)]
+    rejected_test_enqueues: Arc<Mutex<HashSet<u32>>>,
 }
 
 struct ExecutionThread {
@@ -47,8 +52,31 @@ struct ExecutionThread {
 }
 
 enum Job {
-    Work(WorkFn),
+    Work {
+        work: WorkFn,
+        on_panic: Option<PanicFn>,
+    },
     Shutdown, // Signal to exit the worker loop
+}
+
+struct InFlightGuard {
+    jobs_in_flight: Arc<AtomicUsize>,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.jobs_in_flight.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_owned()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "plugin executor job panicked with a non-string payload".to_owned()
+    }
 }
 
 impl PinnedExecutor {
@@ -84,6 +112,8 @@ impl PinnedExecutor {
             connected_clients: connected_clients.clone(),
             plugin_cache: plugin_cache.clone(),
             engine: engine.clone(),
+            #[cfg(test)]
+            rejected_test_enqueues: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -110,15 +140,34 @@ impl PinnedExecutor {
                     let engine = engine;
                     while let Ok(job) = receiver.recv() {
                         match job {
-                            Job::Work(work) => {
-                                work(
-                                    senders.clone(),
-                                    plugin_map.clone(),
-                                    connected_clients.clone(),
-                                    plugin_cache.clone(),
-                                    engine.clone(),
-                                );
-                                jobs_in_flight_clone.fetch_sub(1, Ordering::SeqCst);
+                            Job::Work { work, on_panic } => {
+                                let _in_flight = InFlightGuard {
+                                    jobs_in_flight: jobs_in_flight_clone.clone(),
+                                };
+                                let result = catch_unwind(AssertUnwindSafe(|| {
+                                    work(
+                                        senders.clone(),
+                                        plugin_map.clone(),
+                                        connected_clients.clone(),
+                                        plugin_cache.clone(),
+                                        engine.clone(),
+                                    );
+                                }));
+                                if let Err(payload) = result {
+                                    let message = panic_message(payload);
+                                    log::error!(
+                                        "Plugin executor thread {thread_idx} caught job panic: {message}"
+                                    );
+                                    if let Some(on_panic) = on_panic {
+                                        let callback_result =
+                                            catch_unwind(AssertUnwindSafe(|| on_panic(message)));
+                                        if callback_result.is_err() {
+                                            log::error!(
+                                                "Plugin executor panic callback also panicked on thread {thread_idx}"
+                                            );
+                                        }
+                                    }
+                                }
                             },
                             Job::Shutdown => break,
                         }
@@ -229,34 +278,77 @@ impl PinnedExecutor {
             ) + Send
             + 'static,
     {
-        // Look up assigned thread
+        if let Err(error) = self.try_execute_for_plugin_job(plugin_id, Box::new(f), None) {
+            log::error!("{error}");
+        }
+    }
+
+    #[cfg(test)]
+    pub fn try_execute_for_plugin<F>(&self, plugin_id: u32, f: F) -> std::result::Result<(), String>
+    where
+        F: FnOnce(
+                ThreadSenders,
+                Arc<Mutex<PluginMap>>,
+                Arc<Mutex<Vec<ClientId>>>,
+                PluginCache,
+                Engine,
+            ) + Send
+            + 'static,
+    {
+        self.try_execute_for_plugin_job(plugin_id, Box::new(f), None)
+    }
+
+    fn try_execute_for_plugin_job(
+        &self,
+        plugin_id: u32,
+        work: WorkFn,
+        on_panic: Option<PanicFn>,
+    ) -> std::result::Result<(), String> {
         let thread_idx = {
             let assignments = self.plugin_assignments.lock().unwrap();
             assignments.get(&plugin_id).copied()
         };
         let Some(thread_idx) = thread_idx else {
-            log::error!("Failed to find thread for plugin with id: {}", plugin_id);
-            return;
+            return Err(format!(
+                "failed to find executor assignment for plugin {plugin_id}"
+            ));
         };
 
         // Get thread and mark as busy
         let threads = self.execution_threads.lock().unwrap();
-        let thread = threads[thread_idx].as_ref();
+        let thread = threads.get(thread_idx).and_then(Option::as_ref);
         let Some(thread) = thread else {
-            log::error!("Failed to find thread for plugin with id: {}", plugin_id);
-            return;
+            return Err(format!(
+                "failed to find executor thread {thread_idx} for plugin {plugin_id}"
+            ));
         };
 
         // Increment busy counter BEFORE sending work
         thread.jobs_in_flight.fetch_add(1, Ordering::SeqCst);
 
         // Send work
-        let job = Job::Work(Box::new(f));
-        if thread.sender.send(job).is_err() {
-            // Thread died unexpectedly - this is a critical error
+        let job = Job::Work { work, on_panic };
+        #[cfg(test)]
+        if self
+            .rejected_test_enqueues
+            .lock()
+            .unwrap()
+            .remove(&plugin_id)
+        {
             thread.jobs_in_flight.fetch_sub(1, Ordering::SeqCst);
-            log::error!("Plugin executor thread {} has died", thread_idx);
+            drop(job);
+            return Err(format!(
+                "plugin executor rejected injected test work for plugin {plugin_id}"
+            ));
         }
+        if let Err(send_error) = thread.sender.send(job) {
+            thread.jobs_in_flight.fetch_sub(1, Ordering::SeqCst);
+            drop(send_error.0);
+            return Err(format!(
+                "plugin executor thread {thread_idx} rejected work for plugin {plugin_id}"
+            ));
+        }
+        Ok(())
     }
 
     /// Load a plugin: register it and execute the load work on its assigned thread
@@ -272,16 +364,51 @@ impl PinnedExecutor {
             ) + Send
             + 'static,
     {
-        // Register plugin and assign to a thread
-        self.register_plugin(plugin_id);
-
-        // Execute the load work on the assigned thread
-        self.execute_for_plugin(plugin_id, f);
+        if let Err(error) = self.try_execute_plugin_load_job(plugin_id, Box::new(f), None) {
+            log::error!("{error}");
+        }
     }
 
-    /// Unload a plugin: execute cleanup work, then unregister and potentially shrink pool
-    /// This combines cleanup execution + unregistration for plugin unloading
-    /// Requires Arc<Self> so we can clone it into the closure for unregistration
+    pub fn try_execute_plugin_load<F, P>(
+        &self,
+        plugin_id: u32,
+        f: F,
+        on_panic: P,
+    ) -> std::result::Result<(), String>
+    where
+        F: FnOnce(
+                ThreadSenders,
+                Arc<Mutex<PluginMap>>,
+                Arc<Mutex<Vec<ClientId>>>,
+                PluginCache,
+                Engine,
+            ) + Send
+            + 'static,
+        P: FnOnce(String) + Send + 'static,
+    {
+        self.try_execute_plugin_load_job(plugin_id, Box::new(f), Some(Box::new(on_panic)))
+    }
+
+    fn try_execute_plugin_load_job(
+        &self,
+        plugin_id: u32,
+        work: WorkFn,
+        on_panic: Option<PanicFn>,
+    ) -> std::result::Result<(), String> {
+        self.register_plugin(plugin_id);
+        if let Err(error) = self.try_execute_for_plugin_job(plugin_id, work, on_panic) {
+            self.unregister_plugin(plugin_id);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Queue unload work while preserving the executor assignment as retry debt
+    /// when enqueue or execution fails.
+    ///
+    /// Callers that need a terminal proof must use
+    /// `try_execute_plugin_unload_with_completion` and wait for its receipt.
+    #[cfg(test)]
     pub fn execute_plugin_unload(
         self: &Arc<Self>,
         plugin_id: u32,
@@ -294,17 +421,46 @@ impl PinnedExecutor {
         ) + Send
         + 'static,
     ) {
-        let executor = self.clone();
-        self.execute_for_plugin(
-            plugin_id,
-            move |senders, plugin_map, connected_clients, plugin_cache, engine| {
-                // Execute the cleanup work
-                f(senders, plugin_map, connected_clients, plugin_cache, engine);
+        if let Err(error) = self.try_execute_plugin_unload_with_completion(plugin_id, f) {
+            log::error!("{error}");
+        }
+    }
 
-                // Unregister plugin and potentially shrink the pool
+    /// Queue unload work and return a receipt that resolves only after cleanup and
+    /// executor unregistration have both completed.
+    ///
+    /// Enqueue failures and cleanup panics are returned to the caller. A failed
+    /// cleanup deliberately keeps the executor assignment so an idempotent retry
+    /// can run on the same pinned thread.
+    pub fn try_execute_plugin_unload_with_completion(
+        self: &Arc<Self>,
+        plugin_id: u32,
+        f: impl FnOnce(
+            ThreadSenders,
+            Arc<Mutex<PluginMap>>,
+            Arc<Mutex<Vec<ClientId>>>,
+            PluginCache,
+            Engine,
+        ) + Send
+        + 'static,
+    ) -> std::result::Result<Receiver<std::result::Result<(), String>>, String> {
+        let (completion_tx, completion_rx) = channel();
+        let panic_completion_tx = completion_tx.clone();
+        let executor = self.clone();
+        let work: WorkFn = Box::new(
+            move |senders, plugin_map, connected_clients, plugin_cache, engine| {
+                f(senders, plugin_map, connected_clients, plugin_cache, engine);
                 executor.unregister_plugin(plugin_id);
+                let _ = completion_tx.send(Ok(()));
             },
         );
+        let on_panic: PanicFn = Box::new(move |message| {
+            let _ = panic_completion_tx.send(Err(format!(
+                "plugin {plugin_id} unload cleanup panicked: {message}"
+            )));
+        });
+        self.try_execute_for_plugin_job(plugin_id, work, Some(on_panic))?;
+        Ok(completion_rx)
     }
 
     /// Unregister a plugin and potentially shrink the pool
@@ -364,6 +520,55 @@ impl PinnedExecutor {
             .iter()
             .filter(|t| t.is_some())
             .count()
+    }
+
+    #[cfg(test)]
+    pub(super) fn jobs_in_flight_for_plugin(&self, plugin_id: u32) -> Option<usize> {
+        let thread_idx = self
+            .plugin_assignments
+            .lock()
+            .unwrap()
+            .get(&plugin_id)
+            .copied()?;
+        self.execution_threads
+            .lock()
+            .unwrap()
+            .get(thread_idx)
+            .and_then(Option::as_ref)
+            .map(|thread| thread.jobs_in_flight.load(Ordering::SeqCst))
+    }
+
+    #[cfg(test)]
+    fn disconnect_thread_for_plugin(&self, plugin_id: u32) {
+        let thread_idx = self
+            .plugin_assignments
+            .lock()
+            .unwrap()
+            .get(&plugin_id)
+            .copied()
+            .expect("plugin must be assigned before disconnecting its test thread");
+        let (sender, receiver) = channel();
+        drop(receiver);
+        let mut threads = self.execution_threads.lock().unwrap();
+        threads[thread_idx]
+            .as_mut()
+            .expect("assigned test thread must exist")
+            .sender = sender;
+    }
+
+    #[cfg(test)]
+    pub(super) fn reject_next_enqueue_for_plugin(&self, plugin_id: u32) {
+        self.rejected_test_enqueues
+            .lock()
+            .unwrap()
+            .insert(plugin_id);
+    }
+
+    pub(super) fn has_assignment(&self, plugin_id: u32) -> bool {
+        self.plugin_assignments
+            .lock()
+            .unwrap()
+            .contains_key(&plugin_id)
     }
 }
 
@@ -779,6 +984,147 @@ mod tests {
         // Verify plugin is registered
         let thread_idx = executor.register_plugin(1);
         assert_eq!(thread_idx, 0, "Plugin should already be registered");
+    }
+
+    #[test]
+    fn panicking_job_releases_busy_count_and_worker_accepts_next_job() {
+        let executor = create_test_executor(1);
+        let (panic_tx, panic_rx) = channel();
+        executor
+            .try_execute_plugin_load(
+                41,
+                |_s, _p, _c, _ca, _e| panic!("intentional executor test panic"),
+                move |message| {
+                    panic_tx.send(message).unwrap();
+                },
+            )
+            .expect("panicking job must still be accepted");
+
+        let panic_message = panic_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("panic callback must run");
+        assert!(panic_message.contains("intentional executor test panic"));
+        for _ in 0..100 {
+            if executor.jobs_in_flight_for_plugin(41) == Some(0) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(executor.jobs_in_flight_for_plugin(41), Some(0));
+
+        let (next_tx, next_rx) = channel();
+        executor
+            .try_execute_for_plugin(41, make_signaling_job(next_tx))
+            .expect("worker must survive a job panic");
+        next_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("next job must run on the surviving worker");
+    }
+
+    #[test]
+    fn enqueue_failure_is_reported_and_load_registration_is_rolled_back() {
+        let executor = create_test_executor(1);
+        executor.register_plugin(42);
+        executor.disconnect_thread_for_plugin(42);
+
+        let result = executor.try_execute_plugin_load(42, |_s, _p, _c, _ca, _e| {}, |_message| {});
+
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|message| message.contains("rejected work"))
+        );
+        assert!(
+            !executor
+                .plugin_assignments
+                .lock()
+                .unwrap()
+                .contains_key(&42),
+            "failed enqueue must not retain a phantom plugin assignment"
+        );
+        assert!(
+            executor
+                .thread_plugins
+                .lock()
+                .unwrap()
+                .values()
+                .all(|plugins| !plugins.contains(&42)),
+            "failed enqueue must not retain thread ownership"
+        );
+    }
+
+    #[test]
+    fn panicking_fire_and_forget_unload_retains_executor_assignment_for_retry() {
+        let executor = create_test_executor(1);
+        executor.register_plugin(43);
+
+        executor.execute_plugin_unload(43, |_s, _p, _c, _ca, _e| {
+            panic!("intentional unload cleanup panic");
+        });
+
+        for _ in 0..100 {
+            if executor.jobs_in_flight_for_plugin(43) == Some(0) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            executor.has_assignment(43),
+            "panic during unload cleanup must retain retry ownership"
+        );
+        assert!(
+            executor
+                .thread_plugins
+                .lock()
+                .unwrap()
+                .values()
+                .any(|plugins| plugins.contains(&43)),
+            "panic during unload cleanup must retain pinned-thread ownership"
+        );
+
+        let retry_receipt = executor
+            .try_execute_plugin_unload_with_completion(43, |_s, _p, _c, _ca, _e| {})
+            .expect("retry unload work must be accepted");
+        assert_eq!(
+            retry_receipt
+                .recv_timeout(Duration::from_secs(5))
+                .expect("retry unload must resolve"),
+            Ok(())
+        );
+        assert!(!executor.has_assignment(43));
+    }
+
+    #[test]
+    fn completion_aware_unload_panic_retains_assignment_for_retry() {
+        let executor = create_test_executor(1);
+        executor.register_plugin(44);
+
+        let failed_receipt = executor
+            .try_execute_plugin_unload_with_completion(44, |_s, _p, _c, _ca, _e| {
+                panic!("intentional retryable unload panic");
+            })
+            .expect("unload work must be accepted");
+        let error = failed_receipt
+            .recv_timeout(Duration::from_secs(5))
+            .expect("panic must resolve the unload receipt")
+            .unwrap_err();
+
+        assert!(error.contains("intentional retryable unload panic"));
+        assert!(
+            executor.has_assignment(44),
+            "failed completion-aware unload must retain retry ownership"
+        );
+
+        let retry_receipt = executor
+            .try_execute_plugin_unload_with_completion(44, |_s, _p, _c, _ca, _e| {})
+            .expect("retry unload work must be accepted");
+        assert_eq!(
+            retry_receipt
+                .recv_timeout(Duration::from_secs(5))
+                .expect("retry unload must resolve"),
+            Ok(())
+        );
+        assert!(!executor.has_assignment(44));
     }
 
     #[test]

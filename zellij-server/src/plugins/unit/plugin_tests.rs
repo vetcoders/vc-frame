@@ -1,6 +1,6 @@
 use super::plugin_thread_main;
 use crate::route::NotificationEnd;
-use crate::screen::ScreenInstruction;
+use crate::screen::{LayoutPreparationCleanup, ScreenInstruction};
 use crate::{
     ServerInstruction,
     channels::SenderWithContext,
@@ -19,7 +19,7 @@ use zellij_utils::errors::ErrorContext;
 use zellij_utils::input::actions::Action;
 use zellij_utils::input::keybinds::Keybinds;
 use zellij_utils::input::layout::{
-    PluginAlias, PluginUserConfiguration, RunPlugin, RunPluginLocation, RunPluginOrAlias,
+    PluginAlias, PluginUserConfiguration, Run, RunPlugin, RunPluginLocation, RunPluginOrAlias,
     TiledPaneLayout,
 };
 use zellij_utils::input::permission::PermissionCache;
@@ -32,7 +32,10 @@ use std::env::set_var;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::{plugins::PluginInstruction, pty::PtyInstruction};
+use crate::{
+    plugins::{LayoutPluginReceipt, LayoutPluginResolution, PluginInstruction},
+    pty::PtyInstruction,
+};
 
 use zellij_utils::channels::{self, ChannelWithContext, Receiver};
 
@@ -752,11 +755,13 @@ fn new_tab_pty_handoff_failure_preserves_completion_and_rejects_once() {
             tab_id,
             completion_tx,
             message,
+            cleanup,
             ..
         } => {
             assert_eq!(transaction_id, 701);
             assert_eq!(tab_id, Some(7));
             assert!(message.contains("failed Plugin -> PTY handoff"));
+            assert_eq!(cleanup, LayoutPreparationCleanup::Resolved);
             completion_tx
         },
         other => panic!("expected LayoutPreparationFailed, got {other:?}"),
@@ -775,6 +780,178 @@ fn new_tab_pty_handoff_failure_preserves_completion_and_rejects_once() {
             .error_message
             .as_deref()
             .is_some_and(|message| message.contains("failed Plugin -> PTY handoff"))
+    );
+
+    teardown();
+}
+
+#[test]
+fn failed_local_plugin_release_is_reported_as_retryable_cleanup_debt() {
+    let (plugin_sender, pty_receiver, screen_receiver, teardown) =
+        create_plugin_thread_with_pty_receiver(None, None, None);
+    let transaction_id = 703;
+    plugin_sender
+        .send(PluginInstruction::RejectNextLayoutPluginReleaseForTest(
+            transaction_id,
+        ))
+        .unwrap();
+    drop(pty_receiver);
+    let run_plugin = RunPlugin::from_url(&format!(
+        "file:{}/vc-frame-release-debt-layout-plugin.wasm",
+        std::env::temp_dir().display()
+    ))
+    .unwrap();
+    let tiled_layout = TiledPaneLayout {
+        run: Some(Run::Plugin(RunPluginOrAlias::RunPlugin(run_plugin))),
+        ..Default::default()
+    };
+
+    plugin_sender
+        .send(PluginInstruction::NewTab(
+            None,
+            None,
+            Some(tiled_layout),
+            vec![],
+            9,
+            transaction_id,
+            None,
+            false,
+            true,
+            (1, false),
+            None,
+            None,
+        ))
+        .unwrap();
+
+    let (instruction, _) = screen_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("failed local release must report retryable cleanup debt");
+    let plugin_ids = match instruction {
+        ScreenInstruction::LayoutPreparationFailed {
+            transaction_id: reported_transaction_id,
+            message,
+            cleanup:
+                LayoutPreparationCleanup::ReleasePluginReservation {
+                    plugin_ids,
+                    pty_cleanup_succeeded,
+                },
+            ..
+        } => {
+            assert_eq!(reported_transaction_id, transaction_id);
+            assert!(message.contains("injected layout plugin release failure"));
+            assert!(pty_cleanup_succeeded);
+            plugin_ids
+        },
+        other => panic!("expected retryable LayoutPreparationFailed debt, got {other:?}"),
+    };
+    assert_eq!(plugin_ids, vec![0]);
+
+    let (ack, ack_rx) = channels::bounded(1);
+    plugin_sender
+        .send(PluginInstruction::ResolveLayoutPlugins {
+            transaction_id,
+            resolution: LayoutPluginResolution::Release {
+                reason: "Screen retry after local release failure".to_owned(),
+            },
+            expected_plugin_ids: plugin_ids.clone(),
+            ack,
+        })
+        .unwrap();
+    assert_eq!(
+        ack_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        Ok(LayoutPluginReceipt::Released { plugin_ids })
+    );
+
+    teardown();
+}
+
+#[test]
+fn layout_plugins_remain_suspended_until_resolution_and_release_replays() {
+    let (plugin_sender, pty_receiver, screen_receiver, teardown) =
+        create_plugin_thread_with_pty_receiver(None, None, None);
+    let run_plugin = RunPlugin::from_url(&format!(
+        "file:{}/vc-frame-suspended-layout-plugin.wasm",
+        std::env::temp_dir().display()
+    ))
+    .unwrap();
+    let run_plugin_or_alias = RunPluginOrAlias::RunPlugin(run_plugin);
+    let tiled_layout = TiledPaneLayout {
+        run: Some(Run::Plugin(run_plugin_or_alias.clone())),
+        ..Default::default()
+    };
+
+    plugin_sender
+        .send(PluginInstruction::NewTab(
+            None,
+            None,
+            Some(tiled_layout),
+            vec![],
+            8,
+            702,
+            None,
+            false,
+            true,
+            (1, false),
+            None,
+            None,
+        ))
+        .unwrap();
+
+    let (instruction, _) = pty_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("suspended plugin ids must be handed to PTY");
+    let plugin_ids = match instruction {
+        PtyInstruction::NewTab(_, _, _, _, _, transaction_id, plugin_ids, ..) => {
+            assert_eq!(transaction_id, 702);
+            plugin_ids
+                .get(&run_plugin_or_alias)
+                .cloned()
+                .expect("layout plugin must receive an exact reserved id")
+        },
+        other => panic!("expected NewTab, got {other:?}"),
+    };
+    assert_eq!(plugin_ids, vec![0]);
+    assert!(
+        screen_receiver.try_recv().is_err(),
+        "reservation must not start loading indication or publish plugin state"
+    );
+
+    let release = LayoutPluginResolution::Release {
+        reason: "PTY prepare rejected".to_owned(),
+    };
+    for _ in 0..2 {
+        let (ack, ack_rx) = channels::bounded(1);
+        plugin_sender
+            .send(PluginInstruction::ResolveLayoutPlugins {
+                transaction_id: 702,
+                resolution: release.clone(),
+                expected_plugin_ids: plugin_ids.clone(),
+                ack,
+            })
+            .unwrap();
+        assert_eq!(
+            ack_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Ok(LayoutPluginReceipt::Released {
+                plugin_ids: plugin_ids.clone()
+            })
+        );
+    }
+
+    let (ack, ack_rx) = channels::bounded(1);
+    plugin_sender
+        .send(PluginInstruction::ResolveLayoutPlugins {
+            transaction_id: 702,
+            resolution: LayoutPluginResolution::Activate,
+            expected_plugin_ids: plugin_ids,
+            ack,
+        })
+        .unwrap();
+    assert!(
+        ack_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap_err()
+            .contains("resolution conflict")
     );
 
     teardown();

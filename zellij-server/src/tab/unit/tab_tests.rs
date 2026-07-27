@@ -1,10 +1,16 @@
-use super::Tab;
+use super::{PendingTabLayoutCleanup, Tab};
 use crate::pane_groups::PaneGroups;
 use crate::panes::sixel::SixelImageStore;
 use crate::screen::CopyOptions;
-use crate::{ClientId, os_input_output::ServerOsApi, panes::PaneId, thread_bus::ThreadSenders};
+use crate::{
+    ClientId, channels::SenderWithContext, os_input_output::ServerOsApi, panes::PaneId,
+    plugins::PluginInstruction, pty::PtyInstruction, route::NotificationEnd,
+    thread_bus::ThreadSenders,
+};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
+use std::thread;
+use std::time::Duration;
 use zellij_utils::data::{Direction, NewPanePlacement, Resize, ResizeStrategy, WebSharing};
 use zellij_utils::errors::prelude::*;
 use zellij_utils::input::layout::{SplitDirection, SplitSize, TiledPaneLayout};
@@ -15,13 +21,140 @@ use crate::os_input_output::AsyncReader;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use tokio::sync::oneshot;
 
 use interprocess::local_socket::Stream as LocalSocketStream;
 use zellij_utils::{
+    channels,
     data::{ModeInfo, Palette, Style},
     input::command::{RunCommand, TerminalAction},
     ipc::{ClientToServerMsg, ServerToClientMsg},
 };
+
+#[test]
+fn committed_layout_cleanup_retains_exact_debt_until_each_worker_executes_it() {
+    let terminal_id = PaneId::Terminal(41);
+    let plugin_id = PaneId::Plugin(42);
+    let mut cleanup = PendingTabLayoutCleanup {
+        panes: [(terminal_id, None), (plugin_id, None)]
+            .into_iter()
+            .collect(),
+    };
+
+    let failures = cleanup.flush(77, &ThreadSenders::default(), Duration::from_millis(10), 1);
+    assert_eq!(failures.len(), 2);
+    assert_eq!(cleanup.pane_ids(), vec![terminal_id, plugin_id]);
+
+    let (pty_tx, pty_rx) = channels::unbounded();
+    let (plugin_tx, plugin_rx) = channels::unbounded();
+    let senders = ThreadSenders {
+        to_pty: Some(SenderWithContext::new(pty_tx)),
+        to_plugin: Some(SenderWithContext::new(plugin_tx)),
+        ..Default::default()
+    };
+    let terminal_worker = thread::spawn(move || {
+        let (instruction, _) = pty_rx.recv().expect("terminal cleanup instruction");
+        match instruction {
+            PtyInstruction::CleanupLayoutTerminals {
+                transaction_id,
+                terminal_ids,
+                ack,
+            } => {
+                assert_eq!(transaction_id, 77);
+                assert_eq!(terminal_ids, vec![41]);
+                ack.send(Ok(vec![41, 41]))
+                    .expect("send deliberately duplicated terminal receipt");
+            },
+            other => panic!("unexpected terminal cleanup instruction: {other:?}"),
+        }
+    });
+    let plugin_worker = thread::spawn(move || {
+        let (instruction, _) = plugin_rx.recv().expect("plugin cleanup instruction");
+        match instruction {
+            PluginInstruction::CleanupLayoutPlugins {
+                transaction_id,
+                plugin_ids,
+                ack,
+            } => {
+                assert_eq!(transaction_id, 77);
+                assert_eq!(plugin_ids, vec![42]);
+                ack.send(Ok(plugin_ids))
+                    .expect("send exact plugin cleanup receipt");
+            },
+            other => panic!("unexpected plugin cleanup instruction: {other:?}"),
+        }
+    });
+    let failures = cleanup.flush(77, &senders, Duration::from_millis(100), 1);
+    terminal_worker.join().expect("terminal worker");
+    plugin_worker.join().expect("plugin worker");
+    assert_eq!(failures.len(), 1);
+    assert_eq!(cleanup.pane_ids(), vec![terminal_id]);
+
+    let (retry_pty_tx, retry_pty_rx) = channels::unbounded();
+    let retry_senders = ThreadSenders {
+        to_pty: Some(SenderWithContext::new(retry_pty_tx)),
+        ..Default::default()
+    };
+    let terminal_worker = thread::spawn(move || {
+        let (instruction, _) = retry_pty_rx.recv().expect("retry cleanup instruction");
+        match instruction {
+            PtyInstruction::CleanupLayoutTerminals {
+                transaction_id,
+                terminal_ids,
+                ack,
+            } => {
+                assert_eq!(transaction_id, 77);
+                ack.send(Ok(terminal_ids))
+                    .expect("send exact retry receipt");
+            },
+            other => panic!("unexpected retry instruction: {other:?}"),
+        }
+    });
+    assert!(
+        cleanup
+            .flush(77, &retry_senders, Duration::from_millis(100), 1)
+            .is_empty()
+    );
+    terminal_worker.join().expect("terminal retry worker");
+    assert!(cleanup.is_empty());
+
+    assert!(
+        cleanup
+            .flush(77, &retry_senders, Duration::from_millis(100), 1)
+            .is_empty()
+    );
+}
+
+#[test]
+fn layout_commit_preflight_rejects_a_conflicting_blocking_completion() {
+    let mut tab = create_new_tab(Size { cols: 80, rows: 20 }, false);
+    let (requested_tx, _requested_rx) = oneshot::channel();
+    let transaction = tab
+        .begin_apply_layout(
+            TiledPaneLayout::default(),
+            vec![],
+            vec![(2, None)],
+            vec![],
+            HashMap::new(),
+            1,
+            Some((2, NotificationEnd::new(requested_tx))),
+        )
+        .expect("layout preparation should install terminal 2");
+    let (existing_tx, _existing_rx) = oneshot::channel();
+    assert!(
+        tab.get_pane_with_id_mut(PaneId::Terminal(2))
+            .expect("prepared terminal should exist")
+            .attach_blocking_completion(NotificationEnd::new(existing_tx))
+            .is_ok(),
+        "first blocking completion should attach"
+    );
+
+    let error = transaction
+        .preflight_commit(&tab)
+        .expect_err("preflight must reject a second blocking completion");
+    assert!(format!("{error:#}").contains("already owns a completion"));
+    transaction.rollback(&mut tab, "preflight rejected");
+}
 
 #[derive(Clone)]
 struct FakeInputOutput {}
@@ -933,6 +1066,39 @@ pub fn cannot_split_largest_pane_when_there_is_no_room() {
         tab.tiled_panes.panes.len(),
         1,
         "Tab still has only one pane"
+    );
+}
+
+#[test]
+pub fn ownership_retaining_insert_returns_pane_when_destination_has_no_room() {
+    let pane_id = PaneId::Terminal(1);
+    let mut source = create_new_tab(Size { cols: 80, rows: 20 }, true);
+    let original_geom = source
+        .tiled_panes
+        .panes
+        .get(&pane_id)
+        .unwrap()
+        .position_and_size();
+    let pane = source
+        .extract_pane(pane_id, true)
+        .expect("source must surrender the exact pane owner");
+    let mut destination = create_new_tab(Size { cols: 8, rows: 4 }, true);
+
+    let pane = destination
+        .try_add_tiled_pane_retaining_ownership(pane, pane_id, false, Some(1))
+        .unwrap()
+        .expect("full destination must return rather than consume the pane owner");
+    assert_eq!(pane.pid(), pane_id);
+    assert_eq!(
+        destination.tiled_panes.panes.len(),
+        1,
+        "failed admission must leave destination topology unchanged"
+    );
+
+    source.restore_extracted_pane(pane, pane_id, false, original_geom);
+    assert!(
+        source.has_pane_with_pid(&pane_id),
+        "returned owner must remain restorable to its exact source"
     );
 }
 

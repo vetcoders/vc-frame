@@ -34,10 +34,10 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::str;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 #[cfg(test)]
-use std::sync::{Mutex, OnceLock, mpsc};
+use std::sync::{OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
 use crate::route::NotificationEnd;
@@ -86,14 +86,20 @@ use crate::{
     output::Output,
     panes::PaneId,
     panes::sixel::SixelImageStore,
-    plugins::{DumpSessionLayoutResponse, PluginId, PluginInstruction, PluginRenderAsset},
+    plugins::{
+        DumpSessionLayoutResponse, LayoutPluginReceipt, LayoutPluginResolution, PluginId,
+        PluginInstruction, PluginRenderAsset,
+    },
     pty::{
-        ClientTabIndexOrPaneId, LayoutCommitOutcome, LayoutTransactionId, PtyInstruction, VteBytes,
-        get_default_shell,
+        ClientTabIndexOrPaneId, LayoutCommitAck, LayoutCommitOutcome, LayoutTransactionId,
+        PtyInstruction, VteBytes, get_default_shell,
     },
     pty_writer::PtyWriteInstruction,
-    tab::{SuppressedPanes, Tab, TabLayoutCommitEffects, TabLayoutTransaction},
-    thread_bus::Bus,
+    tab::{
+        Pane, PendingTabLayoutCleanup, SuppressedPanes, Tab, TabLayoutCommitEffects,
+        TabLayoutTransaction, TabTopologyTransaction,
+    },
+    thread_bus::{Bus, ThreadSenders},
     ui::loading_indication::LoadingIndication,
 };
 use zellij_utils::{
@@ -394,12 +400,27 @@ fn dump_screen_error_message(error: &anyhow::Error) -> String {
     format!("{error:#}")
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LayoutPreparationCleanup {
+    /// The producer either allocated nothing or already released everything.
+    Resolved,
+    /// PTY has finished its own rollback and Screen must still obtain the
+    /// exact Plugin release receipt before mutating the pending topology.
+    ReleasePluginReservation {
+        plugin_ids: Vec<PluginId>,
+        pty_cleanup_succeeded: bool,
+    },
+}
+
 /// Instructions that can be sent to the [`Screen`].
 #[derive(Debug, Clone)]
 pub enum ScreenInstruction {
     PtyBytes(u32, VteBytes),
     PluginBytes(Vec<PluginRenderAsset>),
     Render,
+    /// Wakes the Screen loop so it can consume completed layout maintenance
+    /// results without scheduling user-visible render work.
+    LayoutMaintenanceWake,
     RenderToClients,
     NewPane(
         PaneId,
@@ -562,9 +583,16 @@ pub enum ScreenInstruction {
         completion_tx: Option<NotificationEnd>,
         layout_generation: Option<Box<DurableTabLayoutGeneration>>,
         message: String,
+        cleanup: LayoutPreparationCleanup,
     },
     #[cfg(test)]
     RetireLayoutTransactionsForTabForTest(usize),
+    #[cfg(test)]
+    QueryLayoutTransactionStateForTest {
+        transaction_id: LayoutTransactionId,
+        // active owner, background reconciliation owner, pending render/event gate
+        response_channel: channels::Sender<(bool, bool, bool)>,
+    },
     SwitchTabNext(ClientId, Option<NotificationEnd>),
     SwitchTabPrev(ClientId, Option<NotificationEnd>),
     ToggleActiveSyncTab(ClientId, Option<NotificationEnd>),
@@ -949,6 +977,7 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::PtyBytes(..) => ScreenContext::HandlePtyBytes,
             ScreenInstruction::PluginBytes(..) => ScreenContext::PluginBytes,
             ScreenInstruction::Render => ScreenContext::Render,
+            ScreenInstruction::LayoutMaintenanceWake => ScreenContext::Render,
             ScreenInstruction::RenderToClients => ScreenContext::RenderToClients,
             ScreenInstruction::NewPane(..) => ScreenContext::NewPane,
             ScreenInstruction::OpenInPlaceEditor(..) => ScreenContext::OpenInPlaceEditor,
@@ -1044,6 +1073,10 @@ impl From<&ScreenInstruction> for ScreenContext {
             },
             #[cfg(test)]
             ScreenInstruction::RetireLayoutTransactionsForTabForTest(..) => {
+                ScreenContext::LayoutPreparationFailed
+            },
+            #[cfg(test)]
+            ScreenInstruction::QueryLayoutTransactionStateForTest { .. } => {
                 ScreenContext::LayoutPreparationFailed
             },
             ScreenInstruction::SwitchTabNext(..) => ScreenContext::SwitchTabNext,
@@ -1455,6 +1488,25 @@ pub(crate) struct Screen {
     /// handoff until PTY acknowledges the terminal commit decision.
     next_layout_transaction_id: LayoutTransactionId,
     active_layout_transactions: HashMap<LayoutTransactionId, ActiveLayoutTransaction>,
+    /// Prepared Screen rollback owners whose external Plugin/PTY outcome is
+    /// still unknown after bounded inline replay. Background reconciliation
+    /// keeps retrying the exact worker decision while these owners remain
+    /// quarantined.
+    indeterminate_layout_transactions: HashMap<LayoutTransactionId, IndeterminatePreparedLayout>,
+    layout_reconciliation_results: Arc<Mutex<Vec<BackgroundLayoutReconciliationResult>>>,
+    layout_reconciliations_in_flight: HashSet<LayoutTransactionId>,
+    layout_reconciliation_attempts: HashMap<LayoutTransactionId, u32>,
+    /// Removed panes remain owned here until exact PTY/Plugin execution
+    /// receipts arrive. Channel acceptance alone never transfers ownership.
+    pending_layout_cleanup: HashMap<LayoutTransactionId, PendingTabLayoutCleanup>,
+    layout_cleanup_retry_results: Arc<Mutex<Vec<BackgroundLayoutCleanupResult>>>,
+    layout_cleanup_retries_in_flight: HashSet<LayoutTransactionId>,
+    layout_cleanup_retry_attempts: HashMap<LayoutTransactionId, u32>,
+    /// Bounded Screen-side decision receipts make exact completion replay a
+    /// no-op and prevent a late duplicate from compensating resources that
+    /// were already committed.
+    resolved_layout_transactions: HashMap<LayoutTransactionId, ResolvedLayoutTransaction>,
+    resolved_layout_transaction_order: VecDeque<LayoutTransactionId>,
     /// Unique to this server lifetime. Stable tab IDs are only meaningful
     /// together with this incarnation.
     session_incarnation: String,
@@ -1563,10 +1615,98 @@ pub(crate) struct Screen {
 
 struct PreparedApplyLayout {
     tab_id: usize,
-    transaction: TabLayoutTransaction,
+    transaction: Box<TabLayoutTransaction>,
     should_change_client_focus: bool,
     client_id: ClientId,
     is_web_client: bool,
+}
+
+#[derive(Clone)]
+enum LayoutReconciliationIntent {
+    Activate,
+    Reject(String),
+    RejectByOwner(String),
+    PreparationFailure {
+        failure_message: String,
+        pty_cleanup_succeeded: bool,
+    },
+}
+
+#[derive(Clone)]
+struct LayoutReconciliationPlan {
+    intent: LayoutReconciliationIntent,
+    expected_plugin_ids: Vec<PluginId>,
+    resource_ids: Vec<PaneId>,
+    preserve_pending_tab_on_rejection: bool,
+    close_fenced_tab_on_rejection: bool,
+    layout_generation: Option<DurableTabLayoutGeneration>,
+}
+
+/// Topology-safe quarantine for a prepared layout while Plugin and PTY are
+/// being reconciled in the background after bounded foreground ACK attempts
+/// were lost.
+enum IndeterminatePreparedLayout {
+    Apply {
+        prepared: PreparedApplyLayout,
+        plan: LayoutReconciliationPlan,
+    },
+    Override {
+        prepared_layouts: Vec<(usize, TabLayoutTransaction)>,
+        created_tab_ids: Vec<usize>,
+        plan: LayoutReconciliationPlan,
+    },
+    ResolutionOnly {
+        target_tab_ids: Vec<usize>,
+        plan: LayoutReconciliationPlan,
+    },
+}
+
+impl IndeterminatePreparedLayout {
+    fn target_tab_ids(&self) -> Vec<usize> {
+        match self {
+            IndeterminatePreparedLayout::Apply { prepared, .. } => vec![prepared.tab_id],
+            IndeterminatePreparedLayout::Override {
+                prepared_layouts, ..
+            } => prepared_layouts.iter().map(|(tab_id, _)| *tab_id).collect(),
+            IndeterminatePreparedLayout::ResolutionOnly { target_tab_ids, .. } => {
+                target_tab_ids.clone()
+            },
+        }
+    }
+
+    fn mark_blocking_completion_failed(&mut self, message: &str) {
+        match self {
+            IndeterminatePreparedLayout::Apply { prepared, .. } => prepared
+                .transaction
+                .mark_blocking_completion_failed(message),
+            IndeterminatePreparedLayout::Override {
+                prepared_layouts,
+                created_tab_ids,
+                ..
+            } => {
+                let _preserved_created_tab_count = created_tab_ids.len();
+                for (_, transaction) in prepared_layouts {
+                    transaction.mark_blocking_completion_failed(message);
+                }
+            },
+            IndeterminatePreparedLayout::ResolutionOnly { .. } => {},
+        }
+    }
+
+    fn replay_rejection(&self, transaction_id: LayoutTransactionId) -> String {
+        format!(
+            "layout transaction {transaction_id} remains indeterminate and still owns prepared topology for tabs {:?}",
+            self.target_tab_ids()
+        )
+    }
+
+    fn reconciliation_plan(&self) -> LayoutReconciliationPlan {
+        match self {
+            IndeterminatePreparedLayout::Apply { plan, .. }
+            | IndeterminatePreparedLayout::Override { plan, .. }
+            | IndeterminatePreparedLayout::ResolutionOnly { plan, .. } => plan.clone(),
+        }
+    }
 }
 
 struct CommittedApplyLayout {
@@ -1575,6 +1715,15 @@ struct CommittedApplyLayout {
     should_change_client_focus: bool,
     client_id: ClientId,
     is_web_client: bool,
+}
+
+enum CommittedOverrideLayout {
+    Complete(Vec<(usize, TabLayoutCommitEffects)>),
+    Indeterminate {
+        missing_tab_id: usize,
+        committed_effects: Vec<(usize, TabLayoutCommitEffects)>,
+        remaining_prepared: Vec<(usize, TabLayoutTransaction)>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1619,6 +1768,10 @@ impl LayoutTabOwner {
             _ => false,
         }
     }
+
+    fn is_current_or_absent(&self, screen: &Screen) -> bool {
+        self.is_current(screen) || !screen.tabs.contains_key(&self.tab_id)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1626,6 +1779,12 @@ struct ActiveLayoutTransaction {
     kind: ScreenLayoutTransactionKind,
     targets: Vec<LayoutTabOwner>,
     created_pending_tabs: Vec<LayoutTabOwner>,
+    /// Existing tabs whose last committed frame must remain visible while a
+    /// transaction temporarily moves panes out of them. These owners are not
+    /// worker completion targets, so they stay separate from `targets`, but
+    /// they participate in exact-incarnation validation and pending render
+    /// gate retirement.
+    render_fenced_tabs: Vec<LayoutTabOwner>,
     tabs_to_close_after_commit: Vec<LayoutTabOwner>,
     /// Existing panes deliberately moved into a newly-created pending tab
     /// before Plugin/PTY preparation. A rejected break transaction must keep
@@ -1635,23 +1794,86 @@ struct ActiveLayoutTransaction {
     generation: Option<DurableTabLayoutGeneration>,
 }
 
+#[derive(Debug)]
+pub(crate) struct BreakPaneTransfer {
+    destination_tab_id: usize,
+    source_tab_ids: Vec<usize>,
+}
+
+struct ExtractedBreakPane {
+    source_tab_id: usize,
+    was_floating: bool,
+    original_geom: PaneGeom,
+    pane: Box<dyn Pane>,
+}
+
+impl BreakPaneTransfer {
+    fn pending_gate_tab_ids(&self) -> impl Iterator<Item = usize> + '_ {
+        std::iter::once(self.destination_tab_id).chain(self.source_tab_ids.iter().copied())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ScreenLayoutDecision {
+    Committed,
+    CommittedWithCleanupDebt(String),
+    CommittedWithPostCommitError(String),
+    Rejected(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResolvedLayoutTransaction {
+    kind: ScreenLayoutTransactionKind,
+    target_ids: Vec<usize>,
+    generation: Option<DurableTabLayoutGeneration>,
+    resource_ids: Vec<PaneId>,
+    decision: ScreenLayoutDecision,
+}
+
+struct BackgroundLayoutCleanupResult {
+    transaction_id: LayoutTransactionId,
+    acknowledged_ids: Vec<PaneId>,
+    failures: Vec<String>,
+}
+
+struct BackgroundLayoutReconciliationResult {
+    transaction_id: LayoutTransactionId,
+    coordination: LayoutCoordination,
+}
+
 impl ActiveLayoutTransaction {
     fn target_ids_match(&self, target_ids: &[usize]) -> bool {
-        let mut expected = self
+        let expected_raw = self
             .targets
             .iter()
             .map(|target| target.tab_id)
             .collect::<Vec<_>>();
+        let mut expected = expected_raw.clone();
         let mut actual = target_ids.to_vec();
         expected.sort_unstable();
         expected.dedup();
         actual.sort_unstable();
         actual.dedup();
-        expected == actual
+        expected_raw.len() == expected.len()
+            && target_ids.len() == actual.len()
+            && expected == actual
     }
 
     fn exact_targets_are_current(&self, screen: &Screen) -> bool {
         self.targets.iter().all(|target| target.is_current(screen))
+    }
+
+    fn exact_render_fences_are_current(&self, screen: &Screen) -> bool {
+        self.render_fenced_tabs
+            .iter()
+            .all(|target| target.is_current(screen))
+    }
+
+    fn pending_gate_owners(&self) -> impl Iterator<Item = &LayoutTabOwner> {
+        self.targets
+            .iter()
+            .chain(self.created_pending_tabs.iter())
+            .chain(self.render_fenced_tabs.iter())
     }
 
     fn generation_matches(&self, generation: Option<&DurableTabLayoutGeneration>) -> bool {
@@ -1708,14 +1930,222 @@ const LAYOUT_COMMIT_ACK_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(test)]
 const LAYOUT_COMMIT_ACK_TIMEOUT: Duration = Duration::from_secs(2);
 const LAYOUT_COMMIT_ACK_ATTEMPTS: usize = 2;
+#[cfg(not(test))]
+const LAYOUT_CLEANUP_ACK_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const LAYOUT_CLEANUP_ACK_TIMEOUT: Duration = Duration::from_millis(250);
+const LAYOUT_CLEANUP_ACK_ATTEMPTS: usize = 2;
+#[cfg(not(test))]
+const LAYOUT_CLEANUP_RETRY_BASE: Duration = Duration::from_millis(250);
+#[cfg(test)]
+const LAYOUT_CLEANUP_RETRY_BASE: Duration = Duration::from_millis(10);
+#[cfg(not(test))]
+const LAYOUT_CLEANUP_RETRY_MAX: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const LAYOUT_CLEANUP_RETRY_MAX: Duration = Duration::from_millis(100);
+const MAX_RESOLVED_LAYOUT_TRANSACTIONS: usize = 512;
+
+#[derive(Debug)]
+enum LayoutPluginAck {
+    Resolved(LayoutPluginReceipt),
+    Failed(String),
+    Unknown(String),
+}
+
+enum LayoutCoordination {
+    Commit,
+    Rollback(String),
+    Unknown(String),
+}
+
+fn layout_plugin_receipt_ids(receipt: &LayoutPluginReceipt) -> &[PluginId] {
+    match receipt {
+        LayoutPluginReceipt::Activated { plugin_ids }
+        | LayoutPluginReceipt::Released { plugin_ids }
+        | LayoutPluginReceipt::Compensated { plugin_ids }
+        | LayoutPluginReceipt::ActivationRolledBack { plugin_ids, .. } => plugin_ids,
+    }
+}
+
+fn validate_layout_plugin_receipt(
+    transaction_id: LayoutTransactionId,
+    resolution: &LayoutPluginResolution,
+    expected_plugin_ids: &[PluginId],
+    receipt: LayoutPluginReceipt,
+) -> std::result::Result<LayoutPluginReceipt, String> {
+    let receipt_matches_resolution = matches!(
+        (resolution, &receipt),
+        (
+            LayoutPluginResolution::Activate,
+            LayoutPluginReceipt::Activated { .. }
+                | LayoutPluginReceipt::ActivationRolledBack { .. }
+        ) | (
+            LayoutPluginResolution::Release { .. },
+            LayoutPluginReceipt::Released { .. }
+        ) | (
+            LayoutPluginResolution::Compensate { .. },
+            LayoutPluginReceipt::Compensated { .. }
+        )
+    );
+    if !receipt_matches_resolution {
+        return Err(format!(
+            "layout plugin transaction {transaction_id} returned receipt {receipt:?} for incompatible resolution {resolution:?}"
+        ));
+    }
+    let mut expected_plugin_ids = expected_plugin_ids.to_vec();
+    expected_plugin_ids.sort_unstable();
+    let mut receipt_plugin_ids = layout_plugin_receipt_ids(&receipt).to_vec();
+    receipt_plugin_ids.sort_unstable();
+    if receipt_plugin_ids != expected_plugin_ids {
+        return Err(format!(
+            "layout plugin transaction {transaction_id} receipt ids {receipt_plugin_ids:?} did not match expected ids {expected_plugin_ids:?}"
+        ));
+    }
+    Ok(receipt)
+}
+
+fn resolve_layout_plugins_with_ack(
+    senders: &ThreadSenders,
+    transaction_id: LayoutTransactionId,
+    resolution: LayoutPluginResolution,
+    expected_plugin_ids: &[PluginId],
+) -> LayoutPluginAck {
+    if transaction_id == 0 {
+        #[cfg(test)]
+        {
+            let receipt = match resolution {
+                LayoutPluginResolution::Activate => LayoutPluginReceipt::Activated {
+                    plugin_ids: expected_plugin_ids.to_vec(),
+                },
+                LayoutPluginResolution::Release { .. } => LayoutPluginReceipt::Released {
+                    plugin_ids: expected_plugin_ids.to_vec(),
+                },
+                LayoutPluginResolution::Compensate { .. } => LayoutPluginReceipt::Compensated {
+                    plugin_ids: expected_plugin_ids.to_vec(),
+                },
+            };
+            return LayoutPluginAck::Resolved(receipt);
+        }
+        #[cfg(not(test))]
+        {
+            return LayoutPluginAck::Failed(
+                "layout transaction id 0 is reserved and cannot activate Plugin resources"
+                    .to_owned(),
+            );
+        }
+    }
+    let mut failures = vec![];
+    for attempt in 1..=LAYOUT_COMMIT_ACK_ATTEMPTS {
+        let (ack, ack_rx) = channels::bounded(1);
+        let instruction = PluginInstruction::ResolveLayoutPlugins {
+            transaction_id,
+            resolution: resolution.clone(),
+            expected_plugin_ids: expected_plugin_ids.to_vec(),
+            ack,
+        };
+        if let Err(send_failure) = senders.send_to_plugin_recover(instruction) {
+            let (_instruction, send_error) = send_failure.into_parts();
+            failures.push(format!("attempt {attempt} delivery: {send_error:#}"));
+            continue;
+        }
+        match ack_rx.recv_timeout(LAYOUT_COMMIT_ACK_TIMEOUT) {
+            Ok(Ok(receipt)) => {
+                return match validate_layout_plugin_receipt(
+                    transaction_id,
+                    &resolution,
+                    expected_plugin_ids,
+                    receipt,
+                ) {
+                    Ok(receipt) => LayoutPluginAck::Resolved(receipt),
+                    Err(message) => LayoutPluginAck::Failed(message),
+                };
+            },
+            Ok(Err(message)) => {
+                return LayoutPluginAck::Failed(format!(
+                    "attempt {attempt} Plugin resolution: {message}"
+                ));
+            },
+            Err(channels::RecvTimeoutError::Timeout) => {
+                failures.push(format!("attempt {attempt} ACK timeout"));
+            },
+            Err(channels::RecvTimeoutError::Disconnected) => {
+                failures.push(format!("attempt {attempt} ACK disconnect"));
+            },
+        }
+    }
+    LayoutPluginAck::Unknown(format!(
+        "layout plugin transaction {transaction_id} resolution remained unknown after {} attempts: {}",
+        LAYOUT_COMMIT_ACK_ATTEMPTS,
+        failures.join("; ")
+    ))
+}
+
+fn release_layout_plugins_by_transaction_with_ack(
+    senders: &ThreadSenders,
+    transaction_id: LayoutTransactionId,
+    reason: String,
+) -> LayoutPluginAck {
+    if transaction_id == 0 {
+        return LayoutPluginAck::Failed(
+            "layout transaction id 0 is reserved and cannot release Plugin resources".to_owned(),
+        );
+    }
+    let mut failures = vec![];
+    for attempt in 1..=LAYOUT_COMMIT_ACK_ATTEMPTS {
+        let (ack, ack_rx) = channels::bounded(1);
+        let instruction = PluginInstruction::ReleaseLayoutPluginsByTransaction {
+            transaction_id,
+            reason: reason.clone(),
+            ack,
+        };
+        if let Err(send_failure) = senders.send_to_plugin_recover(instruction) {
+            let (_instruction, send_error) = send_failure.into_parts();
+            failures.push(format!("attempt {attempt} delivery: {send_error:#}"));
+            continue;
+        }
+        match ack_rx.recv_timeout(LAYOUT_COMMIT_ACK_TIMEOUT) {
+            Ok(Ok(receipt @ LayoutPluginReceipt::Released { .. })) => {
+                return LayoutPluginAck::Resolved(receipt);
+            },
+            Ok(Ok(receipt)) => {
+                return LayoutPluginAck::Failed(format!(
+                    "layout plugin transaction {transaction_id} returned incompatible by-owner release receipt {receipt:?}"
+                ));
+            },
+            Ok(Err(message)) => {
+                return LayoutPluginAck::Failed(format!(
+                    "attempt {attempt} Plugin by-owner release: {message}"
+                ));
+            },
+            Err(channels::RecvTimeoutError::Timeout) => {
+                failures.push(format!("attempt {attempt} ACK timeout"));
+            },
+            Err(channels::RecvTimeoutError::Disconnected) => {
+                failures.push(format!("attempt {attempt} ACK disconnect"));
+            },
+        }
+    }
+    LayoutPluginAck::Unknown(format!(
+        "layout plugin transaction {transaction_id} by-owner release remained unknown after {} attempts: {}",
+        LAYOUT_COMMIT_ACK_ATTEMPTS,
+        failures.join("; ")
+    ))
+}
 
 fn resolve_layout_commit_with_pty_ack(
-    screen: &Screen,
+    senders: &ThreadSenders,
     transaction_id: LayoutTransactionId,
     outcome: LayoutCommitOutcome,
-) -> Result<()> {
+) -> Result<LayoutCommitAck> {
     if transaction_id == 0 {
-        return Ok(());
+        #[cfg(test)]
+        {
+            return Ok(LayoutCommitAck::Resolved);
+        }
+        #[cfg(not(test))]
+        {
+            bail!("layout transaction id 0 is reserved and cannot commit PTY resources");
+        }
     }
     let mut failures = vec![];
     for attempt in 1..=LAYOUT_COMMIT_ACK_ATTEMPTS {
@@ -1725,13 +2155,13 @@ fn resolve_layout_commit_with_pty_ack(
             outcome: outcome.clone(),
             ack,
         };
-        if let Err(send_failure) = screen.bus.senders.send_to_pty_recover(instruction) {
+        if let Err(send_failure) = senders.send_to_pty_recover(instruction) {
             let (_instruction, send_error) = send_failure.into_parts();
             failures.push(format!("attempt {attempt} delivery: {send_error:#}"));
             continue;
         }
         match ack_rx.recv_timeout(LAYOUT_COMMIT_ACK_TIMEOUT) {
-            Ok(Ok(())) => return Ok(()),
+            Ok(Ok(ack)) => return Ok(ack),
             Ok(Err(message)) => {
                 failures.push(format!("attempt {attempt} PTY resolution: {message}"));
             },
@@ -1748,6 +2178,244 @@ fn resolve_layout_commit_with_pty_ack(
         LAYOUT_COMMIT_ACK_ATTEMPTS,
         failures.join("; ")
     )
+}
+
+fn coordinate_layout_activation(
+    senders: &ThreadSenders,
+    transaction_id: LayoutTransactionId,
+    expected_plugin_ids: &[PluginId],
+) -> LayoutCoordination {
+    match resolve_layout_plugins_with_ack(
+        senders,
+        transaction_id,
+        LayoutPluginResolution::Activate,
+        expected_plugin_ids,
+    ) {
+        LayoutPluginAck::Resolved(LayoutPluginReceipt::Activated { .. }) => {
+            match resolve_layout_commit_with_pty_ack(
+                senders,
+                transaction_id,
+                LayoutCommitOutcome::Committed,
+            ) {
+                Ok(LayoutCommitAck::Resolved) => LayoutCoordination::Commit,
+                Ok(LayoutCommitAck::ActivationRolledBack(message)) => {
+                    let compensation_reason = format!(
+                        "PTY activation rolled back layout transaction {transaction_id}: {message}"
+                    );
+                    match resolve_layout_plugins_with_ack(
+                        senders,
+                        transaction_id,
+                        LayoutPluginResolution::Compensate {
+                            reason: compensation_reason.clone(),
+                        },
+                        expected_plugin_ids,
+                    ) {
+                        LayoutPluginAck::Resolved(LayoutPluginReceipt::Compensated { .. }) => {
+                            LayoutCoordination::Rollback(compensation_reason)
+                        },
+                        LayoutPluginAck::Resolved(receipt) => LayoutCoordination::Unknown(format!(
+                            "{compensation_reason}; Plugin returned unexpected compensation receipt {receipt:?}"
+                        )),
+                        LayoutPluginAck::Failed(error) | LayoutPluginAck::Unknown(error) => {
+                            LayoutCoordination::Unknown(format!(
+                                "{compensation_reason}; Plugin compensation was not certified: {error}"
+                            ))
+                        },
+                    }
+                },
+                Err(error) => LayoutCoordination::Unknown(format!(
+                    "layout transaction {transaction_id} Plugin activation succeeded but PTY commit remained unknown: {error:#}"
+                )),
+            }
+        },
+        LayoutPluginAck::Resolved(LayoutPluginReceipt::ActivationRolledBack {
+            message, ..
+        }) => {
+            let rejection = format!(
+                "Plugin activation rolled back layout transaction {transaction_id}: {message}"
+            );
+            match resolve_layout_commit_with_pty_ack(
+                senders,
+                transaction_id,
+                LayoutCommitOutcome::Rejected(rejection.clone()),
+            ) {
+                Ok(LayoutCommitAck::Resolved) => LayoutCoordination::Rollback(rejection),
+                Ok(LayoutCommitAck::ActivationRolledBack(message)) => {
+                    LayoutCoordination::Unknown(format!(
+                        "{rejection}; PTY returned an activation rollback for a rejection: {message}"
+                    ))
+                },
+                Err(error) => LayoutCoordination::Unknown(format!(
+                    "{rejection}; PTY rejection remained unknown: {error:#}"
+                )),
+            }
+        },
+        LayoutPluginAck::Resolved(receipt) => LayoutCoordination::Unknown(format!(
+            "layout transaction {transaction_id} returned unexpected Plugin activation receipt {receipt:?}"
+        )),
+        LayoutPluginAck::Failed(error) => {
+            let rejection = format!(
+                "Plugin activation failed for layout transaction {transaction_id}: {error}"
+            );
+            match resolve_layout_plugins_with_ack(
+                senders,
+                transaction_id,
+                LayoutPluginResolution::Release {
+                    reason: rejection.clone(),
+                },
+                expected_plugin_ids,
+            ) {
+                LayoutPluginAck::Resolved(LayoutPluginReceipt::Released { .. }) => {
+                    match resolve_layout_commit_with_pty_ack(
+                        senders,
+                        transaction_id,
+                        LayoutCommitOutcome::Rejected(rejection.clone()),
+                    ) {
+                        Ok(LayoutCommitAck::Resolved) => LayoutCoordination::Rollback(rejection),
+                        Ok(LayoutCommitAck::ActivationRolledBack(message)) => {
+                            LayoutCoordination::Unknown(format!(
+                                "{rejection}; PTY returned an activation rollback for a rejection: {message}"
+                            ))
+                        },
+                        Err(error) => LayoutCoordination::Unknown(format!(
+                            "{rejection}; PTY rejection remained unknown: {error:#}"
+                        )),
+                    }
+                },
+                LayoutPluginAck::Resolved(receipt) => LayoutCoordination::Unknown(format!(
+                    "{rejection}; Plugin returned unexpected release receipt {receipt:?}"
+                )),
+                LayoutPluginAck::Failed(release_error)
+                | LayoutPluginAck::Unknown(release_error) => LayoutCoordination::Unknown(format!(
+                    "{rejection}; Plugin release was not certified: {release_error}"
+                )),
+            }
+        },
+        LayoutPluginAck::Unknown(error) => LayoutCoordination::Unknown(format!(
+            "layout transaction {transaction_id} Plugin activation remained unknown: {error}"
+        )),
+    }
+}
+
+fn coordinate_layout_rejection(
+    senders: &ThreadSenders,
+    transaction_id: LayoutTransactionId,
+    expected_plugin_ids: &[PluginId],
+    rejection: String,
+) -> LayoutCoordination {
+    match resolve_layout_plugins_with_ack(
+        senders,
+        transaction_id,
+        LayoutPluginResolution::Release {
+            reason: rejection.clone(),
+        },
+        expected_plugin_ids,
+    ) {
+        LayoutPluginAck::Unknown(error) => LayoutCoordination::Unknown(format!(
+            "{rejection}; Plugin release remained unknown: {error}"
+        )),
+        LayoutPluginAck::Resolved(LayoutPluginReceipt::Released { .. }) => {
+            match resolve_layout_commit_with_pty_ack(
+                senders,
+                transaction_id,
+                LayoutCommitOutcome::Rejected(rejection.clone()),
+            ) {
+                Ok(LayoutCommitAck::Resolved) => LayoutCoordination::Rollback(rejection),
+                Ok(LayoutCommitAck::ActivationRolledBack(message)) => {
+                    LayoutCoordination::Unknown(format!(
+                        "{rejection}; PTY returned an activation rollback for a rejection: {message}"
+                    ))
+                },
+                Err(error) => LayoutCoordination::Unknown(format!(
+                    "{rejection}; PTY rejection remained unknown: {error:#}"
+                )),
+            }
+        },
+        LayoutPluginAck::Resolved(receipt) => LayoutCoordination::Unknown(format!(
+            "{rejection}; Plugin returned unexpected release receipt {receipt:?}"
+        )),
+        LayoutPluginAck::Failed(error) => LayoutCoordination::Unknown(format!(
+            "{rejection}; Plugin release failed explicitly and cleanup is unverified: {error}"
+        )),
+    }
+}
+
+fn coordinate_layout_rejection_by_owner(
+    senders: &ThreadSenders,
+    transaction_id: LayoutTransactionId,
+    rejection: String,
+) -> LayoutCoordination {
+    match release_layout_plugins_by_transaction_with_ack(senders, transaction_id, rejection.clone())
+    {
+        LayoutPluginAck::Unknown(error) => LayoutCoordination::Unknown(format!(
+            "{rejection}; exact Plugin by-owner release remained unknown: {error}"
+        )),
+        LayoutPluginAck::Resolved(LayoutPluginReceipt::Released { .. }) => {
+            match resolve_layout_commit_with_pty_ack(
+                senders,
+                transaction_id,
+                LayoutCommitOutcome::Rejected(rejection.clone()),
+            ) {
+                Ok(LayoutCommitAck::Resolved) => LayoutCoordination::Rollback(rejection),
+                Ok(LayoutCommitAck::ActivationRolledBack(message)) => {
+                    LayoutCoordination::Unknown(format!(
+                        "{rejection}; PTY returned an activation rollback for a rejection: {message}"
+                    ))
+                },
+                Err(error) => LayoutCoordination::Unknown(format!(
+                    "{rejection}; PTY by-owner rejection remained unknown: {error:#}"
+                )),
+            }
+        },
+        LayoutPluginAck::Resolved(receipt) => LayoutCoordination::Unknown(format!(
+            "{rejection}; Plugin returned unexpected by-owner release receipt {receipt:?}"
+        )),
+        LayoutPluginAck::Failed(error) => LayoutCoordination::Unknown(format!(
+            "{rejection}; exact Plugin by-owner release failed and cleanup is unverified: {error}"
+        )),
+    }
+}
+
+fn certify_layout_preparation_cleanup(
+    senders: &ThreadSenders,
+    transaction_id: LayoutTransactionId,
+    cleanup: LayoutPreparationCleanup,
+    failure_message: &str,
+) -> std::result::Result<(), String> {
+    match cleanup {
+        LayoutPreparationCleanup::Resolved => Ok(()),
+        LayoutPreparationCleanup::ReleasePluginReservation {
+            plugin_ids,
+            pty_cleanup_succeeded,
+        } => {
+            let release_reason = format!(
+                "PTY rejected layout transaction {transaction_id} during preparation: {failure_message}"
+            );
+            match resolve_layout_plugins_with_ack(
+                senders,
+                transaction_id,
+                LayoutPluginResolution::Release {
+                    reason: release_reason.clone(),
+                },
+                &plugin_ids,
+            ) {
+                LayoutPluginAck::Resolved(LayoutPluginReceipt::Released { .. })
+                    if pty_cleanup_succeeded =>
+                {
+                    Ok(())
+                },
+                LayoutPluginAck::Resolved(LayoutPluginReceipt::Released { .. }) => Err(format!(
+                    "{release_reason}; Plugin release was certified but PTY cleanup was not"
+                )),
+                LayoutPluginAck::Resolved(receipt) => Err(format!(
+                    "{release_reason}; Plugin returned unexpected preparation-release receipt {receipt:?}"
+                )),
+                LayoutPluginAck::Failed(error) | LayoutPluginAck::Unknown(error) => Err(format!(
+                    "{release_reason}; Plugin release was not certified: {error}"
+                )),
+            }
+        },
+    }
 }
 
 impl Screen {
@@ -1829,6 +2497,16 @@ impl Screen {
             next_tab_id: 0,
             next_layout_transaction_id: 1,
             active_layout_transactions: HashMap::new(),
+            indeterminate_layout_transactions: HashMap::new(),
+            layout_reconciliation_results: Arc::new(Mutex::new(vec![])),
+            layout_reconciliations_in_flight: HashSet::new(),
+            layout_reconciliation_attempts: HashMap::new(),
+            pending_layout_cleanup: HashMap::new(),
+            layout_cleanup_retry_results: Arc::new(Mutex::new(vec![])),
+            layout_cleanup_retries_in_flight: HashSet::new(),
+            layout_cleanup_retry_attempts: HashMap::new(),
+            resolved_layout_transactions: HashMap::new(),
+            resolved_layout_transaction_order: VecDeque::new(),
             session_incarnation: Uuid::new_v4().to_string(),
             terminal_emulator_colors: Rc::new(RefCell::new(Palette::default())),
             terminal_emulator_color_codes: Rc::new(RefCell::new(HashMap::new())),
@@ -1906,10 +2584,891 @@ impl Screen {
                 && !self
                     .active_layout_transactions
                     .contains_key(&transaction_id)
+                && !self
+                    .resolved_layout_transactions
+                    .contains_key(&transaction_id)
+                && !self
+                    .indeterminate_layout_transactions
+                    .contains_key(&transaction_id)
+                && !self.pending_layout_cleanup.contains_key(&transaction_id)
             {
                 return transaction_id;
             }
         }
+    }
+
+    fn retain_layout_cleanup(
+        &mut self,
+        transaction_id: LayoutTransactionId,
+        cleanup: PendingTabLayoutCleanup,
+    ) {
+        if cleanup.is_empty() {
+            return;
+        }
+        self.pending_layout_cleanup
+            .entry(transaction_id)
+            .or_default()
+            .append(cleanup);
+    }
+
+    fn flush_layout_cleanup(&mut self, transaction_id: LayoutTransactionId) {
+        let senders = self.bus.senders.clone();
+        let Some(cleanup) = self.pending_layout_cleanup.get_mut(&transaction_id) else {
+            return;
+        };
+        let failures = cleanup.flush(
+            transaction_id,
+            &senders,
+            LAYOUT_CLEANUP_ACK_TIMEOUT,
+            LAYOUT_CLEANUP_ACK_ATTEMPTS,
+        );
+        if cleanup.is_empty() {
+            self.finish_layout_cleanup(transaction_id);
+        } else if !failures.is_empty() {
+            log::error!(
+                "layout transaction {transaction_id} retains cleanup ownership without exact worker execution receipts: {}",
+                failures.join("; ")
+            );
+        }
+    }
+
+    fn finish_layout_cleanup(&mut self, transaction_id: LayoutTransactionId) {
+        self.pending_layout_cleanup.remove(&transaction_id);
+        self.layout_cleanup_retries_in_flight
+            .remove(&transaction_id);
+        self.layout_cleanup_retry_attempts.remove(&transaction_id);
+        if let Some(receipt) = self.resolved_layout_transactions.get_mut(&transaction_id)
+            && matches!(
+                &receipt.decision,
+                ScreenLayoutDecision::CommittedWithCleanupDebt(_)
+            )
+        {
+            receipt.decision = ScreenLayoutDecision::Committed;
+        }
+    }
+
+    fn retry_pending_layout_cleanup_in_background(&mut self) {
+        let completed = {
+            let mut results = self
+                .layout_cleanup_retry_results
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            std::mem::take(&mut *results)
+        };
+        for result in completed {
+            self.layout_cleanup_retries_in_flight
+                .remove(&result.transaction_id);
+            if let Some(cleanup) = self.pending_layout_cleanup.get_mut(&result.transaction_id) {
+                cleanup.acknowledge(result.acknowledged_ids);
+                if !result.failures.is_empty() {
+                    log::error!(
+                        "layout transaction {} still retains cleanup debt after background execution probe: {}",
+                        result.transaction_id,
+                        result.failures.join("; ")
+                    );
+                }
+                if cleanup.is_empty() {
+                    self.finish_layout_cleanup(result.transaction_id);
+                } else {
+                    self.layout_cleanup_retry_attempts
+                        .entry(result.transaction_id)
+                        .and_modify(|attempts| *attempts = attempts.saturating_add(1))
+                        .or_insert(1);
+                }
+            }
+        }
+
+        let transaction_ids = self
+            .pending_layout_cleanup
+            .keys()
+            .filter(|transaction_id| {
+                !self
+                    .layout_cleanup_retries_in_flight
+                    .contains(transaction_id)
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        for transaction_id in transaction_ids {
+            let Some(pane_ids) = self
+                .pending_layout_cleanup
+                .get(&transaction_id)
+                .map(PendingTabLayoutCleanup::pane_ids)
+            else {
+                continue;
+            };
+            let senders = self.bus.senders.clone();
+            let wake_screen = senders.clone();
+            let results = self.layout_cleanup_retry_results.clone();
+            let retry_attempt = self
+                .layout_cleanup_retry_attempts
+                .get(&transaction_id)
+                .copied()
+                .unwrap_or(0)
+                .min(8);
+            let retry_delay = LAYOUT_CLEANUP_RETRY_BASE
+                .checked_mul(1_u32 << retry_attempt)
+                .unwrap_or(LAYOUT_CLEANUP_RETRY_MAX)
+                .min(LAYOUT_CLEANUP_RETRY_MAX);
+            self.layout_cleanup_retries_in_flight.insert(transaction_id);
+            let spawn_result = std::thread::Builder::new()
+                .name(format!("layout-cleanup-{transaction_id}"))
+                .spawn(move || {
+                    std::thread::sleep(retry_delay);
+                    let probe = PendingTabLayoutCleanup::probe(
+                        transaction_id,
+                        pane_ids,
+                        &senders,
+                        LAYOUT_CLEANUP_ACK_TIMEOUT,
+                        LAYOUT_CLEANUP_ACK_ATTEMPTS,
+                    );
+                    let (acknowledged_ids, failures) = probe.into_parts();
+                    results
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .push(BackgroundLayoutCleanupResult {
+                            transaction_id,
+                            acknowledged_ids,
+                            failures,
+                        });
+                    let _ = wake_screen.send_to_screen(ScreenInstruction::LayoutMaintenanceWake);
+                });
+            if let Err(error) = spawn_result {
+                self.layout_cleanup_retries_in_flight
+                    .remove(&transaction_id);
+                self.layout_cleanup_retry_attempts
+                    .entry(transaction_id)
+                    .and_modify(|attempts| *attempts = attempts.saturating_add(1))
+                    .or_insert(1);
+                log::error!(
+                    "failed to start background cleanup retry for layout transaction {transaction_id}: {error}"
+                );
+            }
+        }
+    }
+
+    fn take_resolved_layout_reconciliations(
+        &mut self,
+    ) -> Vec<(LayoutTransactionId, LayoutCoordination)> {
+        let completed = {
+            let mut results = self
+                .layout_reconciliation_results
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            std::mem::take(&mut *results)
+        };
+        let mut resolved = vec![];
+        for result in completed {
+            self.layout_reconciliations_in_flight
+                .remove(&result.transaction_id);
+            match result.coordination {
+                LayoutCoordination::Unknown(message) => {
+                    self.layout_reconciliation_attempts
+                        .entry(result.transaction_id)
+                        .and_modify(|attempts| *attempts = attempts.saturating_add(1))
+                        .or_insert(1);
+                    log::error!(
+                        "layout transaction {} remains indeterminate after background reconciliation: {}",
+                        result.transaction_id,
+                        message
+                    );
+                },
+                coordination => {
+                    resolved.push((result.transaction_id, coordination));
+                },
+            }
+        }
+        resolved
+    }
+
+    fn retry_indeterminate_layout_transactions_in_background(&mut self) {
+        let transaction_ids = self
+            .indeterminate_layout_transactions
+            .keys()
+            .filter(|transaction_id| {
+                !self
+                    .layout_reconciliations_in_flight
+                    .contains(transaction_id)
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        for transaction_id in transaction_ids {
+            let Some(plan) = self
+                .indeterminate_layout_transactions
+                .get(&transaction_id)
+                .map(IndeterminatePreparedLayout::reconciliation_plan)
+            else {
+                continue;
+            };
+            let retry_attempt = self
+                .layout_reconciliation_attempts
+                .get(&transaction_id)
+                .copied()
+                .unwrap_or(0)
+                .min(8);
+            let retry_delay = LAYOUT_CLEANUP_RETRY_BASE
+                .checked_mul(1_u32 << retry_attempt)
+                .unwrap_or(LAYOUT_CLEANUP_RETRY_MAX)
+                .min(LAYOUT_CLEANUP_RETRY_MAX);
+            let senders = self.bus.senders.clone();
+            let wake_screen = senders.clone();
+            let results = self.layout_reconciliation_results.clone();
+            self.layout_reconciliations_in_flight.insert(transaction_id);
+            let spawn_result = std::thread::Builder::new()
+                .name(format!("layout-reconcile-{transaction_id}"))
+                .spawn(move || {
+                    std::thread::sleep(retry_delay);
+                    let coordination = match plan.intent {
+                        LayoutReconciliationIntent::Activate => coordinate_layout_activation(
+                            &senders,
+                            transaction_id,
+                            &plan.expected_plugin_ids,
+                        ),
+                        LayoutReconciliationIntent::Reject(rejection) => {
+                            coordinate_layout_rejection(
+                                &senders,
+                                transaction_id,
+                                &plan.expected_plugin_ids,
+                                rejection,
+                            )
+                        },
+                        LayoutReconciliationIntent::RejectByOwner(rejection) => {
+                            coordinate_layout_rejection_by_owner(
+                                &senders,
+                                transaction_id,
+                                rejection,
+                            )
+                        },
+                        LayoutReconciliationIntent::PreparationFailure {
+                            failure_message,
+                            pty_cleanup_succeeded,
+                        } => match certify_layout_preparation_cleanup(
+                            &senders,
+                            transaction_id,
+                            LayoutPreparationCleanup::ReleasePluginReservation {
+                                plugin_ids: plan.expected_plugin_ids,
+                                pty_cleanup_succeeded,
+                            },
+                            &failure_message,
+                        ) {
+                            Ok(()) => LayoutCoordination::Rollback(failure_message),
+                            Err(error) => LayoutCoordination::Unknown(error),
+                        },
+                    };
+                    results
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .push(BackgroundLayoutReconciliationResult {
+                            transaction_id,
+                            coordination,
+                        });
+                    let _ = wake_screen.send_to_screen(ScreenInstruction::LayoutMaintenanceWake);
+                });
+            if let Err(error) = spawn_result {
+                self.layout_reconciliations_in_flight
+                    .remove(&transaction_id);
+                self.layout_reconciliation_attempts
+                    .entry(transaction_id)
+                    .and_modify(|attempts| *attempts = attempts.saturating_add(1))
+                    .or_insert(1);
+                log::error!(
+                    "failed to start background reconciliation for layout transaction {transaction_id}: {error}"
+                );
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reconcile_indeterminate_layout_transaction(
+        &mut self,
+        transaction_id: LayoutTransactionId,
+        coordination: LayoutCoordination,
+        pending_tab_ids: &mut HashSet<usize>,
+        durable_tab_layout_generations: &HashMap<String, DurableTabLayoutGeneration>,
+        pending_tab_switches: &mut HashSet<(usize, ClientId)>,
+        pending_events_waiting_for_client: &mut Vec<ScreenInstruction>,
+        pending_events_waiting_for_tab: &mut Vec<ScreenInstruction>,
+        plugin_loading_message_cache: &mut HashMap<PluginId, LoadingIndication>,
+    ) -> Result<()> {
+        let Some(indeterminate) = self
+            .indeterminate_layout_transactions
+            .remove(&transaction_id)
+        else {
+            return Ok(());
+        };
+        let Some(owner) = self
+            .active_layout_transactions
+            .get(&transaction_id)
+            .cloned()
+        else {
+            self.indeterminate_layout_transactions
+                .insert(transaction_id, indeterminate);
+            self.layout_reconciliation_attempts
+                .entry(transaction_id)
+                .and_modify(|attempts| *attempts = attempts.saturating_add(1))
+                .or_insert(1);
+            bail!(
+                "layout transaction {transaction_id} recovered a worker decision but lost its active Screen owner"
+            );
+        };
+        let owner_targets_are_current = owner.exact_targets_are_current(self);
+        let exact_by_owner_rejection =
+            matches!(
+                indeterminate.reconciliation_plan().intent,
+                LayoutReconciliationIntent::RejectByOwner(_)
+            ) && matches!(&coordination, LayoutCoordination::Rollback(_));
+        if !owner_targets_are_current && !exact_by_owner_rejection {
+            self.indeterminate_layout_transactions
+                .insert(transaction_id, indeterminate);
+            self.layout_reconciliation_attempts
+                .entry(transaction_id)
+                .and_modify(|attempts| *attempts = attempts.saturating_add(1))
+                .or_insert(1);
+            bail!(
+                "layout transaction {transaction_id} recovered a worker decision but no longer owns the exact target tab incarnation"
+            );
+        }
+
+        match (coordination, indeterminate) {
+            (LayoutCoordination::Commit, IndeterminatePreparedLayout::Apply { prepared, plan }) => {
+                let tab_id = prepared.tab_id;
+                let should_change_client_focus = prepared.should_change_client_focus;
+                let client_id = prepared.client_id;
+                let mut committed = match self.commit_apply_layout_state(prepared) {
+                    Ok(committed) => committed,
+                    Err(prepared) => {
+                        self.indeterminate_layout_transactions.insert(
+                            transaction_id,
+                            IndeterminatePreparedLayout::Apply { prepared, plan },
+                        );
+                        self.layout_reconciliation_attempts
+                            .entry(transaction_id)
+                            .and_modify(|attempts| *attempts = attempts.saturating_add(1))
+                            .or_insert(1);
+                        bail!(
+                            "layout transaction {transaction_id} recovered a commit receipt but target tab {tab_id} disappeared before Screen reconciliation"
+                        );
+                    },
+                };
+                let cleanup = committed.effects.take_pending_cleanup();
+                self.retain_layout_cleanup(transaction_id, cleanup);
+                if let Some((_, mut completion)) = self.emit_committed_apply_layout(committed) {
+                    completion.mark_failure(format!(
+                        "layout transaction {transaction_id} committed during background reconciliation after its foreground completion had already reported an indeterminate outcome"
+                    ));
+                }
+
+                let mut post_commit_error = self
+                    .close_owned_tabs_after_layout_commit(transaction_id, &owner)
+                    .err()
+                    .map(|error| format!("{error:#}"));
+                self.flush_layout_cleanup(transaction_id);
+                let cleanup_decision = self.pending_layout_cleanup_message(transaction_id);
+                let decision = post_commit_error.take().map_or_else(
+                    || {
+                        cleanup_decision.clone().map_or(
+                            ScreenLayoutDecision::Committed,
+                            ScreenLayoutDecision::CommittedWithCleanupDebt,
+                        )
+                    },
+                    ScreenLayoutDecision::CommittedWithPostCommitError,
+                );
+                self.record_resolved_layout_transaction(
+                    transaction_id,
+                    &owner,
+                    plan.resource_ids.clone(),
+                    decision,
+                );
+
+                self.retire_layout_transaction_from_pending_gate(
+                    transaction_id,
+                    &owner,
+                    pending_tab_ids,
+                );
+                if pending_tab_ids.is_empty() {
+                    for (tab_index, pending_client_id) in pending_tab_switches.drain() {
+                        self.go_to_tab(tab_index + 1, pending_client_id).non_fatal();
+                    }
+                    if should_change_client_focus
+                        && let Some(tab_position) = self.get_tab_position_by_id(tab_id)
+                    {
+                        self.go_to_tab(tab_position + 1, client_id).non_fatal();
+                    }
+                } else if should_change_client_focus {
+                    let client_id_to_switch = if self.active_tab_ids.contains_key(&client_id) {
+                        Some(client_id)
+                    } else {
+                        self.active_tab_ids.keys().next().copied()
+                    };
+                    if let Some(client_id_to_switch) = client_id_to_switch
+                        && let Some(tab_position) = self.get_tab_position_by_id(tab_id)
+                    {
+                        pending_tab_switches.insert((tab_position, client_id_to_switch));
+                    }
+                }
+
+                for resource_id in &plan.resource_ids {
+                    let PaneId::Plugin(plugin_id) = resource_id else {
+                        continue;
+                    };
+                    if let Some(loading_indication) = plugin_loading_message_cache.remove(plugin_id)
+                    {
+                        self.update_plugin_loading_stage(*plugin_id, loading_indication);
+                    }
+                    self.render_blocker.register_blocking_plugin(*plugin_id);
+                }
+                for event in pending_events_waiting_for_client.drain(..) {
+                    self.bus.senders.send_to_screen(event).non_fatal();
+                }
+                for event in pending_events_waiting_for_tab.drain(..) {
+                    self.bus.senders.send_to_screen(event).non_fatal();
+                }
+                self.render(None).non_fatal();
+                if let Some(os_input) = &mut self.bus.os_input {
+                    for (connected_client_id, _) in self.connected_clients.borrow().iter() {
+                        let _ = os_input.send_to_client(
+                            *connected_client_id,
+                            ServerToClientMsg::QueryTerminalSize,
+                        );
+                    }
+                }
+                self.active_layout_transactions.remove(&transaction_id);
+                self.layout_reconciliation_attempts.remove(&transaction_id);
+                self.log_and_report_session_state().non_fatal();
+                log::info!(
+                    "layout transaction {transaction_id} committed after exact background reconciliation"
+                );
+            },
+            (
+                LayoutCoordination::Commit,
+                IndeterminatePreparedLayout::Override {
+                    prepared_layouts,
+                    created_tab_ids,
+                    plan,
+                },
+            ) => match self.commit_override_layout_state(prepared_layouts) {
+                CommittedOverrideLayout::Complete(mut committed_effects) => {
+                    let mut cleanup = PendingTabLayoutCleanup::default();
+                    for (_, effects) in &mut committed_effects {
+                        cleanup.append(effects.take_pending_cleanup());
+                    }
+                    self.retain_layout_cleanup(transaction_id, cleanup);
+                    let mut post_commit_error = None;
+                    for (tab_id, effects) in committed_effects {
+                        if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                            if let Some((_, mut completion)) = effects.emit(tab) {
+                                let message = format!(
+                                    "Override transaction {transaction_id} retained an unexpected blocking completion during background reconciliation"
+                                );
+                                completion.mark_failure(message.clone());
+                                post_commit_error = Some(message);
+                            }
+                        } else {
+                            post_commit_error = Some(format!(
+                                "committed Override target tab {tab_id} disappeared before reconciled local effects"
+                            ));
+                        }
+                    }
+                    if let Err(error) =
+                        self.close_owned_tabs_after_layout_commit(transaction_id, &owner)
+                    {
+                        post_commit_error = Some(format!("{error:#}"));
+                    }
+                    self.flush_layout_cleanup(transaction_id);
+                    let cleanup_decision = self.pending_layout_cleanup_message(transaction_id);
+                    let decision = post_commit_error.map_or_else(
+                        || {
+                            cleanup_decision.map_or(
+                                ScreenLayoutDecision::Committed,
+                                ScreenLayoutDecision::CommittedWithCleanupDebt,
+                            )
+                        },
+                        ScreenLayoutDecision::CommittedWithPostCommitError,
+                    );
+                    self.record_resolved_layout_transaction(
+                        transaction_id,
+                        &owner,
+                        plan.resource_ids.clone(),
+                        decision,
+                    );
+                    self.retire_layout_transaction_from_pending_gate(
+                        transaction_id,
+                        &owner,
+                        pending_tab_ids,
+                    );
+                    if pending_tab_ids.is_empty() {
+                        for (tab_index, pending_client_id) in pending_tab_switches.drain() {
+                            self.go_to_tab(tab_index + 1, pending_client_id).non_fatal();
+                        }
+                    }
+                    for event in pending_events_waiting_for_client.drain(..) {
+                        self.bus.senders.send_to_screen(event).non_fatal();
+                    }
+                    for event in pending_events_waiting_for_tab.drain(..) {
+                        self.bus.senders.send_to_screen(event).non_fatal();
+                    }
+                    self.active_layout_transactions.remove(&transaction_id);
+                    self.layout_reconciliation_attempts.remove(&transaction_id);
+                    self.log_and_report_session_state().non_fatal();
+                    self.render(None).non_fatal();
+                    log::info!(
+                        "Override transaction {transaction_id} committed after exact background reconciliation"
+                    );
+                },
+                CommittedOverrideLayout::Indeterminate {
+                    missing_tab_id,
+                    mut committed_effects,
+                    remaining_prepared,
+                } => {
+                    let mut cleanup = PendingTabLayoutCleanup::default();
+                    for (_, effects) in &mut committed_effects {
+                        cleanup.append(effects.take_pending_cleanup());
+                    }
+                    self.retain_layout_cleanup(transaction_id, cleanup);
+                    for (tab_id, effects) in committed_effects {
+                        if let Some(tab) = self.tabs.get_mut(&tab_id)
+                            && let Some((_, mut completion)) = effects.emit(tab)
+                        {
+                            completion.mark_failure(format!(
+                                "partially reconciled Override transaction {transaction_id} retained an unexpected blocking completion"
+                            ));
+                        }
+                    }
+                    self.flush_layout_cleanup(transaction_id);
+                    self.indeterminate_layout_transactions.insert(
+                        transaction_id,
+                        IndeterminatePreparedLayout::Override {
+                            prepared_layouts: remaining_prepared,
+                            created_tab_ids,
+                            plan,
+                        },
+                    );
+                    self.layout_reconciliation_attempts
+                        .entry(transaction_id)
+                        .and_modify(|attempts| *attempts = attempts.saturating_add(1))
+                        .or_insert(1);
+                    bail!(
+                        "Override transaction {transaction_id} recovered a commit receipt but target tab {missing_tab_id} disappeared during Screen reconciliation"
+                    );
+                },
+            },
+            (
+                LayoutCoordination::Rollback(message),
+                IndeterminatePreparedLayout::Apply { prepared, plan },
+            ) => {
+                self.rollback_prepared_apply_layout(prepared, &message);
+                for resource_id in &plan.resource_ids {
+                    if let PaneId::Plugin(plugin_id) = resource_id {
+                        plugin_loading_message_cache.remove(plugin_id);
+                    }
+                }
+                remove_layout_resources_from_screen(self, &plan.resource_ids);
+                self.record_resolved_layout_transaction(
+                    transaction_id,
+                    &owner,
+                    plan.resource_ids.clone(),
+                    ScreenLayoutDecision::Rejected(message.clone()),
+                );
+                if plan.close_fenced_tab_on_rejection {
+                    if let Some(layout_generation) = plan.layout_generation.as_ref() {
+                        close_globally_stale_fenced_tab(
+                            self,
+                            layout_generation,
+                            &plan.resource_ids,
+                        )
+                        .non_fatal();
+                        pending_tab_ids.remove(&layout_generation.tab_id);
+                    }
+                } else if !plan.preserve_pending_tab_on_rejection && owner_targets_are_current {
+                    if owner.kind == ScreenLayoutTransactionKind::BreakPane {
+                        if let Err(error) =
+                            self.activate_degraded_break_tab(&owner, pending_tab_ids)
+                        {
+                            self.retire_layout_transaction_from_pending_gate(
+                                transaction_id,
+                                &owner,
+                                pending_tab_ids,
+                            );
+                            log::error!(
+                                "layout transaction {transaction_id} could not activate its degraded break-pane destination after reconciliation: {error:#}"
+                            );
+                        }
+                    } else {
+                        self.discard_owned_pending_tabs(&owner, pending_tab_ids);
+                    }
+                }
+                self.retire_layout_transaction_from_pending_gate(
+                    transaction_id,
+                    &owner,
+                    pending_tab_ids,
+                );
+                release_pending_layout_gate_if_ready(
+                    self,
+                    pending_tab_ids,
+                    pending_tab_switches,
+                    pending_events_waiting_for_client,
+                    pending_events_waiting_for_tab,
+                );
+                self.active_layout_transactions.remove(&transaction_id);
+                self.layout_reconciliation_attempts.remove(&transaction_id);
+                self.log_and_report_session_state().non_fatal();
+                self.render(None).non_fatal();
+                log::warn!(
+                    "layout transaction {transaction_id} rejected after exact background reconciliation: {message}"
+                );
+            },
+            (
+                LayoutCoordination::Rollback(message),
+                IndeterminatePreparedLayout::Override {
+                    prepared_layouts,
+                    created_tab_ids,
+                    plan,
+                },
+            ) => {
+                for (tab_id, transaction) in prepared_layouts.into_iter().rev() {
+                    if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                        transaction.rollback(tab, &message);
+                    }
+                }
+                let excluded_pty_resource_ids = plan.resource_ids.iter().copied().collect();
+                for created_tab_id in created_tab_ids.iter().rev() {
+                    if self.tabs.contains_key(created_tab_id) {
+                        self.close_tab_by_id_excluding_pty_resources(
+                            *created_tab_id,
+                            &excluded_pty_resource_ids,
+                        )
+                        .non_fatal();
+                    }
+                }
+                for resource_id in &plan.resource_ids {
+                    if let PaneId::Plugin(plugin_id) = resource_id {
+                        plugin_loading_message_cache.remove(plugin_id);
+                    }
+                }
+                remove_layout_resources_from_screen(self, &plan.resource_ids);
+                self.record_resolved_layout_transaction(
+                    transaction_id,
+                    &owner,
+                    plan.resource_ids.clone(),
+                    ScreenLayoutDecision::Rejected(message.clone()),
+                );
+                if plan.close_fenced_tab_on_rejection {
+                    if let Some(layout_generation) = plan.layout_generation.as_ref() {
+                        close_globally_stale_fenced_tab(
+                            self,
+                            layout_generation,
+                            &plan.resource_ids,
+                        )
+                        .non_fatal();
+                        pending_tab_ids.remove(&layout_generation.tab_id);
+                    }
+                } else if !plan.preserve_pending_tab_on_rejection
+                    && let Some(layout_generation) = plan.layout_generation.as_ref()
+                    && durable_tab_layout_generation_is_current(
+                        self,
+                        durable_tab_layout_generations,
+                        layout_generation,
+                    )
+                {
+                    pending_tab_ids.remove(&layout_generation.tab_id);
+                }
+                self.retire_layout_transaction_from_pending_gate(
+                    transaction_id,
+                    &owner,
+                    pending_tab_ids,
+                );
+                release_pending_layout_gate_if_ready(
+                    self,
+                    pending_tab_ids,
+                    pending_tab_switches,
+                    pending_events_waiting_for_client,
+                    pending_events_waiting_for_tab,
+                );
+                self.active_layout_transactions.remove(&transaction_id);
+                self.layout_reconciliation_attempts.remove(&transaction_id);
+                self.log_and_report_session_state().non_fatal();
+                self.render(None).non_fatal();
+                log::warn!(
+                    "Override transaction {transaction_id} rejected after exact background reconciliation: {message}"
+                );
+            },
+            (
+                LayoutCoordination::Rollback(message),
+                IndeterminatePreparedLayout::ResolutionOnly {
+                    target_tab_ids: _,
+                    plan,
+                },
+            ) => {
+                for resource_id in &plan.resource_ids {
+                    if let PaneId::Plugin(plugin_id) = resource_id {
+                        plugin_loading_message_cache.remove(plugin_id);
+                    }
+                }
+                remove_layout_resources_from_screen(self, &plan.resource_ids);
+                self.record_resolved_layout_transaction(
+                    transaction_id,
+                    &owner,
+                    plan.resource_ids.clone(),
+                    ScreenLayoutDecision::Rejected(message.clone()),
+                );
+                if plan.close_fenced_tab_on_rejection {
+                    if let Some(layout_generation) = plan.layout_generation.as_ref() {
+                        close_globally_stale_fenced_tab(
+                            self,
+                            layout_generation,
+                            &plan.resource_ids,
+                        )
+                        .non_fatal();
+                        pending_tab_ids.remove(&layout_generation.tab_id);
+                    }
+                } else if !plan.preserve_pending_tab_on_rejection && owner_targets_are_current {
+                    if owner.kind == ScreenLayoutTransactionKind::BreakPane {
+                        if let Err(error) =
+                            self.activate_degraded_break_tab(&owner, pending_tab_ids)
+                        {
+                            self.retire_layout_transaction_from_pending_gate(
+                                transaction_id,
+                                &owner,
+                                pending_tab_ids,
+                            );
+                            log::error!(
+                                "layout transaction {transaction_id} could not activate its degraded break-pane destination after resolution-only reconciliation: {error:#}"
+                            );
+                        }
+                    } else {
+                        self.discard_owned_pending_tabs(&owner, pending_tab_ids);
+                    }
+                }
+                self.retire_layout_transaction_from_pending_gate(
+                    transaction_id,
+                    &owner,
+                    pending_tab_ids,
+                );
+                release_pending_layout_gate_if_ready(
+                    self,
+                    pending_tab_ids,
+                    pending_tab_switches,
+                    pending_events_waiting_for_client,
+                    pending_events_waiting_for_tab,
+                );
+                self.active_layout_transactions.remove(&transaction_id);
+                self.layout_reconciliation_attempts.remove(&transaction_id);
+                self.log_and_report_session_state().non_fatal();
+                self.render(None).non_fatal();
+                log::warn!(
+                    "layout transaction {transaction_id} rejected after resolution-only background reconciliation: {message}"
+                );
+            },
+            (
+                LayoutCoordination::Commit,
+                indeterminate @ IndeterminatePreparedLayout::ResolutionOnly { .. },
+            ) => {
+                self.indeterminate_layout_transactions
+                    .insert(transaction_id, indeterminate);
+                self.layout_reconciliation_attempts
+                    .entry(transaction_id)
+                    .and_modify(|attempts| *attempts = attempts.saturating_add(1))
+                    .or_insert(1);
+                bail!(
+                    "layout transaction {transaction_id} returned an impossible commit decision for a rejection-only reconciliation"
+                );
+            },
+            (LayoutCoordination::Unknown(message), indeterminate) => {
+                self.indeterminate_layout_transactions
+                    .insert(transaction_id, indeterminate);
+                self.layout_reconciliation_attempts
+                    .entry(transaction_id)
+                    .and_modify(|attempts| *attempts = attempts.saturating_add(1))
+                    .or_insert(1);
+                bail!(
+                    "layout transaction {transaction_id} remained indeterminate during Screen reconciliation: {message}"
+                );
+            },
+        }
+        Ok(())
+    }
+
+    fn pending_layout_cleanup_message(
+        &self,
+        transaction_id: LayoutTransactionId,
+    ) -> Option<String> {
+        let cleanup = self.pending_layout_cleanup.get(&transaction_id)?;
+        Some(format!(
+            "layout transaction {transaction_id} committed its Screen topology but exact worker cleanup ACK remains unresolved for {:?}; Screen retained every cleanup owner",
+            cleanup.pane_ids()
+        ))
+    }
+
+    fn record_resolved_layout_transaction(
+        &mut self,
+        transaction_id: LayoutTransactionId,
+        owner: &ActiveLayoutTransaction,
+        mut resource_ids: Vec<PaneId>,
+        decision: ScreenLayoutDecision,
+    ) {
+        let mut target_ids = owner
+            .targets
+            .iter()
+            .map(|target| target.tab_id)
+            .collect::<Vec<_>>();
+        target_ids.sort_unstable();
+        target_ids.dedup();
+        resource_ids.sort_unstable();
+        resource_ids.dedup();
+        let receipt = ResolvedLayoutTransaction {
+            kind: owner.kind,
+            target_ids,
+            generation: owner.generation.clone(),
+            resource_ids,
+            decision,
+        };
+        if let Some(existing) = self.resolved_layout_transactions.get(&transaction_id) {
+            if existing != &receipt {
+                log::error!(
+                    "refusing to overwrite conflicting Screen receipt for layout transaction {transaction_id}: existing={existing:?}, new={receipt:?}"
+                );
+            }
+            return;
+        }
+        self.resolved_layout_transactions
+            .insert(transaction_id, receipt);
+        self.resolved_layout_transaction_order
+            .push_back(transaction_id);
+        while self.resolved_layout_transaction_order.len() > MAX_RESOLVED_LAYOUT_TRANSACTIONS {
+            if let Some(expired_transaction_id) = self.resolved_layout_transaction_order.pop_front()
+            {
+                self.resolved_layout_transactions
+                    .remove(&expired_transaction_id);
+            }
+        }
+    }
+
+    fn replay_resolved_layout_transaction(
+        &self,
+        transaction_id: LayoutTransactionId,
+        allowed_kinds: &[ScreenLayoutTransactionKind],
+        target_ids: &[usize],
+        generation: Option<&DurableTabLayoutGeneration>,
+        resource_ids: &[PaneId],
+    ) -> Option<std::result::Result<ScreenLayoutDecision, String>> {
+        let receipt = self.resolved_layout_transactions.get(&transaction_id)?;
+        let mut actual_target_ids = target_ids.to_vec();
+        actual_target_ids.sort_unstable();
+        actual_target_ids.dedup();
+        let mut actual_resource_ids = resource_ids.to_vec();
+        actual_resource_ids.sort_unstable();
+        actual_resource_ids.dedup();
+        if target_ids.len() != actual_target_ids.len()
+            || resource_ids.len() != actual_resource_ids.len()
+            || !allowed_kinds.contains(&receipt.kind)
+            || receipt.target_ids != actual_target_ids
+            || receipt.generation.as_ref() != generation
+            || receipt.resource_ids != actual_resource_ids
+        {
+            return Some(Err(format!(
+                "conflicting replay for resolved layout transaction {transaction_id}: receipt={receipt:?}, targets={actual_target_ids:?}, resources={actual_resource_ids:?}"
+            )));
+        }
+        Some(Ok(receipt.decision.clone()))
     }
 
     fn register_layout_transaction(
@@ -1920,14 +3479,172 @@ impl Screen {
         if transaction_id == 0 {
             bail!("layout transaction id 0 is reserved");
         }
+        let target_id_list = transaction
+            .targets
+            .iter()
+            .map(|target| target.tab_id)
+            .collect::<Vec<_>>();
+        let target_ids = target_id_list.iter().copied().collect::<HashSet<_>>();
+        if target_ids.is_empty() {
+            bail!("layout transaction {transaction_id} has no target tabs");
+        }
+        if target_ids.len() != target_id_list.len() {
+            bail!(
+                "layout transaction {transaction_id} contains duplicate target tabs: {target_id_list:?}"
+            );
+        }
+        let mut render_fenced_tab_ids = transaction
+            .render_fenced_tabs
+            .iter()
+            .map(|owner| owner.tab_id)
+            .collect::<Vec<_>>();
+        let render_fenced_tab_count = render_fenced_tab_ids.len();
+        render_fenced_tab_ids.sort_unstable();
+        render_fenced_tab_ids.dedup();
+        if render_fenced_tab_ids.len() != render_fenced_tab_count {
+            bail!(
+                "layout transaction {transaction_id} contains duplicate render-fenced tabs: {render_fenced_tab_ids:?}"
+            );
+        }
+        if !transaction.exact_render_fences_are_current(self) {
+            bail!(
+                "layout transaction {transaction_id} cannot install a stale render fence for tabs {render_fenced_tab_ids:?}"
+            );
+        }
+        if let Some((blocking_transaction_id, blocked_tab_id)) = self
+            .active_layout_transactions
+            .iter()
+            .find_map(|(active_transaction_id, active_transaction)| {
+                let new_gate_ids = target_ids
+                    .iter()
+                    .copied()
+                    .chain(render_fenced_tab_ids.iter().copied())
+                    .collect::<HashSet<_>>();
+                active_transaction
+                    .render_fenced_tabs
+                    .iter()
+                    .find(|owner| new_gate_ids.contains(&owner.tab_id) && owner.is_current(self))
+                    .map(|owner| (*active_transaction_id, owner.tab_id))
+                    .or_else(|| {
+                        active_transaction
+                            .targets
+                            .iter()
+                            .find(|owner| {
+                                render_fenced_tab_ids.contains(&owner.tab_id)
+                                    && owner.is_current(self)
+                            })
+                            .map(|owner| (*active_transaction_id, owner.tab_id))
+                    })
+            })
+        {
+            bail!(
+                "layout transaction {transaction_id} cannot fence tab {blocked_tab_id} while active transaction {blocking_transaction_id} owns its topology"
+            );
+        }
+        if let Some((indeterminate_id, blocked_tab_id)) = self
+            .indeterminate_layout_transactions
+            .iter()
+            .find_map(|(indeterminate_id, prepared)| {
+                prepared
+                    .target_tab_ids()
+                    .into_iter()
+                    .find(|tab_id| target_ids.contains(tab_id))
+                    .map(|tab_id| (*indeterminate_id, tab_id))
+            })
+        {
+            bail!(
+                "layout transaction {transaction_id} cannot target tab {blocked_tab_id} while indeterminate transaction {indeterminate_id} still owns its prepared topology"
+            );
+        }
         if self
             .active_layout_transactions
-            .insert(transaction_id, transaction)
-            .is_some()
+            .contains_key(&transaction_id)
+            || self
+                .resolved_layout_transactions
+                .contains_key(&transaction_id)
+            || self
+                .indeterminate_layout_transactions
+                .contains_key(&transaction_id)
+            || self.pending_layout_cleanup.contains_key(&transaction_id)
         {
             bail!("duplicate Screen layout transaction id {transaction_id}");
         }
+        self.active_layout_transactions
+            .insert(transaction_id, transaction);
         Ok(())
+    }
+
+    fn ensure_render_fence_tabs_are_available(&self, tab_ids: &[usize]) -> Result<()> {
+        if let Some((blocking_transaction_id, blocked_tab_id)) = self
+            .active_layout_transactions
+            .iter()
+            .find_map(|(transaction_id, transaction)| {
+                transaction
+                    .pending_gate_owners()
+                    .find(|owner| tab_ids.contains(&owner.tab_id) && owner.is_current(self))
+                    .map(|owner| (*transaction_id, owner.tab_id))
+            })
+        {
+            bail!(
+                "cannot move panes out of tab {blocked_tab_id} while layout transaction {blocking_transaction_id} owns its topology"
+            );
+        }
+        Ok(())
+    }
+
+    fn rollback_break_source_transactions(
+        &mut self,
+        source_transactions: BTreeMap<usize, TabTopologyTransaction>,
+        recovered_panes: Vec<ExtractedBreakPane>,
+        destination_tab: &mut Tab,
+    ) -> Vec<String> {
+        let mut panes_by_source: BTreeMap<usize, BTreeMap<PaneId, Box<dyn Pane>>> = BTreeMap::new();
+        for recovered in recovered_panes {
+            panes_by_source
+                .entry(recovered.source_tab_id)
+                .or_default()
+                .insert(recovered.pane.pid(), recovered.pane);
+        }
+
+        let mut failures = vec![];
+        for (source_tab_id, transaction) in source_transactions {
+            let recovered = panes_by_source.remove(&source_tab_id).unwrap_or_default();
+            if let Some(source_tab) = self.tabs.get_mut(&source_tab_id) {
+                transaction.rollback(source_tab, recovered);
+            } else {
+                failures.push(format!(
+                    "source tab {source_tab_id} disappeared during topology rollback"
+                ));
+                for (pane_id, pane) in recovered {
+                    destination_tab.restore_extracted_pane(
+                        pane,
+                        pane_id,
+                        false,
+                        PaneGeom::from(&self.size),
+                    );
+                    if let Some(pane) = destination_tab.get_pane_with_id_mut(pane_id) {
+                        pane.commit_layout_transaction();
+                    }
+                }
+            }
+        }
+        for (source_tab_id, recovered) in panes_by_source {
+            failures.push(format!(
+                "source tab {source_tab_id} had recovered panes without a topology transaction"
+            ));
+            for (pane_id, pane) in recovered {
+                destination_tab.restore_extracted_pane(
+                    pane,
+                    pane_id,
+                    false,
+                    PaneGeom::from(&self.size),
+                );
+                if let Some(pane) = destination_tab.get_pane_with_id_mut(pane_id) {
+                    pane.commit_layout_transaction();
+                }
+            }
+        }
+        failures
     }
 
     fn validate_layout_transaction(
@@ -1967,6 +3684,16 @@ impl Screen {
         if !transaction.exact_targets_are_current(self) {
             bail!(
                 "layout transaction {transaction_id} no longer owns the exact target tab incarnation"
+            );
+        }
+        if let Some(changed_owner) = transaction
+            .tabs_to_close_after_commit
+            .iter()
+            .find(|owner| !owner.is_current_or_absent(self))
+        {
+            bail!(
+                "layout transaction {transaction_id} omitted tab {} changed incarnation before activation",
+                changed_owner.tab_id
             );
         }
         Ok(transaction.clone())
@@ -2089,9 +3816,7 @@ impl Screen {
         pending_tab_ids: &mut HashSet<usize>,
     ) {
         let mut owned_tab_ids = transaction
-            .targets
-            .iter()
-            .chain(transaction.created_pending_tabs.iter())
+            .pending_gate_owners()
             .map(|owner| owner.tab_id)
             .collect::<Vec<_>>();
         owned_tab_ids.sort_unstable();
@@ -2103,17 +3828,38 @@ impl Screen {
         }
     }
 
-    fn close_owned_tabs_after_layout_commit(&mut self, transaction: &ActiveLayoutTransaction) {
+    fn close_owned_tabs_after_layout_commit(
+        &mut self,
+        transaction_id: LayoutTransactionId,
+        transaction: &ActiveLayoutTransaction,
+    ) -> Result<()> {
+        let mut failures = vec![];
         for owner in &transaction.tabs_to_close_after_commit {
             if owner.is_current(self) {
-                self.close_tab_by_id(owner.tab_id).non_fatal();
+                if let Err(error) = self.close_tab_by_id_excluding_pty_resources_for_transaction(
+                    owner.tab_id,
+                    &HashSet::new(),
+                    transaction_id,
+                ) {
+                    failures.push(format!("omitted tab {}: {error:#}", owner.tab_id));
+                }
+            } else if !self.tabs.contains_key(&owner.tab_id) {
+                // Another already-committed action reached the same desired
+                // absence. This is idempotent, not an ownership mismatch.
             } else {
-                log::warn!(
-                    "not closing tab {} after layout commit because its incarnation changed",
+                failures.push(format!(
+                    "omitted tab {} changed incarnation after activation",
                     owner.tab_id
-                );
+                ));
             }
         }
+        if !failures.is_empty() {
+            bail!(
+                "layout transaction {transaction_id} could not close every omitted tab after retaining all reachable cleanup owners: {}",
+                failures.join("; ")
+            );
+        }
+        Ok(())
     }
 
     fn tab_has_other_active_layout_owner(
@@ -2126,8 +3872,7 @@ impl Screen {
             .any(|(other_id, transaction)| {
                 *other_id != transaction_id
                     && transaction
-                        .targets
-                        .iter()
+                        .pending_gate_owners()
                         .any(|target| target.tab_id == tab_id && target.is_current(self))
             })
     }
@@ -2271,21 +4016,17 @@ impl Screen {
     fn move_suppressed_panes_from_closed_tab(
         &mut self,
         suppressed_panes: SuppressedPanes,
-    ) -> Result<()> {
+    ) -> std::result::Result<(), SuppressedPanes> {
         // TODO: this is not entirely accurate, these also sometimes contain a pane who's
         // scrollback is being edited - in this case we need to close it or to move it to the
         // appropriate tab
-        let err_context = || "Failed to move suppressed panes from closed tab";
-        let first_tab_index = *self
-            .tabs
-            .keys()
-            .next()
-            .context("screen contains no tabs")
-            .with_context(err_context)?;
-        self.tabs
-            .get_mut(&first_tab_index)
-            .with_context(err_context)?
-            .add_suppressed_panes(suppressed_panes);
+        let Some(first_tab_index) = self.tabs.keys().next().copied() else {
+            return Err(suppressed_panes);
+        };
+        let Some(destination) = self.tabs.get_mut(&first_tab_index) else {
+            return Err(suppressed_panes);
+        };
+        destination.add_suppressed_panes(suppressed_panes);
         Ok(())
     }
 
@@ -2531,8 +4272,19 @@ impl Screen {
     }
 
     fn close_tab_by_id(&mut self, tab_id: usize) -> Result<()> {
-        self.close_tab_by_id_excluding_pty_resources(tab_id, &HashSet::new())
-            .map(|_| ())
+        let cleanup_transaction_id = self.reserve_layout_transaction_id();
+        let result = self.close_tab_by_id_excluding_pty_resources_for_transaction(
+            tab_id,
+            &HashSet::new(),
+            cleanup_transaction_id,
+        );
+        self.flush_layout_cleanup(cleanup_transaction_id);
+        result.map(|_| ()).and_then(|_| {
+            if let Some(message) = self.pending_layout_cleanup_message(cleanup_transaction_id) {
+                bail!("{message}");
+            }
+            Ok(())
+        })
     }
 
     fn close_tab_by_id_excluding_pty_resources(
@@ -2540,7 +4292,47 @@ impl Screen {
         tab_id: usize,
         excluded_pty_resource_ids: &HashSet<PaneId>,
     ) -> Result<Vec<PaneId>> {
+        let cleanup_transaction_id = self.reserve_layout_transaction_id();
+        let result = self.close_tab_by_id_excluding_pty_resources_for_transaction(
+            tab_id,
+            excluded_pty_resource_ids,
+            cleanup_transaction_id,
+        );
+        self.flush_layout_cleanup(cleanup_transaction_id);
+        result.and_then(|pane_ids| {
+            if let Some(message) = self.pending_layout_cleanup_message(cleanup_transaction_id) {
+                bail!("{message}");
+            }
+            Ok(pane_ids)
+        })
+    }
+
+    fn close_tab_by_id_excluding_pty_resources_for_transaction(
+        &mut self,
+        tab_id: usize,
+        excluded_pty_resource_ids: &HashSet<PaneId>,
+        cleanup_transaction_id: LayoutTransactionId,
+    ) -> Result<Vec<PaneId>> {
         let err_context = || format!("failed to close tab at index {tab_id:?}");
+        if let Some(blocking_transaction_id) =
+            self.indeterminate_layout_transactions
+                .keys()
+                .find(|transaction_id| {
+                    **transaction_id != cleanup_transaction_id
+                        && self
+                            .active_layout_transactions
+                            .get(transaction_id)
+                            .is_some_and(|transaction| {
+                                transaction.targets.iter().any(|target| {
+                                    target.tab_id == tab_id && target.is_current(self)
+                                })
+                            })
+                })
+        {
+            bail!(
+                "refusing to close tab {tab_id} while indeterminate layout transaction {blocking_transaction_id} owns its exact incarnation"
+            );
+        }
 
         let mut tab_to_close = self.tabs.remove(&tab_id).with_context(err_context)?;
         let mut pane_ids = tab_to_close.get_all_pane_ids();
@@ -2549,9 +4341,45 @@ impl Screen {
         // tab they are in, and in the future we should probably make them global to screen rather
         // than to each tab) and move them to another tab if there is one
         let suppressed_panes = tab_to_close.extract_suppressed_panes();
-        for suppressed_pane_id in suppressed_panes.keys() {
-            pane_ids.retain(|p| p != suppressed_pane_id);
+        let suppressed_runtime_ids = suppressed_panes
+            .values()
+            .map(|(_, pane)| pane.pid())
+            .collect::<HashSet<_>>();
+        let mut suppressed_transfer_error = None;
+        let suppressed_panes_to_cleanup = if self.tabs.is_empty() {
+            suppressed_panes
+        } else {
+            match self.move_suppressed_panes_from_closed_tab(suppressed_panes) {
+                Ok(()) => {
+                    pane_ids.retain(|pane_id| !suppressed_runtime_ids.contains(pane_id));
+                    SuppressedPanes::new()
+                },
+                Err(suppressed_panes) => {
+                    suppressed_transfer_error =
+                        Some("failed to transfer suppressed panes to the remaining tab".to_owned());
+                    suppressed_panes
+                },
+            }
+        };
+        let cleanup_pane_ids = pane_ids
+            .iter()
+            .copied()
+            .filter(|pane_id| !excluded_pty_resource_ids.contains(pane_id))
+            .collect::<Vec<_>>();
+        let mut owned_panes = tab_to_close.take_panes_for_cleanup();
+        for (_, (_, pane)) in suppressed_panes_to_cleanup {
+            let pane_id = pane.pid();
+            if !excluded_pty_resource_ids.contains(&pane_id) {
+                owned_panes.entry(pane_id).or_insert(pane);
+            }
         }
+        for excluded_resource_id in excluded_pty_resource_ids {
+            owned_panes.remove(excluded_resource_id);
+        }
+        self.retain_layout_cleanup(
+            cleanup_transaction_id,
+            PendingTabLayoutCleanup::from_owned_panes(cleanup_pane_ids, owned_panes),
+        );
 
         let _ = self.bus.senders.send_to_plugin(PluginInstruction::Update(
             pane_ids
@@ -2566,20 +4394,6 @@ impl Screen {
             self.notify_pane_closed_to_subscribers((*p_id).into());
         }
 
-        // below we don't check the result of sending the CloseTab instruction to the pty thread
-        // because this might be happening when the app is closing, at which point the pty thread
-        // has already closed and this would result in an error
-        let pty_resource_ids = pane_ids
-            .iter()
-            .copied()
-            .filter(|pane_id| !excluded_pty_resource_ids.contains(pane_id))
-            .collect::<Vec<_>>();
-        if !pty_resource_ids.is_empty() {
-            self.bus
-                .senders
-                .send_to_pty(PtyInstruction::CloseTab(pty_resource_ids))
-                .with_context(err_context)?;
-        }
         if self.tabs.is_empty() {
             self.active_tab_ids.clear();
             self.bus
@@ -2589,8 +4403,6 @@ impl Screen {
         } else {
             let client_mode_infos_in_closed_tab = tab_to_close.drain_connected_clients(None);
             self.move_clients_from_closed_tab(client_mode_infos_in_closed_tab)
-                .with_context(err_context)?;
-            self.move_suppressed_panes_from_closed_tab(suppressed_panes)
                 .with_context(err_context)?;
             let visible_tab_indices: HashSet<usize> =
                 self.active_tab_ids.values().copied().collect();
@@ -2606,6 +4418,9 @@ impl Screen {
             self.log_and_report_session_state()
                 .with_context(err_context)?;
             self.render(None).with_context(err_context)?;
+        }
+        if let Some(message) = suppressed_transfer_error {
+            bail!("{message}");
         }
         Ok(pane_ids)
     }
@@ -3186,10 +5001,13 @@ impl Screen {
                 has_ansi_subscribers || self.plugins_need_ansi_pane_contents;
 
             for (tab_index, tab) in &mut self.tabs {
+                if tab.is_pending() || pending_tab_ids.contains(tab_index) {
+                    continue;
+                }
                 if tab.has_selectable_tiled_panes() {
                     // Pass None for normal client rendering
                     tab.render(&mut output, None).context(err_context)?;
-                } else if !tab.is_pending() && !pending_tab_ids.contains(tab_index) {
+                } else {
                     tabs_to_close.push(*tab_index);
                 }
             }
@@ -3300,6 +5118,8 @@ impl Screen {
                 .tabs
                 .get_mut(&focused_tab_index_of_followed_client_id)
                 .as_mut()
+                && !tab.is_pending()
+                && !pending_tab_ids.contains(&focused_tab_index_of_followed_client_id)
             {
                 // Only force render if:
                 // 1. Non-watcher output was dirty, OR
@@ -3665,7 +5485,7 @@ impl Screen {
         self.tabs.insert(tab_id, tab);
         Ok(())
     }
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn apply_layout(
         &mut self,
         layout: TiledPaneLayout,
@@ -3689,8 +5509,75 @@ impl Screen {
             client_id_and_is_web_client,
             blocking_terminal,
         )?;
-        let committed = self.commit_apply_layout_state(prepared)?;
-        self.emit_committed_apply_layout(committed)?;
+        prepared
+            .transaction
+            .preflight_commit(self.tabs.get(&prepared.tab_id).with_context(|| {
+                format!(
+                    "prepared Apply target tab {} disappeared before commit preflight",
+                    prepared.tab_id
+                )
+            })?)?;
+        let cleanup_transaction_id = self.reserve_layout_transaction_id();
+        let mut committed = match self.commit_apply_layout_state(prepared) {
+            Ok(committed) => committed,
+            Err(mut prepared) => {
+                let message = format!(
+                    "prepared Apply target tab {} disappeared before direct commit",
+                    prepared.tab_id
+                );
+                prepared
+                    .transaction
+                    .mark_blocking_completion_failed(&message);
+                self.indeterminate_layout_transactions.insert(
+                    cleanup_transaction_id,
+                    IndeterminatePreparedLayout::Apply {
+                        prepared,
+                        plan: LayoutReconciliationPlan {
+                            intent: LayoutReconciliationIntent::Reject(message.clone()),
+                            expected_plugin_ids: vec![],
+                            resource_ids: vec![],
+                            preserve_pending_tab_on_rejection: false,
+                            close_fenced_tab_on_rejection: false,
+                            layout_generation: None,
+                        },
+                    },
+                );
+                bail!("{message}");
+            },
+        };
+        self.retain_layout_cleanup(
+            cleanup_transaction_id,
+            committed.effects.take_pending_cleanup(),
+        );
+        let committed_tab_id = committed.tab_id;
+        let blocking_terminal = self.emit_committed_apply_layout(committed);
+        self.render(None).non_fatal();
+        self.flush_layout_cleanup(cleanup_transaction_id);
+        if let Some(message) = self.pending_layout_cleanup_message(cleanup_transaction_id) {
+            if let Some((_, mut completion)) = blocking_terminal {
+                completion.mark_failure(message.clone());
+            }
+            bail!("{message}");
+        }
+        if let Some((terminal_id, completion)) = blocking_terminal {
+            let Some(tab) = self.tabs.get_mut(&committed_tab_id) else {
+                let mut completion = completion;
+                let message = format!(
+                    "committed Apply target tab {committed_tab_id} disappeared before blocking completion attachment"
+                );
+                completion.mark_failure(message.clone());
+                bail!("{message}");
+            };
+            if let Err(mut completion) =
+                tab.attach_blocking_layout_completion(terminal_id, completion)
+            {
+                let message = format!(
+                    "terminal {terminal_id} rejected direct blocking completion attachment"
+                );
+                completion.mark_failure(message.clone());
+                bail!("{message}");
+            }
+        }
         Ok(())
     }
 
@@ -3746,7 +5633,7 @@ impl Screen {
             .with_context(err_context)?;
         Ok(PreparedApplyLayout {
             tab_id,
-            transaction,
+            transaction: Box::new(transaction),
             should_change_client_focus,
             client_id,
             is_web_client,
@@ -3756,7 +5643,10 @@ impl Screen {
     fn commit_apply_layout_state(
         &mut self,
         prepared: PreparedApplyLayout,
-    ) -> Result<CommittedApplyLayout> {
+    ) -> std::result::Result<CommittedApplyLayout, PreparedApplyLayout> {
+        let Some(tab) = self.tabs.get_mut(&prepared.tab_id) else {
+            return Err(prepared);
+        };
         let PreparedApplyLayout {
             tab_id,
             transaction,
@@ -3764,10 +5654,7 @@ impl Screen {
             client_id,
             is_web_client,
         } = prepared;
-        let tab = self.tabs.get_mut(&tab_id).with_context(|| {
-            format!("prepared Apply target tab {tab_id} disappeared before commit")
-        })?;
-        let effects = transaction.commit_state(tab);
+        let effects = (*transaction).commit_state(tab);
         Ok(CommittedApplyLayout {
             tab_id,
             effects,
@@ -3777,28 +5664,65 @@ impl Screen {
         })
     }
 
+    fn commit_override_layout_state(
+        &mut self,
+        prepared_layouts: Vec<(usize, TabLayoutTransaction)>,
+    ) -> CommittedOverrideLayout {
+        let mut committed_effects = vec![];
+        let mut remaining = prepared_layouts.into_iter();
+        while let Some((tab_id, transaction)) = remaining.next() {
+            let Some(tab) = self.tabs.get_mut(&tab_id) else {
+                let mut remaining_prepared = vec![(tab_id, transaction)];
+                remaining_prepared.extend(remaining);
+                return CommittedOverrideLayout::Indeterminate {
+                    missing_tab_id: tab_id,
+                    committed_effects,
+                    remaining_prepared,
+                };
+            };
+            committed_effects.push((tab_id, transaction.commit_state(tab)));
+        }
+        CommittedOverrideLayout::Complete(committed_effects)
+    }
+
     fn rollback_prepared_apply_layout(
         &mut self,
         prepared: PreparedApplyLayout,
         rejection_message: &str,
     ) {
         if let Some(tab) = self.tabs.get_mut(&prepared.tab_id) {
-            prepared.transaction.rollback(tab, rejection_message);
+            (*prepared.transaction).rollback(tab, rejection_message);
         }
     }
 
-    fn emit_committed_apply_layout(&mut self, committed: CommittedApplyLayout) -> Result<()> {
+    fn emit_committed_apply_layout(
+        &mut self,
+        committed: CommittedApplyLayout,
+    ) -> Option<(u32, NotificationEnd)> {
         let CommittedApplyLayout {
             tab_id,
-            effects,
+            mut effects,
             should_change_client_focus,
             client_id,
             is_web_client,
         } = committed;
-        let tab = self.tabs.get_mut(&tab_id).with_context(|| {
-            format!("committed Apply target tab {tab_id} disappeared before effects")
-        })?;
-        effects.emit(tab)?;
+        let mut blocking_terminal = effects.take_blocking_terminal();
+        let Some(tab) = self.tabs.get_mut(&tab_id) else {
+            let message = format!(
+                "committed Apply target tab {tab_id} disappeared before infallible local effects"
+            );
+            if let Some((_, completion)) = blocking_terminal.as_mut() {
+                completion.mark_failure(message.clone());
+            }
+            log::error!("{message}");
+            return None;
+        };
+        if let Some((_, mut unexpected_completion)) = effects.emit(tab) {
+            let message =
+                "Apply effects retained a blocking completion after Screen extracted ownership";
+            unexpected_completion.mark_failure(message);
+            log::error!("{message}");
+        }
 
         // move the relevant clients out of the current tab and place them in the new one
         let drained_clients = if should_change_client_focus {
@@ -3854,8 +5778,7 @@ impl Screen {
         // viewports.
         self.recompute_tab_size(tab_id).non_fatal();
         self.log_and_report_session_state().non_fatal();
-        self.render(None).non_fatal();
-        Ok(())
+        blocking_terminal
     }
 
     pub fn add_client(&mut self, client_id: ClientId, is_web_client: bool) -> Result<()> {
@@ -4916,12 +6839,12 @@ impl Screen {
         default_layout: Box<Layout>,
         client_id: ClientId,
         mut completion_tx: Option<NotificationEnd>,
-    ) -> Result<()> {
+    ) -> Result<Option<BreakPaneTransfer>> {
         let err_context = || "failed break pane out of tab".to_string();
         if let Some(completion) = completion_tx.as_mut() {
             completion.require_explicit_resolution();
         }
-        let (source_tab_id, active_pane_id, active_pane_run_instruction, active_pane_was_floating) = {
+        let (source_tab_id, active_pane_id, active_pane_run_instruction) = {
             let active_tab = self.get_active_tab_mut(client_id)?;
             if active_tab.get_selectable_tiled_panes_count() <= 1
                 && active_tab.get_visible_selectable_floating_panes_count() == 0
@@ -4941,25 +6864,26 @@ impl Screen {
                         message.into(),
                     ))
                     .with_context(err_context)?;
-                return Ok(());
+                return Ok(None);
             }
             let active_pane_id = active_tab.get_active_pane_id(client_id).with_context(|| {
                 format!("active pane disappeared before break for client {client_id}")
             })?;
-            let active_pane_run_instruction = active_tab
+            let active_pane = active_tab
                 .get_pane_with_id(active_pane_id)
                 .with_context(|| {
                     format!("active pane {active_pane_id:?} disappeared before break metadata read")
-                })?
-                .invoked_with()
-                .clone();
-            (
-                active_tab.id,
-                active_pane_id,
-                active_pane_run_instruction,
-                active_tab.pane_id_is_floating(&active_pane_id),
-            )
+                })?;
+            let active_pane_run_instruction = active_pane.invoked_with().clone();
+            (active_tab.id, active_pane_id, active_pane_run_instruction)
         };
+        if let Err(error) = self.ensure_render_fence_tabs_are_available(&[source_tab_id]) {
+            let message = format!("cannot start break-pane transaction: {error:#}");
+            if let Some(completion) = completion_tx.as_mut() {
+                completion.mark_failure(message.clone());
+            }
+            return Err(anyhow!(message));
+        }
 
         let tab_index = self.get_new_tab_id();
         tab_index
@@ -4974,13 +6898,24 @@ impl Screen {
         // render stream never exposes a blank destination tab. The two
         // fallible new-tab prerequisites above are the same ones `new_tab`
         // resolves before mutation.
+        let mut source_transaction = Some(TabTopologyTransaction::begin(
+            self.tabs
+                .get_mut(&source_tab_id)
+                .context("source tab disappeared before break transaction snapshot")?,
+        ));
         let active_pane = self
             .tabs
             .get_mut(&source_tab_id)
-            .and_then(|tab| tab.extract_pane(active_pane_id, false))
-            .with_context(|| {
-                format!("source pane {active_pane_id:?} disappeared before break extraction")
-            })?;
+            .and_then(|tab| tab.extract_pane(active_pane_id, false));
+        let Some(active_pane) = active_pane else {
+            if let Some(source_tab) = self.tabs.get_mut(&source_tab_id) {
+                source_transaction
+                    .take()
+                    .unwrap()
+                    .rollback(source_tab, BTreeMap::new());
+            }
+            bail!("source pane {active_pane_id:?} disappeared before break extraction");
+        };
         let swap_layouts = (
             default_layout.swap_tiled_layouts.clone(),
             default_layout.swap_floating_layouts.clone(),
@@ -4995,27 +6930,44 @@ impl Screen {
             let source_tab = self
                 .tabs
                 .get_mut(&source_tab_id)
-                .context("source tab disappeared while restoring failed break-pane creation")?;
-            if active_pane_was_floating {
-                source_tab.add_floating_pane(active_pane, active_pane_id, None, true)?;
-            } else {
-                source_tab.add_tiled_pane(active_pane, active_pane_id, false, Some(client_id))?;
-            }
+                .context("source tab disappeared while rolling back failed break-pane creation")?;
+            source_transaction
+                .take()
+                .unwrap()
+                .rollback(source_tab, BTreeMap::from([(active_pane_id, active_pane)]));
             return Err(error).with_context(err_context);
         }
         let (mut tiled_panes_layout, floating_panes_layout) = default_layout.new_tab();
         let without_relayout = true;
-        self.tabs
+        let rejected_pane = self
+            .tabs
             .get_mut(&tab_index)
             .with_context(|| {
                 format!("break destination tab {tab_index} disappeared immediately after creation")
             })?
-            .add_tiled_pane(
+            .try_add_tiled_pane_retaining_ownership(
                 active_pane,
                 active_pane_id,
                 without_relayout,
                 Some(client_id),
             )?;
+        if let Some(rejected_pane) = rejected_pane {
+            let source_tab = self.tabs.get_mut(&source_tab_id).context(
+                "source tab disappeared while rolling back rejected break-pane admission",
+            )?;
+            source_transaction.take().unwrap().rollback(
+                source_tab,
+                BTreeMap::from([(active_pane_id, rejected_pane)]),
+            );
+            self.discard_pending_tab_after_layout_rejection(tab_index)
+                .non_fatal();
+            let message =
+                format!("break destination tab {tab_index} has no room for {active_pane_id:?}");
+            if let Some(completion) = completion_tx.as_mut() {
+                completion.mark_failure(message.clone());
+            }
+            bail!(message);
+        }
         tiled_panes_layout.ignore_run_instruction(active_pane_run_instruction);
         let should_change_focus_to_new_tab = true;
         let is_web_client = self
@@ -5026,15 +6978,78 @@ impl Screen {
             .unwrap_or(false);
         let transaction_id = self.reserve_layout_transaction_id();
         let target = LayoutTabOwner::capture(self, tab_index);
+        let source_render_fence = LayoutTabOwner::capture(self, source_tab_id);
         let transaction = ActiveLayoutTransaction {
             kind: ScreenLayoutTransactionKind::BreakPane,
             targets: vec![target.clone()],
             created_pending_tabs: vec![target],
+            render_fenced_tabs: vec![source_render_fence],
             tabs_to_close_after_commit: vec![],
             moved_original_panes: vec![active_pane_id],
             generation: None,
         };
-        self.register_layout_transaction(transaction_id, transaction.clone())?;
+        if let Err(error) = self.register_layout_transaction(transaction_id, transaction.clone()) {
+            let pane = self
+                .tabs
+                .get_mut(&tab_index)
+                .and_then(|tab| tab.extract_pane(active_pane_id, true));
+            match pane {
+                Some(pane) => {
+                    if let Some(source_tab) = self.tabs.get_mut(&source_tab_id) {
+                        source_transaction
+                            .take()
+                            .unwrap()
+                            .rollback(source_tab, BTreeMap::from([(active_pane_id, pane)]));
+                        self.discard_pending_tab_after_layout_rejection(tab_index)
+                            .non_fatal();
+                    } else {
+                        source_transaction.take();
+                        let recovery_geom = PaneGeom::from(&self.size);
+                        if let Some(destination) = self.tabs.get_mut(&tab_index) {
+                            destination.restore_extracted_pane(
+                                pane,
+                                active_pane_id,
+                                false,
+                                recovery_geom,
+                            );
+                        }
+                        let mut no_pending_gate = HashSet::new();
+                        self.activate_degraded_break_tab(&transaction, &mut no_pending_gate)
+                            .non_fatal();
+                    }
+                },
+                None => {
+                    if let Some(source_tab) = self.tabs.get_mut(&source_tab_id) {
+                        source_transaction.take().unwrap().commit(source_tab);
+                    } else {
+                        source_transaction.take();
+                    }
+                    let mut no_pending_gate = HashSet::new();
+                    self.activate_degraded_break_tab(&transaction, &mut no_pending_gate)
+                        .non_fatal();
+                },
+            }
+            let message = format!(
+                "failed to register break-pane layout transaction {transaction_id}: {error:#}"
+            );
+            if let Some(completion) = completion_tx.as_mut() {
+                completion.mark_failure(message.clone());
+            }
+            self.render(None).non_fatal();
+            return Err(anyhow!(message));
+        }
+        if let Some(source_tab) = self.tabs.get_mut(&source_tab_id) {
+            source_transaction.take().unwrap().commit(source_tab);
+        } else {
+            source_transaction.take();
+        }
+        if let Some(pane) = self
+            .tabs
+            .get_mut(&tab_index)
+            .and_then(|tab| tab.get_pane_with_id_mut(active_pane_id))
+        {
+            pane.commit_layout_transaction();
+        }
         if let Some(completion) = completion_tx.as_mut() {
             completion.set_affected_tab_id(tab_index);
             completion.set_affected_pane_id(active_pane_id);
@@ -5093,7 +7108,10 @@ impl Screen {
             self.render(None).non_fatal();
             return Err(anyhow!(message));
         }
-        Ok(())
+        Ok(Some(BreakPaneTransfer {
+            destination_tab_id: tab_index,
+            source_tab_ids: vec![source_tab_id],
+        }))
     }
     pub fn break_multiple_panes_to_new_tab(
         &mut self,
@@ -5103,10 +7121,43 @@ impl Screen {
         new_tab_name: Option<String>,
         client_id: ClientId,
         mut completion_tx: Option<NotificationEnd>,
-    ) -> Result<usize> {
+    ) -> Result<BreakPaneTransfer> {
         let err_context = || "failed break multiple panes to a new tab".to_string();
         if let Some(completion) = completion_tx.as_mut() {
             completion.require_explicit_resolution();
+        }
+
+        let mut seen_pane_ids = HashSet::new();
+        let located_panes = pane_ids
+            .iter()
+            .copied()
+            .filter(|pane_id| seen_pane_ids.insert(*pane_id))
+            .filter_map(|pane_id| {
+                self.tabs
+                    .iter()
+                    .find(|(_, tab)| tab.has_pane_with_pid(&pane_id))
+                    .map(|(source_tab_id, _)| (pane_id, *source_tab_id))
+            })
+            .collect::<Vec<_>>();
+        if located_panes.is_empty() {
+            let message = "none of the requested panes existed";
+            if let Some(completion) = completion_tx.as_mut() {
+                completion.mark_failure(message);
+            }
+            bail!(message);
+        }
+        let mut source_tab_ids = located_panes
+            .iter()
+            .map(|(_, source_tab_id)| *source_tab_id)
+            .collect::<Vec<_>>();
+        source_tab_ids.sort_unstable();
+        source_tab_ids.dedup();
+        if let Err(error) = self.ensure_render_fence_tabs_are_available(&source_tab_ids) {
+            let message = format!("cannot start break-multiple transaction: {error:#}");
+            if let Some(completion) = completion_tx.as_mut() {
+                completion.mark_failure(message.clone());
+            }
+            return Err(anyhow!(message));
         }
 
         let (mut tiled_panes_layout, floating_panes_layout) = self.default_layout.new_tab();
@@ -5130,36 +7181,75 @@ impl Screen {
         if let Some(new_tab_name) = new_tab_name {
             tab.name = new_tab_name.clone();
         }
+        // Hold the destination locally while extraction, admission and rollback
+        // run. It is the unconditional recovery owner if a source disappears.
+        let mut destination_tab = self.tabs.remove(&tab_index).with_context(err_context)?;
+        let mut source_transactions = BTreeMap::new();
+        for source_tab_id in &source_tab_ids {
+            let source_tab = self
+                .tabs
+                .get_mut(source_tab_id)
+                .with_context(|| format!("break source tab {source_tab_id} disappeared"))?;
+            source_transactions.insert(*source_tab_id, TabTopologyTransaction::begin(source_tab));
+        }
         let mut extracted_panes = vec![];
         let mut extracted_pane_ids = vec![];
-        for pane_id in &pane_ids {
-            for (source_tab_id, source_tab) in self.tabs.iter_mut() {
-                if *source_tab_id == tab_index {
-                    continue;
-                }
-                // We do not need to trigger a source relayout here; the
-                // destination layout transaction will either commit or retain
-                // these exact panes as its degraded baseline.
-                if let Some(pane) = source_tab.extract_pane(*pane_id, true) {
-                    extracted_pane_ids.push(*pane_id);
-                    extracted_panes.push(pane);
-                    break;
-                }
-            }
+        for (pane_id, source_tab_id) in located_panes {
+            let extraction_result = (|| {
+                let source_tab = self
+                    .tabs
+                    .get_mut(&source_tab_id)
+                    .with_context(|| format!("break source tab {source_tab_id} disappeared"))?;
+                let was_floating = source_tab.pane_id_is_floating(&pane_id);
+                let original_geom = source_tab
+                    .get_pane_with_id(pane_id)
+                    .map(|pane| pane.position_and_size())
+                    .with_context(|| {
+                        format!("break source pane {pane_id:?} disappeared before extraction")
+                    })?;
+                let pane = source_tab.extract_pane(pane_id, true).with_context(|| {
+                    format!("break source pane {pane_id:?} disappeared during extraction")
+                })?;
+                Ok::<_, anyhow::Error>(ExtractedBreakPane {
+                    source_tab_id,
+                    was_floating,
+                    original_geom,
+                    pane,
+                })
+            })();
+            let extracted = match extraction_result {
+                Ok(extracted) => extracted,
+                Err(error) => {
+                    let failures = self.rollback_break_source_transactions(
+                        source_transactions,
+                        extracted_panes,
+                        &mut destination_tab,
+                    );
+                    self.tabs.insert(tab_index, destination_tab);
+                    self.discard_pending_tab_after_layout_rejection(tab_index)
+                        .non_fatal();
+                    let message = format!(
+                        "{error:#}{}",
+                        if failures.is_empty() {
+                            String::new()
+                        } else {
+                            format!("; rollback failures: {}", failures.join("; "))
+                        }
+                    );
+                    if let Some(completion) = completion_tx.as_mut() {
+                        completion.mark_failure(message.clone());
+                    }
+                    bail!(message);
+                },
+            };
+            extracted_pane_ids.push(pane_id);
+            extracted_panes.push(extracted);
         }
-        if extracted_panes.is_empty() {
-            self.discard_pending_tab_after_layout_rejection(tab_index)
-                .non_fatal();
-            let message = "none of the requested panes existed";
-            if let Some(completion) = completion_tx.as_mut() {
-                completion.mark_failure(message);
-            }
-            bail!(message);
-        }
-        let tab = self.tabs.get_mut(&tab_index).with_context(err_context)?;
-        for mut pane in extracted_panes {
-            let run_instruction = pane.invoked_with().clone();
-            let pane_id = pane.pid();
+        let mut inserted_panes = vec![];
+        let mut extracted_panes = extracted_panes.into_iter();
+        while let Some(mut extracted) = extracted_panes.next() {
+            let run_instruction = extracted.pane.invoked_with().clone();
+            let pane_id = extracted.pane.pid();
             let without_relayout = true;
 
             // we reset the pane geom here to screen size so that we won't have trouble adding it
@@ -5167,13 +7257,141 @@ impl Screen {
             // will be adjusted before the next render, further down the pipeline, when we apply
             // the layout to this new tab
             let new_geom = PaneGeom::from(&self.size);
-            pane.set_geom(new_geom);
+            extracted.pane.set_geom(new_geom);
 
             // here we pass None instead of the ClientId, because we do not want this pane to be
             // necessarily focused
-            tab.add_tiled_pane(pane, pane_id, without_relayout, None)?;
-            tiled_panes_layout.ignore_run_instruction(run_instruction.clone());
+            let rejected_pane = match destination_tab.try_add_tiled_pane_retaining_ownership(
+                extracted.pane,
+                pane_id,
+                without_relayout,
+                None,
+            ) {
+                Ok(rejected_pane) => rejected_pane,
+                Err(error) => {
+                    let mut panes_to_restore = vec![];
+                    let mut restoration_failures = vec![];
+                    if let Some(pane) = destination_tab.extract_pane(pane_id, true) {
+                        panes_to_restore.push(ExtractedBreakPane {
+                            source_tab_id: extracted.source_tab_id,
+                            was_floating: extracted.was_floating,
+                            original_geom: extracted.original_geom,
+                            pane,
+                        });
+                    } else {
+                        restoration_failures.push(format!(
+                            "destination lost pane {pane_id:?} after failed admission"
+                        ));
+                    }
+                    panes_to_restore.extend(extracted_panes);
+                    for (inserted_id, source_tab_id, was_floating, original_geom) in
+                        inserted_panes.into_iter().rev()
+                    {
+                        if let Some(pane) = destination_tab.extract_pane(inserted_id, true) {
+                            panes_to_restore.push(ExtractedBreakPane {
+                                source_tab_id,
+                                was_floating,
+                                original_geom,
+                                pane,
+                            });
+                        } else {
+                            restoration_failures.push(format!(
+                                "destination lost inserted pane {inserted_id:?} before admission rollback"
+                            ));
+                        }
+                    }
+                    restoration_failures.extend(self.rollback_break_source_transactions(
+                        source_transactions,
+                        panes_to_restore,
+                        &mut destination_tab,
+                    ));
+                    if !restoration_failures.is_empty() {
+                        destination_tab
+                            .activate_degraded_pending_layout()
+                            .non_fatal();
+                    }
+                    self.tabs.insert(tab_index, destination_tab);
+                    if restoration_failures.is_empty() {
+                        self.discard_pending_tab_after_layout_rejection(tab_index)
+                            .non_fatal();
+                    }
+                    let message = format!(
+                        "failed to admit pane {pane_id:?} into break destination{}: {error:#}",
+                        if restoration_failures.is_empty() {
+                            String::new()
+                        } else {
+                            format!(
+                                "; retained degraded ownership after {}",
+                                restoration_failures.join("; ")
+                            )
+                        }
+                    );
+                    if let Some(completion) = completion_tx.as_mut() {
+                        completion.mark_failure(message.clone());
+                    }
+                    return Err(anyhow!(message)).with_context(err_context);
+                },
+            };
+            if let Some(rejected_pane) = rejected_pane {
+                extracted.pane = rejected_pane;
+                let mut panes_to_restore = vec![extracted];
+                panes_to_restore.extend(extracted_panes);
+
+                let mut restoration_failures = vec![];
+                for (inserted_id, source_tab_id, was_floating, original_geom) in
+                    inserted_panes.into_iter().rev()
+                {
+                    if let Some(pane) = destination_tab.extract_pane(inserted_id, true) {
+                        panes_to_restore.push(ExtractedBreakPane {
+                            source_tab_id,
+                            was_floating,
+                            original_geom,
+                            pane,
+                        });
+                    } else {
+                        restoration_failures.push(format!(
+                            "destination lost inserted pane {inserted_id:?} before rollback"
+                        ));
+                    }
+                }
+                restoration_failures.extend(self.rollback_break_source_transactions(
+                    source_transactions,
+                    panes_to_restore,
+                    &mut destination_tab,
+                ));
+
+                let message = if restoration_failures.is_empty() {
+                    format!(
+                        "break destination tab {tab_index} has no room for pane {pane_id:?}; restored every extracted pane to its source"
+                    )
+                } else {
+                    destination_tab
+                        .activate_degraded_pending_layout()
+                        .non_fatal();
+                    format!(
+                        "break destination tab {tab_index} has no room for pane {pane_id:?}; retained ownership with degraded recovery: {}",
+                        restoration_failures.join("; ")
+                    )
+                };
+                self.tabs.insert(tab_index, destination_tab);
+                if restoration_failures.is_empty() {
+                    self.discard_pending_tab_after_layout_rejection(tab_index)
+                        .non_fatal();
+                }
+                if let Some(completion) = completion_tx.as_mut() {
+                    completion.mark_failure(message.clone());
+                }
+                bail!(message);
+            }
+            inserted_panes.push((
+                pane_id,
+                extracted.source_tab_id,
+                extracted.was_floating,
+                extracted.original_geom,
+            ));
+            tiled_panes_layout.ignore_run_instruction(run_instruction);
         }
+        self.tabs.insert(tab_index, destination_tab);
         let is_web_client = self
             .connected_clients
             .borrow()
@@ -5182,17 +7400,85 @@ impl Screen {
             .unwrap_or(false);
         let transaction_id = self.reserve_layout_transaction_id();
         let target = LayoutTabOwner::capture(self, tab_index);
-        self.register_layout_transaction(
-            transaction_id,
-            ActiveLayoutTransaction {
-                kind: ScreenLayoutTransactionKind::BreakPane,
-                targets: vec![target.clone()],
-                created_pending_tabs: vec![target],
-                tabs_to_close_after_commit: vec![],
-                moved_original_panes: extracted_pane_ids.clone(),
-                generation: None,
-            },
-        )?;
+        let render_fenced_tabs = source_tab_ids
+            .iter()
+            .map(|source_tab_id| LayoutTabOwner::capture(self, *source_tab_id))
+            .collect();
+        let transaction = ActiveLayoutTransaction {
+            kind: ScreenLayoutTransactionKind::BreakPane,
+            targets: vec![target.clone()],
+            created_pending_tabs: vec![target],
+            render_fenced_tabs,
+            tabs_to_close_after_commit: vec![],
+            moved_original_panes: extracted_pane_ids.clone(),
+            generation: None,
+        };
+        if let Err(error) = self.register_layout_transaction(transaction_id, transaction.clone()) {
+            let mut destination_tab = self
+                .tabs
+                .remove(&tab_index)
+                .context("break destination disappeared during registration rollback")?;
+            let mut restoration_failures = vec![];
+            let mut panes_to_restore = vec![];
+            for (pane_id, source_tab_id, was_floating, original_geom) in
+                inserted_panes.into_iter().rev()
+            {
+                if let Some(pane) = destination_tab.extract_pane(pane_id, true) {
+                    panes_to_restore.push(ExtractedBreakPane {
+                        source_tab_id,
+                        was_floating,
+                        original_geom,
+                        pane,
+                    });
+                } else {
+                    restoration_failures.push(format!(
+                        "destination lost pane {pane_id:?} before registration rollback"
+                    ));
+                }
+            }
+            restoration_failures.extend(self.rollback_break_source_transactions(
+                source_transactions,
+                panes_to_restore,
+                &mut destination_tab,
+            ));
+            if !restoration_failures.is_empty() {
+                destination_tab
+                    .activate_degraded_pending_layout()
+                    .non_fatal();
+            }
+            self.tabs.insert(tab_index, destination_tab);
+            if restoration_failures.is_empty() {
+                self.discard_pending_tab_after_layout_rejection(tab_index)
+                    .non_fatal();
+            }
+            let message = if restoration_failures.is_empty() {
+                format!(
+                    "failed to register break-multiple layout transaction {transaction_id}; restored every extracted pane: {error:#}"
+                )
+            } else {
+                format!(
+                    "failed to register break-multiple layout transaction {transaction_id}; retained exact ownership with degraded recovery ({}): {error:#}",
+                    restoration_failures.join("; ")
+                )
+            };
+            if let Some(completion) = completion_tx.as_mut() {
+                completion.mark_failure(message.clone());
+            }
+            self.render(None).non_fatal();
+            return Err(anyhow!(message));
+        }
+        for (source_tab_id, source_transaction) in source_transactions {
+            if let Some(source_tab) = self.tabs.get_mut(&source_tab_id) {
+                source_transaction.commit(source_tab);
+            }
+        }
+        if let Some(destination_tab) = self.tabs.get_mut(&tab_index) {
+            for pane_id in &extracted_pane_ids {
+                if let Some(pane) = destination_tab.get_pane_with_id_mut(*pane_id) {
+                    pane.commit_layout_transaction();
+                }
+            }
+        }
         if let Some(completion) = completion_tx.as_mut() {
             completion.set_affected_tab_id(tab_index);
             if let Some(first_pane_id) = extracted_pane_ids.first() {
@@ -5256,7 +7542,10 @@ impl Screen {
             self.render(None).non_fatal();
             return Err(anyhow!(message));
         }
-        Ok(tab_index)
+        Ok(BreakPaneTransfer {
+            destination_tab_id: tab_index,
+            source_tab_ids,
+        })
     }
     pub fn break_pane_to_new_tab(
         &mut self,
@@ -6661,6 +8950,29 @@ fn remove_layout_resources_from_screen(screen: &mut Screen, resource_ids: &[Pane
     }
 }
 
+fn release_pending_layout_gate_if_ready(
+    screen: &mut Screen,
+    pending_tab_ids: &HashSet<usize>,
+    pending_tab_switches: &mut HashSet<(usize, ClientId)>,
+    pending_events_waiting_for_client: &mut Vec<ScreenInstruction>,
+    pending_events_waiting_for_tab: &mut Vec<ScreenInstruction>,
+) {
+    if !pending_tab_ids.is_empty() {
+        return;
+    }
+    for (tab_index, pending_client_id) in pending_tab_switches.drain() {
+        screen
+            .go_to_tab(tab_index + 1, pending_client_id)
+            .non_fatal();
+    }
+    for event in pending_events_waiting_for_client.drain(..) {
+        screen.bus.senders.send_to_screen(event).non_fatal();
+    }
+    for event in pending_events_waiting_for_tab.drain(..) {
+        screen.bus.senders.send_to_screen(event).non_fatal();
+    }
+}
+
 #[cfg(test)]
 struct ViewerCreationPostInstallTestHook {
     installed: mpsc::Sender<()>,
@@ -6771,20 +9083,17 @@ fn layout_resource_ids(
     new_floating_pane_pids: &[(u32, HoldForCommand)],
     new_plugin_ids: &HashMap<RunPluginOrAlias, Vec<u32>>,
 ) -> Vec<PaneId> {
-    let mut ids = HashSet::new();
-    ids.extend(
-        new_pane_pids
-            .iter()
-            .chain(new_floating_pane_pids)
-            .map(|(id, _)| PaneId::Terminal(*id)),
-    );
-    ids.extend(
-        new_plugin_ids
-            .values()
-            .flatten()
-            .map(|id| PaneId::Plugin(*id)),
-    );
-    ids.into_iter().collect()
+    new_pane_pids
+        .iter()
+        .chain(new_floating_pane_pids)
+        .map(|(id, _)| PaneId::Terminal(*id))
+        .chain(
+            new_plugin_ids
+                .values()
+                .flatten()
+                .map(|id| PaneId::Plugin(*id)),
+        )
+        .collect()
 }
 
 fn find_already_running_panes(
@@ -6989,6 +9298,24 @@ pub(crate) fn screen_thread_main(
     let mut plugin_loading_message_cache = HashMap::new();
     let mut keybind_intercepts = HashMap::new();
     loop {
+        for (transaction_id, coordination) in screen.take_resolved_layout_reconciliations() {
+            if let Err(error) = screen.reconcile_indeterminate_layout_transaction(
+                transaction_id,
+                coordination,
+                &mut pending_tab_ids,
+                &durable_tab_layout_generations,
+                &mut pending_tab_switches,
+                &mut pending_events_waiting_for_client,
+                &mut pending_events_waiting_for_tab,
+                &mut plugin_loading_message_cache,
+            ) {
+                log::error!(
+                    "failed to finalize reconciled layout transaction {transaction_id}: {error:#}"
+                );
+            }
+        }
+        screen.retry_indeterminate_layout_transactions_in_background();
+        screen.retry_pending_layout_cleanup_in_background();
         let (event, mut err_ctx) = screen
             .bus
             .recv()
@@ -7045,6 +9372,7 @@ pub(crate) fn screen_thread_main(
             ScreenInstruction::Render => {
                 screen.render(None)?;
             },
+            ScreenInstruction::LayoutMaintenanceWake => {},
             ScreenInstruction::RenderToClients => {
                 // render_blocker.can_render() returning true means that either all pending plugins
                 // (only those waiting for a new tab layout to be applied!) have been rendered or
@@ -8270,13 +10598,28 @@ pub(crate) fn screen_thread_main(
                 screen.switch_tab_prev(None, true, client_id)?;
                 screen.render(None)?;
             },
-            ScreenInstruction::CloseTab(
-                client_id,
-                _completion_tx, // the action ends here, dropping this will release anything
-                                // waiting for it
-            ) => {
-                screen.close_tab(client_id)?;
-                screen.render(None)?;
+            ScreenInstruction::CloseTab(client_id, mut completion_tx) => {
+                if let Some(completion) = completion_tx.as_mut() {
+                    completion.require_explicit_resolution();
+                }
+                let result = screen
+                    .close_tab(client_id)
+                    .and_then(|_| screen.render(None));
+                match result {
+                    Ok(()) => {
+                        if let Some(completion) = completion_tx.as_mut() {
+                            completion.mark_success();
+                        }
+                    },
+                    Err(error) => {
+                        let message = format!("failed to close active tab: {error:#}");
+                        if let Some(completion) = completion_tx.as_mut() {
+                            completion.mark_failure(message.clone());
+                        }
+                        screen.log_and_report_session_state().non_fatal();
+                        log::error!("{message}");
+                    },
+                }
             },
             ScreenInstruction::NewTab(
                 cwd,
@@ -8443,6 +10786,7 @@ pub(crate) fn screen_thread_main(
                                     kind: ScreenLayoutTransactionKind::DurableRecovery,
                                     targets: vec![target],
                                     created_pending_tabs: vec![],
+                                    render_fenced_tabs: vec![],
                                     tabs_to_close_after_commit: vec![],
                                     moved_original_panes: vec![],
                                     generation: Some(generation.clone()),
@@ -8574,6 +10918,7 @@ pub(crate) fn screen_thread_main(
                             kind: ScreenLayoutTransactionKind::NewTab,
                             targets: vec![target.clone()],
                             created_pending_tabs: vec![target],
+                            render_fenced_tabs: vec![],
                             tabs_to_close_after_commit: vec![],
                             moved_original_panes: vec![],
                             generation: layout_generation.as_deref().cloned(),
@@ -8672,8 +11017,6 @@ pub(crate) fn screen_thread_main(
                 transaction_id,
             ) => {
                 #[cfg(test)]
-                let legacy_test_transaction = transaction_id == 0;
-                #[cfg(test)]
                 let transaction_id = screen.resolve_legacy_test_layout_transaction_id(
                     transaction_id,
                     &[
@@ -8688,21 +11031,99 @@ pub(crate) fn screen_thread_main(
                 if let Some((_, completion)) = blocking_terminal.as_mut() {
                     completion.require_explicit_resolution();
                 }
-                let installed_resource_ids =
+                if let Some(indeterminate) = screen
+                    .indeterminate_layout_transactions
+                    .get(&transaction_id)
+                {
+                    let message = indeterminate.replay_rejection(transaction_id);
+                    if let Some(completion) = completion_tx.as_mut() {
+                        completion.mark_failure(message.clone());
+                    }
+                    if let Some((_, completion)) = blocking_terminal.as_mut() {
+                        completion.mark_failure(message.clone());
+                    }
+                    log::error!("{message}");
+                    continue;
+                }
+                let raw_installed_resource_ids =
                     layout_resource_ids(&new_pane_pids, &new_floating_pane_pids, &new_plugin_ids);
+                let mut installed_resource_ids = raw_installed_resource_ids.clone();
+                installed_resource_ids.sort_unstable();
+                installed_resource_ids.dedup();
+                let mut expected_plugin_ids = new_plugin_ids
+                    .values()
+                    .flatten()
+                    .copied()
+                    .collect::<Vec<_>>();
+                expected_plugin_ids.sort_unstable();
+                expected_plugin_ids.dedup();
                 let registered_owner = screen
                     .active_layout_transactions
                     .get(&transaction_id)
                     .cloned();
+                if let Some(replay) = screen.replay_resolved_layout_transaction(
+                    transaction_id,
+                    &[
+                        ScreenLayoutTransactionKind::NewTab,
+                        ScreenLayoutTransactionKind::BreakPane,
+                    ],
+                    &[tab_id],
+                    layout_generation.as_deref(),
+                    &raw_installed_resource_ids,
+                ) {
+                    match replay {
+                        Ok(ScreenLayoutDecision::Committed) => {
+                            if let Some(completion) = completion_tx.as_mut() {
+                                completion.set_affected_tab_id(tab_id);
+                                if let Some(resource_id) = installed_resource_ids.first() {
+                                    completion.set_affected_pane_id(*resource_id);
+                                }
+                                completion.mark_success();
+                            }
+                            if let Some((_, completion)) = blocking_terminal.as_mut() {
+                                completion.mark_success();
+                            }
+                        },
+                        Ok(ScreenLayoutDecision::CommittedWithCleanupDebt(message))
+                        | Ok(ScreenLayoutDecision::CommittedWithPostCommitError(message))
+                        | Ok(ScreenLayoutDecision::Rejected(message))
+                        | Err(message) => {
+                            if let Some(completion) = completion_tx.as_mut() {
+                                completion.mark_failure(message.clone());
+                            }
+                            if let Some((_, completion)) = blocking_terminal.as_mut() {
+                                completion.mark_failure(message.clone());
+                            }
+                        },
+                    }
+                    continue;
+                }
+                if transaction_id != 0 && registered_owner.is_none() {
+                    let message = format!(
+                        "unknown layout transaction {transaction_id}; refusing to manufacture a Plugin/PTY resolution for an unowned completion"
+                    );
+                    if let Some(completion) = completion_tx.as_mut() {
+                        completion.mark_failure(message.clone());
+                    }
+                    if let Some((_, completion)) = blocking_terminal.as_mut() {
+                        completion.mark_failure(message.clone());
+                    }
+                    log::error!("{message}");
+                    continue;
+                }
                 // A newer generation of the same durable viewer will reuse and
                 // heal this empty tab. Keep it pending so render GC cannot
                 // delete the stable identity between the two writers.
                 let mut preserve_pending_tab_on_rejection = false;
                 let mut close_fenced_tab_on_rejection = false;
                 let mut prepared_apply_layout = None;
-                let mut committed_apply_layout = None;
                 let mut validated_owner = None;
                 let transaction_result: Result<()> = (|| {
+                    if installed_resource_ids.len() != raw_installed_resource_ids.len() {
+                        bail!(
+                            "layout transaction {transaction_id} returned duplicate Apply resource ids: {raw_installed_resource_ids:?}"
+                        );
+                    }
                     if transaction_id != 0 {
                         validated_owner = Some(screen.validate_layout_transaction(
                             transaction_id,
@@ -8793,78 +11214,172 @@ pub(crate) fn screen_thread_main(
                         return Err(anyhow!(rejection.to_string()));
                     }
 
-                    let prepared = prepared_apply_layout
-                        .take()
-                        .context("prepared Apply transaction disappeared before commit")?;
-                    committed_apply_layout = Some(screen.commit_apply_layout_state(prepared)?);
+                    let prepared = prepared_apply_layout.as_ref().with_context(|| {
+                        format!(
+                            "prepared Apply transaction {transaction_id} disappeared before commit preflight"
+                        )
+                    })?;
+                    let tab = screen.tabs.get(&tab_id).with_context(|| {
+                        format!(
+                            "prepared Apply target tab {tab_id} disappeared before commit preflight"
+                        )
+                    })?;
+                    prepared.transaction.preflight_commit(tab)?;
                     Ok(())
                 })();
 
-                let (outcome, rejection_message) = match transaction_result {
-                    Ok(()) => (LayoutCommitOutcome::Committed, None),
-                    Err(error) => {
-                        let message = format!("{error:#}");
-                        if let Some(prepared) = prepared_apply_layout.take() {
-                            screen.rollback_prepared_apply_layout(prepared, &message);
-                        }
-                        for resource_id in &installed_resource_ids {
-                            if let PaneId::Plugin(plugin_id) = resource_id {
-                                plugin_loading_message_cache.remove(plugin_id);
-                            }
-                        }
-                        remove_layout_resources_from_screen(&mut screen, &installed_resource_ids);
-                        if let Some(completion) = completion_tx.as_mut() {
-                            completion.mark_failure(message.clone());
-                        } else if let Some((_, completion)) = blocking_terminal.as_mut() {
-                            completion.mark_failure(message.clone());
-                        }
-                        log::warn!(
-                            "rejected layout transaction {}: {}",
-                            transaction_id,
-                            message
-                        );
-                        (
-                            LayoutCommitOutcome::Rejected(message.clone()),
-                            Some(message),
-                        )
+                let reconciliation_intent = match transaction_result {
+                    Ok(()) => LayoutReconciliationIntent::Activate,
+                    Err(error) => LayoutReconciliationIntent::Reject(format!("{error:#}")),
+                };
+                let reconciliation_plan = LayoutReconciliationPlan {
+                    intent: reconciliation_intent.clone(),
+                    expected_plugin_ids: expected_plugin_ids.clone(),
+                    resource_ids: installed_resource_ids.clone(),
+                    preserve_pending_tab_on_rejection,
+                    close_fenced_tab_on_rejection,
+                    layout_generation: layout_generation.as_deref().cloned(),
+                };
+                let coordination = match &reconciliation_intent {
+                    LayoutReconciliationIntent::Activate => coordinate_layout_activation(
+                        &screen.bus.senders,
+                        transaction_id,
+                        &expected_plugin_ids,
+                    ),
+                    LayoutReconciliationIntent::Reject(rejection) => coordinate_layout_rejection(
+                        &screen.bus.senders,
+                        transaction_id,
+                        &expected_plugin_ids,
+                        rejection.clone(),
+                    ),
+                    LayoutReconciliationIntent::RejectByOwner(_) => {
+                        unreachable!("Apply completion cannot originate by-owner rejection retry")
+                    },
+                    LayoutReconciliationIntent::PreparationFailure { .. } => {
+                        unreachable!("Apply completion cannot originate preparation-failure retry")
                     },
                 };
-                #[cfg(test)]
-                let ack_result = if legacy_test_transaction {
-                    Ok(())
-                } else {
-                    resolve_layout_commit_with_pty_ack(&screen, transaction_id, outcome.clone())
-                };
-                #[cfg(not(test))]
-                let ack_result =
-                    resolve_layout_commit_with_pty_ack(&screen, transaction_id, outcome.clone());
-
-                if matches!(outcome, LayoutCommitOutcome::Committed) {
-                    match ack_result {
-                        Ok(()) => {
-                            let emit_result = committed_apply_layout.take().map_or_else(
-                                || {
-                                    Err(anyhow!(
-                                        "committed Apply transaction {transaction_id} lost its deferred effects"
-                                    ))
+                let mut retire_active_transaction = true;
+                let mut post_commit_error = None;
+                let mut committed_blocking_terminal = None;
+                match coordination {
+                    LayoutCoordination::Commit => {
+                        if let Some(prepared) = prepared_apply_layout.take() {
+                            let screen_commit_succeeded = match screen
+                                .commit_apply_layout_state(prepared)
+                            {
+                                Ok(mut committed) => {
+                                    let cleanup = committed.effects.take_pending_cleanup();
+                                    screen.retain_layout_cleanup(transaction_id, cleanup);
+                                    committed_blocking_terminal =
+                                        screen.emit_committed_apply_layout(committed);
+                                    if let Some(owner) =
+                                        validated_owner.as_ref().or(registered_owner.as_ref())
+                                        && let Err(error) = screen
+                                            .close_owned_tabs_after_layout_commit(
+                                                transaction_id,
+                                                owner,
+                                            )
+                                    {
+                                        post_commit_error = Some(format!("{error:#}"));
+                                    }
+                                    screen.flush_layout_cleanup(transaction_id);
+                                    true
                                 },
-                                |committed| screen.emit_committed_apply_layout(committed),
-                            );
-                            if let Err(error) = emit_result {
-                                let message = format!(
-                                    "layout transaction {transaction_id} activated in PTY but Screen post-commit failed: {error:#}"
-                                );
-                                if let Some(completion) = completion_tx.as_mut() {
-                                    completion.mark_failure(message.clone());
+                                Err(mut prepared) => {
+                                    let message = format!(
+                                        "layout transaction {transaction_id} activated externally but its preflighted Screen target tab {} disappeared; preserved the complete prepared owner as indeterminate",
+                                        prepared.tab_id
+                                    );
+                                    prepared
+                                        .transaction
+                                        .mark_blocking_completion_failed(&message);
+                                    screen.indeterminate_layout_transactions.insert(
+                                        transaction_id,
+                                        IndeterminatePreparedLayout::Apply {
+                                            prepared,
+                                            plan: reconciliation_plan.clone(),
+                                        },
+                                    );
+                                    if let Some(completion) = completion_tx.as_mut() {
+                                        completion.mark_failure(message.clone());
+                                    }
+                                    retire_active_transaction = false;
+                                    log::error!("{message}");
+                                    false
+                                },
+                            };
+                            if screen_commit_succeeded {
+                                let cleanup_decision =
+                                    screen.pending_layout_cleanup_message(transaction_id);
+                                if let Some(message) =
+                                    post_commit_error.as_ref().or(cleanup_decision.as_ref())
+                                {
+                                    if let Some((_, mut completion)) =
+                                        committed_blocking_terminal.take()
+                                    {
+                                        completion.mark_failure(message.clone());
+                                    }
+                                } else if let Some((terminal_id, completion)) =
+                                    committed_blocking_terminal.take()
+                                {
+                                    let attachment_result =
+                                        if let Some(tab) = screen.tabs.get_mut(&tab_id) {
+                                            tab.attach_blocking_layout_completion(
+                                                terminal_id,
+                                                completion,
+                                            )
+                                        } else {
+                                            Err(completion)
+                                        };
+                                    if let Err(mut completion) = attachment_result {
+                                        let message = format!(
+                                            "layout transaction {transaction_id} committed but terminal {terminal_id} rejected blocking completion attachment"
+                                        );
+                                        completion.mark_failure(message.clone());
+                                        post_commit_error = Some(message);
+                                    }
                                 }
-                                pending_tab_ids.remove(&tab_id);
-                                screen.log_and_report_session_state().non_fatal();
-                                log::error!("{message}");
-                            } else {
-                                if let Some(completion) = completion_tx.as_mut() {
+                                if let Some(message) = post_commit_error.as_ref() {
+                                    if let Some(completion) = completion_tx.as_mut() {
+                                        completion.mark_failure(message.clone());
+                                    }
+                                } else if let Some(message) = cleanup_decision.as_ref() {
+                                    if let Some(completion) = completion_tx.as_mut() {
+                                        completion.mark_failure(message.clone());
+                                    }
+                                } else if let Some(completion) = completion_tx.as_mut() {
                                     completion.mark_success();
                                 }
-                                pending_tab_ids.remove(&tab_id);
+                                if let Some(owner) =
+                                    validated_owner.as_ref().or(registered_owner.as_ref())
+                                {
+                                    screen.record_resolved_layout_transaction(
+                                        transaction_id,
+                                        owner,
+                                        installed_resource_ids.clone(),
+                                        post_commit_error.clone().map_or_else(
+                                            || {
+                                                cleanup_decision.clone().map_or(
+                                                    ScreenLayoutDecision::Committed,
+                                                    ScreenLayoutDecision::CommittedWithCleanupDebt,
+                                                )
+                                            },
+                                            ScreenLayoutDecision::CommittedWithPostCommitError,
+                                        ),
+                                    );
+                                }
+                                if let Some(owner) =
+                                    validated_owner.as_ref().or(registered_owner.as_ref())
+                                {
+                                    screen.retire_layout_transaction_from_pending_gate(
+                                        transaction_id,
+                                        owner,
+                                        &mut pending_tab_ids,
+                                    );
+                                } else {
+                                    pending_tab_ids.remove(&tab_id);
+                                }
                                 if pending_tab_ids.is_empty() {
                                     for (tab_index, pending_client_id) in
                                         pending_tab_switches.drain()
@@ -8909,11 +11424,6 @@ pub(crate) fn screen_thread_main(
                                         screen.render_blocker.register_blocking_plugin(*plugin_id);
                                     }
                                 }
-                                if let Some(owner) =
-                                    validated_owner.as_ref().or(registered_owner.as_ref())
-                                {
-                                    screen.close_owned_tabs_after_layout_commit(owner);
-                                }
                                 for event in pending_events_waiting_for_client.drain(..) {
                                     screen.bus.senders.send_to_screen(event).non_fatal();
                                 }
@@ -8936,52 +11446,133 @@ pub(crate) fn screen_thread_main(
                                     }
                                 }
                             }
-                        },
-                        Err(error) => {
+                        } else {
                             let message = format!(
-                                "layout transaction {transaction_id} Screen state committed but PTY activation was not acknowledged: {error:#}"
+                                "prepared Apply transaction {transaction_id} disappeared after successful commit preflight; retaining its active owner for reconciliation"
                             );
-                            if let Some(committed) = committed_apply_layout.as_mut() {
-                                committed.effects.reject_blocking_completion(&message);
-                            }
                             if let Some(completion) = completion_tx.as_mut() {
                                 completion.mark_failure(message.clone());
                             }
-                            // Delivery succeeded at least once. After retries
-                            // an absent ACK is still ambiguous: PTY may have
-                            // activated and only lost the receipt. Preserve the
-                            // exact Screen topology for diagnosis instead of
-                            // manufacturing a rollback that could orphan a
-                            // live child.
-                            pending_tab_ids.remove(&tab_id);
-                            for resource_id in &installed_resource_ids {
-                                if let PaneId::Plugin(plugin_id) = resource_id {
-                                    plugin_loading_message_cache.remove(plugin_id);
-                                }
-                            }
-                            screen.log_and_report_session_state().non_fatal();
+                            retire_active_transaction = false;
                             log::error!("{message}");
-                        },
-                    }
-                } else {
-                    let cleanup_acknowledged = ack_result.is_ok();
-                    if let Err(error) = &ack_result {
-                        let message = format!(
-                            "layout transaction {transaction_id} was rejected but PTY cleanup was not acknowledged: {error:#}"
-                        );
+                        }
+                    },
+                    LayoutCoordination::Rollback(message) => {
+                        if let Some(prepared) = prepared_apply_layout.take() {
+                            screen.rollback_prepared_apply_layout(prepared, &message);
+                        }
+                        for resource_id in &installed_resource_ids {
+                            if let PaneId::Plugin(plugin_id) = resource_id {
+                                plugin_loading_message_cache.remove(plugin_id);
+                            }
+                        }
+                        remove_layout_resources_from_screen(&mut screen, &installed_resource_ids);
                         if let Some(completion) = completion_tx.as_mut() {
                             completion.mark_failure(message.clone());
                         } else if let Some((_, completion)) = blocking_terminal.as_mut() {
                             completion.mark_failure(message.clone());
                         }
-                        log::error!("{message}");
-                    }
-                    if !cleanup_acknowledged {
-                        // PTY might have consumed the resolution while only
-                        // its receipt was lost. Retire the global pending gate,
-                        // but preserve the exact Screen topology and pending
-                        // tab for diagnosis rather than risking a live child.
-                        if let Some(owner) = registered_owner.as_ref() {
+                        if let Some(owner) = validated_owner.as_ref().or(registered_owner.as_ref())
+                        {
+                            screen.record_resolved_layout_transaction(
+                                transaction_id,
+                                owner,
+                                installed_resource_ids.clone(),
+                                ScreenLayoutDecision::Rejected(message.clone()),
+                            );
+                        }
+                        if close_fenced_tab_on_rejection
+                            && let Some(layout_generation) = layout_generation.as_ref()
+                        {
+                            close_globally_stale_fenced_tab(
+                                &mut screen,
+                                layout_generation,
+                                &installed_resource_ids,
+                            )
+                            .non_fatal();
+                            pending_tab_ids.remove(&layout_generation.tab_id);
+                        } else if !preserve_pending_tab_on_rejection {
+                            if let Some(owner) = validated_owner.as_ref() {
+                                if owner.kind == ScreenLayoutTransactionKind::BreakPane {
+                                    if let Err(error) = screen
+                                        .activate_degraded_break_tab(owner, &mut pending_tab_ids)
+                                    {
+                                        screen.retire_layout_transaction_from_pending_gate(
+                                            transaction_id,
+                                            owner,
+                                            &mut pending_tab_ids,
+                                        );
+                                        log::error!(
+                                            "layout transaction {transaction_id} could not activate its degraded break-pane destination safely: {error:#}"
+                                        );
+                                    } else {
+                                        screen.render(None).non_fatal();
+                                    }
+                                } else {
+                                    screen.discard_owned_pending_tabs(owner, &mut pending_tab_ids);
+                                }
+                            } else if transaction_id == 0 {
+                                screen
+                                    .discard_pending_tab_after_layout_rejection(tab_id)
+                                    .non_fatal();
+                                pending_tab_ids.remove(&tab_id);
+                            } else if let Some(owner) = registered_owner.as_ref() {
+                                screen.retire_layout_transaction_from_pending_gate(
+                                    transaction_id,
+                                    owner,
+                                    &mut pending_tab_ids,
+                                );
+                            }
+                        }
+                        if let Some(owner) = validated_owner.as_ref().or(registered_owner.as_ref())
+                        {
+                            screen.retire_layout_transaction_from_pending_gate(
+                                transaction_id,
+                                owner,
+                                &mut pending_tab_ids,
+                            );
+                        }
+                        release_pending_layout_gate_if_ready(
+                            &mut screen,
+                            &pending_tab_ids,
+                            &mut pending_tab_switches,
+                            &mut pending_events_waiting_for_client,
+                            &mut pending_events_waiting_for_tab,
+                        );
+                        log::warn!(
+                            "layout transaction {transaction_id} finished rejected: {message}"
+                        );
+                    },
+                    LayoutCoordination::Unknown(message) => {
+                        let mut indeterminate = if let Some(prepared) = prepared_apply_layout.take()
+                        {
+                            IndeterminatePreparedLayout::Apply {
+                                prepared,
+                                plan: reconciliation_plan,
+                            }
+                        } else {
+                            if let Some((_, completion)) = blocking_terminal.as_mut() {
+                                completion.mark_failure(message.clone());
+                            }
+                            IndeterminatePreparedLayout::ResolutionOnly {
+                                target_tab_ids: vec![tab_id],
+                                plan: reconciliation_plan,
+                            }
+                        };
+                        indeterminate.mark_blocking_completion_failed(&message);
+                        screen
+                            .indeterminate_layout_transactions
+                            .insert(transaction_id, indeterminate);
+                        if let Some(completion) = completion_tx.as_mut() {
+                            completion.mark_failure(message.clone());
+                        }
+                        if let Some(owner) = validated_owner.as_ref().or(registered_owner.as_ref())
+                        {
+                            // The active transaction and indeterminate ledger retain exact
+                            // topology/render ownership while worker receipts are unknown.
+                            // Do not also retain the global pending-event gate: doing so
+                            // wedges unrelated tab events even though background
+                            // reconciliation already owns the only unsafe continuation.
                             screen.retire_layout_transaction_from_pending_gate(
                                 transaction_id,
                                 owner,
@@ -8990,62 +11581,19 @@ pub(crate) fn screen_thread_main(
                         } else {
                             pending_tab_ids.remove(&tab_id);
                         }
-                    } else if close_fenced_tab_on_rejection
-                        && let Some(layout_generation) = layout_generation.as_ref()
-                    {
-                        close_globally_stale_fenced_tab(
+                        release_pending_layout_gate_if_ready(
                             &mut screen,
-                            layout_generation,
-                            &installed_resource_ids,
-                        )
-                        .non_fatal();
-                        pending_tab_ids.remove(&layout_generation.tab_id);
-                    } else if !preserve_pending_tab_on_rejection {
-                        if let Some(owner) = validated_owner.as_ref() {
-                            if owner.kind == ScreenLayoutTransactionKind::BreakPane {
-                                if let Err(error) =
-                                    screen.activate_degraded_break_tab(owner, &mut pending_tab_ids)
-                                {
-                                    // The invariant could not be proven. Do
-                                    // not fall through to discard: quarantine
-                                    // the destination and keep its live pane.
-                                    screen.retire_layout_transaction_from_pending_gate(
-                                        transaction_id,
-                                        owner,
-                                        &mut pending_tab_ids,
-                                    );
-                                    log::error!(
-                                        "layout transaction {transaction_id} could not activate its degraded break-pane destination safely: {error:#}"
-                                    );
-                                } else {
-                                    screen.render(None).non_fatal();
-                                }
-                            } else {
-                                screen.discard_owned_pending_tabs(owner, &mut pending_tab_ids);
-                            }
-                        } else if transaction_id == 0 {
-                            screen
-                                .discard_pending_tab_after_layout_rejection(tab_id)
-                                .non_fatal();
-                            pending_tab_ids.remove(&tab_id);
-                        } else if let Some(owner) = registered_owner.as_ref() {
-                            // Validation failed before Screen proved the
-                            // returned target/incarnation. Resolve ownership
-                            // terminally without touching any tab topology.
-                            screen.retire_layout_transaction_from_pending_gate(
-                                transaction_id,
-                                owner,
-                                &mut pending_tab_ids,
-                            );
-                        }
-                    }
-                    if let Some(message) = rejection_message {
-                        log::warn!(
-                            "layout transaction {transaction_id} finished rejected: {message}"
+                            &pending_tab_ids,
+                            &mut pending_tab_switches,
+                            &mut pending_events_waiting_for_client,
+                            &mut pending_events_waiting_for_tab,
                         );
-                    }
+                        retire_active_transaction = false;
+                        screen.log_and_report_session_state().non_fatal();
+                        log::error!("{message}");
+                    },
                 }
-                if registered_owner.is_some() {
+                if retire_active_transaction && registered_owner.is_some() {
                     screen.active_layout_transactions.remove(&transaction_id);
                 }
             },
@@ -9055,6 +11603,7 @@ pub(crate) fn screen_thread_main(
                 mut completion_tx,
                 layout_generation,
                 message,
+                cleanup,
             } => {
                 if let Some(completion) = completion_tx.as_mut() {
                     completion.require_explicit_resolution();
@@ -9072,6 +11621,15 @@ pub(crate) fn screen_thread_main(
                     );
                     continue;
                 };
+                if screen
+                    .indeterminate_layout_transactions
+                    .contains_key(&transaction_id)
+                {
+                    log::warn!(
+                        "ignoring duplicate preparation failure while layout transaction {transaction_id} is already owned by background reconciliation"
+                    );
+                    continue;
+                }
                 let reported_tab_is_owned = tab_id.is_none_or(|reported_tab_id| {
                     owner
                         .targets
@@ -9082,20 +11640,48 @@ pub(crate) fn screen_thread_main(
                     && owner.generation_matches(layout_generation.as_deref())
                     && owner.exact_targets_are_current(&screen);
                 if !exact_failure {
-                    log::warn!(
-                        "quarantining mismatched preparation failure for active layout transaction {} without mutating tab topology: {}",
+                    // The supplied tab/generation/cleanup payload is not
+                    // authoritative, so never release its claimed IDs or mutate
+                    // its claimed topology. The transaction id is authoritative:
+                    // retain the render/pending fence and ask Plugin plus PTY to
+                    // reject the resources they themselves own for that exact id.
+                    // This turns a malformed producer result into a bounded,
+                    // replayable reconciliation instead of an immortal owner.
+                    let owner_tab_ids = owner
+                        .pending_gate_owners()
+                        .map(|owner| owner.tab_id)
+                        .collect::<Vec<_>>();
+                    let preserve_pending_tab_on_rejection = !owner
+                        .exact_targets_are_current(&screen)
+                        || owner_tab_ids.iter().any(|owner_tab_id| {
+                            screen.tab_has_other_active_layout_owner(transaction_id, *owner_tab_id)
+                        });
+                    let rejection = format!(
+                        "layout transaction {transaction_id} reported a mismatched preparation failure and was rejected by exact worker ownership: {message}"
+                    );
+                    let plan = LayoutReconciliationPlan {
+                        intent: LayoutReconciliationIntent::RejectByOwner(rejection),
+                        expected_plugin_ids: vec![],
+                        resource_ids: vec![],
+                        preserve_pending_tab_on_rejection,
+                        close_fenced_tab_on_rejection: false,
+                        layout_generation: owner.generation.clone(),
+                    };
+                    screen.indeterminate_layout_transactions.insert(
+                        transaction_id,
+                        IndeterminatePreparedLayout::ResolutionOnly {
+                            target_tab_ids: owner_tab_ids,
+                            plan,
+                        },
+                    );
+                    screen.log_and_report_session_state().non_fatal();
+                    log::error!(
+                        "reconciling mismatched preparation failure for active layout transaction {} by exact Plugin/PTy ownership while retaining its pending gate: {}",
                         transaction_id,
                         message
                     );
-                    screen.retire_layout_transaction_from_pending_gate(
-                        transaction_id,
-                        &owner,
-                        &mut pending_tab_ids,
-                    );
-                    screen.active_layout_transactions.remove(&transaction_id);
                     continue;
                 }
-
                 let owner_tab_ids = owner
                     .targets
                     .iter()
@@ -9110,6 +11696,58 @@ pub(crate) fn screen_thread_main(
                         generation,
                     )
                 });
+                let cleanup_for_retry = cleanup.clone();
+                if let Err(cleanup_error) = certify_layout_preparation_cleanup(
+                    &screen.bus.senders,
+                    transaction_id,
+                    cleanup,
+                    &message,
+                ) {
+                    if let LayoutPreparationCleanup::ReleasePluginReservation {
+                        mut plugin_ids,
+                        pty_cleanup_succeeded: true,
+                    } = cleanup_for_retry
+                    {
+                        plugin_ids.sort_unstable();
+                        plugin_ids.dedup();
+                        let plan = LayoutReconciliationPlan {
+                            intent: LayoutReconciliationIntent::PreparationFailure {
+                                failure_message: message.clone(),
+                                pty_cleanup_succeeded: true,
+                            },
+                            expected_plugin_ids: plugin_ids.clone(),
+                            resource_ids: plugin_ids.into_iter().map(PaneId::Plugin).collect(),
+                            preserve_pending_tab_on_rejection: superseded,
+                            close_fenced_tab_on_rejection: false,
+                            layout_generation: layout_generation.as_deref().cloned(),
+                        };
+                        screen.indeterminate_layout_transactions.insert(
+                            transaction_id,
+                            IndeterminatePreparedLayout::ResolutionOnly {
+                                target_tab_ids: owner_tab_ids,
+                                plan,
+                            },
+                        );
+                        screen.retire_layout_transaction_from_pending_gate(
+                            transaction_id,
+                            &owner,
+                            &mut pending_tab_ids,
+                        );
+                    }
+                    release_pending_layout_gate_if_ready(
+                        &mut screen,
+                        &pending_tab_ids,
+                        &mut pending_tab_switches,
+                        &mut pending_events_waiting_for_client,
+                        &mut pending_events_waiting_for_tab,
+                    );
+                    screen.log_and_report_session_state().non_fatal();
+                    log::error!(
+                        "quarantining layout transaction {transaction_id} after preparation failure because cleanup is not certified: {cleanup_error}"
+                    );
+                    continue;
+                }
+
                 if !superseded {
                     if owner.kind == ScreenLayoutTransactionKind::BreakPane {
                         if let Err(error) =
@@ -9139,6 +11777,13 @@ pub(crate) fn screen_thread_main(
                         &mut pending_tab_ids,
                     );
                 }
+                release_pending_layout_gate_if_ready(
+                    &mut screen,
+                    &pending_tab_ids,
+                    &mut pending_tab_switches,
+                    &mut pending_events_waiting_for_client,
+                    &mut pending_events_waiting_for_tab,
+                );
                 screen.active_layout_transactions.remove(&transaction_id);
                 log::warn!(
                     "layout transaction {} failed during Plugin/PTY preparation: {}",
@@ -9173,6 +11818,29 @@ pub(crate) fn screen_thread_main(
                         screen.active_layout_transactions.remove(&transaction_id);
                     }
                 }
+            },
+            #[cfg(test)]
+            ScreenInstruction::QueryLayoutTransactionStateForTest {
+                transaction_id,
+                response_channel,
+            } => {
+                let pending_gate = screen
+                    .active_layout_transactions
+                    .get(&transaction_id)
+                    .is_some_and(|transaction| {
+                        transaction
+                            .pending_gate_owners()
+                            .any(|target| pending_tab_ids.contains(&target.tab_id))
+                    });
+                let _ = response_channel.send((
+                    screen
+                        .active_layout_transactions
+                        .contains_key(&transaction_id),
+                    screen
+                        .indeterminate_layout_transactions
+                        .contains_key(&transaction_id),
+                    pending_gate,
+                ));
             },
             ScreenInstruction::GoToTab(
                 tab_index,
@@ -9273,6 +11941,7 @@ pub(crate) fn screen_thread_main(
                                     kind: ScreenLayoutTransactionKind::NewTab,
                                     targets: vec![target.clone()],
                                     created_pending_tabs: vec![target],
+                                    render_fenced_tabs: vec![],
                                     tabs_to_close_after_commit: vec![],
                                     moved_original_panes: vec![],
                                     generation: None,
@@ -9882,10 +12551,16 @@ pub(crate) fn screen_thread_main(
                     kind: ScreenLayoutTransactionKind::Override,
                     targets,
                     created_pending_tabs: vec![],
+                    render_fenced_tabs: vec![],
                     tabs_to_close_after_commit,
                     moved_original_panes: vec![],
                     generation: None,
                 };
+                let pending_override_tab_ids = transaction
+                    .targets
+                    .iter()
+                    .map(|target| target.tab_id)
+                    .collect::<Vec<_>>();
                 if let Err(error) = screen.register_layout_transaction(transaction_id, transaction)
                 {
                     if let Some(completion) = completion_tx.as_mut() {
@@ -9894,6 +12569,7 @@ pub(crate) fn screen_thread_main(
                     log::error!("{error:#}");
                     continue;
                 }
+                pending_tab_ids.extend(pending_override_tab_ids);
                 let instruction = PluginInstruction::OverrideLayout(
                     cwd,
                     default_shell,
@@ -9921,7 +12597,25 @@ pub(crate) fn screen_thread_main(
                         ) => (recovered_completion, true),
                         _ => (None, false),
                     };
+                    if let Some(owner) = screen
+                        .active_layout_transactions
+                        .get(&transaction_id)
+                        .cloned()
+                    {
+                        screen.retire_layout_transaction_from_pending_gate(
+                            transaction_id,
+                            &owner,
+                            &mut pending_tab_ids,
+                        );
+                    }
                     screen.active_layout_transactions.remove(&transaction_id);
+                    release_pending_layout_gate_if_ready(
+                        &mut screen,
+                        &pending_tab_ids,
+                        &mut pending_tab_switches,
+                        &mut pending_events_waiting_for_client,
+                        &mut pending_events_waiting_for_tab,
+                    );
                     let message = if recovered_expected_kind {
                         format!(
                             "failed to hand layout transaction {transaction_id} to Plugin: {send_error:#}"
@@ -9947,8 +12641,6 @@ pub(crate) fn screen_thread_main(
                 transaction_id,
             ) => {
                 #[cfg(test)]
-                let legacy_test_transaction = transaction_id == 0;
-                #[cfg(test)]
                 let transaction_id = screen.resolve_legacy_test_layout_transaction_id(
                     transaction_id,
                     &[
@@ -9963,7 +12655,18 @@ pub(crate) fn screen_thread_main(
                 if let Some(completion) = completion_tx.as_mut() {
                     completion.require_explicit_resolution();
                 }
-                let installed_resource_ids = tab_results
+                if let Some(indeterminate) = screen
+                    .indeterminate_layout_transactions
+                    .get(&transaction_id)
+                {
+                    let message = indeterminate.replay_rejection(transaction_id);
+                    if let Some(completion) = completion_tx.as_mut() {
+                        completion.mark_failure(message.clone());
+                    }
+                    log::error!("{message}");
+                    continue;
+                }
+                let raw_installed_resource_ids = tab_results
                     .iter()
                     .flat_map(|result| {
                         layout_resource_ids(
@@ -9972,34 +12675,90 @@ pub(crate) fn screen_thread_main(
                             &result.plugin_ids,
                         )
                     })
-                    .collect::<HashSet<_>>()
-                    .into_iter()
                     .collect::<Vec<_>>();
+                let mut installed_resource_ids = raw_installed_resource_ids.clone();
+                installed_resource_ids.sort_unstable();
+                installed_resource_ids.dedup();
+                let mut expected_plugin_ids = tab_results
+                    .iter()
+                    .flat_map(|result| result.plugin_ids.values().flatten().copied())
+                    .collect::<Vec<_>>();
+                expected_plugin_ids.sort_unstable();
+                expected_plugin_ids.dedup();
                 let mut created_tab_ids = vec![];
                 // See ApplyLayout: same-viewer supersession retires only this
                 // writer, not the stable empty tab awaited by the next writer.
                 let mut preserve_pending_tab_on_rejection = false;
                 let mut close_fenced_tab_on_rejection = false;
                 let mut prepared_override_layouts = vec![];
-                let mut committed_override_effects = vec![];
                 let mut validated_owner = None;
                 let registered_owner = screen
                     .active_layout_transactions
                     .get(&transaction_id)
                     .cloned();
+                let transaction_target_ids = tab_results
+                    .iter()
+                    .map(|result| result.tab_index)
+                    .collect::<Vec<_>>();
+                if let Some(replay) = screen.replay_resolved_layout_transaction(
+                    transaction_id,
+                    &[
+                        ScreenLayoutTransactionKind::Override,
+                        ScreenLayoutTransactionKind::DurableRecovery,
+                    ],
+                    &transaction_target_ids,
+                    layout_generation.as_deref(),
+                    &raw_installed_resource_ids,
+                ) {
+                    match replay {
+                        Ok(ScreenLayoutDecision::Committed) => {
+                            if let Some(completion) = completion_tx.as_mut() {
+                                completion.mark_success();
+                            }
+                        },
+                        Ok(ScreenLayoutDecision::CommittedWithCleanupDebt(message))
+                        | Ok(ScreenLayoutDecision::CommittedWithPostCommitError(message))
+                        | Ok(ScreenLayoutDecision::Rejected(message))
+                        | Err(message) => {
+                            if let Some(completion) = completion_tx.as_mut() {
+                                completion.mark_failure(message);
+                            }
+                        },
+                    }
+                    continue;
+                }
+                if transaction_id != 0 && registered_owner.is_none() {
+                    let message = format!(
+                        "unknown layout transaction {transaction_id}; refusing to manufacture a Plugin/PTY resolution for an unowned Override completion"
+                    );
+                    if let Some(completion) = completion_tx.as_mut() {
+                        completion.mark_failure(message.clone());
+                    }
+                    log::error!("{message}");
+                    continue;
+                }
                 let transaction_result: Result<()> = (|| {
+                    let mut unique_target_ids = transaction_target_ids.clone();
+                    unique_target_ids.sort_unstable();
+                    unique_target_ids.dedup();
+                    if unique_target_ids.len() != transaction_target_ids.len() {
+                        bail!(
+                            "layout transaction {transaction_id} returned duplicate Override tab results: {transaction_target_ids:?}"
+                        );
+                    }
+                    if installed_resource_ids.len() != raw_installed_resource_ids.len() {
+                        bail!(
+                            "layout transaction {transaction_id} returned duplicate Override resource ids: {raw_installed_resource_ids:?}"
+                        );
+                    }
                     if transaction_id != 0 {
-                        let target_ids = tab_results
-                            .iter()
-                            .map(|result| result.tab_index)
-                            .collect::<Vec<_>>();
                         validated_owner = Some(screen.validate_layout_transaction(
                             transaction_id,
                             &[
                                 ScreenLayoutTransactionKind::Override,
                                 ScreenLayoutTransactionKind::DurableRecovery,
                             ],
-                            &target_ids,
+                            &transaction_target_ids,
                             layout_generation.as_deref(),
                         )?);
                     }
@@ -10064,7 +12823,7 @@ pub(crate) fn screen_thread_main(
                             .map(str::to_ascii_lowercase);
                         if let Some(tab) = screen.tabs.get_mut(&tab_index) {
                             let new_tab_name = tab_result.tab_name.clone();
-                            let transaction = tab
+                            let mut transaction = tab
                                 .begin_override_layout(
                                     tab_result.tiled_layout,
                                     tab_result.floating_layouts,
@@ -10081,12 +12840,11 @@ pub(crate) fn screen_thread_main(
                                 .with_context(|| {
                                     format!("failed to override layout for tab {tab_index}")
                                 })?;
-                            if let Some(new_tab_name) = new_tab_name {
-                                tab.name = new_tab_name;
-                            }
+                            transaction.defer_tab_name(new_tab_name);
                             prepared_override_layouts.push((tab_index, transaction));
                         } else {
                             // Tab doesn't exist - create it.
+                            let new_tab_name = tab_result.tab_name.clone();
                             let swap_layouts = (
                                 tab_result.swap_tiled_layouts.clone().unwrap_or_default(),
                                 tab_result.swap_floating_layouts.clone().unwrap_or_default(),
@@ -10095,7 +12853,7 @@ pub(crate) fn screen_thread_main(
                                 .new_tab(
                                     tab_index,
                                     swap_layouts,
-                                    tab_result.tab_name.clone(),
+                                    None,
                                     None,
                                     TabPlacement::Append,
                                 )
@@ -10110,8 +12868,21 @@ pub(crate) fn screen_thread_main(
                             {
                                 tab.instance_id = restored_tab_instance_id;
                             }
+                            let created_owner = LayoutTabOwner::capture(&screen, tab_index);
+                            if let Some(active_transaction) =
+                                screen.active_layout_transactions.get_mut(&transaction_id)
+                            {
+                                if let Some(target) = active_transaction
+                                    .targets
+                                    .iter_mut()
+                                    .find(|target| target.tab_id == tab_index)
+                                {
+                                    *target = created_owner.clone();
+                                }
+                                active_transaction.created_pending_tabs.push(created_owner);
+                            }
 
-                            let transaction = screen
+                            let mut transaction = screen
                                 .tabs
                                 .get_mut(&tab_index)
                                 .with_context(|| {
@@ -10135,6 +12906,7 @@ pub(crate) fn screen_thread_main(
                                 .with_context(|| {
                                     format!("failed to override layout for new tab {tab_index}")
                                 })?;
+                            transaction.defer_tab_name(new_tab_name);
                             prepared_override_layouts.push((tab_index, transaction));
                         }
                     }
@@ -10155,29 +12927,207 @@ pub(crate) fn screen_thread_main(
                         return Err(anyhow!(rejection.to_string()));
                     }
 
-                    for (tab_id, _) in &prepared_override_layouts {
-                        if !screen.tabs.contains_key(tab_id) {
-                            bail!(
-                                "prepared Override target tab {tab_id} disappeared before commit"
-                            );
-                        }
+                    if transaction_id != 0 {
+                        validated_owner = Some(screen.validate_layout_transaction(
+                            transaction_id,
+                            &[
+                                ScreenLayoutTransactionKind::Override,
+                                ScreenLayoutTransactionKind::DurableRecovery,
+                            ],
+                            &transaction_target_ids,
+                            layout_generation.as_deref(),
+                        )?);
                     }
-                    for (tab_id, transaction) in prepared_override_layouts.drain(..) {
-                        let tab = screen.tabs.get_mut(&tab_id).with_context(|| {
+                    for (tab_id, transaction) in &prepared_override_layouts {
+                        let tab = screen.tabs.get(tab_id).with_context(|| {
                             format!(
-                                "validated Override target tab {tab_id} disappeared during commit"
+                                "prepared Override target tab {tab_id} disappeared before commit preflight"
                             )
                         })?;
-                        let effects = transaction.commit_state(tab);
-                        committed_override_effects.push((tab_id, effects));
+                        transaction.preflight_commit(tab)?;
                     }
                     Ok(())
                 })();
 
-                let (outcome, rejection_message) = match transaction_result {
-                    Ok(()) => (LayoutCommitOutcome::Committed, None),
-                    Err(error) => {
-                        let message = format!("{error:#}");
+                let reconciliation_intent = match transaction_result {
+                    Ok(()) => LayoutReconciliationIntent::Activate,
+                    Err(error) => LayoutReconciliationIntent::Reject(format!("{error:#}")),
+                };
+                let reconciliation_plan = LayoutReconciliationPlan {
+                    intent: reconciliation_intent.clone(),
+                    expected_plugin_ids: expected_plugin_ids.clone(),
+                    resource_ids: installed_resource_ids.clone(),
+                    preserve_pending_tab_on_rejection,
+                    close_fenced_tab_on_rejection,
+                    layout_generation: layout_generation.as_deref().cloned(),
+                };
+                let coordination = match &reconciliation_intent {
+                    LayoutReconciliationIntent::Activate => coordinate_layout_activation(
+                        &screen.bus.senders,
+                        transaction_id,
+                        &expected_plugin_ids,
+                    ),
+                    LayoutReconciliationIntent::Reject(rejection) => coordinate_layout_rejection(
+                        &screen.bus.senders,
+                        transaction_id,
+                        &expected_plugin_ids,
+                        rejection.clone(),
+                    ),
+                    LayoutReconciliationIntent::RejectByOwner(_) => {
+                        unreachable!(
+                            "Override completion cannot originate by-owner rejection retry"
+                        )
+                    },
+                    LayoutReconciliationIntent::PreparationFailure { .. } => {
+                        unreachable!(
+                            "Override completion cannot originate preparation-failure retry"
+                        )
+                    },
+                };
+                let mut retire_active_transaction = true;
+                let mut post_commit_error = None;
+                match coordination {
+                    LayoutCoordination::Commit => {
+                        match screen.commit_override_layout_state(std::mem::take(
+                            &mut prepared_override_layouts,
+                        )) {
+                            CommittedOverrideLayout::Complete(mut committed_override_effects) => {
+                                let mut cleanup = PendingTabLayoutCleanup::default();
+                                for (_, effects) in &mut committed_override_effects {
+                                    cleanup.append(effects.take_pending_cleanup());
+                                }
+                                screen.retain_layout_cleanup(transaction_id, cleanup);
+                                for (tab_id, effects) in committed_override_effects {
+                                    if let Some(tab) = screen.tabs.get_mut(&tab_id) {
+                                        if let Some((_, mut completion)) = effects.emit(tab) {
+                                            let message = format!(
+                                                "Override transaction {transaction_id} unexpectedly retained a blocking terminal completion"
+                                            );
+                                            completion.mark_failure(message.clone());
+                                            post_commit_error = Some(message);
+                                        }
+                                    } else {
+                                        log::error!(
+                                            "committed Override target tab {tab_id} disappeared before infallible local effects"
+                                        );
+                                    }
+                                }
+                                if let Some(owner) =
+                                    validated_owner.as_ref().or(registered_owner.as_ref())
+                                    && let Err(error) = screen
+                                        .close_owned_tabs_after_layout_commit(transaction_id, owner)
+                                {
+                                    post_commit_error = Some(format!("{error:#}"));
+                                }
+                                screen.flush_layout_cleanup(transaction_id);
+                                let cleanup_decision =
+                                    screen.pending_layout_cleanup_message(transaction_id);
+                                if let Some(message) = post_commit_error.as_ref() {
+                                    if let Some(completion) = completion_tx.as_mut() {
+                                        completion.mark_failure(message.clone());
+                                    }
+                                } else if let Some(message) = cleanup_decision.as_ref() {
+                                    if let Some(completion) = completion_tx.as_mut() {
+                                        completion.mark_failure(message.clone());
+                                    }
+                                } else if let Some(completion) = completion_tx.as_mut() {
+                                    completion.mark_success();
+                                }
+                                if let Some(owner) =
+                                    validated_owner.as_ref().or(registered_owner.as_ref())
+                                {
+                                    screen.record_resolved_layout_transaction(
+                                        transaction_id,
+                                        owner,
+                                        installed_resource_ids.clone(),
+                                        post_commit_error.clone().map_or_else(
+                                            || {
+                                                cleanup_decision.clone().map_or(
+                                                    ScreenLayoutDecision::Committed,
+                                                    ScreenLayoutDecision::CommittedWithCleanupDebt,
+                                                )
+                                            },
+                                            ScreenLayoutDecision::CommittedWithPostCommitError,
+                                        ),
+                                    );
+                                }
+                                if let Some(owner) =
+                                    validated_owner.as_ref().or(registered_owner.as_ref())
+                                {
+                                    screen.retire_layout_transaction_from_pending_gate(
+                                        transaction_id,
+                                        owner,
+                                        &mut pending_tab_ids,
+                                    );
+                                } else if let Some(layout_generation) = layout_generation.as_ref() {
+                                    pending_tab_ids.remove(&layout_generation.tab_id);
+                                }
+                                if pending_tab_ids.is_empty() {
+                                    for (tab_index, pending_client_id) in
+                                        pending_tab_switches.drain()
+                                    {
+                                        screen
+                                            .go_to_tab(tab_index + 1, pending_client_id)
+                                            .non_fatal();
+                                    }
+                                }
+                                for event in pending_events_waiting_for_client.drain(..) {
+                                    screen.bus.senders.send_to_screen(event).non_fatal();
+                                }
+                                for event in pending_events_waiting_for_tab.drain(..) {
+                                    screen.bus.senders.send_to_screen(event).non_fatal();
+                                }
+                                screen.log_and_report_session_state().non_fatal();
+                                screen.render(None).non_fatal();
+                            },
+                            CommittedOverrideLayout::Indeterminate {
+                                missing_tab_id,
+                                mut committed_effects,
+                                remaining_prepared,
+                            } => {
+                                let message = format!(
+                                    "layout transaction {transaction_id} activated in Plugin and PTY but preflighted Override target tab {missing_tab_id} disappeared during Screen commit; preserved every remaining transaction as indeterminate"
+                                );
+                                let mut cleanup = PendingTabLayoutCleanup::default();
+                                for (_, effects) in &mut committed_effects {
+                                    cleanup.append(effects.take_pending_cleanup());
+                                }
+                                screen.retain_layout_cleanup(transaction_id, cleanup);
+                                for (tab_id, effects) in committed_effects {
+                                    if let Some(tab) = screen.tabs.get_mut(&tab_id) {
+                                        if let Some((_, mut completion)) = effects.emit(tab) {
+                                            let message = format!(
+                                                "partially committed Override transaction {transaction_id} unexpectedly retained a blocking terminal completion"
+                                            );
+                                            completion.mark_failure(message.clone());
+                                            log::error!("{message}");
+                                        }
+                                    } else {
+                                        log::error!(
+                                            "partially committed Override target tab {tab_id} disappeared before local effects"
+                                        );
+                                    }
+                                }
+                                screen.flush_layout_cleanup(transaction_id);
+                                let mut indeterminate = IndeterminatePreparedLayout::Override {
+                                    prepared_layouts: remaining_prepared,
+                                    created_tab_ids,
+                                    plan: reconciliation_plan.clone(),
+                                };
+                                indeterminate.mark_blocking_completion_failed(&message);
+                                screen
+                                    .indeterminate_layout_transactions
+                                    .insert(transaction_id, indeterminate);
+                                if let Some(completion) = completion_tx.as_mut() {
+                                    completion.mark_failure(message.clone());
+                                }
+                                retire_active_transaction = false;
+                                screen.log_and_report_session_state().non_fatal();
+                                log::error!("{message}");
+                            },
+                        }
+                    },
+                    LayoutCoordination::Rollback(message) => {
                         for (tab_id, transaction) in prepared_override_layouts.drain(..).rev() {
                             if let Some(tab) = screen.tabs.get_mut(&tab_id) {
                                 transaction.rollback(tab, &message);
@@ -10204,143 +13154,85 @@ pub(crate) fn screen_thread_main(
                         if let Some(completion) = completion_tx.as_mut() {
                             completion.mark_failure(message.clone());
                         }
-                        log::warn!(
-                            "rejected layout transaction {}: {}",
-                            transaction_id,
-                            message
-                        );
-                        (
-                            LayoutCommitOutcome::Rejected(message.clone()),
-                            Some(message),
-                        )
-                    },
-                };
-                #[cfg(test)]
-                let ack_result = if legacy_test_transaction {
-                    Ok(())
-                } else {
-                    resolve_layout_commit_with_pty_ack(&screen, transaction_id, outcome.clone())
-                };
-                #[cfg(not(test))]
-                let ack_result =
-                    resolve_layout_commit_with_pty_ack(&screen, transaction_id, outcome.clone());
-
-                if matches!(outcome, LayoutCommitOutcome::Committed) {
-                    match ack_result {
-                        Ok(()) => {
-                            let mut emit_error = None;
-                            for (tab_id, effects) in committed_override_effects.drain(..) {
-                                let result = screen.tabs.get_mut(&tab_id).map_or_else(
-                                    || {
-                                        Err(anyhow!(
-                                            "committed Override target tab {tab_id} disappeared before effects"
-                                        ))
-                                    },
-                                    |tab| effects.emit(tab),
-                                );
-                                if let Err(error) = result {
-                                    emit_error = Some(format!("{error:#}"));
-                                    break;
-                                }
-                            }
-                            if let Some(error) = emit_error {
-                                let message = format!(
-                                    "layout transaction {transaction_id} activated in PTY but Screen post-commit failed: {error}"
-                                );
-                                if let Some(completion) = completion_tx.as_mut() {
-                                    completion.mark_failure(message.clone());
-                                }
-                                log::error!("{message}");
-                            } else {
-                                if let Some(completion) = completion_tx.as_mut() {
-                                    completion.mark_success();
-                                }
-                                if let Some(owner) =
-                                    validated_owner.as_ref().or(registered_owner.as_ref())
-                                {
-                                    screen.close_owned_tabs_after_layout_commit(owner);
-                                }
-                                if let Some(layout_generation) = layout_generation.as_ref() {
-                                    pending_tab_ids.remove(&layout_generation.tab_id);
-                                    if pending_tab_ids.is_empty() {
-                                        for (tab_index, pending_client_id) in
-                                            pending_tab_switches.drain()
-                                        {
-                                            screen
-                                                .go_to_tab(tab_index + 1, pending_client_id)
-                                                .non_fatal();
-                                        }
-                                    }
-                                }
-                                for event in pending_events_waiting_for_client.drain(..) {
-                                    screen.bus.senders.send_to_screen(event).non_fatal();
-                                }
-                                for event in pending_events_waiting_for_tab.drain(..) {
-                                    screen.bus.senders.send_to_screen(event).non_fatal();
-                                }
-                                screen.log_and_report_session_state().non_fatal();
-                                screen.render(None).non_fatal();
-                            }
-                        },
-                        Err(error) => {
-                            let message = format!(
-                                "layout transaction {transaction_id} Screen state committed but PTY activation was not acknowledged: {error:#}"
+                        if let Some(owner) = validated_owner.as_ref().or(registered_owner.as_ref())
+                        {
+                            screen.record_resolved_layout_transaction(
+                                transaction_id,
+                                owner,
+                                installed_resource_ids.clone(),
+                                ScreenLayoutDecision::Rejected(message.clone()),
                             );
-                            for (_, effects) in committed_override_effects.iter_mut() {
-                                effects.reject_blocking_completion(&message);
-                            }
-                            if let Some(completion) = completion_tx.as_mut() {
-                                completion.mark_failure(message.clone());
-                            }
-                            if let Some(layout_generation) = layout_generation.as_ref() {
-                                pending_tab_ids.remove(&layout_generation.tab_id);
-                            }
-                            for resource_id in &installed_resource_ids {
-                                if let PaneId::Plugin(plugin_id) = resource_id {
-                                    plugin_loading_message_cache.remove(plugin_id);
-                                }
-                            }
-                            screen.log_and_report_session_state().non_fatal();
-                            log::error!("{message}");
-                        },
-                    }
-                } else {
-                    if let Err(error) = ack_result {
-                        let message = format!(
-                            "layout transaction {transaction_id} was rejected but PTY cleanup was not acknowledged: {error:#}"
-                        );
-                        if let Some(completion) = completion_tx.as_mut() {
-                            completion.mark_failure(message.clone());
                         }
-                        log::error!("{message}");
-                    }
-                    if close_fenced_tab_on_rejection
-                        && let Some(layout_generation) = layout_generation.as_ref()
-                    {
-                        close_globally_stale_fenced_tab(
+                        if close_fenced_tab_on_rejection
+                            && let Some(layout_generation) = layout_generation.as_ref()
+                        {
+                            close_globally_stale_fenced_tab(
+                                &mut screen,
+                                layout_generation,
+                                &installed_resource_ids,
+                            )
+                            .non_fatal();
+                            pending_tab_ids.remove(&layout_generation.tab_id);
+                        } else if !preserve_pending_tab_on_rejection
+                            && let Some(layout_generation) = layout_generation.as_ref()
+                            && durable_tab_layout_generation_is_current(
+                                &screen,
+                                &durable_tab_layout_generations,
+                                layout_generation,
+                            )
+                        {
+                            pending_tab_ids.remove(&layout_generation.tab_id);
+                        }
+                        if let Some(owner) = validated_owner.as_ref().or(registered_owner.as_ref())
+                        {
+                            screen.retire_layout_transaction_from_pending_gate(
+                                transaction_id,
+                                owner,
+                                &mut pending_tab_ids,
+                            );
+                        }
+                        release_pending_layout_gate_if_ready(
                             &mut screen,
-                            layout_generation,
-                            &installed_resource_ids,
-                        )
-                        .non_fatal();
-                        pending_tab_ids.remove(&layout_generation.tab_id);
-                    } else if !preserve_pending_tab_on_rejection
-                        && let Some(layout_generation) = layout_generation.as_ref()
-                        && durable_tab_layout_generation_is_current(
-                            &screen,
-                            &durable_tab_layout_generations,
-                            layout_generation,
-                        )
-                    {
-                        pending_tab_ids.remove(&layout_generation.tab_id);
-                    }
-                    if let Some(message) = rejection_message {
+                            &pending_tab_ids,
+                            &mut pending_tab_switches,
+                            &mut pending_events_waiting_for_client,
+                            &mut pending_events_waiting_for_tab,
+                        );
                         log::warn!(
                             "layout transaction {transaction_id} finished rejected: {message}"
                         );
-                    }
+                    },
+                    LayoutCoordination::Unknown(message) => {
+                        let mut indeterminate = IndeterminatePreparedLayout::Override {
+                            prepared_layouts: prepared_override_layouts,
+                            created_tab_ids,
+                            plan: reconciliation_plan,
+                        };
+                        indeterminate.mark_blocking_completion_failed(&message);
+                        screen
+                            .indeterminate_layout_transactions
+                            .insert(transaction_id, indeterminate);
+                        if let Some(completion) = completion_tx.as_mut() {
+                            completion.mark_failure(message.clone());
+                        }
+                        if registered_owner.is_none()
+                            && let Some(layout_generation) = layout_generation.as_ref()
+                        {
+                            pending_tab_ids.remove(&layout_generation.tab_id);
+                            release_pending_layout_gate_if_ready(
+                                &mut screen,
+                                &pending_tab_ids,
+                                &mut pending_tab_switches,
+                                &mut pending_events_waiting_for_client,
+                                &mut pending_events_waiting_for_tab,
+                            );
+                        }
+                        retire_active_transaction = false;
+                        screen.log_and_report_session_state().non_fatal();
+                        log::error!("{message}");
+                    },
                 }
-                if registered_owner.is_some() {
+                if retire_active_transaction && registered_owner.is_some() {
                     screen.active_layout_transactions.remove(&transaction_id);
                 }
             },
@@ -11135,9 +14027,21 @@ pub(crate) fn screen_thread_main(
             },
             ScreenInstruction::BreakPane(default_shell, client_id, completion_tx) => {
                 let default_layout = screen.default_layout.clone();
-                screen
-                    .break_pane(default_shell, default_layout, client_id, completion_tx)
-                    .non_fatal();
+                match screen.break_pane(default_shell, default_layout, client_id, completion_tx) {
+                    Ok(Some(transfer)) => {
+                        pending_tab_ids.extend(transfer.pending_gate_tab_ids());
+                        // Both the source extraction and the destination stay
+                        // behind one transaction fence. A render request while
+                        // worker ACKs are unresolved therefore preserves the
+                        // last committed frame instead of making the pane
+                        // disappear.
+                        screen.render(None).non_fatal();
+                    },
+                    Ok(None) => {},
+                    Err(error) => {
+                        log::error!("{error:#}");
+                    },
+                }
             },
             ScreenInstruction::BreakPaneRight(
                 client_id,
@@ -11676,16 +14580,22 @@ pub(crate) fn screen_thread_main(
                 client_id,
                 completion_tx,
             } => {
-                screen
-                    .break_multiple_panes_to_new_tab(
-                        pane_ids,
-                        default_shell,
-                        should_change_focus_to_new_tab,
-                        new_tab_name,
-                        client_id,
-                        completion_tx,
-                    )
-                    .non_fatal();
+                match screen.break_multiple_panes_to_new_tab(
+                    pane_ids,
+                    default_shell,
+                    should_change_focus_to_new_tab,
+                    new_tab_name,
+                    client_id,
+                    completion_tx,
+                ) {
+                    Ok(transfer) => {
+                        pending_tab_ids.extend(transfer.pending_gate_tab_ids());
+                        screen.render(None).non_fatal();
+                    },
+                    Err(error) => {
+                        log::error!("{error:#}");
+                    },
+                }
                 // TODO: is this a race?
                 let pane_group = screen.get_client_pane_group(&client_id);
                 if !pane_group.is_empty() {

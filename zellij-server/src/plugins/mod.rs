@@ -19,7 +19,7 @@ use wasmi::Engine;
 
 use crate::panes::PaneId;
 use crate::route::NotificationEnd;
-use crate::screen::{DurableTabLayoutGeneration, ScreenInstruction};
+use crate::screen::{DurableTabLayoutGeneration, LayoutPreparationCleanup, ScreenInstruction};
 use crate::session_layout_metadata::SessionLayoutMetadata;
 use crate::{
     ClientId, ServerInstruction,
@@ -30,9 +30,10 @@ use zellij_utils::data::PaneRenderReport;
 use zellij_utils::input::layout::TabLayoutInfo;
 
 pub use wasm_bridge::PluginRenderAsset;
-use wasm_bridge::WasmBridge;
+use wasm_bridge::{LayoutPluginReservationRequest, WasmBridge};
 
 use zellij_utils::{
+    channels,
     data::{
         ClientInfo, CommandOrPlugin, Event, EventType, FloatingPaneCoordinates, InputMode,
         LayoutInfo, LayoutWithError, MessageToPlugin, PermissionStatus, PermissionType,
@@ -51,6 +52,30 @@ use zellij_utils::{
 };
 
 pub type PluginId = u32;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LayoutPluginResolution {
+    Activate,
+    Release { reason: String },
+    Compensate { reason: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LayoutPluginReceipt {
+    Activated {
+        plugin_ids: Vec<PluginId>,
+    },
+    Released {
+        plugin_ids: Vec<PluginId>,
+    },
+    Compensated {
+        plugin_ids: Vec<PluginId>,
+    },
+    ActivationRolledBack {
+        plugin_ids: Vec<PluginId>,
+        message: String,
+    },
+}
 
 #[derive(Clone, Debug)]
 pub struct DumpSessionLayoutResponse {
@@ -117,6 +142,29 @@ pub enum PluginInstruction {
         Option<NotificationEnd>,
         Option<Box<DurableTabLayoutGeneration>>,
     ),
+    ResolveLayoutPlugins {
+        transaction_id: LayoutTransactionId,
+        resolution: LayoutPluginResolution,
+        expected_plugin_ids: Vec<PluginId>,
+        ack: channels::Sender<std::result::Result<LayoutPluginReceipt, String>>,
+    },
+    ReleaseLayoutPluginsByTransaction {
+        transaction_id: LayoutTransactionId,
+        reason: String,
+        ack: channels::Sender<std::result::Result<LayoutPluginReceipt, String>>,
+    },
+    CleanupLayoutPlugins {
+        transaction_id: LayoutTransactionId,
+        plugin_ids: Vec<PluginId>,
+        ack: channels::Sender<std::result::Result<Vec<PluginId>, String>>,
+    },
+    LayoutPluginActivationFailed {
+        transaction_id: LayoutTransactionId,
+        plugin_ids: Vec<PluginId>,
+        message: String,
+    },
+    #[cfg(test)]
+    RejectNextLayoutPluginReleaseForTest(LayoutTransactionId),
     ApplyCachedEvents {
         plugin_ids: Vec<PluginId>,
         done_receiving_permissions: bool,
@@ -250,6 +298,12 @@ impl From<&PluginInstruction> for PluginContext {
             PluginInstruction::RemoveClient(_) => PluginContext::RemoveClient,
             PluginInstruction::NewTab(..) => PluginContext::NewTab,
             PluginInstruction::OverrideLayout(..) => PluginContext::OverrideLayout,
+            PluginInstruction::ResolveLayoutPlugins { .. }
+            | PluginInstruction::ReleaseLayoutPluginsByTransaction { .. }
+            | PluginInstruction::CleanupLayoutPlugins { .. }
+            | PluginInstruction::LayoutPluginActivationFailed { .. } => PluginContext::Update,
+            #[cfg(test)]
+            PluginInstruction::RejectNextLayoutPluginReleaseForTest(..) => PluginContext::Update,
             PluginInstruction::ApplyCachedEvents { .. } => PluginContext::ApplyCachedEvents,
             PluginInstruction::ApplyCachedWorkerMessages(..) => {
                 PluginContext::ApplyCachedWorkerMessages
@@ -552,7 +606,6 @@ pub(crate) fn plugin_thread_main(
                     client_id
                 };
 
-                let mut plugin_ids: HashMap<RunPluginOrAlias, Vec<PluginId>> = HashMap::new();
                 tab_layout = tab_layout.or_else(|| Some(layout.new_tab().0));
 
                 // Match initial_panes plugins to empty slots in the layout
@@ -600,51 +653,75 @@ pub(crate) fn plugin_thread_main(
                 let mut all_run_instructions = extracted_run_instructions;
                 all_run_instructions.append(&mut extracted_floating_plugins);
 
-                let mut plugin_load_error = None;
+                let mut plugin_reservation_error = None;
+                let mut planned_plugins = vec![];
                 for run_instruction in all_run_instructions {
                     if let Some(Run::Plugin(run_plugin_or_alias)) = run_instruction {
-                        let run_plugin = run_plugin_or_alias.get_run_plugin();
-                        let cwd = run_plugin_or_alias
+                        let Some(run_plugin) = run_plugin_or_alias.get_run_plugin() else {
+                            plugin_reservation_error = Some(anyhow!(
+                                "failed to resolve layout plugin {:?} for tab {}",
+                                run_plugin_or_alias,
+                                tab_id
+                            ));
+                            break;
+                        };
+                        let plugin_cwd = run_plugin_or_alias
                             .get_initial_cwd()
                             .or_else(|| cwd.clone());
-                        let skip_cache = false;
-                        match wasm_bridge.load_plugin(
-                            &run_plugin,
-                            Some(tab_id),
-                            size,
-                            cwd,
-                            skip_cache,
-                            Some(client_id),
-                        ) {
-                            Ok((plugin_id, _client_id)) => {
-                                plugin_ids
-                                    .entry(run_plugin_or_alias.clone())
-                                    .or_default()
-                                    .push(plugin_id);
+                        planned_plugins.push((
+                            run_plugin_or_alias,
+                            LayoutPluginReservationRequest {
+                                run_plugin,
+                                tab_index: Some(tab_id),
+                                size,
+                                cwd: plugin_cwd,
+                                skip_cache: false,
+                                client_id,
                             },
-                            Err(e) => {
-                                plugin_load_error = Some(anyhow!(
-                                    "failed to load layout plugin {:?} for tab {}: {e:#}",
-                                    run_plugin_or_alias,
-                                    tab_id
-                                ));
-                                break;
-                            },
-                        }
+                        ));
                     }
                 }
-                if let Some(error) = plugin_load_error {
-                    let message =
-                        rollback_layout_plugins(&mut wasm_bridge, &plugin_ids, error).to_string();
+                if let Some(error) = plugin_reservation_error {
                     reject_layout_preparation(
                         &bus,
                         transaction_id,
                         Some(tab_id),
                         completion_tx,
                         layout_generation,
-                        message,
+                        error.to_string(),
+                        LayoutPreparationCleanup::Resolved,
                     );
                     continue;
+                }
+                let reservation_requests = planned_plugins
+                    .iter()
+                    .map(|(_, request)| request.clone())
+                    .collect();
+                let reserved_plugin_ids = match wasm_bridge
+                    .reserve_layout_plugins(transaction_id, reservation_requests)
+                {
+                    Ok(plugin_ids) => plugin_ids,
+                    Err(message) => {
+                        reject_layout_preparation(
+                            &bus,
+                            transaction_id,
+                            Some(tab_id),
+                            completion_tx,
+                            layout_generation,
+                            message,
+                            LayoutPreparationCleanup::Resolved,
+                        );
+                        continue;
+                    },
+                };
+                let mut plugin_ids: HashMap<RunPluginOrAlias, Vec<PluginId>> = HashMap::new();
+                for ((run_plugin_or_alias, _), plugin_id) in
+                    planned_plugins.into_iter().zip(reserved_plugin_ids)
+                {
+                    plugin_ids
+                        .entry(run_plugin_or_alias)
+                        .or_default()
+                        .push(plugin_id);
                 }
                 let plugin_ids_for_handoff_failure = plugin_ids.clone();
                 let instruction = PtyInstruction::NewTab(
@@ -688,14 +765,15 @@ pub(crate) fn plugin_thread_main(
                                 layout_generation,
                             ),
                             _ => {
-                                let message = rollback_layout_plugins(
-                                &mut wasm_bridge,
-                                &plugin_ids_for_handoff_failure,
-                                anyhow!(
-                                    "Plugin -> PTY handoff returned an unexpected instruction for layout transaction {transaction_id}: {handoff_error:#}"
-                                ),
-                            )
-                            .to_string();
+                                let (release_error, cleanup) = release_layout_plugin_reservation(
+                                    &mut wasm_bridge,
+                                    transaction_id,
+                                    &plugin_ids_for_handoff_failure,
+                                    anyhow!(
+                                        "Plugin -> PTY handoff returned an unexpected instruction for layout transaction {transaction_id}: {handoff_error:#}"
+                                    ),
+                                );
+                                let message = release_error.to_string();
                                 reject_layout_preparation(
                                     &bus,
                                     transaction_id,
@@ -703,6 +781,7 @@ pub(crate) fn plugin_thread_main(
                                     None,
                                     None,
                                     message,
+                                    cleanup,
                                 );
                                 continue;
                             },
@@ -710,8 +789,13 @@ pub(crate) fn plugin_thread_main(
                     let error = handoff_error.context(format!(
                         "layout transaction {transaction_id} failed Plugin -> PTY handoff"
                     ));
-                    let message =
-                        rollback_layout_plugins(&mut wasm_bridge, &plugin_ids, error).to_string();
+                    let (release_error, cleanup) = release_layout_plugin_reservation(
+                        &mut wasm_bridge,
+                        transaction_id,
+                        &plugin_ids,
+                        error,
+                    );
+                    let message = release_error.to_string();
                     mark_layout_completion_failed(completion_tx.as_mut(), &message);
                     reject_layout_preparation(
                         &bus,
@@ -720,6 +804,7 @@ pub(crate) fn plugin_thread_main(
                         completion_tx,
                         layout_generation,
                         message,
+                        cleanup,
                     );
                 }
             },
@@ -743,10 +828,11 @@ pub(crate) fn plugin_thread_main(
                     client_id
                 };
 
-                // 2. Process each tab layout
-                let mut tab_layouts_with_plugin_ids = Vec::new();
-
-                let mut plugin_load_error = None;
+                // 2. Process each tab layout and build one transaction-wide,
+                // side-effect-free reservation plan.
+                let mut tab_layouts_with_plugin_keys = Vec::new();
+                let mut reservation_requests = Vec::new();
+                let mut plugin_reservation_error = None;
                 for mut tab_layout_info in tab_layouts {
                     // Populate plugin aliases in layouts
                     tab_layout_info
@@ -774,57 +860,39 @@ pub(crate) fn plugin_thread_main(
                     let mut all_run_instructions = extracted_run_instructions;
                     all_run_instructions.extend(extracted_floating_plugins);
 
-                    // Load plugins for all Run::Plugin instructions
-                    let mut plugin_ids: HashMap<RunPluginOrAlias, Vec<PluginId>> = HashMap::new();
+                    let mut plugin_keys = Vec::new();
                     let size = Size::default();
 
                     for run_instruction in all_run_instructions {
                         if let Some(Run::Plugin(run_plugin_or_alias)) = run_instruction {
-                            let run_plugin = run_plugin_or_alias.get_run_plugin();
-                            let cwd = run_plugin_or_alias.get_initial_cwd();
-                            let skip_cache = false;
-
-                            match wasm_bridge.load_plugin(
-                                &run_plugin,
-                                Some(tab_layout_info.tab_index),
+                            let Some(run_plugin) = run_plugin_or_alias.get_run_plugin() else {
+                                plugin_reservation_error = Some(anyhow!(
+                                    "failed to resolve layout plugin {:?} for recovered tab {}",
+                                    run_plugin_or_alias,
+                                    tab_layout_info.tab_index
+                                ));
+                                break;
+                            };
+                            let plugin_cwd = run_plugin_or_alias.get_initial_cwd();
+                            plugin_keys.push(run_plugin_or_alias);
+                            reservation_requests.push(LayoutPluginReservationRequest {
+                                run_plugin,
+                                tab_index: Some(tab_layout_info.tab_index),
                                 size,
-                                cwd,
-                                skip_cache,
-                                Some(client_id),
-                            ) {
-                                Ok((plugin_id, _client_id)) => {
-                                    plugin_ids
-                                        .entry(run_plugin_or_alias.clone())
-                                        .or_default()
-                                        .push(plugin_id);
-                                },
-                                Err(e) => {
-                                    plugin_load_error = Some(anyhow!(
-                                        "failed to load layout plugin {:?} for recovered tab {}: {e:#}",
-                                        run_plugin_or_alias,
-                                        tab_layout_info.tab_index
-                                    ));
-                                    break;
-                                },
-                            }
+                                cwd: plugin_cwd,
+                                skip_cache: false,
+                                client_id,
+                            });
                         }
                     }
 
-                    // Pair this tab's layout with its plugin IDs
-                    tab_layouts_with_plugin_ids.push((tab_layout_info, plugin_ids));
-                    if plugin_load_error.is_some() {
+                    tab_layouts_with_plugin_keys.push((tab_layout_info, plugin_keys));
+                    if plugin_reservation_error.is_some() {
                         break;
                     }
                 }
 
-                if let Some(error) = plugin_load_error {
-                    let all_plugin_ids = tab_layouts_with_plugin_ids
-                        .iter()
-                        .map(|(_, plugin_ids)| plugin_ids)
-                        .collect::<Vec<_>>();
-                    let message =
-                        rollback_layout_plugin_maps(&mut wasm_bridge, &all_plugin_ids, error)
-                            .to_string();
+                if let Some(error) = plugin_reservation_error {
                     reject_layout_preparation(
                         &bus,
                         transaction_id,
@@ -833,10 +901,46 @@ pub(crate) fn plugin_thread_main(
                             .map(|generation| generation.tab_id),
                         completion_tx,
                         layout_generation,
-                        message,
+                        error.to_string(),
+                        LayoutPreparationCleanup::Resolved,
                     );
                     continue;
                 }
+                let reserved_plugin_ids = match wasm_bridge
+                    .reserve_layout_plugins(transaction_id, reservation_requests)
+                {
+                    Ok(plugin_ids) => plugin_ids,
+                    Err(message) => {
+                        reject_layout_preparation(
+                            &bus,
+                            transaction_id,
+                            layout_generation
+                                .as_ref()
+                                .map(|generation| generation.tab_id),
+                            completion_tx,
+                            layout_generation,
+                            message,
+                            LayoutPreparationCleanup::Resolved,
+                        );
+                        continue;
+                    },
+                };
+                let mut reserved_plugin_ids = reserved_plugin_ids.into_iter();
+                let mut tab_layouts_with_plugin_ids = Vec::new();
+                for (tab_layout_info, plugin_keys) in tab_layouts_with_plugin_keys {
+                    let mut plugin_ids = HashMap::new();
+                    for run_plugin_or_alias in plugin_keys {
+                        let plugin_id = reserved_plugin_ids.next().expect(
+                            "layout plugin reservation must return one id per planned plugin",
+                        );
+                        plugin_ids
+                            .entry(run_plugin_or_alias)
+                            .or_insert_with(Vec::new)
+                            .push(plugin_id);
+                    }
+                    tab_layouts_with_plugin_ids.push((tab_layout_info, plugin_ids));
+                }
+                debug_assert!(reserved_plugin_ids.next().is_none());
                 // 3. Send to pty thread with all tab layouts and their plugin IDs
                 let plugin_ids_for_handoff_failure = tab_layouts_with_plugin_ids
                     .iter()
@@ -880,14 +984,15 @@ pub(crate) fn plugin_thread_main(
                         _ => {
                             let plugin_id_maps =
                                 plugin_ids_for_handoff_failure.iter().collect::<Vec<_>>();
-                            let message = rollback_layout_plugin_maps(
+                            let (release_error, cleanup) = release_layout_plugin_reservation_maps(
                                 &mut wasm_bridge,
+                                transaction_id,
                                 &plugin_id_maps,
                                 anyhow!(
                                     "Plugin -> PTY handoff returned an unexpected instruction for Override transaction {transaction_id}: {handoff_error:#}"
                                 ),
-                            )
-                            .to_string();
+                            );
+                            let message = release_error.to_string();
                             reject_layout_preparation(
                                 &bus,
                                 transaction_id,
@@ -895,6 +1000,7 @@ pub(crate) fn plugin_thread_main(
                                 None,
                                 None,
                                 message,
+                                cleanup,
                             );
                             continue;
                         },
@@ -906,9 +1012,13 @@ pub(crate) fn plugin_thread_main(
                     let error = handoff_error.context(format!(
                         "layout transaction {transaction_id} failed Plugin -> PTY handoff"
                     ));
-                    let message =
-                        rollback_layout_plugin_maps(&mut wasm_bridge, &all_plugin_ids, error)
-                            .to_string();
+                    let (release_error, cleanup) = release_layout_plugin_reservation_maps(
+                        &mut wasm_bridge,
+                        transaction_id,
+                        &all_plugin_ids,
+                        error,
+                    );
+                    let message = release_error.to_string();
                     mark_layout_completion_failed(completion_tx.as_mut(), &message);
                     reject_layout_preparation(
                         &bus,
@@ -919,8 +1029,54 @@ pub(crate) fn plugin_thread_main(
                         completion_tx,
                         layout_generation,
                         message,
+                        cleanup,
                     );
                 }
+            },
+            PluginInstruction::ResolveLayoutPlugins {
+                transaction_id,
+                resolution,
+                expected_plugin_ids,
+                ack,
+            } => {
+                let result = wasm_bridge.resolve_layout_plugins(
+                    transaction_id,
+                    resolution,
+                    expected_plugin_ids,
+                );
+                let _ = ack.send(result);
+            },
+            PluginInstruction::ReleaseLayoutPluginsByTransaction {
+                transaction_id,
+                reason,
+                ack,
+            } => {
+                let result =
+                    wasm_bridge.release_layout_plugins_by_transaction(transaction_id, reason);
+                let _ = ack.send(result);
+            },
+            PluginInstruction::CleanupLayoutPlugins {
+                transaction_id,
+                plugin_ids,
+                ack,
+            } => {
+                let result = wasm_bridge.cleanup_layout_plugins(transaction_id, plugin_ids);
+                let _ = ack.send(result);
+            },
+            PluginInstruction::LayoutPluginActivationFailed {
+                transaction_id,
+                plugin_ids,
+                message,
+            } => {
+                wasm_bridge.handle_layout_plugin_activation_failure(
+                    transaction_id,
+                    plugin_ids,
+                    message,
+                );
+            },
+            #[cfg(test)]
+            PluginInstruction::RejectNextLayoutPluginReleaseForTest(transaction_id) => {
+                wasm_bridge.reject_next_layout_plugin_release_for_test(transaction_id);
             },
             PluginInstruction::ApplyCachedEvents {
                 plugin_ids,
@@ -1619,19 +1775,26 @@ fn mark_layout_completion_failed(completion: Option<&mut NotificationEnd>, messa
     }
 }
 
-fn rollback_layout_plugins(
+fn release_layout_plugin_reservation(
     wasm_bridge: &mut WasmBridge,
+    transaction_id: LayoutTransactionId,
     plugin_ids: &HashMap<RunPluginOrAlias, Vec<PluginId>>,
     original_error: anyhow::Error,
-) -> anyhow::Error {
-    rollback_layout_plugin_maps(wasm_bridge, &[plugin_ids], original_error)
+) -> (anyhow::Error, LayoutPreparationCleanup) {
+    release_layout_plugin_reservation_maps(
+        wasm_bridge,
+        transaction_id,
+        &[plugin_ids],
+        original_error,
+    )
 }
 
-fn rollback_layout_plugin_maps(
+fn release_layout_plugin_reservation_maps(
     wasm_bridge: &mut WasmBridge,
+    transaction_id: LayoutTransactionId,
     plugin_id_maps: &[&HashMap<RunPluginOrAlias, Vec<PluginId>>],
     original_error: anyhow::Error,
-) -> anyhow::Error {
+) -> (anyhow::Error, LayoutPreparationCleanup) {
     let mut allocated_plugin_ids = plugin_id_maps
         .iter()
         .flat_map(|plugin_ids| plugin_ids.values())
@@ -1640,20 +1803,43 @@ fn rollback_layout_plugin_maps(
         .collect::<Vec<_>>();
     allocated_plugin_ids.sort_unstable();
     allocated_plugin_ids.dedup();
+    let unresolved_cleanup = LayoutPreparationCleanup::ReleasePluginReservation {
+        plugin_ids: allocated_plugin_ids.clone(),
+        pty_cleanup_succeeded: true,
+    };
 
-    let mut cleanup_errors = vec![];
-    for plugin_id in allocated_plugin_ids {
-        if let Err(error) = wasm_bridge.unload_plugin(plugin_id) {
-            cleanup_errors.push(format!("plugin {plugin_id}: {error:#}"));
-        }
-    }
-    if cleanup_errors.is_empty() {
-        original_error
-    } else {
-        original_error.context(format!(
-            "failed to release one or more partial plugin allocations: {}",
-            cleanup_errors.join("; ")
-        ))
+    match wasm_bridge.resolve_layout_plugins(
+        transaction_id,
+        LayoutPluginResolution::Release {
+            reason: original_error.to_string(),
+        },
+        allocated_plugin_ids.clone(),
+    ) {
+        Ok(LayoutPluginReceipt::Released { mut plugin_ids }) => {
+            plugin_ids.sort_unstable();
+            if plugin_ids == allocated_plugin_ids {
+                (original_error, LayoutPreparationCleanup::Resolved)
+            } else {
+                (
+                    original_error.context(format!(
+                        "layout plugin transaction {transaction_id} returned mismatched release ids {plugin_ids:?}, expected {allocated_plugin_ids:?}"
+                    )),
+                    unresolved_cleanup,
+                )
+            }
+        },
+        Ok(receipt) => (
+            original_error.context(format!(
+                "layout plugin transaction {transaction_id} returned unexpected release receipt: {receipt:?}"
+            )),
+            unresolved_cleanup,
+        ),
+        Err(error) => (
+            original_error.context(format!(
+                "failed to release suspended plugin allocation for transaction {transaction_id}: {error}"
+            )),
+            unresolved_cleanup,
+        ),
     }
 }
 
@@ -1664,6 +1850,7 @@ fn reject_layout_preparation(
     mut completion_tx: Option<NotificationEnd>,
     layout_generation: Option<Box<DurableTabLayoutGeneration>>,
     message: String,
+    cleanup: LayoutPreparationCleanup,
 ) {
     mark_layout_completion_failed(completion_tx.as_mut(), &message);
     let instruction = ScreenInstruction::LayoutPreparationFailed {
@@ -1672,6 +1859,7 @@ fn reject_layout_preparation(
         completion_tx,
         layout_generation,
         message: message.clone(),
+        cleanup,
     };
     if let Err(send_failure) = bus.senders.send_to_screen_recover(instruction) {
         let (recovered_instruction, send_error) = send_failure.into_parts();

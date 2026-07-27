@@ -4937,6 +4937,7 @@ dependencies = [
  "sysinfo",
  "tempfile",
  "tokio",
+ "tokio-util",
  "typetag",
  "unicode-width 0.1.10",
  "url",

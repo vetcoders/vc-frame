@@ -37,6 +37,9 @@ use zellij_utils::{envs, errors::prelude::*, input::command::RunCommand};
 
 pub use async_trait::async_trait;
 
+const PROCESS_REAP_CONFIRMATION_ATTEMPTS: usize = 25;
+const PROCESS_REAP_CONFIRMATION_INTERVAL: Duration = Duration::from_millis(10);
+
 /// An `AsyncReader` that wraps a `RawFd` using epoll via `AsyncFd`.
 ///
 /// Construction sets O_NONBLOCK but defers `AsyncFd` registration to the first
@@ -50,7 +53,8 @@ struct RawFdAsyncReader {
 }
 
 impl RawFdAsyncReader {
-    fn new(fd: RawFd) -> io::Result<Self> {
+    fn new(file: File) -> io::Result<Self> {
+        let fd = file.as_raw_fd();
         // Set O_NONBLOCK so AsyncFd can use epoll correctly
         let flags =
             fcntl(fd, FcntlArg::F_GETFL).map_err(|e| io::Error::from_raw_os_error(e as i32))?;
@@ -58,7 +62,6 @@ impl RawFdAsyncReader {
         oflags.insert(OFlag::O_NONBLOCK);
         fcntl(fd, FcntlArg::F_SETFL(oflags)).map_err(|e| io::Error::from_raw_os_error(e as i32))?;
 
-        let file = unsafe { File::from_raw_fd(fd) };
         Ok(Self {
             pending: Some(file),
             async_fd: None,
@@ -71,10 +74,12 @@ impl RawFdAsyncReader {
             let file = self
                 .pending
                 .take()
-                .expect("RawFdAsyncReader used after init");
+                .ok_or_else(|| io::Error::other("RawFdAsyncReader used after init"))?;
             self.async_fd = Some(AsyncFd::new(file)?);
         }
-        Ok(self.async_fd.as_mut().unwrap())
+        self.async_fd
+            .as_mut()
+            .ok_or_else(|| io::Error::other("RawFdAsyncReader initialization lost its file"))
     }
 }
 
@@ -128,7 +133,7 @@ fn set_terminal_size_using_fd(
 
 /// Handle some signals for the child process. This will loop until the child
 /// process exits.
-fn handle_command_exit(mut child: Child) -> Result<Option<i32>> {
+fn handle_command_exit(child: &mut Child) -> Result<Option<i32>> {
     let id = child.id();
     let err_context = || {
         format!(
@@ -154,7 +159,7 @@ fn handle_command_exit(mut child: Child) -> Result<Option<i32>> {
             Ok(None) => {
                 thread::sleep(Duration::from_millis(10));
             },
-            Err(e) => panic!("error attempting to wait: {}", e),
+            Err(e) => return Err(e).with_context(err_context),
         }
 
         if !should_exit {
@@ -175,9 +180,170 @@ fn handle_command_exit(mut child: Child) -> Result<Option<i32>> {
         } else {
             // when I say whoa, I mean WHOA!
             let _ = child.kill();
+            child.wait().with_context(err_context)?;
             break 'handle_exit Ok(None);
         }
     }
+}
+
+#[cfg(test)]
+static FAIL_MONITOR_SPAWN_FOR_TERMINAL: AtomicU32 = AtomicU32::new(u32::MAX);
+#[cfg(test)]
+static UNIX_CHILD_GUARD_CLEANUPS: AtomicU32 = AtomicU32::new(0);
+#[cfg(test)]
+static LAST_REAPED_UNIX_CHILD: AtomicU32 = AtomicU32::new(0);
+
+struct UnixChildMonitor {
+    child: Option<Child>,
+    secondary_fd: Option<RawFd>,
+    cmd: Option<RunCommand>,
+    quit_cb: Option<Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>>,
+    terminal_id: u32,
+}
+
+impl std::fmt::Debug for UnixChildMonitor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UnixChildMonitor")
+            .field("child_id", &self.child.as_ref().map(Child::id))
+            .field("secondary_fd", &self.secondary_fd)
+            .field("terminal_id", &self.terminal_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl UnixChildMonitor {
+    fn new(
+        child: Child,
+        secondary_fd: RawFd,
+        cmd: RunCommand,
+        quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
+        terminal_id: u32,
+    ) -> Self {
+        Self {
+            child: Some(child),
+            secondary_fd: Some(secondary_fd),
+            cmd: Some(cmd),
+            quit_cb: Some(quit_cb),
+            terminal_id,
+        }
+    }
+
+    fn child_id(&self) -> Option<u32> {
+        self.child.as_ref().map(Child::id)
+    }
+
+    fn kill_and_reap(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        #[cfg(test)]
+        let child_id = child.id();
+        #[cfg(test)]
+        UNIX_CHILD_GUARD_CLEANUPS.fetch_add(1, Ordering::SeqCst);
+
+        match child.try_wait() {
+            Ok(Some(_)) => {},
+            Ok(None) | Err(_) => {
+                if let Err(error) = child.kill() {
+                    log::debug!(
+                        "failed to kill child process {} during spawn cleanup: {}",
+                        child.id(),
+                        error
+                    );
+                }
+                if let Err(error) = child.wait() {
+                    log::error!(
+                        "failed to reap child process {} during spawn cleanup: {}",
+                        child.id(),
+                        error
+                    );
+                }
+            },
+        }
+        #[cfg(test)]
+        LAST_REAPED_UNIX_CHILD.store(child_id, Ordering::SeqCst);
+    }
+
+    fn close_secondary_fd(&mut self) {
+        if let Some(secondary_fd) = self.secondary_fd.take() {
+            let _ = unistd::close(secondary_fd);
+        }
+    }
+
+    fn run(mut self) {
+        let command_name = self
+            .cmd
+            .as_ref()
+            .map(|cmd| cmd.command.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "<unknown>".to_owned());
+        let exit_status = match self.child.as_mut() {
+            Some(child) => match handle_command_exit(child) {
+                Ok(exit_status) => {
+                    self.child.take();
+                    exit_status
+                },
+                Err(error) => {
+                    log::error!(
+                        "failed to monitor child process for '{}': {:#}",
+                        command_name,
+                        error
+                    );
+                    self.kill_and_reap();
+                    None
+                },
+            },
+            None => {
+                log::error!("child process ownership vanished before monitor start");
+                None
+            },
+        };
+        self.close_secondary_fd();
+
+        match (self.quit_cb.take(), self.cmd.take()) {
+            (Some(quit_cb), Some(cmd)) => {
+                quit_cb(PaneId::Terminal(self.terminal_id), exit_status, cmd);
+            },
+            _ => {
+                log::error!(
+                    "child monitor for terminal {} lost its completion callback",
+                    self.terminal_id
+                );
+            },
+        }
+    }
+}
+
+impl Drop for UnixChildMonitor {
+    fn drop(&mut self) {
+        self.kill_and_reap();
+        self.close_secondary_fd();
+    }
+}
+
+#[derive(Debug)]
+struct SpawnedUnixTerminal {
+    primary: File,
+    monitor: UnixChildMonitor,
+}
+
+fn spawn_child_monitor<F>(terminal_id: u32, monitor: F) -> io::Result<thread::JoinHandle<()>>
+where
+    F: FnOnce() + Send + 'static,
+{
+    #[cfg(test)]
+    if FAIL_MONITOR_SPAWN_FOR_TERMINAL
+        .compare_exchange(terminal_id, u32::MAX, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        return Err(io::Error::other(
+            "injected Unix child-monitor thread spawn failure",
+        ));
+    }
+
+    thread::Builder::new()
+        .name(format!("pty-child-monitor-{terminal_id}"))
+        .spawn(monitor)
 }
 
 unsafe fn spawn_command_in_pty<F>(
@@ -216,7 +382,7 @@ fn handle_openpty(
     cmd: RunCommand,
     quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
     terminal_id: u32,
-) -> Result<(RawFd, RawFd)> {
+) -> Result<SpawnedUnixTerminal> {
     let err_context = |cmd: &RunCommand| {
         format!(
             "failed to open PTY for command '{}'",
@@ -228,7 +394,7 @@ fn handle_openpty(
     let pid_primary = open_pty_res.master;
     let pid_secondary = open_pty_res.slave;
 
-    let mut child = match unsafe {
+    let child = match unsafe {
         spawn_command_in_pty(&cmd, terminal_id, move || -> io::Result<()> {
             if libc::login_tty(pid_secondary) != 0 {
                 return Err(io::Error::last_os_error());
@@ -245,17 +411,11 @@ fn handle_openpty(
         },
     };
 
-    let child_id = child.id();
-    thread::spawn(move || {
-        child.wait().with_context(|| err_context(&cmd)).fatal();
-        let exit_status = handle_command_exit(child)
-            .with_context(|| err_context(&cmd))
-            .fatal();
-        let _ = unistd::close(pid_secondary);
-        quit_cb(PaneId::Terminal(terminal_id), exit_status, cmd);
-    });
-
-    Ok((pid_primary, child_id as RawFd))
+    // SAFETY: ownership of the successfully opened primary descriptor is
+    // transferred exactly once to `File`; every return/unwind now closes it.
+    let primary = unsafe { File::from_raw_fd(pid_primary) };
+    let monitor = UnixChildMonitor::new(child, pid_secondary, cmd, quit_cb, terminal_id);
+    Ok(SpawnedUnixTerminal { primary, monitor })
 }
 
 /// Spawns a new terminal from the parent terminal with [`termios`](termios::Termios)
@@ -266,7 +426,7 @@ fn handle_terminal(
     orig_termios: Option<termios::Termios>,
     quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
     terminal_id: u32,
-) -> Result<(RawFd, RawFd)> {
+) -> Result<SpawnedUnixTerminal> {
     let err_context = || "failed to spawn child terminal".to_string();
     if !command_exists(&cmd) {
         return Err(ZellijError::CommandNotFound {
@@ -290,7 +450,7 @@ fn handle_terminal(
                 handle_terminal(failover_cmd, None, orig_termios, quit_cb, terminal_id)
                     .with_context(err_context)
             },
-            None => Err::<(i32, i32), _>(e)
+            None => Err::<SpawnedUnixTerminal, _>(e)
                 .context("failed to start pty")
                 .with_context(err_context)
                 .to_log(),
@@ -348,26 +508,68 @@ impl UnixPtyBackend {
         quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
         terminal_id: u32,
     ) -> Result<(Box<dyn AsyncReader>, RawFd)> {
+        {
+            let terminal_registry = self
+                .terminal_id_to_raw_fd
+                .lock()
+                .to_anyhow()
+                .context("failed to lock terminal registry before spawn")?;
+            match terminal_registry.get(&terminal_id) {
+                Some(None) => {},
+                Some(Some(_)) => {
+                    return Err(anyhow!(
+                        "terminal {terminal_id} is already active and cannot be spawned again"
+                    ));
+                },
+                None => {
+                    return Err(anyhow!(
+                        "terminal {terminal_id} was not reserved before spawn"
+                    ));
+                },
+            }
+        }
         let orig_termios = self
             .orig_termios
             .lock()
             .to_anyhow()
-            .context("failed to lock orig_termios")?;
-        let (pid_primary, child_fd) = handle_terminal(
-            cmd,
-            failover_cmd,
-            orig_termios.clone(),
-            quit_cb,
-            terminal_id,
-        )?;
-        self.terminal_id_to_raw_fd
+            .context("failed to lock orig_termios")?
+            .clone();
+        let spawned = handle_terminal(cmd, failover_cmd, orig_termios, quit_cb, terminal_id)?;
+        let child_fd = spawned
+            .monitor
+            .child_id()
+            .ok_or_else(|| anyhow!("child ownership vanished immediately after spawn"))?
+            as RawFd;
+        let SpawnedUnixTerminal { primary, monitor } = spawned;
+        let pid_primary = primary.as_raw_fd();
+        let async_reader =
+            Box::new(RawFdAsyncReader::new(primary).context("failed to create async reader")?)
+                as Box<dyn AsyncReader>;
+
+        let mut terminal_registry = self
+            .terminal_id_to_raw_fd
             .lock()
-            .to_anyhow()?
-            .insert(terminal_id, Some(pid_primary));
-        let async_reader = Box::new(
-            RawFdAsyncReader::new(pid_primary)
-                .map_err(|e| anyhow::anyhow!("failed to create async reader: {}", e))?,
-        ) as Box<dyn AsyncReader>;
+            .to_anyhow()
+            .context("failed to lock terminal registry after child spawn")?;
+        match terminal_registry.get(&terminal_id) {
+            Some(None) => {},
+            Some(Some(_)) => {
+                return Err(anyhow!(
+                    "terminal {terminal_id} became active while its child was spawning"
+                ));
+            },
+            None => {
+                return Err(anyhow!(
+                    "terminal {terminal_id} reservation vanished while its child was spawning"
+                ));
+            },
+        }
+        terminal_registry.insert(terminal_id, Some(pid_primary));
+
+        if let Err(error) = spawn_child_monitor(terminal_id, move || monitor.run()) {
+            terminal_registry.insert(terminal_id, None);
+            return Err(error).context("failed to spawn Unix child-monitor thread");
+        }
         Ok((async_reader, child_fd))
     }
 
@@ -441,14 +643,61 @@ impl UnixPtyBackend {
         }
     }
 
+    fn wait_for_process_exit(pid: unistd::Pid) -> Result<bool> {
+        for attempt in 0..PROCESS_REAP_CONFIRMATION_ATTEMPTS {
+            match kill(pid, None) {
+                Err(nix::errno::Errno::ESRCH) => return Ok(true),
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("failed to confirm child process {pid} termination")
+                    });
+                },
+                Ok(()) if attempt + 1 < PROCESS_REAP_CONFIRMATION_ATTEMPTS => {
+                    thread::sleep(PROCESS_REAP_CONFIRMATION_INTERVAL);
+                },
+                Ok(()) => {},
+            }
+        }
+        Ok(false)
+    }
+
     pub fn kill(&self, pid: u32) -> Result<()> {
-        let _ = kill(unistd::Pid::from_raw(pid as i32), Some(Signal::SIGHUP));
-        Ok(())
+        let child_pid = unistd::Pid::from_raw(pid as i32);
+        match kill(child_pid, Some(Signal::SIGHUP)) {
+            Ok(()) => {},
+            Err(nix::errno::Errno::ESRCH) => return Ok(()),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to send SIGHUP to child process {child_pid}")
+                });
+            },
+        }
+
+        if Self::wait_for_process_exit(child_pid)? {
+            return Ok(());
+        }
+
+        self.force_kill(pid)?;
+        if Self::wait_for_process_exit(child_pid)? {
+            return Ok(());
+        }
+
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "child process {child_pid} still exists after SIGKILL; exit/reap remains unconfirmed"
+            ),
+        )
+        .into())
     }
 
     pub fn force_kill(&self, pid: u32) -> Result<()> {
-        let _ = kill(unistd::Pid::from_raw(pid as i32), Some(Signal::SIGKILL));
-        Ok(())
+        match kill(unistd::Pid::from_raw(pid as i32), Some(Signal::SIGKILL)) {
+            Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
+            Err(error) => {
+                Err(error).with_context(|| format!("failed to send SIGKILL to child process {pid}"))
+            },
+        }
     }
 
     pub fn send_sigint(&self, pid: u32) -> Result<()> {
@@ -504,6 +753,12 @@ mod tests {
 
     #[test]
     fn repeated_missing_commands_do_not_leak_pty_file_descriptors() {
+        // The Rust test harness runs this alongside tests which legitimately
+        // open process-wide descriptors. Keep a bounded allowance for that
+        // noise while still catching the original per-attempt leak: leaking
+        // one descriptor for each of the 128 rejected commands exceeds this
+        // ceiling by a wide margin.
+        const PARALLEL_TEST_FD_ALLOWANCE: usize = 32;
         let before = open_file_descriptor_count();
         for terminal_id in 0..128 {
             let command = RunCommand {
@@ -519,9 +774,129 @@ mod tests {
         }
         let after = open_file_descriptor_count();
         assert!(
-            after <= before + 1,
+            after <= before + PARALLEL_TEST_FD_ALLOWANCE,
             "128 rejected commands leaked file descriptors: before={before}, after={after}"
         );
+    }
+
+    #[test]
+    fn exact_spawn_requires_and_preserves_its_reservation_on_command_not_found() {
+        let backend = UnixPtyBackend::new().expect("backend");
+        let terminal_id = 77;
+        let missing_command = RunCommand {
+            command: "/definitely/not/a/real/vc-frame-command".into(),
+            ..Default::default()
+        };
+
+        let unreserved_error = match backend.spawn_terminal(
+            missing_command.clone(),
+            None,
+            Box::new(|_, _, _| {}),
+            terminal_id,
+        ) {
+            Ok(_) => panic!("an exact spawn without a reservation is a protocol error"),
+            Err(error) => error,
+        };
+        assert!(format!("{unreserved_error:#}").contains("was not reserved before spawn"));
+
+        backend.reserve_terminal_id(terminal_id);
+        let command_error = match backend.spawn_terminal(
+            missing_command,
+            None,
+            Box::new(|_, _, _| {}),
+            terminal_id,
+        ) {
+            Ok(_) => panic!("the reserved missing command must remain CommandNotFound"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            command_error.downcast_ref::<ZellijError>(),
+            Some(ZellijError::CommandNotFound {
+                terminal_id: 77,
+                ..
+            })
+        ));
+        assert!(matches!(
+            backend
+                .terminal_id_to_raw_fd
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(&terminal_id),
+            Some(None)
+        ));
+        backend.clear_terminal_id(terminal_id);
+    }
+
+    #[test]
+    fn monitor_thread_spawn_failure_reaps_child_and_rolls_back_reservation() {
+        let backend = UnixPtyBackend::new().expect("backend");
+        let terminal_id = 0xffff_ff00;
+        backend.reserve_terminal_id(terminal_id);
+
+        let cleanups_before = UNIX_CHILD_GUARD_CLEANUPS.load(Ordering::SeqCst);
+        FAIL_MONITOR_SPAWN_FOR_TERMINAL.store(terminal_id, Ordering::SeqCst);
+        let command = RunCommand {
+            command: "/bin/sh".into(),
+            args: vec!["-c".into(), "sleep 30".into()],
+            ..Default::default()
+        };
+
+        let error = match backend.spawn_terminal(command, None, Box::new(|_, _, _| {}), terminal_id)
+        {
+            Ok(_) => panic!("the injected monitor-thread failure must reject the spawn"),
+            Err(error) => error,
+        };
+        assert!(
+            format!("{error:#}").contains("injected Unix child-monitor thread spawn failure"),
+            "the injected thread failure must remain visible: {error:#}"
+        );
+        assert!(
+            UNIX_CHILD_GUARD_CLEANUPS.load(Ordering::SeqCst) > cleanups_before,
+            "the exact spawned child must pass through the kill-and-reap guard"
+        );
+        let reaped_child = LAST_REAPED_UNIX_CHILD.load(Ordering::SeqCst);
+        assert_ne!(reaped_child, 0, "the guard must record the exact child pid");
+        let mut wait_status = 0;
+        let wait_result =
+            unsafe { libc::waitpid(reaped_child as libc::pid_t, &mut wait_status, libc::WNOHANG) };
+        assert_eq!(
+            wait_result, -1,
+            "the child must already be reaped before spawn_terminal returns"
+        );
+        assert_eq!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD),
+            "waitpid must report that no unreaped child remains"
+        );
+        assert!(matches!(
+            backend
+                .terminal_id_to_raw_fd
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(&terminal_id),
+            Some(None)
+        ));
+        backend.clear_terminal_id(terminal_id);
+    }
+
+    #[test]
+    fn windows_spawn_source_keeps_child_guarded_until_fallible_monitor_handoff() {
+        let source = include_str!("os_input_output_windows.rs");
+        let do_spawn = source
+            .split("    fn do_spawn(")
+            .nth(1)
+            .and_then(|source| source.split("    pub fn spawn_terminal(").next())
+            .expect("Windows do_spawn source");
+
+        assert!(do_spawn.contains("WindowsSpawnGuard::new("));
+        assert!(do_spawn.contains("spawn_child_monitor("));
+        assert!(!do_spawn.contains("std::thread::spawn("));
+        assert!(!do_spawn.contains(".lock().unwrap()"));
+        assert!(!do_spawn.contains("CloseHandle(process_handle)"));
+        assert!(source.contains("impl Drop for WindowsProcessGuard"));
+        assert!(source.contains("thread::Builder::new()"));
+        assert!(source.contains("TerminateProcess(handle, 1)"));
+        assert!(source.contains("WaitForSingleObject(handle, INFINITE)"));
     }
 
     #[test]

@@ -932,6 +932,9 @@ impl Pane for TerminalPane {
             Ok(())
         }
     }
+    fn can_attach_blocking_completion(&self) -> bool {
+        self.notification_end.is_none()
+    }
     fn current_title(&self) -> String {
         if self.pane_name.is_empty() {
             self.grid

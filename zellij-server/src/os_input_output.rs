@@ -268,6 +268,21 @@ pub trait ServerOsApi: Send + Sync {
         quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
         default_editor: Option<PathBuf>,
     ) -> Result<(u32, Box<dyn AsyncReader>, Option<u32>)>;
+    /// Activate a terminal ID previously returned by [`Self::reserve_terminal_id`].
+    ///
+    /// Layout preparation uses this exact-ID path so no process, reader task or
+    /// PID bookkeeping exists before the layout transaction is committed.
+    fn spawn_terminal_with_reserved_id(
+        &self,
+        terminal_id: u32,
+        _terminal_action: TerminalAction,
+        _quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
+        _default_editor: Option<PathBuf>,
+    ) -> Result<(Box<dyn AsyncReader>, Option<u32>)> {
+        Err(anyhow!(
+            "OS interface cannot activate reserved terminal {terminal_id}"
+        ))
+    }
     // reserves a terminal id without actually opening a terminal
     fn reserve_terminal_id(&self) -> Result<u32> {
         unimplemented!()
@@ -276,7 +291,11 @@ pub trait ServerOsApi: Send + Sync {
     fn write_to_tty_stdin(&self, terminal_id: u32, buf: &[u8]) -> Result<usize>;
     /// Wait until all output written to the terminal has been transmitted.
     fn tcdrain(&self, terminal_id: u32) -> Result<()>;
-    /// Terminate the process with process ID `pid`. (SIGHUP)
+    /// Gracefully terminate the process with process ID `pid`.
+    ///
+    /// `Ok(())` certifies that the process exited and no longer remains in the
+    /// platform process table. Backends must return an error while delivery,
+    /// exit or reap remains unconfirmed so transactional cleanup can retry.
     fn kill(&self, pid: u32) -> Result<()>;
     /// Terminate the process with process ID `pid`. (SIGKILL)
     fn force_kill(&self, pid: u32) -> Result<()>;
@@ -366,6 +385,24 @@ impl ServerOsApi for ServerOsInputOutput {
             .with_context(err_context)?;
 
         Ok((terminal_id, async_reader, Some(child_fd as u32)))
+    }
+    fn spawn_terminal_with_reserved_id(
+        &self,
+        terminal_id: u32,
+        terminal_action: TerminalAction,
+        quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
+        default_editor: Option<PathBuf>,
+    ) -> Result<(Box<dyn AsyncReader>, Option<u32>)> {
+        let err_context =
+            || format!("failed to activate previously reserved terminal {terminal_id}");
+        let (cmd, failover_cmd) = build_command(terminal_action, default_editor);
+        let spawn_result = self
+            .pty_backend
+            .spawn_terminal(cmd, failover_cmd, quit_cb, terminal_id);
+        let (async_reader, child_fd) =
+            resolve_reserved_terminal_spawn(terminal_id, spawn_result, |_| {})
+                .with_context(err_context)?;
+        Ok((async_reader, Some(child_fd as u32)))
     }
     fn reserve_terminal_id(&self) -> Result<u32> {
         let terminal_id = self

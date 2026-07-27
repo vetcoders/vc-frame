@@ -7,12 +7,15 @@ use crate::{
     ClientId, ServerInstruction,
     panes::PaneId,
     plugins::{DumpSessionLayoutResponse, PluginId, PluginInstruction},
-    screen::{DurableTabLayoutGeneration, ScreenInstruction, TabOverrideResult},
+    screen::{
+        DurableTabLayoutGeneration, LayoutPreparationCleanup, ScreenInstruction, TabOverrideResult,
+    },
     session_layout_metadata::SessionLayoutMetadata,
     thread_bus::{Bus, ThreadSenders},
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
+    io,
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -40,11 +43,29 @@ pub type TabIndex = u32;
 /// Zero is reserved for legacy/test Screen instructions without a PTY owner.
 pub type LayoutTransactionId = u64;
 const MAX_LAYOUT_COMMIT_RECEIPTS: usize = 256;
+const MAX_LAYOUT_TERMINAL_CLEANUP_RECEIPTS: usize = 256;
+
+#[cfg(test)]
+std::thread_local! {
+    static PANIC_NEXT_TERMINAL_RUNTIME_SPAWN: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn panic_next_terminal_runtime_spawn() {
+    PANIC_NEXT_TERMINAL_RUNTIME_SPAWN.with(|should_panic| should_panic.set(true));
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LayoutCommitOutcome {
     Committed,
     Rejected(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LayoutCommitAck {
+    Resolved,
+    ActivationRolledBack(String),
 }
 
 type QuitCallback = Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>;
@@ -277,10 +298,15 @@ pub enum PtyInstruction {
     },
     UpdateAndReportCwds,
     NotifyCwdFromOsc7(u32, PathBuf),
+    CleanupLayoutTerminals {
+        transaction_id: LayoutTransactionId,
+        terminal_ids: Vec<u32>,
+        ack: zellij_utils::channels::Sender<std::result::Result<Vec<u32>, String>>,
+    },
     LayoutCommitResolved {
         transaction_id: LayoutTransactionId,
         outcome: LayoutCommitOutcome,
-        ack: zellij_utils::channels::Sender<std::result::Result<(), String>>,
+        ack: zellij_utils::channels::Sender<std::result::Result<LayoutCommitAck, String>>,
     },
     Exit,
 }
@@ -315,52 +341,76 @@ impl From<&PtyInstruction> for PtyContext {
             PtyInstruction::GetPaneCwd { .. } => PtyContext::GetPaneCwd,
             PtyInstruction::UpdateAndReportCwds => PtyContext::UpdateAndReportCwds,
             PtyInstruction::NotifyCwdFromOsc7(..) => PtyContext::NotifyCwdFromOsc7,
+            PtyInstruction::CleanupLayoutTerminals { .. } => PtyContext::CloseTab,
             PtyInstruction::LayoutCommitResolved { .. } => PtyContext::LayoutCommitResolved,
             PtyInstruction::Exit => PtyContext::Exit,
         }
     }
 }
 
+struct CleanupNotifyingReader {
+    terminal_id: u32,
+    reader: Box<dyn AsyncReader>,
+    cleanup_senders: ThreadSenders,
+}
+
+#[async_trait::async_trait]
+impl AsyncReader for CleanupNotifyingReader {
+    async fn read(&mut self, buf: &mut [u8]) -> std::result::Result<usize, io::Error> {
+        let read_result = self.reader.read(buf).await;
+        if let Err(error) = &read_result {
+            let reader_error = error.to_string();
+            if let Err(send_failure) =
+                self.cleanup_senders
+                    .send_to_pty_recover(PtyInstruction::ClosePane(
+                        PaneId::Terminal(self.terminal_id),
+                        None,
+                    ))
+            {
+                let (_instruction, send_error) = send_failure.into_parts();
+                log::error!(
+                    "terminal reader {} failed but could not return cleanup debt to PTY: {send_error:#}; reader failure: {reader_error}",
+                    self.terminal_id
+                );
+            }
+        }
+        read_result
+    }
+}
+
 #[derive(Default)]
 struct LayoutAllocationLedger {
-    allocated_ids: BTreeSet<PaneId>,
+    terminal_ids: BTreeSet<u32>,
     quit_callback_fences: Vec<QuitCallbackFence>,
     drop_cleanup: Option<LayoutAllocationCleanup>,
 }
 
 struct LayoutAllocationCleanup {
-    senders: ThreadSenders,
     os_input: Option<Box<dyn ServerOsApi>>,
 }
 
 impl LayoutAllocationLedger {
     fn armed_for_bus(bus: &Bus<PtyInstruction>) -> Self {
         Self {
-            allocated_ids: BTreeSet::new(),
+            terminal_ids: BTreeSet::new(),
             quit_callback_fences: vec![],
             drop_cleanup: Some(LayoutAllocationCleanup {
-                senders: bus.senders.clone(),
                 os_input: bus.os_input.as_ref().map(|os_input| os_input.box_clone()),
             }),
         }
     }
 
-    fn track_plugin_ids(&mut self, plugin_ids: &HashMap<RunPluginOrAlias, Vec<u32>>) {
-        self.allocated_ids
-            .extend(plugin_ids.values().flatten().copied().map(PaneId::Plugin));
-    }
-
     fn track_terminal(&mut self, terminal_id: u32) {
-        self.allocated_ids.insert(PaneId::Terminal(terminal_id));
+        self.terminal_ids.insert(terminal_id);
     }
 
     fn track_quit_callback_fence(&mut self, fence: QuitCallbackFence) {
         self.quit_callback_fences.push(fence);
     }
 
-    fn disarm(mut self) {
+    fn disarm(&mut self) {
         self.drop_cleanup.take();
-        self.allocated_ids.clear();
+        self.terminal_ids.clear();
         self.quit_callback_fences.clear();
     }
 }
@@ -373,20 +423,16 @@ impl Drop for LayoutAllocationLedger {
         for quit_callback_fence in self.quit_callback_fences.drain(..) {
             quit_callback_fence.cancel();
         }
-        while let Some(pane_id) = self.allocated_ids.pop_first() {
-            let result = match pane_id {
-                PaneId::Terminal(terminal_id) => cleanup
-                    .os_input
-                    .as_ref()
-                    .context("layout allocation guard has no OS interface")
-                    .and_then(|os_input| os_input.clear_terminal_id(terminal_id)),
-                PaneId::Plugin(plugin_id) => cleanup
-                    .senders
-                    .send_to_plugin_recover(PluginInstruction::Unload(plugin_id))
-                    .map_err(|send_failure| send_failure.into_parts().1),
-            };
+        while let Some(terminal_id) = self.terminal_ids.pop_first() {
+            let result = cleanup
+                .os_input
+                .as_ref()
+                .context("layout allocation guard has no OS interface")
+                .and_then(|os_input| os_input.clear_terminal_id(terminal_id));
             if let Err(error) = result {
-                log::error!("layout allocation guard failed to release {pane_id:?}: {error:#}");
+                log::error!(
+                    "layout allocation guard failed to release terminal {terminal_id}: {error:#}"
+                );
             }
         }
     }
@@ -395,13 +441,14 @@ impl Drop for LayoutAllocationLedger {
 enum PreparedTerminal {
     Runnable {
         terminal_id: u32,
-        reader: Box<dyn AsyncReader>,
+        terminal_action: TerminalAction,
+        quit_callback: QuitCallback,
         quit_callback_fence: QuitCallbackFence,
+        command_not_found_hold: Option<RunCommand>,
     },
     HeldTerminal {
         terminal_id: u32,
         run_command: RunCommand,
-        command_not_found: bool,
     },
 }
 
@@ -419,7 +466,6 @@ impl PreparedTerminal {
             PreparedTerminal::HeldTerminal {
                 terminal_id,
                 run_command,
-                ..
             } => (*terminal_id, Some(run_command.clone())),
         }
     }
@@ -435,7 +481,45 @@ struct PendingLayoutCommit {
     allocation_ledger: LayoutAllocationLedger,
     terminals: Vec<PreparedTerminal>,
     originating_plugins_to_inform: Vec<(u32, OriginatingPlugin)>,
+    layout_plugin_ids: Vec<PluginId>,
     tab_id: Option<usize>,
+    layout_generation: Option<Box<DurableTabLayoutGeneration>>,
+}
+
+struct LayoutPreparationRollback {
+    error: anyhow::Error,
+    cleanup_succeeded: bool,
+    cleanup_debt: Option<LayoutAllocationLedger>,
+}
+
+enum LayoutCleanupContinuation {
+    Resolution {
+        outcome: LayoutCommitOutcome,
+        local_error: String,
+        success_ack: LayoutCommitAck,
+    },
+    PreparationFailure {
+        tab_id: Option<usize>,
+        layout_generation: Option<Box<DurableTabLayoutGeneration>>,
+        plugin_ids: Vec<PluginId>,
+        message: String,
+    },
+}
+
+struct PendingLayoutCleanup {
+    allocation_ledger: LayoutAllocationLedger,
+    continuation: LayoutCleanupContinuation,
+}
+
+#[derive(Default)]
+struct PendingTerminalCleanup {
+    completions: Vec<NotificationEnd>,
+    unblock_input: bool,
+}
+
+struct PendingLayoutTerminalCleanup {
+    exact_terminal_ids: Vec<u32>,
+    remaining_terminal_ids: BTreeSet<u32>,
 }
 
 struct LayoutCommitStartError {
@@ -460,11 +544,11 @@ impl LayoutCommitStartError {
 struct LayoutCommitReceipt {
     outcome: LayoutCommitOutcome,
     local_error: Option<String>,
-    ack_result: std::result::Result<(), String>,
+    ack_result: std::result::Result<LayoutCommitAck, String>,
 }
 
 impl LayoutCommitReceipt {
-    fn replay(&self) -> (Result<()>, std::result::Result<(), String>) {
+    fn replay(&self) -> (Result<()>, std::result::Result<LayoutCommitAck, String>) {
         let local_result = self
             .local_error
             .as_ref()
@@ -487,7 +571,12 @@ pub(crate) struct Pty {
     pane_activity_flags: HashMap<u32, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     terminal_cmds: HashMap<u32, Vec<String>>,
     terminal_foreground_cmds: HashMap<u32, Vec<String>>,
+    terminal_kill_confirmations: BTreeSet<u32>,
     pending_layout_commits: HashMap<LayoutTransactionId, PendingLayoutCommit>,
+    pending_layout_cleanups: BTreeMap<LayoutTransactionId, PendingLayoutCleanup>,
+    pending_terminal_cleanups: BTreeMap<u32, PendingTerminalCleanup>,
+    pending_layout_terminal_cleanups: BTreeMap<LayoutTransactionId, PendingLayoutTerminalCleanup>,
+    resolved_layout_terminal_cleanups: BTreeMap<LayoutTransactionId, Vec<u32>>,
     resolved_layout_commits: BTreeMap<LayoutTransactionId, LayoutCommitReceipt>,
 }
 
@@ -499,6 +588,11 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
     // disconnect. Explicit paths may already have drained the map; a second
     // drain is a no-op.
     pty.rollback_pending_layout_commits_on_exit();
+    pty.retry_all_layout_terminal_cleanup_debts();
+    pty.retry_terminal_cleanup_debts();
+    pty.fail_pending_terminal_cleanup_debts(
+        "PTY stopped before terminal cleanup could be certified",
+    );
     result
 }
 
@@ -509,6 +603,7 @@ fn pty_thread_main_loop(pty: &mut Pty, layout: Box<Layout>) -> Result<()> {
             Err(error) => {
                 log::error!("PTY instruction channel disconnected: {error}");
                 pty.rollback_pending_layout_commits_on_exit();
+                pty.retry_terminal_cleanup_debts();
                 break;
             },
         };
@@ -853,6 +948,12 @@ fn pty_thread_main_loop(pty: &mut Pty, layout: Box<Layout>) -> Result<()> {
                     Err::<(), _>(error).with_context(err_context).non_fatal();
                 }
             },
+            PtyInstruction::ClosePane(PaneId::Terminal(id), completion_tx) => {
+                // Terminal cleanup is retried by the PTY owner. This also
+                // gives failed TerminalBytes tasks one strict, idempotent
+                // route back into the authoritative process/task registries.
+                pty.defer_terminal_cleanup(id, completion_tx, true);
+            },
             PtyInstruction::ClosePane(id, _completion_tx) => {
                 pty.close_pane(id)
                     .and_then(|_| {
@@ -860,7 +961,8 @@ fn pty_thread_main_loop(pty: &mut Pty, layout: Box<Layout>) -> Result<()> {
                             .senders
                             .send_to_server(ServerInstruction::UnblockInputThread)
                     })
-                    .with_context(|| format!("failed to close pane {:?}", id))?;
+                    .with_context(|| format!("failed to close pane {:?}", id))
+                    .non_fatal();
             },
             PtyInstruction::CloseTab(ids) => {
                 pty.close_tab(ids)
@@ -869,7 +971,8 @@ fn pty_thread_main_loop(pty: &mut Pty, layout: Box<Layout>) -> Result<()> {
                             .senders
                             .send_to_server(ServerInstruction::UnblockInputThread)
                     })
-                    .context("failed to close tabs")?;
+                    .context("failed to close tabs")
+                    .non_fatal();
             },
             PtyInstruction::ReRunCommandInPane(pane_id, run_command, _completion_tx) => {
                 let err_context = || format!("failed to rerun command in pane {:?}", pane_id);
@@ -1217,6 +1320,15 @@ fn pty_thread_main_loop(pty: &mut Pty, layout: Box<Layout>) -> Result<()> {
             PtyInstruction::NotifyCwdFromOsc7(terminal_id, path) => {
                 pty.notify_cwd_from_osc7(terminal_id, path);
             },
+            PtyInstruction::CleanupLayoutTerminals {
+                transaction_id,
+                terminal_ids,
+                ack,
+            } => {
+                let ack_result =
+                    pty.cleanup_layout_terminals_with_ack(transaction_id, terminal_ids);
+                let _ = ack.send(ack_result);
+            },
             PtyInstruction::LayoutCommitResolved {
                 transaction_id,
                 outcome,
@@ -1229,9 +1341,12 @@ fn pty_thread_main_loop(pty: &mut Pty, layout: Box<Layout>) -> Result<()> {
             },
             PtyInstruction::Exit => {
                 pty.rollback_pending_layout_commits_on_exit();
+                pty.retry_terminal_cleanup_debts();
                 break;
             },
         }
+        pty.retry_preparation_cleanup_debts();
+        pty.retry_terminal_cleanup_debts();
     }
     Ok(())
 }
@@ -1257,7 +1372,12 @@ impl Pty {
             pane_activity_flags: HashMap::new(),
             terminal_cmds: HashMap::new(),
             terminal_foreground_cmds: HashMap::new(),
+            terminal_kill_confirmations: BTreeSet::new(),
             pending_layout_commits: HashMap::new(),
+            pending_layout_cleanups: BTreeMap::new(),
+            pending_terminal_cleanups: BTreeMap::new(),
+            pending_layout_terminal_cleanups: BTreeMap::new(),
+            resolved_layout_terminal_cleanups: BTreeMap::new(),
             resolved_layout_commits: BTreeMap::new(),
         }
     }
@@ -1273,9 +1393,13 @@ impl Pty {
                 pending_commit,
             ));
         }
-        if self.resolved_layout_commits.contains_key(&transaction_id) {
+        if self.resolved_layout_commits.contains_key(&transaction_id)
+            || self.pending_layout_cleanups.contains_key(&transaction_id)
+        {
             return Err(LayoutCommitStartError::new(
-                anyhow!("layout transaction id {transaction_id} is already resolved"),
+                anyhow!(
+                    "layout transaction id {transaction_id} is already resolved or awaiting cleanup"
+                ),
                 pending_commit,
             ));
         }
@@ -1295,7 +1419,7 @@ impl Pty {
         &mut self,
         transaction_id: LayoutTransactionId,
         outcome: LayoutCommitOutcome,
-    ) -> (Result<()>, std::result::Result<(), String>) {
+    ) -> (Result<()>, std::result::Result<LayoutCommitAck, String>) {
         if let Some(receipt) = self.resolved_layout_commits.get(&transaction_id) {
             if receipt.outcome == outcome {
                 return receipt.replay();
@@ -1306,74 +1430,75 @@ impl Pty {
             );
             return (Err(anyhow!(failure.clone())), Err(failure));
         }
+        if self.pending_layout_cleanups.contains_key(&transaction_id) {
+            return self.retry_layout_resolution_cleanup(transaction_id, outcome);
+        }
         let Some(pending_commit) = self.pending_layout_commits.remove(&transaction_id) else {
             let failure = format!("cannot resolve unknown layout transaction {transaction_id}");
             log::error!("{failure}");
             return (Err(anyhow!(failure.clone())), Err(failure));
         };
 
+        let PendingLayoutCommit {
+            mut allocation_ledger,
+            terminals,
+            originating_plugins_to_inform,
+            layout_plugin_ids: _,
+            tab_id: _,
+            layout_generation: _,
+        } = pending_commit;
         let recorded_outcome = outcome.clone();
         let resolution = match outcome {
             LayoutCommitOutcome::Committed => {
-                let allocation_ledger = pending_commit.allocation_ledger;
-                for prepared_terminal in pending_commit.terminals {
+                for prepared_terminal in terminals {
                     if let Err(error) = self.activate_prepared_terminal(prepared_terminal) {
-                        let resolution = self.layout_activation_failure(
+                        return self.layout_activation_failure(
                             transaction_id,
                             error,
                             allocation_ledger,
                         );
-                        self.record_layout_commit_receipt(
-                            transaction_id,
-                            recorded_outcome,
-                            &resolution,
-                        );
-                        return resolution;
                     }
                 }
-                for (terminal_id, originating_plugin) in
-                    pending_commit.originating_plugins_to_inform
+                if let Err(error) =
+                    self.inform_originating_plugins_of_open(originating_plugins_to_inform)
                 {
-                    if let Err(error) =
-                        self.inform_originating_plugin_of_open(terminal_id, originating_plugin)
-                    {
-                        let resolution = self.layout_activation_failure(
-                            transaction_id,
-                            error,
-                            allocation_ledger,
-                        );
-                        self.record_layout_commit_receipt(
-                            transaction_id,
-                            recorded_outcome,
-                            &resolution,
-                        );
-                        return resolution;
-                    }
+                    return self.layout_activation_failure(
+                        transaction_id,
+                        error,
+                        allocation_ledger,
+                    );
                 }
-                // Keep the allocation ledger armed until every prepared
-                // runtime surface has crossed its activation fence. The
-                // suspended-allocation checkpoint will make activation
-                // fallible; this ordering is the invariant it relies on.
+                for quit_callback_fence in &allocation_ledger.quit_callback_fences {
+                    quit_callback_fence.commit();
+                }
+                // Keep the allocation ledger armed until every prepared runtime
+                // surface has crossed its activation fence. No process or task
+                // exists before this resolution begins.
                 allocation_ledger.disarm();
-                (Ok(()), Ok(()))
+                (Ok(()), Ok(LayoutCommitAck::Resolved))
             },
             LayoutCommitOutcome::Rejected(message) => {
                 let business_failure =
                     format!("screen rejected layout transaction {transaction_id}: {message}");
-                let cleanup_errors =
-                    self.cleanup_layout_allocations(pending_commit.allocation_ledger);
+                let cleanup_errors = self.cleanup_layout_allocations(&mut allocation_ledger);
                 if cleanup_errors.is_empty() {
                     // Rejection is the expected business outcome. The ACK only
                     // certifies that PTY resolved its ledger, so a successful
                     // cleanup must ACK Ok even though the local diagnostic
                     // remains an Err for logs and direct tests.
-                    (Err(anyhow!(business_failure)), Ok(()))
+                    (
+                        Err(anyhow!(business_failure)),
+                        Ok(LayoutCommitAck::Resolved),
+                    )
                 } else {
-                    let failure = format!(
-                        "{business_failure}: failed to release one or more partial layout allocations: {}",
-                        cleanup_errors.join("; ")
+                    return self.defer_layout_resolution_cleanup(
+                        transaction_id,
+                        recorded_outcome,
+                        allocation_ledger,
+                        business_failure,
+                        LayoutCommitAck::Resolved,
+                        cleanup_errors,
                     );
-                    (Err(anyhow!(failure.clone())), Err(failure))
                 }
             },
         };
@@ -1385,7 +1510,7 @@ impl Pty {
         &mut self,
         transaction_id: LayoutTransactionId,
         outcome: LayoutCommitOutcome,
-        resolution: &(Result<()>, std::result::Result<(), String>),
+        resolution: &(Result<()>, std::result::Result<LayoutCommitAck, String>),
     ) {
         let receipt = LayoutCommitReceipt {
             outcome,
@@ -1406,45 +1531,156 @@ impl Pty {
         }
     }
 
+    fn retry_layout_resolution_cleanup(
+        &mut self,
+        transaction_id: LayoutTransactionId,
+        requested_outcome: LayoutCommitOutcome,
+    ) -> (Result<()>, std::result::Result<LayoutCommitAck, String>) {
+        let Some(mut pending_cleanup) = self.pending_layout_cleanups.remove(&transaction_id) else {
+            let failure =
+                format!("cannot retry unknown layout cleanup transaction {transaction_id}");
+            return (Err(anyhow!(failure.clone())), Err(failure));
+        };
+        let LayoutCleanupContinuation::Resolution {
+            outcome,
+            local_error,
+            success_ack,
+        } = &pending_cleanup.continuation
+        else {
+            let failure = format!(
+                "layout transaction {transaction_id} still owns unresolved preparation cleanup"
+            );
+            self.pending_layout_cleanups
+                .insert(transaction_id, pending_cleanup);
+            return (Err(anyhow!(failure.clone())), Err(failure));
+        };
+        if *outcome != requested_outcome {
+            let failure = format!(
+                "conflicting resolution for layout cleanup transaction {transaction_id}: recorded {:?}, received {:?}",
+                outcome, requested_outcome
+            );
+            self.pending_layout_cleanups
+                .insert(transaction_id, pending_cleanup);
+            return (Err(anyhow!(failure.clone())), Err(failure));
+        }
+        let recorded_outcome = outcome.clone();
+        let local_error = local_error.clone();
+        let success_ack = success_ack.clone();
+        let cleanup_errors =
+            self.cleanup_layout_allocations(&mut pending_cleanup.allocation_ledger);
+        if !cleanup_errors.is_empty() {
+            let failure = format!(
+                "{local_error}: failed to release one or more partial layout allocations: {}",
+                cleanup_errors.join("; ")
+            );
+            self.pending_layout_cleanups
+                .insert(transaction_id, pending_cleanup);
+            return (Err(anyhow!(failure.clone())), Err(failure));
+        }
+
+        let resolution = (Err(anyhow!(local_error)), Ok(success_ack));
+        self.record_layout_commit_receipt(transaction_id, recorded_outcome, &resolution);
+        resolution
+    }
+
+    fn defer_layout_resolution_cleanup(
+        &mut self,
+        transaction_id: LayoutTransactionId,
+        outcome: LayoutCommitOutcome,
+        allocation_ledger: LayoutAllocationLedger,
+        local_error: String,
+        success_ack: LayoutCommitAck,
+        cleanup_errors: Vec<String>,
+    ) -> (Result<()>, std::result::Result<LayoutCommitAck, String>) {
+        let failure = format!(
+            "{local_error}: failed to release one or more partial layout allocations: {}",
+            cleanup_errors.join("; ")
+        );
+        self.pending_layout_cleanups.insert(
+            transaction_id,
+            PendingLayoutCleanup {
+                allocation_ledger,
+                continuation: LayoutCleanupContinuation::Resolution {
+                    outcome,
+                    local_error,
+                    success_ack,
+                },
+            },
+        );
+        (Err(anyhow!(failure.clone())), Err(failure))
+    }
+
     fn layout_activation_failure(
         &mut self,
         transaction_id: LayoutTransactionId,
         error: anyhow::Error,
-        allocation_ledger: LayoutAllocationLedger,
-    ) -> (Result<()>, std::result::Result<(), String>) {
-        let error = self.rollback_partial_layout_allocations(
-            error.context(format!(
-                "failed to activate committed layout transaction {transaction_id}"
-            )),
-            allocation_ledger,
-        );
-        let ack_error = format!("{error:#}");
-        (Err(error), Err(ack_error))
+        mut allocation_ledger: LayoutAllocationLedger,
+    ) -> (Result<()>, std::result::Result<LayoutCommitAck, String>) {
+        let activation_error = error.context(format!(
+            "failed to activate committed layout transaction {transaction_id}"
+        ));
+        let cleanup_errors = self.cleanup_layout_allocations(&mut allocation_ledger);
+        if cleanup_errors.is_empty() {
+            let message = format!("{activation_error:#}");
+            let resolution = (
+                Err(activation_error),
+                Ok(LayoutCommitAck::ActivationRolledBack(message.clone())),
+            );
+            self.record_layout_commit_receipt(
+                transaction_id,
+                LayoutCommitOutcome::Committed,
+                &resolution,
+            );
+            resolution
+        } else {
+            let local_error = format!("{activation_error:#}");
+            self.defer_layout_resolution_cleanup(
+                transaction_id,
+                LayoutCommitOutcome::Committed,
+                allocation_ledger,
+                local_error.clone(),
+                LayoutCommitAck::ActivationRolledBack(local_error),
+                cleanup_errors,
+            )
+        }
     }
 
     fn rollback_pending_layout_commits_on_exit(&mut self) {
         let pending_layout_commits = std::mem::take(&mut self.pending_layout_commits);
         for (transaction_id, pending_commit) in pending_layout_commits {
             let tab_id = pending_commit.tab_id;
-            let error = self.rollback_partial_layout_allocations(
+            let layout_plugin_ids = pending_commit.layout_plugin_ids;
+            let layout_generation = pending_commit.layout_generation;
+            let rollback = self.rollback_partial_layout_allocations(
                 anyhow!("PTY exited with layout transaction {transaction_id} unresolved"),
                 pending_commit.allocation_ledger,
             );
-            let rejection =
-                self.reject_layout_preparation(transaction_id, tab_id, None, None, error);
+            let rejection = self.reject_layout_preparation(
+                transaction_id,
+                tab_id,
+                None,
+                layout_generation,
+                layout_plugin_ids,
+                rollback,
+            );
             Err::<(), _>(rejection).non_fatal();
         }
+        self.retry_preparation_cleanup_debts();
     }
 
     fn reject_pending_layout_send(
         &mut self,
         transaction_id: LayoutTransactionId,
         error: anyhow::Error,
-    ) -> anyhow::Error {
+    ) -> LayoutPreparationRollback {
         let Some(pending_commit) = self.pending_layout_commits.remove(&transaction_id) else {
-            return error.context(format!(
-                "layout transaction {transaction_id} disappeared before send rollback"
-            ));
+            return LayoutPreparationRollback {
+                error: error.context(format!(
+                    "layout transaction {transaction_id} disappeared before send rollback"
+                )),
+                cleanup_succeeded: false,
+                cleanup_debt: None,
+            };
         };
         self.rollback_partial_layout_allocations(error, pending_commit.allocation_ledger)
     }
@@ -1455,9 +1691,29 @@ impl Pty {
         tab_id: Option<usize>,
         mut completion_tx: Option<NotificationEnd>,
         layout_generation: Option<Box<DurableTabLayoutGeneration>>,
-        error: anyhow::Error,
+        layout_plugin_ids: Vec<PluginId>,
+        rollback: LayoutPreparationRollback,
     ) -> anyhow::Error {
+        let LayoutPreparationRollback {
+            error,
+            cleanup_succeeded,
+            cleanup_debt,
+        } = rollback;
         let message = format!("{error:#}");
+        if let Some(allocation_ledger) = cleanup_debt {
+            self.pending_layout_cleanups.insert(
+                transaction_id,
+                PendingLayoutCleanup {
+                    allocation_ledger,
+                    continuation: LayoutCleanupContinuation::PreparationFailure {
+                        tab_id,
+                        layout_generation: layout_generation.clone(),
+                        plugin_ids: layout_plugin_ids.clone(),
+                        message: message.clone(),
+                    },
+                },
+            );
+        }
         if let Some(completion) = completion_tx.as_mut() {
             completion.mark_failure(message.clone());
         }
@@ -1467,6 +1723,10 @@ impl Pty {
             completion_tx,
             layout_generation,
             message: message.clone(),
+            cleanup: LayoutPreparationCleanup::ReleasePluginReservation {
+                plugin_ids: layout_plugin_ids,
+                pty_cleanup_succeeded: cleanup_succeeded,
+            },
         };
         if let Err(send_failure) = self.bus.senders.send_to_screen_recover(instruction) {
             let (recovered_instruction, send_error) = send_failure.into_parts();
@@ -1479,6 +1739,234 @@ impl Pty {
             ));
         }
         error
+    }
+
+    fn retry_preparation_cleanup_debts(&mut self) {
+        let transaction_ids = self
+            .pending_layout_cleanups
+            .iter()
+            .filter_map(|(transaction_id, pending_cleanup)| {
+                matches!(
+                    &pending_cleanup.continuation,
+                    LayoutCleanupContinuation::PreparationFailure { .. }
+                )
+                .then_some(*transaction_id)
+            })
+            .collect::<Vec<_>>();
+        for transaction_id in transaction_ids {
+            let Some(mut pending_cleanup) = self.pending_layout_cleanups.remove(&transaction_id)
+            else {
+                continue;
+            };
+            let cleanup_errors =
+                self.cleanup_layout_allocations(&mut pending_cleanup.allocation_ledger);
+            if !cleanup_errors.is_empty() {
+                log::error!(
+                    "layout preparation cleanup transaction {transaction_id} remains pending: {}",
+                    cleanup_errors.join("; ")
+                );
+                self.pending_layout_cleanups
+                    .insert(transaction_id, pending_cleanup);
+                continue;
+            }
+            let LayoutCleanupContinuation::PreparationFailure {
+                tab_id,
+                layout_generation,
+                plugin_ids,
+                message,
+            } = &pending_cleanup.continuation
+            else {
+                self.pending_layout_cleanups
+                    .insert(transaction_id, pending_cleanup);
+                continue;
+            };
+            let instruction = ScreenInstruction::LayoutPreparationFailed {
+                transaction_id,
+                tab_id: *tab_id,
+                completion_tx: None,
+                layout_generation: layout_generation.clone(),
+                message: message.clone(),
+                cleanup: LayoutPreparationCleanup::ReleasePluginReservation {
+                    plugin_ids: plugin_ids.clone(),
+                    pty_cleanup_succeeded: true,
+                },
+            };
+            if let Err(send_failure) = self.bus.senders.send_to_screen_recover(instruction) {
+                let (_instruction, send_error) = send_failure.into_parts();
+                log::error!(
+                    "layout preparation cleanup transaction {transaction_id} completed locally but its Screen receipt remains pending: {send_error:#}"
+                );
+                self.pending_layout_cleanups
+                    .insert(transaction_id, pending_cleanup);
+            }
+        }
+    }
+
+    fn cleanup_layout_terminals_with_ack(
+        &mut self,
+        transaction_id: LayoutTransactionId,
+        mut terminal_ids: Vec<u32>,
+    ) -> std::result::Result<Vec<u32>, String> {
+        terminal_ids.sort_unstable();
+        terminal_ids.dedup();
+        if transaction_id == 0 {
+            return Err("layout terminal cleanup transaction id 0 is reserved".to_owned());
+        }
+        if let Some(resolved_terminal_ids) =
+            self.resolved_layout_terminal_cleanups.get(&transaction_id)
+        {
+            if resolved_terminal_ids == &terminal_ids {
+                return Ok(resolved_terminal_ids.clone());
+            }
+            return Err(format!(
+                "layout terminal cleanup transaction {transaction_id} was already resolved for {resolved_terminal_ids:?}, not {terminal_ids:?}"
+            ));
+        }
+        if let Some(pending_cleanup) = self.pending_layout_terminal_cleanups.get(&transaction_id) {
+            if pending_cleanup.exact_terminal_ids != terminal_ids {
+                return Err(format!(
+                    "layout terminal cleanup transaction {transaction_id} is pending for {:?}, not {terminal_ids:?}",
+                    pending_cleanup.exact_terminal_ids
+                ));
+            }
+        } else {
+            self.pending_layout_terminal_cleanups.insert(
+                transaction_id,
+                PendingLayoutTerminalCleanup {
+                    exact_terminal_ids: terminal_ids.clone(),
+                    remaining_terminal_ids: terminal_ids.iter().copied().collect(),
+                },
+            );
+        }
+        self.retry_layout_terminal_cleanup(transaction_id)
+    }
+
+    fn retry_layout_terminal_cleanup(
+        &mut self,
+        transaction_id: LayoutTransactionId,
+    ) -> std::result::Result<Vec<u32>, String> {
+        let Some(mut pending_cleanup) = self
+            .pending_layout_terminal_cleanups
+            .remove(&transaction_id)
+        else {
+            return Err(format!(
+                "layout terminal cleanup transaction {transaction_id} has no pending debt"
+            ));
+        };
+        let remaining_terminal_ids = pending_cleanup
+            .remaining_terminal_ids
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        let mut cleanup_errors = Vec::new();
+        for terminal_id in remaining_terminal_ids {
+            match self.close_pane(PaneId::Terminal(terminal_id)) {
+                Ok(()) => {
+                    pending_cleanup.remaining_terminal_ids.remove(&terminal_id);
+                },
+                Err(error) => {
+                    cleanup_errors.push(format!("Terminal({terminal_id}): {error:#}"));
+                },
+            }
+        }
+        if !pending_cleanup.remaining_terminal_ids.is_empty() {
+            let remaining_terminal_ids = pending_cleanup
+                .remaining_terminal_ids
+                .iter()
+                .copied()
+                .collect::<Vec<_>>();
+            self.pending_layout_terminal_cleanups
+                .insert(transaction_id, pending_cleanup);
+            return Err(format!(
+                "layout terminal cleanup transaction {transaction_id} remains pending for {remaining_terminal_ids:?}: {}",
+                cleanup_errors.join("; ")
+            ));
+        }
+        let exact_terminal_ids = pending_cleanup.exact_terminal_ids;
+        self.resolved_layout_terminal_cleanups
+            .insert(transaction_id, exact_terminal_ids.clone());
+        while self.resolved_layout_terminal_cleanups.len() > MAX_LAYOUT_TERMINAL_CLEANUP_RECEIPTS {
+            self.resolved_layout_terminal_cleanups.pop_first();
+        }
+        Ok(exact_terminal_ids)
+    }
+
+    fn retry_all_layout_terminal_cleanup_debts(&mut self) {
+        let transaction_ids = self
+            .pending_layout_terminal_cleanups
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        for transaction_id in transaction_ids {
+            if let Err(error) = self.retry_layout_terminal_cleanup(transaction_id) {
+                log::error!("{error}");
+            }
+        }
+    }
+
+    fn defer_terminal_cleanup(
+        &mut self,
+        terminal_id: u32,
+        mut completion: Option<NotificationEnd>,
+        unblock_input: bool,
+    ) {
+        if let Some(completion) = completion.as_mut() {
+            completion.require_explicit_resolution();
+        }
+        let pending_cleanup = self
+            .pending_terminal_cleanups
+            .entry(terminal_id)
+            .or_default();
+        if let Some(completion) = completion {
+            pending_cleanup.completions.push(completion);
+        }
+        pending_cleanup.unblock_input |= unblock_input;
+    }
+
+    fn retry_terminal_cleanup_debts(&mut self) {
+        let terminal_ids = self
+            .pending_terminal_cleanups
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        for terminal_id in terminal_ids {
+            match self.close_pane(PaneId::Terminal(terminal_id)) {
+                Ok(()) => {
+                    let Some(mut pending_cleanup) =
+                        self.pending_terminal_cleanups.remove(&terminal_id)
+                    else {
+                        continue;
+                    };
+                    for completion in &mut pending_cleanup.completions {
+                        completion.mark_success();
+                    }
+                    if pending_cleanup.unblock_input
+                        && let Err(error) = self
+                            .bus
+                            .senders
+                            .send_to_server(ServerInstruction::UnblockInputThread)
+                    {
+                        log::error!(
+                            "terminal {terminal_id} cleanup completed but input unblock failed: {error:#}"
+                        );
+                    }
+                },
+                Err(error) => {
+                    log::error!(
+                        "terminal {terminal_id} cleanup remains pending after strict close failure: {error:#}"
+                    );
+                },
+            }
+        }
+    }
+
+    fn fail_pending_terminal_cleanup_debts(&mut self, reason: &str) {
+        let pending_cleanups = std::mem::take(&mut self.pending_terminal_cleanups);
+        for (terminal_id, mut pending_cleanup) in pending_cleanups {
+            for completion in &mut pending_cleanup.completions {
+                completion.mark_failure(format!("{reason}: terminal {terminal_id}"));
+            }
+        }
     }
 
     pub fn get_default_terminal(
@@ -1683,28 +2171,31 @@ impl Pty {
                 os_input.spawn_terminal(terminal_action, quit_cb, self.default_editor.clone())
             })
             .with_context(err_context)?;
-        let activity_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let terminal_bytes = async_runtime().spawn({
-            let err_context =
-                |terminal_id: u32| format!("failed to run async task for terminal {terminal_id}");
-            let senders = self.bus.senders.clone();
-            let debug_to_file = self.debug_to_file;
-            let activity_flag = activity_flag.clone();
-            async move {
-                TerminalBytes::new(terminal_id, reader, senders, debug_to_file, activity_flag)
-                    .listen()
-                    .await
-                    .with_context(|| err_context(terminal_id))
-                    .fatal();
-            }
-        });
-
-        self.task_handles.insert(terminal_id, terminal_bytes);
-        self.pane_activity_flags.insert(terminal_id, activity_flag);
         if let Some(child_pid) = child_pid {
+            self.terminal_kill_confirmations.remove(&terminal_id);
             self.id_to_child_pid.insert(terminal_id, child_pid);
             self.capture_initial_cwd(terminal_id, child_pid);
         }
+        let activity_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let terminal_bytes = match self.spawn_terminal_bytes_task(
+            terminal_id,
+            reader,
+            activity_flag.clone(),
+        ) {
+            Ok(terminal_bytes) => terminal_bytes,
+            Err(runtime_error) => {
+                if let Err(cleanup_error) = self.close_pane(PaneId::Terminal(terminal_id)) {
+                    self.defer_terminal_cleanup(terminal_id, None, false);
+                    return Err(runtime_error.context(format!(
+                            "terminal {terminal_id} runtime startup failed and strict cleanup remains pending: {cleanup_error:#}"
+                        )));
+                }
+                return Err(runtime_error);
+            },
+        };
+
+        self.task_handles.insert(terminal_id, terminal_bytes);
+        self.pane_activity_flags.insert(terminal_id, activity_flag);
 
         let starts_held = false;
         Ok((terminal_id, starts_held))
@@ -1726,20 +2217,24 @@ impl Pty {
         mut layout_generation: Option<Box<DurableTabLayoutGeneration>>,
     ) -> Result<()> {
         let err_context = || "failed to spawn terminals for layout for".to_string();
+        let mut layout_plugin_ids = plugin_ids.values().flatten().copied().collect::<Vec<_>>();
+        layout_plugin_ids.sort_unstable();
+        layout_plugin_ids.dedup();
         if transaction_id == 0
             || self.pending_layout_commits.contains_key(&transaction_id)
+            || self.pending_layout_cleanups.contains_key(&transaction_id)
             || self.resolved_layout_commits.contains_key(&transaction_id)
         {
             let error =
                 anyhow!("layout transaction id {transaction_id} is reserved or already pending");
-            let mut allocation_ledger = LayoutAllocationLedger::armed_for_bus(&self.bus);
-            allocation_ledger.track_plugin_ids(&plugin_ids);
+            let allocation_ledger = LayoutAllocationLedger::armed_for_bus(&self.bus);
             let error = self.rollback_partial_layout_allocations(error, allocation_ledger);
             return Err(self.reject_layout_preparation(
                 transaction_id,
                 Some(tab_index),
                 completion_tx,
                 layout_generation,
+                layout_plugin_ids,
                 error,
             ));
         }
@@ -1783,7 +2278,6 @@ impl Pty {
 
         let mut originating_plugins_to_inform = vec![];
         let mut allocation_ledger = LayoutAllocationLedger::armed_for_bus(&self.bus);
-        allocation_ledger.track_plugin_ids(&plugin_ids);
 
         for run_instruction in extracted_run_instructions {
             let originating_plugin = run_instruction.as_ref().and_then(|r| {
@@ -1811,6 +2305,7 @@ impl Pty {
                         Some(tab_index),
                         completion_tx,
                         layout_generation,
+                        layout_plugin_ids,
                         error,
                     ));
                 },
@@ -1846,6 +2341,7 @@ impl Pty {
                         Some(tab_index),
                         completion_tx,
                         layout_generation,
+                        layout_plugin_ids,
                         error,
                     ));
                 },
@@ -1879,7 +2375,9 @@ impl Pty {
             allocation_ledger,
             terminals,
             originating_plugins_to_inform,
+            layout_plugin_ids: layout_plugin_ids.clone(),
             tab_id: Some(tab_index),
+            layout_generation: layout_generation.clone(),
         };
         if let Err(start_failure) = self.begin_layout_commit(transaction_id, pending_commit) {
             let (error, pending_commit) = start_failure.into_parts();
@@ -1890,6 +2388,7 @@ impl Pty {
                 Some(tab_index),
                 completion_tx,
                 layout_generation,
+                layout_plugin_ids,
                 error,
             ));
         }
@@ -1962,13 +2461,14 @@ impl Pty {
                     "Screen handoff returned an unexpected instruction for Apply layout transaction {transaction_id}"
                 ))
             };
-            let error = self.reject_pending_layout_send(transaction_id, handoff_error);
+            let rollback = self.reject_pending_layout_send(transaction_id, handoff_error);
             return Err(self.reject_layout_preparation(
                 transaction_id,
                 Some(tab_index),
                 completion_tx,
                 layout_generation,
-                error,
+                layout_plugin_ids,
+                rollback,
             ));
         }
         Ok(())
@@ -1986,11 +2486,16 @@ impl Pty {
         mut layout_generation: Option<Box<DurableTabLayoutGeneration>>,
     ) -> Result<()> {
         let mut allocation_ledger = LayoutAllocationLedger::armed_for_bus(&self.bus);
-        for (_, plugin_ids) in &tab_layouts_with_plugin_ids {
-            allocation_ledger.track_plugin_ids(plugin_ids);
-        }
+        let mut layout_plugin_ids = tab_layouts_with_plugin_ids
+            .iter()
+            .flat_map(|(_, plugin_ids)| plugin_ids.values().flatten())
+            .copied()
+            .collect::<Vec<_>>();
+        layout_plugin_ids.sort_unstable();
+        layout_plugin_ids.dedup();
         if transaction_id == 0
             || self.pending_layout_commits.contains_key(&transaction_id)
+            || self.pending_layout_cleanups.contains_key(&transaction_id)
             || self.resolved_layout_commits.contains_key(&transaction_id)
         {
             let error =
@@ -2003,13 +2508,13 @@ impl Pty {
                     .map(|generation| generation.tab_id),
                 completion_tx,
                 layout_generation,
+                layout_plugin_ids,
                 error,
             ));
         }
-        // Keep the preflight ledger armed while each tab is prepared.
-        // `track_plugin_ids` writes into a BTreeSet, so revisiting the same IDs
-        // is idempotent and must not create a short-lived second guard whose
-        // Drop would unload valid plugins before the Screen handoff.
+        // Keep the terminal-only preflight ledger armed while each tab is
+        // prepared. Plugin reservations have their own transaction owner and
+        // are resolved explicitly by Screen.
         let mut all_tab_results = Vec::new();
         let mut all_prepared_terminals = Vec::new();
         let mut all_originating_plugins_to_inform = Vec::new();
@@ -2047,6 +2552,7 @@ impl Pty {
                             .map(|generation| generation.tab_id),
                         completion_tx,
                         layout_generation,
+                        layout_plugin_ids,
                         error,
                     ));
                 },
@@ -2057,9 +2563,11 @@ impl Pty {
             allocation_ledger,
             terminals: all_prepared_terminals,
             originating_plugins_to_inform: all_originating_plugins_to_inform,
+            layout_plugin_ids: layout_plugin_ids.clone(),
             tab_id: layout_generation
                 .as_ref()
                 .map(|generation| generation.tab_id),
+            layout_generation: layout_generation.clone(),
         };
         if let Err(start_failure) = self.begin_layout_commit(transaction_id, pending_commit) {
             let (error, pending_commit) = start_failure.into_parts();
@@ -2072,6 +2580,7 @@ impl Pty {
                     .map(|generation| generation.tab_id),
                 completion_tx,
                 layout_generation,
+                layout_plugin_ids,
                 error,
             ));
         }
@@ -2108,7 +2617,7 @@ impl Pty {
                     "Screen handoff returned an unexpected instruction for Override layout transaction {transaction_id}"
                 ))
             };
-            let error = self.reject_pending_layout_send(transaction_id, handoff_error);
+            let rollback = self.reject_pending_layout_send(transaction_id, handoff_error);
             return Err(self.reject_layout_preparation(
                 transaction_id,
                 layout_generation
@@ -2116,7 +2625,8 @@ impl Pty {
                     .map(|generation| generation.tab_id),
                 completion_tx,
                 layout_generation,
-                error,
+                layout_plugin_ids,
+                rollback,
             ));
         }
         Ok(())
@@ -2136,8 +2646,6 @@ impl Pty {
         swap_floating_layouts: Option<Vec<SwapFloatingLayout>>,
         allocation_ledger: &mut LayoutAllocationLedger,
     ) -> Result<PreparedTabOverride> {
-        allocation_ledger.track_plugin_ids(&plugin_ids);
-
         let mut default_shell =
             default_shell.unwrap_or_else(|| self.get_default_terminal(cwd, None));
         self.fill_cwd(&mut default_shell, client_id);
@@ -2236,111 +2744,243 @@ impl Pty {
     fn rollback_partial_layout_allocations(
         &mut self,
         original_error: anyhow::Error,
-        allocation_ledger: LayoutAllocationLedger,
-    ) -> anyhow::Error {
-        let cleanup_errors = self.cleanup_layout_allocations(allocation_ledger);
+        mut allocation_ledger: LayoutAllocationLedger,
+    ) -> LayoutPreparationRollback {
+        let cleanup_errors = self.cleanup_layout_allocations(&mut allocation_ledger);
         if cleanup_errors.is_empty() {
-            original_error
+            LayoutPreparationRollback {
+                error: original_error,
+                cleanup_succeeded: true,
+                cleanup_debt: None,
+            }
         } else {
-            original_error.context(format!(
-                "failed to release one or more partial layout allocations: {}",
-                cleanup_errors.join("; ")
-            ))
+            LayoutPreparationRollback {
+                error: original_error.context(format!(
+                    "failed to release one or more partial layout allocations: {}",
+                    cleanup_errors.join("; ")
+                )),
+                cleanup_succeeded: false,
+                cleanup_debt: Some(allocation_ledger),
+            }
         }
     }
 
     fn cleanup_layout_allocations(
         &mut self,
-        mut allocation_ledger: LayoutAllocationLedger,
+        allocation_ledger: &mut LayoutAllocationLedger,
     ) -> Vec<String> {
         let mut cleanup_errors = Vec::new();
         for quit_callback_fence in allocation_ledger.quit_callback_fences.drain(..) {
             quit_callback_fence.cancel();
         }
-        while let Some(pane_id) = allocation_ledger.allocated_ids.pop_first() {
-            if let Err(error) = self.close_pane(pane_id) {
-                cleanup_errors.push(format!("{error:#}"));
+        let terminal_ids = allocation_ledger
+            .terminal_ids
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        for terminal_id in terminal_ids {
+            match self.close_pane(PaneId::Terminal(terminal_id)) {
+                Ok(()) => {
+                    allocation_ledger.terminal_ids.remove(&terminal_id);
+                },
+                Err(error) => {
+                    cleanup_errors.push(format!("{error:#}"));
+                },
             }
         }
-        // Every tracked allocation was attempted exactly once above. Disable
-        // the unwind guard even when an individual close failed so Drop does
-        // not issue a second, ambiguous cleanup attempt.
-        allocation_ledger.disarm();
+        if allocation_ledger.terminal_ids.is_empty() {
+            allocation_ledger.disarm();
+        }
         cleanup_errors
+    }
+
+    fn spawn_terminal_bytes_task(
+        &self,
+        terminal_id: u32,
+        reader: Box<dyn AsyncReader>,
+        activity_flag: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<JoinHandle<()>> {
+        let terminal_senders = self.bus.senders.clone();
+        let cleanup_senders = terminal_senders.clone();
+        let debug_to_file = self.debug_to_file;
+        let reader: Box<dyn AsyncReader> = Box::new(CleanupNotifyingReader {
+            terminal_id,
+            reader,
+            cleanup_senders: cleanup_senders.clone(),
+        });
+        let task_spawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            #[cfg(test)]
+            PANIC_NEXT_TERMINAL_RUNTIME_SPAWN.with(|should_panic| {
+                if should_panic.replace(false) {
+                    panic!("injected terminal runtime spawn panic");
+                }
+            });
+            async_runtime().spawn(async move {
+                let listen_result = TerminalBytes::new(
+                    terminal_id,
+                    reader,
+                    terminal_senders,
+                    debug_to_file,
+                    activity_flag,
+                )
+                .listen()
+                .await
+                .with_context(|| format!("failed to run async task for terminal {terminal_id}"));
+                if let Err(error) = listen_result {
+                    let listener_error = format!("{error:#}");
+                    log::error!("{listener_error}");
+                    if let Err(send_failure) =
+                        cleanup_senders.send_to_pty_recover(PtyInstruction::ClosePane(
+                            PaneId::Terminal(terminal_id),
+                            None,
+                        ))
+                    {
+                        let (_instruction, send_error) = send_failure.into_parts();
+                        log::error!(
+                            "failed terminal reader {terminal_id} could not return cleanup debt to PTY: {send_error:#}; reader failure: {listener_error}"
+                        );
+                    }
+                }
+            })
+        }));
+        task_spawn.map_err(|panic_payload| {
+            let panic_message = if let Some(message) = panic_payload.downcast_ref::<&'static str>()
+            {
+                (*message).to_owned()
+            } else if let Some(message) = panic_payload.downcast_ref::<String>() {
+                message.clone()
+            } else {
+                "non-string panic payload".to_owned()
+            };
+            anyhow!("terminal {terminal_id} async runtime initialization panicked: {panic_message}")
+        })
     }
 
     fn activate_prepared_terminal(&mut self, prepared_terminal: PreparedTerminal) -> Result<()> {
         match prepared_terminal {
             PreparedTerminal::Runnable {
                 terminal_id,
-                reader,
+                terminal_action,
+                quit_callback,
                 quit_callback_fence,
+                command_not_found_hold,
             } => {
-                let activity_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let terminal_bytes = async_runtime().spawn({
-                    let senders = self.bus.senders.clone();
-                    let debug_to_file = self.debug_to_file;
-                    let activity_flag = activity_flag.clone();
-                    async move {
-                        TerminalBytes::new(
+                let spawn_result = self
+                    .bus
+                    .os_input
+                    .as_ref()
+                    .context("no OS I/O interface found")
+                    .and_then(|os_input| {
+                        os_input.spawn_terminal_with_reserved_id(
                             terminal_id,
-                            reader,
-                            senders,
-                            debug_to_file,
-                            activity_flag,
+                            terminal_action,
+                            quit_callback,
+                            self.default_editor.clone(),
                         )
-                        .listen()
-                        .await
-                        .context("failed to spawn terminals for layout")
-                        .fatal();
-                    }
-                });
+                    });
+                let (reader, child_pid) = match spawn_result {
+                    Ok(spawned_terminal) => spawned_terminal,
+                    Err(error) => {
+                        let command_not_found_for_this_terminal = matches!(
+                            error.downcast_ref::<ZellijError>(),
+                            Some(ZellijError::CommandNotFound {
+                                terminal_id: missing_command_terminal_id,
+                                ..
+                            }) if *missing_command_terminal_id == terminal_id
+                        );
+                        if command_not_found_for_this_terminal
+                            && let Some(run_command) = command_not_found_hold
+                        {
+                            quit_callback_fence.cancel();
+                            send_command_not_found_to_screen(
+                                self.bus.senders.clone(),
+                                terminal_id,
+                                run_command,
+                            )
+                            .context(
+                                "failed to transition missing layout command into a held pane",
+                            )?;
+                            return Ok(());
+                        }
+                        return Err(error.context(format!(
+                            "failed to activate reserved terminal {terminal_id}"
+                        )));
+                    },
+                };
+                if let Some(child_pid) = child_pid {
+                    self.terminal_kill_confirmations.remove(&terminal_id);
+                    self.id_to_child_pid.insert(terminal_id, child_pid);
+                    self.capture_initial_cwd(terminal_id, child_pid);
+                }
+                let activity_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let terminal_bytes =
+                    self.spawn_terminal_bytes_task(terminal_id, reader, activity_flag.clone())?;
                 self.task_handles.insert(terminal_id, terminal_bytes);
                 self.pane_activity_flags.insert(terminal_id, activity_flag);
-                quit_callback_fence.commit();
             },
             PreparedTerminal::HeldTerminal {
-                terminal_id,
-                run_command,
-                command_not_found,
-            } => {
-                if command_not_found {
-                    send_command_not_found_to_screen(
-                        self.bus.senders.clone(),
-                        terminal_id,
-                        run_command,
-                    )
-                    .context("failed to notify screen about held command-not-found terminal")
-                    .non_fatal();
-                }
-            },
+                terminal_id: _,
+                run_command: _,
+            } => {},
         }
         Ok(())
     }
-    fn inform_originating_plugin_of_open(
+
+    fn prepare_runnable_terminal(
         &mut self,
-        terminal_id: u32,
-        originating_plugin: OriginatingPlugin,
+        terminal_action: TerminalAction,
+        quit_callback: QuitCallback,
+        command_not_found_hold: Option<RunCommand>,
+        allocation_ledger: &mut LayoutAllocationLedger,
+    ) -> Result<PreparedTerminal> {
+        let (quit_callback_fence, quit_callback) = QuitCallbackFence::wrap(quit_callback);
+        let terminal_id = self
+            .bus
+            .os_input
+            .as_ref()
+            .context("no OS I/O interface found")?
+            .reserve_terminal_id()
+            .context("failed to reserve terminal for layout")?;
+        allocation_ledger.track_terminal(terminal_id);
+        allocation_ledger.track_quit_callback_fence(quit_callback_fence.clone());
+        Ok(PreparedTerminal::Runnable {
+            terminal_id,
+            terminal_action,
+            quit_callback,
+            quit_callback_fence,
+            command_not_found_hold,
+        })
+    }
+
+    fn inform_originating_plugins_of_open(
+        &mut self,
+        originating_plugins: Vec<(u32, OriginatingPlugin)>,
     ) -> Result<()> {
-        self.originating_plugins
-            .insert(terminal_id, originating_plugin.clone());
-        let update_event = Event::CommandPaneOpened(terminal_id, originating_plugin.context);
-        if let Err(send_failure) =
-            self.bus
-                .senders
-                .send_to_plugin_recover(PluginInstruction::Update(vec![(
+        if originating_plugins.is_empty() {
+            return Ok(());
+        }
+        let update_events = originating_plugins
+            .iter()
+            .map(|(terminal_id, originating_plugin)| {
+                (
                     Some(originating_plugin.plugin_id),
                     Some(originating_plugin.client_id),
-                    update_event,
-                )]))
+                    Event::CommandPaneOpened(*terminal_id, originating_plugin.context.clone()),
+                )
+            })
+            .collect();
+        if let Err(send_failure) = self
+            .bus
+            .senders
+            .send_to_plugin_recover(PluginInstruction::Update(update_events))
         {
             let (_, error) = send_failure.into_parts();
-            self.originating_plugins.remove(&terminal_id);
             return Err(error.context(format!(
-                "failed to report terminal {terminal_id} activation to originating plugin {}",
-                originating_plugin.plugin_id
+                "failed to report {} terminal activations to their originating plugins",
+                originating_plugins.len()
             )));
         }
+        self.originating_plugins.extend(originating_plugins);
         Ok(())
     }
 
@@ -2430,219 +3070,115 @@ impl Pty {
                             Ok(Some(PreparedTerminal::HeldTerminal {
                                 terminal_id,
                                 run_command: command,
-                                command_not_found: false,
                             }))
                         },
                         Err(e) => Err(e),
                     }
                 } else {
-                    let (quit_callback_fence, quit_cb) = QuitCallbackFence::wrap(quit_cb);
-                    match self
-                        .bus
-                        .os_input
-                        .as_mut()
-                        .context("no OS I/O interface found")
-                        .with_context(err_context)?
-                        .spawn_terminal(cmd, quit_cb, self.default_editor.clone())
-                        .with_context(err_context)
-                    {
-                        Ok((terminal_id, reader, child_pid)) => {
-                            allocation_ledger.track_terminal(terminal_id);
-                            allocation_ledger
-                                .track_quit_callback_fence(quit_callback_fence.clone());
-                            if let Some(child_pid) = child_pid {
-                                self.id_to_child_pid.insert(terminal_id, child_pid);
-                                self.capture_initial_cwd(terminal_id, child_pid);
-                            }
-                            Ok(Some(PreparedTerminal::Runnable {
-                                terminal_id,
-                                reader,
-                                quit_callback_fence,
-                            }))
-                        },
-                        Err(error) => {
-                            quit_callback_fence.cancel();
-                            match error.downcast_ref::<ZellijError>() {
-                                Some(ZellijError::CommandNotFound { terminal_id, .. }) => {
-                                    let terminal_id = *terminal_id;
-                                    allocation_ledger.track_terminal(terminal_id);
-                                    if command.hold_on_close {
-                                        Ok(Some(PreparedTerminal::HeldTerminal {
-                                            terminal_id,
-                                            run_command: command,
-                                            command_not_found: true,
-                                        }))
-                                    } else {
-                                        Err(error.context(
-                                            "CommandNotFound terminal cannot enter a layout without \
-                                             hold_on_close",
-                                        ))
-                                    }
-                                },
-                                _ => Err(error),
-                            }
-                        },
-                    }
+                    let command_not_found_hold = command.hold_on_close.then_some(command);
+                    self.prepare_runnable_terminal(
+                        cmd,
+                        quit_cb,
+                        command_not_found_hold,
+                        allocation_ledger,
+                    )
+                    .map(Some)
+                    .with_context(err_context)
                 }
             },
             Some(Run::Cwd(cwd)) => {
                 let shell = self.get_default_terminal(Some(cwd), Some(default_shell.clone()));
-                let (quit_callback_fence, quit_cb) = QuitCallbackFence::wrap(quit_cb);
-                match self
-                    .bus
-                    .os_input
-                    .as_mut()
-                    .context("no OS I/O interface found")
-                    .with_context(err_context)?
-                    .spawn_terminal(shell, quit_cb, self.default_editor.clone())
+                self.prepare_runnable_terminal(shell, quit_cb, None, allocation_ledger)
+                    .map(Some)
                     .with_context(err_context)
-                {
-                    Ok((terminal_id, reader, child_pid)) => {
-                        allocation_ledger.track_terminal(terminal_id);
-                        allocation_ledger.track_quit_callback_fence(quit_callback_fence.clone());
-                        if let Some(child_pid) = child_pid {
-                            self.id_to_child_pid.insert(terminal_id, child_pid);
-                            self.capture_initial_cwd(terminal_id, child_pid);
-                        }
-                        Ok(Some(PreparedTerminal::Runnable {
-                            terminal_id,
-                            reader,
-                            quit_callback_fence,
-                        }))
-                    },
-                    Err(error) => {
-                        quit_callback_fence.cancel();
-                        match error.downcast_ref::<ZellijError>() {
-                            Some(ZellijError::CommandNotFound { terminal_id, .. }) => {
-                                allocation_ledger.track_terminal(*terminal_id);
-                                Err(error.context(
-                                    "CommandNotFound Cwd terminal cannot enter a layout without an \
-                                     explicit held command",
-                                ))
-                            },
-                            _ => Err(error),
-                        }
-                    },
-                }
             },
-            Some(Run::EditFile(path_to_file, line_number, cwd)) => {
-                let (quit_callback_fence, quit_cb) = QuitCallbackFence::wrap(quit_cb);
-                match self
-                    .bus
-                    .os_input
-                    .as_mut()
-                    .context("no OS I/O interface found")
-                    .with_context(err_context)?
-                    .spawn_terminal(
-                        TerminalAction::OpenFile(OpenFilePayload::new(
-                            path_to_file,
-                            line_number,
-                            cwd,
-                        )),
-                        quit_cb,
-                        self.default_editor.clone(),
-                    )
-                    .with_context(err_context)
-                {
-                    Ok((terminal_id, reader, child_pid)) => {
-                        allocation_ledger.track_terminal(terminal_id);
-                        allocation_ledger.track_quit_callback_fence(quit_callback_fence.clone());
-                        if let Some(child_pid) = child_pid {
-                            self.id_to_child_pid.insert(terminal_id, child_pid);
-                            self.capture_initial_cwd(terminal_id, child_pid);
-                        }
-                        Ok(Some(PreparedTerminal::Runnable {
-                            terminal_id,
-                            reader,
-                            quit_callback_fence,
-                        }))
-                    },
-                    Err(error) => {
-                        quit_callback_fence.cancel();
-                        match error.downcast_ref::<ZellijError>() {
-                            Some(ZellijError::CommandNotFound { terminal_id, .. }) => {
-                                allocation_ledger.track_terminal(*terminal_id);
-                                Err(error.context(
-                                    "CommandNotFound editor terminal cannot enter a layout without an \
-                                     explicit held command",
-                                ))
-                            },
-                            _ => Err(error),
-                        }
-                    },
-                }
-            },
-            None => {
-                let (quit_callback_fence, quit_cb) = QuitCallbackFence::wrap(quit_cb);
-                match self
-                    .bus
-                    .os_input
-                    .as_mut()
-                    .context("no OS I/O interface found")
-                    .with_context(err_context)?
-                    .spawn_terminal(default_shell.clone(), quit_cb, self.default_editor.clone())
-                    .with_context(err_context)
-                {
-                    Ok((terminal_id, reader, child_pid)) => {
-                        allocation_ledger.track_terminal(terminal_id);
-                        allocation_ledger.track_quit_callback_fence(quit_callback_fence.clone());
-                        if let Some(child_pid) = child_pid {
-                            self.id_to_child_pid.insert(terminal_id, child_pid);
-                            self.capture_initial_cwd(terminal_id, child_pid);
-                        }
-                        Ok(Some(PreparedTerminal::Runnable {
-                            terminal_id,
-                            reader,
-                            quit_callback_fence,
-                        }))
-                    },
-                    Err(error) => {
-                        quit_callback_fence.cancel();
-                        match error.downcast_ref::<ZellijError>() {
-                            Some(ZellijError::CommandNotFound { terminal_id, .. }) => {
-                                allocation_ledger.track_terminal(*terminal_id);
-                                Err(error.context(
-                                    "CommandNotFound default terminal cannot enter a layout without an \
-                                     explicit held command",
-                                ))
-                            },
-                            _ => Err(error),
-                        }
-                    },
-                }
-            },
+            Some(Run::EditFile(path_to_file, line_number, cwd)) => self
+                .prepare_runnable_terminal(
+                    TerminalAction::OpenFile(OpenFilePayload::new(path_to_file, line_number, cwd)),
+                    quit_cb,
+                    None,
+                    allocation_ledger,
+                )
+                .map(Some)
+                .with_context(err_context),
+            None => self
+                .prepare_runnable_terminal(default_shell, quit_cb, None, allocation_ledger)
+                .map(Some)
+                .with_context(err_context),
             // Investigate moving plugin loading to here.
             Some(Run::Plugin(_)) => Ok(None),
         }
     }
+    fn process_is_already_gone(error: &anyhow::Error) -> bool {
+        error.chain().any(|cause| {
+            if let Some(io_error) = cause.downcast_ref::<io::Error>() {
+                if io_error.kind() == io::ErrorKind::NotFound {
+                    return true;
+                }
+                #[cfg(unix)]
+                if io_error.raw_os_error() == Some(libc::ESRCH) {
+                    return true;
+                }
+                #[cfg(windows)]
+                if io_error.raw_os_error() == Some(87) {
+                    // ERROR_INVALID_PARAMETER from OpenProcess means this PID
+                    // no longer denotes a live process.
+                    return true;
+                }
+            }
+            #[cfg(unix)]
+            if cause.downcast_ref::<nix::errno::Errno>() == Some(&nix::errno::Errno::ESRCH) {
+                return true;
+            }
+            false
+        })
+    }
+
     pub fn close_pane(&mut self, id: PaneId) -> Result<()> {
         let err_context = || format!("failed to close for pane {id:?}");
         match id {
             PaneId::Terminal(id) => {
-                if let Some(handle) = self.task_handles.remove(&id) {
-                    handle.abort();
-                }
-                if let Some(child_pid) = self.id_to_child_pid.remove(&id) {
-                    let err_context = || format!("failed to kill child processes for pane {id}");
-                    self.bus
+                if !self.terminal_kill_confirmations.contains(&id)
+                    && let Some(child_pid) = self.id_to_child_pid.get(&id).copied()
+                {
+                    let kill_result = self
+                        .bus
                         .os_input
                         .as_mut()
-                        .with_context(err_context)
-                        .fatal()
-                        .kill(child_pid)
-                        .with_context(err_context)
-                        .non_fatal();
+                        .context("no OS I/O interface found")
+                        .and_then(|os_input| os_input.kill(child_pid))
+                        .with_context(|| {
+                            format!("failed to kill child process {child_pid} for pane {id}")
+                        });
+                    if let Err(error) = kill_result
+                        && !Self::process_is_already_gone(&error)
+                    {
+                        return Err(error).with_context(err_context);
+                    }
+                    self.terminal_kill_confirmations.insert(id);
                 }
-                self.pane_activity_flags.remove(&id);
-                self.terminal_cwds.remove(&id);
-                self.terminal_cmds.remove(&id);
-                self.terminal_foreground_cmds.remove(&id);
-                self.bus
+                let clear_result = self
+                    .bus
                     .os_input
                     .as_ref()
                     .context("no OS I/O interface found")
                     .and_then(|os_input| os_input.clear_terminal_id(id))
-                    .with_context(err_context)?;
+                    .with_context(err_context);
+                if let Err(error) = clear_result
+                    && !Self::process_is_already_gone(&error)
+                {
+                    return Err(error);
+                }
+                self.terminal_kill_confirmations.remove(&id);
+                if let Some(handle) = self.task_handles.remove(&id) {
+                    handle.abort();
+                }
+                self.id_to_child_pid.remove(&id);
+                self.pane_activity_flags.remove(&id);
+                self.terminal_cwds.remove(&id);
+                self.terminal_cmds.remove(&id);
+                self.terminal_foreground_cmds.remove(&id);
+                self.originating_plugins.remove(&id);
             },
             PaneId::Plugin(pid) => self
                 .bus
@@ -2723,28 +3259,31 @@ impl Pty {
                         os_input.re_run_command_in_terminal(id, run_command, quit_cb)
                     })
                     .with_context(err_context)?;
-                let activity_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let terminal_bytes = async_runtime().spawn({
-                    let err_context =
-                        |pane_id| format!("failed to run async task for pane {pane_id:?}");
-                    let senders = self.bus.senders.clone();
-                    let debug_to_file = self.debug_to_file;
-                    let activity_flag = activity_flag.clone();
-                    async move {
-                        TerminalBytes::new(id, reader, senders, debug_to_file, activity_flag)
-                            .listen()
-                            .await
-                            .with_context(|| err_context(pane_id))
-                            .fatal();
-                    }
-                });
-
-                self.task_handles.insert(id, terminal_bytes);
-                self.pane_activity_flags.insert(id, activity_flag);
                 if let Some(child_pid) = child_pid {
+                    self.terminal_kill_confirmations.remove(&id);
                     self.id_to_child_pid.insert(id, child_pid);
                     self.capture_initial_cwd(id, child_pid);
                 }
+                let activity_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let terminal_bytes = match self.spawn_terminal_bytes_task(
+                    id,
+                    reader,
+                    activity_flag.clone(),
+                ) {
+                    Ok(terminal_bytes) => terminal_bytes,
+                    Err(runtime_error) => {
+                        if let Err(cleanup_error) = self.close_pane(PaneId::Terminal(id)) {
+                            self.defer_terminal_cleanup(id, None, false);
+                            return Err(runtime_error.context(format!(
+                                    "terminal {id} rerun runtime startup failed and strict cleanup remains pending: {cleanup_error:#}"
+                                )));
+                        }
+                        return Err(runtime_error);
+                    },
+                };
+
+                self.task_handles.insert(id, terminal_bytes);
+                self.pane_activity_flags.insert(id, activity_flag);
                 if let Some(originating_plugin) = self.originating_plugins.get(&id) {
                     self.bus
                         .senders
@@ -3170,11 +3709,26 @@ impl Pty {
 
 impl Drop for Pty {
     fn drop(&mut self) {
-        let child_ids: Vec<u32> = self.id_to_child_pid.keys().copied().collect();
-        for id in child_ids {
+        self.retry_all_layout_terminal_cleanup_debts();
+        self.retry_terminal_cleanup_debts();
+        let mut terminal_ids = self
+            .id_to_child_pid
+            .keys()
+            .chain(self.task_handles.keys())
+            .chain(self.pending_terminal_cleanups.keys())
+            .chain(self.terminal_kill_confirmations.iter())
+            .copied()
+            .collect::<BTreeSet<_>>();
+        for pending_cleanup in self.pending_layout_terminal_cleanups.values() {
+            terminal_ids.extend(pending_cleanup.remaining_terminal_ids.iter().copied());
+        }
+        self.fail_pending_terminal_cleanup_debts(
+            "PTY dropped before terminal cleanup could be certified",
+        );
+        for id in terminal_ids {
             self.close_pane(PaneId::Terminal(id))
                 .with_context(|| format!("failed to close pane for pid {id}"))
-                .fatal();
+                .non_fatal();
         }
     }
 }
@@ -3183,11 +3737,6 @@ impl Drop for Pty {
 std::thread_local! {
     static FAIL_COMMAND_NOT_FOUND_NOTIFICATION_AT_SEND: std::cell::Cell<u8> =
         const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-fn fail_next_command_not_found_notification() {
-    FAIL_COMMAND_NOT_FOUND_NOTIFICATION_AT_SEND.with(|fail_at| fail_at.set(1));
 }
 
 #[cfg(test)]

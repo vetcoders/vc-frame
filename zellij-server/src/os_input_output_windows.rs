@@ -11,12 +11,15 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU32, AtomicU64, Ordering},
     },
+    thread,
 };
 
 use tokio::io::AsyncReadExt;
 use tokio::net::windows::named_pipe::NamedPipeServer;
 
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, S_OK};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, HANDLE, INVALID_HANDLE_VALUE, S_OK, WAIT_FAILED,
+};
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_OVERLAPPED, FlushFileBuffers, OPEN_EXISTING, WriteFile,
 };
@@ -28,7 +31,7 @@ use windows_sys::Win32::System::Pipes::{CreateNamedPipeW, CreatePipe};
 use windows_sys::Win32::System::Threading::{
     CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
     EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList,
-    OpenProcess, PROCESS_INFORMATION, PROCESS_TERMINATE, STARTUPINFOEXW, STARTUPINFOW,
+    OpenProcess, PROCESS_INFORMATION, PROCESS_TERMINATE, STARTUPINFOEXW, STARTUPINFOW, SYNCHRONIZE,
     TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
@@ -72,6 +75,184 @@ impl Drop for ConPtyTerminal {
     }
 }
 
+struct WindowsProcessGuard {
+    handle: Option<HANDLE>,
+}
+
+// `HANDLE` is a raw pointer in windows-sys, but an owned process handle can be
+// waited on and closed from a dedicated monitor thread.
+unsafe impl Send for WindowsProcessGuard {}
+
+impl WindowsProcessGuard {
+    fn new(handle: HANDLE) -> Self {
+        Self {
+            handle: Some(handle),
+        }
+    }
+
+    fn wait_for_exit(&mut self) -> io::Result<i32> {
+        let Some(handle) = self.handle else {
+            return Err(io::Error::other(
+                "process handle ownership vanished before wait",
+            ));
+        };
+
+        let wait_result = unsafe { WaitForSingleObject(handle, INFINITE) };
+        if wait_result == WAIT_FAILED {
+            return Err(io::Error::last_os_error());
+        }
+
+        let mut exit_code: u32 = 0;
+        if unsafe { GetExitCodeProcess(handle, &mut exit_code) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        unsafe { CloseHandle(handle) };
+        self.handle = None;
+        Ok(exit_code as i32)
+    }
+
+    fn terminate_reap_and_close(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            unsafe {
+                let _ = TerminateProcess(handle, 1);
+                let _ = WaitForSingleObject(handle, INFINITE);
+                CloseHandle(handle);
+            }
+        }
+    }
+
+    fn run(
+        mut self,
+        terminal_id: u32,
+        cmd: RunCommand,
+        quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
+    ) {
+        let exit_status = match self.wait_for_exit() {
+            Ok(exit_status) => Some(exit_status),
+            Err(error) => {
+                log::error!(
+                    "failed to monitor Windows child process for terminal {}: {}",
+                    terminal_id,
+                    error
+                );
+                self.terminate_reap_and_close();
+                None
+            },
+        };
+        quit_cb(PaneId::Terminal(terminal_id), exit_status, cmd);
+    }
+}
+
+impl Drop for WindowsProcessGuard {
+    fn drop(&mut self) {
+        self.terminate_reap_and_close();
+    }
+}
+
+struct WindowsSpawnGuard {
+    process: Option<WindowsProcessGuard>,
+    thread_handle: Option<HANDLE>,
+    hpcon: Option<HPCON>,
+    input_write: Option<HANDLE>,
+    output_read: Option<HANDLE>,
+}
+
+impl WindowsSpawnGuard {
+    fn new(
+        process_handle: HANDLE,
+        thread_handle: HANDLE,
+        hpcon: HPCON,
+        input_write: HANDLE,
+        output_read: HANDLE,
+    ) -> Self {
+        Self {
+            process: Some(WindowsProcessGuard::new(process_handle)),
+            thread_handle: Some(thread_handle),
+            hpcon: Some(hpcon),
+            input_write: Some(input_write),
+            output_read: Some(output_read),
+        }
+    }
+
+    fn close_thread_handle(&mut self) {
+        if let Some(thread_handle) = self.thread_handle.take() {
+            unsafe { CloseHandle(thread_handle) };
+        }
+    }
+
+    fn take_process(&mut self) -> io::Result<WindowsProcessGuard> {
+        self.process.take().ok_or_else(|| {
+            io::Error::other("process handle ownership vanished during spawn handoff")
+        })
+    }
+
+    fn take_terminal(&mut self) -> io::Result<ConPtyTerminal> {
+        match (self.hpcon.take(), self.input_write.take()) {
+            (Some(hpcon), Some(input_write_handle)) => Ok(ConPtyTerminal {
+                hpcon,
+                input_write_handle,
+            }),
+            (hpcon, input_write) => {
+                self.hpcon = hpcon;
+                self.input_write = input_write;
+                Err(io::Error::other(
+                    "ConPTY ownership vanished during spawn handoff",
+                ))
+            },
+        }
+    }
+
+    fn take_output_reader(&mut self) -> io::Result<OwnedHandle> {
+        let output_read = self.output_read.take().ok_or_else(|| {
+            io::Error::other("ConPTY output ownership vanished during spawn handoff")
+        })?;
+        // SAFETY: the guard held the sole owner of this valid handle and
+        // transfers it exactly once to `OwnedHandle`.
+        Ok(unsafe { OwnedHandle::from_raw_handle(output_read as *mut core::ffi::c_void) })
+    }
+}
+
+impl Drop for WindowsSpawnGuard {
+    fn drop(&mut self) {
+        if let Some(mut process) = self.process.take() {
+            process.terminate_reap_and_close();
+        }
+        self.close_thread_handle();
+        if let Some(hpcon) = self.hpcon.take() {
+            unsafe { ClosePseudoConsole(hpcon) };
+        }
+        if let Some(input_write) = self.input_write.take() {
+            unsafe { CloseHandle(input_write) };
+        }
+        if let Some(output_read) = self.output_read.take() {
+            unsafe { CloseHandle(output_read) };
+        }
+    }
+}
+
+#[cfg(test)]
+static FAIL_MONITOR_SPAWN_FOR_TERMINAL: AtomicU32 = AtomicU32::new(u32::MAX);
+
+fn spawn_child_monitor<F>(terminal_id: u32, monitor: F) -> io::Result<thread::JoinHandle<()>>
+where
+    F: FnOnce() + Send + 'static,
+{
+    #[cfg(test)]
+    if FAIL_MONITOR_SPAWN_FOR_TERMINAL
+        .compare_exchange(terminal_id, u32::MAX, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        return Err(io::Error::other(
+            "injected Windows child-monitor thread spawn failure",
+        ));
+    }
+
+    thread::Builder::new()
+        .name(format!("conpty-child-monitor-{terminal_id}"))
+        .spawn(monitor)
+}
+
 /// An `AsyncReader` backed by a named pipe connected to ConPTY output.
 ///
 /// Construction stores the raw `OwnedHandle`. The first `read()` call promotes
@@ -106,7 +287,7 @@ impl AsyncReader for ConPtyAsyncReader {
         let pipe = self
             .pipe
             .as_mut()
-            .expect("ConPtyAsyncReader used after init");
+            .ok_or_else(|| io::Error::other("ConPtyAsyncReader used after init"))?;
         pipe.read(buf).await
     }
 }
@@ -352,14 +533,21 @@ fn spawn_child_process(
 
 fn terminate_process(pid: u32) -> std::result::Result<(), std::io::Error> {
     unsafe {
-        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        let handle = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, 0, pid);
         if handle.is_null() {
             return Err(std::io::Error::last_os_error());
         }
         let ok = TerminateProcess(handle, 1);
-        CloseHandle(handle);
         if ok == 0 {
-            return Err(std::io::Error::last_os_error());
+            let error = std::io::Error::last_os_error();
+            CloseHandle(handle);
+            return Err(error);
+        }
+        let wait_result = WaitForSingleObject(handle, INFINITE);
+        let wait_error = (wait_result == WAIT_FAILED).then(std::io::Error::last_os_error);
+        CloseHandle(handle);
+        if let Some(error) = wait_error {
+            return Err(error);
         }
     }
     Ok(())
@@ -447,42 +635,50 @@ impl WindowsPtyBackend {
                 },
             };
 
-        // Thread handle is not needed after spawn.
-        unsafe { CloseHandle(thread_handle) };
-
-        // 6. Store per-terminal state
-        self.terminals.lock().unwrap().insert(
-            terminal_id,
-            Some(ConPtyTerminal {
-                hpcon,
-                input_write_handle: input_write,
-            }),
+        // From this point until the monitor thread successfully owns the
+        // process, every resource created for this child has an RAII owner.
+        let mut spawned = WindowsSpawnGuard::new(
+            process_handle,
+            thread_handle,
+            hpcon,
+            input_write,
+            output_read,
         );
+        spawned.close_thread_handle();
+        let output_reader = spawned
+            .take_output_reader()
+            .with_context(|| err_context(&cmd))?;
+        let reader = Box::new(ConPtyAsyncReader::new(output_reader)) as Box<dyn AsyncReader>;
 
-        // 7. Exit-monitoring thread (zero CPU — spends all time in kernel wait)
-        // Pass the HANDLE through as `usize` because raw pointers are not
-        // Send. Windows OS handles are safe to use cross-thread.
-        let cmd_for_monitor = cmd.clone();
-        let process_handle_addr = process_handle as usize;
-        std::thread::spawn(move || {
-            let process_handle = process_handle_addr as HANDLE;
-            let exit_code = unsafe {
-                WaitForSingleObject(process_handle, INFINITE);
-                let mut code: u32 = 0;
-                GetExitCodeProcess(process_handle, &mut code);
-                CloseHandle(process_handle);
-                code
-            };
-            quit_cb(
-                PaneId::Terminal(terminal_id),
-                Some(exit_code as i32),
-                cmd_for_monitor,
-            );
-        });
+        let mut terminal_registry = self
+            .terminals
+            .lock()
+            .to_anyhow()
+            .context("failed to lock terminal registry after Windows child spawn")?;
+        match terminal_registry.get(&terminal_id) {
+            Some(None) => {},
+            Some(Some(_)) => {
+                return Err(anyhow!(
+                    "terminal {terminal_id} became active while its Windows child was spawning"
+                ));
+            },
+            None => {
+                return Err(anyhow!(
+                    "terminal {terminal_id} reservation vanished while its Windows child was spawning"
+                ));
+            },
+        }
 
-        // 8. Wrap the output read handle in an async reader
-        let owned = unsafe { OwnedHandle::from_raw_handle(output_read as *mut core::ffi::c_void) };
-        let reader = Box::new(ConPtyAsyncReader::new(owned)) as Box<dyn AsyncReader>;
+        let process = spawned.take_process().with_context(|| err_context(&cmd))?;
+        let terminal = spawned.take_terminal().with_context(|| err_context(&cmd))?;
+        terminal_registry.insert(terminal_id, Some(terminal));
+
+        if let Err(error) = spawn_child_monitor(terminal_id, move || {
+            process.run(terminal_id, cmd, quit_cb);
+        }) {
+            terminal_registry.insert(terminal_id, None);
+            return Err(error).context("failed to spawn Windows child-monitor thread");
+        }
 
         Ok((reader, child_pid))
     }
@@ -494,6 +690,26 @@ impl WindowsPtyBackend {
         quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
         terminal_id: u32,
     ) -> Result<(Box<dyn AsyncReader>, u32)> {
+        {
+            let terminal_registry = self
+                .terminals
+                .lock()
+                .to_anyhow()
+                .context("failed to lock terminal registry before spawn")?;
+            match terminal_registry.get(&terminal_id) {
+                Some(None) => {},
+                Some(Some(_)) => {
+                    return Err(anyhow!(
+                        "terminal {terminal_id} is already active and cannot be spawned again"
+                    ));
+                },
+                None => {
+                    return Err(anyhow!(
+                        "terminal {terminal_id} was not reserved before spawn"
+                    ));
+                },
+            }
+        }
         if let Some(resolved) = resolve_command(&cmd) {
             cmd.command = resolved;
             return self.do_spawn(cmd, quit_cb, terminal_id);

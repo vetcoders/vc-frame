@@ -24,9 +24,16 @@ struct MockOsApi {
     command_not_found_on_spawn_call: Arc<AtomicUsize>,
     command_not_found_payload_terminal_id: Arc<AtomicUsize>,
     spawn_terminal_calls: Arc<AtomicUsize>,
+    spawned_child_pid: Arc<AtomicUsize>,
     next_terminal_id: Arc<AtomicUsize>,
+    reserved_terminal_ids: Arc<Mutex<Vec<u32>>>,
+    activated_terminal_ids: Arc<Mutex<Vec<u32>>>,
     cleared_terminal_ids: Arc<Mutex<Vec<u32>>>,
     fail_clear_terminal_ids: Arc<Mutex<Vec<u32>>>,
+    killed_child_pids: Arc<Mutex<Vec<u32>>>,
+    fail_kill_child_pids: Arc<Mutex<Vec<u32>>>,
+    unconfirmed_exit_child_pids: Arc<Mutex<Vec<u32>>>,
+    gone_child_pids: Arc<Mutex<Vec<u32>>>,
     quit_callbacks: Arc<Mutex<Vec<QuitCallback>>>,
 }
 
@@ -34,6 +41,25 @@ fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+struct OneByteAsyncReader;
+
+#[async_trait::async_trait]
+impl AsyncReader for OneByteAsyncReader {
+    async fn read(&mut self, buf: &mut [u8]) -> std::result::Result<usize, io::Error> {
+        buf[0] = b'x';
+        Ok(1)
+    }
+}
+
+struct FailingAsyncReader;
+
+#[async_trait::async_trait]
+impl AsyncReader for FailingAsyncReader {
+    async fn read(&mut self, _buf: &mut [u8]) -> std::result::Result<usize, io::Error> {
+        Err(io::Error::other("injected terminal reader failure"))
+    }
 }
 
 impl MockOsApi {
@@ -47,9 +73,16 @@ impl MockOsApi {
             command_not_found_on_spawn_call: Arc::new(AtomicUsize::new(0)),
             command_not_found_payload_terminal_id: Arc::new(AtomicUsize::new(0)),
             spawn_terminal_calls: Arc::new(AtomicUsize::new(0)),
+            spawned_child_pid: Arc::new(AtomicUsize::new(0)),
             next_terminal_id: Arc::new(AtomicUsize::new(100)),
+            reserved_terminal_ids: Arc::new(Mutex::new(vec![])),
+            activated_terminal_ids: Arc::new(Mutex::new(vec![])),
             cleared_terminal_ids: Arc::new(Mutex::new(vec![])),
             fail_clear_terminal_ids: Arc::new(Mutex::new(vec![])),
+            killed_child_pids: Arc::new(Mutex::new(vec![])),
+            fail_kill_child_pids: Arc::new(Mutex::new(vec![])),
+            unconfirmed_exit_child_pids: Arc::new(Mutex::new(vec![])),
+            gone_child_pids: Arc::new(Mutex::new(vec![])),
             quit_callbacks: Arc::new(Mutex::new(vec![])),
         }
     }
@@ -71,11 +104,43 @@ impl MockOsApi {
     fn fail_clear_terminal_id(&self, terminal_id: u32) {
         lock_recover(&self.fail_clear_terminal_ids).push(terminal_id);
     }
+    fn allow_clear_terminal_id(&self, terminal_id: u32) {
+        lock_recover(&self.fail_clear_terminal_ids).retain(|id| *id != terminal_id);
+    }
+    fn return_child_pid_on_spawn(&self, child_pid: u32) {
+        self.spawned_child_pid
+            .store(child_pid as usize, Ordering::Relaxed);
+    }
+    fn fail_kill(&self, child_pid: u32) {
+        lock_recover(&self.fail_kill_child_pids).push(child_pid);
+    }
+    fn report_child_already_gone(&self, child_pid: u32) {
+        lock_recover(&self.gone_child_pids).push(child_pid);
+    }
+    fn delay_exit_confirmation(&self, child_pid: u32) {
+        lock_recover(&self.unconfirmed_exit_child_pids).push(child_pid);
+    }
+    fn confirm_exit(&self, child_pid: u32) {
+        lock_recover(&self.unconfirmed_exit_child_pids).retain(|pid| *pid != child_pid);
+        lock_recover(&self.gone_child_pids).push(child_pid);
+    }
+    fn allow_kill(&self, child_pid: u32) {
+        lock_recover(&self.fail_kill_child_pids).retain(|pid| *pid != child_pid);
+    }
+    fn killed_child_pids(&self) -> Vec<u32> {
+        lock_recover(&self.killed_child_pids).clone()
+    }
     fn record_cleared_terminal_id(&self, terminal_id: u32) {
         lock_recover(&self.cleared_terminal_ids).push(terminal_id);
     }
     fn cleared_terminal_ids(&self) -> Vec<u32> {
         lock_recover(&self.cleared_terminal_ids).clone()
+    }
+    fn reserved_terminal_ids(&self) -> Vec<u32> {
+        lock_recover(&self.reserved_terminal_ids).clone()
+    }
+    fn activated_terminal_ids(&self) -> Vec<u32> {
+        lock_recover(&self.activated_terminal_ids).clone()
     }
     fn fire_next_quit_callback(
         &self,
@@ -152,8 +217,54 @@ impl ServerOsApi for MockOsApi {
             self.record_cleared_terminal_id(terminal_id);
         })
     }
+    fn spawn_terminal_with_reserved_id(
+        &self,
+        terminal_id: u32,
+        _: TerminalAction,
+        quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
+        _: Option<PathBuf>,
+    ) -> anyhow::Result<(Box<dyn AsyncReader>, Option<u32>)> {
+        if !lock_recover(&self.reserved_terminal_ids).contains(&terminal_id) {
+            return Err(anyhow!(
+                "terminal {terminal_id} was not reserved before exact activation"
+            ));
+        }
+        let call = self.spawn_terminal_calls.fetch_add(1, Ordering::Relaxed) + 1;
+        let spawn_result: anyhow::Result<(Box<dyn AsyncReader>, Option<u32>)> =
+            if self.fail_spawn_terminal.load(Ordering::Relaxed)
+                || self.fail_on_spawn_call.load(Ordering::Relaxed) == call
+            {
+                Err(anyhow::Error::new(io::Error::other(
+                    "injected EMFILE-like spawn failure",
+                )))
+            } else if self.command_not_found_on_spawn_call.load(Ordering::Relaxed) == call {
+                let payload_terminal_id = self
+                    .command_not_found_payload_terminal_id
+                    .load(Ordering::Relaxed);
+                let payload_terminal_id = if payload_terminal_id == 0 {
+                    terminal_id
+                } else {
+                    payload_terminal_id as u32
+                };
+                Err(anyhow::Error::new(ZellijError::CommandNotFound {
+                    terminal_id: payload_terminal_id,
+                    command: "injected-missing-command".to_owned(),
+                }))
+            } else {
+                lock_recover(&self.quit_callbacks).push(quit_cb);
+                lock_recover(&self.activated_terminal_ids).push(terminal_id);
+                let child_pid = self.spawned_child_pid.load(Ordering::Relaxed);
+                Ok((
+                    Box::new(NullAsyncReader),
+                    (child_pid != 0).then_some(child_pid as u32),
+                ))
+            };
+        resolve_reserved_terminal_spawn(terminal_id, spawn_result, |_| {})
+    }
     fn reserve_terminal_id(&self) -> anyhow::Result<u32> {
-        Ok(self.next_terminal_id.fetch_add(1, Ordering::Relaxed) as u32)
+        let terminal_id = self.next_terminal_id.fetch_add(1, Ordering::Relaxed) as u32;
+        lock_recover(&self.reserved_terminal_ids).push(terminal_id);
+        Ok(terminal_id)
     }
     fn write_to_tty_stdin(&self, _: u32, buf: &[u8]) -> anyhow::Result<usize> {
         Ok(buf.len())
@@ -161,8 +272,25 @@ impl ServerOsApi for MockOsApi {
     fn tcdrain(&self, _: u32) -> anyhow::Result<()> {
         Ok(())
     }
-    fn kill(&self, _: u32) -> anyhow::Result<()> {
-        Ok(())
+    fn kill(&self, child_pid: u32) -> anyhow::Result<()> {
+        lock_recover(&self.killed_child_pids).push(child_pid);
+        if lock_recover(&self.gone_child_pids).contains(&child_pid) {
+            Err(anyhow::Error::new(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("child {child_pid} already exited"),
+            )))
+        } else if lock_recover(&self.fail_kill_child_pids).contains(&child_pid) {
+            Err(anyhow::Error::new(io::Error::other(format!(
+                "injected kill failure for child {child_pid}"
+            ))))
+        } else if lock_recover(&self.unconfirmed_exit_child_pids).contains(&child_pid) {
+            Err(anyhow::Error::new(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("child {child_pid} accepted termination but exit/reap remains unconfirmed"),
+            )))
+        } else {
+            Ok(())
+        }
     }
     fn force_kill(&self, _: u32) -> anyhow::Result<()> {
         Ok(())
@@ -232,6 +360,8 @@ impl ServerOsApi for MockOsApi {
         if lock_recover(&self.fail_clear_terminal_ids).contains(&terminal_id) {
             Err(anyhow!("injected clear failure for terminal {terminal_id}"))
         } else {
+            lock_recover(&self.reserved_terminal_ids).retain(|id| *id != terminal_id);
+            lock_recover(&self.activated_terminal_ids).retain(|id| *id != terminal_id);
             Ok(())
         }
     }
@@ -291,6 +421,7 @@ fn collect_command_changed_events(
 fn new_tab_spawn_failure_does_not_terminate_pty_thread() {
     let mock = MockOsApi::new();
     mock.fail_spawn_terminal();
+    let probe = mock.clone();
     let (pty_tx, pty_rx) = channels::unbounded();
     let pty_sender = SenderWithContext::new(pty_tx);
     let (screen_tx, _screen_rx) = channels::unbounded();
@@ -323,6 +454,14 @@ fn new_tab_spawn_failure_does_not_terminate_pty_thread() {
             None,
         ))
         .unwrap();
+    let (ack_tx, ack_rx) = channels::bounded(1);
+    pty_sender
+        .send(PtyInstruction::LayoutCommitResolved {
+            transaction_id: 1,
+            outcome: LayoutCommitOutcome::Committed,
+            ack: ack_tx,
+        })
+        .unwrap();
     pty_sender.send(PtyInstruction::Exit).unwrap();
 
     let result = pty_thread_main(pty, Box::<Layout>::default());
@@ -331,6 +470,15 @@ fn new_tab_spawn_failure_does_not_terminate_pty_thread() {
         result.is_ok(),
         "new-tab spawn failures such as EMFILE must be logged and keep the pty thread alive"
     );
+    let ack = ack_rx
+        .recv()
+        .expect("PTY must acknowledge the failed activation");
+    assert!(matches!(
+        ack,
+        Ok(LayoutCommitAck::ActivationRolledBack(message))
+            if message.contains("injected EMFILE-like spawn failure")
+    ));
+    assert_eq!(probe.cleared_terminal_ids(), vec![100]);
 }
 
 #[test]
@@ -350,6 +498,14 @@ fn pty_channel_disconnect_rolls_back_and_rejects_every_pending_layout() {
         Some(Box::new(mock)),
     );
     let pty = Pty::new(bus, false, None, None);
+    let plugin = RunPluginOrAlias::from_url("file:/pending-exit.wasm", &None, None, None).unwrap();
+    let layout_generation = DurableTabLayoutGeneration {
+        tab_id: 7,
+        tab_name: "pending-exit".to_owned(),
+        tab_instance_id: "0123456789abcdef0123456789abcdef".to_owned(),
+        generation: 9,
+        viewer_creation_fence: None,
+    };
 
     pty_sender
         .send(PtyInstruction::NewTab(
@@ -359,13 +515,13 @@ fn pty_channel_disconnect_rolls_back_and_rejects_every_pending_layout() {
             vec![],
             7,
             61,
-            HashMap::new(),
+            HashMap::from([(plugin, vec![77])]),
             None,
             false,
             true,
             (0, false),
             None,
-            None,
+            Some(Box::new(layout_generation.clone())),
         ))
         .unwrap();
     drop(pty_sender);
@@ -407,22 +563,111 @@ fn pty_channel_disconnect_rolls_back_and_rejects_every_pending_layout() {
         Some(ScreenInstruction::LayoutPreparationFailed {
             transaction_id: 61,
             tab_id: Some(7),
+            layout_generation: reported_generation,
+            cleanup:
+                LayoutPreparationCleanup::ReleasePluginReservation {
+                    plugin_ids,
+                    pty_cleanup_succeeded: true,
+                },
             ..
-        })
+        }) if plugin_ids == &vec![77]
+            && reported_generation.as_deref() == Some(&layout_generation)
     ));
 }
 
 #[test]
-fn partial_new_tab_spawn_failure_releases_terminals_and_plugins() {
+fn preparation_clear_failure_retains_debt_and_reports_exact_followup_receipt() {
+    let mock = MockOsApi::new();
+    mock.fail_clear_terminal_id(100);
+    let probe = mock.clone();
+    let (screen_tx, screen_rx) = channels::unbounded();
+    let mut bus: Bus<PtyInstruction> = Bus::empty();
+    bus.os_input = Some(Box::new(mock));
+    bus.senders.to_screen = Some(SenderWithContext::new(screen_tx));
+    bus.senders.should_silently_fail = false;
+    let mut pty = Pty::new(bus, false, None, None);
+    let generation = DurableTabLayoutGeneration {
+        tab_id: 7,
+        tab_name: "preparation-debt".to_owned(),
+        tab_instance_id: "fedcba9876543210fedcba9876543210".to_owned(),
+        generation: 3,
+        viewer_creation_fence: None,
+    };
+
+    pty.spawn_terminals_for_layout(
+        None,
+        TiledPaneLayout::default(),
+        vec![],
+        None,
+        HashMap::new(),
+        None,
+        7,
+        66,
+        false,
+        true,
+        (1, false),
+        None,
+        Some(Box::new(generation.clone())),
+    )
+    .expect("the prepared layout must reach Screen");
+    let rollback = pty.reject_pending_layout_send(66, anyhow!("injected Screen handoff failure"));
+    pty.reject_layout_preparation(
+        66,
+        Some(7),
+        None,
+        Some(Box::new(generation.clone())),
+        vec![801, 802],
+        rollback,
+    );
+
+    assert!(pty.pending_layout_cleanups.contains_key(&66));
+    assert_eq!(probe.reserved_terminal_ids(), vec![100]);
+    probe.allow_clear_terminal_id(100);
+    pty.retry_preparation_cleanup_debts();
+    assert!(!pty.pending_layout_cleanups.contains_key(&66));
+    assert!(probe.reserved_terminal_ids().is_empty());
+
+    let instructions = screen_rx
+        .try_iter()
+        .map(|(instruction, _)| instruction)
+        .collect::<Vec<_>>();
+    let cleanup_receipts = instructions
+        .iter()
+        .filter_map(|instruction| match instruction {
+            ScreenInstruction::LayoutPreparationFailed {
+                transaction_id: 66,
+                layout_generation,
+                cleanup:
+                    LayoutPreparationCleanup::ReleasePluginReservation {
+                        plugin_ids,
+                        pty_cleanup_succeeded,
+                    },
+                ..
+            } => Some((
+                layout_generation.as_deref(),
+                plugin_ids.as_slice(),
+                *pty_cleanup_succeeded,
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(cleanup_receipts.len(), 2);
+    assert_eq!(cleanup_receipts[0].0, Some(&generation));
+    assert_eq!(cleanup_receipts[0].1, &[801, 802]);
+    assert!(!cleanup_receipts[0].2);
+    assert_eq!(cleanup_receipts[1].0, Some(&generation));
+    assert_eq!(cleanup_receipts[1].1, &[801, 802]);
+    assert!(cleanup_receipts[1].2);
+}
+
+#[test]
+fn partial_new_tab_activation_failure_releases_every_reserved_terminal() {
     let mock = MockOsApi::new();
     mock.fail_on_spawn_call(2);
     let probe = mock.clone();
     let (mut pty, plugin_rx) = make_pty_with_plugin_receiver(mock);
     let (screen_tx, screen_rx) = channels::unbounded();
     pty.bus.senders.to_screen = Some(SenderWithContext::new(screen_tx));
-    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
-    let mut completion = NotificationEnd::new(completion_tx);
-    completion.require_explicit_resolution();
     let plugin =
         RunPluginOrAlias::from_url("file:/partial-new-tab.wasm", &None, None, None).unwrap();
     let plugin_ids = HashMap::from([(plugin, vec![77])]);
@@ -435,80 +680,55 @@ fn partial_new_tab_spawn_failure_releases_terminals_and_plugins() {
         ..Default::default()
     });
 
-    let error = pty
-        .spawn_terminals_for_layout(
-            None,
-            layout,
-            vec![],
-            Some(default_shell),
-            plugin_ids,
-            None,
-            7,
-            1,
-            false,
-            true,
-            (1, false),
-            Some(completion),
-            None,
-        )
-        .expect_err("the second terminal spawn must fail");
-
-    assert!(
-        format!("{:#}", error).contains("injected EMFILE-like spawn failure"),
-        "the original spawn failure must remain in the error chain"
-    );
+    pty.spawn_terminals_for_layout(
+        None,
+        layout,
+        vec![],
+        Some(default_shell),
+        plugin_ids,
+        None,
+        7,
+        1,
+        false,
+        true,
+        (1, false),
+        None,
+        None,
+    )
+    .expect("prepare must reserve IDs without spawning");
+    assert_eq!(probe.spawn_terminal_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(probe.reserved_terminal_ids(), vec![100, 101]);
+    assert!(probe.activated_terminal_ids().is_empty());
+    let transaction_id = match screen_rx.try_recv().expect("ApplyLayout").0 {
+        ScreenInstruction::ApplyLayout(_, _, _, _, _, _, _, _, _, _, _, transaction_id) => {
+            transaction_id
+        },
+        other => panic!("expected ApplyLayout, got {other:?}"),
+    };
+    let (resolution, ack) =
+        pty.resolve_layout_commit_with_ack(transaction_id, LayoutCommitOutcome::Committed);
+    let error = resolution.expect_err("the second exact activation must fail");
+    assert!(format!("{error:#}").contains("injected EMFILE-like spawn failure"));
+    assert!(matches!(
+        ack,
+        Ok(LayoutCommitAck::ActivationRolledBack(message))
+            if message.contains("injected EMFILE-like spawn failure")
+    ));
     assert_eq!(
         probe.cleared_terminal_ids(),
-        vec![101, 100],
-        "the failed reservation and the prior terminal must each be cleared exactly once"
+        vec![100, 101],
+        "the active first terminal and failed second reservation must be cleared in ID order"
     );
-    let unloaded_plugin_ids = plugin_rx
-        .try_iter()
-        .filter_map(|(instruction, _)| match instruction {
-            PluginInstruction::Unload(plugin_id) => Some(plugin_id),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        unloaded_plugin_ids,
-        vec![77],
-        "every plugin loaded for the failed tab must be unloaded exactly once"
-    );
-    let failures = screen_rx
-        .try_iter()
-        .filter_map(|(instruction, _)| match instruction {
-            ScreenInstruction::LayoutPreparationFailed {
-                transaction_id,
-                tab_id,
-                completion_tx,
-                ..
-            } => Some((transaction_id, tab_id, completion_tx)),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        failures.len(),
-        1,
-        "one failed preparation must emit one terminal Screen rejection"
-    );
-    let (transaction_id, tab_id, completion) = failures.into_iter().next().unwrap();
-    assert_eq!(transaction_id, 1);
-    assert_eq!(tab_id, Some(7));
-    drop(completion);
-    let completion = completion_rx
-        .blocking_recv()
-        .expect("the original action completion must be resolved");
-    assert_eq!(completion.exit_status, Some(1));
+    assert!(probe.reserved_terminal_ids().is_empty());
+    assert!(probe.activated_terminal_ids().is_empty());
     assert!(
-        completion
-            .error_message
-            .as_deref()
-            .is_some_and(|message| message.contains("injected EMFILE-like spawn failure"))
+        unloaded_plugin_ids(&plugin_rx).is_empty(),
+        "PTY must not compensate Plugin-owned reservations"
     );
 }
 
 #[test]
-fn floating_nth_spawn_failure_releases_every_prior_allocation_exactly_once() {
+fn floating_nth_activation_failure_releases_every_prior_terminal_exactly_once() {
     let mock = MockOsApi::new();
     mock.fail_on_spawn_call(3);
     let probe = mock.clone();
@@ -516,43 +736,45 @@ fn floating_nth_spawn_failure_releases_every_prior_allocation_exactly_once() {
     let plugin =
         RunPluginOrAlias::from_url("file:/floating-failure.wasm", &None, None, None).unwrap();
 
-    let error = pty
-        .spawn_terminals_for_layout(
-            None,
-            TiledPaneLayout::default(),
-            vec![FloatingPaneLayout::default(), FloatingPaneLayout::default()],
-            Some(TerminalAction::RunCommand(RunCommand {
-                command: PathBuf::from("sh"),
-                ..Default::default()
-            })),
-            HashMap::from([(plugin, vec![77])]),
-            None,
-            7,
-            2,
-            false,
-            true,
-            (1, false),
-            None,
-            None,
-        )
-        .expect_err("the second floating terminal spawn must fail");
-
+    let (screen_tx, screen_rx) = channels::unbounded();
+    pty.bus.senders.to_screen = Some(SenderWithContext::new(screen_tx));
+    pty.spawn_terminals_for_layout(
+        None,
+        TiledPaneLayout::default(),
+        vec![FloatingPaneLayout::default(), FloatingPaneLayout::default()],
+        Some(TerminalAction::RunCommand(RunCommand {
+            command: PathBuf::from("sh"),
+            ..Default::default()
+        })),
+        HashMap::from([(plugin, vec![77])]),
+        None,
+        7,
+        2,
+        false,
+        true,
+        (1, false),
+        None,
+        None,
+    )
+    .expect("all three terminal IDs must be reserved without spawning");
+    assert_eq!(probe.spawn_terminal_calls.load(Ordering::Relaxed), 0);
+    let transaction_id = match screen_rx.try_recv().expect("ApplyLayout").0 {
+        ScreenInstruction::ApplyLayout(_, _, _, _, _, _, _, _, _, _, _, transaction_id) => {
+            transaction_id
+        },
+        other => panic!("expected ApplyLayout, got {other:?}"),
+    };
+    let (resolution, ack) =
+        pty.resolve_layout_commit_with_ack(transaction_id, LayoutCommitOutcome::Committed);
+    let error = resolution.expect_err("the third exact activation must fail");
     assert!(format!("{error:#}").contains("injected EMFILE-like spawn failure"));
+    assert!(matches!(ack, Ok(LayoutCommitAck::ActivationRolledBack(_))));
     assert_eq!(
         probe.cleared_terminal_ids(),
-        vec![102, 100, 101],
-        "the failed reservation is cleared first, then the ledger rolls back in id order"
+        vec![100, 101, 102],
+        "the ledger rolls every reserved ID back exactly once in stable order"
     );
-    assert_eq!(
-        plugin_rx
-            .try_iter()
-            .filter_map(|(instruction, _)| match instruction {
-                PluginInstruction::Unload(plugin_id) => Some(plugin_id),
-                _ => None,
-            })
-            .collect::<Vec<_>>(),
-        vec![77]
-    );
+    assert!(unloaded_plugin_ids(&plugin_rx).is_empty());
 }
 
 #[test]
@@ -599,24 +821,21 @@ fn new_tab_apply_layout_failure_releases_terminals_and_plugins() {
     assert_eq!(
         probe.cleared_terminal_ids(),
         vec![100],
-        "the terminal allocated before ApplyLayout must not remain reserved"
+        "the terminal reserved before ApplyLayout must not remain reserved"
     );
-    let unloaded_plugin_ids = plugin_rx
-        .try_iter()
-        .filter_map(|(instruction, _)| match instruction {
-            PluginInstruction::Unload(plugin_id) => Some(plugin_id),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
     assert_eq!(
-        unloaded_plugin_ids,
-        vec![77],
-        "every plugin loaded for the rejected tab must be unloaded exactly once"
+        probe.spawn_terminal_calls.load(Ordering::Relaxed),
+        0,
+        "a failed Screen handoff must never activate a process"
+    );
+    assert!(
+        unloaded_plugin_ids(&plugin_rx).is_empty(),
+        "Plugin owns release of its own transaction reservation"
     );
 }
 
 #[test]
-fn post_apply_layout_notification_failure_keeps_new_tab_allocations() {
+fn command_not_found_with_hold_transitions_only_after_commit() {
     let mock = MockOsApi::new();
     mock.command_not_found_on_spawn_call(1);
     let probe = mock.clone();
@@ -639,8 +858,6 @@ fn post_apply_layout_notification_failure_keeps_new_tab_allocations() {
         })),
         ..Default::default()
     };
-    fail_next_command_not_found_notification();
-
     pty.spawn_terminals_for_layout(
         None,
         layout,
@@ -679,12 +896,12 @@ fn post_apply_layout_notification_failure_keeps_new_tab_allocations() {
             assert_eq!(
                 terminal_ids.len(),
                 1,
-                "only one explicit held terminal enters the layout"
+                "one reserved terminal enters the prepared layout"
             );
             assert_eq!(terminal_ids[0].0, 100);
             assert!(
-                terminal_ids[0].1.is_some(),
-                "CommandNotFound with hold_on_close must be explicit held state"
+                terminal_ids[0].1.is_none(),
+                "command existence is not probed by spawning during preparation"
             );
             assert_eq!(
                 plugin_ids.values().flatten().copied().collect::<Vec<_>>(),
@@ -702,23 +919,33 @@ fn post_apply_layout_notification_failure_keeps_new_tab_allocations() {
         probe.cleared_terminal_ids().is_empty(),
         "pending terminal must not be cleared before the Screen resolution"
     );
+    assert_eq!(probe.spawn_terminal_calls.load(Ordering::Relaxed), 0);
     assert!(
         !plugin_rx
             .try_iter()
             .any(|(instruction, _)| matches!(instruction, PluginInstruction::Unload(77))),
         "pending plugin must not be rolled back before the Screen resolution"
     );
-    pty.resolve_layout_commit_with_ack(transaction_id, LayoutCommitOutcome::Committed)
-        .0
-        .expect("the Screen commit must activate the held terminal");
-    assert!(
-        screen_rx.try_recv().is_err(),
-        "the injected optional notification must not produce a partial second screen message"
-    );
+    let (resolution, ack) =
+        pty.resolve_layout_commit_with_ack(transaction_id, LayoutCommitOutcome::Committed);
+    resolution.expect("the Screen commit must transition the missing command to held");
+    assert_eq!(ack, Ok(LayoutCommitAck::Resolved));
+    assert!(matches!(
+        screen_rx.try_recv(),
+        Ok((ScreenInstruction::PtyBytes(100, _), _))
+    ));
+    assert!(matches!(
+        screen_rx.try_recv(),
+        Ok((
+            ScreenInstruction::HoldPane(PaneId::Terminal(100), Some(2), _),
+            _
+        ))
+    ));
+    assert!(probe.activated_terminal_ids().is_empty());
     let (replayed_resolution, replayed_ack) =
         pty.resolve_layout_commit_with_ack(transaction_id, LayoutCommitOutcome::Committed);
     replayed_resolution.expect("a lost ACK retry must replay the committed receipt");
-    assert_eq!(replayed_ack, Ok(()));
+    assert_eq!(replayed_ack, Ok(LayoutCommitAck::Resolved));
 }
 
 #[test]
@@ -763,15 +990,16 @@ fn fast_exit_callback_waits_for_screen_commit_at_the_common_pty_fence() {
         },
         other => panic!("expected ApplyLayout, got {other:?}"),
     };
-    callback_probe.fire_next_quit_callback(PaneId::Terminal(100), Some(0), command);
     assert!(
-        screen_rx.try_recv().is_err(),
-        "a backend waiter callback must not race ahead of Screen ownership"
+        lock_recover(&callback_probe.quit_callbacks).is_empty(),
+        "no child and therefore no exit callback may exist before commit"
     );
 
-    pty.resolve_layout_commit_with_ack(transaction_id, LayoutCommitOutcome::Committed)
-        .0
-        .expect("Screen commit must release the fast-exit callback");
+    let (resolution, ack) =
+        pty.resolve_layout_commit_with_ack(transaction_id, LayoutCommitOutcome::Committed);
+    resolution.expect("Screen commit must activate the process and release its callback fence");
+    assert_eq!(ack, Ok(LayoutCommitAck::Resolved));
+    callback_probe.fire_next_quit_callback(PaneId::Terminal(100), Some(0), command);
     assert!(matches!(
         screen_rx.try_recv(),
         Ok((ScreenInstruction::ClosePane(PaneId::Terminal(100), ..), _))
@@ -779,7 +1007,12 @@ fn fast_exit_callback_waits_for_screen_commit_at_the_common_pty_fence() {
     let (replayed_resolution, replayed_ack) =
         pty.resolve_layout_commit_with_ack(transaction_id, LayoutCommitOutcome::Committed);
     replayed_resolution.expect("a lost ACK retry must replay without reactivation");
-    assert_eq!(replayed_ack, Ok(()));
+    assert_eq!(replayed_ack, Ok(LayoutCommitAck::Resolved));
+    assert_eq!(
+        callback_probe.spawn_terminal_calls.load(Ordering::Relaxed),
+        1,
+        "receipt replay must not spawn a second process"
+    );
     assert!(
         screen_rx.try_recv().is_err(),
         "a fast exit must fire exactly once"
@@ -787,7 +1020,7 @@ fn fast_exit_callback_waits_for_screen_commit_at_the_common_pty_fence() {
 }
 
 #[test]
-fn rejected_screen_commit_cancels_fast_exit_and_rolls_back_union_exactly_once() {
+fn rejected_screen_commit_spawns_nothing_and_rolls_back_terminal_reservations() {
     let mock = MockOsApi::new();
     let probe = mock.clone();
     let (plugin_tx, plugin_rx) = channels::unbounded();
@@ -831,10 +1064,9 @@ fn rejected_screen_commit_cancels_fast_exit_and_rolls_back_union_exactly_once() 
         },
         other => panic!("expected ApplyLayout, got {other:?}"),
     };
-    probe.fire_next_quit_callback(PaneId::Terminal(100), Some(0), command);
     assert!(
-        screen_rx.try_recv().is_err(),
-        "the queued fast exit must remain behind the ownership fence"
+        lock_recover(&probe.quit_callbacks).is_empty(),
+        "a rejected transaction must not have an exit callback to cancel"
     );
 
     let rejected_outcome =
@@ -844,11 +1076,12 @@ fn rejected_screen_commit_cancels_fast_exit_and_rolls_back_union_exactly_once() 
     resolution.expect_err("a rejected commit reports the Screen failure after cleanup");
     assert_eq!(
         ack,
-        Ok(()),
+        Ok(LayoutCommitAck::Resolved),
         "a business rejection ACK certifies that PTY cleanup completed"
     );
     assert_eq!(probe.cleared_terminal_ids(), vec![100]);
-    assert_eq!(unloaded_plugin_ids(&plugin_rx), vec![77]);
+    assert_eq!(probe.spawn_terminal_calls.load(Ordering::Relaxed), 0);
+    assert!(unloaded_plugin_ids(&plugin_rx).is_empty());
     assert!(
         screen_rx.try_recv().is_err(),
         "rollback must cancel the queued quit callback instead of creating a ghost ClosePane"
@@ -859,7 +1092,7 @@ fn rejected_screen_commit_cancels_fast_exit_and_rolls_back_union_exactly_once() 
     replayed_resolution.expect_err("the cached business rejection remains a local diagnostic");
     assert_eq!(
         replayed_ack,
-        Ok(()),
+        Ok(LayoutCommitAck::Resolved),
         "retry must replay the successful cleanup receipt"
     );
     pty.resolve_layout_commit_with_ack(
@@ -876,6 +1109,7 @@ fn rejected_screen_commit_cancels_fast_exit_and_rolls_back_union_exactly_once() 
 fn rejected_layout_ack_reports_only_real_cleanup_failure() {
     let mock = MockOsApi::new();
     mock.fail_clear_terminal_id(100);
+    let probe = mock.clone();
     let (screen_tx, screen_rx) = channels::unbounded();
     let mut bus: Bus<PtyInstruction> = Bus::empty();
     bus.os_input = Some(Box::new(mock));
@@ -917,6 +1151,35 @@ fn rejected_layout_ack_reports_only_real_cleanup_failure() {
         "unexpected cleanup ACK: {ack_error}"
     );
     assert!(format!("{resolution_error:#}").contains("injected clear failure for terminal 100"));
+    assert!(
+        pty.pending_layout_cleanups.contains_key(&transaction_id),
+        "failed cleanup must retain an exact transaction-owned retry ledger"
+    );
+    assert!(
+        !pty.resolved_layout_commits.contains_key(&transaction_id),
+        "an unresolved cleanup must never be cached as a final receipt"
+    );
+    assert_eq!(probe.reserved_terminal_ids(), vec![100]);
+
+    probe.allow_clear_terminal_id(100);
+    let (retried_resolution, retried_ack) = pty.resolve_layout_commit_with_ack(
+        transaction_id,
+        LayoutCommitOutcome::Rejected("injected Screen failure".to_owned()),
+    );
+    retried_resolution.expect_err("the business rejection remains the local diagnostic");
+    assert_eq!(
+        retried_ack,
+        Ok(LayoutCommitAck::Resolved),
+        "same-outcome retry must resolve only after the retained ledger is empty"
+    );
+    assert!(!pty.pending_layout_cleanups.contains_key(&transaction_id));
+    assert!(pty.resolved_layout_commits.contains_key(&transaction_id));
+    assert!(probe.reserved_terminal_ids().is_empty());
+    assert_eq!(
+        probe.cleared_terminal_ids(),
+        vec![100, 100],
+        "retry must target only the exact retained terminal"
+    );
 }
 
 #[test]
@@ -971,8 +1234,11 @@ fn partial_activation_failure_keeps_guard_armed_and_rolls_back_every_allocation(
         pty.resolve_layout_commit_with_ack(transaction_id, LayoutCommitOutcome::Committed);
     let resolution_error =
         resolution.expect_err("the missing Plugin receiver must fail full activation");
-    let ack_error = ack.expect_err("partial activation must not ACK success");
-    assert!(ack_error.contains("failed to get plugin sender"));
+    let rollback_message = match ack {
+        Ok(LayoutCommitAck::ActivationRolledBack(message)) => message,
+        other => panic!("full cleanup must return explicit rolled-back ACK, got {other:?}"),
+    };
+    assert!(rollback_message.contains("failed to get plugin sender"));
     assert!(format!("{resolution_error:#}").contains("failed to get plugin sender"));
     assert_eq!(
         probe.cleared_terminal_ids(),
@@ -989,6 +1255,488 @@ fn partial_activation_failure_keeps_guard_armed_and_rolls_back_every_allocation(
 }
 
 #[test]
+fn activation_cleanup_kill_failure_retains_exact_debt_until_same_outcome_retry() {
+    let mock = MockOsApi::new();
+    mock.return_child_pid_on_spawn(4242);
+    mock.fail_kill(4242);
+    let probe = mock.clone();
+    let (screen_tx, screen_rx) = channels::unbounded();
+    let mut bus: Bus<PtyInstruction> = Bus::empty();
+    bus.os_input = Some(Box::new(mock));
+    bus.senders.to_screen = Some(SenderWithContext::new(screen_tx));
+    bus.senders.should_silently_fail = false;
+    let mut pty = Pty::new(bus, false, None, None);
+
+    pty.spawn_terminals_for_layout(
+        None,
+        TiledPaneLayout {
+            run: Some(Run::Command(RunCommand {
+                command: PathBuf::from("cleanup-debt-command"),
+                originating_plugin: Some(OriginatingPlugin::new(77, 1, Default::default())),
+                ..Default::default()
+            })),
+            ..Default::default()
+        },
+        vec![],
+        None,
+        HashMap::new(),
+        None,
+        7,
+        65,
+        false,
+        true,
+        (1, false),
+        None,
+        None,
+    )
+    .expect("the prepared layout must reach Screen");
+    let transaction_id = match screen_rx.try_recv().expect("ApplyLayout").0 {
+        ScreenInstruction::ApplyLayout(_, _, _, _, _, _, _, _, _, _, _, transaction_id) => {
+            transaction_id
+        },
+        other => panic!("expected ApplyLayout, got {other:?}"),
+    };
+    pty.terminal_cwds
+        .insert(100, PathBuf::from("/tmp/cleanup-debt"));
+    pty.terminal_cmds
+        .insert(100, vec!["cleanup-debt-command".to_owned()]);
+
+    let (resolution, ack) =
+        pty.resolve_layout_commit_with_ack(transaction_id, LayoutCommitOutcome::Committed);
+    assert!(
+        format!(
+            "{:#}",
+            resolution.expect_err("Plugin notification must fail")
+        )
+        .contains("injected kill failure for child 4242")
+    );
+    assert!(
+        ack.expect_err("failed kill must not certify activation rollback")
+            .contains("injected kill failure for child 4242")
+    );
+    assert!(pty.pending_layout_cleanups.contains_key(&transaction_id));
+    assert_eq!(pty.id_to_child_pid.get(&100), Some(&4242));
+    assert!(pty.task_handles.contains_key(&100));
+    assert!(pty.pane_activity_flags.contains_key(&100));
+    assert!(pty.terminal_cwds.contains_key(&100));
+    assert!(pty.terminal_cmds.contains_key(&100));
+    assert_eq!(probe.cleared_terminal_ids(), Vec::<u32>::new());
+
+    probe.allow_kill(4242);
+    let (retried_resolution, retried_ack) =
+        pty.resolve_layout_commit_with_ack(transaction_id, LayoutCommitOutcome::Committed);
+    retried_resolution.expect_err("activation failure remains the local diagnostic");
+    assert!(matches!(
+        retried_ack,
+        Ok(LayoutCommitAck::ActivationRolledBack(message))
+            if message.contains("failed to get plugin sender")
+    ));
+    assert_eq!(probe.killed_child_pids(), vec![4242, 4242]);
+    assert_eq!(probe.cleared_terminal_ids(), vec![100]);
+    assert!(!pty.pending_layout_cleanups.contains_key(&transaction_id));
+    assert!(!pty.id_to_child_pid.contains_key(&100));
+    assert!(!pty.task_handles.contains_key(&100));
+    assert!(!pty.pane_activity_flags.contains_key(&100));
+    assert!(!pty.terminal_cwds.contains_key(&100));
+    assert!(!pty.terminal_cmds.contains_key(&100));
+}
+
+#[test]
+fn runtime_panic_after_live_layout_spawn_is_caught_and_strictly_rolled_back() {
+    let mock = MockOsApi::new();
+    mock.return_child_pid_on_spawn(4242);
+    let probe = mock.clone();
+    let (screen_tx, screen_rx) = channels::unbounded();
+    let mut bus: Bus<PtyInstruction> = Bus::empty();
+    bus.os_input = Some(Box::new(mock));
+    bus.senders.to_screen = Some(SenderWithContext::new(screen_tx));
+    bus.senders.should_silently_fail = false;
+    let mut pty = Pty::new(bus, false, None, None);
+
+    pty.spawn_terminals_for_layout(
+        None,
+        TiledPaneLayout::default(),
+        vec![],
+        None,
+        HashMap::new(),
+        None,
+        7,
+        67,
+        false,
+        true,
+        (1, false),
+        None,
+        None,
+    )
+    .expect("the prepared layout must reach Screen");
+    let transaction_id = match screen_rx.try_recv().expect("ApplyLayout").0 {
+        ScreenInstruction::ApplyLayout(_, _, _, _, _, _, _, _, _, _, _, transaction_id) => {
+            transaction_id
+        },
+        other => panic!("expected ApplyLayout, got {other:?}"),
+    };
+    panic_next_terminal_runtime_spawn();
+
+    let (resolution, ack) =
+        pty.resolve_layout_commit_with_ack(transaction_id, LayoutCommitOutcome::Committed);
+    let error = resolution.expect_err("the injected runtime panic must fail activation");
+    assert!(format!("{error:#}").contains("injected terminal runtime spawn panic"));
+    assert!(matches!(
+        ack,
+        Ok(LayoutCommitAck::ActivationRolledBack(message))
+            if message.contains("injected terminal runtime spawn panic")
+    ));
+    assert_eq!(probe.killed_child_pids(), vec![4242]);
+    assert_eq!(probe.cleared_terminal_ids(), vec![100]);
+    assert!(!pty.pending_layout_cleanups.contains_key(&transaction_id));
+    assert!(!pty.pending_terminal_cleanups.contains_key(&100));
+    assert!(!pty.id_to_child_pid.contains_key(&100));
+    assert!(!pty.task_handles.contains_key(&100));
+    assert!(!pty.pane_activity_flags.contains_key(&100));
+}
+
+#[test]
+fn terminal_reader_and_screen_send_failures_return_exact_cleanup_to_the_pty_owner() {
+    let mock = MockOsApi::new();
+    let (pty_tx, pty_rx) = channels::unbounded();
+    let mut bus: Bus<PtyInstruction> = Bus::empty();
+    bus.os_input = Some(Box::new(mock));
+    bus.senders.to_pty = Some(SenderWithContext::new(pty_tx));
+    bus.senders.should_silently_fail = false;
+    let pty = Pty::new(bus, false, None, None);
+    for (terminal_id, reader) in [
+        (100, Box::new(FailingAsyncReader) as Box<dyn AsyncReader>),
+        (101, Box::new(OneByteAsyncReader) as Box<dyn AsyncReader>),
+    ] {
+        let terminal_bytes = pty
+            .spawn_terminal_bytes_task(terminal_id, reader, Arc::new(AtomicBool::new(false)))
+            .expect("the global runtime must accept the reader task");
+        async_runtime()
+            .block_on(terminal_bytes)
+            .expect("the failed reader task must return after handing cleanup back");
+    }
+
+    let mut cleanup_ids = pty_rx
+        .try_iter()
+        .filter_map(|(instruction, _)| match instruction {
+            PtyInstruction::ClosePane(PaneId::Terminal(terminal_id), None) => Some(terminal_id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    cleanup_ids.sort_unstable();
+    assert_eq!(cleanup_ids, vec![100, 101]);
+}
+
+#[test]
+fn close_terminal_treats_an_already_exited_child_as_certified_cleanup() {
+    let mock = MockOsApi::new();
+    mock.report_child_already_gone(4242);
+    let probe = mock.clone();
+    let (mut pty, _plugin_rx) = make_pty_with_plugin_receiver(mock);
+    set_active_terminal(&mut pty, 100, 4242);
+    pty.terminal_cwds
+        .insert(100, PathBuf::from("/tmp/already-gone"));
+
+    pty.close_pane(PaneId::Terminal(100))
+        .expect("an already-exited child is a successful idempotent close");
+
+    assert_eq!(probe.killed_child_pids(), vec![4242]);
+    assert_eq!(probe.cleared_terminal_ids(), vec![100]);
+    assert!(!pty.id_to_child_pid.contains_key(&100));
+    assert!(!pty.pane_activity_flags.contains_key(&100));
+    assert!(!pty.terminal_cwds.contains_key(&100));
+}
+
+#[test]
+fn clear_retry_does_not_rekill_an_already_confirmed_dead_child() {
+    let mock = MockOsApi::new();
+    mock.fail_clear_terminal_id(100);
+    let probe = mock.clone();
+    let (mut pty, _plugin_rx) = make_pty_with_plugin_receiver(mock);
+    set_active_terminal(&mut pty, 100, 4242);
+
+    let error = pty
+        .close_pane(PaneId::Terminal(100))
+        .expect_err("the injected terminal-id clear failure must remain cleanup debt");
+    assert!(format!("{error:#}").contains("injected clear failure"));
+    assert_eq!(probe.killed_child_pids(), vec![4242]);
+    assert!(pty.terminal_kill_confirmations.contains(&100));
+    assert_eq!(pty.id_to_child_pid.get(&100), Some(&4242));
+    assert!(pty.pane_activity_flags.contains_key(&100));
+
+    probe.allow_clear_terminal_id(100);
+    pty.close_pane(PaneId::Terminal(100))
+        .expect("retry must resume at the exact remaining clear step");
+
+    assert_eq!(
+        probe.killed_child_pids(),
+        vec![4242],
+        "a confirmed-dead PID must not be targeted again while clear debt is retried"
+    );
+    assert_eq!(probe.cleared_terminal_ids(), vec![100, 100]);
+    assert!(!pty.terminal_kill_confirmations.contains(&100));
+    assert!(!pty.id_to_child_pid.contains_key(&100));
+    assert!(!pty.pane_activity_flags.contains_key(&100));
+}
+
+#[test]
+fn close_kill_failure_stays_as_debt_without_terminating_the_pty_loop() {
+    let mock = MockOsApi::new();
+    mock.fail_kill(4242);
+    let probe = mock.clone();
+    let (pty_tx, pty_rx) = channels::unbounded();
+    let pty_sender = SenderWithContext::new(pty_tx);
+    let bus = Bus::new(
+        vec![pty_rx],
+        ThreadSenders {
+            should_silently_fail: false,
+            ..Default::default()
+        },
+        Some(Box::new(mock)),
+    );
+    let mut pty = Pty::new(bus, false, None, None);
+    set_active_terminal(&mut pty, 100, 4242);
+    pty_sender
+        .send(PtyInstruction::ClosePane(PaneId::Terminal(100), None))
+        .unwrap();
+    pty_sender.send(PtyInstruction::Exit).unwrap();
+
+    pty_thread_main_loop(&mut pty, Box::<Layout>::default())
+        .expect("strict close failure must not terminate the PTY owner");
+
+    assert!(pty.pending_terminal_cleanups.contains_key(&100));
+    assert_eq!(pty.id_to_child_pid.get(&100), Some(&4242));
+    assert!(pty.pane_activity_flags.contains_key(&100));
+    assert_eq!(probe.killed_child_pids(), vec![4242, 4242]);
+    assert!(probe.cleared_terminal_ids().is_empty());
+}
+
+#[test]
+fn terminal_cleanup_debt_resolves_all_completion_waiters_only_after_certified_close() {
+    let mock = MockOsApi::new();
+    mock.fail_kill(4242);
+    let probe = mock.clone();
+    let (mut pty, _plugin_rx) = make_pty_with_plugin_receiver(mock);
+    set_active_terminal(&mut pty, 100, 4242);
+    let (first_tx, mut first_rx) = tokio::sync::oneshot::channel();
+    let (second_tx, mut second_rx) = tokio::sync::oneshot::channel();
+
+    pty.defer_terminal_cleanup(100, Some(NotificationEnd::new(first_tx)), true);
+    pty.retry_terminal_cleanup_debts();
+    assert!(matches!(
+        first_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    pty.defer_terminal_cleanup(100, Some(NotificationEnd::new(second_tx)), true);
+    probe.allow_kill(4242);
+    pty.retry_terminal_cleanup_debts();
+
+    for completion in [
+        first_rx.try_recv().expect("first waiter must resolve"),
+        second_rx
+            .try_recv()
+            .expect("deduplicated waiter must resolve"),
+    ] {
+        assert_eq!(completion.exit_status, None);
+        assert_eq!(completion.error_message, None);
+    }
+    assert!(!pty.pending_terminal_cleanups.contains_key(&100));
+    assert_eq!(probe.killed_child_pids(), vec![4242, 4242]);
+    assert_eq!(probe.cleared_terminal_ids(), vec![100]);
+}
+
+#[test]
+fn layout_terminal_cleanup_ack_retries_only_debt_and_replays_full_exact_receipt() {
+    let mock = MockOsApi::new();
+    mock.fail_kill(4343);
+    let probe = mock.clone();
+    let (mut pty, _plugin_rx) = make_pty_with_plugin_receiver(mock);
+    set_active_terminal(&mut pty, 100, 4242);
+    set_active_terminal(&mut pty, 101, 4343);
+
+    let first_ack = pty.cleanup_layout_terminals_with_ack(901, vec![101, 100, 101]);
+    let first_error = first_ack.expect_err("one failed kill must keep the exact cleanup pending");
+    assert!(first_error.contains("Terminal(101)"));
+    let pending = pty
+        .pending_layout_terminal_cleanups
+        .get(&901)
+        .expect("the transaction must retain only unresolved cleanup debt");
+    assert_eq!(pending.exact_terminal_ids, vec![100, 101]);
+    assert_eq!(
+        pending
+            .remaining_terminal_ids
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![101]
+    );
+    assert!(!pty.id_to_child_pid.contains_key(&100));
+    assert_eq!(pty.id_to_child_pid.get(&101), Some(&4343));
+    assert_eq!(probe.killed_child_pids(), vec![4242, 4343]);
+    assert_eq!(probe.cleared_terminal_ids(), vec![100]);
+
+    probe.allow_kill(4343);
+    assert_eq!(
+        pty.cleanup_layout_terminals_with_ack(901, vec![100, 101]),
+        Ok(vec![100, 101])
+    );
+    assert_eq!(probe.killed_child_pids(), vec![4242, 4343, 4343]);
+    assert_eq!(probe.cleared_terminal_ids(), vec![100, 101]);
+    assert!(!pty.pending_layout_terminal_cleanups.contains_key(&901));
+    assert_eq!(
+        pty.resolved_layout_terminal_cleanups
+            .get(&901)
+            .map(Vec::as_slice),
+        Some([100, 101].as_slice())
+    );
+
+    assert_eq!(
+        pty.cleanup_layout_terminals_with_ack(901, vec![101, 100, 100]),
+        Ok(vec![100, 101]),
+        "a lost success ACK must replay without touching OS state again"
+    );
+    assert_eq!(probe.killed_child_pids(), vec![4242, 4343, 4343]);
+    assert_eq!(probe.cleared_terminal_ids(), vec![100, 101]);
+    assert!(
+        pty.cleanup_layout_terminals_with_ack(901, vec![100])
+            .expect_err("a reused transaction id with different exact IDs must be rejected")
+            .contains("already resolved")
+    );
+}
+
+#[test]
+fn layout_terminal_cleanup_refuses_ack_until_process_exit_is_confirmed() {
+    let mock = MockOsApi::new();
+    mock.delay_exit_confirmation(4242);
+    let probe = mock.clone();
+    let (mut pty, _plugin_rx) = make_pty_with_plugin_receiver(mock);
+    set_active_terminal(&mut pty, 100, 4242);
+
+    let error = pty
+        .cleanup_layout_terminals_with_ack(903, vec![100])
+        .expect_err("unconfirmed exit must remain exact transaction debt");
+    assert!(error.contains("exit/reap remains unconfirmed"));
+    assert_eq!(probe.cleared_terminal_ids(), Vec::<u32>::new());
+    assert_eq!(pty.id_to_child_pid.get(&100), Some(&4242));
+    assert_eq!(
+        pty.pending_layout_terminal_cleanups
+            .get(&903)
+            .map(|cleanup| cleanup
+                .remaining_terminal_ids
+                .iter()
+                .copied()
+                .collect::<Vec<_>>()),
+        Some(vec![100])
+    );
+    assert!(
+        !pty.resolved_layout_terminal_cleanups.contains_key(&903),
+        "a process that may still be alive must not mint a replayable success receipt"
+    );
+
+    probe.confirm_exit(4242);
+    assert_eq!(
+        pty.cleanup_layout_terminals_with_ack(903, vec![100]),
+        Ok(vec![100])
+    );
+    assert_eq!(probe.cleared_terminal_ids(), vec![100]);
+    assert!(!pty.id_to_child_pid.contains_key(&100));
+    assert!(!pty.pending_layout_terminal_cleanups.contains_key(&903));
+    assert_eq!(
+        pty.resolved_layout_terminal_cleanups.get(&903),
+        Some(&vec![100])
+    );
+}
+
+#[test]
+fn layout_terminal_cleanup_instruction_acks_without_terminating_the_pty_loop() {
+    let mock = MockOsApi::new();
+    let probe = mock.clone();
+    let (pty_tx, pty_rx) = channels::unbounded();
+    let pty_sender = SenderWithContext::new(pty_tx);
+    let bus = Bus::new(
+        vec![pty_rx],
+        ThreadSenders {
+            should_silently_fail: false,
+            ..Default::default()
+        },
+        Some(Box::new(mock)),
+    );
+    let mut pty = Pty::new(bus, false, None, None);
+    set_active_terminal(&mut pty, 100, 4242);
+    let (ack_tx, ack_rx) = channels::bounded(1);
+    pty_sender
+        .send(PtyInstruction::CleanupLayoutTerminals {
+            transaction_id: 902,
+            terminal_ids: vec![100, 100],
+            ack: ack_tx,
+        })
+        .unwrap();
+    pty_sender.send(PtyInstruction::Exit).unwrap();
+
+    pty_thread_main_loop(&mut pty, Box::<Layout>::default())
+        .expect("a certified cleanup ACK must keep the PTY loop healthy");
+
+    assert_eq!(ack_rx.recv().unwrap(), Ok(vec![100]));
+    assert_eq!(probe.killed_child_pids(), vec![4242]);
+    assert_eq!(probe.cleared_terminal_ids(), vec![100]);
+}
+
+#[test]
+fn originating_plugin_open_notifications_cross_the_commit_fence_as_one_batch() {
+    let (plugin_tx, plugin_rx) = channels::unbounded();
+    let mut bus: Bus<PtyInstruction> = Bus::empty();
+    bus.senders.to_plugin = Some(SenderWithContext::new(plugin_tx));
+    bus.senders.should_silently_fail = false;
+    let mut pty = Pty::new(bus, false, None, None);
+    let first_origin = OriginatingPlugin::new(77, 1, Default::default());
+    let second_origin = OriginatingPlugin::new(88, 2, Default::default());
+
+    assert!(
+        pty.begin_layout_commit(
+            64,
+            PendingLayoutCommit {
+                allocation_ledger: LayoutAllocationLedger::default(),
+                terminals: vec![],
+                originating_plugins_to_inform: vec![
+                    (100, first_origin.clone()),
+                    (101, second_origin.clone()),
+                ],
+                layout_plugin_ids: vec![],
+                tab_id: Some(7),
+                layout_generation: None,
+            },
+        )
+        .is_ok(),
+        "the transaction must enter the PTY commit ledger"
+    );
+
+    let (resolution, ack) = pty.resolve_layout_commit_with_ack(64, LayoutCommitOutcome::Committed);
+    resolution.expect("the atomic notification batch must be accepted");
+    assert_eq!(ack, Ok(LayoutCommitAck::Resolved));
+    let (instruction, _) = plugin_rx
+        .try_recv()
+        .expect("one Plugin update must carry the whole notification batch");
+    let PluginInstruction::Update(updates) = instruction else {
+        panic!("expected a batched Plugin update, got {instruction:?}");
+    };
+    assert_eq!(updates.len(), 2);
+    assert!(matches!(
+        &updates[0],
+        (Some(77), Some(1), Event::CommandPaneOpened(100, _))
+    ));
+    assert!(matches!(
+        &updates[1],
+        (Some(88), Some(2), Event::CommandPaneOpened(101, _))
+    ));
+    assert!(
+        plugin_rx.try_recv().is_err(),
+        "a partial second delivery must be impossible"
+    );
+    assert_eq!(pty.originating_plugins.get(&100), Some(&first_origin));
+    assert_eq!(pty.originating_plugins.get(&101), Some(&second_origin));
+}
+
+#[test]
 fn duplicate_and_late_layout_resolutions_never_replace_the_live_ledger() {
     let mut pty = Pty::new(Bus::empty(), false, None, None);
     let mut first_ledger = LayoutAllocationLedger::default();
@@ -1000,7 +1748,9 @@ fn duplicate_and_late_layout_resolutions_never_replace_the_live_ledger() {
                 allocation_ledger: first_ledger,
                 terminals: vec![],
                 originating_plugins_to_inform: vec![],
+                layout_plugin_ids: vec![],
                 tab_id: Some(7),
+                layout_generation: None,
             },
         )
         .is_ok(),
@@ -1016,7 +1766,9 @@ fn duplicate_and_late_layout_resolutions_never_replace_the_live_ledger() {
                 allocation_ledger: duplicate_ledger,
                 terminals: vec![],
                 originating_plugins_to_inform: vec![],
+                layout_plugin_ids: vec![],
                 tab_id: Some(8),
+                layout_generation: None,
             },
         )
         .expect_err("a duplicate identity must not replace the live transaction");
@@ -1025,33 +1777,23 @@ fn duplicate_and_late_layout_resolutions_never_replace_the_live_ledger() {
     assert!(
         duplicate_commit
             .allocation_ledger
-            .allocated_ids
-            .contains(&PaneId::Terminal(101))
+            .terminal_ids
+            .contains(&101)
     );
     let live_commit = pty.pending_layout_commits.get(&62).unwrap();
-    assert!(
-        live_commit
-            .allocation_ledger
-            .allocated_ids
-            .contains(&PaneId::Terminal(100))
-    );
-    assert!(
-        !live_commit
-            .allocation_ledger
-            .allocated_ids
-            .contains(&PaneId::Terminal(101))
-    );
+    assert!(live_commit.allocation_ledger.terminal_ids.contains(&100));
+    assert!(!live_commit.allocation_ledger.terminal_ids.contains(&101));
 
     let (resolution, ack) = pty.resolve_layout_commit_with_ack(62, LayoutCommitOutcome::Committed);
     assert!(resolution.is_ok());
-    assert_eq!(ack, Ok(()));
+    assert_eq!(ack, Ok(LayoutCommitAck::Resolved));
     let (replayed_resolution, replayed_ack) =
         pty.resolve_layout_commit_with_ack(62, LayoutCommitOutcome::Committed);
     assert!(
         replayed_resolution.is_ok(),
         "same-outcome retry must replay the receipt"
     );
-    assert_eq!(replayed_ack, Ok(()));
+    assert_eq!(replayed_ack, Ok(LayoutCommitAck::Resolved));
     let mut reused_ledger = LayoutAllocationLedger::default();
     reused_ledger.track_terminal(102);
     let reuse_failure = pty
@@ -1061,18 +1803,15 @@ fn duplicate_and_late_layout_resolutions_never_replace_the_live_ledger() {
                 allocation_ledger: reused_ledger,
                 terminals: vec![],
                 originating_plugins_to_inform: vec![],
+                layout_plugin_ids: vec![],
                 tab_id: Some(9),
+                layout_generation: None,
             },
         )
         .expect_err("a resolved transaction identity must not be reused");
     let (reuse_error, reused_commit) = reuse_failure.into_parts();
     assert!(format!("{reuse_error:#}").contains("layout transaction id 62 is already resolved"));
-    assert!(
-        reused_commit
-            .allocation_ledger
-            .allocated_ids
-            .contains(&PaneId::Terminal(102))
-    );
+    assert!(reused_commit.allocation_ledger.terminal_ids.contains(&102));
     let (late_resolution, late_ack) = pty.resolve_layout_commit_with_ack(
         62,
         LayoutCommitOutcome::Rejected("late duplicate".to_owned()),
@@ -1100,7 +1839,7 @@ fn duplicate_and_late_layout_resolutions_never_replace_the_live_ledger() {
 fn layout_resolution_receipts_are_strictly_bounded() {
     let mut pty = Pty::new(Bus::empty(), false, None, None);
     for transaction_id in 1..=(MAX_LAYOUT_COMMIT_RECEIPTS as u64 + 1) {
-        let resolution = (Ok(()), Ok(()));
+        let resolution = (Ok(()), Ok(LayoutCommitAck::Resolved));
         pty.record_layout_commit_receipt(
             transaction_id,
             LayoutCommitOutcome::Committed,
@@ -1153,29 +1892,38 @@ fn command_not_found_without_explicit_hold_never_enters_a_layout() {
         bus.senders.should_silently_fail = false;
         let mut pty = Pty::new(bus, false, None, None);
 
-        let error = pty
-            .spawn_terminals_for_layout(
-                None,
-                TiledPaneLayout {
-                    run,
-                    ..Default::default()
-                },
-                vec![],
-                Some(TerminalAction::RunCommand(RunCommand {
-                    command: PathBuf::from("missing-default"),
-                    ..Default::default()
-                })),
-                HashMap::new(),
-                None,
-                7,
-                7,
-                false,
-                true,
-                (1, false),
-                None,
-                None,
-            )
-            .unwrap_err();
+        pty.spawn_terminals_for_layout(
+            None,
+            TiledPaneLayout {
+                run,
+                ..Default::default()
+            },
+            vec![],
+            Some(TerminalAction::RunCommand(RunCommand {
+                command: PathBuf::from("missing-default"),
+                ..Default::default()
+            })),
+            HashMap::new(),
+            None,
+            7,
+            7,
+            false,
+            true,
+            (1, false),
+            None,
+            None,
+        )
+        .expect("prepare must not probe command existence by spawning");
+        assert_eq!(probe.spawn_terminal_calls.load(Ordering::Relaxed), 0);
+        let transaction_id = match screen_rx.try_recv().expect("ApplyLayout").0 {
+            ScreenInstruction::ApplyLayout(_, _, _, _, _, _, _, _, _, _, _, transaction_id) => {
+                transaction_id
+            },
+            other => panic!("expected ApplyLayout, got {other:?}"),
+        };
+        let (resolution, ack) =
+            pty.resolve_layout_commit_with_ack(transaction_id, LayoutCommitOutcome::Committed);
+        let error = resolution.expect_err("activation must expose CommandNotFound");
 
         assert!(
             error.downcast_ref::<ZellijError>().is_some(),
@@ -1186,29 +1934,16 @@ fn command_not_found_without_explicit_hold_never_enters_a_layout() {
             vec![100],
             "{label}: the retained reservation must roll back before transfer"
         );
-        let screen_instructions = screen_rx
-            .try_iter()
-            .map(|(instruction, _)| instruction)
-            .collect::<Vec<_>>();
+        assert!(matches!(
+            ack,
+            Ok(LayoutCommitAck::ActivationRolledBack(message))
+                if message.contains("CommandNotFound")
+                    || message.contains("failed to spawn terminal")
+                    || message.contains("injected-missing-command")
+        ));
         assert!(
-            !screen_instructions
-                .iter()
-                .any(|instruction| matches!(instruction, ScreenInstruction::ApplyLayout(..))),
-            "{label}: ApplyLayout must never be sent"
-        );
-        assert_eq!(
-            screen_instructions
-                .iter()
-                .filter(|instruction| matches!(
-                    instruction,
-                    ScreenInstruction::LayoutPreparationFailed {
-                        transaction_id: 7,
-                        ..
-                    }
-                ))
-                .count(),
-            1,
-            "{label}: the failed transaction must reach one terminal rejection"
+            screen_rx.try_recv().is_err(),
+            "{label}: PTY reports activation rollback by ACK; Screen owns topology rollback"
         );
     }
 }
@@ -1249,18 +1984,24 @@ fn hold_on_start_is_an_explicit_held_terminal_without_notification() {
     .expect("hold_on_start must commit as an explicit held terminal");
 
     let (instruction, _) = screen_rx.try_recv().expect("ApplyLayout");
-    match instruction {
+    let transaction_id = match instruction {
         ScreenInstruction::ApplyLayout(_, _, terminal_ids, ..) => {
             assert_eq!(terminal_ids.len(), 1);
             assert_eq!(terminal_ids[0].0, 100);
             assert!(terminal_ids[0].1.is_some());
+            8
         },
         other => panic!("expected ApplyLayout, got {other:?}"),
-    }
+    };
     assert!(
         screen_rx.try_recv().is_err(),
         "hold_on_start is not a command-not-found notification"
     );
+    let (resolution, ack) =
+        pty.resolve_layout_commit_with_ack(transaction_id, LayoutCommitOutcome::Committed);
+    resolution.expect("held terminal requires no process activation");
+    assert_eq!(ack, Ok(LayoutCommitAck::Resolved));
+    assert_eq!(probe.spawn_terminal_calls.load(Ordering::Relaxed), 0);
     assert!(probe.cleared_terminal_ids().is_empty());
 }
 
@@ -1279,30 +2020,38 @@ fn mismatched_command_not_found_never_transfers_or_clears_the_foreign_payload_id
     let mut pty = Pty::new(bus, false, None, None);
     let plugin = RunPluginOrAlias::from_url("file:/foreign-id.wasm", &None, None, None).unwrap();
 
-    let error = pty
-        .spawn_terminals_for_layout(
-            None,
-            TiledPaneLayout {
-                run: Some(Run::Command(RunCommand {
-                    command: PathBuf::from("missing-command"),
-                    hold_on_close: true,
-                    ..Default::default()
-                })),
+    pty.spawn_terminals_for_layout(
+        None,
+        TiledPaneLayout {
+            run: Some(Run::Command(RunCommand {
+                command: PathBuf::from("missing-command"),
+                hold_on_close: true,
                 ..Default::default()
-            },
-            vec![],
-            None,
-            HashMap::from([(plugin, vec![77])]),
-            None,
-            7,
-            9,
-            false,
-            true,
-            (1, false),
-            None,
-            None,
-        )
-        .expect_err("a foreign CommandNotFound id is a protocol error");
+            })),
+            ..Default::default()
+        },
+        vec![],
+        None,
+        HashMap::from([(plugin, vec![77])]),
+        None,
+        7,
+        9,
+        false,
+        true,
+        (1, false),
+        None,
+        None,
+    )
+    .expect("prepare must only reserve the real terminal ID");
+    let transaction_id = match screen_rx.try_recv().expect("ApplyLayout").0 {
+        ScreenInstruction::ApplyLayout(_, _, _, _, _, _, _, _, _, _, _, transaction_id) => {
+            transaction_id
+        },
+        other => panic!("expected ApplyLayout, got {other:?}"),
+    };
+    let (resolution, ack) =
+        pty.resolve_layout_commit_with_ack(transaction_id, LayoutCommitOutcome::Committed);
+    let error = resolution.expect_err("a foreign CommandNotFound id is a protocol error");
 
     assert!(
         error.downcast_ref::<ZellijError>().is_none(),
@@ -1318,39 +2067,13 @@ fn mismatched_command_not_found_never_transfers_or_clears_the_foreign_payload_id
         "only the real reservation is cleared"
     );
     assert!(!probe.cleared_terminal_ids().contains(&999));
-    let screen_instructions = screen_rx
-        .try_iter()
-        .map(|(instruction, _)| instruction)
-        .collect::<Vec<_>>();
-    assert!(
-        !screen_instructions
-            .iter()
-            .any(|instruction| matches!(instruction, ScreenInstruction::ApplyLayout(..))),
-        "the foreign payload id must never reach ApplyLayout"
-    );
-    assert_eq!(
-        screen_instructions
-            .iter()
-            .filter(|instruction| matches!(
-                instruction,
-                ScreenInstruction::LayoutPreparationFailed {
-                    transaction_id: 9,
-                    ..
-                }
-            ))
-            .count(),
-        1
-    );
-    assert_eq!(
-        plugin_rx
-            .try_iter()
-            .filter_map(|(instruction, _)| match instruction {
-                PluginInstruction::Unload(plugin_id) => Some(plugin_id),
-                _ => None,
-            })
-            .collect::<Vec<_>>(),
-        vec![77]
-    );
+    assert!(matches!(
+        ack,
+        Ok(LayoutCommitAck::ActivationRolledBack(message))
+            if message.contains("reserved terminal 100")
+    ));
+    assert!(screen_rx.try_recv().is_err());
+    assert!(unloaded_plugin_ids(&plugin_rx).is_empty());
 }
 
 fn override_tab(
@@ -1388,7 +2111,7 @@ fn unloaded_plugin_ids(
 }
 
 #[test]
-fn override_between_notification_failure_is_nonfatal_after_final_commit() {
+fn override_notification_failure_rolls_back_before_screen_commit() {
     let mock = MockOsApi::new();
     mock.command_not_found_on_spawn_call(1);
     let probe = mock.clone();
@@ -1429,7 +2152,7 @@ fn override_between_notification_failure_is_nonfatal_after_final_commit() {
         None,
         None,
     )
-    .expect("between-message notification failure must not revoke a committed override");
+    .expect("prepare must reserve the override without spawning");
 
     let (screen_instruction, _) = screen_rx
         .try_recv()
@@ -1439,14 +2162,8 @@ fn override_between_notification_failure_is_nonfatal_after_final_commit() {
             assert_eq!(tab_results.len(), 1);
             assert_eq!(
                 tab_results[0].new_terminal_pids,
-                vec![(
-                    100,
-                    Some(RunCommand {
-                        command: PathBuf::from("missing-command"),
-                        hold_on_close: true,
-                        ..Default::default()
-                    })
-                )]
+                vec![(100, None)],
+                "prepare must not probe command existence by spawning"
             );
             assert_eq!(
                 tab_results[0]
@@ -1465,9 +2182,15 @@ fn override_between_notification_failure_is_nonfatal_after_final_commit() {
         screen_rx.try_recv().is_err(),
         "a prepared override must remain quiescent until Screen commits it"
     );
-    pty.resolve_layout_commit_with_ack(transaction_id, LayoutCommitOutcome::Committed)
-        .0
-        .expect("the Screen commit must activate held override terminals");
+    let (resolution, ack) =
+        pty.resolve_layout_commit_with_ack(transaction_id, LayoutCommitOutcome::Committed);
+    let error = resolution.expect_err("a partial held-pane notification must roll activation back");
+    assert!(format!("{error:#}").contains("injected between-message"));
+    assert!(matches!(
+        ack,
+        Ok(LayoutCommitAck::ActivationRolledBack(message))
+            if message.contains("injected between-message")
+    ));
     assert!(matches!(
         screen_rx.try_recv(),
         Ok((ScreenInstruction::PtyBytes(100, _), _))
@@ -1476,20 +2199,17 @@ fn override_between_notification_failure_is_nonfatal_after_final_commit() {
         screen_rx.try_recv().is_err(),
         "the injected between-message failure suppresses HoldPane only"
     );
-    assert!(
-        probe.cleared_terminal_ids().is_empty(),
-        "caller-owned override terminal must not be cleared or double-cleaned"
-    );
+    assert_eq!(probe.cleared_terminal_ids(), vec![100]);
     assert!(
         !plugin_rx
             .try_iter()
             .any(|(instruction, _)| matches!(instruction, PluginInstruction::Unload(77))),
-        "caller-owned override plugin must not be rolled back"
+        "Plugin compensation is not owned by PTY"
     );
 }
 
 #[test]
-fn partial_override_spawn_failure_releases_terminals_and_plugins() {
+fn partial_override_activation_failure_releases_all_terminal_reservations() {
     let mock = MockOsApi::new();
     mock.fail_on_spawn_call(2);
     let probe = mock.clone();
@@ -1497,6 +2217,8 @@ fn partial_override_spawn_failure_releases_terminals_and_plugins() {
     let plugin =
         RunPluginOrAlias::from_url("file:/partial-allocation.wasm", &None, None, None).unwrap();
     let plugin_ids = HashMap::from([(plugin, vec![77])]);
+    let (screen_tx, screen_rx) = channels::unbounded();
+    pty.bus.senders.to_screen = Some(SenderWithContext::new(screen_tx));
     let layout = TiledPaneLayout {
         children: vec![TiledPaneLayout::default(), TiledPaneLayout::default()],
         ..Default::default()
@@ -1506,45 +2228,50 @@ fn partial_override_spawn_failure_releases_terminals_and_plugins() {
         ..Default::default()
     });
 
-    let error = pty
-        .override_layout_transaction(
-            None,
-            Some(default_shell),
-            vec![(
-                TabLayoutInfo {
-                    tab_index: 7,
-                    tab_name: Some("Finalized runs".to_owned()),
-                    tiled_layout: layout,
-                    floating_layouts: vec![],
-                    swap_tiled_layouts: None,
-                    swap_floating_layouts: None,
-                },
-                plugin_ids,
-            )],
-            11,
-            true,
-            true,
-            1,
-            None,
-            None,
-        )
-        .expect_err("the second terminal spawn must fail");
+    pty.override_layout_transaction(
+        None,
+        Some(default_shell),
+        vec![(
+            TabLayoutInfo {
+                tab_index: 7,
+                tab_name: Some("Finalized runs".to_owned()),
+                tiled_layout: layout,
+                floating_layouts: vec![],
+                swap_tiled_layouts: None,
+                swap_floating_layouts: None,
+            },
+            plugin_ids,
+        )],
+        11,
+        true,
+        true,
+        1,
+        None,
+        None,
+    )
+    .expect("prepare must reserve both override terminals");
+    assert_eq!(probe.spawn_terminal_calls.load(Ordering::Relaxed), 0);
+    let transaction_id = match screen_rx.try_recv().expect("OverrideLayoutComplete").0 {
+        ScreenInstruction::OverrideLayoutComplete(_, _, _, _, _, _, transaction_id) => {
+            transaction_id
+        },
+        other => panic!("expected OverrideLayoutComplete, got {other:?}"),
+    };
+    let (resolution, ack) =
+        pty.resolve_layout_commit_with_ack(transaction_id, LayoutCommitOutcome::Committed);
+    let error = resolution.expect_err("the second exact activation must fail");
 
     assert!(
         format!("{:#}", error).contains("injected EMFILE-like spawn failure"),
         "the original spawn failure must remain in the error chain"
     );
-    assert_eq!(probe.cleared_terminal_ids(), vec![101, 100]);
-    assert!(
-        plugin_rx
-            .try_iter()
-            .any(|(instruction, _)| matches!(instruction, PluginInstruction::Unload(77))),
-        "every plugin allocated before the terminal failure must be unloaded"
-    );
+    assert!(matches!(ack, Ok(LayoutCommitAck::ActivationRolledBack(_))));
+    assert_eq!(probe.cleared_terminal_ids(), vec![100, 101]);
+    assert!(unloaded_plugin_ids(&plugin_rx).is_empty());
 }
 
 #[test]
-fn override_per_tab_failure_rolls_back_current_and_all_prior_tabs() {
+fn override_per_tab_activation_failure_rolls_back_current_and_all_prior_tabs() {
     let mock = MockOsApi::new();
     mock.fail_on_spawn_call(3);
     let probe = mock.clone();
@@ -1561,60 +2288,54 @@ fn override_per_tab_failure_rolls_back_current_and_all_prior_tabs() {
         ..Default::default()
     };
 
-    let error = pty
-        .override_layout_transaction(
-            None,
-            None,
-            vec![
-                (
-                    override_tab(0, TiledPaneLayout::default(), vec![]),
-                    override_plugin("file:/first-tab.wasm", 71),
-                ),
-                (
-                    override_tab(1, second_tab_layout, vec![]),
-                    override_plugin("file:/second-tab.wasm", 72),
-                ),
-            ],
-            12,
-            true,
-            true,
-            1,
-            None,
-            None,
-        )
-        .expect_err("a later tab failure aborts the whole override");
+    pty.override_layout_transaction(
+        None,
+        None,
+        vec![
+            (
+                override_tab(0, TiledPaneLayout::default(), vec![]),
+                override_plugin("file:/first-tab.wasm", 71),
+            ),
+            (
+                override_tab(1, second_tab_layout, vec![]),
+                override_plugin("file:/second-tab.wasm", 72),
+            ),
+        ],
+        12,
+        true,
+        true,
+        1,
+        None,
+        None,
+    )
+    .expect("all tabs must reserve without spawning");
+    assert_eq!(probe.spawn_terminal_calls.load(Ordering::Relaxed), 0);
+    let transaction_id = match screen_rx.try_recv().expect("OverrideLayoutComplete").0 {
+        ScreenInstruction::OverrideLayoutComplete(_, _, _, _, _, _, transaction_id) => {
+            transaction_id
+        },
+        other => panic!("expected OverrideLayoutComplete, got {other:?}"),
+    };
+    let (resolution, ack) =
+        pty.resolve_layout_commit_with_ack(transaction_id, LayoutCommitOutcome::Committed);
+    let error = resolution.expect_err("the third exact activation must abort the whole override");
 
     assert!(format!("{error:#}").contains("injected EMFILE-like spawn failure"));
+    assert!(matches!(ack, Ok(LayoutCommitAck::ActivationRolledBack(_))));
     assert_eq!(
         probe.cleared_terminal_ids(),
-        vec![102, 100, 101],
-        "failed reservation plus prior/current prepared terminals are cleared exactly once"
+        vec![100, 101, 102],
+        "prior and current terminal reservations are cleared exactly once"
     );
-    assert_eq!(unloaded_plugin_ids(&plugin_rx), vec![71, 72]);
-    let screen_instructions = screen_rx
-        .try_iter()
-        .map(|(instruction, _)| instruction)
-        .collect::<Vec<_>>();
-    assert!(
-        !screen_instructions.iter().any(|instruction| matches!(
-            instruction,
-            ScreenInstruction::OverrideLayoutComplete(..)
-        )),
-        "no partial OverrideLayoutComplete may be sent"
-    );
-    assert_eq!(
-        screen_instructions
-            .iter()
-            .filter(|instruction| matches!(
-                instruction,
-                ScreenInstruction::LayoutPreparationFailed {
-                    transaction_id: 12,
-                    ..
-                }
-            ))
-            .count(),
-        1
-    );
+    assert!(unloaded_plugin_ids(&plugin_rx).is_empty());
+    // A reader can enqueue its idempotent render wake-up immediately before
+    // cleanup aborts the task. No pane mutation or exit callback may escape.
+    while let Ok((instruction, _)) = screen_rx.try_recv() {
+        assert!(
+            matches!(instruction, ScreenInstruction::Render),
+            "rollback emitted an unexpected mutating Screen instruction: {instruction:?}"
+        );
+    }
 }
 
 #[test]
@@ -1653,7 +2374,8 @@ fn override_final_send_failure_rolls_back_the_union_exactly_once() {
 
     assert!(format!("{error:#}").contains("failed to get screen sender"));
     assert_eq!(probe.cleared_terminal_ids(), vec![100, 101]);
-    assert_eq!(unloaded_plugin_ids(&plugin_rx), vec![71, 72]);
+    assert_eq!(probe.spawn_terminal_calls.load(Ordering::Relaxed), 0);
+    assert!(unloaded_plugin_ids(&plugin_rx).is_empty());
 }
 
 #[test]
@@ -1699,21 +2421,20 @@ fn rejected_multi_tab_override_ack_rolls_back_the_union_exactly_once() {
         other => panic!("expected OverrideLayoutComplete, got {other:?}"),
     };
 
-    probe.fire_next_quit_callback(PaneId::Terminal(101), Some(0), RunCommand::default());
-    probe.fire_next_quit_callback(PaneId::Terminal(100), Some(0), RunCommand::default());
     assert!(
-        screen_rx.try_recv().is_err(),
-        "neither tab may emit a ghost callback before the shared commit"
+        lock_recover(&probe.quit_callbacks).is_empty(),
+        "rejected prepared tabs must not own child exit callbacks"
     );
-    pty.resolve_layout_commit_with_ack(
+    let (resolution, ack) = pty.resolve_layout_commit_with_ack(
         transaction_id,
         LayoutCommitOutcome::Rejected("second tab failed in Screen".to_owned()),
-    )
-    .0
-    .expect_err("Screen rejection remains visible after exact cleanup");
+    );
+    resolution.expect_err("Screen rejection remains visible after exact cleanup");
+    assert_eq!(ack, Ok(LayoutCommitAck::Resolved));
 
     assert_eq!(probe.cleared_terminal_ids(), vec![100, 101]);
-    assert_eq!(unloaded_plugin_ids(&plugin_rx), vec![71, 72]);
+    assert_eq!(probe.spawn_terminal_calls.load(Ordering::Relaxed), 0);
+    assert!(unloaded_plugin_ids(&plugin_rx).is_empty());
     assert!(
         screen_rx.try_recv().is_err(),
         "rollback must cancel every tab's queued quit callback"
@@ -1738,13 +2459,16 @@ fn rollback_aggregates_cleanup_errors_in_stable_order_and_preserves_source() {
     let mut allocation_ledger = LayoutAllocationLedger::default();
     allocation_ledger.track_terminal(2);
     allocation_ledger.track_terminal(1);
-    allocation_ledger.track_plugin_ids(&override_plugin("file:/cleanup-errors.wasm", 9));
-    allocation_ledger.allocated_ids.insert(PaneId::Plugin(8));
 
-    let error = pty.rollback_partial_layout_allocations(
+    let rollback = pty.rollback_partial_layout_allocations(
         anyhow::Error::new(io::Error::other("primary layout failure")),
         allocation_ledger,
     );
+    assert!(
+        !rollback.cleanup_succeeded,
+        "an injected terminal cleanup failure must remain uncertified"
+    );
+    let error = rollback.error;
     assert!(
         error.downcast_ref::<io::Error>().is_some(),
         "cleanup context must preserve the original source"
@@ -1753,15 +2477,8 @@ fn rollback_aggregates_cleanup_errors_in_stable_order_and_preserves_source() {
     let terminal_2 = message
         .find("Terminal(2):")
         .expect("terminal cleanup error");
-    let plugin_8 = message.find("Plugin(8):").expect("plugin 8 cleanup error");
-    let plugin_9 = message.find("Plugin(9):").expect("plugin 9 cleanup error");
-    assert!(
-        terminal_2 < plugin_8 && plugin_8 < plugin_9,
-        "cleanup errors must follow deterministic PaneId order: {message}"
-    );
+    assert!(terminal_2 < message.len());
     assert_eq!(message.matches("Terminal(2):").count(), 1);
-    assert_eq!(message.matches("Plugin(8):").count(), 1);
-    assert_eq!(message.matches("Plugin(9):").count(), 1);
     assert_eq!(
         probe.cleared_terminal_ids(),
         vec![1, 2],
@@ -1773,19 +2490,15 @@ fn rollback_aggregates_cleanup_errors_in_stable_order_and_preserves_source() {
 fn armed_layout_ledger_drop_is_a_last_resort_exact_cleanup_guard() {
     let mock = MockOsApi::new();
     let probe = mock.clone();
-    let (plugin_tx, plugin_rx) = channels::unbounded();
     let mut bus: Bus<PtyInstruction> = Bus::empty();
     bus.os_input = Some(Box::new(mock));
-    bus.senders.to_plugin = Some(SenderWithContext::new(plugin_tx));
     bus.senders.should_silently_fail = false;
     let mut allocation_ledger = LayoutAllocationLedger::armed_for_bus(&bus);
     allocation_ledger.track_terminal(100);
-    allocation_ledger.track_plugin_ids(&override_plugin("file:/guarded.wasm", 77));
 
     drop(allocation_ledger);
 
     assert_eq!(probe.cleared_terminal_ids(), vec![100]);
-    assert_eq!(unloaded_plugin_ids(&plugin_rx), vec![77]);
 }
 
 #[test]
