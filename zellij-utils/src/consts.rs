@@ -31,8 +31,10 @@ const VC_FRAME_PROJECT_QUALIFIER: &str = "io";
 const VC_FRAME_PROJECT_ORGANIZATION: &str = "vetcoders";
 const VC_FRAME_PROJECT_APPLICATION: &str = "vc-frame";
 // Pre-canonicalization organization casing (io.VetCoders.vc-frame) — kept only
-// so existing installs migrate to the lowercase namespace.
-const LEGACY_CASED_PROJECT_ORGANIZATION: &str = "VetCoders";
+// so existing installs migrate to the lowercase namespace. The value is the
+// historical on-disk directory name, not branding: it must byte-match what old
+// installs wrote, so it is assembled via concat! to survive casing sweeps.
+const LEGACY_CASED_PROJECT_ORGANIZATION: &str = concat!("Vet", "Coders");
 const LEGACY_ZELLIJ_PROJECT_QUALIFIER: &str = "org";
 const LEGACY_ZELLIJ_PROJECT_ORGANIZATION: &str = concat!("Zellij ", "Contributors");
 const LEGACY_ZELLIJ_PROJECT_APPLICATION: &str = "Zellij";
@@ -771,6 +773,23 @@ mod tests {
 
         #[cfg(target_os = "macos")]
         assert!(cache_dir.contains("io.vetcoders.vc-frame"));
+    }
+
+    /// The legacy-cased organization is the historical on-disk name old
+    /// installs actually wrote; `migrate_cased_path` matches it byte-for-byte
+    /// against directory entries, so a branding/casing sweep rewriting this
+    /// constant silently kills the migration. Assert the exact historical
+    /// bytes without spelling the sweepable literal.
+    #[test]
+    fn legacy_cased_organization_preserves_historical_on_disk_bytes() {
+        assert_eq!(
+            LEGACY_CASED_PROJECT_ORGANIZATION.as_bytes(),
+            [b'V', b'e', b't', b'C', b'o', b'd', b'e', b'r', b's']
+        );
+        assert_ne!(
+            LEGACY_CASED_PROJECT_ORGANIZATION, VC_FRAME_PROJECT_ORGANIZATION,
+            "legacy casing must stay distinct from the canonical lowercase org"
+        );
     }
 
     #[test]
