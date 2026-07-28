@@ -568,7 +568,7 @@ fn render_mode_key_indicators(
 }
 
 fn full_inline_keys_modes_shortcut_list(
-    keys_without_common_modifiers: &Vec<KeyShortcut>,
+    keys_without_common_modifiers: &[KeyShortcut],
     help: &ModeInfo,
 ) -> LinePart {
     let mut full_shortcut_list = LinePart::default();
@@ -589,7 +589,7 @@ fn full_inline_keys_modes_shortcut_list(
 }
 
 fn shortened_inline_keys_modes_shortcut_list(
-    keys_without_common_modifiers: &Vec<KeyShortcut>,
+    keys_without_common_modifiers: &[KeyShortcut],
     help: &ModeInfo,
 ) -> LinePart {
     let mut shortened_shortcut_list = LinePart::default();
@@ -683,7 +683,7 @@ fn common_modifiers_in_all_modes(
 fn render_common_modifiers(
     palette: &ColoredElements,
     mode_info: &ModeInfo,
-    common_modifiers: &Vec<KeyModifier>,
+    common_modifiers: &[KeyModifier],
     line_part_to_render: &mut LinePart,
     separator: &str,
 ) {
@@ -1121,7 +1121,7 @@ fn keybinds(help: &ModeInfo, max_width: usize) -> Option<LinePart> {
 fn add_shortcut(
     help: &ModeInfo,
     text: &str,
-    keys: &Vec<KeyWithModifier>,
+    keys: &[KeyWithModifier],
     selected: bool,
     key_color_index: Option<usize>,
 ) -> LinePart {
