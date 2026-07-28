@@ -13,7 +13,7 @@
 //!   3. Nothing. Debug builds record `unknown`; RELEASE builds fail closed,
 //!      because a release binary must never claim an identity it does not have.
 //!
-//! 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by VetCoders (c)2024-2026 LibraxisAI
+//! 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
 
 use std::collections::BTreeSet;
 use std::fs;

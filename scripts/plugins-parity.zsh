@@ -13,7 +13,7 @@
 #   double-rebuild   Two isolated rebuilds; hashes must match exactly
 #   self-test        Deliberate perturbation fails check; restore passes
 #
-# 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by VetCoders (c)2024-2026 LibraxisAI
+# 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
 set -euo pipefail
 
 # Ensure standard userland tools (shasum/awk/sort) are visible even when the

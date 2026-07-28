@@ -1,6 +1,6 @@
 # vc-frame Operator Surface
 
-vc-frame is the VetCoders terminal frame for Vibecrafted operator work. It is a
+vc-frame is the Vetcoders terminal frame for Vibecrafted operator work. It is a
 Zellij-core fork with a fork-owned default surface: grayscale chrome, sessions on
 the left, and runs/tabs on top.
 
@@ -41,7 +41,7 @@ vc-frame
 ```
 
 Public packages and executables named `zellij` belong to upstream Zellij, not
-the VetCoders vc-frame runtime.
+the Vetcoders vc-frame runtime.
 
 ## Release Channel
 

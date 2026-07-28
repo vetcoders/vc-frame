@@ -124,7 +124,7 @@ jobs:
                 git verify-tag --raw "refs/tags/$tag" 2>&1
             )" || {
               printf '%s\n' "$tag_verification" >&2
-              echo "release tag $tag has no valid VetCoders signature" >&2
+              echo "release tag $tag has no valid Vetcoders signature" >&2
               exit 1
             }
             tag_primary_fingerprints="$(
@@ -132,7 +132,7 @@ jobs:
                 awk '$1 == "[GNUPG:]" && $2 == "VALIDSIG" { print toupper($NF) }'
             )"
             test "$tag_primary_fingerprints" = "$expected_fingerprint" || {
-              echo "release tag must have exactly one pinned VetCoders signer" >&2
+              echo "release tag must have exactly one pinned Vetcoders signer" >&2
               exit 1
             }
           fi

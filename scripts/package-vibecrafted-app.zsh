@@ -8,7 +8,7 @@
 #   (no flag)  build into build/Vibecrafted.app and stop
 #   --install  atomically swap /Applications/Vibecrafted.app (backup kept)
 #
-# 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by VetCoders (c)2024-2026 LibraxisAI
+# 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
 
 set -eu
 REPO="${0:A:h:h}"
@@ -61,7 +61,7 @@ family = "Monaco"
 [mouse]
 hide_when_typing = true
 
-# VetCoders copper palette
+# Vetcoders copper palette
 [colors.primary]
 background = "#1a1a2e"
 foreground = "#e0def4"

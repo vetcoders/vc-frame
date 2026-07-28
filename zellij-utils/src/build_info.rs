@@ -9,7 +9,7 @@
 //! out to git, reads `.git`, or touches the filesystem: an installed binary
 //! reports its provenance with the repository nowhere in sight.
 //!
-//! 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by VetCoders (c)2024-2026 LibraxisAI
+//! 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
 
 /// Human-facing version string: `<semver>+g<sha8>[.dirty]`.
 ///

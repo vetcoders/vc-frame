@@ -77,7 +77,7 @@ archive signature therefore cannot be replayed as a newer release.
 empty value, `true`, `2`, or any other typo aborts before network access.
 
 GPG and OIDC have different jobs. GPG gives users a stable, offline-compatible
-VetCoders trust root. GitHub OIDC gives each CI build a short-lived identity
+Vetcoders trust root. GitHub OIDC gives each CI build a short-lived identity
 bound to this repository and workflow, with no long-lived attestation token.
 Both are required by the release workflow.
 
@@ -88,7 +88,7 @@ and clean-machine verification procedure lives in
 The operator vault's `vibecrafted-signing.key/.pub` pair is RSA/PEM, not GPG,
 so it cannot be dropped into this contract without changing the signature
 format and installer. Loctree's release path can use a GPG identity already in
-the runner keyring. Reusing that GPG identity is technically valid if VetCoders
+the runner keyring. Reusing that GPG identity is technically valid if Vetcoders
 intentionally wants one product-family trust root, but a dedicated vc-frame
 key or signing subkey gives cleaner revocation and blast-radius boundaries. In
 either case, never commit private key material.
@@ -145,7 +145,7 @@ then repeats the clean-main provenance check after the quality cone.
 
 `make release-tag` has the PHONY preflight as a hard prerequisite, so it always
 reruns that complete gate. It derives `vX.Y.Z` from
-`[workspace.package].version`, requires the full VetCoders primary fingerprint
+`[workspace.package].version`, requires the full Vetcoders primary fingerprint
 pinned in `tools/install.sh`, locates the matching signing-capable secret key
 under the selected GPG home, creates an annotated OpenPGP tag, and verifies its
 exact object, direct `HEAD` target, embedded tag name, signature, and primary

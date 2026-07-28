@@ -8,7 +8,7 @@
 
 This page lists third-party packages for upstream `zellij`. They are useful
 when you want stock Zellij compatibility, but they do **not** install the
-VetCoders `vc-frame` runtime, its grayscale default surface, or its left
+Vetcoders `vc-frame` runtime, its grayscale default surface, or its left
 session rail.
 
 For vc-frame itself:

@@ -63,7 +63,7 @@ This installs `vc-frame`. Existing Zellij configuration and layout concepts
 remain compatible, but vc-frame does not claim ownership of the public
 `zellij` executable or package channel.
 
-This is not the same as a public package channel. Upstream distro/Homebrew packages named `zellij` install upstream Zellij, not this VetCoders `vc-frame` runtime. See [docs/THIRD_PARTY_INSTALL.md](docs/THIRD_PARTY_INSTALL.md) for that compatibility boundary and [docs/RELEASE.md](docs/RELEASE.md) for the release-grade `curl ... | sh` path.
+This is not the same as a public package channel. Upstream distro/Homebrew packages named `zellij` install upstream Zellij, not this Vetcoders `vc-frame` runtime. See [docs/THIRD_PARTY_INSTALL.md](docs/THIRD_PARTY_INSTALL.md) for that compatibility boundary and [docs/RELEASE.md](docs/RELEASE.md) for the release-grade `curl ... | sh` path.
 
 #### Installing from `main`
 Installing vc-frame from an arbitrary development branch is not recommended for daily use. Development branches represent pre-release code, are constantly being worked on, and may contain broken or unusable features.

@@ -1,4 +1,4 @@
-# VetCoders release signing: runbook od zera
+# Vetcoders release signing: runbook od zera
 
 Ten dokument opisuje utworzenie własnego, trwałego źródła zaufania dla
 `vc-frame`, CodeScribe i Pensieve. Nie trzeba kupować „certyfikowanego GPG”.
@@ -12,14 +12,14 @@ Wartość klucza wynika z tego, że:
   razem z artefaktem.
 
 GPG i trusted publishing rozwiązują dwa różne problemy. GPG daje użytkownikom
-stabilną tożsamość VetCoders także poza GitHubem. OIDC daje pojedynczemu jobowi
+stabilną tożsamość Vetcoders także poza GitHubem. OIDC daje pojedynczemu jobowi
 CI krótkotrwałą tożsamość bez stałego tokenu do npm, PyPI, crates.io lub
 GitHub attestations. Dla publicznego release używamy obu.
 
 ## Docelowy układ
 
 ```text
-VetCoders offline primary key (tylko certyfikacja, 5 lat)
+Vetcoders offline primary key (tylko certyfikacja, 5 lat)
 ├── vc-frame release signing subkey (1 rok)
 ├── CodeScribe release signing subkey (1 rok)
 └── Pensieve release signing subkey (1 rok)
@@ -27,15 +27,15 @@ VetCoders offline primary key (tylko certyfikacja, 5 lat)
 
 Klucz główny jest wspólnym publicznym korzeniem organizacji. Podklucze są
 oddzielne, więc wyciek sekretu jednego produktu nie zmusza do porzucenia całej
-tożsamości VetCoders. Loctree może dostarczyć sprawdzony proces i automatyzację,
+tożsamości Vetcoders. Loctree może dostarczyć sprawdzony proces i automatyzację,
 ale nie kopiujemy jego prywatnego klucza ani nie udajemy, że tożsamość Loctree
-jest tożsamością VetCoders.
+jest tożsamością Vetcoders.
 
 ## Zanim zaczniesz
 
 Przygotuj:
 
-1. skrzynkę, którą VetCoders będzie kontrolować przez lata, np.
+1. skrzynkę, którą Vetcoders będzie kontrolować przez lata, np.
    `releases@vetcoders.io`;
 2. odłączony od sieci komputer lub świeży profil systemowy;
 3. dwa oddzielne, szyfrowane nośniki na backup;
@@ -49,12 +49,12 @@ kluczami prywatnymi.
 ## 1. Utwórz offline primary key
 
 Poniższe polecenia uruchom na szyfrowanym, odłączonym nośniku. Zmień ścieżkę i
-adres e-mail na faktycznie kontrolowane przez VetCoders:
+adres e-mail na faktycznie kontrolowane przez Vetcoders:
 
 ```sh
 umask 077
-VC_GNUPG_HOME="/Volumes/VetCoders-Secrets/gpg-master"
-VC_RELEASE_UID="VetCoders Release Signing <releases@vetcoders.io>"
+VC_GNUPG_HOME="/Volumes/Vetcoders-Secrets/gpg-master"
+VC_RELEASE_UID="Vetcoders Release Signing <releases@vetcoders.io>"
 
 install -d -m 700 "$VC_GNUPG_HOME"
 gpg --homedir "$VC_GNUPG_HOME" \
@@ -65,7 +65,7 @@ VC_PRIMARY_FPR="$(
     --list-secret-keys "$VC_RELEASE_UID" |
     awk -F: '$1 == "fpr" { print $10; exit }'
 )"
-printf 'VetCoders primary fingerprint: %s\n' "$VC_PRIMARY_FPR"
+printf 'Vetcoders primary fingerprint: %s\n' "$VC_PRIMARY_FPR"
 ```
 
 `cert` jest celowe: primary key służy do zatwierdzania i odwoływania podkluczy,
@@ -110,7 +110,7 @@ primary fingerprintu przypiętego w instalatorach.
 Na pierwszym szyfrowanym nośniku:
 
 ```sh
-VC_GPG_BACKUP="/Volumes/VetCoders-Secrets/recovery"
+VC_GPG_BACKUP="/Volumes/Vetcoders-Secrets/recovery"
 install -d -m 700 "$VC_GPG_BACKUP"
 
 gpg --homedir "$VC_GNUPG_HOME" --armor \
@@ -156,7 +156,7 @@ wymaganego reviewera i dodaj do niego:
 
 - `GPG_PRIVATE_KEY` — eksport sekretnego podklucza tylko tego produktu;
 - `GPG_PASSPHRASE` — hasło klucza;
-- `GPG_PUBLIC_KEY` — pełny publiczny klucz VetCoders;
+- `GPG_PUBLIC_KEY` — pełny publiczny klucz Vetcoders;
 - opcjonalnie `GPG_SIGNING_KEY_ID` — fingerprint podklucza, jeśli workflow
   wybiera go jawnie.
 
@@ -171,7 +171,7 @@ Ten sam primary fingerprint i publiczny klucz opublikuj co najmniej w:
 - `SECURITY.md` każdego produktu;
 - stronie `vetcoders.io/security`;
 - GitHub Organization profile albo przypiętym repo bezpieczeństwa;
-- WKD dla domeny VetCoders;
+- WKD dla domeny Vetcoders;
 - `keys.openpgp.org` — po wysłaniu klucza potwierdź adres e-mail;
 - opisie pierwszego podpisanego GitHub Release.
 
@@ -197,13 +197,13 @@ Po przejściu na OIDC usuń stałe tokeny publikujące. Nie dodawaj tokenu
 Na maszynie podpisującej:
 
 ```sh
-printf 'VetCoders signing canary\n' >canary.txt
+printf 'Vetcoders signing canary\n' >canary.txt
 gpg --homedir "$VC_GNUPG_HOME" \
   --local-user "$VC_PRODUCT_SUBKEY_FPR!" \
   --armor --detach-sign canary.txt
 ```
 
-Na czystej maszynie, która nie ma żadnych kluczy VetCoders:
+Na czystej maszynie, która nie ma żadnych kluczy Vetcoders:
 
 ```sh
 GNUPGHOME="$(mktemp -d)"
@@ -216,7 +216,7 @@ gpg --with-colons --fingerprint
 ```
 
 Porównaj pełny primary fingerprint z wartością opublikowaną na stronie
-VetCoders i przypiętą w instalatorze. Potem uruchom candidate release i sprawdź
+Vetcoders i przypiętą w instalatorze. Potem uruchom candidate release i sprawdź
 na czystej maszynie:
 
 1. podpis GPG każdego artefaktu;
@@ -239,7 +239,7 @@ uczciwe opcje:
    chronionych środowiskach CI;
 3. jeden wspólny podklucz sprzętowy — prostszy, ale z większym blast radiusem.
 
-Dla VetCoders na dziś rekomendowana jest opcja 2: offline primary key, osobne
+Dla Vetcoders na dziś rekomendowana jest opcja 2: offline primary key, osobne
 roczne podklucze produktów w chronionym CI, dwa zaszyfrowane recovery kity i
 dwa tokeny do operacji ręcznych. Nie kupuj trzech par tokenów, dopóki realny
 kanał release nie uzasadnia tego kosztu.
@@ -259,7 +259,7 @@ zaktualizowany publiczny klucz i wydaj czysty patch release. Jeżeli wycieknie
 primary key, użyj offline revocation certificate, zatrzymaj wszystkie release'y
 i przeprowadź nową ceremonię korzenia organizacji.
 
-## Checklista gotowości VetCoders
+## Checklista gotowości Vetcoders
 
 - [ ] primary key jest `cert`-only i pozostaje offline;
 - [ ] istnieją osobne podklucze vc-frame, CodeScribe i Pensieve;
