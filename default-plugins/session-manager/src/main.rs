@@ -2515,6 +2515,126 @@ mod rail_tests {
         );
     }
 
+    /// The same inventory as seen by two different plugin instances: each one
+    /// considers a different session current.
+    fn two_views_of_the_same_inventory() -> (SessionList, SessionList) {
+        let mut view_from_alpha = SessionList::default();
+        view_from_alpha.set_sessions(
+            vec![
+                session("zeta", false),
+                session("alpha", true),
+                session("mid", false),
+            ],
+            vec![],
+        );
+        let mut view_from_zeta = SessionList::default();
+        view_from_zeta.set_sessions(
+            vec![
+                session("zeta", true),
+                session("alpha", false),
+                session("mid", false),
+            ],
+            vec![],
+        );
+        (view_from_alpha, view_from_zeta)
+    }
+
+    fn working_row_texts(sessions: &[SessionUiInfo]) -> Vec<String> {
+        session_rail_rows(sessions)
+            .into_iter()
+            .filter(|row| !row.is_bucket())
+            .map(|row| row.text)
+            .collect()
+    }
+
+    #[test]
+    fn session_order_is_independent_of_current_session() {
+        let (view_from_alpha, view_from_zeta) = two_views_of_the_same_inventory();
+        let names = |list: &SessionList| -> Vec<String> {
+            list.session_ui_infos
+                .iter()
+                .map(|s| s.name.clone())
+                .collect()
+        };
+        assert_eq!(names(&view_from_alpha), vec!["alpha", "mid", "zeta"]);
+        assert_eq!(
+            names(&view_from_alpha),
+            names(&view_from_zeta),
+            "session order must not depend on which session is current"
+        );
+    }
+
+    #[test]
+    fn current_session_change_moves_only_the_marker() {
+        let (view_from_alpha, view_from_zeta) = two_views_of_the_same_inventory();
+        assert_eq!(
+            working_row_texts(&view_from_alpha.session_ui_infos),
+            vec!["01 * alpha", "02 - mid", "03 - zeta"]
+        );
+        assert_eq!(
+            working_row_texts(&view_from_zeta.session_ui_infos),
+            vec!["01 - alpha", "02 - mid", "03 * zeta"]
+        );
+    }
+
+    #[test]
+    fn hotkeys_and_rail_rows_target_the_same_sessions_in_every_view() {
+        let (view_from_alpha, view_from_zeta) = two_views_of_the_same_inventory();
+        for character in ['1', '2', '3'] {
+            let target_a =
+                rail_ordinal_target(&view_from_alpha.session_ui_infos, character).unwrap();
+            let target_b =
+                rail_ordinal_target(&view_from_zeta.session_ui_infos, character).unwrap();
+            assert_eq!(
+                view_from_alpha.session_ui_infos[target_a].name,
+                view_from_zeta.session_ui_infos[target_b].name,
+                "hotkey {} must resolve to the same session in every view",
+                character
+            );
+        }
+        // Click rows carry the session index they display, so the row under a
+        // given ordinal and the hotkey for that ordinal must agree.
+        let rows = session_rail_rows(&view_from_alpha.session_ui_infos);
+        for (ordinal, row) in rows.iter().filter(|row| !row.is_bucket()).enumerate() {
+            let SessionRailRowKind::Session(session_index) = &row.kind else {
+                panic!("expected a session row, got {:?}", row.kind);
+            };
+            let hotkey = char::from_digit(ordinal as u32 + 1, 10).unwrap();
+            assert_eq!(
+                rail_ordinal_target(&view_from_alpha.session_ui_infos, hotkey),
+                Some(*session_index),
+                "click target and hotkey {} must point at the same session",
+                hotkey
+            );
+        }
+    }
+
+    #[test]
+    fn buckets_stay_pinned_below_name_sorted_sessions() {
+        let mut rail = SessionList::default();
+        // Bucket names sort alphabetically before the working sessions, which
+        // must not pull them out of their pinned tail position.
+        rail.set_sessions(
+            vec![
+                session("zzz", false),
+                session("Finalized runs", false),
+                session("aaa", true),
+                session("Failed runs", false),
+                session("Needs attention", false),
+            ],
+            vec![],
+        );
+        let rows = session_rail_rows(&rail.session_ui_infos);
+        let bucket_start = rows.iter().position(|row| row.is_bucket()).unwrap();
+        assert_eq!(
+            bucket_start, 2,
+            "only the two working sessions may precede the buckets"
+        );
+        assert!(rows[bucket_start..].iter().all(|row| row.is_bucket()));
+        assert_eq!(rows[0].text, "01 * aaa");
+        assert_eq!(rows[1].text, "02 - zzz");
+    }
+
     #[test]
     fn rail_expands_sessions_with_live_process_tabs_only() {
         let mut alpha = session("alpha", true);

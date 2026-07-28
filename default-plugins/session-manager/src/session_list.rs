@@ -78,15 +78,11 @@ impl SessionList {
         mut session_ui_infos: Vec<SessionUiInfo>,
         mut forbidden_sessions: Vec<SessionUiInfo>,
     ) {
-        session_ui_infos.sort_unstable_by(|a, b| {
-            if a.is_current_session {
-                std::cmp::Ordering::Less
-            } else if b.is_current_session {
-                std::cmp::Ordering::Greater
-            } else {
-                a.name.cmp(&b.name)
-            }
-        });
+        // Name order is the canonical rail order. Every plugin instance sees a
+        // different `is_current_session`, so sorting by it would make each rail
+        // render the same inventory in a different order; the current session
+        // keeps its `*` marker but not a special position.
+        session_ui_infos.sort_unstable_by(|a, b| a.name.cmp(&b.name));
         forbidden_sessions.sort_unstable_by(|a, b| a.name.cmp(&b.name));
         self.session_ui_infos = session_ui_infos;
         self.forbidden_sessions = forbidden_sessions;
