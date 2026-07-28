@@ -9356,6 +9356,7 @@ pub(crate) fn screen_thread_main(
 
         match event {
             ScreenInstruction::PtyBytes(pid, vte_bytes) => {
+                let n_bytes = vte_bytes.len();
                 let all_tabs = screen.get_tabs_mut();
                 let mut vte_bytes = Some(vte_bytes);
                 for tab in all_tabs.values_mut() {
@@ -9367,6 +9368,10 @@ pub(crate) fn screen_thread_main(
                         break;
                     }
                 }
+                // Release backpressure budget whether the bytes were parsed
+                // or dropped (pane already gone) — the reader is waiting on
+                // this accounting, not on the parse result.
+                crate::terminal_bytes::note_pty_bytes_processed(pid, n_bytes);
                 if let Some(vte_bytes) = vte_bytes {
                     pending_events_waiting_for_pane
                         .entry(PaneId::Terminal(pid))

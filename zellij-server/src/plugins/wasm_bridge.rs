@@ -401,6 +401,11 @@ struct LayoutPluginCleanupDebt {
     remaining_plugin_ids: BTreeSet<PluginId>,
 }
 
+/// Ring-buffer cap for events cached on behalf of a plugin that has not
+/// finished loading. Oldest entries are dropped first: a stuck or
+/// crash-looping load must not retain unbounded broadcast history.
+const MAX_CACHED_EVENTS_PER_PENDING_PLUGIN: usize = 4096;
+
 pub struct WasmBridge {
     connected_clients: Arc<Mutex<Vec<ClientId>>>,
     senders: ThreadSenders,
@@ -2112,16 +2117,25 @@ impl WasmBridge {
             .cloned()
             .collect();
 
-        // Execute each plugin update on its respective pinned thread
+        // Execute each plugin update on its respective pinned thread.
+        // Snapshot each plugin's subscriptions ONCE per call — locking and
+        // cloning them inside the events × plugins product turned a build's
+        // FileSystemUpdate burst into a lock-storm on the plugin thread.
+        let plugin_subscription_snapshots: Vec<_> = plugins_to_update
+            .iter()
+            .map(|(_, _, _, subscriptions)| subscriptions.lock().unwrap().clone())
+            .collect();
         let plugin_executor = self.plugin_executor.clone();
-        // let senders = self.senders.clone();
-        for (pid, cid, event) in updates.clone().into_iter() {
-            for (plugin_id, client_id, running_plugin, subscriptions) in &plugins_to_update {
-                let subs = subscriptions.lock().unwrap().clone();
-                // FIXME: This is very janky... Maybe I should write my own macro for Event -> EventType?
-                if let Ok(event_type) = EventType::from_str(&event.to_string())
-                    && (subs.contains(&event_type)
-                        || event_type == EventType::PermissionRequestResult)
+        for (pid, cid, event) in updates.iter() {
+            let (pid, cid) = (*pid, *cid);
+            // FIXME: This is very janky... Maybe I should write my own macro for Event -> EventType?
+            let Ok(event_type) = EventType::from_str(&event.to_string()) else {
+                continue;
+            };
+            for ((plugin_id, client_id, running_plugin, _), subs) in
+                plugins_to_update.iter().zip(&plugin_subscription_snapshots)
+            {
+                if (subs.contains(&event_type) || event_type == EventType::PermissionRequestResult)
                     && Self::message_is_directed_at_plugin(pid, cid, plugin_id, client_id)
                 {
                     // Execute directly on pinned thread (no async I/O needed for event processing)
@@ -2175,6 +2189,13 @@ impl WasmBridge {
         for (pid, _cid, event) in updates.drain(..) {
             for (plugin_id, cached_events) in self.cached_events_for_pending_plugins.iter_mut() {
                 if pid.is_none() || pid.as_ref() == Some(plugin_id) {
+                    // Keep the newest events — a stuck or crash-looping load
+                    // must not accumulate unbounded broadcast history
+                    // (FileSystemUpdate bursts, 1Hz SessionUpdate snapshots)
+                    // while it waits.
+                    if cached_events.len() >= MAX_CACHED_EVENTS_PER_PENDING_PLUGIN {
+                        cached_events.remove(0);
+                    }
                     cached_events.push(EventOrPipeMessage::Event(Box::new(event.clone())));
                 }
             }
@@ -2384,6 +2405,9 @@ impl WasmBridge {
                 .collect();
             for (plugin_id, cached_events) in self.cached_events_for_pending_plugins.iter_mut() {
                 if message_pid.is_none() || message_pid.as_ref() == Some(plugin_id) {
+                    if cached_events.len() >= MAX_CACHED_EVENTS_PER_PENDING_PLUGIN {
+                        cached_events.remove(0);
+                    }
                     cached_events.push(EventOrPipeMessage::PipeMessage(pipe_message.clone()));
                     if let PipeSource::Cli(pipe_id) = &pipe_message.source {
                         for client_id in &all_connected_clients {

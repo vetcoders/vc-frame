@@ -13,6 +13,32 @@ use zellij_utils::{data::Event, errors::prelude::Result};
 
 const DEBOUNCE_DURATION_MS: u64 = 400;
 
+/// Directory names whose events never reach plugins. The watcher observes the
+/// whole session cwd recursively; a `cargo build` or `npm install` inside it
+/// emits tens of thousands of events under these trees per burst, and every
+/// debounce batch fans out to every plugin. Plugins that genuinely browse
+/// build artifacts lose live refresh under these dirs — an acceptable trade
+/// against melting the plugin thread on every compile.
+const IGNORED_DIR_NAMES: &[&str] = &[
+    ".git",
+    "target",
+    "node_modules",
+    "__pycache__",
+    ".venv",
+    "venv",
+];
+
+fn path_is_ignored(path: &Path, root: &Path) -> bool {
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    relative.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::Normal(name)
+                if IGNORED_DIR_NAMES.iter().any(|ignored| name == *ignored)
+        )
+    })
+}
+
 pub fn watch_filesystem(
     senders: ThreadSenders,
     zellij_cwd: &Path,
@@ -29,6 +55,13 @@ pub fn watch_filesystem(
                 let mut update_events = vec![];
                 let mut delete_events = vec![];
                 for event in events {
+                    if event
+                        .paths
+                        .iter()
+                        .all(|path| path_is_ignored(path, &current_dir))
+                    {
+                        continue;
+                    }
                     match event.kind {
                         EventKind::Access(_) => read_events.push(event),
                         EventKind::Create(_) => create_events.push(event),
@@ -92,6 +125,15 @@ pub fn watch_filesystem(
                 // TODO: at some point we might want to add FileMetadata to these, but right now
                 // the API is a bit unstable, so let's not rock the boat too much by adding another
                 // expensive syscall
+                if create_paths.is_empty()
+                    && read_paths.is_empty()
+                    && update_paths.is_empty()
+                    && delete_paths.is_empty()
+                {
+                    // Everything in this batch was ignored — don't fan an
+                    // empty four-event Update out to every plugin.
+                    return;
+                }
                 let _ = senders.send_to_plugin(PluginInstruction::Update(vec![
                     (
                         None,
