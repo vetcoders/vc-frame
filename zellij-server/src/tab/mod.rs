@@ -35,11 +35,12 @@ use layout_applier::{LayoutApplier, LayoutSideEffects, LayoutTransactionParts};
 use swap_layouts::SwapLayouts;
 
 use self::clipboard::ClipboardProvider;
+use crate::panes::grid::RenderOutput;
 use crate::route::NotificationEnd;
 use crate::{
     ClientId, ServerInstruction,
     os_input_output::ServerOsApi,
-    output::{CharacterChunk, Output, SixelImageChunk},
+    output::{CharacterChunk, Output},
     panes::floating_panes::floating_pane_grid::half_size_middle_geom,
     panes::grid::namespace_notification_id,
     panes::sixel::SixelImageStore,
@@ -394,10 +395,7 @@ pub trait Pane {
     fn selectable(&self) -> bool;
     fn set_selectable(&mut self, selectable: bool);
     fn request_permissions_from_user(&mut self, _permissions: Option<PluginPermission>) {}
-    fn render(
-        &mut self,
-        client_id: Option<ClientId>,
-    ) -> Result<Option<(Vec<CharacterChunk>, Option<String>, Vec<SixelImageChunk>)>>; // TODO: better
+    fn render(&mut self, client_id: Option<ClientId>) -> Result<Option<RenderOutput>>;
     fn render_frame(
         &mut self,
         client_id: ClientId,
@@ -1640,6 +1638,7 @@ impl Tab {
     }
 
     #[cfg(test)]
+    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
     pub fn apply_layout(
         &mut self,
         layout: TiledPaneLayout,
@@ -1688,6 +1687,7 @@ impl Tab {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
     pub(crate) fn begin_apply_layout(
         &mut self,
         layout: TiledPaneLayout,
@@ -1764,6 +1764,7 @@ impl Tab {
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
     pub(crate) fn begin_override_layout(
         &mut self,
         layout: TiledPaneLayout,
@@ -2308,6 +2309,7 @@ impl Tab {
             invoked_with
         }
     }
+    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
     pub fn new_pane(
         &mut self,
         pid: PaneId,
@@ -2408,6 +2410,7 @@ impl Tab {
             ),
         }
     }
+    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
     pub fn new_no_preference_pane(
         &mut self,
         pid: PaneId,
@@ -2516,6 +2519,7 @@ impl Tab {
             self.add_tiled_pane(new_pane, pid, false, client_id)
         }
     }
+    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
     pub fn new_tiled_pane(
         &mut self,
         pid: PaneId,
@@ -2619,6 +2623,7 @@ impl Tab {
             self.add_tiled_pane(new_pane, pid, false, client_id)
         }
     }
+    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
     pub fn new_floating_pane(
         &mut self,
         pid: PaneId,
@@ -2717,6 +2722,7 @@ impl Tab {
             self.add_floating_pane(new_pane, pid, floating_pane_coordinates, should_focus_pane)
         }
     }
+    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
     pub fn new_in_place_pane(
         &mut self,
         pid: PaneId,
@@ -2763,6 +2769,7 @@ impl Tab {
         }
         Ok(())
     }
+    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
     pub fn new_stacked_pane(
         &mut self,
         pid: PaneId,
@@ -4819,7 +4826,7 @@ impl Tab {
 
         // Check tiled panes
         if let Some(pane) = self.tiled_panes.get_pane(pane_id) {
-            let mut info = pane_info_for_pane(&pane_id, pane, &current_pane_group);
+            let mut info = pane_info_for_pane(&pane_id, pane.as_ref(), &current_pane_group);
             // Note: is_focused will be false since we don't have a specific client_id context
             // Plugins calling this API would need to compare the pane_id with their own focused pane
             info.is_focused = false;
@@ -4831,7 +4838,7 @@ impl Tab {
 
         // Check floating panes
         if let Some(pane) = self.floating_panes.get_pane(pane_id) {
-            let mut info = pane_info_for_pane(&pane_id, pane, &current_pane_group);
+            let mut info = pane_info_for_pane(&pane_id, pane.as_ref(), &current_pane_group);
             info.is_focused = false;
             info.is_fullscreen = false;
             info.is_floating = true;
@@ -4841,7 +4848,7 @@ impl Tab {
 
         // Check suppressed panes
         if let Some((_previous_id, pane)) = self.suppressed_panes.get(&pane_id) {
-            let mut info = pane_info_for_pane(&pane_id, pane, &current_pane_group);
+            let mut info = pane_info_for_pane(&pane_id, pane.as_ref(), &current_pane_group);
             info.is_focused = false;
             info.is_fullscreen = false;
             info.is_floating = false;
@@ -5575,7 +5582,7 @@ impl Tab {
                 .stacked_pane_ids_under_and_over_flexible_panes()
                 .with_context(err_context)?
         };
-        let pane_contains_point = |p: &Box<dyn Pane>,
+        let pane_contains_point = |p: &dyn Pane,
                                    point: &Position,
                                    stacked_pane_ids_under_flexible_pane: &HashSet<PaneId>|
          -> bool {
@@ -5607,12 +5614,16 @@ impl Tab {
         if search_selectable {
             Ok(self
                 .get_selectable_tiled_panes()
-                .find(|(_, p)| pane_contains_point(p, point, &stacked_pane_ids_under_flexible_pane))
+                .find(|(_, p)| {
+                    pane_contains_point(p.as_ref(), point, &stacked_pane_ids_under_flexible_pane)
+                })
                 .map(|(&id, _)| id))
         } else {
             Ok(self
                 .get_tiled_panes()
-                .find(|(_, p)| pane_contains_point(p, point, &stacked_pane_ids_under_flexible_pane))
+                .find(|(_, p)| {
+                    pane_contains_point(p.as_ref(), point, &stacked_pane_ids_under_flexible_pane)
+                })
                 .map(|(&id, _)| id))
         }
     }
@@ -6332,7 +6343,7 @@ impl Tab {
             self.suppressed_panes.iter()
         {
             let mut pane_info_for_suppressed_pane =
-                pane_info_for_pane(&pane.pid(), pane, &current_pane_group);
+                pane_info_for_pane(&pane.pid(), pane.as_ref(), &current_pane_group);
             pane_info_for_suppressed_pane.is_floating = false;
             pane_info_for_suppressed_pane.is_suppressed = true;
             pane_info_for_suppressed_pane.is_focused = false;
@@ -7135,7 +7146,7 @@ impl Tab {
 
 pub fn pane_info_for_pane(
     pane_id: &PaneId,
-    pane: &Box<dyn Pane>,
+    pane: &dyn Pane,
     current_pane_group: &HashMap<ClientId, Vec<PaneId>>,
 ) -> PaneInfo {
     let index_in_pane_group: BTreeMap<ClientId, usize> = current_pane_group

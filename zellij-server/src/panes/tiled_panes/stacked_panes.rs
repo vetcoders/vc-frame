@@ -976,7 +976,7 @@ impl<'a> StackedPanes<'a> {
     }
     fn get_flexible_pane_id(
         &self,
-        all_stacked_pane_positions: &Vec<(PaneId, PaneGeom)>,
+        all_stacked_pane_positions: &[(PaneId, PaneGeom)],
     ) -> Option<PaneId> {
         let err_context = || "Failed to get flexible pane id";
         let position_of_flexible_pane = self

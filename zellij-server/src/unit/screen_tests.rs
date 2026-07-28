@@ -503,11 +503,13 @@ fn send_cli_action_to_server(
     }
 }
 
+type TtyStdinWrites = Arc<Mutex<Vec<(u32, Vec<u8>)>>>;
+
 #[derive(Clone, Default)]
 struct FakeInputOutput {
     fake_filesystem: Arc<Mutex<HashMap<String, String>>>,
     server_to_client_messages: Arc<Mutex<HashMap<ClientId, Vec<ServerToClientMsg>>>>,
-    tty_stdin_writes: Arc<Mutex<Vec<(u32, Vec<u8>)>>>,
+    tty_stdin_writes: TtyStdinWrites,
 }
 
 impl ServerOsApi for FakeInputOutput {
@@ -6686,6 +6688,7 @@ fn dispatch_transactional_new_tab(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
 fn send_transactional_apply(
     mock_screen: &MockScreen,
     tab_id: usize,

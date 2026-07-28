@@ -193,11 +193,13 @@ static UNIX_CHILD_GUARD_CLEANUPS: AtomicU32 = AtomicU32::new(0);
 #[cfg(test)]
 static LAST_REAPED_UNIX_CHILD: AtomicU32 = AtomicU32::new(0);
 
+type ChildQuitCallback = Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>;
+
 struct UnixChildMonitor {
     child: Option<Child>,
     secondary_fd: Option<RawFd>,
     cmd: Option<RunCommand>,
-    quit_cb: Option<Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>>,
+    quit_cb: Option<ChildQuitCallback>,
     terminal_id: u32,
 }
 
