@@ -100,10 +100,16 @@ cargo xtask run --singlepass
 
 ## How we treat clippy lints
 
-We currently use clippy in [GitHub Actions](https://github.com/vetcoders/vc-frame/blob/main/.github/workflows/rust.yml) with the default settings that report only [`clippy::correctness`](https://github.com/rust-lang/rust-clippy#readme) as errors and other lints as warnings because vc-frame is still unstable. This means that all warnings can be ignored depending on the situation at that time, even though they are also helpful to keep the code quality.
-Since we just cannot afford to manage them, we are always welcome to fix them!
+The canonical gate is `make clippy` (also run by `make precheck` and by
+[GitHub Actions](https://github.com/vetcoders/vc-frame/blob/main/.github/workflows/rust.yml)):
+`cargo clippy --workspace --all-targets --all-features -- -D warnings`, with no
+gate-level allowances. Any new warning fails the gate.
 
-Here is [the detailed discussion](https://github.com/zellij-org/zellij/pull/1090) if you want to see it.
+The only tolerated escape hatch is an explicit per-site `#[allow(...)]` with a
+comment explaining why — today that is a bounded set of inherited
+`clippy::too_many_arguments` constructors awaiting a params-struct refactor.
+Do not add new gate-level `-A` flags and do not silence lints without a reason
+written next to the annotation.
 
 
 ## Toolchain Versions and MSRV
