@@ -449,6 +449,7 @@ pub struct WasmBridge {
 }
 
 impl WasmBridge {
+    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
     pub fn new(
         senders: ThreadSenders,
         engine: Engine,
@@ -3025,6 +3026,7 @@ impl WasmBridge {
 
     // gets all running plugins details matching this run_plugin, if none are running, loads one and
     // returns its details
+    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
     pub fn get_or_load_plugins(
         &mut self,
         run_plugin_or_alias: RunPluginOrAlias,

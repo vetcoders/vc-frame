@@ -354,6 +354,7 @@ impl From<&PluginInstruction> for PluginContext {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
 pub(crate) fn plugin_thread_main(
     bus: Bus<PluginInstruction>,
     engine: Engine,
@@ -1708,6 +1709,7 @@ fn pipe_to_all_plugins(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
 fn pipe_to_specific_plugins(
     pipe_source: PipeSource,
     plugin_url: &str,

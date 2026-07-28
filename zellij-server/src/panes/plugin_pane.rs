@@ -111,6 +111,7 @@ pub(crate) struct PluginPane {
 }
 
 impl PluginPane {
+    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
     pub fn new(
         pid: u32,
         position_and_size: PaneGeom,

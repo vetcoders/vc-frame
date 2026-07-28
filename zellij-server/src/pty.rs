@@ -2200,6 +2200,7 @@ impl Pty {
         let starts_held = false;
         Ok((terminal_id, starts_held))
     }
+    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
     pub fn spawn_terminals_for_layout(
         &mut self,
         cwd: Option<PathBuf>,
@@ -2473,6 +2474,7 @@ impl Pty {
         }
         Ok(())
     }
+    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
     fn override_layout_transaction(
         &mut self,
         cwd: Option<PathBuf>,
@@ -2632,6 +2634,7 @@ impl Pty {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
     fn prepare_terminals_for_layout_override(
         &mut self,
         cwd: Option<PathBuf>,
@@ -3345,6 +3348,7 @@ impl Pty {
         session_layout_metadata.update_default_editor(&self.default_editor);
         session_layout_metadata.detect_editor_panes();
     }
+    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
     pub fn fill_plugin_cwd(
         &self,
         should_float: Option<bool>,

@@ -178,14 +178,9 @@ test-no-web:
 check: plugins
 	$(CARGO) check --workspace
 
-## Clippy: zero warnings, with project-agreed allowances; builds bundled WASM plugins first
+## Clippy: zero warnings, no gate-level allowances; builds bundled WASM plugins first
 clippy: plugins
-	$(CARGO) clippy --workspace --all-targets -- \
-		-D warnings \
-		-A clippy::too_many_arguments \
-		-A clippy::type_complexity \
-		-A clippy::borrowed_box \
-		-A clippy::ptr_arg
+	$(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
 
 ## Format all code
 fmt:

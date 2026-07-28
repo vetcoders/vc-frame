@@ -273,6 +273,7 @@ fn complete_action_immediately(sender: oneshot::Sender<ActionCompletionResult>) 
 // otherwise blocking-CLI actions
 // (`critical_completion=true`) park this function while still holding the guard,
 // deadlocking concurrent `session_data.write()`s.
+#[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
 pub(crate) fn route_action(
     action: Action,
     client_id: ClientId,

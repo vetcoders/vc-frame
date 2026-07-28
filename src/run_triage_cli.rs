@@ -1237,6 +1237,7 @@ fn load_runtime_transcript_manifest(
     Ok((manifest, canonical_transcript, transcript_file))
 }
 
+#[allow(clippy::too_many_arguments)] // capture origin wants a params struct; de-arg refactor is its own cut
 fn capture_runtime_transcript(
     run_id: &str,
     session: &str,

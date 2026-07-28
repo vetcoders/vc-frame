@@ -31,6 +31,7 @@ const MAX_AUTH_ATTEMPTS: u32 = 3;
 /// - Saving session tokens when --remember is used
 ///
 /// Returns WebSocketConnections on success
+#[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
 pub fn attach_to_remote_session(
     runtime: Handle,
     _os_input: Box<dyn ClientOsApi>,

@@ -2440,6 +2440,7 @@ impl Screen {
     }
 
     /// Creates and returns a new [`Screen`].
+    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
     pub fn new(
         bus: Bus<ScreenInstruction>,
         client_attributes: &ClientAttributes,
@@ -5486,6 +5487,7 @@ impl Screen {
         Ok(())
     }
     #[cfg(test)]
+    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
     pub fn apply_layout(
         &mut self,
         layout: TiledPaneLayout,
@@ -5581,6 +5583,7 @@ impl Screen {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
     fn prepare_apply_layout(
         &mut self,
         layout: TiledPaneLayout,
@@ -7811,6 +7814,7 @@ impl Screen {
         }
         let _ = self.log_and_report_session_state();
     }
+    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
     pub fn reconfigure(
         &mut self,
         new_keybinds: Keybinds,

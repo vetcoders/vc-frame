@@ -417,6 +417,7 @@ impl<'a> PluginLoader<'a> {
 
         Ok((store, instance))
     }
+    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
     pub fn create_wasi_ctx(
         host_dir: &Path,
         data_dir: &Path,

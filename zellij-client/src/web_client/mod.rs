@@ -58,6 +58,7 @@ use websocket_handlers::{ws_handler_control, ws_handler_terminal};
 #[allow(dead_code)] // used in #[cfg(not(unix))] code path
 const DEFAULT_SERVER_STARTUP_TIMEOUT_SECS: u64 = 10;
 
+#[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
 pub fn start_web_client(
     config: Config,
     config_options: Options,
@@ -170,6 +171,7 @@ pub fn start_web_client(
     ));
 }
 
+#[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
 pub async fn serve_web_client(
     config: Config,
     config_options: Options,

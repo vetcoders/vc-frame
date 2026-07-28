@@ -633,6 +633,7 @@ pub async fn run_remote_client_terminal_loop(
 }
 
 #[cfg(feature = "web_server_capability")]
+#[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
 pub fn start_remote_client(
     mut os_input: Box<dyn ClientOsApi>,
     remote_session_url: &str,

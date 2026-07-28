@@ -20,6 +20,7 @@ use zellij_utils::{
     setup::Setup,
 };
 
+#[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
 pub fn zellij_server_listener(
     os_input: Box<dyn ClientOsApi>,
     connection_table: Arc<Mutex<ConnectionTable>>,

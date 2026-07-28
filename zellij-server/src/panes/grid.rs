@@ -914,6 +914,7 @@ fn resolve_highlight_colors(
 }
 
 impl Grid {
+    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
     pub fn new(
         rows: usize,
         columns: usize,
