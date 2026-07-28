@@ -892,6 +892,16 @@ impl MouseHandler {
         if let Some(pane_at_position) = Self::unselectable_pane_at_position(tab, &position) {
             let relative_position = pane_at_position.relative_position(&position);
             pane_at_position.start_selection(&relative_position, client_id);
+        } else if let Some(active_pane) = tab.get_active_pane_mut(client_id)
+            && matches!(active_pane.pid(), PaneId::Plugin(_))
+            && active_pane.contains(&position)
+        {
+            // A selectable plugin pane (e.g. the session rail) must receive
+            // the press that focused it. Without this, the first click only
+            // moves focus and is swallowed — the user has to click twice,
+            // while hover highlighting already promised the click would land.
+            let relative_position = active_pane.relative_position(&position);
+            active_pane.start_selection(&relative_position, client_id);
         }
 
         if tab.floating_panes.panes_are_visible() {
@@ -1020,9 +1030,15 @@ impl MouseHandler {
                             .with_context(err_context)?;
                     }
                 }
-                tab.selecting_with_mouse_in_pane = None;
             }
         }
+        // Clear the selection latch on every release path — not only when the
+        // selection ended in-pane. If the pane's application enabled mouse
+        // tracking between press and release, the release is forwarded to the
+        // terminal above; if the selecting pane closed, the lookup misses.
+        // Leaving the latch set makes determine_mouse_action swallow every
+        // subsequent press in this tab.
+        tab.selecting_with_mouse_in_pane = None;
 
         if leave_clipboard_message {
             Ok(MouseEffect::leave_clipboard_message())

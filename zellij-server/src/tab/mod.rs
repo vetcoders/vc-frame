@@ -5763,8 +5763,19 @@ impl Tab {
         self.senders
             .send_to_plugin(PluginInstruction::Update(plugin_updates))
             .with_context(|| format!("failed to set visibility of tab to {visible}"))?;
-        if !visible {
+        if visible {
+            // A tab becoming visible must repaint from scratch: while hidden,
+            // its pane output diffs were drained by other viewers (or nobody),
+            // so an incoming client would otherwise receive deltas against a
+            // frame it never saw.
+            self.set_force_render();
+        } else {
             self.mouse_hover_pane_id.clear();
+            // Mouse press/drag latches must not survive the tab going
+            // invisible: a press whose release lands in another tab would
+            // otherwise leave this tab swallowing its next click.
+            self.selecting_with_mouse_in_pane = None;
+            self.pane_being_resized_with_mouse = None;
         }
         Ok(())
     }

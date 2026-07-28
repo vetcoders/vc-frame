@@ -1412,20 +1412,18 @@ impl RenderBlocker {
 
     #[cfg(not(test))]
     pub fn can_render(&mut self) -> bool {
-        let ret = if self.blocking_plugins.is_empty() {
-            true
-        } else {
-            let timeout = Duration::from_millis(self.timeout_ms);
-            let now = Instant::now();
-
-            self.blocking_plugins
-                .values()
-                .all(|&registered_at| now.duration_since(registered_at) >= timeout)
-        };
-        if ret {
-            self.blocking_plugins.clear();
+        if self.blocking_plugins.is_empty() {
+            return true;
         }
-        ret
+        let timeout = Duration::from_millis(self.timeout_ms);
+        let now = Instant::now();
+        // Evict expired entries individually. The previous all-or-nothing
+        // check let every fresh registration re-arm the whole gate: under
+        // multi-tab churn a new plugin always landed before the previous
+        // batch aged out, so rendering was starved session-wide.
+        self.blocking_plugins
+            .retain(|_, registered_at| now.duration_since(*registered_at) < timeout);
+        self.blocking_plugins.is_empty()
     }
 }
 
@@ -4101,6 +4099,10 @@ impl Screen {
             match self.get_active_tab(client_id) {
                 Ok(current_tab) => {
                     // If new active tab is same as the current one, do nothing.
+                    // (A deferred switch replayed after the pending-layout
+                    // gate also lands here; its suppressed frame is re-emitted
+                    // by the gate-exit force-render in screen_thread_main, so
+                    // this no-op is safe.)
                     if current_tab.position == new_tab_pos {
                         return Ok(());
                     }
@@ -9301,6 +9303,12 @@ pub(crate) fn screen_thread_main(
         HashMap::new();
     let mut plugin_loading_message_cache = HashMap::new();
     let mut keybind_intercepts = HashMap::new();
+    // Tabs gated by `pending_tab_ids` are skipped by render; whichever of the
+    // many retirement paths removes a tab from the gate, the client still
+    // shows the pre-gate frame until something re-renders. Snapshot the gate
+    // each pass and force-render every tab that left it — one chokepoint
+    // instead of a render call in every retirement site.
+    let mut previously_gated_tab_ids: HashSet<usize> = HashSet::new();
     loop {
         for (transaction_id, coordination) in screen.take_resolved_layout_reconciliations() {
             if let Err(error) = screen.reconcile_indeterminate_layout_transaction(
@@ -9320,6 +9328,23 @@ pub(crate) fn screen_thread_main(
         }
         screen.retry_indeterminate_layout_transactions_in_background();
         screen.retry_pending_layout_cleanup_in_background();
+        if !previously_gated_tab_ids.is_empty() {
+            let ungated: Vec<usize> = previously_gated_tab_ids
+                .iter()
+                .filter(|tab_id| !pending_tab_ids.contains(tab_id))
+                .copied()
+                .collect();
+            if !ungated.is_empty() {
+                let tabs = screen.get_tabs_mut();
+                for tab_id in &ungated {
+                    if let Some(tab) = tabs.get_mut(tab_id) {
+                        tab.set_force_render();
+                    }
+                }
+                screen.render(None)?;
+            }
+        }
+        previously_gated_tab_ids.clone_from(&pending_tab_ids);
         let (event, mut err_ctx) = screen
             .bus
             .recv()
@@ -9376,7 +9401,13 @@ pub(crate) fn screen_thread_main(
             ScreenInstruction::Render => {
                 screen.render(None)?;
             },
-            ScreenInstruction::LayoutMaintenanceWake => {},
+            ScreenInstruction::LayoutMaintenanceWake => {
+                // Intentionally no work here: the wake exists to unblock
+                // recv() so the loop-top reconciliation runs. If that pass
+                // retires a layout gate, the gate-exit force-render in the
+                // loop head emits the frame — rendering here would spam a
+                // frame per wake even when nothing changed.
+            },
             ScreenInstruction::RenderToClients => {
                 // render_blocker.can_render() returning true means that either all pending plugins
                 // (only those waiting for a new tab layout to be applied!) have been rendered or
