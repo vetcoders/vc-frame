@@ -841,21 +841,28 @@ fn format_process_tab_rail_entry(tab: &TabUiInfo) -> String {
     text
 }
 
-// Direct rail navigation (vc_rail_nav pipe, bound to Ctrl+Shift+Up/Down even
-// in locked mode): the target is resolved relative to the *current* session
-// with wrap-around, so every rail instance receiving the broadcast computes
-// the same destination and the switch stays idempotent.
+// Direct rail navigation (vc_rail_nav pipe, bound to tab-mode Up/Down —
+// ctrl+t then arrows): the target is resolved relative to the *current*
+// session with wrap-around, so every rail instance receiving the broadcast
+// computes the same destination and the switch stays idempotent. Navigation
+// walks the *working* sessions in rail order only — the f/x/n bucket
+// sessions have their own hotkeys and must not swallow a step.
 fn relative_session_target(sessions: &[SessionUiInfo], offset: isize) -> Option<String> {
-    if sessions.len() < 2 {
+    let working = working_session_indices(sessions);
+    if working.len() < 2 {
         return None;
     }
-    let current = sessions.iter().position(|s| s.is_current_session)?;
-    let count = sessions.len() as isize;
-    let target = (current as isize + offset).rem_euclid(count) as usize;
-    if target == current {
+    let current_pos = working
+        .iter()
+        .position(|&index| sessions[index].is_current_session)?;
+    let count = working.len() as isize;
+    let target_pos = (current_pos as isize + offset).rem_euclid(count) as usize;
+    if target_pos == current_pos {
         return None;
     }
-    sessions.get(target).map(|s| s.name.clone())
+    sessions
+        .get(working[target_pos])
+        .map(|session| session.name.clone())
 }
 
 /// Working sessions in rail order — bucket sessions are pinned separately and
@@ -1206,7 +1213,19 @@ impl State {
             match rail_row.kind {
                 SessionRailRowKind::Session(session_index) => {
                     if cols >= 4 {
-                        text = text.color_range(1, 3..4);
+                        // The `*` current-session marker must be the brightest
+                        // ink on the line: leave it at the row's base color and
+                        // dim the `-` of every other session instead. Painting
+                        // both with the same muted emphasis made "you are
+                        // here" invisible.
+                        let is_current = self
+                            .sessions
+                            .session_ui_infos
+                            .get(session_index)
+                            .is_some_and(|session| session.is_current_session);
+                        if !is_current {
+                            text = text.color_range(2, 3..4);
+                        }
                     }
                     if selected_index == Some(session_index) {
                         text = text.selected();
@@ -2469,6 +2488,121 @@ mod rail_tests {
             is_current_session,
             creation_time: Duration::ZERO,
         }
+    }
+
+    fn session_launched_at(name: &str, is_current_session: bool, secs: u64) -> SessionUiInfo {
+        SessionUiInfo {
+            creation_time: Duration::from_secs(secs),
+            ..session(name, is_current_session)
+        }
+    }
+
+    /// The rail contract: slot = launch order. The session started first holds
+    /// slot 01 for as long as it lives — regardless of its name and of which
+    /// session the viewing instance considers current.
+    #[test]
+    fn rail_orders_sessions_by_launch_time_not_name_or_current() {
+        let mut rail = SessionList::default();
+        rail.set_sessions(
+            vec![
+                session_launched_at("alpha", true, 200),
+                session_launched_at("zeta", false, 100),
+            ],
+            vec![],
+        );
+        let names: Vec<&str> = rail
+            .session_ui_infos
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["zeta", "alpha"],
+            "the earlier-launched session holds the earlier slot, name and current-ness be damned"
+        );
+    }
+
+    /// Activating a different session must not reshuffle the rail: two views
+    /// with different `is_current_session` flags render the same order.
+    #[test]
+    fn activation_does_not_reshuffle_rail() {
+        let order_seen_by = |current: &str| {
+            let mut rail = SessionList::default();
+            rail.set_sessions(
+                vec![
+                    session_launched_at("morning", current == "morning", 100),
+                    session_launched_at("noon", current == "noon", 200),
+                    session_launched_at("evening", current == "evening", 300),
+                ],
+                vec![],
+            );
+            rail.session_ui_infos
+                .iter()
+                .map(|s| s.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(order_seen_by("morning"), order_seen_by("evening"));
+        assert_eq!(order_seen_by("noon"), vec!["morning", "noon", "evening"]);
+    }
+
+    /// ctrl+t Up/Down steps through working sessions in rail order, wrapping
+    /// around — and never lands on an f/x/n bucket session.
+    #[test]
+    fn rail_nav_steps_over_working_sessions_and_skips_buckets() {
+        let sessions = vec![
+            session_launched_at("early", false, 100),
+            session_launched_at("Finalized runs", false, 150),
+            session_launched_at("late", true, 200),
+            session_launched_at("Needs attention", false, 250),
+        ];
+        // current = "late" (last working session): down wraps to "early",
+        // up steps back to "early" as well (two working sessions total).
+        assert_eq!(
+            relative_session_target(&sessions, 1).as_deref(),
+            Some("early"),
+            "down from the last working session must wrap, not hit a bucket"
+        );
+        assert_eq!(
+            relative_session_target(&sessions, -1).as_deref(),
+            Some("early")
+        );
+        // A single working session has nowhere to go.
+        let lonely = vec![
+            session_launched_at("only", true, 100),
+            session_launched_at("Failed runs", false, 200),
+        ];
+        assert_eq!(relative_session_target(&lonely, 1), None);
+    }
+
+    /// When a session dies, the sessions below it move up one slot — the
+    /// survivors keep their relative launch order and a newly launched
+    /// session appends at the end.
+    #[test]
+    fn dead_session_compacts_slots_preserving_launch_order() {
+        let mut rail = SessionList::default();
+        rail.set_sessions(
+            vec![
+                session_launched_at("first", true, 100),
+                session_launched_at("second", false, 200),
+                session_launched_at("third", false, 300),
+            ],
+            vec![],
+        );
+        // "second" dies; a fresh "fourth" launches later.
+        rail.set_sessions(
+            vec![
+                session_launched_at("third", false, 300),
+                session_launched_at("first", true, 100),
+                session_launched_at("fourth", false, 400),
+            ],
+            vec![],
+        );
+        let names: Vec<&str> = rail
+            .session_ui_infos
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["first", "third", "fourth"]);
     }
 
     #[test]

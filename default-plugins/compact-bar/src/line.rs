@@ -404,14 +404,22 @@ impl TabLinePrefixBuilder {
 
         if self.cols.saturating_sub(used_len) >= mode_len {
             let colors = self.get_text_colors();
+            // An armed mode (TAB, SESSION, PANE, …) renders as an inverse
+            // accent chip; foreground-only shades made NORMAL near-invisible
+            // and every armed mode identical, so a blind ctrl+t / ctrl+o had
+            // no visible confirmation at all.
             let style = match mode {
-                InputMode::Locked => {
-                    style!(self.palette.text_unselected.emphasis_3, colors.background)
-                },
+                InputMode::Locked => style!(
+                    self.palette.text_unselected.background,
+                    self.palette.text_unselected.emphasis_1
+                ),
                 InputMode::Normal => {
                     style!(self.palette.text_unselected.emphasis_2, colors.background)
                 },
-                _ => style!(self.palette.text_unselected.emphasis_0, colors.background),
+                _ => style!(
+                    self.palette.ribbon_selected.base,
+                    self.palette.ribbon_selected.background
+                ),
             };
 
             Some(LinePart {

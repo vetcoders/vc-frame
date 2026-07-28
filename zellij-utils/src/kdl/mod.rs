@@ -5305,10 +5305,15 @@ impl Themes {
                         "list_selected",
                     )
                     .map(|maybe_style| maybe_style.unwrap_or(DEFAULT_STYLES.list_selected))?,
+                    // Like every other surface, an omitted frame_unselected
+                    // falls back to the fork default (explicit DIM baseline) —
+                    // leaving it None would hand unfocused frames to the
+                    // terminal's default foreground.
                     frame_unselected: Themes::style_declaration_from_node(
                         theme_config,
                         "frame_unselected",
-                    )?,
+                    )
+                    .map(|maybe_style| maybe_style.or(DEFAULT_STYLES.frame_unselected))?,
                     frame_selected: Themes::style_declaration_from_node(
                         theme_config,
                         "frame_selected",

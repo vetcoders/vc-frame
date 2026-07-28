@@ -1,5 +1,6 @@
 ---
 source: zellij-utils/src/setup.rs
+assertion_line: 893
 expression: "format!(\"{:#?}\", config)"
 ---
 Config {
@@ -7381,7 +7382,28 @@ Config {
                         ),
                     ),
                 },
-                frame_unselected: None,
+                frame_unselected: Some(
+                    StyleDeclaration {
+                        base: EightBit(
+                            240,
+                        ),
+                        background: EightBit(
+                            234,
+                        ),
+                        emphasis_0: EightBit(
+                            244,
+                        ),
+                        emphasis_1: EightBit(
+                            240,
+                        ),
+                        emphasis_2: EightBit(
+                            16,
+                        ),
+                        emphasis_3: EightBit(
+                            240,
+                        ),
+                    },
+                ),
                 frame_selected: StyleDeclaration {
                     base: Rgb(
                         (
@@ -7971,7 +7993,28 @@ Config {
                         ),
                     ),
                 },
-                frame_unselected: None,
+                frame_unselected: Some(
+                    StyleDeclaration {
+                        base: EightBit(
+                            240,
+                        ),
+                        background: EightBit(
+                            234,
+                        ),
+                        emphasis_0: EightBit(
+                            244,
+                        ),
+                        emphasis_1: EightBit(
+                            240,
+                        ),
+                        emphasis_2: EightBit(
+                            16,
+                        ),
+                        emphasis_3: EightBit(
+                            240,
+                        ),
+                    },
+                ),
                 frame_selected: StyleDeclaration {
                     base: Rgb(
                         (
@@ -8561,7 +8604,28 @@ Config {
                         ),
                     ),
                 },
-                frame_unselected: None,
+                frame_unselected: Some(
+                    StyleDeclaration {
+                        base: EightBit(
+                            240,
+                        ),
+                        background: EightBit(
+                            234,
+                        ),
+                        emphasis_0: EightBit(
+                            244,
+                        ),
+                        emphasis_1: EightBit(
+                            240,
+                        ),
+                        emphasis_2: EightBit(
+                            16,
+                        ),
+                        emphasis_3: EightBit(
+                            240,
+                        ),
+                    },
+                ),
                 frame_selected: StyleDeclaration {
                     base: Rgb(
                         (

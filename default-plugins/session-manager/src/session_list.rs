@@ -78,12 +78,21 @@ impl SessionList {
         mut session_ui_infos: Vec<SessionUiInfo>,
         mut forbidden_sessions: Vec<SessionUiInfo>,
     ) {
-        // Name order is the canonical rail order. Every plugin instance sees a
-        // different `is_current_session`, so sorting by it would make each rail
-        // render the same inventory in a different order; the current session
-        // keeps its `*` marker but not a special position.
-        session_ui_infos.sort_unstable_by(|a, b| a.name.cmp(&b.name));
-        forbidden_sessions.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        // Launch order is the canonical rail order: the session started first
+        // holds slot 01 for as long as it lives, and when a session dies the
+        // ones below move up one slot. Activation, clicks and attach must
+        // never reshuffle the rail — every plugin instance sees a different
+        // `is_current_session`, so any current-dependent order makes each
+        // rail render the same inventory differently. Name is only the
+        // deterministic tie-break (equal or missing creation times, e.g.
+        // when another session's metadata has not been read yet).
+        let launch_order = |a: &SessionUiInfo, b: &SessionUiInfo| {
+            a.creation_time
+                .cmp(&b.creation_time)
+                .then_with(|| a.name.cmp(&b.name))
+        };
+        session_ui_infos.sort_unstable_by(launch_order);
+        forbidden_sessions.sort_unstable_by(launch_order);
         self.session_ui_infos = session_ui_infos;
         self.forbidden_sessions = forbidden_sessions;
     }

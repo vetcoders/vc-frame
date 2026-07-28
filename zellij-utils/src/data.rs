@@ -1458,29 +1458,38 @@ pub const DEFAULT_STYLES: Styling = Styling {
         emphasis_3: PaletteColor::EightBit(grayscale::SOFT),
         background: PaletteColor::EightBit(grayscale::BG),
     },
+    // Selection is an inverse chip (ink on light), not a 2-step background
+    // nudge: in a grayscale surface FG-on-SELECTED vs FG-on-BG was barely
+    // distinguishable, so keyboard selection was effectively invisible.
     text_selected: StyleDeclaration {
-        base: PaletteColor::EightBit(grayscale::FG),
-        emphasis_0: PaletteColor::EightBit(grayscale::SOFT),
-        emphasis_1: PaletteColor::EightBit(grayscale::MUTED),
-        emphasis_2: PaletteColor::EightBit(grayscale::DIM),
-        emphasis_3: PaletteColor::EightBit(grayscale::SOFT),
-        background: PaletteColor::EightBit(grayscale::SELECTED),
-    },
-    ribbon_unselected: StyleDeclaration {
-        base: PaletteColor::EightBit(grayscale::SOFT),
-        emphasis_0: PaletteColor::EightBit(grayscale::FG),
-        emphasis_1: PaletteColor::EightBit(grayscale::FG),
-        emphasis_2: PaletteColor::EightBit(grayscale::MUTED),
-        emphasis_3: PaletteColor::EightBit(grayscale::DIM),
-        background: PaletteColor::EightBit(grayscale::SURFACE),
-    },
-    ribbon_selected: StyleDeclaration {
         base: PaletteColor::EightBit(grayscale::INK),
         emphasis_0: PaletteColor::EightBit(grayscale::INK),
         emphasis_1: PaletteColor::EightBit(grayscale::INK),
         emphasis_2: PaletteColor::EightBit(grayscale::DIM),
         emphasis_3: PaletteColor::EightBit(grayscale::MUTED),
         background: PaletteColor::EightBit(grayscale::SOFT),
+    },
+    ribbon_unselected: StyleDeclaration {
+        base: PaletteColor::EightBit(grayscale::SOFT),
+        emphasis_0: PaletteColor::EightBit(grayscale::FG),
+        // emphasis_1 is the alternate-tab background in tab-bar/compact-bar.
+        // FG here produced a light pill with SOFT text (~1.1:1 contrast) that
+        // both hid the tab name and impersonated the active tab.
+        emphasis_1: PaletteColor::EightBit(grayscale::SELECTED),
+        emphasis_2: PaletteColor::EightBit(grayscale::MUTED),
+        emphasis_3: PaletteColor::EightBit(grayscale::DIM),
+        background: PaletteColor::EightBit(grayscale::SURFACE),
+    },
+    // The active ribbon is the surface's single accent: ink on ATTENTION.
+    // Ink-on-SOFT made every light element (incl. alternate tabs) read as
+    // "active"; one reserved accent color makes the active tab unambiguous.
+    ribbon_selected: StyleDeclaration {
+        base: PaletteColor::EightBit(grayscale::INK),
+        emphasis_0: PaletteColor::EightBit(grayscale::INK),
+        emphasis_1: PaletteColor::EightBit(grayscale::INK),
+        emphasis_2: PaletteColor::EightBit(grayscale::DIM),
+        emphasis_3: PaletteColor::EightBit(grayscale::MUTED),
+        background: PaletteColor::EightBit(grayscale::ATTENTION),
     },
     exit_code_success: StyleDeclaration {
         base: PaletteColor::EightBit(grayscale::SUCCESS),
@@ -1498,9 +1507,20 @@ pub const DEFAULT_STYLES: Styling = Styling {
         emphasis_3: PaletteColor::EightBit(grayscale::DIM),
         background: PaletteColor::EightBit(grayscale::BG),
     },
-    frame_unselected: None,
+    // None here made unfocused frames fall back to the terminal's default
+    // foreground (usually brighter than SOFT) — the focused pane looked
+    // DIMMER than unfocused ones. Explicit DIM baseline + FG focus restores
+    // the hierarchy: focused frame is the brightest thing on the wall.
+    frame_unselected: Some(StyleDeclaration {
+        base: PaletteColor::EightBit(grayscale::DIM),
+        emphasis_0: PaletteColor::EightBit(grayscale::MUTED),
+        emphasis_1: PaletteColor::EightBit(grayscale::DIM),
+        emphasis_2: PaletteColor::EightBit(grayscale::INK),
+        emphasis_3: PaletteColor::EightBit(grayscale::DIM),
+        background: PaletteColor::EightBit(grayscale::BG),
+    }),
     frame_selected: StyleDeclaration {
-        base: PaletteColor::EightBit(grayscale::SOFT),
+        base: PaletteColor::EightBit(grayscale::FG),
         emphasis_0: PaletteColor::EightBit(grayscale::MUTED),
         emphasis_1: PaletteColor::EightBit(grayscale::FG),
         emphasis_2: PaletteColor::EightBit(grayscale::INK),
@@ -1547,13 +1567,14 @@ pub const DEFAULT_STYLES: Styling = Styling {
         emphasis_3: PaletteColor::EightBit(grayscale::SOFT),
         background: PaletteColor::EightBit(grayscale::BG),
     },
+    // Inverse chip for the same reason as text_selected above.
     list_selected: StyleDeclaration {
-        base: PaletteColor::EightBit(grayscale::FG),
-        emphasis_0: PaletteColor::EightBit(grayscale::MUTED),
-        emphasis_1: PaletteColor::EightBit(grayscale::SOFT),
+        base: PaletteColor::EightBit(grayscale::INK),
+        emphasis_0: PaletteColor::EightBit(grayscale::INK),
+        emphasis_1: PaletteColor::EightBit(grayscale::INK),
         emphasis_2: PaletteColor::EightBit(grayscale::DIM),
         emphasis_3: PaletteColor::EightBit(grayscale::MUTED),
-        background: PaletteColor::EightBit(grayscale::SELECTED),
+        background: PaletteColor::EightBit(grayscale::SOFT),
     },
     multiplayer_user_colors: MultiplayerColors {
         player_1: PaletteColor::EightBit(grayscale::FG),
@@ -1656,7 +1677,12 @@ impl From<Palette> for Styling {
                 emphasis_3: palette.purple,
                 background: Default::default(),
             },
-            frame_unselected: None,
+            // Palette themes get an explicit dim unfocused frame too — None
+            // would fall back to the terminal default foreground, which can
+            // outshine the focused frame. Legacy palettes carry no usable
+            // dim color (gray/silver default to 0 = black), so the neutral
+            // fork default (mid-gray DIM) is the only always-visible choice.
+            frame_unselected: DEFAULT_STYLES.frame_unselected,
             frame_selected: StyleDeclaration {
                 base: palette.green,
                 emphasis_0: palette.orange,
@@ -3757,7 +3783,6 @@ pub fn default_styles_keep_ordinary_surfaces_grayscale() {
         DEFAULT_STYLES.text_unselected,
         DEFAULT_STYLES.text_selected,
         DEFAULT_STYLES.ribbon_unselected,
-        DEFAULT_STYLES.ribbon_selected,
         DEFAULT_STYLES.frame_selected,
         DEFAULT_STYLES.table_title,
         DEFAULT_STYLES.table_cell_unselected,
@@ -3776,9 +3801,38 @@ pub fn default_styles_keep_ordinary_surfaces_grayscale() {
             assert_default_grayscale(color);
         }
     }
+    // ACTIVE-state surfaces are the deliberate exception: the surface keeps
+    // exactly one accent (ATTENTION) and it is reserved for "you are here" —
+    // the active ribbon pill and the armed-mode pane frame. Everything else
+    // stays grayscale so the accent cannot be diluted.
+    assert_eq!(
+        DEFAULT_STYLES.ribbon_selected.background,
+        PaletteColor::EightBit(grayscale::ATTENTION),
+        "the active ribbon is the single accent surface"
+    );
+    for color in [
+        DEFAULT_STYLES.ribbon_selected.base,
+        DEFAULT_STYLES.ribbon_selected.emphasis_0,
+        DEFAULT_STYLES.ribbon_selected.emphasis_1,
+        DEFAULT_STYLES.ribbon_selected.emphasis_2,
+        DEFAULT_STYLES.ribbon_selected.emphasis_3,
+    ] {
+        assert_default_grayscale(color);
+    }
     assert_eq!(
         DEFAULT_STYLES.frame_highlight.base,
         PaletteColor::EightBit(grayscale::ATTENTION)
+    );
+    // Unfocused frames must be explicitly styled and dimmer than the focused
+    // frame — `None` fell back to the terminal default foreground, which made
+    // focused panes look dimmer than unfocused ones.
+    let unfocused_frame = DEFAULT_STYLES
+        .frame_unselected
+        .expect("unfocused frames must not fall back to the terminal default");
+    assert_eq!(unfocused_frame.base, PaletteColor::EightBit(grayscale::DIM));
+    assert_eq!(
+        DEFAULT_STYLES.frame_selected.base,
+        PaletteColor::EightBit(grayscale::FG)
     );
 }
 
