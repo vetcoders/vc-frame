@@ -1289,17 +1289,17 @@ impl State {
             let mut text = Text::new(fitted.clone());
             match rail_row.kind {
                 SessionRailRowKind::Session(session_index) => {
+                    let is_current = self
+                        .sessions
+                        .session_ui_infos
+                        .get(session_index)
+                        .is_some_and(|session| session.is_current_session);
                     if cols >= 4 {
                         // The `*` current-session marker must be the brightest
                         // ink on the line: leave it at the row's base color and
                         // dim the `-` of every other session instead. Painting
                         // both with the same muted emphasis made "you are
                         // here" invisible.
-                        let is_current = self
-                            .sessions
-                            .session_ui_infos
-                            .get(session_index)
-                            .is_some_and(|session| session.is_current_session);
                         // Ordinal digits are chrome, not content — dim them.
                         text = text.color_range(2, 0..2);
                         if is_current {
@@ -1312,16 +1312,24 @@ impl State {
                             text = text.color_range(2, 3..4);
                         }
                     }
-                    if selected_index == Some(session_index) {
+                    // The whole current-session block sits on a full-width
+                    // highlight bed — this header row opens it.
+                    if is_current || selected_index == Some(session_index) {
                         text = text.selected();
                     }
                 },
-                SessionRailRowKind::LiveProcess { .. } => {
+                SessionRailRowKind::LiveProcess { session_index, .. } => {
+                    let in_current_session = self
+                        .sessions
+                        .session_ui_infos
+                        .get(session_index)
+                        .is_some_and(|session| session.is_current_session);
+                    let is_active_tab_row = fitted.chars().nth(3) == Some('●');
                     if cols >= 4 {
                         // Active tab dot gets the accent, idle dot stays dim;
                         // the trailing "· command +N" diagnostics dim away so
                         // the tab name is the only bright ink on the line.
-                        if fitted.chars().nth(3) == Some('●') {
+                        if is_active_tab_row {
                             text = text.color_range(1, 3..4);
                         } else {
                             text = text.color_range(2, 3..4);
@@ -1329,6 +1337,19 @@ impl State {
                         if let Some(separator) = char_offset_of(&fitted, " · ", 4) {
                             text = text.color_range(2, separator..fitted_chars);
                         }
+                        if in_current_session && is_active_tab_row {
+                            // Strongest level of the three: on the highlight
+                            // bed, the tab you are actually in carries the
+                            // accent on its whole name.
+                            let name_end =
+                                char_offset_of(&fitted, " · ", 4).unwrap_or(fitted_chars);
+                            text = text.color_range(1, 3..name_end);
+                        }
+                    }
+                    // Process rows extend the current-session highlight block
+                    // so the whole "you are here" region reads as one shape.
+                    if in_current_session {
+                        text = text.selected();
                     }
                 },
                 SessionRailRowKind::Bucket { .. } => {},

@@ -288,16 +288,22 @@ impl TabLinePrefixBuilder {
     fn build(
         &self,
         session_name: Option<&str>,
+        mode: InputMode,
         brand_text: Option<&str>,
         brand_text_short: Option<&str>,
     ) -> Vec<LinePart> {
         let mut parts = vec![self.create_brand_part(brand_text, brand_text_short)];
-        let used_len = parts.first().map_or(0, |p| p.len);
+        let mut used_len = parts.first().map_or(0, |p| p.len);
 
         if let Some(name) = session_name
             && let Some(name_part) = self.create_session_name_part(name, used_len)
         {
+            used_len += name_part.len;
             parts.push(name_part);
+        }
+
+        if let Some(mode_part) = self.create_mode_part(mode, used_len) {
+            parts.push(mode_part);
         }
 
         parts
@@ -374,22 +380,62 @@ impl TabLinePrefixBuilder {
     }
 
     fn create_session_name_part(&self, name: &str, used_len: usize) -> Option<LinePart> {
-        let plain = format!("│ {} │", name);
-        let name_part_len = plain.width();
+        let name_part = format!("({})", name);
+        let name_part_len = name_part.width();
 
         if self.cols.saturating_sub(used_len) >= name_part_len {
             let colors = self.get_text_colors();
-            let rule_color = self.palette.text_unselected.emphasis_2;
-            let styled_parts = [
-                style!(rule_color, colors.background).paint("│ "),
-                style!(colors.text, colors.background)
-                    .bold()
-                    .paint(name.to_owned()),
-                style!(rule_color, colors.background).paint(" │"),
-            ];
             Some(LinePart {
-                part: AnsiStrings(&styled_parts).to_string(),
+                part: style!(colors.text, colors.background)
+                    .bold()
+                    .paint(name_part)
+                    .to_string(),
                 len: name_part_len,
+                tab_index: None,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Mode indicator with a glyph the eye can find without reading:
+    /// `⌁ NORMAL` stays quiet, `⚿ LOCKED` inverts on the accent, armed modes
+    /// (PANE, TAB, …) invert on the ribbon accent. ⚿ (U+26BF SQUARED KEY,
+    /// "parental lock") is the only padlock glyph with a text-only
+    /// presentation — the emoji padlock is double-width and colored, which
+    /// would break the bar's column math.
+    fn create_mode_part(&self, mode: InputMode, used_len: usize) -> Option<LinePart> {
+        let label = format!("{:?}", mode).to_uppercase();
+        let (glyph, style) = match mode {
+            InputMode::Locked => (
+                "⚿",
+                style!(
+                    self.palette.text_unselected.background,
+                    self.palette.text_unselected.emphasis_1
+                ),
+            ),
+            InputMode::Normal => (
+                "⌁",
+                style!(
+                    self.palette.text_unselected.emphasis_2,
+                    self.palette.text_unselected.background
+                ),
+            ),
+            _ => (
+                "⌁",
+                style!(
+                    self.palette.ribbon_selected.base,
+                    self.palette.ribbon_selected.background
+                ),
+            ),
+        };
+        let mode_text = format!(" {} {} ", glyph, label);
+        let mode_len = mode_text.width();
+
+        if self.cols.saturating_sub(used_len) >= mode_len {
+            Some(LinePart {
+                part: style.bold().paint(mode_text).to_string(),
+                len: mode_len,
                 tab_index: None,
             })
         } else {
@@ -440,54 +486,15 @@ impl RightSideElementsBuilder {
             elements.push(swap_status);
         }
 
-        elements.push(self.create_mode_part(config.mode));
-
         elements
-    }
-
-    /// Mode indicator pinned to the far right: `⌁ NORMAL` stays quiet,
-    /// `⚿ LOCKED` inverts on the accent, armed modes (PANE, TAB, …) invert
-    /// on the ribbon accent. ⚿ (U+26BF SQUARED KEY, "parental lock") is the
-    /// only padlock glyph with a text-only presentation — 🔒 is emoji-wide
-    /// and would break the bar's column math.
-    fn create_mode_part(&self, mode: InputMode) -> LinePart {
-        let label = format!("{:?}", mode).to_uppercase();
-        let (glyph, style) = match mode {
-            InputMode::Locked => (
-                "⚿",
-                style!(
-                    self.palette.text_unselected.background,
-                    self.palette.text_unselected.emphasis_1
-                ),
-            ),
-            InputMode::Normal => (
-                "⌁",
-                style!(
-                    self.palette.text_unselected.emphasis_2,
-                    self.palette.text_unselected.background
-                ),
-            ),
-            _ => (
-                "⌁",
-                style!(
-                    self.palette.ribbon_selected.base,
-                    self.palette.ribbon_selected.background
-                ),
-            ),
-        };
-        let mode_text = format!(" {} {} ", glyph, label);
-
-        LinePart {
-            len: mode_text.width(),
-            part: style.bold().paint(mode_text).to_string(),
-            tab_index: None,
-        }
     }
 
     /// Always-visible Composer entry point: same shape as the tooltip
     /// indicator (`<key> Ribbon`), clickable via the sentinel tab_index.
+    /// ⌥ (U+2325 OPTION KEY) matches the physical key label on the
+    /// operator's keyboard better than the spelled-out "Alt".
     fn create_composer_chip(&self) -> LinePart {
-        let key_text = "Alt+e";
+        let key_text = "⌥+e";
         let key = Text::new(key_text).color_all(3).opaque();
         let ribbon_text = "Composer";
         let ribbon = Text::new(ribbon_text);
@@ -642,6 +649,7 @@ impl TabLineBuilder {
 
         let mut prefix = prefix_builder.build(
             session_name,
+            self.config.mode,
             self.config.brand_text.as_deref(),
             self.config.brand_text_short.as_deref(),
         );
@@ -692,12 +700,6 @@ impl TabLineBuilder {
             let right_builder = RightSideElementsBuilder::new(self.palette, self.capabilities);
             let available_space = self.cols.saturating_sub(current_len);
             let mut right_elements = right_builder.build(&self.config, available_space);
-
-            if current_len + calculate_total_length(&right_elements) > self.cols {
-                // the mode indicator outranks the chips — a locked bar must
-                // say so even when there is no room for Composer/Tooltip
-                right_elements = vec![right_builder.create_mode_part(self.config.mode)];
-            }
 
             let right_len = calculate_total_length(&right_elements);
 
