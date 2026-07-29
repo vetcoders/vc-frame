@@ -1,0 +1,52 @@
+# vc-frame host preset for Alacritty (>= 0.14, TOML config)
+#
+# Alacritty is the maintenance input of the Vibecrafted stack: vc-frame owns
+# the chrome (rail, bars, tabs), the terminal stays a transparent host.
+# Use via import so your own alacritty.toml keeps the last word:
+#
+#   [general]
+#   import = ["~/.config/alacritty/vc-frame.toml"]
+#
+# Full rationale for every knob: docs/ALACRITTY_INTEGRATION.md
+
+[general]
+live_config_reload = true
+
+[terminal]
+# Land straight in the operator workspace. Comment this block out if you
+# prefer a plain shell and want to start vc-frame by hand.
+shell = { program = "vc-frame", args = ["attach", "--create", "main"] }
+
+[window]
+# NON-NEGOTIABLE on macOS: without this, Option produces locale characters
+# (ę, €, …) instead of Alt — Alt+e (Composer) and the Alt+Shift external-open
+# click never reach vc-frame.
+option_as_alt = "Both"
+# The chrome paints its own background; zero padding avoids visible seams
+# between the Alacritty surface and the vc-frame bars.
+padding = { x = 0, y = 0 }
+dynamic_padding = false
+
+[font]
+# Any complete monospace works — the chrome glyphs (◉ ○ ⚿ ⌁ │ ·) are plain
+# text-presentation Unicode, not emoji and not private-use icons. A Nerd Font
+# is a safe superset if you also want powerline/devicon coverage.
+# normal = { family = "JetBrainsMono Nerd Font" }
+size = 13.0
+
+[mouse]
+hide_when_typing = true
+
+# ─── What is deliberately NOT here ──────────────────────────────────────────
+# - No Shift+click bindings: terminals reserve bare Shift+click to bypass
+#   mouse reporting, so it can never reach vc-frame. That is why the
+#   external-open gestures are Alt+Shift+click and Ctrl+Shift+click.
+# - No colors: vc-frame themes carry their own RGB. If you want the window
+#   background to match the chrome ground, import a matching Alacritty theme
+#   generated from your vc-frame theme (see docs/THEMES_GUIDE.md roadmap).
+# - Ctrl+Left/Right/Up/Down are consumed by vc-frame (LOCK-mode tab and
+#   session navigation). On macOS, System Settings > Keyboard > Shortcuts >
+#   Mission Control steals Ctrl+Left/Right at the OS level — disable those
+#   two shortcuts or the keys never reach any terminal.
+
+# 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by VetCoders (c)2024-2026 LibraxisAI
