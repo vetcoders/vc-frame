@@ -179,6 +179,38 @@ Config {
             ],
             KeyWithModifier {
                 bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; \"${EDITOR:-vim}\" \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
                     'f',
                 ),
                 key_modifiers: {
@@ -840,6 +872,38 @@ Config {
             ],
             KeyWithModifier {
                 bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; \"${EDITOR:-vim}\" \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
                     'f',
                 ),
                 key_modifiers: {
@@ -1363,6 +1427,38 @@ Config {
                 TogglePaneEmbedOrFloating,
                 SwitchToMode {
                     input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; \"${EDITOR:-vim}\" \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
                 },
             ],
             KeyWithModifier {
@@ -2134,6 +2230,38 @@ Config {
             ],
             KeyWithModifier {
                 bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; \"${EDITOR:-vim}\" \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
                     'f',
                 ),
                 key_modifiers: {
@@ -2741,6 +2869,38 @@ Config {
             ],
             KeyWithModifier {
                 bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; \"${EDITOR:-vim}\" \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
                     'f',
                 ),
                 key_modifiers: {
@@ -3218,6 +3378,38 @@ Config {
             ],
             KeyWithModifier {
                 bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; \"${EDITOR:-vim}\" \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
                     'f',
                 ),
                 key_modifiers: {
@@ -3680,6 +3872,38 @@ Config {
                 key_modifiers: {},
             }: [
                 HalfPageScrollDown,
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; \"${EDITOR:-vim}\" \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -4185,6 +4409,38 @@ Config {
             ],
             KeyWithModifier {
                 bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; \"${EDITOR:-vim}\" \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
                     'f',
                 ),
                 key_modifiers: {
@@ -4594,6 +4850,38 @@ Config {
             }: [
                 SwitchToMode {
                     input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; \"${EDITOR:-vim}\" \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
                 },
             ],
             KeyWithModifier {
@@ -5066,6 +5354,38 @@ Config {
                 key_modifiers: {},
             }: [
                 Detach,
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; \"${EDITOR:-vim}\" \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -5663,6 +5983,38 @@ Config {
             ],
             KeyWithModifier {
                 bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; \"${EDITOR:-vim}\" \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
                     'f',
                 ),
                 key_modifiers: {
@@ -6133,6 +6485,38 @@ Config {
             }: [
                 SwitchToMode {
                     input_mode: Tmux,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; \"${EDITOR:-vim}\" \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
                 },
             ],
             KeyWithModifier {
@@ -6677,6 +7061,38 @@ Config {
                 key_modifiers: {},
             }: [
                 Detach,
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; \"${EDITOR:-vim}\" \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
             ],
             KeyWithModifier {
                 bare_key: Char(
