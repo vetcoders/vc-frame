@@ -139,6 +139,10 @@ enum MouseAction {
     GroupToggle(PaneId),
     GroupAdd(PaneId),
     Ungroup,
+    /// Shift-modified click on a plugin highlight: open the target outside
+    /// the process (system editor / browser). Miss is a quiet no-op — the
+    /// Shift gesture never falls through to grouping or resize.
+    HighlightOpenExternal(PaneId),
     StartResize {
         pane_id: PaneId,
         edge: PaneEdge,
@@ -726,6 +730,28 @@ impl MouseHandler {
                 }
                 // No highlight hit — fall through to pane grouping
                 Ok(MouseEffect::group_toggle(pane_id))
+            },
+            MouseAction::HighlightOpenExternal(pane_id) => {
+                if let Some(pane) = tab.get_pane_with_id_mut(pane_id) {
+                    let relative_position = pane.relative_position(&event.position);
+                    if let Some((hit_plugin_id, pattern, matched_string, mut context)) =
+                        pane.plugin_highlight_at(&relative_position)
+                    {
+                        context.insert("vc_open_external".to_owned(), "true".to_owned());
+                        let _ = tab
+                            .senders
+                            .send_to_plugin(PluginInstruction::HighlightClicked {
+                                plugin_id: hit_plugin_id,
+                                client_id,
+                                pane_id,
+                                pattern,
+                                matched_string,
+                                context,
+                            });
+                        return Ok(MouseEffect::state_changed());
+                    }
+                }
+                Ok(MouseEffect::default())
             },
             MouseAction::GroupAdd(pane_id) => Ok(MouseEffect::group_add(pane_id)),
             MouseAction::Ungroup => Ok(MouseEffect::ungroup()),
@@ -1338,6 +1364,9 @@ impl MouseHandler {
             let is_left_motion = event.left && event.event_type == MouseEventType::Motion;
 
             if is_left_press && let Some(pane_id) = ctx.pane_id_at_position {
+                if event.shift {
+                    return Ok(MouseAction::HighlightOpenExternal(pane_id));
+                }
                 return Ok(MouseAction::GroupToggle(pane_id));
             }
             if is_left_motion && let Some(pane_id) = ctx.pane_id_at_position {
@@ -1365,6 +1394,18 @@ impl MouseHandler {
                 if event.wheel_down {
                     return Ok(MouseAction::ScrollDown { pane_id, lines: 3 });
                 }
+            }
+            return Ok(MouseAction::NoAction);
+        }
+
+        // Ctrl+Shift+click mirrors Alt+Shift+click as the external-open
+        // gesture: some host terminals swallow one combo but forward the
+        // other, so both must resolve to the same action.
+        let is_ctrl_shift_left_press =
+            event.ctrl && event.shift && event.left && event.event_type == MouseEventType::Press;
+        if is_ctrl_shift_left_press {
+            if let Some(pane_id) = ctx.pane_id_at_position {
+                return Ok(MouseAction::HighlightOpenExternal(pane_id));
             }
             return Ok(MouseAction::NoAction);
         }

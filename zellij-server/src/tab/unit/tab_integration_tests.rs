@@ -12690,6 +12690,87 @@ fn click_on_plugin_highlight_sends_highlight_clicked() {
     );
 }
 
+fn external_open_click_test(configure_event: impl Fn(&mut MouseEvent)) {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 1;
+    let (mut tab, mock_plugin_receiver) =
+        create_new_tab_with_plugin_receiver(size, ModeInfo::default());
+
+    tab.handle_pty_bytes(1, Vec::from("click here foo bar".as_bytes()))
+        .unwrap();
+
+    let highlights = vec![RegexHighlight {
+        pattern: "foo".into(),
+        style: HighlightStyle::Emphasis0,
+        layer: HighlightLayer::Hint,
+        context: BTreeMap::new(),
+        on_hover: false,
+        bold: false,
+        italic: false,
+        underline: true,
+        tooltip_text: None,
+    }];
+    tab.set_plugin_regex_highlights_for_pane(
+        PaneId::Terminal(1),
+        42,
+        highlights,
+        &Style::default(),
+    );
+
+    let click_position = Position::new(1, 12);
+    let mut click = MouseEvent::new_left_press_event(click_position);
+    configure_event(&mut click);
+    let effect = tab.handle_mouse_event(&click, client_id).unwrap();
+
+    assert!(effect.state_changed);
+
+    let mut found_external_open = false;
+    while let Ok((instruction, _ctx)) = mock_plugin_receiver.try_recv() {
+        if let PluginInstruction::HighlightClicked {
+            plugin_id,
+            pane_id,
+            matched_string,
+            context,
+            ..
+        } = instruction
+        {
+            assert_eq!(plugin_id, 42);
+            assert_eq!(pane_id, PaneId::Terminal(1));
+            assert_eq!(matched_string, "foo");
+            assert_eq!(
+                context.get("vc_open_external").map(String::as_str),
+                Some("true"),
+                "external-open click must tag the highlight context"
+            );
+            found_external_open = true;
+            break;
+        }
+    }
+    assert!(
+        found_external_open,
+        "Expected HighlightClicked with vc_open_external for the shift-modified click"
+    );
+}
+
+#[test]
+fn alt_shift_click_on_highlight_sends_external_open() {
+    external_open_click_test(|click| {
+        click.alt = true;
+        click.shift = true;
+    });
+}
+
+#[test]
+fn ctrl_shift_click_on_highlight_sends_external_open() {
+    external_open_click_test(|click| {
+        click.ctrl = true;
+        click.shift = true;
+    });
+}
+
 #[test]
 fn click_outside_highlight_starts_normal_selection() {
     let size = Size {

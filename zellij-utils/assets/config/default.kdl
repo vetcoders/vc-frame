@@ -297,7 +297,10 @@ plugins {
     vc-tab-title location="vc-frame:vc-tab-title"
 }
 
-// Plugins to load in the background when a new session starts
+// Plugins to load in the background when a new session starts.
+// The link plugin powers click-to-open on file paths: Alt+Click opens
+// in-frame, Alt+Shift+Click or Ctrl+Shift+Click opens with the system
+// default handler.
 load_plugins {
     "vc-frame:link"
     "vc-frame:vc-tab-title"

@@ -137,6 +137,22 @@ impl State {
             Err(_) => return, // path does not exist — silently ignore
         };
 
+        // Shift-modified click (vc_open_external): hand the path to the OS
+        // default handler instead of the in-frame editor/filepicker. One
+        // portable shell line covers macOS (`open`) and Linux (`xdg-open`).
+        if context.get("vc_open_external").map(String::as_str) == Some("true") {
+            run_command(
+                &[
+                    "sh",
+                    "-c",
+                    r#"open "$0" 2>/dev/null || xdg-open "$0""#,
+                    &absolute_path.display().to_string(),
+                ],
+                BTreeMap::new(),
+            );
+            return;
+        }
+
         if metadata.is_dir() {
             let mut args = BTreeMap::new();
             let mut configuration = BTreeMap::new();
