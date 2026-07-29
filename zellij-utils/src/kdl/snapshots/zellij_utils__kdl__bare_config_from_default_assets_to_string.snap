@@ -1,6 +1,6 @@
 ---
 source: zellij-utils/src/kdl/mod.rs
-assertion_line: 7270
+assertion_line: 7319
 expression: fake_config_stringified
 ---
 keybinds clear-defaults=true {
@@ -217,6 +217,13 @@ keybinds clear-defaults=true {
         bind "Alt =" { Resize "Increase"; }
         bind "Alt [" { PreviousSwapLayout; }
         bind "Alt ]" { NextSwapLayout; }
+        bind "Alt e" {
+            Run "sh" "-c" "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; \"${EDITOR:-vim}\" \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"" {
+                floating true
+                close_on_exit true
+                name "Composer"
+            }
+        }
         bind "Alt f" { ToggleFloatingPanes; }
         bind "Ctrl g" { SwitchToMode "locked"; }
         bind "Alt h" { MoveFocusOrTab "left"; }

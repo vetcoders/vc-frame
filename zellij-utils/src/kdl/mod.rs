@@ -865,14 +865,17 @@ impl Action {
                         cwd_node.push(cwd.display().to_string());
                         node_children.nodes_mut().push(cwd_node);
                     }
+                    // Emit the parser's vocabulary (start_suspended /
+                    // close_on_exit) — the hold_on_* spellings serialize but
+                    // never re-parse, silently losing both flags on roundtrip.
                     if run_command_action.hold_on_start {
-                        let mut hos_node = KdlNode::new("hold_on_start");
+                        let mut hos_node = KdlNode::new("start_suspended");
                         hos_node.push(KdlValue::Bool(true));
                         node_children.nodes_mut().push(hos_node);
                     }
                     if !run_command_action.hold_on_close {
-                        let mut hoc_node = KdlNode::new("hold_on_close");
-                        hoc_node.push(KdlValue::Bool(false));
+                        let mut hoc_node = KdlNode::new("close_on_exit");
+                        hoc_node.push(KdlValue::Bool(true));
                         node_children.nodes_mut().push(hoc_node);
                     }
                 }
@@ -919,14 +922,17 @@ impl Action {
                         cwd_node.push(cwd.display().to_string());
                         node_children.nodes_mut().push(cwd_node);
                     }
+                    // Emit the parser's vocabulary (start_suspended /
+                    // close_on_exit) — the hold_on_* spellings serialize but
+                    // never re-parse, silently losing both flags on roundtrip.
                     if run_command_action.hold_on_start {
-                        let mut hos_node = KdlNode::new("hold_on_start");
+                        let mut hos_node = KdlNode::new("start_suspended");
                         hos_node.push(KdlValue::Bool(true));
                         node_children.nodes_mut().push(hos_node);
                     }
                     if !run_command_action.hold_on_close {
-                        let mut hoc_node = KdlNode::new("hold_on_close");
-                        hoc_node.push(KdlValue::Bool(false));
+                        let mut hoc_node = KdlNode::new("close_on_exit");
+                        hoc_node.push(KdlValue::Bool(true));
                         node_children.nodes_mut().push(hoc_node);
                     }
                 }
@@ -1013,14 +1019,17 @@ impl Action {
                         cwd_node.push(cwd.display().to_string());
                         node_children.nodes_mut().push(cwd_node);
                     }
+                    // Emit the parser's vocabulary (start_suspended /
+                    // close_on_exit) — the hold_on_* spellings serialize but
+                    // never re-parse, silently losing both flags on roundtrip.
                     if run_command_action.hold_on_start {
-                        let mut hos_node = KdlNode::new("hold_on_start");
+                        let mut hos_node = KdlNode::new("start_suspended");
                         hos_node.push(KdlValue::Bool(true));
                         node_children.nodes_mut().push(hos_node);
                     }
                     if !run_command_action.hold_on_close {
-                        let mut hoc_node = KdlNode::new("hold_on_close");
-                        hoc_node.push(KdlValue::Bool(false));
+                        let mut hoc_node = KdlNode::new("close_on_exit");
+                        hoc_node.push(KdlValue::Bool(true));
                         node_children.nodes_mut().push(hoc_node);
                     }
                 }
@@ -1060,14 +1069,17 @@ impl Action {
                         cwd_node.push(cwd.display().to_string());
                         node_children.nodes_mut().push(cwd_node);
                     }
+                    // Emit the parser's vocabulary (start_suspended /
+                    // close_on_exit) — the hold_on_* spellings serialize but
+                    // never re-parse, silently losing both flags on roundtrip.
                     if run_command_action.hold_on_start {
-                        let mut hos_node = KdlNode::new("hold_on_start");
+                        let mut hos_node = KdlNode::new("start_suspended");
                         hos_node.push(KdlValue::Bool(true));
                         node_children.nodes_mut().push(hos_node);
                     }
                     if !run_command_action.hold_on_close {
-                        let mut hoc_node = KdlNode::new("hold_on_close");
-                        hoc_node.push(KdlValue::Bool(false));
+                        let mut hoc_node = KdlNode::new("close_on_exit");
+                        hoc_node.push(KdlValue::Bool(true));
                         node_children.nodes_mut().push(hoc_node);
                     }
                     if let Some(name) = name {
