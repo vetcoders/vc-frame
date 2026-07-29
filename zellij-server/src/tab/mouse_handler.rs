@@ -1494,7 +1494,12 @@ impl MouseHandler {
                 }
             }
 
-            if ctx.mouse_click_through && !ctx.focus_follows_mouse {
+            // Plugin panes are UI surfaces: a click on a list row must land
+            // in one click, never "first click focuses, second click acts" —
+            // that two-step lottery is exactly what made the session rail
+            // feel random depending on hover-focus timing.
+            let is_plugin_pane = matches!(details.pane_id, PaneId::Plugin(_));
+            if is_plugin_pane || (ctx.mouse_click_through && !ctx.focus_follows_mouse) {
                 return Ok(MouseAction::FocusPaneAndClickThrough {
                     pane_id: details.pane_id,
                     position: event.position,

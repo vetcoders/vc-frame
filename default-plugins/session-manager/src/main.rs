@@ -722,6 +722,20 @@ const RESOURCE_SAMPLE_TICKS: u8 = 5;
 // used RSS KiB and total RAM KiB — Linux via /proc/meminfo, macOS via sysctl.
 const RESOURCE_SAMPLE_COMMAND: &str = r#"cpu=$(ps -A -o %cpu= | awk '{s+=$1} END {printf "%.0f", s}'); used=$(ps -A -o rss= | awk '{s+=$1} END {print s}'); if [ -r /proc/meminfo ]; then total=$(awk '/^MemTotal:/{print $2}' /proc/meminfo); else total=$(( $(sysctl -n hw.memsize) / 1024 )); fi; printf '%s %s %s' "$cpu" "$used" "$total""#;
 
+/// Char offset of `needle` in `haystack`, searching from char offset `from`.
+/// Text::color_range speaks char offsets, while `str::find` returns bytes —
+/// this bridges the two for rows containing multi-byte glyphs (`●`, `·`).
+fn char_offset_of(haystack: &str, needle: &str, from: usize) -> Option<usize> {
+    let byte_start = if from == 0 {
+        0
+    } else {
+        haystack.char_indices().nth(from).map(|(byte, _)| byte)?
+    };
+    haystack[byte_start..]
+        .find(needle)
+        .map(|relative| haystack[..byte_start + relative].chars().count())
+}
+
 /// Format the three-number sample ("cpu used_kib total_kib") into the rail
 /// cockpit line. Returns None on any malformed field so a bad sample never
 /// blanks a previously valid reading.
@@ -1270,7 +1284,9 @@ impl State {
 
         self.rail_click_map.clear();
         for rail_row in &rail_rows[start..end] {
-            let mut text = Text::new(fit_rail_line(&rail_row.text, cols));
+            let fitted = fit_rail_line(&rail_row.text, cols);
+            let fitted_chars = fitted.chars().count();
+            let mut text = Text::new(fitted.clone());
             match rail_row.kind {
                 SessionRailRowKind::Session(session_index) => {
                     if cols >= 4 {
@@ -1284,7 +1300,15 @@ impl State {
                             .session_ui_infos
                             .get(session_index)
                             .is_some_and(|session| session.is_current_session);
-                        if !is_current {
+                        // Ordinal digits are chrome, not content — dim them.
+                        text = text.color_range(2, 0..2);
+                        if is_current {
+                            // "You are here" carries the accent on the NAME,
+                            // the same ink as the header — one glance finds it.
+                            if fitted_chars > 5 {
+                                text = text.color_range(1, 5..fitted_chars);
+                            }
+                        } else {
                             text = text.color_range(2, 3..4);
                         }
                     }
@@ -1294,7 +1318,17 @@ impl State {
                 },
                 SessionRailRowKind::LiveProcess { .. } => {
                     if cols >= 4 {
-                        text = text.color_range(2, 3..4);
+                        // Active tab dot gets the accent, idle dot stays dim;
+                        // the trailing "· command +N" diagnostics dim away so
+                        // the tab name is the only bright ink on the line.
+                        if fitted.chars().nth(3) == Some('●') {
+                            text = text.color_range(1, 3..4);
+                        } else {
+                            text = text.color_range(2, 3..4);
+                        }
+                        if let Some(separator) = char_offset_of(&fitted, " · ", 4) {
+                            text = text.color_range(2, separator..fitted_chars);
+                        }
                     }
                 },
                 SessionRailRowKind::Bucket { .. } => {},
@@ -1375,6 +1409,16 @@ impl State {
             },
             BareKey::Enter if key.has_no_modifiers() => {
                 self.handle_session_rail_selection();
+                true
+            },
+            BareKey::Char('+') | BareKey::Char('=') if key.has_no_modifiers() => {
+                // Rail width is operator-tunable: the layout's size=24 is only
+                // the starting point. Growing the right edge widens the column.
+                resize_focused_pane_with_direction(Resize::Increase, Direction::Right);
+                true
+            },
+            BareKey::Char('-') if key.has_no_modifiers() => {
+                resize_focused_pane_with_direction(Resize::Decrease, Direction::Right);
                 true
             },
             BareKey::Char(character) if key.has_no_modifiers() => {
@@ -3787,6 +3831,16 @@ mod rail_tests {
             bucket_text.as_bytes().get(3).map(|_| 3),
             "color_range(1, 3..4) targets the same column for both"
         );
+    }
+
+    #[test]
+    fn char_offset_of_speaks_chars_not_bytes() {
+        // "   ● tab · cmd" — the dot separator sits after multi-byte `●`.
+        let row = "   ● tab · cmd";
+        assert_eq!(char_offset_of(row, " · ", 4), Some(8));
+        assert_eq!(char_offset_of(row, " · ", 0), Some(8));
+        assert_eq!(char_offset_of(row, "missing", 0), None);
+        assert_eq!(char_offset_of("ab", "b", 5), None, "from beyond end");
     }
 
     #[test]
