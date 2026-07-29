@@ -14,6 +14,7 @@ pub fn tab_line(
     brand_text: Option<String>,
     brand_text_short: Option<String>,
     live_count: usize,
+    left_inset: usize,
 ) -> Vec<LinePart> {
     let config = TabLineConfig {
         session_name: mode_info.session_name.to_owned(),
@@ -24,6 +25,7 @@ pub fn tab_line(
         brand_text,
         brand_text_short,
         live_count,
+        left_inset,
     };
 
     let builder = TabLineBuilder::new(config, mode_info.style.colors, mode_info.capabilities, cols);
@@ -40,6 +42,7 @@ pub struct TabLineConfig {
     pub brand_text: Option<String>,
     pub brand_text_short: Option<String>,
     pub live_count: usize,
+    pub left_inset: usize,
 }
 
 fn calculate_total_length(parts: &[LinePart]) -> usize {
@@ -318,11 +321,9 @@ impl TabLinePrefixBuilder {
     ) -> LinePart {
         let prefix_text = self.select_brand_text(brand_text, brand_text_short);
         let is_branded = brand_text.is_some();
-        let colors = if is_branded {
-            self.get_brand_colors()
-        } else {
-            self.get_text_colors()
-        };
+        // The brand sits bare on the bar ground (operator call 2026-07-30):
+        // the inverted chip belongs to the MODE, not the wordmark.
+        let colors = self.get_text_colors();
 
         if !is_branded {
             return LinePart {
@@ -386,21 +387,14 @@ impl TabLinePrefixBuilder {
         let name_part_len = tinted.width() + 2; // flanking │ rules
 
         if self.cols.saturating_sub(used_len) >= name_part_len {
-            // The session joins the brand as the bar's inverted anchor —
-            // one step softer than the brand chip, on the same tint the
-            // rail uses for the current-session block, so "you are here"
-            // speaks one color across the whole chrome. No parentheses:
-            // the dim │ rules carry the segment boundaries instead.
+            // The session name sits bare on the bar ground (operator call
+            // 2026-07-30) — no tint block; the dim │ rules carry the
+            // segment boundaries and the inverted weight stays on the MODE.
             let rule_color = self.palette.text_unselected.emphasis_2;
             let colors = self.get_text_colors();
             let styled_parts = [
                 style!(rule_color, colors.background).paint("│"),
-                style!(
-                    self.palette.text_selected.base,
-                    self.palette.text_selected.background
-                )
-                .bold()
-                .paint(tinted),
+                style!(colors.text, colors.background).bold().paint(tinted),
                 style!(rule_color, colors.background).paint("│"),
             ];
             Some(LinePart {
@@ -420,14 +414,18 @@ impl TabLinePrefixBuilder {
     /// are measured with `.width()` so the click map never drifts.
     fn create_mode_part(&self, mode: InputMode, used_len: usize) -> Option<LinePart> {
         let (glyph, code) = mode_chip(mode);
+        // The mode chip carries the bar's inversion (operator call
+        // 2026-07-30): always inverse video, with the ground telling the
+        // state apart — neutral base for Normal, the emphasis_1 accent for
+        // Locked, the ribbon accent for every armed mode.
         let style = match mode {
             InputMode::Locked => style!(
                 self.palette.text_unselected.background,
                 self.palette.text_unselected.emphasis_1
             ),
             InputMode::Normal => style!(
-                self.palette.text_unselected.emphasis_2,
-                self.palette.text_unselected.background
+                self.palette.text_unselected.background,
+                self.palette.text_unselected.base
             ),
             _ => style!(
                 self.palette.ribbon_selected.base,
@@ -452,14 +450,6 @@ impl TabLinePrefixBuilder {
         IndicatorColors {
             text: self.palette.text_unselected.base,
             background: self.palette.text_unselected.background,
-            separator: self.palette.text_unselected.background,
-        }
-    }
-
-    fn get_brand_colors(&self) -> IndicatorColors {
-        IndicatorColors {
-            text: self.palette.ribbon_selected.base,
-            background: self.palette.ribbon_selected.background,
             separator: self.palette.text_unselected.background,
         }
     }
@@ -594,6 +584,24 @@ impl TabLineBuilder {
             self.config.brand_text.as_deref(),
             self.config.brand_text_short.as_deref(),
         );
+        // The 🚥 zone: blank columns before the brand so the bar clears the
+        // macOS traffic lights in the native transparent window. A LinePart
+        // with tab_index None keeps the click map honest — both the tab and
+        // sentinel resolvers walk cumulative lens.
+        let left_inset = self.config.left_inset.min(self.cols / 2);
+        if left_inset > 0 {
+            let colors = self.palette.text_unselected;
+            prefix.insert(
+                0,
+                LinePart {
+                    part: style!(colors.base, colors.background)
+                        .paint(" ".repeat(left_inset))
+                        .to_string(),
+                    len: left_inset,
+                    tab_index: None,
+                },
+            );
+        }
         let prefix_len = calculate_total_length(&prefix);
 
         if prefix_len + active_tab.len > self.cols {

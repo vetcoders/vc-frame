@@ -23,6 +23,11 @@ const CONFIG_IS_TOOLTIP: &str = "is_tooltip";
 const CONFIG_TOGGLE_TOOLTIP_KEY: &str = "tooltip";
 const CONFIG_BRAND_TEXT: &str = "brand_text";
 const CONFIG_BRAND_TEXT_SHORT: &str = "brand_text_short";
+/// Columns of blank bar before the brand chip — the 🚥 zone. In the native
+/// transparent window (Alacritty preset) the macOS traffic lights float over
+/// the first row; the inset shifts the whole bar clear of them. 9 columns
+/// ≈ 65–70px at a 13pt monospace.
+const CONFIG_LEFT_INSET: &str = "left_inset";
 const MSG_TOGGLE_TOOLTIP: &str = "toggle_tooltip";
 // the status-bar shows up in the pane manifest as "vc-frame:status-bar" when
 // loaded by url and as "status-bar" when loaded through its config alias
@@ -85,6 +90,7 @@ struct State {
     toggle_tooltip_key: Option<String>,
     brand_text: Option<String>,
     brand_text_short: Option<String>,
+    left_inset: usize,
 
     // Tooltip state
     is_tooltip: bool,
@@ -199,6 +205,10 @@ impl State {
             }
             self.brand_text = configuration.get(CONFIG_BRAND_TEXT).cloned();
             self.brand_text_short = configuration.get(CONFIG_BRAND_TEXT_SHORT).cloned();
+            self.left_inset = configuration
+                .get(CONFIG_LEFT_INSET)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
         }
 
         if self.is_tooltip {
@@ -667,6 +677,7 @@ impl State {
             self.brand_text.clone(),
             self.brand_text_short.clone(),
             self.live_count,
+            self.left_inset,
         );
 
         let output = self

@@ -67,14 +67,14 @@ so no color-font surprises.
   plain shell? Comment it out and run `vc-frame` on demand.
 - **The native-window block** (preset default, operator-tuned live
   2026-07-29): `decorations = "Transparent"` + `title = "𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍."` +
-  `startup_mode = "Maximized"` + `blur`/`opacity 0.9` + small padding
-  (`x = 4, y = 16`). The OS titlebar dissolves and the compact-bar becomes
-  the de-facto window chrome — vc-frame reads as a native app, and the
-  padding keeps the bar clear of the traffic-light zone without burning
-  terminal columns on host-specific geometry. Any visible padding shows the
-  host background color — with `blur`/`opacity` that is the point; if you
-  drop the translucency, match the host background to the theme ground so
-  the seam disappears.
+  `startup_mode = "Maximized"` + `blur`/`opacity 0.9` + zero padding. The OS
+  titlebar dissolves and the compact-bar becomes the de-facto window chrome —
+  vc-frame reads as a native app. The traffic-light zone is handled bar-side,
+  not with padding: the operator layouts pass `left_inset "9"` to the
+  compact-bar, which starts the bar 9 blank columns in (≈ 65–70px at a 13pt
+  monospace) so the brand chip clears the macOS window buttons. Padding would
+  shift every row and both edges; the inset costs only the first row's
+  corner. Tune the number to your font size, or set 0 in a decorated window.
 - **`live_config_reload = true`** — same feedback loop the vc-frame config
   watcher gives: edit, see, iterate.
 - **`hide_when_typing = true`** — the pointer hides while typing; hover
