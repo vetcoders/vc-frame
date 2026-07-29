@@ -65,9 +65,16 @@ so no color-font surprises.
   ([terminal] table) — opening Alacritty lands you in the operator
   workspace; closing the window detaches, the session lives on. Prefer a
   plain shell? Comment it out and run `vc-frame` on demand.
-- **`padding = 0` + background matching the theme ground** — the chrome
-  paints its own background; padding shows the host color as a seam around
-  it. Either zero the padding (preset default) or match the color.
+- **The native-window block** (preset default, operator-tuned live
+  2026-07-29): `decorations = "Transparent"` + `title = "𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍."` +
+  `startup_mode = "Maximized"` + `blur`/`opacity 0.9` + small padding
+  (`x = 4, y = 16`). The OS titlebar dissolves and the compact-bar becomes
+  the de-facto window chrome — vc-frame reads as a native app, and the
+  padding keeps the bar clear of the traffic-light zone without burning
+  terminal columns on host-specific geometry. Any visible padding shows the
+  host background color — with `blur`/`opacity` that is the point; if you
+  drop the translucency, match the host background to the theme ground so
+  the seam disappears.
 - **`live_config_reload = true`** — same feedback loop the vc-frame config
   watcher gives: edit, see, iterate.
 - **`hide_when_typing = true`** — the pointer hides while typing; hover
@@ -94,7 +101,7 @@ chrome ground can never drift apart.
 | `Shift+click` on a link does nothing | terminal-level mouse-reporting bypass | use `Alt+Shift` or `Ctrl+Shift` click |
 | `Ctrl+←/→` switches macOS Spaces | Mission Control owns the shortcut | disable in System Settings |
 | Chrome glyphs show as boxes | font lacks Misc Symbols coverage | pick a fuller monospace / Nerd Font |
-| Thin colored border around the chrome | host padding + mismatched background | `padding = 0` or match theme ground |
+| Thin colored border around the chrome | host padding + opaque mismatched background | keep the preset's `blur`/`opacity`, or match theme ground / zero the padding |
 
 ---
 

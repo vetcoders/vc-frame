@@ -380,16 +380,22 @@ impl TabLinePrefixBuilder {
     }
 
     fn create_session_name_part(&self, name: &str, used_len: usize) -> Option<LinePart> {
-        let name_part = format!("({})", name);
+        let name_part = format!(" ({}) ", name);
         let name_part_len = name_part.width();
 
         if self.cols.saturating_sub(used_len) >= name_part_len {
-            let colors = self.get_text_colors();
+            // The session joins the brand as the bar's inverted anchor —
+            // one step softer than the brand chip, on the same tint the
+            // rail uses for the current-session block, so "you are here"
+            // speaks one color across the whole chrome.
             Some(LinePart {
-                part: style!(colors.text, colors.background)
-                    .bold()
-                    .paint(name_part)
-                    .to_string(),
+                part: style!(
+                    self.palette.text_selected.base,
+                    self.palette.text_selected.background
+                )
+                .bold()
+                .paint(name_part)
+                .to_string(),
                 len: name_part_len,
                 tab_index: None,
             })

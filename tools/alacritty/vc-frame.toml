@@ -22,10 +22,17 @@ shell = { program = "vc-frame", args = ["attach", "--create", "main"] }
 # (ę, €, …) instead of Alt — Alt+e (Composer) and the Alt+Shift external-open
 # click never reach vc-frame.
 option_as_alt = "Both"
-# The chrome paints its own background; zero padding avoids visible seams
-# between the Alacritty surface and the vc-frame bars.
+# Native-app illusion (lifted from the operator's daily config, 2026-07-29):
+# the OS titlebar dissolves and the compact-bar becomes the de-facto window
+# chrome — vc-frame reads as a native app instead of a program in a terminal.
+title = "𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍."
+decorations = "Transparent"
+startup_mode = "Maximized"
+blur = true
+opacity = 0.9
+# The chrome paints its own background; zero padding avoids visible seams.
 padding = { x = 0, y = 0 }
-dynamic_padding = false
+dynamic_padding = true
 
 [font]
 # Any complete monospace works — the chrome glyphs (◉ ○ ⚿ ⌁ │ ·) are plain
@@ -36,6 +43,128 @@ size = 13.0
 
 [mouse]
 hide_when_typing = true
+bindings = [
+  # While vc-frame mouse reporting is active, Shift suppresses reporting so
+  # the wheel can drive Alacritty's own scrollback instead.
+  { mouse = "WheelUp", mods = "Shift", action = "ScrollLineUp" },
+  { mouse = "WheelDown", mods = "Shift", action = "ScrollLineDown" },
+]
+
+# ─── option_as_alt survival kit ─────────────────────────────────────────────
+# `option_as_alt = "Both"` takes the whole Option layer away from macOS text
+# input. Two things break and both are re-injected explicitly below:
+#
+# 1. Word-jump: Option+Left/Right would send ESC[1;3D / ESC[1;3C, which most
+#    shells don't bind — leaking literal ";3D" into the prompt.
+[[keyboard.bindings]]
+key = "Left"
+mods = "Alt"
+chars = "\u001Bb"
+
+[[keyboard.bindings]]
+key = "Right"
+mods = "Alt"
+chars = "\u001Bf"
+
+# 2. Locale characters typed with Option (Polish shown — the operator's daily
+#    layer; adapt or delete for your locale). Without these, Option+letter
+#    reaches vc-frame as Alt and the diacritic never appears.
+[[keyboard.bindings]]
+key = "A"
+mods = "Alt"
+chars = "ą"
+
+[[keyboard.bindings]]
+key = "A"
+mods = "Alt|Shift"
+chars = "Ą"
+
+[[keyboard.bindings]]
+key = "C"
+mods = "Alt"
+chars = "ć"
+
+[[keyboard.bindings]]
+key = "C"
+mods = "Alt|Shift"
+chars = "Ć"
+
+[[keyboard.bindings]]
+key = "E"
+mods = "Alt"
+chars = "ę"
+
+[[keyboard.bindings]]
+key = "E"
+mods = "Alt|Shift"
+chars = "Ę"
+
+[[keyboard.bindings]]
+key = "L"
+mods = "Alt"
+chars = "ł"
+
+[[keyboard.bindings]]
+key = "L"
+mods = "Alt|Shift"
+chars = "Ł"
+
+[[keyboard.bindings]]
+key = "N"
+mods = "Alt"
+chars = "ń"
+
+[[keyboard.bindings]]
+key = "N"
+mods = "Alt|Shift"
+chars = "Ń"
+
+[[keyboard.bindings]]
+key = "O"
+mods = "Alt"
+chars = "ó"
+
+[[keyboard.bindings]]
+key = "O"
+mods = "Alt|Shift"
+chars = "Ó"
+
+[[keyboard.bindings]]
+key = "S"
+mods = "Alt"
+chars = "ś"
+
+[[keyboard.bindings]]
+key = "S"
+mods = "Alt|Shift"
+chars = "Ś"
+
+[[keyboard.bindings]]
+key = "X"
+mods = "Alt"
+chars = "ź"
+
+[[keyboard.bindings]]
+key = "X"
+mods = "Alt|Shift"
+chars = "Ź"
+
+[[keyboard.bindings]]
+key = "Z"
+mods = "Alt"
+chars = "ż"
+
+[[keyboard.bindings]]
+key = "Z"
+mods = "Alt|Shift"
+chars = "Ż"
+
+# Multiline drafting: Shift+Enter inserts a newline instead of submitting
+# (pairs with the Composer flow for quick inline multi-line commands).
+[[keyboard.bindings]]
+key = "Enter"
+mods = "Shift"
+chars = "\u001B\r"
 
 # ─── What is deliberately NOT here ──────────────────────────────────────────
 # - No Shift+click bindings: terminals reserve bare Shift+click to bypass
