@@ -259,7 +259,12 @@ impl State {
 /// argument, never interpolated into the shell string.
 fn open_with_system_handler(target: &str) {
     run_command(
-        &["sh", "-c", r#"open "$0" 2>/dev/null || xdg-open "$0""#, target],
+        &[
+            "sh",
+            "-c",
+            r#"open "$0" 2>/dev/null || xdg-open "$0""#,
+            target,
+        ],
         BTreeMap::new(),
     );
 }

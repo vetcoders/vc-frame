@@ -344,13 +344,12 @@ impl ZellijPlugin for State {
             Event::RunCommandResult(exit_code, stdout, _stderr, context)
                 if context.contains_key(RESOURCE_SAMPLE_CONTEXT_KEY) =>
             {
-                if exit_code == Some(0) {
-                    if let Some(line) = parse_resource_sample(&stdout) {
-                        if self.resource_line.as_deref() != Some(line.as_str()) {
-                            self.resource_line = Some(line);
-                            should_render = true;
-                        }
-                    }
+                if exit_code == Some(0)
+                    && let Some(line) = parse_resource_sample(&stdout)
+                    && self.resource_line.as_deref() != Some(line.as_str())
+                {
+                    self.resource_line = Some(line);
+                    should_render = true;
                 }
             },
             Event::Visible(is_visible) => {
