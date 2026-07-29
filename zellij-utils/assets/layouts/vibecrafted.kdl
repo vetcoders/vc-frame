@@ -12,7 +12,6 @@ layout {
         pane size=1 borderless=true {
             plugin location="compact-bar" {
                 brand_text " 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. "
-                brand_text_short " VC. "
             }
         }
         pane split_direction="vertical" {

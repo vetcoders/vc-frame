@@ -622,7 +622,6 @@ impl State {
         let mut active_tab_index = 0;
         let mut active_swap_layout_name = None;
         let mut is_swap_layout_dirty = false;
-        let mut is_alternate_tab = false;
 
         for tab in &self.tabs {
             let tab_name = self.get_tab_display_name(tab);
@@ -635,15 +634,8 @@ impl State {
                 }
             }
 
-            let styled_tab = tab_style(
-                tab_name,
-                tab,
-                is_alternate_tab,
-                self.mode_info.style.colors,
-                self.mode_info.capabilities,
-            );
+            let styled_tab = tab_style(tab_name, tab, self.mode_info.style.colors);
 
-            is_alternate_tab = !is_alternate_tab;
             all_tabs.push(styled_tab);
         }
 

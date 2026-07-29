@@ -1,8 +1,14 @@
-use crate::{LinePart, line::tab_separator};
+use crate::LinePart;
 use ansi_term::{AnsiString, AnsiStrings};
 use unicode_width::UnicodeWidthStr;
 use zellij_tile::prelude::*;
 use zellij_tile_utils::style;
+
+/// Rail-language tab markers: ◉ marks the tab you are on, ○ everything else.
+/// Same fisheye/circle semantics as the session rail so the whole chrome
+/// speaks one visual language.
+const ACTIVE_TAB_MARKER: &str = "◉";
+const INACTIVE_TAB_MARKER: &str = "○";
 
 fn cursors<'a>(
     focused_clients: &'a [ClientId],
@@ -21,70 +27,51 @@ fn cursors<'a>(
     (cursors, len)
 }
 
-pub fn render_tab(
-    text: String,
-    tab: &TabInfo,
-    is_alternate_tab: bool,
-    palette: Styling,
-    separator: &str,
-) -> LinePart {
+pub fn render_tab(text: String, tab: &TabInfo, palette: Styling) -> LinePart {
     let focused_clients = tab.other_focused_clients.as_slice();
-    let separator_width = separator.width();
-    let alternate_tab_color = if is_alternate_tab {
-        palette.ribbon_unselected.emphasis_1
-    } else {
-        palette.ribbon_unselected.background
-    };
-    let background_color = if tab.active {
-        palette.ribbon_selected.background
-    } else if is_alternate_tab {
-        alternate_tab_color
-    } else {
-        palette.ribbon_unselected.background
-    };
-    let foreground_color = if tab.is_flashing_bell {
-        if tab.active {
-            palette.ribbon_selected.emphasis_3
+    let background_color = palette.text_unselected.background;
+    let ordinal_color = palette.text_unselected.emphasis_2;
+    let (marker, ink, emphasized) = if tab.is_flashing_bell {
+        let marker = if tab.active {
+            ACTIVE_TAB_MARKER
         } else {
-            palette.ribbon_unselected.emphasis_3
-        }
+            INACTIVE_TAB_MARKER
+        };
+        (marker, palette.text_unselected.emphasis_3, true)
     } else if tab.active {
-        palette.ribbon_selected.base
+        (ACTIVE_TAB_MARKER, palette.text_unselected.emphasis_1, true)
     } else {
-        palette.ribbon_unselected.base
+        (INACTIVE_TAB_MARKER, palette.text_unselected.base, false)
     };
-    let separator_fill_color = palette.text_unselected.background;
-    let left_separator = style!(separator_fill_color, background_color).paint(separator);
-    let mut tab_text_len = text.width() + (separator_width * 2) + 2; // + 2 for padding
 
-    let tab_styled_text = style!(foreground_color, background_color)
-        .bold()
-        .paint(format!(" {} ", text));
+    let ordinal_text = format!(" {:02} ", tab.position + 1);
+    let body_text = format!("{} {} ", marker, text);
+    let mut tab_text_len = ordinal_text.width() + body_text.width();
 
-    let right_separator = style!(background_color, separator_fill_color).paint(separator);
+    let ordinal_styled = style!(ordinal_color, background_color).paint(ordinal_text);
+    let body_style = style!(ink, background_color);
+    let body_styled = if emphasized {
+        body_style.bold().paint(body_text)
+    } else {
+        body_style.paint(body_text)
+    };
+
     let tab_styled_text = if !focused_clients.is_empty() {
         let (cursor_section, extra_length) =
             cursors(focused_clients, palette.multiplayer_user_colors);
         tab_text_len += extra_length;
         let mut s = String::new();
-        let cursor_beginning = style!(foreground_color, background_color)
-            .bold()
-            .paint("[")
-            .to_string();
+        let cursor_beginning = style!(ink, background_color).bold().paint("[").to_string();
         let cursor_section = AnsiStrings(&cursor_section).to_string();
-        let cursor_end = style!(foreground_color, background_color)
-            .bold()
-            .paint("]")
-            .to_string();
-        s.push_str(&left_separator.to_string());
-        s.push_str(&tab_styled_text.to_string());
+        let cursor_end = style!(ink, background_color).bold().paint("]").to_string();
+        s.push_str(&ordinal_styled.to_string());
+        s.push_str(&body_styled.to_string());
         s.push_str(&cursor_beginning);
         s.push_str(&cursor_section);
         s.push_str(&cursor_end);
-        s.push_str(&right_separator.to_string());
         s
     } else {
-        AnsiStrings(&[left_separator, tab_styled_text, right_separator]).to_string()
+        AnsiStrings(&[ordinal_styled, body_styled]).to_string()
     };
 
     LinePart {
@@ -94,15 +81,7 @@ pub fn render_tab(
     }
 }
 
-pub fn tab_style(
-    mut tabname: String,
-    tab: &TabInfo,
-    mut is_alternate_tab: bool,
-    palette: Styling,
-    capabilities: PluginCapabilities,
-) -> LinePart {
-    let separator = tab_separator(capabilities);
-
+pub fn tab_style(mut tabname: String, tab: &TabInfo, palette: Styling) -> LinePart {
     if tab.is_fullscreen_active {
         tabname.push_str(" (FULLSCREEN)");
     } else if tab.is_sync_panes_active {
@@ -111,12 +90,8 @@ pub fn tab_style(
     if tab.has_bell_notification || tab.is_flashing_bell {
         tabname.push_str(" [!]");
     }
-    // we only color alternate tabs differently if we can't use the arrow fonts to separate them
-    if !capabilities.arrow_fonts {
-        is_alternate_tab = false;
-    }
 
-    render_tab(tabname, tab, is_alternate_tab, palette, separator)
+    render_tab(tabname, tab, palette)
 }
 
 pub(crate) fn get_tab_to_focus(
