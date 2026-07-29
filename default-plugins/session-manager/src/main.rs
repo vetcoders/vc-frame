@@ -841,8 +841,9 @@ fn format_process_tab_rail_entry(tab: &TabUiInfo) -> String {
     text
 }
 
-// Direct rail navigation (vc_rail_nav pipe, bound to tab-mode Up/Down —
-// ctrl+t then arrows): the target is resolved relative to the *current*
+// Direct rail navigation (vc_rail_nav pipe — locked-mode Ctrl+Up/Down and
+// tab-mode Up/Down — plus bare arrows on a focused rail): the target is
+// resolved relative to the *current*
 // session with wrap-around, so every rail instance receiving the broadcast
 // computes the same destination and the switch stays idempotent. Navigation
 // walks the *working* sessions in rail order only — the f/x/n bucket
@@ -1304,11 +1305,12 @@ impl State {
     fn handle_session_rail_key(&mut self, key: KeyWithModifier) -> bool {
         match key.bare_key {
             BareKey::Down if key.has_no_modifiers() => {
-                self.sessions.move_session_selection_down();
+                // Operator contract: arrow = immediate switch, no Enter confirm.
+                self.switch_session_relative(1);
                 true
             },
             BareKey::Up if key.has_no_modifiers() => {
-                self.sessions.move_session_selection_up();
+                self.switch_session_relative(-1);
                 true
             },
             BareKey::Enter if key.has_no_modifiers() => {

@@ -6,6 +6,20 @@ keybinds {
     }
     locked {
         bind "Ctrl g" { SwitchToMode "Normal"; }
+        bind "Ctrl Left" { GoToPreviousTab; }
+        bind "Ctrl Right" { GoToNextTab; }
+        bind "Ctrl Up" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "up"
+            };
+        }
+        bind "Ctrl Down" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "down"
+            };
+        }
     }
     resize {
         bind "Ctrl n" { SwitchToMode "Normal"; }

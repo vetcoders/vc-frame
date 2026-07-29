@@ -1,9 +1,26 @@
 ---
 source: zellij-utils/src/kdl/mod.rs
+assertion_line: 7270
 expression: fake_config_stringified
 ---
 keybinds clear-defaults=true {
     locked {
+        bind "Ctrl left" { GoToPreviousTab; }
+        bind "Ctrl down" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "down"
+                floating false
+            }
+        }
+        bind "Ctrl up" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "up"
+                floating false
+            }
+        }
+        bind "Ctrl right" { GoToNextTab; }
         bind "Ctrl g" { SwitchToMode "normal"; }
     }
     pane {
@@ -328,4 +345,3 @@ load_plugins {
 web_client {
     font "monospace"
 }
-

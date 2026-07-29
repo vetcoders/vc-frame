@@ -1,9 +1,26 @@
 ---
 source: zellij-utils/src/kdl/mod.rs
+assertion_line: 7282
 expression: fake_config_stringified
 ---
 keybinds clear-defaults=true {
     locked {
+        bind "Ctrl left" { GoToPreviousTab; }
+        bind "Ctrl down" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "down"
+                floating false
+            }
+        }
+        bind "Ctrl up" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "up"
+                floating false
+            }
+        }
+        bind "Ctrl right" { GoToNextTab; }
         bind "Ctrl g" { SwitchToMode "normal"; }
     }
     pane {
@@ -634,4 +651,3 @@ web_client {
 // typically work best. Set to 0 to use the number of (physical) CPU cores.
 // Note: This only applies to web clients at the moment.
 // client_async_worker_tasks 4
-
