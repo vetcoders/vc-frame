@@ -1,6 +1,6 @@
 ---
 source: zellij-utils/src/kdl/mod.rs
-assertion_line: 7282
+assertion_line: 7319
 expression: fake_config_stringified
 ---
 keybinds clear-defaults=true {
@@ -452,6 +452,13 @@ web_client {
 // Default value: 10000
 // 
 // scroll_buffer_size 10000
+ 
+// Automatically switch this client to Locked mode after this many
+// seconds without keyboard or mouse input
+// Valid values: positive integers (0 or unset = never)
+// Default value: unset
+// 
+// auto_lock_after_seconds 15
  
 // Provide a command to execute when copying text. The text will be piped to
 // the stdin of the program to perform the copy. This can be used with

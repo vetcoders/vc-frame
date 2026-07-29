@@ -1,5 +1,6 @@
 ---
 source: zellij-utils/src/setup.rs
+assertion_line: 861
 expression: "format!(\"{:#?}\", config)"
 ---
 Config {
@@ -390,6 +391,43 @@ Config {
         },
         Locked: {
             KeyWithModifier {
+                bare_key: Left,
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                GoToPreviousTab,
+            ],
+            KeyWithModifier {
+                bare_key: Down,
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
                 bare_key: Down,
                 key_modifiers: {
                     Ctrl,
@@ -402,6 +440,35 @@ Config {
                     ),
                     payload: Some(
                         "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Up,
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
                     ),
                     args: None,
                     plugin: Some(
@@ -448,6 +515,14 @@ Config {
                     cwd: None,
                     pane_title: None,
                 },
+            ],
+            KeyWithModifier {
+                bare_key: Right,
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                GoToNextTab,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -6952,6 +7027,7 @@ Config {
         mirror_session: None,
         on_force_close: None,
         scroll_buffer_size: None,
+        auto_lock_after_seconds: None,
         copy_command: None,
         copy_clipboard: None,
         copy_on_select: None,

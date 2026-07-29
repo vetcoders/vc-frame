@@ -1996,6 +1996,8 @@ pub struct Options {
     pub theme_dark: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, optional, tag="47")]
     pub theme_light: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint64, optional, tag="48")]
+    pub auto_lock_after_seconds: ::core::option::Option<u64>,
 }
 /// Pane-targeting action messages
 #[allow(clippy::derive_partial_eq_without_eq)]

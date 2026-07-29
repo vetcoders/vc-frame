@@ -3,8 +3,9 @@ use crate::{
     ClientId, ClientInstruction, CommandIsExecuting, InputInstruction,
     os_input_output::ClientOsApi, stdin_ansi_parser::AnsiStdinInstruction,
 };
+use std::time::{Duration, Instant};
 use zellij_utils::{
-    channels::{Receiver, SenderWithContext},
+    channels::{Receiver, RecvTimeoutError, SenderWithContext},
     data::{InputMode, KeyWithModifier},
     errors::{ContextType, ErrorContext, FatalError, OPENCALLS},
     input::{
@@ -35,6 +36,8 @@ struct InputHandler {
     receive_input_instructions: Receiver<(InputInstruction, ErrorContext)>,
     mouse_old_event: MouseEvent,
     mouse_mode_active: bool,
+    last_input_activity: Instant,
+    auto_lock_fired: bool,
 }
 
 fn termwiz_mouse_convert(original_event: &mut MouseEvent, event: &TermwizMouseEvent) {
@@ -142,6 +145,8 @@ impl InputHandler {
             receive_input_instructions,
             mouse_old_event: MouseEvent::new(),
             mouse_mode_active: false,
+            last_input_activity: Instant::now(),
+            auto_lock_fired: false,
         }
     }
 
@@ -160,8 +165,30 @@ impl InputHandler {
             if self.should_exit {
                 break;
             }
-            match self.receive_input_instructions.recv() {
-                Ok((InputInstruction::KeyEvent(input_event, raw_bytes), _error_context)) => {
+            let received = match self
+                .receive_input_instructions
+                .recv_timeout(Duration::from_secs(1))
+            {
+                Ok(received) => received,
+                Err(RecvTimeoutError::Timeout) => {
+                    self.auto_lock_if_idle();
+                    continue;
+                },
+                Err(RecvTimeoutError::Disconnected) => {
+                    panic!("Encountered read error: input channel disconnected");
+                },
+            };
+            if matches!(
+                received.0,
+                InputInstruction::KeyEvent(..)
+                    | InputInstruction::KeyWithModifierEvent(..)
+                    | InputInstruction::MouseEvent(..)
+            ) {
+                self.last_input_activity = Instant::now();
+                self.auto_lock_fired = false;
+            }
+            match received {
+                (InputInstruction::KeyEvent(input_event, raw_bytes), _error_context) => {
                     match input_event {
                         InputEvent::Key(key_event) => {
                             let key = cast_termwiz_key(
@@ -230,45 +257,69 @@ impl InputHandler {
                         _ => {},
                     }
                 },
-                Ok((
+                (
                     InputInstruction::KeyWithModifierEvent(key_with_modifier, raw_bytes, is_kitty),
                     _error_context,
-                )) => {
+                ) => {
                     self.handle_key(&key_with_modifier, raw_bytes, is_kitty);
                 },
-                Ok((InputInstruction::MouseEvent(mouse_event), _error_context)) => {
+                (InputInstruction::MouseEvent(mouse_event), _error_context) => {
                     self.handle_mouse_event(&mouse_event);
                 },
-                Ok((
+                (
                     InputInstruction::AnsiStdinInstructions(ansi_stdin_instructions),
                     _error_context,
-                )) => {
+                ) => {
                     for ansi_instruction in ansi_stdin_instructions {
                         self.handle_stdin_ansi_instruction(ansi_instruction);
                     }
                 },
-                Ok((InputInstruction::DesktopNotificationResponse(raw_bytes), _error_context)) => {
+                (InputInstruction::DesktopNotificationResponse(raw_bytes), _error_context) => {
                     self.os_input
                         .send_to_server(ClientToServerMsg::DesktopNotificationResponse {
                             raw_bytes,
                         });
                 },
-                Ok((
+                (
                     InputInstruction::ForwardedReplyFromHostComplete { token, reply_bytes },
                     _error_context,
-                )) => {
+                ) => {
                     self.os_input
                         .send_to_server(ClientToServerMsg::ForwardedReplyFromHost {
                             token,
                             reply_bytes,
                         });
                 },
-                Ok((InputInstruction::Exit, _error_context)) => {
+                (InputInstruction::Exit, _error_context) => {
                     self.should_exit = true;
                 },
-                Err(err) => panic!("Encountered read error: {:?}", err),
             }
         }
+    }
+    /// Auto-lock: after `auto_lock_after_seconds` without keyboard or mouse
+    /// input, switch this client to Locked mode. Fires once per idle period;
+    /// any fresh input re-arms it.
+    fn auto_lock_if_idle(&mut self) {
+        let Some(timeout_secs) = self
+            .options
+            .auto_lock_after_seconds
+            .filter(|seconds| *seconds > 0)
+        else {
+            return;
+        };
+        if self.auto_lock_fired {
+            return;
+        }
+        if self.last_input_activity.elapsed() < Duration::from_secs(timeout_secs) {
+            return;
+        }
+        self.auto_lock_fired = true;
+        self.dispatch_action(
+            Action::SwitchToMode {
+                input_mode: InputMode::Locked,
+            },
+            None,
+        );
     }
     fn handle_key(
         &mut self,
