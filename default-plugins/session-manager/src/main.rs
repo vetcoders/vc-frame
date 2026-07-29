@@ -198,11 +198,6 @@ struct State {
     // Once a producer generation has been superseded, a delayed payload from
     // that retired generation must never roll the rail back.
     retired_settlement_generations: BTreeSet<String>,
-    // Host resource cockpit on the rail: one formatted "CPU … · MEM …" line,
-    // sampled via run_command every few visible seconds. None until the first
-    // valid sample; a malformed sample keeps the previous line.
-    resource_line: Option<String>,
-    resource_sample_ticks: u8,
 }
 
 register_plugin!(State);
@@ -336,21 +331,7 @@ impl ZellijPlugin for State {
                 if self.refresh_session_list() {
                     should_render = true;
                 }
-                if self.is_rail {
-                    self.tick_resource_sample();
-                }
                 self.arm_refresh_timer();
-            },
-            Event::RunCommandResult(exit_code, stdout, _stderr, context)
-                if context.contains_key(RESOURCE_SAMPLE_CONTEXT_KEY) =>
-            {
-                if exit_code == Some(0)
-                    && let Some(line) = parse_resource_sample(&stdout)
-                    && self.resource_line.as_deref() != Some(line.as_str())
-                {
-                    self.resource_line = Some(line);
-                    should_render = true;
-                }
             },
             Event::Visible(is_visible) => {
                 let was_visible = self.is_visible;
@@ -715,13 +696,6 @@ const RAIL_BUCKETS: [BucketKind; 3] = [
 /// in lockstep with the layout by `chrome_tab_names_match_the_default_layout`.
 const CHROME_TAB_NAMES: [&str; 2] = ["Start here", "Shell"];
 
-const RESOURCE_SAMPLE_CONTEXT_KEY: &str = "vc_rail_resources";
-// Sampled every 5th visible-rail timer tick (~5s).
-const RESOURCE_SAMPLE_TICKS: u8 = 5;
-// Portable host sample: total CPU% (per-core percentages summed, like top),
-// used RSS KiB and total RAM KiB — Linux via /proc/meminfo, macOS via sysctl.
-const RESOURCE_SAMPLE_COMMAND: &str = r#"cpu=$(ps -A -o %cpu= | awk '{s+=$1} END {printf "%.0f", s}'); used=$(ps -A -o rss= | awk '{s+=$1} END {print s}'); if [ -r /proc/meminfo ]; then total=$(awk '/^MemTotal:/{print $2}' /proc/meminfo); else total=$(( $(sysctl -n hw.memsize) / 1024 )); fi; printf '%s %s %s' "$cpu" "$used" "$total""#;
-
 /// Char offset of `needle` in `haystack`, searching from char offset `from`.
 /// Text::color_range speaks char offsets, while `str::find` returns bytes —
 /// this bridges the two for rows containing multi-byte glyphs (`●`, `·`).
@@ -734,27 +708,6 @@ fn char_offset_of(haystack: &str, needle: &str, from: usize) -> Option<usize> {
     haystack[byte_start..]
         .find(needle)
         .map(|relative| haystack[..byte_start + relative].chars().count())
-}
-
-/// Format the three-number sample ("cpu used_kib total_kib") into the rail
-/// cockpit line. Returns None on any malformed field so a bad sample never
-/// blanks a previously valid reading.
-fn parse_resource_sample(stdout: &[u8]) -> Option<String> {
-    let text = String::from_utf8_lossy(stdout);
-    let mut parts = text.split_whitespace();
-    let cpu: f64 = parts.next()?.parse().ok()?;
-    let used_kib: f64 = parts.next()?.parse().ok()?;
-    let total_kib: f64 = parts.next()?.parse().ok()?;
-    if total_kib <= 0.0 || cpu < 0.0 || used_kib < 0.0 {
-        return None;
-    }
-    const KIB_PER_GIB: f64 = 1024.0 * 1024.0;
-    Some(format!(
-        "CPU {:.0}% · MEM {:.1}/{:.0}G",
-        cpu,
-        used_kib / KIB_PER_GIB,
-        total_kib / KIB_PER_GIB,
-    ))
 }
 
 impl BucketKind {
@@ -847,6 +800,7 @@ struct SessionRailRow {
 }
 
 impl SessionRailRow {
+    #[cfg(test)]
     fn is_live_process(&self) -> bool {
         matches!(self.kind, SessionRailRowKind::LiveProcess { .. })
     }
@@ -1238,32 +1192,17 @@ impl State {
         let bucket_row_start = all_rows.iter().position(|row| row.is_bucket()).unwrap_or(0);
         let (rail_rows, bucket_rows) = all_rows.split_at(bucket_row_start);
 
+        // The LIVE number moved to the compact-bar's fleet chip; the header
+        // keeps only the session count and slots in under the traffic lights.
         let session_count = working_session_indices(&self.sessions.session_ui_infos).len();
-        let live_process_count = rail_rows.iter().filter(|row| row.is_live_process()).count();
-        let header = fit_rail_line(
-            &format!("SESSIONS {} · LIVE {}", session_count, live_process_count),
-            cols,
-        );
+        let header = fit_rail_line(&format!("SESSIONS {}", session_count), cols);
         let mut header = Text::new(header);
         if cols >= 8 {
             header = header.color_range(1, 0..8);
         }
         print_text_with_coordinates(header, 0, 0, None, None);
 
-        // Resource cockpit line sits directly under the header; the session
-        // list shifts down by one row while a sample is available.
-        let resource_rows = usize::from(self.resource_line.is_some());
-        if let Some(resource_line) = &self.resource_line {
-            let fitted = fit_rail_line(resource_line, cols);
-            let fitted_len = fitted.chars().count();
-            let mut text = Text::new(fitted);
-            if fitted_len > 0 {
-                text = text.color_range(2, 0..fitted_len);
-            }
-            print_text_with_coordinates(text, 0, 1, None, None);
-        }
-
-        let list_rows = rows.saturating_sub(1 + resource_rows);
+        let list_rows = rows.saturating_sub(1);
         if list_rows == 0 {
             return;
         }
@@ -1280,7 +1219,7 @@ impl State {
                 .position(|row| row.kind == SessionRailRowKind::Session(selected_session_index))
         });
         let (start, end) = rail_range_to_render(entry_rows, rail_rows.len(), selected_row_index);
-        let mut row = 1 + resource_rows;
+        let mut row = 1;
 
         self.rail_click_map.clear();
         for rail_row in &rail_rows[start..end] {
@@ -1581,16 +1520,6 @@ impl State {
                 self.reset_selected_index();
             },
         }
-    }
-    fn tick_resource_sample(&mut self) {
-        if self.resource_sample_ticks > 0 {
-            self.resource_sample_ticks -= 1;
-            return;
-        }
-        self.resource_sample_ticks = RESOURCE_SAMPLE_TICKS;
-        let mut context = BTreeMap::new();
-        context.insert(RESOURCE_SAMPLE_CONTEXT_KEY.to_owned(), "true".to_owned());
-        run_command(&["sh", "-c", RESOURCE_SAMPLE_COMMAND], context);
     }
     fn switch_session_relative(&mut self, offset: isize) {
         if let Some(target_session_name) =
@@ -3862,21 +3791,5 @@ mod rail_tests {
         assert_eq!(char_offset_of(row, " · ", 0), Some(8));
         assert_eq!(char_offset_of(row, "missing", 0), None);
         assert_eq!(char_offset_of("ab", "b", 5), None, "from beyond end");
-    }
-
-    #[test]
-    fn resource_sample_formats_cpu_and_memory() {
-        // 342% CPU, 8 GiB used of 64 GiB (values in KiB, like ps/meminfo).
-        let sample = parse_resource_sample(b"342 8388608 67108864");
-        assert_eq!(sample.as_deref(), Some("CPU 342% · MEM 8.0/64G"));
-    }
-
-    #[test]
-    fn resource_sample_rejects_malformed_input() {
-        assert_eq!(parse_resource_sample(b""), None, "empty");
-        assert_eq!(parse_resource_sample(b"only two"), None, "non-numeric");
-        assert_eq!(parse_resource_sample(b"12 34"), None, "missing total");
-        assert_eq!(parse_resource_sample(b"12 34 0"), None, "zero total");
-        assert_eq!(parse_resource_sample(b"-5 34 100"), None, "negative cpu");
     }
 }

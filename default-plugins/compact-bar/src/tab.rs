@@ -68,13 +68,20 @@ pub fn render_tab(
     let padded_text = format!(" {} {} ", marker, text);
     let separator_fill_color = palette.text_unselected.background;
     let left_separator = style!(separator_fill_color, background_color).paint(separator);
-    let mut tab_text_len = padded_text.width() + (separator_width * 2);
+    let mut tab_text_len = padded_text.width() + (separator_width * 2) + 1; // +1 closing │ rule
 
     let tab_styled_text = style!(foreground_color, background_color)
         .bold()
         .paint(padded_text);
 
     let right_separator = style!(background_color, separator_fill_color).paint(separator);
+    // Every tab closes with a dim │ rule — the segment language of the whole
+    // bar (brand │ mode │ session │ tab │ tab │ …).
+    let closing_rule = style!(
+        palette.text_unselected.emphasis_2,
+        palette.text_unselected.background
+    )
+    .paint("│");
     let tab_styled_text = if !focused_clients.is_empty() {
         let (cursor_section, extra_length) =
             cursors(focused_clients, palette.multiplayer_user_colors);
@@ -95,9 +102,16 @@ pub fn render_tab(
         s.push_str(&cursor_section);
         s.push_str(&cursor_end);
         s.push_str(&right_separator.to_string());
+        s.push_str(&closing_rule.to_string());
         s
     } else {
-        AnsiStrings(&[left_separator, tab_styled_text, right_separator]).to_string()
+        AnsiStrings(&[
+            left_separator,
+            tab_styled_text,
+            right_separator,
+            closing_rule,
+        ])
+        .to_string()
     };
 
     LinePart {
