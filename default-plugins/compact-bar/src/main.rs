@@ -33,6 +33,13 @@ const STATUS_BAR_PLUGIN_URLS: [&str; 3] =
 const CLIPBOARD_HINT_TTL_SECONDS: f64 = 2.0;
 const MSG_TOGGLE_PERSISTED_TOOLTIP: &str = "toggle_persisted_tooltip";
 const MSG_LAUNCH_TOOLTIP: &str = "launch_tooltip_if_not_launched";
+/// Sentinel tab_index marking the clickable Composer chip on the tab line —
+/// a real tab can never occupy this index. Checked before tab resolution so
+/// it never reaches switch_tab_to.
+pub const COMPOSER_CLICK_SENTINEL: usize = usize::MAX;
+/// Same drafting contract as the Alt+e keybind in the default config: draft
+/// in $EDITOR, land the text in the underlying pane unexecuted, clean up.
+const COMPOSER_COMMAND: &str = r#"f=$(mktemp "${TMPDIR:-/tmp}/vc-composer.XXXXXX") || exit 1; "${EDITOR:-vim}" "$f"; if [ -s "$f" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars "$(cat "$f")"; fi; rm -f -- "$f""#;
 
 #[derive(Debug, Default)]
 pub struct LinePart {
@@ -414,16 +421,46 @@ impl State {
     }
 
     fn handle_tab_click(&self, col: usize) {
+        if self.composer_chip_clicked(col) {
+            open_composer();
+            return;
+        }
         if let Some(tab_idx) = get_tab_to_focus(&self.tab_line, self.active_tab_idx, col) {
             switch_tab_to(tab_idx.try_into().unwrap());
         }
+    }
+
+    fn composer_chip_clicked(&self, col: usize) -> bool {
+        let mut offset = 0;
+        for part in &self.tab_line {
+            if part.tab_index == Some(COMPOSER_CLICK_SENTINEL)
+                && col >= offset
+                && col < offset + part.len
+            {
+                return true;
+            }
+            offset += part.len;
+        }
+        false
     }
 
     fn scroll_tab_up(&self) {
         let next_tab = min(self.active_tab_idx + 1, self.tabs.len());
         switch_tab_to(next_tab as u32);
     }
+}
 
+/// Click path of the Composer chip — identical contract to the Alt+e bind.
+fn open_composer() {
+    let command = CommandToRun::new_with_args("sh", vec!["-c", COMPOSER_COMMAND]);
+    if let Some(PaneId::Terminal(terminal_pane_id)) =
+        open_command_pane_floating(command, None, BTreeMap::new())
+    {
+        rename_terminal_pane(terminal_pane_id, "Composer");
+    }
+}
+
+impl State {
     fn scroll_tab_down(&self) {
         let prev_tab = max(self.active_tab_idx.saturating_sub(1), 1);
         switch_tab_to(prev_tab as u32);

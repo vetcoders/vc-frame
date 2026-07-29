@@ -465,6 +465,8 @@ impl RightSideElementsBuilder {
     fn build(&self, config: &TabLineConfig, available_space: usize) -> Vec<LinePart> {
         let mut elements = Vec::new();
 
+        elements.push(self.create_composer_chip());
+
         if let Some(ref tooltip_key) = config.toggle_tooltip_key {
             elements.push(self.create_tooltip_indicator(tooltip_key, config.tooltip_is_active));
         }
@@ -474,6 +476,21 @@ impl RightSideElementsBuilder {
         }
 
         elements
+    }
+
+    /// Always-visible Composer entry point: same shape as the tooltip
+    /// indicator (`<key> Ribbon`), clickable via the sentinel tab_index.
+    fn create_composer_chip(&self) -> LinePart {
+        let key_text = "Alt+e";
+        let key = Text::new(key_text).color_all(3).opaque();
+        let ribbon_text = "Composer";
+        let ribbon = Text::new(ribbon_text);
+
+        LinePart {
+            part: format!("{} {}", serialize_text(&key), serialize_ribbon(&ribbon)),
+            len: key_text.chars().count() + ribbon_text.chars().count() + 6,
+            tab_index: Some(crate::COMPOSER_CLICK_SENTINEL),
+        }
     }
 
     fn create_tooltip_indicator(&self, toggle_key: &str, is_active: bool) -> LinePart {
