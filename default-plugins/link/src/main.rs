@@ -6,6 +6,8 @@ const FILE_PATH_REGEX: &str = r#"(?:^|\s)((?:(?:\./|\.\./|/)[A-Za-z0-9_./\-+@%,#
 
 const CWD_CONTEXT_KEY: &str = "cwd";
 
+const URL_REGEX: &str = r#"(https?://[A-Za-z0-9_.\-~:/?#\[\]@!$&'()*+,;=%]+[A-Za-z0-9_\-~/#=%])"#;
+
 #[derive(Default)]
 struct State {
     known_terminal_panes: HashSet<PaneId>,
@@ -112,6 +114,13 @@ impl State {
     }
 
     fn handle_highlight_clicked(&self, matched_string: String, context: BTreeMap<String, String>) {
+        // URLs have exactly one meaningful handler — the browser — so every
+        // click gesture routes them there.
+        let trimmed = matched_string.trim();
+        if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+            open_with_system_handler(trimmed);
+            return;
+        }
         let (path_str, line_number) = parse_path_and_line(&matched_string);
         let path_str = path_str.trim();
         let expanded = expand_path(path_str, &self.env_vars);
@@ -141,15 +150,7 @@ impl State {
         // default handler instead of the in-frame editor/filepicker. One
         // portable shell line covers macOS (`open`) and Linux (`xdg-open`).
         if context.get("vc_open_external").map(String::as_str) == Some("true") {
-            run_command(
-                &[
-                    "sh",
-                    "-c",
-                    r#"open "$0" 2>/dev/null || xdg-open "$0""#,
-                    &absolute_path.display().to_string(),
-                ],
-                BTreeMap::new(),
-            );
+            open_with_system_handler(&absolute_path.display().to_string());
             return;
         }
 
@@ -200,6 +201,19 @@ impl State {
             tooltip_text: Some("Open".to_string()),
         });
 
+        // URLs (always present) — clicked links open in the browser
+        highlights.push(RegexHighlight {
+            pattern: URL_REGEX.to_owned(),
+            style: HighlightStyle::None,
+            layer: HighlightLayer::Hint,
+            context: context.clone(),
+            on_hover: true,
+            bold: false,
+            italic: true,
+            underline: true,
+            tooltip_text: Some("Open in browser".to_string()),
+        });
+
         // Directory-entry patterns for the pane's current CWD
         if let Some(entries) = self.pane_dir_entries.get(&pane_id) {
             for entry_name in entries {
@@ -238,6 +252,16 @@ impl State {
         }
         context
     }
+}
+
+/// Open a path or URL with the OS default handler. One portable shell line
+/// covers macOS (`open`) and Linux (`xdg-open`); the target is passed as an
+/// argument, never interpolated into the shell string.
+fn open_with_system_handler(target: &str) {
+    run_command(
+        &["sh", "-c", r#"open "$0" 2>/dev/null || xdg-open "$0""#, target],
+        BTreeMap::new(),
+    );
 }
 
 /// Scan a directory for first-level file and folder names.
