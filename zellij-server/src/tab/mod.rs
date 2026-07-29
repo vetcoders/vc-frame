@@ -3711,7 +3711,17 @@ impl Tab {
         // returns true if a UI update should be triggered (eg. when closing a command pane with
         // ctrl-c)
         let mut should_trigger_ui_change = false;
-        let pane_ids = self.get_static_and_floating_pane_ids();
+        // Sync mirrors typing into the terminals of this tab — never into
+        // plugin panes. Chrome plugins (session rail, bars) interpret keys as
+        // hotkeys, so a sync broadcast reaching them turns innocent typing
+        // into actions (`f` typed into two shells also opened the rail's
+        // Failed bucket). Focused-plugin input flows through
+        // write_to_active_terminal and is unaffected.
+        let pane_ids: Vec<PaneId> = self
+            .get_static_and_floating_pane_ids()
+            .into_iter()
+            .filter(|pane_id| matches!(pane_id, PaneId::Terminal(_)))
+            .collect();
         for pane_id in pane_ids {
             let ui_change_triggered = self
                 .write_to_pane_id(
