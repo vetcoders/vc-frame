@@ -452,6 +452,10 @@ impl Pane for TerminalPane {
         }
         if let Some((frame_color_override, _text)) = self.pane_frame_color_override.as_ref() {
             frame.override_color(*frame_color_override);
+        } else if matches!(self.invoked_with, Some(Run::EditFile(..))) {
+            // The editor "ticket" overlay must not blend into the grayscale
+            // frames around it — it always renders with the accent color.
+            frame.override_color(self.style.colors.frame_highlight.base);
         }
 
         let res = match self.frame.get(&client_id) {
