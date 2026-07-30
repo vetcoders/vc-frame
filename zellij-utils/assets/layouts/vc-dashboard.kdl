@@ -21,7 +21,6 @@ layout {
                 brand_text " 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. "
                 // 🚥 zone: clear the macOS traffic lights in the native window
                 left_inset "9"
-                brand_text_short " VC. "
             }
         }
         pane split_direction="vertical" {
