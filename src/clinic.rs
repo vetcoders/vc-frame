@@ -827,16 +827,26 @@ const EVIDENCE_LIMIT: usize = 16;
 /// Is this one of the verbs this fork added — the ones a frozen dump or an
 /// upstream-shaped config cannot possibly have?
 ///
-/// LOCK navigation and anything routed to the session rail: `session x`,
-/// `session r`, the rail hop inside LOCK. Those are the concrete losses an
-/// operator can recognise, so they lead the evidence.
+/// Order of recognition: `session x` / `session r`, the public Alt product
+/// tab/session contract, then LOCK bonus nav. Those are the concrete losses
+/// an operator can recognise, so they lead the evidence.
 fn is_headline(group: &BindGroup) -> bool {
     headline_priority(group).is_some()
 }
 
-/// Lower = more important. Operator-recognisable fork verbs first, then LOCK
-/// nav, then other session-rail traffic. Without ranking, Alt product binds
-/// crowd out `session x` / `session r` under the evidence cap.
+/// Lower = more important.
+///
+/// 0 — fork session verbs (`session x` / `session r`)
+/// 1 — public product Alt arrows (tabs / session rail outside LOCK)
+/// 2 — LOCK bonus / word-jump (Ctrl or Alt arrows while locked)
+/// 3 — other LOCK binds
+/// 4 — other session-rail traffic
+///
+/// Without ranking, a frozen dump's ~170 shadowed binds bury the product
+/// contract under upstream resize/tmux noise. Alt product binds used to fall
+/// off the headline list entirely because they live in `shared_except
+/// "locked"` (not LOCK mode) — that was a silent dual-truth after the
+/// Alt-arrows wave.
 fn headline_priority(group: &BindGroup) -> Option<u8> {
     let sig = actions_signature(&group.contract);
     let key = group.key.to_kdl();
@@ -844,6 +854,15 @@ fn headline_priority(group: &BindGroup) -> Option<u8> {
     if session_mode && (key == "x" || key == "r") && sig.contains("session-rail") {
         return Some(0);
     }
+    // Public product contract: Alt → tabs / sessions (unlocked modes).
+    let is_alt_product_nav = key.contains("Alt")
+        && (sig.contains("GoToPreviousTab")
+            || sig.contains("GoToNextTab")
+            || sig.contains("session-rail"));
+    if is_alt_product_nav {
+        return Some(1);
+    }
+    // LOCK bonus (Ctrl arrows) and LOCK word-jump (Alt arrows → Write).
     if group.modes.contains(&InputMode::Locked)
         && (key.contains("Ctrl") || key.contains("Alt"))
         && (sig.contains("GoToPreviousTab")
@@ -851,13 +870,13 @@ fn headline_priority(group: &BindGroup) -> Option<u8> {
             || sig.contains("session-rail")
             || sig.contains("Write"))
     {
-        return Some(1);
-    }
-    if group.modes.contains(&InputMode::Locked) {
         return Some(2);
     }
-    if sig.contains("session-rail") {
+    if group.modes.contains(&InputMode::Locked) {
         return Some(3);
+    }
+    if sig.contains("session-rail") {
+        return Some(4);
     }
     None
 }
@@ -1874,10 +1893,9 @@ layout_dir "{}"
         );
         // The destructive divergence always leads.
         assert!(detail[0].contains("Ctrl q → Quit"), "{detail:#?}");
-        // Every verb this fork added and the config now lacks is named.
+        // Every verb this fork added and the config now lacks is named —
+        // product Alt contract first among navigation, LOCK Ctrl as bonus.
         let named = detail.join("\n");
-        assert!(named.contains("locked Ctrl up"), "{named}");
-        assert!(named.contains("locked Ctrl down"), "{named}");
         assert!(
             named.contains("session x → MessagePlugin \"session-rail\""),
             "{named}"
@@ -1885,6 +1903,18 @@ layout_dir "{}"
         assert!(
             named.contains("session r → LaunchOrFocusPlugin \"session-rail\""),
             "{named}"
+        );
+        assert!(
+            named.contains("Alt left") && named.contains("GoToPreviousTab"),
+            "public Alt tab contract must survive the evidence cap, got {named}"
+        );
+        assert!(
+            named.contains("Alt right") && named.contains("GoToNextTab"),
+            "public Alt tab contract must survive the evidence cap, got {named}"
+        );
+        assert!(
+            named.contains("locked Ctrl up") || named.contains("locked Ctrl down"),
+            "LOCK Ctrl bonus should still be named when room remains, got {named}"
         );
         // The upstream long tail is a count, not a sample.
         assert!(!named.contains("resize H"), "{named}");

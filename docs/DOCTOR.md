@@ -48,7 +48,8 @@ $ vc-frame doctor
 [CONFIG SHADOWING]  CRITICAL  keybinds clear-defaults=true (170 binds)
     Ctrl q → Quit          (contract: CloseFocus)  ← kills the whole session
     session "x"            missing                (kill current session + hop)
-    locked Ctrl ←→ ↑↓      missing                (tab / session navigation)
+    Alt ←→ / Alt ↑↓        missing                (product tab / session nav)
+    locked Ctrl ←→ ↑↓      missing                (optional LOCK bonus)
 [LOCK STRANDING]    WARN      auto_lock_after_seconds 5, LOCK knows only Ctrl+g
 [INSTALL FRESHNESS] ok        binary matches checkout
 [SHELL]             ok        /bin/zsh (caller environment — not the server process)

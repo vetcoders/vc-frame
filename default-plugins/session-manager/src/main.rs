@@ -865,13 +865,14 @@ fn format_process_tab_rail_entry(tab: &TabUiInfo) -> String {
     text
 }
 
-// Direct rail navigation (vc_rail_nav pipe — locked-mode Ctrl+Up/Down and
-// tab-mode Up/Down — plus bare arrows on a focused rail): the target is
-// resolved relative to the *current*
-// session with wrap-around, so every rail instance receiving the broadcast
-// computes the same destination and the switch stays idempotent. Navigation
-// walks the *working* sessions in rail order only — the f/x/n bucket
-// sessions have their own hotkeys and must not swallow a step.
+// Direct rail navigation (vc_rail_nav pipe): product contract is Alt+Up/Down
+// outside LOCK; LOCK keeps Ctrl+Up/Down as an optional bonus; tab-mode
+// Up/Down and bare arrows on a focused rail also hit this path. The target
+// is resolved relative to the *current* session with wrap-around, so every
+// rail instance receiving the broadcast computes the same destination and
+// the switch stays idempotent. Navigation walks the *working* sessions in
+// rail order only — the f/x/n bucket sessions have their own hotkeys and
+// must not swallow a step.
 fn relative_session_target(sessions: &[SessionUiInfo], offset: isize) -> Option<String> {
     let working = working_session_indices(sessions);
     if working.len() < 2 {
