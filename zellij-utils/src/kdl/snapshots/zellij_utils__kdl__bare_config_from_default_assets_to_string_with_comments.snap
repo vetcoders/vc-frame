@@ -1,6 +1,5 @@
 ---
 source: zellij-utils/src/kdl/mod.rs
-assertion_line: 7331
 expression: fake_config_stringified
 ---
 keybinds clear-defaults=true {
@@ -190,6 +189,13 @@ keybinds clear-defaults=true {
             }
             SwitchToMode "normal"
         }
+        bind "x" {
+            MessagePlugin "session-rail" {
+                name "vc_kill_current_session"
+                floating false
+            }
+            SwitchToMode "normal"
+        }
     }
     shared {
         bind "Ctrl Shift down" {
@@ -235,7 +241,7 @@ keybinds clear-defaults=true {
         bind "Alt o" { MoveTab "right"; }
         bind "Alt p" { TogglePaneInGroup; }
         bind "Alt Shift p" { ToggleGroupMarking; }
-        bind "Ctrl q" { Quit; }
+        bind "Ctrl q" { CloseFocus; }
     }
     shared_except "locked" "move" {
         bind "Ctrl h" { SwitchToMode "move"; }
@@ -463,9 +469,9 @@ web_client {
 // Automatically switch this client to Locked mode after this many
 // seconds without keyboard or mouse input
 // Valid values: positive integers (0 or unset = never)
-// Default value: unset
+// Default value: 5
 // 
-// auto_lock_after_seconds 15
+auto_lock_after_seconds 5
  
 // Provide a command to execute when copying text. The text will be piped to
 // the stdin of the program to perform the copy. This can be used with

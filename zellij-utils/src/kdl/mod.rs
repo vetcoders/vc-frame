@@ -3384,7 +3384,7 @@ impl Options {
             "// Automatically switch this client to Locked mode after this many",
             "// seconds without keyboard or mouse input",
             "// Valid values: positive integers (0 or unset = never)",
-            "// Default value: unset",
+            "// Default value: 5",
             "// ",
         );
 
@@ -3400,7 +3400,7 @@ impl Options {
             }
             Some(node)
         } else if add_comments {
-            let mut node = create_node(15);
+            let mut node = create_node(5);
             node.set_leading(format!("{}\n// ", comment_text));
             Some(node)
         } else {

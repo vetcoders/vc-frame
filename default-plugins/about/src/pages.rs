@@ -708,8 +708,12 @@ impl Page {
                         .color_substring(3, "Ctrl+p"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("  Ctrl+o  SESSION attach / rename / kill session")
+                    Text::new("  Ctrl+o  SESSION  then x = kill session (stay in vc-frame)")
                         .color_substring(3, "Ctrl+o"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  Ctrl+t  TAB      then x = kill tab")
+                        .color_substring(3, "Ctrl+t"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new("  Ctrl+n  new pane immediately").color_substring(3, "Ctrl+n"),
@@ -718,7 +722,7 @@ impl Page {
                     Text::new("  Ctrl+s  SCROLL  scrollback / copy").color_substring(3, "Ctrl+s"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("  Ctrl+g  LOCK    lock input (auto-lock can arm it after idle)")
+                    Text::new("  Ctrl+g  LOCK    lock input (auto-lock default 5s idle)")
                         .color_substring(3, "Ctrl+g"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(

@@ -15,7 +15,11 @@ live_config_reload = true
 [terminal]
 # Land straight in the operator workspace. Comment this block out if you
 # prefer a plain shell and want to start vc-frame by hand.
-shell = { program = "vc-frame", args = ["attach", "--create", "main"] }
+#
+# Launch through a login zsh so the vc-frame *server* inherits SHELL and a
+# full profile. Spawning `vc-frame` as the program itself left SHELL unset
+# and every new pane fell back to bare /bin/sh.
+shell = { program = "/bin/zsh", args = ["-lc", "exec vc-frame attach --create main"] }
 
 [window]
 # NON-NEGOTIABLE on macOS: without this, Option produces locale characters

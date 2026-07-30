@@ -785,6 +785,29 @@ impl WasmBridge {
             ));
         }
 
+        // Ghost short-circuit: if none of the requested plugins still own
+        // layout state, runtime map entries, or executor assignments, certify
+        // cleanup immediately so CloseTab debt cannot probe dead ids forever.
+        let runtime_plugin_ids = self
+            .plugin_map
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .plugin_ids();
+        self.plugin_map.clear_poison();
+        let any_live_plugin = plugin_ids.iter().any(|plugin_id| {
+            self.layout_plugin_owners.contains_key(plugin_id)
+                || runtime_plugin_ids.contains(plugin_id)
+                || self.plugin_executor.has_assignment(*plugin_id)
+        });
+        if !any_live_plugin {
+            self.layout_plugin_cleanup_debts.remove(&transaction_id);
+            self.record_layout_plugin_cleanup_receipt(transaction_id, plugin_ids.clone());
+            log::info!(
+                "layout plugin cleanup transaction {transaction_id} certified ghost plugins {plugin_ids:?} as already gone"
+            );
+            return Ok(plugin_ids);
+        }
+
         if let Some(debt) = self.layout_plugin_cleanup_debts.get(&transaction_id) {
             if debt.requested_plugin_ids != plugin_ids {
                 return Err(format!(

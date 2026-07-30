@@ -1,6 +1,5 @@
 ---
 source: zellij-utils/src/kdl/mod.rs
-assertion_line: 7319
 expression: fake_config_stringified
 ---
 keybinds clear-defaults=true {
@@ -190,6 +189,13 @@ keybinds clear-defaults=true {
             }
             SwitchToMode "normal"
         }
+        bind "x" {
+            MessagePlugin "session-rail" {
+                name "vc_kill_current_session"
+                floating false
+            }
+            SwitchToMode "normal"
+        }
     }
     shared {
         bind "Ctrl Shift down" {
@@ -235,7 +241,7 @@ keybinds clear-defaults=true {
         bind "Alt o" { MoveTab "right"; }
         bind "Alt p" { TogglePaneInGroup; }
         bind "Alt Shift p" { ToggleGroupMarking; }
-        bind "Ctrl q" { Quit; }
+        bind "Ctrl q" { CloseFocus; }
     }
     shared_except "locked" "move" {
         bind "Ctrl h" { SwitchToMode "move"; }
@@ -352,3 +358,4 @@ load_plugins {
 web_client {
     font "monospace"
 }
+auto_lock_after_seconds 5

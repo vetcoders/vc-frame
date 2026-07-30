@@ -1,6 +1,5 @@
 ---
 source: zellij-utils/src/kdl/mod.rs
-assertion_line: 7258
 expression: fake_document.to_string()
 ---
  
@@ -107,9 +106,9 @@ scroll_buffer_size 100
 // Automatically switch this client to Locked mode after this many
 // seconds without keyboard or mouse input
 // Valid values: positive integers (0 or unset = never)
-// Default value: unset
+// Default value: 5
 // 
-// auto_lock_after_seconds 15
+// auto_lock_after_seconds 5
  
 // Provide a command to execute when copying text. The text will be piped to
 // the stdin of the program to perform the copy. This can be used with

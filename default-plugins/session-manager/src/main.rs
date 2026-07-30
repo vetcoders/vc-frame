@@ -169,6 +169,8 @@ struct State {
     is_multi_screen: bool,
     single_screen_state: SingleScreenState,
     show_kill_all_sessions_warning: bool,
+    /// Last-session kill confirmation (Ctrl+o → x when no other live sessions).
+    show_kill_last_session_warning: bool,
     request_ids: Vec<String>,
     is_web_client: bool,
     current_session_last_saved_time: Option<u64>,
@@ -287,6 +289,9 @@ impl ZellijPlugin for State {
                 Some("down") => self.switch_session_relative(1),
                 _ => (),
             }
+            true
+        } else if pipe_message.name == "vc_kill_current_session" {
+            self.kill_current_session_preserving_client();
             true
         } else if pipe_message.name == "filepicker_result" {
             if let (Some(payload), Some(request_id)) =
@@ -453,6 +458,8 @@ impl ZellijPlugin for State {
             ActiveScreen::AttachToSession => {
                 if let Some(new_session_name) = self.renaming_session_name.as_ref() {
                     render_renaming_session_screen(new_session_name, height, width, x, y + 2);
+                } else if self.show_kill_last_session_warning {
+                    self.render_kill_last_session_warning(height, width, x, y);
                 } else if self.show_kill_all_sessions_warning {
                     self.render_kill_all_sessions_warning(height, width, x, y);
                 } else {
@@ -476,6 +483,8 @@ impl ZellijPlugin for State {
                     SingleScreenMode::SearchAndSelect => {
                         if let Some(new_session_name) = self.renaming_session_name.as_ref() {
                             render_renaming_session_screen(new_session_name, height, width, x, y);
+                        } else if self.show_kill_last_session_warning {
+                            self.render_kill_last_session_warning(height, width, x, y);
                         } else if self.show_kill_all_sessions_warning {
                             self.render_kill_all_sessions_warning(height, width, x, y);
                         } else {
@@ -1528,6 +1537,99 @@ impl State {
             switch_session_with_focus(&target_session_name, None, None);
         }
     }
+
+    /// Kill the current session without leaving vc-frame when another live
+    /// session exists (switch first, then kill the abandoned server). If this
+    /// is the last active session, arm a y/n confirmation overlay.
+    fn kill_current_session_preserving_client(&mut self) {
+        if self.show_kill_last_session_warning {
+            // Second Ctrl+o → x (or repeated pipe) acts as explicit confirm.
+            self.confirm_kill_last_session();
+            return;
+        }
+
+        let current_name = self
+            .sessions
+            .session_ui_infos
+            .iter()
+            .find(|session| session.is_current_session)
+            .map(|session| session.name.clone())
+            .or_else(|| self.session_name.clone());
+        let Some(current_name) = current_name else {
+            self.show_error("No current session to kill.");
+            return;
+        };
+
+        if let Some(target) = relative_session_target(&self.sessions.session_ui_infos, 1) {
+            // Hop first so the client stays inside vc-frame, then kill the old server.
+            switch_session_with_focus(&target, None, None);
+            match kill_sessions(std::slice::from_ref(&current_name)) {
+                Ok(()) => {
+                    self.sessions
+                        .session_ui_infos
+                        .retain(|session| session.name != current_name);
+                    self.show_kill_last_session_warning = false;
+                },
+                Err(error) => {
+                    self.show_error(&format!("Failed to kill session: {error}"));
+                },
+            }
+            return;
+        }
+
+        // Last active session in this window — require explicit confirmation.
+        self.show_kill_last_session_warning = true;
+        self.show_kill_all_sessions_warning = false;
+        // Rail is narrow: use the error banner. Floating manager uses the
+        // dedicated y/n overlay (see render_kill_last_session_warning).
+        if self.is_rail {
+            self.show_error(
+                "You are about to close the last active session in this window. Are you sure? y/n \
+                 (or Ctrl+o → x again).",
+            );
+        }
+        // Make the plugin pane visible so the prompt is not buried.
+        show_self(true);
+    }
+
+    fn confirm_kill_last_session(&mut self) {
+        self.show_kill_last_session_warning = false;
+        let name = self
+            .sessions
+            .session_ui_infos
+            .iter()
+            .find(|session| session.is_current_session)
+            .map(|session| session.name.clone())
+            .or_else(|| self.session_name.clone());
+        let Some(name) = name else {
+            self.show_error("No current session to kill.");
+            return;
+        };
+        // No other session to hop to — kill this server (client exits with it).
+        if let Err(error) = kill_sessions(std::slice::from_ref(&name)) {
+            self.show_error(&format!("Failed to kill session: {error}"));
+        }
+    }
+
+    fn handle_kill_last_session_warning_key(&mut self, key: KeyWithModifier) -> bool {
+        match key.bare_key {
+            BareKey::Char('y') if key.has_no_modifiers() => {
+                self.confirm_kill_last_session();
+                true
+            },
+            BareKey::Char('n') | BareKey::Esc if key.has_no_modifiers() => {
+                self.show_kill_last_session_warning = false;
+                self.error = None;
+                true
+            },
+            BareKey::Char('c') if key.has_modifiers(&[KeyModifier::Ctrl]) => {
+                self.show_kill_last_session_warning = false;
+                self.error = None;
+                true
+            },
+            _ => true,
+        }
+    }
     fn handle_session_rail_selection(&mut self) {
         self.ensure_rail_selection();
         if let Some(selected_session_name) = self.sessions.get_selected_session_name() {
@@ -1540,6 +1642,9 @@ impl State {
         }
     }
     fn handle_key(&mut self, key: KeyWithModifier) -> bool {
+        if self.show_kill_last_session_warning {
+            return self.handle_kill_last_session_warning_key(key);
+        }
         if self.error.is_some() {
             self.error = None;
             return true;
@@ -2526,6 +2631,35 @@ impl State {
             x + columns.saturating_sub(confirmation_text.chars().count()) / 2;
         print_text_with_coordinates(
             Text::new(warning_description_text).color_range(0, 15..16 + session_count_len),
+            warning_x_location,
+            warning_y_location,
+            None,
+            None,
+        );
+        print_text_with_coordinates(
+            Text::new(confirmation_text).color_indices(2, vec![15, 17]),
+            confirmation_x_location,
+            confirmation_y_location,
+            None,
+            None,
+        );
+    }
+
+    fn render_kill_last_session_warning(&self, rows: usize, columns: usize, x: usize, y: usize) {
+        if rows == 0 || columns == 0 {
+            return;
+        }
+        let warning_description_text =
+            "You are about to close the last active session in this window.";
+        let confirmation_text = "Are you sure? (y/n)";
+        let warning_y_location = y + (rows / 2).saturating_sub(1);
+        let confirmation_y_location = y + (rows / 2) + 1;
+        let warning_x_location =
+            x + columns.saturating_sub(warning_description_text.chars().count()) / 2;
+        let confirmation_x_location =
+            x + columns.saturating_sub(confirmation_text.chars().count()) / 2;
+        print_text_with_coordinates(
+            Text::new(warning_description_text).color_range(0, ..),
             warning_x_location,
             warning_y_location,
             None,

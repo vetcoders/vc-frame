@@ -1941,6 +1941,13 @@ const LAYOUT_CLEANUP_RETRY_BASE: Duration = Duration::from_millis(10);
 const LAYOUT_CLEANUP_RETRY_MAX: Duration = Duration::from_secs(30);
 #[cfg(test)]
 const LAYOUT_CLEANUP_RETRY_MAX: Duration = Duration::from_millis(100);
+/// Background probes for retained cleanup debt. After this many failed
+/// background rounds the debt is abandoned so CloseTab cannot leave the
+/// server probing forever (zombie layout cleanup).
+#[cfg(not(test))]
+const LAYOUT_CLEANUP_MAX_BACKGROUND_RETRIES: u32 = 6;
+#[cfg(test)]
+const LAYOUT_CLEANUP_MAX_BACKGROUND_RETRIES: u32 = 3;
 const MAX_RESOLVED_LAYOUT_TRANSACTIONS: usize = 512;
 
 #[derive(Debug)]
@@ -2646,6 +2653,21 @@ impl Screen {
         }
     }
 
+    fn abandon_layout_cleanup(
+        &mut self,
+        transaction_id: LayoutTransactionId,
+        reason: &str,
+    ) {
+        if let Some(cleanup) = self.pending_layout_cleanup.get_mut(&transaction_id) {
+            let remaining = cleanup.pane_ids();
+            log::error!(
+                "layout transaction {transaction_id} abandoning cleanup debt ({reason}); remaining panes {remaining:?}"
+            );
+            cleanup.acknowledge(remaining);
+        }
+        self.finish_layout_cleanup(transaction_id);
+    }
+
     fn retry_pending_layout_cleanup_in_background(&mut self) {
         let completed = {
             let mut results = self
@@ -2669,10 +2691,21 @@ impl Screen {
                 if cleanup.is_empty() {
                     self.finish_layout_cleanup(result.transaction_id);
                 } else {
-                    self.layout_cleanup_retry_attempts
+                    let attempts = self
+                        .layout_cleanup_retry_attempts
                         .entry(result.transaction_id)
                         .and_modify(|attempts| *attempts = attempts.saturating_add(1))
                         .or_insert(1);
+                    if *attempts >= LAYOUT_CLEANUP_MAX_BACKGROUND_RETRIES {
+                        let attempts = *attempts;
+                        self.abandon_layout_cleanup(
+                            result.transaction_id,
+                            &format!(
+                                "gave up after {attempts} background probes (max {})",
+                                LAYOUT_CLEANUP_MAX_BACKGROUND_RETRIES
+                            ),
+                        );
+                    }
                 }
             }
         }
@@ -2688,6 +2721,21 @@ impl Screen {
             .copied()
             .collect::<Vec<_>>();
         for transaction_id in transaction_ids {
+            let prior_attempts = self
+                .layout_cleanup_retry_attempts
+                .get(&transaction_id)
+                .copied()
+                .unwrap_or(0);
+            if prior_attempts >= LAYOUT_CLEANUP_MAX_BACKGROUND_RETRIES {
+                self.abandon_layout_cleanup(
+                    transaction_id,
+                    &format!(
+                        "refusing further probes after {prior_attempts} background failures (max {})",
+                        LAYOUT_CLEANUP_MAX_BACKGROUND_RETRIES
+                    ),
+                );
+                continue;
+            }
             let Some(pane_ids) = self
                 .pending_layout_cleanup
                 .get(&transaction_id)
@@ -2698,12 +2746,7 @@ impl Screen {
             let senders = self.bus.senders.clone();
             let wake_screen = senders.clone();
             let results = self.layout_cleanup_retry_results.clone();
-            let retry_attempt = self
-                .layout_cleanup_retry_attempts
-                .get(&transaction_id)
-                .copied()
-                .unwrap_or(0)
-                .min(8);
+            let retry_attempt = prior_attempts.min(8);
             let retry_delay = LAYOUT_CLEANUP_RETRY_BASE
                 .checked_mul(1_u32 << retry_attempt)
                 .unwrap_or(LAYOUT_CLEANUP_RETRY_MAX)
@@ -2734,13 +2777,24 @@ impl Screen {
             if let Err(error) = spawn_result {
                 self.layout_cleanup_retries_in_flight
                     .remove(&transaction_id);
-                self.layout_cleanup_retry_attempts
+                let attempts = self
+                    .layout_cleanup_retry_attempts
                     .entry(transaction_id)
                     .and_modify(|attempts| *attempts = attempts.saturating_add(1))
                     .or_insert(1);
                 log::error!(
                     "failed to start background cleanup retry for layout transaction {transaction_id}: {error}"
                 );
+                if *attempts >= LAYOUT_CLEANUP_MAX_BACKGROUND_RETRIES {
+                    let attempts = *attempts;
+                    self.abandon_layout_cleanup(
+                        transaction_id,
+                        &format!(
+                            "spawn failures exhausted after {attempts} attempts (max {})",
+                            LAYOUT_CLEANUP_MAX_BACKGROUND_RETRIES
+                        ),
+                    );
+                }
             }
         }
     }

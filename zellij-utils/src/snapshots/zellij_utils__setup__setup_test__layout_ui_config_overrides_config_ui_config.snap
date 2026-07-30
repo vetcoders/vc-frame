@@ -1,6 +1,5 @@
 ---
 source: zellij-utils/src/setup.rs
-assertion_line: 877
 expression: "format!(\"{:#?}\", config)"
 ---
 Config {
@@ -394,7 +393,7 @@ Config {
                     Ctrl,
                 },
             }: [
-                Quit,
+                CloseFocus,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -1139,7 +1138,7 @@ Config {
                     Ctrl,
                 },
             }: [
-                Quit,
+                CloseFocus,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -1731,7 +1730,7 @@ Config {
                     Ctrl,
                 },
             }: [
-                Quit,
+                CloseFocus,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -2541,7 +2540,7 @@ Config {
                     Ctrl,
                 },
             }: [
-                Quit,
+                CloseFocus,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -3126,7 +3125,7 @@ Config {
                     Ctrl,
                 },
             }: [
-                Quit,
+                CloseFocus,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -3593,7 +3592,7 @@ Config {
                     Ctrl,
                 },
             }: [
-                Quit,
+                CloseFocus,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -4162,7 +4161,7 @@ Config {
                     Ctrl,
                 },
             }: [
-                Quit,
+                CloseFocus,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -4624,7 +4623,7 @@ Config {
                     Ctrl,
                 },
             }: [
-                Quit,
+                CloseFocus,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -5069,7 +5068,7 @@ Config {
                     Ctrl,
                 },
             }: [
-                Quit,
+                CloseFocus,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -5634,7 +5633,7 @@ Config {
                     Ctrl,
                 },
             }: [
-                Quit,
+                CloseFocus,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -5747,6 +5746,36 @@ Config {
                     close_replaced_pane: false,
                     skip_cache: false,
                     tab_id: None,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'x',
+                ),
+                key_modifiers: {},
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_kill_current_session",
+                    ),
+                    payload: None,
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
                 SwitchToMode {
                     input_mode: Normal,
@@ -6264,7 +6293,7 @@ Config {
                     Ctrl,
                 },
             }: [
-                Quit,
+                CloseFocus,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -6704,7 +6733,7 @@ Config {
                     Ctrl,
                 },
             }: [
-                Quit,
+                CloseFocus,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -7361,7 +7390,7 @@ Config {
                     Ctrl,
                 },
             }: [
-                Quit,
+                CloseFocus,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -7443,7 +7472,9 @@ Config {
         mirror_session: None,
         on_force_close: None,
         scroll_buffer_size: None,
-        auto_lock_after_seconds: None,
+        auto_lock_after_seconds: Some(
+            5,
+        ),
         copy_command: None,
         copy_clipboard: None,
         copy_on_select: None,

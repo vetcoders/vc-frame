@@ -119,6 +119,12 @@ keybinds clear-defaults=true {{
     }}
     session {{
         bind "o" {{ SwitchToMode "Normal"; }}
+        bind "x" {{
+            MessagePlugin "session-rail" {{
+                name "vc_kill_current_session"
+            }};
+            SwitchToMode "Normal"
+        }}
         bind "d" {{ Detach; }}
         bind "w" {{
             LaunchOrFocusPlugin "session-manager" {{
@@ -165,7 +171,7 @@ keybinds clear-defaults=true {{
     }}
     shared_except "locked" "renametab" "renamepane" {{
         bind "{primary_modifier} g" {{ SwitchToMode "Locked"; }}
-        bind "{primary_modifier} q" {{ Quit; }}
+        bind "{primary_modifier} q" {{ CloseFocus; }}
     }}
     shared_except "renamepane" "renametab" "entersearch" "locked" {{
         bind "esc" {{ SwitchToMode "locked"; }}
@@ -342,6 +348,12 @@ keybinds clear-defaults=true {{
     session {{
         bind "{primary_modifier} o" {{ SwitchToMode "Normal"; }}
         bind "{primary_modifier} s" {{ SwitchToMode "Scroll"; }}
+        bind "x" {{
+            MessagePlugin "session-rail" {{
+                name "vc_kill_current_session"
+            }};
+            SwitchToMode "Normal"
+        }}
         bind "d" {{ Detach; }}
         bind "w" {{
             LaunchOrFocusPlugin "session-manager" {{
@@ -411,7 +423,7 @@ keybinds clear-defaults=true {{
     }}
     shared_except "locked" {{
         bind "{primary_modifier} g" {{ SwitchToMode "Locked"; }}
-        bind "{primary_modifier} q" {{ Quit; }}
+        bind "{primary_modifier} q" {{ CloseFocus; }}
         bind "{secondary_modifier} f" {{ ToggleFloatingPanes; }}
         bind "{secondary_modifier} n" {{ NewPane; }}
         bind "{secondary_modifier} i" {{ MoveTab "Left"; }}
@@ -565,6 +577,12 @@ keybinds clear-defaults=true {{
         bind "Esc" {{ UndoRenamePane; SwitchToMode "Pane"; }}
     }}
     session {{
+        bind "x" {{
+            MessagePlugin "session-rail" {{
+                name "vc_kill_current_session"
+            }};
+            SwitchToMode "Normal"
+        }}
         bind "d" {{ Detach; }}
         bind "w" {{
             LaunchOrFocusPlugin "session-manager" {{
@@ -769,6 +787,12 @@ keybinds clear-defaults=true {{
     session {{
         bind "{primary_modifier} o" {{ SwitchToMode "Normal"; }}
         bind "{primary_modifier} s" {{ SwitchToMode "Scroll"; }}
+        bind "x" {{
+            MessagePlugin "session-rail" {{
+                name "vc_kill_current_session"
+            }};
+            SwitchToMode "Normal"
+        }}
         bind "d" {{ Detach; }}
         bind "w" {{
             LaunchOrFocusPlugin "session-manager" {{
@@ -838,7 +862,7 @@ keybinds clear-defaults=true {{
     }}
     shared_except "locked" {{
         bind "{primary_modifier} g" {{ SwitchToMode "Locked"; }}
-        bind "{primary_modifier} q" {{ Quit; }}
+        bind "{primary_modifier} q" {{ CloseFocus; }}
     }}
     shared_except "normal" "locked" {{
         bind "Enter" "Esc" {{ SwitchToMode "Normal"; }}
@@ -972,6 +996,12 @@ keybinds clear-defaults=true {
         bind "Esc" { UndoRenamePane; SwitchToMode "Pane"; }
     }
     session {
+        bind "x" {
+            MessagePlugin "session-rail" {
+                name "vc_kill_current_session"
+            };
+            SwitchToMode "Normal"
+        }
         bind "d" { Detach; }
         bind "w" {
             LaunchOrFocusPlugin "session-manager" {
@@ -1171,6 +1201,12 @@ keybinds clear-defaults=true {{
     session {{
         bind "{primary_modifier} o" {{ SwitchToMode "Normal"; }}
         bind "{primary_modifier} s" {{ SwitchToMode "Scroll"; }}
+        bind "x" {{
+            MessagePlugin "session-rail" {{
+                name "vc_kill_current_session"
+            }};
+            SwitchToMode "Normal"
+        }}
         bind "d" {{ Detach; }}
         bind "w" {{
             LaunchOrFocusPlugin "session-manager" {{
@@ -1240,7 +1276,7 @@ keybinds clear-defaults=true {{
     }}
     shared_except "locked" {{
         bind "{primary_modifier} g" {{ SwitchToMode "Locked"; }}
-        bind "{primary_modifier} q" {{ Quit; }}
+        bind "{primary_modifier} q" {{ CloseFocus; }}
         bind "{secondary_modifier} f" {{ ToggleFloatingPanes; }}
         bind "{secondary_modifier} n" {{ NewPane; }}
         bind "{secondary_modifier} i" {{ MoveTab "Left"; }}

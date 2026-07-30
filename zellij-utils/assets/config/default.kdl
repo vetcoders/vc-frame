@@ -140,6 +140,14 @@ keybinds {
     session {
         bind "Ctrl o" { SwitchToMode "Normal"; }
         bind "Ctrl s" { SwitchToMode "Scroll"; }
+        // Kill this session without leaving vc-frame when another session is
+        // alive; last session prompts y/n via session-manager.
+        bind "x" {
+            MessagePlugin "session-rail" {
+                name "vc_kill_current_session"
+            };
+            SwitchToMode "Normal"
+        }
         bind "d" { Detach; }
         bind "w" {
             LaunchOrFocusPlugin "session-manager" {
@@ -231,7 +239,8 @@ keybinds {
     }
     shared_except "locked" {
         bind "Ctrl g" { SwitchToMode "Locked"; }
-        bind "Ctrl q" { Quit; }
+        // One-shot close of the focused pane only — never quits the session.
+        bind "Ctrl q" { CloseFocus; }
         bind "Alt f" { ToggleFloatingPanes; }
         bind "Alt n" { NewPane; }
         bind "Alt i" { MoveTab "Left"; }
@@ -592,6 +601,12 @@ load_plugins {
 // Default: true
 //
 // osc8_hyperlinks false
+
+// Automatically switch this client to Locked mode after this many
+// seconds without keyboard or mouse input
+// Valid values: positive integers (0 or unset = never)
+// Default value: 5
+auto_lock_after_seconds 5
 
 // A command to run (will be wrapped with sh -c and provided the RESURRECT_COMMAND env variable)
 // after Zellij attempts to discover a command inside a pane when resurrecting sessions, the STDOUT
