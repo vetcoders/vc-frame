@@ -3798,10 +3798,35 @@ fn send_command_not_found_to_screen(
 
 #[cfg(not(windows))]
 pub fn get_default_shell() -> PathBuf {
-    PathBuf::from(std::env::var("SHELL").unwrap_or_else(|_| {
-        log::warn!("Cannot read SHELL env, falling back to use /bin/sh");
-        "/bin/sh".to_string()
-    }))
+    if let Ok(shell) = std::env::var("SHELL")
+        && !shell.is_empty()
+    {
+        return PathBuf::from(shell);
+    }
+    // Alacritty host presets often launch vc-frame as terminal.shell, so the
+    // server process never inherits a login-shell SHELL. Reconstruct from the
+    // passwd database before falling all the way to /bin/sh.
+    if let Some(shell) = user_login_shell() {
+        log::info!(
+            "SHELL env missing; using login shell from passwd: {}",
+            shell.display()
+        );
+        return shell;
+    }
+    log::warn!("Cannot read SHELL env, falling back to use /bin/sh");
+    PathBuf::from("/bin/sh")
+}
+
+#[cfg(not(windows))]
+fn user_login_shell() -> Option<PathBuf> {
+    // Reentrant passwd lookup via nix (getpwuid_r under the hood). Avoids the
+    // non-reentrant getpwuid static buffer and keeps this module free of bare
+    // `unsafe` blocks for shell resolution.
+    let user = nix::unistd::User::from_uid(nix::unistd::Uid::current()).ok()??;
+    if user.shell.as_os_str().is_empty() {
+        return None;
+    }
+    Some(user.shell)
 }
 
 #[cfg(windows)]

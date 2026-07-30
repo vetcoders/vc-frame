@@ -1205,6 +1205,7 @@ message Options {
   optional bool mouse_click_through = 45;
   optional string theme_dark = 46;
   optional string theme_light = 47;
+  optional uint64 auto_lock_after_seconds = 48;
 }
 
 enum OnForceClose {

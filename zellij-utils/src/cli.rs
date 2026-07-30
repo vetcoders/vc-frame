@@ -736,6 +736,36 @@ pub enum Command {
         "vc-frame [--session <OTHER SESSION NAME>] subscribe [OPTIONS] --pane-id..."
     ))]
     Subscribe(SubscribeCli),
+
+    /// Diagnose this install: config shadowing, lock stranding, freshness
+    #[clap(name = "doctor", value_parser)]
+    Doctor(DoctorCli),
+
+    /// Cure what `doctor` diagnosed. Writes the user config, nothing else.
+    #[clap(name = "repair")]
+    #[clap(subcommand)]
+    Repair(RepairCli),
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize, Args)]
+pub struct DoctorCli {
+    /// Emit the findings as a machine document instead of a report
+    #[clap(long, value_parser)]
+    pub json: bool,
+}
+
+/// The ailments `repair` knows how to treat. One subcommand per ailment, so a
+/// cure is always named at the call site — never an implicit "fix everything".
+#[derive(Debug, Subcommand, Clone, Serialize, Deserialize)]
+pub enum RepairCli {
+    /// Retire a frozen `clear-defaults=true` keybinds block (and drop binds
+    /// that merely restate the shipped defaults), after a timestamped backup
+    #[clap(name = "key-bindings", value_parser)]
+    KeyBindings {
+        /// Print the plan and write nothing
+        #[clap(long, value_parser)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

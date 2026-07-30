@@ -1412,20 +1412,18 @@ impl RenderBlocker {
 
     #[cfg(not(test))]
     pub fn can_render(&mut self) -> bool {
-        let ret = if self.blocking_plugins.is_empty() {
-            true
-        } else {
-            let timeout = Duration::from_millis(self.timeout_ms);
-            let now = Instant::now();
-
-            self.blocking_plugins
-                .values()
-                .all(|&registered_at| now.duration_since(registered_at) >= timeout)
-        };
-        if ret {
-            self.blocking_plugins.clear();
+        if self.blocking_plugins.is_empty() {
+            return true;
         }
-        ret
+        let timeout = Duration::from_millis(self.timeout_ms);
+        let now = Instant::now();
+        // Evict expired entries individually. The previous all-or-nothing
+        // check let every fresh registration re-arm the whole gate: under
+        // multi-tab churn a new plugin always landed before the previous
+        // batch aged out, so rendering was starved session-wide.
+        self.blocking_plugins
+            .retain(|_, registered_at| now.duration_since(*registered_at) < timeout);
+        self.blocking_plugins.is_empty()
     }
 }
 
@@ -1943,6 +1941,13 @@ const LAYOUT_CLEANUP_RETRY_BASE: Duration = Duration::from_millis(10);
 const LAYOUT_CLEANUP_RETRY_MAX: Duration = Duration::from_secs(30);
 #[cfg(test)]
 const LAYOUT_CLEANUP_RETRY_MAX: Duration = Duration::from_millis(100);
+/// Background probes for retained cleanup debt. After this many failed
+/// background rounds the debt is abandoned so CloseTab cannot leave the
+/// server probing forever (zombie layout cleanup).
+#[cfg(not(test))]
+const LAYOUT_CLEANUP_MAX_BACKGROUND_RETRIES: u32 = 6;
+#[cfg(test)]
+const LAYOUT_CLEANUP_MAX_BACKGROUND_RETRIES: u32 = 3;
 const MAX_RESOLVED_LAYOUT_TRANSACTIONS: usize = 512;
 
 #[derive(Debug)]
@@ -2648,6 +2653,17 @@ impl Screen {
         }
     }
 
+    fn abandon_layout_cleanup(&mut self, transaction_id: LayoutTransactionId, reason: &str) {
+        if let Some(cleanup) = self.pending_layout_cleanup.get_mut(&transaction_id) {
+            let remaining = cleanup.pane_ids();
+            log::error!(
+                "layout transaction {transaction_id} abandoning cleanup debt ({reason}); remaining panes {remaining:?}"
+            );
+            cleanup.acknowledge(remaining);
+        }
+        self.finish_layout_cleanup(transaction_id);
+    }
+
     fn retry_pending_layout_cleanup_in_background(&mut self) {
         let completed = {
             let mut results = self
@@ -2671,10 +2687,21 @@ impl Screen {
                 if cleanup.is_empty() {
                     self.finish_layout_cleanup(result.transaction_id);
                 } else {
-                    self.layout_cleanup_retry_attempts
+                    let attempts = self
+                        .layout_cleanup_retry_attempts
                         .entry(result.transaction_id)
                         .and_modify(|attempts| *attempts = attempts.saturating_add(1))
                         .or_insert(1);
+                    if *attempts >= LAYOUT_CLEANUP_MAX_BACKGROUND_RETRIES {
+                        let attempts = *attempts;
+                        self.abandon_layout_cleanup(
+                            result.transaction_id,
+                            &format!(
+                                "gave up after {attempts} background probes (max {})",
+                                LAYOUT_CLEANUP_MAX_BACKGROUND_RETRIES
+                            ),
+                        );
+                    }
                 }
             }
         }
@@ -2690,6 +2717,21 @@ impl Screen {
             .copied()
             .collect::<Vec<_>>();
         for transaction_id in transaction_ids {
+            let prior_attempts = self
+                .layout_cleanup_retry_attempts
+                .get(&transaction_id)
+                .copied()
+                .unwrap_or(0);
+            if prior_attempts >= LAYOUT_CLEANUP_MAX_BACKGROUND_RETRIES {
+                self.abandon_layout_cleanup(
+                    transaction_id,
+                    &format!(
+                        "refusing further probes after {prior_attempts} background failures (max {})",
+                        LAYOUT_CLEANUP_MAX_BACKGROUND_RETRIES
+                    ),
+                );
+                continue;
+            }
             let Some(pane_ids) = self
                 .pending_layout_cleanup
                 .get(&transaction_id)
@@ -2700,12 +2742,7 @@ impl Screen {
             let senders = self.bus.senders.clone();
             let wake_screen = senders.clone();
             let results = self.layout_cleanup_retry_results.clone();
-            let retry_attempt = self
-                .layout_cleanup_retry_attempts
-                .get(&transaction_id)
-                .copied()
-                .unwrap_or(0)
-                .min(8);
+            let retry_attempt = prior_attempts.min(8);
             let retry_delay = LAYOUT_CLEANUP_RETRY_BASE
                 .checked_mul(1_u32 << retry_attempt)
                 .unwrap_or(LAYOUT_CLEANUP_RETRY_MAX)
@@ -2736,13 +2773,24 @@ impl Screen {
             if let Err(error) = spawn_result {
                 self.layout_cleanup_retries_in_flight
                     .remove(&transaction_id);
-                self.layout_cleanup_retry_attempts
+                let attempts = self
+                    .layout_cleanup_retry_attempts
                     .entry(transaction_id)
                     .and_modify(|attempts| *attempts = attempts.saturating_add(1))
                     .or_insert(1);
                 log::error!(
                     "failed to start background cleanup retry for layout transaction {transaction_id}: {error}"
                 );
+                if *attempts >= LAYOUT_CLEANUP_MAX_BACKGROUND_RETRIES {
+                    let attempts = *attempts;
+                    self.abandon_layout_cleanup(
+                        transaction_id,
+                        &format!(
+                            "spawn failures exhausted after {attempts} attempts (max {})",
+                            LAYOUT_CLEANUP_MAX_BACKGROUND_RETRIES
+                        ),
+                    );
+                }
             }
         }
     }
@@ -4101,6 +4149,10 @@ impl Screen {
             match self.get_active_tab(client_id) {
                 Ok(current_tab) => {
                     // If new active tab is same as the current one, do nothing.
+                    // (A deferred switch replayed after the pending-layout
+                    // gate also lands here; its suppressed frame is re-emitted
+                    // by the gate-exit force-render in screen_thread_main, so
+                    // this no-op is safe.)
                     if current_tab.position == new_tab_pos {
                         return Ok(());
                     }
@@ -9301,6 +9353,12 @@ pub(crate) fn screen_thread_main(
         HashMap::new();
     let mut plugin_loading_message_cache = HashMap::new();
     let mut keybind_intercepts = HashMap::new();
+    // Tabs gated by `pending_tab_ids` are skipped by render; whichever of the
+    // many retirement paths removes a tab from the gate, the client still
+    // shows the pre-gate frame until something re-renders. Snapshot the gate
+    // each pass and force-render every tab that left it — one chokepoint
+    // instead of a render call in every retirement site.
+    let mut previously_gated_tab_ids: HashSet<usize> = HashSet::new();
     loop {
         for (transaction_id, coordination) in screen.take_resolved_layout_reconciliations() {
             if let Err(error) = screen.reconcile_indeterminate_layout_transaction(
@@ -9320,6 +9378,23 @@ pub(crate) fn screen_thread_main(
         }
         screen.retry_indeterminate_layout_transactions_in_background();
         screen.retry_pending_layout_cleanup_in_background();
+        if !previously_gated_tab_ids.is_empty() {
+            let ungated: Vec<usize> = previously_gated_tab_ids
+                .iter()
+                .filter(|tab_id| !pending_tab_ids.contains(tab_id))
+                .copied()
+                .collect();
+            if !ungated.is_empty() {
+                let tabs = screen.get_tabs_mut();
+                for tab_id in &ungated {
+                    if let Some(tab) = tabs.get_mut(tab_id) {
+                        tab.set_force_render();
+                    }
+                }
+                screen.render(None)?;
+            }
+        }
+        previously_gated_tab_ids.clone_from(&pending_tab_ids);
         let (event, mut err_ctx) = screen
             .bus
             .recv()
@@ -9331,6 +9406,7 @@ pub(crate) fn screen_thread_main(
 
         match event {
             ScreenInstruction::PtyBytes(pid, vte_bytes) => {
+                let n_bytes = vte_bytes.len();
                 let all_tabs = screen.get_tabs_mut();
                 let mut vte_bytes = Some(vte_bytes);
                 for tab in all_tabs.values_mut() {
@@ -9342,6 +9418,10 @@ pub(crate) fn screen_thread_main(
                         break;
                     }
                 }
+                // Release backpressure budget whether the bytes were parsed
+                // or dropped (pane already gone) — the reader is waiting on
+                // this accounting, not on the parse result.
+                crate::terminal_bytes::note_pty_bytes_processed(pid, n_bytes);
                 if let Some(vte_bytes) = vte_bytes {
                     pending_events_waiting_for_pane
                         .entry(PaneId::Terminal(pid))
@@ -9376,7 +9456,13 @@ pub(crate) fn screen_thread_main(
             ScreenInstruction::Render => {
                 screen.render(None)?;
             },
-            ScreenInstruction::LayoutMaintenanceWake => {},
+            ScreenInstruction::LayoutMaintenanceWake => {
+                // Intentionally no work here: the wake exists to unblock
+                // recv() so the loop-top reconciliation runs. If that pass
+                // retires a layout gate, the gate-exit force-render in the
+                // loop head emits the frame — rendering here would spam a
+                // frame per wake even when nothing changed.
+            },
             ScreenInstruction::RenderToClients => {
                 // render_blocker.can_render() returning true means that either all pending plugins
                 // (only those waiting for a new tab layout to be applied!) have been rendered or

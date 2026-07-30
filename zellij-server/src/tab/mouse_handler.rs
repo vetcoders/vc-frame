@@ -139,6 +139,10 @@ enum MouseAction {
     GroupToggle(PaneId),
     GroupAdd(PaneId),
     Ungroup,
+    /// Shift-modified click on a plugin highlight: open the target outside
+    /// the process (system editor / browser). Miss is a quiet no-op — the
+    /// Shift gesture never falls through to grouping or resize.
+    HighlightOpenExternal(PaneId),
     StartResize {
         pane_id: PaneId,
         edge: PaneEdge,
@@ -727,6 +731,28 @@ impl MouseHandler {
                 // No highlight hit — fall through to pane grouping
                 Ok(MouseEffect::group_toggle(pane_id))
             },
+            MouseAction::HighlightOpenExternal(pane_id) => {
+                if let Some(pane) = tab.get_pane_with_id_mut(pane_id) {
+                    let relative_position = pane.relative_position(&event.position);
+                    if let Some((hit_plugin_id, pattern, matched_string, mut context)) =
+                        pane.plugin_highlight_at(&relative_position)
+                    {
+                        context.insert("vc_open_external".to_owned(), "true".to_owned());
+                        let _ = tab
+                            .senders
+                            .send_to_plugin(PluginInstruction::HighlightClicked {
+                                plugin_id: hit_plugin_id,
+                                client_id,
+                                pane_id,
+                                pattern,
+                                matched_string,
+                                context,
+                            });
+                        return Ok(MouseEffect::state_changed());
+                    }
+                }
+                Ok(MouseEffect::default())
+            },
             MouseAction::GroupAdd(pane_id) => Ok(MouseEffect::group_add(pane_id)),
             MouseAction::Ungroup => Ok(MouseEffect::ungroup()),
             MouseAction::StartResize {
@@ -892,6 +918,16 @@ impl MouseHandler {
         if let Some(pane_at_position) = Self::unselectable_pane_at_position(tab, &position) {
             let relative_position = pane_at_position.relative_position(&position);
             pane_at_position.start_selection(&relative_position, client_id);
+        } else if let Some(active_pane) = tab.get_active_pane_mut(client_id)
+            && matches!(active_pane.pid(), PaneId::Plugin(_))
+            && active_pane.contains(&position)
+        {
+            // A selectable plugin pane (e.g. the session rail) must receive
+            // the press that focused it. Without this, the first click only
+            // moves focus and is swallowed — the user has to click twice,
+            // while hover highlighting already promised the click would land.
+            let relative_position = active_pane.relative_position(&position);
+            active_pane.start_selection(&relative_position, client_id);
         }
 
         if tab.floating_panes.panes_are_visible() {
@@ -1020,9 +1056,15 @@ impl MouseHandler {
                             .with_context(err_context)?;
                     }
                 }
-                tab.selecting_with_mouse_in_pane = None;
             }
         }
+        // Clear the selection latch on every release path — not only when the
+        // selection ended in-pane. If the pane's application enabled mouse
+        // tracking between press and release, the release is forwarded to the
+        // terminal above; if the selecting pane closed, the lookup misses.
+        // Leaving the latch set makes determine_mouse_action swallow every
+        // subsequent press in this tab.
+        tab.selecting_with_mouse_in_pane = None;
 
         if leave_clipboard_message {
             Ok(MouseEffect::leave_clipboard_message())
@@ -1322,6 +1364,9 @@ impl MouseHandler {
             let is_left_motion = event.left && event.event_type == MouseEventType::Motion;
 
             if is_left_press && let Some(pane_id) = ctx.pane_id_at_position {
+                if event.shift {
+                    return Ok(MouseAction::HighlightOpenExternal(pane_id));
+                }
                 return Ok(MouseAction::GroupToggle(pane_id));
             }
             if is_left_motion && let Some(pane_id) = ctx.pane_id_at_position {
@@ -1349,6 +1394,18 @@ impl MouseHandler {
                 if event.wheel_down {
                     return Ok(MouseAction::ScrollDown { pane_id, lines: 3 });
                 }
+            }
+            return Ok(MouseAction::NoAction);
+        }
+
+        // Ctrl+Shift+click mirrors Alt+Shift+click as the external-open
+        // gesture: some host terminals swallow one combo but forward the
+        // other, so both must resolve to the same action.
+        let is_ctrl_shift_left_press =
+            event.ctrl && event.shift && event.left && event.event_type == MouseEventType::Press;
+        if is_ctrl_shift_left_press {
+            if let Some(pane_id) = ctx.pane_id_at_position {
+                return Ok(MouseAction::HighlightOpenExternal(pane_id));
             }
             return Ok(MouseAction::NoAction);
         }
@@ -1437,7 +1494,12 @@ impl MouseHandler {
                 }
             }
 
-            if ctx.mouse_click_through && !ctx.focus_follows_mouse {
+            // Plugin panes are UI surfaces: a click on a list row must land
+            // in one click, never "first click focuses, second click acts" —
+            // that two-step lottery is exactly what made the session rail
+            // feel random depending on hover-focus timing.
+            let is_plugin_pane = matches!(details.pane_id, PaneId::Plugin(_));
+            if is_plugin_pane || (ctx.mouse_click_through && !ctx.focus_follows_mouse) {
                 return Ok(MouseAction::FocusPaneAndClickThrough {
                     pane_id: details.pane_id,
                     position: event.position,

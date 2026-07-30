@@ -119,6 +119,12 @@ keybinds clear-defaults=true {{
     }}
     session {{
         bind "o" {{ SwitchToMode "Normal"; }}
+        bind "x" {{
+            MessagePlugin "session-rail" {{
+                name "vc_kill_current_session"
+            }};
+            SwitchToMode "Normal"
+        }}
         bind "d" {{ Detach; }}
         bind "w" {{
             LaunchOrFocusPlugin "session-manager" {{
@@ -165,7 +171,7 @@ keybinds clear-defaults=true {{
     }}
     shared_except "locked" "renametab" "renamepane" {{
         bind "{primary_modifier} g" {{ SwitchToMode "Locked"; }}
-        bind "{primary_modifier} q" {{ Quit; }}
+        bind "{primary_modifier} q" {{ CloseFocus; }}
     }}
     shared_except "renamepane" "renametab" "entersearch" "locked" {{
         bind "esc" {{ SwitchToMode "locked"; }}
@@ -175,10 +181,25 @@ keybinds clear-defaults=true {{
         bind "{secondary_modifier} f" {{ ToggleFloatingPanes; }}
         bind "{secondary_modifier} i" {{ MoveTab "Left"; }}
         bind "{secondary_modifier} o" {{ MoveTab "Right"; }}
-        bind "{secondary_modifier} h" "{secondary_modifier} Left" {{ MoveFocusOrTab "Left"; }}
-        bind "{secondary_modifier} l" "{secondary_modifier} Right" {{ MoveFocusOrTab "Right"; }}
-        bind "{secondary_modifier} j" "{secondary_modifier} Down" {{ MoveFocus "Down"; }}
-        bind "{secondary_modifier} k" "{secondary_modifier} Up" {{ MoveFocus "Up"; }}
+        // Product contract: secondary+arrows = tabs / sessions; letters keep focus.
+        bind "{secondary_modifier} Left" {{ GoToPreviousTab; }}
+        bind "{secondary_modifier} Right" {{ GoToNextTab; }}
+        bind "{secondary_modifier} Up" {{
+            MessagePlugin "session-rail" {{
+                name "vc_rail_nav"
+                payload "up"
+            }};
+        }}
+        bind "{secondary_modifier} Down" {{
+            MessagePlugin "session-rail" {{
+                name "vc_rail_nav"
+                payload "down"
+            }};
+        }}
+        bind "{secondary_modifier} h" {{ MoveFocusOrTab "Left"; }}
+        bind "{secondary_modifier} l" {{ MoveFocusOrTab "Right"; }}
+        bind "{secondary_modifier} j" {{ MoveFocus "Down"; }}
+        bind "{secondary_modifier} k" {{ MoveFocus "Up"; }}
         bind "{secondary_modifier} =" "{secondary_modifier} +" {{ Resize "Increase"; }}
         bind "{secondary_modifier} -" {{ Resize "Decrease"; }}
         bind "{secondary_modifier} [" {{ PreviousSwapLayout; }}
@@ -342,6 +363,12 @@ keybinds clear-defaults=true {{
     session {{
         bind "{primary_modifier} o" {{ SwitchToMode "Normal"; }}
         bind "{primary_modifier} s" {{ SwitchToMode "Scroll"; }}
+        bind "x" {{
+            MessagePlugin "session-rail" {{
+                name "vc_kill_current_session"
+            }};
+            SwitchToMode "Normal"
+        }}
         bind "d" {{ Detach; }}
         bind "w" {{
             LaunchOrFocusPlugin "session-manager" {{
@@ -411,15 +438,30 @@ keybinds clear-defaults=true {{
     }}
     shared_except "locked" {{
         bind "{primary_modifier} g" {{ SwitchToMode "Locked"; }}
-        bind "{primary_modifier} q" {{ Quit; }}
+        bind "{primary_modifier} q" {{ CloseFocus; }}
         bind "{secondary_modifier} f" {{ ToggleFloatingPanes; }}
         bind "{secondary_modifier} n" {{ NewPane; }}
         bind "{secondary_modifier} i" {{ MoveTab "Left"; }}
         bind "{secondary_modifier} o" {{ MoveTab "Right"; }}
-        bind "{secondary_modifier} h" "{secondary_modifier} Left" {{ MoveFocusOrTab "Left"; }}
-        bind "{secondary_modifier} l" "{secondary_modifier} Right" {{ MoveFocusOrTab "Right"; }}
-        bind "{secondary_modifier} j" "{secondary_modifier} Down" {{ MoveFocus "Down"; }}
-        bind "{secondary_modifier} k" "{secondary_modifier} Up" {{ MoveFocus "Up"; }}
+        // Product contract: secondary+arrows = tabs / sessions; letters keep focus.
+        bind "{secondary_modifier} Left" {{ GoToPreviousTab; }}
+        bind "{secondary_modifier} Right" {{ GoToNextTab; }}
+        bind "{secondary_modifier} Up" {{
+            MessagePlugin "session-rail" {{
+                name "vc_rail_nav"
+                payload "up"
+            }};
+        }}
+        bind "{secondary_modifier} Down" {{
+            MessagePlugin "session-rail" {{
+                name "vc_rail_nav"
+                payload "down"
+            }};
+        }}
+        bind "{secondary_modifier} h" {{ MoveFocusOrTab "Left"; }}
+        bind "{secondary_modifier} l" {{ MoveFocusOrTab "Right"; }}
+        bind "{secondary_modifier} j" {{ MoveFocus "Down"; }}
+        bind "{secondary_modifier} k" {{ MoveFocus "Up"; }}
         bind "{secondary_modifier} =" "{secondary_modifier} +" {{ Resize "Increase"; }}
         bind "{secondary_modifier} -" {{ Resize "Decrease"; }}
         bind "{secondary_modifier} [" {{ PreviousSwapLayout; }}
@@ -565,6 +607,12 @@ keybinds clear-defaults=true {{
         bind "Esc" {{ UndoRenamePane; SwitchToMode "Pane"; }}
     }}
     session {{
+        bind "x" {{
+            MessagePlugin "session-rail" {{
+                name "vc_kill_current_session"
+            }};
+            SwitchToMode "Normal"
+        }}
         bind "d" {{ Detach; }}
         bind "w" {{
             LaunchOrFocusPlugin "session-manager" {{
@@ -636,10 +684,25 @@ keybinds clear-defaults=true {{
         bind "{secondary_modifier} f" {{ ToggleFloatingPanes; }}
         bind "{secondary_modifier} i" {{ MoveTab "Left"; }}
         bind "{secondary_modifier} o" {{ MoveTab "Right"; }}
-        bind "{secondary_modifier} h" "{secondary_modifier} Left" {{ MoveFocusOrTab "Left"; }}
-        bind "{secondary_modifier} l" "{secondary_modifier} Right" {{ MoveFocusOrTab "Right"; }}
-        bind "{secondary_modifier} j" "{secondary_modifier} Down" {{ MoveFocus "Down"; }}
-        bind "{secondary_modifier} k" "{secondary_modifier} Up" {{ MoveFocus "Up"; }}
+        // Product contract: secondary+arrows = tabs / sessions; letters keep focus.
+        bind "{secondary_modifier} Left" {{ GoToPreviousTab; }}
+        bind "{secondary_modifier} Right" {{ GoToNextTab; }}
+        bind "{secondary_modifier} Up" {{
+            MessagePlugin "session-rail" {{
+                name "vc_rail_nav"
+                payload "up"
+            }};
+        }}
+        bind "{secondary_modifier} Down" {{
+            MessagePlugin "session-rail" {{
+                name "vc_rail_nav"
+                payload "down"
+            }};
+        }}
+        bind "{secondary_modifier} h" {{ MoveFocusOrTab "Left"; }}
+        bind "{secondary_modifier} l" {{ MoveFocusOrTab "Right"; }}
+        bind "{secondary_modifier} j" {{ MoveFocus "Down"; }}
+        bind "{secondary_modifier} k" {{ MoveFocus "Up"; }}
         bind "{secondary_modifier} =" "{secondary_modifier} +" {{ Resize "Increase"; }}
         bind "{secondary_modifier} -" {{ Resize "Decrease"; }}
         bind "{secondary_modifier} [" {{ PreviousSwapLayout; }}
@@ -769,6 +832,12 @@ keybinds clear-defaults=true {{
     session {{
         bind "{primary_modifier} o" {{ SwitchToMode "Normal"; }}
         bind "{primary_modifier} s" {{ SwitchToMode "Scroll"; }}
+        bind "x" {{
+            MessagePlugin "session-rail" {{
+                name "vc_kill_current_session"
+            }};
+            SwitchToMode "Normal"
+        }}
         bind "d" {{ Detach; }}
         bind "w" {{
             LaunchOrFocusPlugin "session-manager" {{
@@ -838,7 +907,7 @@ keybinds clear-defaults=true {{
     }}
     shared_except "locked" {{
         bind "{primary_modifier} g" {{ SwitchToMode "Locked"; }}
-        bind "{primary_modifier} q" {{ Quit; }}
+        bind "{primary_modifier} q" {{ CloseFocus; }}
     }}
     shared_except "normal" "locked" {{
         bind "Enter" "Esc" {{ SwitchToMode "Normal"; }}
@@ -972,6 +1041,12 @@ keybinds clear-defaults=true {
         bind "Esc" { UndoRenamePane; SwitchToMode "Pane"; }
     }
     session {
+        bind "x" {
+            MessagePlugin "session-rail" {
+                name "vc_kill_current_session"
+            };
+            SwitchToMode "Normal"
+        }
         bind "d" { Detach; }
         bind "w" {
             LaunchOrFocusPlugin "session-manager" {
@@ -1171,6 +1246,12 @@ keybinds clear-defaults=true {{
     session {{
         bind "{primary_modifier} o" {{ SwitchToMode "Normal"; }}
         bind "{primary_modifier} s" {{ SwitchToMode "Scroll"; }}
+        bind "x" {{
+            MessagePlugin "session-rail" {{
+                name "vc_kill_current_session"
+            }};
+            SwitchToMode "Normal"
+        }}
         bind "d" {{ Detach; }}
         bind "w" {{
             LaunchOrFocusPlugin "session-manager" {{
@@ -1240,15 +1321,30 @@ keybinds clear-defaults=true {{
     }}
     shared_except "locked" {{
         bind "{primary_modifier} g" {{ SwitchToMode "Locked"; }}
-        bind "{primary_modifier} q" {{ Quit; }}
+        bind "{primary_modifier} q" {{ CloseFocus; }}
         bind "{secondary_modifier} f" {{ ToggleFloatingPanes; }}
         bind "{secondary_modifier} n" {{ NewPane; }}
         bind "{secondary_modifier} i" {{ MoveTab "Left"; }}
         bind "{secondary_modifier} o" {{ MoveTab "Right"; }}
-        bind "{secondary_modifier} h" "{secondary_modifier} Left" {{ MoveFocusOrTab "Left"; }}
-        bind "{secondary_modifier} l" "{secondary_modifier} Right" {{ MoveFocusOrTab "Right"; }}
-        bind "{secondary_modifier} j" "{secondary_modifier} Down" {{ MoveFocus "Down"; }}
-        bind "{secondary_modifier} k" "{secondary_modifier} Up" {{ MoveFocus "Up"; }}
+        // Product contract: secondary+arrows = tabs / sessions; letters keep focus.
+        bind "{secondary_modifier} Left" {{ GoToPreviousTab; }}
+        bind "{secondary_modifier} Right" {{ GoToNextTab; }}
+        bind "{secondary_modifier} Up" {{
+            MessagePlugin "session-rail" {{
+                name "vc_rail_nav"
+                payload "up"
+            }};
+        }}
+        bind "{secondary_modifier} Down" {{
+            MessagePlugin "session-rail" {{
+                name "vc_rail_nav"
+                payload "down"
+            }};
+        }}
+        bind "{secondary_modifier} h" {{ MoveFocusOrTab "Left"; }}
+        bind "{secondary_modifier} l" {{ MoveFocusOrTab "Right"; }}
+        bind "{secondary_modifier} j" {{ MoveFocus "Down"; }}
+        bind "{secondary_modifier} k" {{ MoveFocus "Up"; }}
         bind "{secondary_modifier} =" "{secondary_modifier} +" {{ Resize "Increase"; }}
         bind "{secondary_modifier} -" {{ Resize "Decrease"; }}
         bind "{secondary_modifier} [" {{ PreviousSwapLayout; }}

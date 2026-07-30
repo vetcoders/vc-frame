@@ -1,5 +1,6 @@
 ---
 source: zellij-utils/src/kdl/mod.rs
+assertion_line: 7270
 expression: fake_document.to_string()
 ---
  
@@ -102,6 +103,13 @@ on_force_close "quit"
 // Default value: 10000
 // 
 scroll_buffer_size 100
+ 
+// Automatically switch this client to Locked mode after this many
+// seconds without keyboard or mouse input
+// Valid values: positive integers (0 or unset = never)
+// Default value in the shipped config template: 30
+// 
+// auto_lock_after_seconds 5
  
 // Provide a command to execute when copying text. The text will be piped to
 // the stdin of the program to perform the copy. This can be used with
@@ -301,4 +309,3 @@ web_sharing "disabled"
 // typically work best. Set to 0 to use the number of (physical) CPU cores.
 // Note: This only applies to web clients at the moment.
 // client_async_worker_tasks 4
-

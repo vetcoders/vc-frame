@@ -839,7 +839,8 @@ fn screencasts_link_selected_len() -> Box<dyn Fn() -> usize> {
 
 fn tips_help_text(hovering_over_link: bool) -> Text {
     if hovering_over_link {
-        let help_text = "Help: Click or Shift-Click to open in browser".to_string();
+        let help_text =
+            "Help: Click → open · Shift+click URL → host · Alt+Shift path → system app".to_string();
         Text::new(help_text)
             .color_range(3, 6..=10)
             .color_range(3, 15..=25)

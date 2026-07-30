@@ -865,14 +865,17 @@ impl Action {
                         cwd_node.push(cwd.display().to_string());
                         node_children.nodes_mut().push(cwd_node);
                     }
+                    // Emit the parser's vocabulary (start_suspended /
+                    // close_on_exit) — the hold_on_* spellings serialize but
+                    // never re-parse, silently losing both flags on roundtrip.
                     if run_command_action.hold_on_start {
-                        let mut hos_node = KdlNode::new("hold_on_start");
+                        let mut hos_node = KdlNode::new("start_suspended");
                         hos_node.push(KdlValue::Bool(true));
                         node_children.nodes_mut().push(hos_node);
                     }
                     if !run_command_action.hold_on_close {
-                        let mut hoc_node = KdlNode::new("hold_on_close");
-                        hoc_node.push(KdlValue::Bool(false));
+                        let mut hoc_node = KdlNode::new("close_on_exit");
+                        hoc_node.push(KdlValue::Bool(true));
                         node_children.nodes_mut().push(hoc_node);
                     }
                 }
@@ -919,14 +922,17 @@ impl Action {
                         cwd_node.push(cwd.display().to_string());
                         node_children.nodes_mut().push(cwd_node);
                     }
+                    // Emit the parser's vocabulary (start_suspended /
+                    // close_on_exit) — the hold_on_* spellings serialize but
+                    // never re-parse, silently losing both flags on roundtrip.
                     if run_command_action.hold_on_start {
-                        let mut hos_node = KdlNode::new("hold_on_start");
+                        let mut hos_node = KdlNode::new("start_suspended");
                         hos_node.push(KdlValue::Bool(true));
                         node_children.nodes_mut().push(hos_node);
                     }
                     if !run_command_action.hold_on_close {
-                        let mut hoc_node = KdlNode::new("hold_on_close");
-                        hoc_node.push(KdlValue::Bool(false));
+                        let mut hoc_node = KdlNode::new("close_on_exit");
+                        hoc_node.push(KdlValue::Bool(true));
                         node_children.nodes_mut().push(hoc_node);
                     }
                 }
@@ -1013,14 +1019,17 @@ impl Action {
                         cwd_node.push(cwd.display().to_string());
                         node_children.nodes_mut().push(cwd_node);
                     }
+                    // Emit the parser's vocabulary (start_suspended /
+                    // close_on_exit) — the hold_on_* spellings serialize but
+                    // never re-parse, silently losing both flags on roundtrip.
                     if run_command_action.hold_on_start {
-                        let mut hos_node = KdlNode::new("hold_on_start");
+                        let mut hos_node = KdlNode::new("start_suspended");
                         hos_node.push(KdlValue::Bool(true));
                         node_children.nodes_mut().push(hos_node);
                     }
                     if !run_command_action.hold_on_close {
-                        let mut hoc_node = KdlNode::new("hold_on_close");
-                        hoc_node.push(KdlValue::Bool(false));
+                        let mut hoc_node = KdlNode::new("close_on_exit");
+                        hoc_node.push(KdlValue::Bool(true));
                         node_children.nodes_mut().push(hoc_node);
                     }
                 }
@@ -1060,14 +1069,17 @@ impl Action {
                         cwd_node.push(cwd.display().to_string());
                         node_children.nodes_mut().push(cwd_node);
                     }
+                    // Emit the parser's vocabulary (start_suspended /
+                    // close_on_exit) — the hold_on_* spellings serialize but
+                    // never re-parse, silently losing both flags on roundtrip.
                     if run_command_action.hold_on_start {
-                        let mut hos_node = KdlNode::new("hold_on_start");
+                        let mut hos_node = KdlNode::new("start_suspended");
                         hos_node.push(KdlValue::Bool(true));
                         node_children.nodes_mut().push(hos_node);
                     }
                     if !run_command_action.hold_on_close {
-                        let mut hoc_node = KdlNode::new("hold_on_close");
-                        hoc_node.push(KdlValue::Bool(false));
+                        let mut hoc_node = KdlNode::new("close_on_exit");
+                        hoc_node.push(KdlValue::Bool(true));
                         node_children.nodes_mut().push(hoc_node);
                     }
                     if let Some(name) = name {
@@ -2713,6 +2725,9 @@ impl Options {
         let scroll_buffer_size =
             kdl_property_first_arg_as_i64_or_error!(kdl_options, "scroll_buffer_size")
                 .map(|(scroll_buffer_size, _entry)| scroll_buffer_size as usize);
+        let auto_lock_after_seconds =
+            kdl_property_first_arg_as_i64_or_error!(kdl_options, "auto_lock_after_seconds")
+                .map(|(auto_lock_after_seconds, _entry)| auto_lock_after_seconds as u64);
         let copy_command = kdl_property_first_arg_as_string_or_error!(kdl_options, "copy_command")
             .map(|(copy_command, _entry)| copy_command.to_string());
         let copy_clipboard =
@@ -2855,6 +2870,7 @@ impl Options {
             mirror_session,
             on_force_close,
             scroll_buffer_size,
+            auto_lock_after_seconds,
             copy_command,
             copy_clipboard,
             copy_on_select,
@@ -3355,6 +3371,36 @@ impl Options {
             Some(node)
         } else if add_comments {
             let mut node = create_node(10000);
+            node.set_leading(format!("{}\n// ", comment_text));
+            Some(node)
+        } else {
+            None
+        }
+    }
+    fn auto_lock_after_seconds_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
+        let comment_text = format!(
+            "{}\n{}\n{}\n{}\n{}\n{}",
+            " ",
+            "// Automatically switch this client to Locked mode after this many",
+            "// seconds without keyboard or mouse input",
+            "// Valid values: positive integers (0 or unset = never)",
+            "// Default value in the shipped config template: 30",
+            "// ",
+        );
+
+        let create_node = |node_value: u64| -> KdlNode {
+            let mut node = KdlNode::new("auto_lock_after_seconds");
+            node.push(KdlValue::Base10(node_value as i64));
+            node
+        };
+        if let Some(auto_lock_after_seconds) = self.auto_lock_after_seconds {
+            let mut node = create_node(auto_lock_after_seconds);
+            if add_comments {
+                node.set_leading(format!("{}\n", comment_text));
+            }
+            Some(node)
+        } else if add_comments {
+            let mut node = create_node(5);
             node.set_leading(format!("{}\n// ", comment_text));
             Some(node)
         } else {
@@ -4313,6 +4359,9 @@ impl Options {
         }
         if let Some(scroll_buffer_size) = self.scroll_buffer_size_to_kdl(add_comments) {
             nodes.push(scroll_buffer_size);
+        }
+        if let Some(auto_lock_after_seconds) = self.auto_lock_after_seconds_to_kdl(add_comments) {
+            nodes.push(auto_lock_after_seconds);
         }
         if let Some(copy_command) = self.copy_command_to_kdl(add_comments) {
             nodes.push(copy_command);
@@ -5305,10 +5354,15 @@ impl Themes {
                         "list_selected",
                     )
                     .map(|maybe_style| maybe_style.unwrap_or(DEFAULT_STYLES.list_selected))?,
+                    // Like every other surface, an omitted frame_unselected
+                    // falls back to the fork default (explicit DIM baseline) —
+                    // leaving it None would hand unfocused frames to the
+                    // terminal's default foreground.
                     frame_unselected: Themes::style_declaration_from_node(
                         theme_config,
                         "frame_unselected",
-                    )?,
+                    )
+                    .map(|maybe_style| maybe_style.or(DEFAULT_STYLES.frame_unselected))?,
                     frame_selected: Themes::style_declaration_from_node(
                         theme_config,
                         "frame_selected",

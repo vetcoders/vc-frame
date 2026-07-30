@@ -169,6 +169,8 @@ struct State {
     is_multi_screen: bool,
     single_screen_state: SingleScreenState,
     show_kill_all_sessions_warning: bool,
+    /// Last-session kill confirmation (Ctrl+o → x when no other live sessions).
+    show_kill_last_session_warning: bool,
     request_ids: Vec<String>,
     is_web_client: bool,
     current_session_last_saved_time: Option<u64>,
@@ -287,6 +289,9 @@ impl ZellijPlugin for State {
                 Some("down") => self.switch_session_relative(1),
                 _ => (),
             }
+            true
+        } else if pipe_message.name == "vc_kill_current_session" {
+            self.kill_current_session_preserving_client();
             true
         } else if pipe_message.name == "filepicker_result" {
             if let (Some(payload), Some(request_id)) =
@@ -453,6 +458,8 @@ impl ZellijPlugin for State {
             ActiveScreen::AttachToSession => {
                 if let Some(new_session_name) = self.renaming_session_name.as_ref() {
                     render_renaming_session_screen(new_session_name, height, width, x, y + 2);
+                } else if self.show_kill_last_session_warning {
+                    self.render_kill_last_session_warning(height, width, x, y);
                 } else if self.show_kill_all_sessions_warning {
                     self.render_kill_all_sessions_warning(height, width, x, y);
                 } else {
@@ -476,6 +483,8 @@ impl ZellijPlugin for State {
                     SingleScreenMode::SearchAndSelect => {
                         if let Some(new_session_name) = self.renaming_session_name.as_ref() {
                             render_renaming_session_screen(new_session_name, height, width, x, y);
+                        } else if self.show_kill_last_session_warning {
+                            self.render_kill_last_session_warning(height, width, x, y);
                         } else if self.show_kill_all_sessions_warning {
                             self.render_kill_all_sessions_warning(height, width, x, y);
                         } else {
@@ -696,6 +705,20 @@ const RAIL_BUCKETS: [BucketKind; 3] = [
 /// in lockstep with the layout by `chrome_tab_names_match_the_default_layout`.
 const CHROME_TAB_NAMES: [&str; 2] = ["Start here", "Shell"];
 
+/// Char offset of `needle` in `haystack`, searching from char offset `from`.
+/// Text::color_range speaks char offsets, while `str::find` returns bytes —
+/// this bridges the two for rows containing multi-byte glyphs (`●`, `·`).
+fn char_offset_of(haystack: &str, needle: &str, from: usize) -> Option<usize> {
+    let byte_start = if from == 0 {
+        0
+    } else {
+        haystack.char_indices().nth(from).map(|(byte, _)| byte)?
+    };
+    haystack[byte_start..]
+        .find(needle)
+        .map(|relative| haystack[..byte_start + relative].chars().count())
+}
+
 impl BucketKind {
     fn session_name(&self) -> &'static str {
         match self {
@@ -786,6 +809,7 @@ struct SessionRailRow {
 }
 
 impl SessionRailRow {
+    #[cfg(test)]
     fn is_live_process(&self) -> bool {
         matches!(self.kind, SessionRailRowKind::LiveProcess { .. })
     }
@@ -841,21 +865,59 @@ fn format_process_tab_rail_entry(tab: &TabUiInfo) -> String {
     text
 }
 
-// Direct rail navigation (vc_rail_nav pipe, bound to Ctrl+Shift+Up/Down even
-// in locked mode): the target is resolved relative to the *current* session
-// with wrap-around, so every rail instance receiving the broadcast computes
-// the same destination and the switch stays idempotent.
+// Direct rail navigation (vc_rail_nav pipe): product contract v3 is
+// Cmd/Super+Up/Down in every mode (Ctrl+Up/Down mirrors it outside LOCK);
+// tab-mode Up/Down and bare arrows on a focused rail also hit this path. The target
+// is resolved relative to the *current* session with wrap-around, so every
+// rail instance receiving the broadcast computes the same destination and
+// the switch stays idempotent. Navigation walks the *working* sessions in
+// rail order only — the f/x/n bucket sessions have their own hotkeys and
+// must not swallow a step.
 fn relative_session_target(sessions: &[SessionUiInfo], offset: isize) -> Option<String> {
-    if sessions.len() < 2 {
+    let working = working_session_indices(sessions);
+    if working.len() < 2 {
         return None;
     }
-    let current = sessions.iter().position(|s| s.is_current_session)?;
-    let count = sessions.len() as isize;
-    let target = (current as isize + offset).rem_euclid(count) as usize;
-    if target == current {
+    let current_pos = working
+        .iter()
+        .position(|&index| sessions[index].is_current_session)?;
+    let count = working.len() as isize;
+    let target_pos = (current_pos as isize + offset).rem_euclid(count) as usize;
+    if target_pos == current_pos {
         return None;
     }
-    sessions.get(target).map(|s| s.name.clone())
+    sessions
+        .get(working[target_pos])
+        .map(|session| session.name.clone())
+}
+
+/// Where the client should land after killing the current session: the next
+/// working session in nav order first, then any other working session (the
+/// nav helper cannot even find "here" when the current session is a bucket),
+/// then any other bucket — an f/x/n drawer is still a live session, and
+/// hopping into it beats killing the whole client. Only a true "nothing else
+/// is alive" returns `None`.
+///
+/// Navigation may skip buckets; the kill path must not — that asymmetry is
+/// deliberate. Collapsing both onto [`relative_session_target`] was how
+/// killing a session next to live buckets took the client down with it.
+fn kill_fallback_target(sessions: &[SessionUiInfo]) -> Option<String> {
+    if let Some(target) = relative_session_target(sessions, 1) {
+        return Some(target);
+    }
+    let current_index = sessions.iter().position(|s| s.is_current_session);
+    let is_other = |index: usize| Some(index) != current_index;
+    if let Some(index) = working_session_indices(sessions)
+        .into_iter()
+        .find(|&index| is_other(index))
+    {
+        return Some(sessions[index].name.clone());
+    }
+    sessions
+        .iter()
+        .enumerate()
+        .find(|&(index, _)| is_other(index))
+        .map(|(_, session)| session.name.clone())
 }
 
 /// Working sessions in rail order — bucket sessions are pinned separately and
@@ -1169,15 +1231,31 @@ impl State {
         let bucket_row_start = all_rows.iter().position(|row| row.is_bucket()).unwrap_or(0);
         let (rail_rows, bucket_rows) = all_rows.split_at(bucket_row_start);
 
+        // The LIVE number moved to the compact-bar's fleet chip; the header
+        // keeps the session count and the current-session anchor — the top
+        // bar carries brand │ mode │ tabs only (operator call 2026-07-30),
+        // so "where am I" lives here, right above the session list.
         let session_count = working_session_indices(&self.sessions.session_ui_infos).len();
-        let live_process_count = rail_rows.iter().filter(|row| row.is_live_process()).count();
-        let header = fit_rail_line(
-            &format!("SESSIONS {} · LIVE {}", session_count, live_process_count),
-            cols,
-        );
+        let mut header_text = format!("SESSIONS {}", session_count);
+        let anchor_start = header_text.width() + 3; // " · " before the name
+        if let Some(current) = self
+            .sessions
+            .session_ui_infos
+            .iter()
+            .find(|s| s.is_current_session)
+        {
+            header_text.push_str(&format!(" · {}", current.name));
+        }
+        let header = fit_rail_line(&header_text, cols);
+        let header_width = header.width();
         let mut header = Text::new(header);
         if cols >= 8 {
             header = header.color_range(1, 0..8);
+        }
+        if header_width > anchor_start {
+            // The anchor takes the same accent as SESSIONS — one hue for
+            // "you are here", per the THEMES_GUIDE doctrine.
+            header = header.color_range(1, anchor_start..);
         }
         print_text_with_coordinates(header, 0, 0, None, None);
 
@@ -1202,19 +1280,72 @@ impl State {
 
         self.rail_click_map.clear();
         for rail_row in &rail_rows[start..end] {
-            let mut text = Text::new(fit_rail_line(&rail_row.text, cols));
+            let fitted = fit_rail_line(&rail_row.text, cols);
+            let fitted_chars = fitted.chars().count();
+            let mut text = Text::new(fitted.clone());
             match rail_row.kind {
                 SessionRailRowKind::Session(session_index) => {
+                    let is_current = self
+                        .sessions
+                        .session_ui_infos
+                        .get(session_index)
+                        .is_some_and(|session| session.is_current_session);
                     if cols >= 4 {
-                        text = text.color_range(1, 3..4);
+                        // The `*` current-session marker must be the brightest
+                        // ink on the line: leave it at the row's base color and
+                        // dim the `-` of every other session instead. Painting
+                        // both with the same muted emphasis made "you are
+                        // here" invisible.
+                        // Ordinal digits are chrome, not content — dim them.
+                        text = text.color_range(2, 0..2);
+                        if is_current {
+                            // "You are here" carries the accent on the NAME,
+                            // the same ink as the header — one glance finds it.
+                            if fitted_chars > 5 {
+                                text = text.color_range(1, 5..fitted_chars);
+                            }
+                        } else {
+                            text = text.color_range(2, 3..4);
+                        }
                     }
-                    if selected_index == Some(session_index) {
+                    // The whole current-session block sits on a full-width
+                    // highlight bed — this header row opens it.
+                    if is_current || selected_index == Some(session_index) {
                         text = text.selected();
                     }
                 },
-                SessionRailRowKind::LiveProcess { .. } => {
+                SessionRailRowKind::LiveProcess { session_index, .. } => {
+                    let in_current_session = self
+                        .sessions
+                        .session_ui_infos
+                        .get(session_index)
+                        .is_some_and(|session| session.is_current_session);
+                    let is_active_tab_row = fitted.chars().nth(3) == Some('●');
                     if cols >= 4 {
-                        text = text.color_range(2, 3..4);
+                        // Active tab dot gets the accent, idle dot stays dim;
+                        // the trailing "· command +N" diagnostics dim away so
+                        // the tab name is the only bright ink on the line.
+                        if is_active_tab_row {
+                            text = text.color_range(1, 3..4);
+                        } else {
+                            text = text.color_range(2, 3..4);
+                        }
+                        if let Some(separator) = char_offset_of(&fitted, " · ", 4) {
+                            text = text.color_range(2, separator..fitted_chars);
+                        }
+                        if in_current_session && is_active_tab_row {
+                            // Strongest level of the three: on the highlight
+                            // bed, the tab you are actually in carries the
+                            // accent on its whole name.
+                            let name_end =
+                                char_offset_of(&fitted, " · ", 4).unwrap_or(fitted_chars);
+                            text = text.color_range(1, 3..name_end);
+                        }
+                    }
+                    // Process rows extend the current-session highlight block
+                    // so the whole "you are here" region reads as one shape.
+                    if in_current_session {
+                        text = text.selected();
                     }
                 },
                 SessionRailRowKind::Bucket { .. } => {},
@@ -1285,15 +1416,26 @@ impl State {
     fn handle_session_rail_key(&mut self, key: KeyWithModifier) -> bool {
         match key.bare_key {
             BareKey::Down if key.has_no_modifiers() => {
-                self.sessions.move_session_selection_down();
+                // Operator contract: arrow = immediate switch, no Enter confirm.
+                self.switch_session_relative(1);
                 true
             },
             BareKey::Up if key.has_no_modifiers() => {
-                self.sessions.move_session_selection_up();
+                self.switch_session_relative(-1);
                 true
             },
             BareKey::Enter if key.has_no_modifiers() => {
                 self.handle_session_rail_selection();
+                true
+            },
+            BareKey::Char('+') | BareKey::Char('=') if key.has_no_modifiers() => {
+                // Rail width is operator-tunable: the layout's size=24 is only
+                // the starting point. Growing the right edge widens the column.
+                resize_focused_pane_with_direction(Resize::Increase, Direction::Right);
+                true
+            },
+            BareKey::Char('-') if key.has_no_modifiers() => {
+                resize_focused_pane_with_direction(Resize::Decrease, Direction::Right);
                 true
             },
             BareKey::Char(character) if key.has_no_modifiers() => {
@@ -1443,6 +1585,99 @@ impl State {
             switch_session_with_focus(&target_session_name, None, None);
         }
     }
+
+    /// Kill the current session without leaving vc-frame when another live
+    /// session exists (switch first, then kill the abandoned server). If this
+    /// is the last active session, arm a y/n confirmation overlay.
+    fn kill_current_session_preserving_client(&mut self) {
+        if self.show_kill_last_session_warning {
+            // Second Ctrl+o → x (or repeated pipe) acts as explicit confirm.
+            self.confirm_kill_last_session();
+            return;
+        }
+
+        let current_name = self
+            .sessions
+            .session_ui_infos
+            .iter()
+            .find(|session| session.is_current_session)
+            .map(|session| session.name.clone())
+            .or_else(|| self.session_name.clone());
+        let Some(current_name) = current_name else {
+            self.show_error("No current session to kill.");
+            return;
+        };
+
+        if let Some(target) = kill_fallback_target(&self.sessions.session_ui_infos) {
+            // Hop first so the client stays inside vc-frame, then kill the old server.
+            switch_session_with_focus(&target, None, None);
+            match kill_sessions(std::slice::from_ref(&current_name)) {
+                Ok(()) => {
+                    self.sessions
+                        .session_ui_infos
+                        .retain(|session| session.name != current_name);
+                    self.show_kill_last_session_warning = false;
+                },
+                Err(error) => {
+                    self.show_error(&format!("Failed to kill session: {error}"));
+                },
+            }
+            return;
+        }
+
+        // Last active session in this window — require explicit confirmation.
+        self.show_kill_last_session_warning = true;
+        self.show_kill_all_sessions_warning = false;
+        // Rail is narrow: use the error banner. Floating manager uses the
+        // dedicated y/n overlay (see render_kill_last_session_warning).
+        if self.is_rail {
+            self.show_error(
+                "You are about to close the last active session in this window. Are you sure? y/n \
+                 (or Ctrl+o → x again).",
+            );
+        }
+        // Make the plugin pane visible so the prompt is not buried.
+        show_self(true);
+    }
+
+    fn confirm_kill_last_session(&mut self) {
+        self.show_kill_last_session_warning = false;
+        let name = self
+            .sessions
+            .session_ui_infos
+            .iter()
+            .find(|session| session.is_current_session)
+            .map(|session| session.name.clone())
+            .or_else(|| self.session_name.clone());
+        let Some(name) = name else {
+            self.show_error("No current session to kill.");
+            return;
+        };
+        // No other session to hop to — kill this server (client exits with it).
+        if let Err(error) = kill_sessions(std::slice::from_ref(&name)) {
+            self.show_error(&format!("Failed to kill session: {error}"));
+        }
+    }
+
+    fn handle_kill_last_session_warning_key(&mut self, key: KeyWithModifier) -> bool {
+        match key.bare_key {
+            BareKey::Char('y') if key.has_no_modifiers() => {
+                self.confirm_kill_last_session();
+                true
+            },
+            BareKey::Char('n') | BareKey::Esc if key.has_no_modifiers() => {
+                self.show_kill_last_session_warning = false;
+                self.error = None;
+                true
+            },
+            BareKey::Char('c') if key.has_modifiers(&[KeyModifier::Ctrl]) => {
+                self.show_kill_last_session_warning = false;
+                self.error = None;
+                true
+            },
+            _ => true,
+        }
+    }
     fn handle_session_rail_selection(&mut self) {
         self.ensure_rail_selection();
         if let Some(selected_session_name) = self.sessions.get_selected_session_name() {
@@ -1455,6 +1690,9 @@ impl State {
         }
     }
     fn handle_key(&mut self, key: KeyWithModifier) -> bool {
+        if self.show_kill_last_session_warning {
+            return self.handle_kill_last_session_warning_key(key);
+        }
         if self.error.is_some() {
             self.error = None;
             return true;
@@ -2454,6 +2692,35 @@ impl State {
             None,
         );
     }
+
+    fn render_kill_last_session_warning(&self, rows: usize, columns: usize, x: usize, y: usize) {
+        if rows == 0 || columns == 0 {
+            return;
+        }
+        let warning_description_text =
+            "You are about to close the last active session in this window.";
+        let confirmation_text = "Are you sure? (y/n)";
+        let warning_y_location = y + (rows / 2).saturating_sub(1);
+        let confirmation_y_location = y + (rows / 2) + 1;
+        let warning_x_location =
+            x + columns.saturating_sub(warning_description_text.chars().count()) / 2;
+        let confirmation_x_location =
+            x + columns.saturating_sub(confirmation_text.chars().count()) / 2;
+        print_text_with_coordinates(
+            Text::new(warning_description_text).color_range(0, ..),
+            warning_x_location,
+            warning_y_location,
+            None,
+            None,
+        );
+        print_text_with_coordinates(
+            Text::new(confirmation_text).color_indices(2, vec![15, 17]),
+            confirmation_x_location,
+            confirmation_y_location,
+            None,
+            None,
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2469,6 +2736,171 @@ mod rail_tests {
             is_current_session,
             creation_time: Duration::ZERO,
         }
+    }
+
+    fn session_launched_at(name: &str, is_current_session: bool, secs: u64) -> SessionUiInfo {
+        SessionUiInfo {
+            creation_time: Duration::from_secs(secs),
+            ..session(name, is_current_session)
+        }
+    }
+
+    /// Killing next to live buckets must hop into a bucket, never take the
+    /// client down: buckets are invisible to navigation, not to the kill path.
+    #[test]
+    fn kill_next_to_buckets_hops_into_a_bucket_instead_of_dying() {
+        let sessions = vec![
+            session("work", true),
+            session("Finalized runs", false),
+            session("Needs attention", false),
+        ];
+        // Navigation deliberately sees nothing…
+        assert_eq!(relative_session_target(&sessions, 1), None);
+        // …but the kill path still finds a live session to land on.
+        assert_eq!(
+            kill_fallback_target(&sessions),
+            Some("Finalized runs".to_owned())
+        );
+    }
+
+    /// When the CURRENT session is a bucket, nav cannot even locate "here";
+    /// the kill path must still prefer a working session over dying.
+    #[test]
+    fn kill_from_inside_a_bucket_prefers_a_working_session() {
+        let sessions = vec![
+            session("Failed runs", true),
+            session("work", false),
+            session("Finalized runs", false),
+        ];
+        assert_eq!(kill_fallback_target(&sessions), Some("work".to_owned()));
+    }
+
+    /// Two working sessions: the kill path follows the same wrap-around
+    /// order the rail nav uses.
+    #[test]
+    fn kill_with_working_neighbours_follows_nav_order() {
+        let sessions = vec![
+            session("alpha", true),
+            session("beta", false),
+            session("Finalized runs", false),
+        ];
+        assert_eq!(kill_fallback_target(&sessions), Some("beta".to_owned()));
+    }
+
+    /// Only when nothing else is alive may the kill path return None —
+    /// that is the one case where the confirmation overlay is honest.
+    #[test]
+    fn kill_of_the_truly_last_session_returns_none() {
+        let sessions = vec![session("only", true)];
+        assert_eq!(kill_fallback_target(&sessions), None);
+    }
+
+    /// The rail contract: slot = launch order. The session started first holds
+    /// slot 01 for as long as it lives — regardless of its name and of which
+    /// session the viewing instance considers current.
+    #[test]
+    fn rail_orders_sessions_by_launch_time_not_name_or_current() {
+        let mut rail = SessionList::default();
+        rail.set_sessions(
+            vec![
+                session_launched_at("alpha", true, 200),
+                session_launched_at("zeta", false, 100),
+            ],
+            vec![],
+        );
+        let names: Vec<&str> = rail
+            .session_ui_infos
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["zeta", "alpha"],
+            "the earlier-launched session holds the earlier slot, name and current-ness be damned"
+        );
+    }
+
+    /// Activating a different session must not reshuffle the rail: two views
+    /// with different `is_current_session` flags render the same order.
+    #[test]
+    fn activation_does_not_reshuffle_rail() {
+        let order_seen_by = |current: &str| {
+            let mut rail = SessionList::default();
+            rail.set_sessions(
+                vec![
+                    session_launched_at("morning", current == "morning", 100),
+                    session_launched_at("noon", current == "noon", 200),
+                    session_launched_at("evening", current == "evening", 300),
+                ],
+                vec![],
+            );
+            rail.session_ui_infos
+                .iter()
+                .map(|s| s.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(order_seen_by("morning"), order_seen_by("evening"));
+        assert_eq!(order_seen_by("noon"), vec!["morning", "noon", "evening"]);
+    }
+
+    /// ctrl+t Up/Down steps through working sessions in rail order, wrapping
+    /// around — and never lands on an f/x/n bucket session.
+    #[test]
+    fn rail_nav_steps_over_working_sessions_and_skips_buckets() {
+        let sessions = vec![
+            session_launched_at("early", false, 100),
+            session_launched_at("Finalized runs", false, 150),
+            session_launched_at("late", true, 200),
+            session_launched_at("Needs attention", false, 250),
+        ];
+        // current = "late" (last working session): down wraps to "early",
+        // up steps back to "early" as well (two working sessions total).
+        assert_eq!(
+            relative_session_target(&sessions, 1).as_deref(),
+            Some("early"),
+            "down from the last working session must wrap, not hit a bucket"
+        );
+        assert_eq!(
+            relative_session_target(&sessions, -1).as_deref(),
+            Some("early")
+        );
+        // A single working session has nowhere to go.
+        let lonely = vec![
+            session_launched_at("only", true, 100),
+            session_launched_at("Failed runs", false, 200),
+        ];
+        assert_eq!(relative_session_target(&lonely, 1), None);
+    }
+
+    /// When a session dies, the sessions below it move up one slot — the
+    /// survivors keep their relative launch order and a newly launched
+    /// session appends at the end.
+    #[test]
+    fn dead_session_compacts_slots_preserving_launch_order() {
+        let mut rail = SessionList::default();
+        rail.set_sessions(
+            vec![
+                session_launched_at("first", true, 100),
+                session_launched_at("second", false, 200),
+                session_launched_at("third", false, 300),
+            ],
+            vec![],
+        );
+        // "second" dies; a fresh "fourth" launches later.
+        rail.set_sessions(
+            vec![
+                session_launched_at("third", false, 300),
+                session_launched_at("first", true, 100),
+                session_launched_at("fourth", false, 400),
+            ],
+            vec![],
+        );
+        let names: Vec<&str> = rail
+            .session_ui_infos
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["first", "third", "fourth"]);
     }
 
     #[test]
@@ -3581,5 +4013,15 @@ mod rail_tests {
             bucket_text.as_bytes().get(3).map(|_| 3),
             "color_range(1, 3..4) targets the same column for both"
         );
+    }
+
+    #[test]
+    fn char_offset_of_speaks_chars_not_bytes() {
+        // "   ● tab · cmd" — the dot separator sits after multi-byte `●`.
+        let row = "   ● tab · cmd";
+        assert_eq!(char_offset_of(row, " · ", 4), Some(8));
+        assert_eq!(char_offset_of(row, " · ", 0), Some(8));
+        assert_eq!(char_offset_of(row, "missing", 0), None);
+        assert_eq!(char_offset_of("ab", "b", 5), None, "from beyond end");
     }
 }

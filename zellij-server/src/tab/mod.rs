@@ -3711,7 +3711,17 @@ impl Tab {
         // returns true if a UI update should be triggered (eg. when closing a command pane with
         // ctrl-c)
         let mut should_trigger_ui_change = false;
-        let pane_ids = self.get_static_and_floating_pane_ids();
+        // Sync mirrors typing into the terminals of this tab — never into
+        // plugin panes. Chrome plugins (session rail, bars) interpret keys as
+        // hotkeys, so a sync broadcast reaching them turns innocent typing
+        // into actions (`f` typed into two shells also opened the rail's
+        // Failed bucket). Focused-plugin input flows through
+        // write_to_active_terminal and is unaffected.
+        let pane_ids: Vec<PaneId> = self
+            .get_static_and_floating_pane_ids()
+            .into_iter()
+            .filter(|pane_id| matches!(pane_id, PaneId::Terminal(_)))
+            .collect();
         for pane_id in pane_ids {
             let ui_change_triggered = self
                 .write_to_pane_id(
@@ -5763,8 +5773,19 @@ impl Tab {
         self.senders
             .send_to_plugin(PluginInstruction::Update(plugin_updates))
             .with_context(|| format!("failed to set visibility of tab to {visible}"))?;
-        if !visible {
+        if visible {
+            // A tab becoming visible must repaint from scratch: while hidden,
+            // its pane output diffs were drained by other viewers (or nobody),
+            // so an incoming client would otherwise receive deltas against a
+            // frame it never saw.
+            self.set_force_render();
+        } else {
             self.mouse_hover_pane_id.clear();
+            // Mouse press/drag latches must not survive the tab going
+            // invisible: a press whose release lands in another tab would
+            // otherwise leave this tab swallowing its next click.
+            self.selecting_with_mouse_in_pane = None;
+            self.pane_being_resized_with_mouse = None;
         }
         Ok(())
     }

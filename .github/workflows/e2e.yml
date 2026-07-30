@@ -22,7 +22,7 @@ jobs:
   test-e2e:
     name: Build generic binary and run tests on it
     timeout-minutes: 90
-    runs-on: [self-hosted, ops-linux]
+    runs-on: [self-hosted, linux-vetcoders]
     environment: cachix
 
     services:
@@ -36,7 +36,9 @@ jobs:
           USER_PASSWORD: test
           USER_NAME: test
         ports:
-          - 2222:2222
+          # Loopback only — a publicly bound password-auth SSH service on a
+          # self-hosted runner is an open door (2026-07-30 incident).
+          - 127.0.0.1:2222:2222
         options: -v ${{ github.workspace }}/target:/usr/src/zellij --name ssh
     steps:
     - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4

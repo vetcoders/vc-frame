@@ -27,7 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ops-linux, dragon-macos]
+        os: [linux-vetcoders, dragon-macos]
 
     runs-on: [self-hosted, '${{ matrix.os }}']
 
@@ -167,7 +167,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ops-linux, dragon-macos]
+        os: [linux-vetcoders, dragon-macos]
 
     runs-on: [self-hosted, '${{ matrix.os }}']
 
@@ -229,7 +229,7 @@ jobs:
   test-no-web:
     name: Test (No Web)
     timeout-minutes: 90
-    runs-on: [self-hosted, ops-linux]
+    runs-on: [self-hosted, linux-vetcoders]
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -254,7 +254,7 @@ jobs:
   format:
     name: Check Formatting
     timeout-minutes: 15
-    runs-on: [self-hosted, ops-linux]
+    runs-on: [self-hosted, linux-vetcoders]
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4

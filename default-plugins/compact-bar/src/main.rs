@@ -23,6 +23,11 @@ const CONFIG_IS_TOOLTIP: &str = "is_tooltip";
 const CONFIG_TOGGLE_TOOLTIP_KEY: &str = "tooltip";
 const CONFIG_BRAND_TEXT: &str = "brand_text";
 const CONFIG_BRAND_TEXT_SHORT: &str = "brand_text_short";
+/// Columns of blank bar before the brand chip — the 🚥 zone. In the native
+/// transparent window (Alacritty preset) the macOS traffic lights float over
+/// the first row; the inset shifts the whole bar clear of them. 9 columns
+/// ≈ 65–70px at a 13pt monospace.
+const CONFIG_LEFT_INSET: &str = "left_inset";
 const MSG_TOGGLE_TOOLTIP: &str = "toggle_tooltip";
 // the status-bar shows up in the pane manifest as "vc-frame:status-bar" when
 // loaded by url and as "status-bar" when loaded through its config alias
@@ -33,6 +38,39 @@ const STATUS_BAR_PLUGIN_URLS: [&str; 3] =
 const CLIPBOARD_HINT_TTL_SECONDS: f64 = 2.0;
 const MSG_TOGGLE_PERSISTED_TOOLTIP: &str = "toggle_persisted_tooltip";
 const MSG_LAUNCH_TOOLTIP: &str = "launch_tooltip_if_not_launched";
+/// Sentinel tab_index marking the clickable Composer chip on the tab line —
+/// a real tab can never occupy this index. Checked before tab resolution so
+/// it never reaches switch_tab_to.
+pub const COMPOSER_CLICK_SENTINEL: usize = usize::MAX;
+/// Sentinel tab_index for the ䷅ LIVE fleet chip — click opens the Gallery.
+pub const GALLERY_CLICK_SENTINEL: usize = usize::MAX - 1;
+/// Sentinel tab_index for the ⌬ Agents chip — click lands in the Agents
+/// station (the NOW-view of the fleet; ䷅ LIVE → Gallery is the WAS-view)
+/// and floats the Dispatcher shell over it.
+pub const AGENTS_CLICK_SENTINEL: usize = usize::MAX - 2;
+/// The per-session station tab where dispatched agents stack up. One tab,
+/// many stacked panes: a collapsed title-bar is a list row, an expanded
+/// pane is the agent's full terminal.
+const AGENTS_TAB_NAME: &str = "Agents";
+/// The Dispatcher is a bare login shell in a named floating pane — dispatch
+/// is typing vibecrafted CLI commands (`vc-init codex`) into it. Deliberate
+/// zsh fallback: the server may run without SHELL in its env, and /bin/sh
+/// with no profile is exactly the trap we refuse to spawn.
+const DISPATCHER_COMMAND: &str = r#"exec "${SHELL:-/bin/zsh}" -l"#;
+/// Same drafting contract as the Alt+e keybind in the default config: draft
+/// in $VC_COMPOSER (or $EDITOR), land the text in the underlying pane
+/// unexecuted, clean up. VC_COMPOSER expands unquoted on purpose — it is a
+/// command line ("open -W -n -a Pensieve", "pensieve --wait"), not a path.
+const COMPOSER_COMMAND: &str = r#"f=$(mktemp "${TMPDIR:-/tmp}/vc-composer.XXXXXX") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} "$f"; if [ -s "$f" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars "$(cat "$f")"; fi; rm -f -- "$f""#;
+/// Gallery v0: the aicx wizard is the cross-agent session gallery — one
+/// timeline over claude/codex/grok/gemini histories. The chip opens it in a
+/// floating pane; a missing aicx leaves an explanatory line instead of a
+/// silently vanishing pane.
+const GALLERY_COMMAND: &str = r#"command -v aicx >/dev/null 2>&1 && exec aicx wizard; echo "aicx not found on PATH — the Gallery rides on aicx (Loctree/aicx)"; read -r _"#;
+/// Status-bucket session names — wire contract with the triage reaper, kept
+/// identical to `run_triage.rs` (see the session-manager's matching pin).
+/// Bucket sessions never count toward the fleet pulse.
+const BUCKET_SESSION_NAMES: [&str; 3] = ["Finalized runs", "Failed runs", "Needs attention"];
 
 #[derive(Debug, Default)]
 pub struct LinePart {
@@ -67,6 +105,7 @@ struct State {
     toggle_tooltip_key: Option<String>,
     brand_text: Option<String>,
     brand_text_short: Option<String>,
+    left_inset: usize,
 
     // Tooltip state
     is_tooltip: bool,
@@ -78,13 +117,20 @@ struct State {
 
     // Keybinding cache
     cached_keybinds: KeybindsVec,
+
+    // Fleet pulse: live agent-process count across every session (the rail's
+    // LIVE number promoted to the bar). Fed by SessionUpdate.
+    live_count: usize,
+
+    // ⌬ Agents chip: the Dispatcher spawn is deferred until a TabUpdate
+    // confirms the Agents tab is the active one. Firing it in the same
+    // click raced tab creation and floated the shell over the wrong tab.
+    pending_dispatcher_spawn: bool,
 }
 
 struct TabRenderData {
     tabs: Vec<LinePart>,
     active_tab_index: usize,
-    active_swap_layout_name: Option<String>,
-    is_swap_layout_dirty: bool,
 }
 
 register_plugin!(State);
@@ -95,6 +141,8 @@ impl ZellijPlugin for State {
         self.own_plugin_id = Some(plugin_ids.plugin_id);
         self.own_client_id = plugin_ids.client_id;
         self.initialize_configuration(configuration);
+        // The fleet pulse needs the cross-session snapshot (SessionUpdate).
+        request_permission(&[PermissionType::ReadApplicationState]);
         self.setup_subscriptions();
         self.configure_keybinds();
     }
@@ -130,6 +178,13 @@ impl ZellijPlugin for State {
             Event::SystemClipboardFailure => self.handle_clipboard_failure(),
             Event::Timer(_) => self.handle_clipboard_hint_timeout(),
             Event::InputReceived => self.handle_input_received(),
+            Event::SessionUpdate(sessions, _) => {
+                let live_count = fleet_live_count(&sessions);
+                let should_render = self.live_count != live_count;
+                self.live_count = live_count;
+                should_render
+            },
+            Event::PermissionRequestResult(_) => true,
             _ => false,
         }
     }
@@ -170,6 +225,10 @@ impl State {
             }
             self.brand_text = configuration.get(CONFIG_BRAND_TEXT).cloned();
             self.brand_text_short = configuration.get(CONFIG_BRAND_TEXT_SHORT).cloned();
+            self.left_inset = configuration
+                .get(CONFIG_LEFT_INSET)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
         }
 
         if self.is_tooltip {
@@ -197,6 +256,8 @@ impl State {
                 EventType::SystemClipboardFailure,
                 EventType::InitialKeybinds,
                 EventType::Timer,
+                EventType::SessionUpdate,
+                EventType::PermissionRequestResult,
             ]
         };
 
@@ -275,6 +336,19 @@ impl State {
 
             self.active_tab_idx = active_tab_idx;
             self.tabs = tabs;
+
+            // Deferred half of the ⌬ Agents click: the server has now told
+            // us which tab is active. Spawn the Dispatcher only when that
+            // tab is the Agents station — the float lands where it belongs.
+            if self.pending_dispatcher_spawn
+                && self
+                    .tabs
+                    .iter()
+                    .any(|tab| tab.active && tab.name == AGENTS_TAB_NAME)
+            {
+                self.pending_dispatcher_spawn = false;
+                open_dispatcher();
+            }
             should_render
         } else {
             false
@@ -413,17 +487,112 @@ impl State {
         None
     }
 
-    fn handle_tab_click(&self, col: usize) {
+    fn handle_tab_click(&mut self, col: usize) {
+        if self.sentinel_clicked(col, COMPOSER_CLICK_SENTINEL) {
+            open_composer();
+            return;
+        }
+        if self.sentinel_clicked(col, GALLERY_CLICK_SENTINEL) {
+            open_gallery();
+            return;
+        }
+        if self.sentinel_clicked(col, AGENTS_CLICK_SENTINEL) {
+            self.open_agents_station();
+            return;
+        }
         if let Some(tab_idx) = get_tab_to_focus(&self.tab_line, self.active_tab_idx, col) {
             switch_tab_to(tab_idx.try_into().unwrap());
         }
+    }
+
+    /// Click path of the ⌬ Agents chip: land in the Agents station tab
+    /// (creating it on first use) and float the Dispatcher shell over it —
+    /// "klikasz i masz gdzie pisać". The spawn is NOT fired here: tab
+    /// creation and pane creation travel separate server paths, so the
+    /// Dispatcher only opens once [`handle_tab_update`] confirms the Agents
+    /// tab is active. No more first-click float over the wrong tab.
+    fn open_agents_station(&mut self) {
+        if self.tabs.iter().any(|tab| tab.name == AGENTS_TAB_NAME) {
+            go_to_tab_name(AGENTS_TAB_NAME);
+        } else {
+            new_tab(Some(AGENTS_TAB_NAME), None);
+        }
+        self.pending_dispatcher_spawn = true;
+    }
+
+    fn sentinel_clicked(&self, col: usize, sentinel: usize) -> bool {
+        let mut offset = 0;
+        for part in &self.tab_line {
+            if part.tab_index == Some(sentinel) && col >= offset && col < offset + part.len {
+                return true;
+            }
+            offset += part.len;
+        }
+        false
     }
 
     fn scroll_tab_up(&self) {
         let next_tab = min(self.active_tab_idx + 1, self.tabs.len());
         switch_tab_to(next_tab as u32);
     }
+}
 
+/// The Dispatcher: a named floating login shell — the operator's dispatch
+/// console (vibecrafted CLI is the dispatch language, the pane is the desk).
+fn open_dispatcher() {
+    let command = CommandToRun::new_with_args("sh", vec!["-c", DISPATCHER_COMMAND]);
+    if let Some(PaneId::Terminal(terminal_pane_id)) =
+        open_command_pane_floating(command, None, BTreeMap::new())
+    {
+        rename_terminal_pane(terminal_pane_id, "Dispatcher");
+    }
+}
+
+/// Click path of the Composer chip — identical contract to the Alt+e bind.
+fn open_composer() {
+    let command = CommandToRun::new_with_args("sh", vec!["-c", COMPOSER_COMMAND]);
+    if let Some(PaneId::Terminal(terminal_pane_id)) =
+        open_command_pane_floating(command, None, BTreeMap::new())
+    {
+        rename_terminal_pane(terminal_pane_id, "Composer");
+    }
+}
+
+/// Click path of the ䷅ LIVE chip: the Gallery — cross-agent session history
+/// in a floating pane (aicx wizard, Gallery v0).
+fn open_gallery() {
+    let command = CommandToRun::new_with_args("sh", vec!["-c", GALLERY_COMMAND]);
+    if let Some(PaneId::Terminal(terminal_pane_id)) =
+        open_command_pane_floating(command, None, BTreeMap::new())
+    {
+        rename_terminal_pane(terminal_pane_id, "Gallery");
+    }
+}
+
+/// The rail's LIVE number, recomputed from the same predicate the rail uses:
+/// a tab is "live" when it holds at least one non-plugin pane that has not
+/// exited and is not held. Bucket sessions are pinned drawers, not fleet.
+fn fleet_live_count(sessions: &[SessionInfo]) -> usize {
+    sessions
+        .iter()
+        .filter(|session| !BUCKET_SESSION_NAMES.contains(&session.name.as_str()))
+        .map(|session| {
+            session
+                .tabs
+                .iter()
+                .filter(|tab| {
+                    session.panes.panes.get(&tab.position).is_some_and(|panes| {
+                        panes
+                            .iter()
+                            .any(|pane| !pane.is_plugin && !pane.exited && !pane.is_held)
+                    })
+                })
+                .count()
+        })
+        .sum()
+}
+
+impl State {
     fn scroll_tab_down(&self) {
         let prev_tab = max(self.active_tab_idx.saturating_sub(1), 1);
         switch_tab_to(prev_tab as u32);
@@ -562,15 +731,16 @@ impl State {
         }
 
         let tab_data = self.prepare_tab_data();
-        self.tab_line = tab_line(
-            &self.mode_info,
-            tab_data,
-            cols,
-            self.toggle_tooltip_key.clone(),
-            self.tooltip_is_active,
-            self.brand_text.clone(),
-            self.brand_text_short.clone(),
-        );
+        let config = crate::line::TabLineConfig {
+            mode: self.mode_info.mode,
+            toggle_tooltip_key: self.toggle_tooltip_key.clone(),
+            tooltip_is_active: self.tooltip_is_active,
+            brand_text: self.brand_text.clone(),
+            brand_text_short: self.brand_text_short.clone(),
+            live_count: self.live_count,
+            left_inset: self.left_inset,
+        };
+        self.tab_line = tab_line(&self.mode_info, tab_data, cols, config);
 
         let output = self
             .tab_line
@@ -583,8 +753,6 @@ impl State {
     fn prepare_tab_data(&self) -> TabRenderData {
         let mut all_tabs = Vec::new();
         let mut active_tab_index = 0;
-        let mut active_swap_layout_name = None;
-        let mut is_swap_layout_dirty = false;
         let mut is_alternate_tab = false;
 
         for tab in &self.tabs {
@@ -592,10 +760,6 @@ impl State {
 
             if tab.active {
                 active_tab_index = tab.position;
-                if self.mode_info.mode != InputMode::RenameTab {
-                    is_swap_layout_dirty = tab.is_swap_layout_dirty;
-                    active_swap_layout_name = tab.active_swap_layout_name.clone();
-                }
             }
 
             let styled_tab = tab_style(
@@ -613,8 +777,6 @@ impl State {
         TabRenderData {
             tabs: all_tabs,
             active_tab_index,
-            active_swap_layout_name,
-            is_swap_layout_dirty,
         }
     }
 

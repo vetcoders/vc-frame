@@ -366,16 +366,42 @@ where
         }
     }
 
-    pub fn recv_client_msg(&mut self) -> Option<(ClientToServerMsg, ErrorContext)> {
+    /// Typed client receive: preserve the distinction between a normal
+    /// disconnect, a protocol failure, and a usable message.
+    ///
+    /// The historical `Option` surface collapsed EOF, decode errors, and
+    /// conversion failures into `None`, which made the server route loop treat
+    /// a clean disconnect as "unknown message" and spin until logout.
+    pub fn recv_client_msg_outcome(&mut self) -> ClientReceiveOutcome {
         match read_protobuf_message::<ProtoClientToServerMsg>(&mut self.receiver) {
             Ok(proto_msg) => match proto_msg.try_into() {
-                Ok(rust_msg) => Some((rust_msg, ErrorContext::default())),
+                Ok(rust_msg) => {
+                    ClientReceiveOutcome::Message(Box::new(rust_msg), ErrorContext::default())
+                },
                 Err(e) => {
                     warn!("Error converting protobuf to ClientToServerMsg: {:?}", e);
-                    None
+                    ClientReceiveOutcome::ProtocolError(format!(
+                        "protobuf → ClientToServerMsg conversion failed: {e:?}"
+                    ))
                 },
             },
-            Err(_e) => None,
+            Err(e) => {
+                if ipc_error_is_disconnect(&e) {
+                    ClientReceiveOutcome::Disconnected
+                } else {
+                    warn!("Error reading ClientToServerMsg protobuf: {:?}", e);
+                    ClientReceiveOutcome::ProtocolError(format!(
+                        "ClientToServerMsg decode failed: {e}"
+                    ))
+                }
+            },
+        }
+    }
+
+    pub fn recv_client_msg(&mut self) -> Option<(ClientToServerMsg, ErrorContext)> {
+        match self.recv_client_msg_outcome() {
+            ClientReceiveOutcome::Message(msg, ctx) => Some((*msg, ctx)),
+            ClientReceiveOutcome::Disconnected | ClientReceiveOutcome::ProtocolError(_) => None,
         }
     }
 
@@ -405,15 +431,82 @@ where
     }
 }
 
+/// Outcome of a typed client → server receive.
+///
+/// Callers that care about availability (the server route loop) must match on
+/// this enum. Collapsing everything into `Option::None` is how clean
+/// disconnects were misread as unknown messages.
+#[derive(Debug)]
+pub enum ClientReceiveOutcome {
+    /// Boxed: `ClientToServerMsg` is large; keep the enum stack-small.
+    Message(Box<ClientToServerMsg>, ErrorContext),
+    /// Peer closed the socket (EOF / broken pipe / reset). End the route
+    /// without a retry loop.
+    Disconnected,
+    /// Decode or conversion failure. Fail closed; do not spin.
+    ProtocolError(String),
+}
+
+fn ipc_error_is_disconnect(error: &anyError) -> bool {
+    use std::io::ErrorKind;
+    for cause in error.chain() {
+        if let Some(io_error) = cause.downcast_ref::<io::Error>() {
+            match io_error.kind() {
+                ErrorKind::UnexpectedEof
+                | ErrorKind::ConnectionReset
+                | ErrorKind::BrokenPipe
+                | ErrorKind::ConnectionAborted
+                | ErrorKind::NotConnected => return true,
+                _ => {},
+            }
+        }
+    }
+    false
+}
+
 // Protobuf wire format utilities
 fn read_protobuf_message<T: Message + Default>(reader: &mut impl Read) -> Result<T> {
-    // Read length-prefixed protobuf message
+    // Read length-prefixed protobuf message. EOF is only a clean disconnect
+    // when it lands BETWEEN frames (zero bytes read); an EOF in the middle
+    // of the 4-byte prefix or the payload means the peer died mid-sentence —
+    // that is a protocol truncation (`InvalidData`, mapped to
+    // `ProtocolError`), not a `Disconnected`.
     let mut len_bytes = [0u8; 4];
-    reader.read_exact(&mut len_bytes)?;
+    let mut filled = 0usize;
+    while filled < len_bytes.len() {
+        match reader.read(&mut len_bytes[filled..]) {
+            Ok(0) if filled == 0 => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "clean EOF between frames",
+                )
+                .into());
+            },
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("truncated frame: EOF after {filled} of 4 length-prefix bytes"),
+                )
+                .into());
+            },
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
     let len = u32::from_le_bytes(len_bytes) as usize;
 
     let mut buf = vec![0u8; len];
-    reader.read_exact(&mut buf)?;
+    if let Err(e) = reader.read_exact(&mut buf) {
+        if e.kind() == io::ErrorKind::UnexpectedEof {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("truncated frame: EOF inside a {len}-byte payload"),
+            )
+            .into());
+        }
+        return Err(e.into());
+    }
 
     T::decode(&buf[..]).map_err(Into::into)
 }

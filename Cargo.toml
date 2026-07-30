@@ -20,14 +20,15 @@ path = "src/main.rs"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-zellij-client = { path = "zellij-client/", version = "0.47.1" }
-zellij-server = { path = "zellij-server/", version = "0.47.1" }
+zellij-client = { path = "zellij-client/", version = "0.47.2" }
+zellij-server = { path = "zellij-server/", version = "0.47.2" }
 zellij-utils = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 dialoguer = { workspace = true }
 humantime = { workspace = true }
 interprocess = { workspace = true }
+kdl = { workspace = true }
 log = { workspace = true }
 miette = { workspace = true }
 names = { workspace = true }
@@ -79,7 +80,7 @@ members = [
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/zellij-org/zellij"
-version = "0.47.1"
+version = "0.47.2"
 # NOTE: When updating this, modify `channel` in `rust-toolchain.toml` accordingly
 rust-version = "1.95"
 
@@ -123,7 +124,7 @@ windows-sys = { version = "0.59", default-features = false }
 names = { version = "0.14.0", default-features = false }
 include_dir = { version = "0.7.3", default-features = false }
 sha2 = { version = "0.10", default-features = false }
-zellij-utils = { path = "zellij-utils/", version = "0.47.1" }
+zellij-utils = { path = "zellij-utils/", version = "0.47.2" }
 
 [profile.dev-opt]
 inherits = "dev"

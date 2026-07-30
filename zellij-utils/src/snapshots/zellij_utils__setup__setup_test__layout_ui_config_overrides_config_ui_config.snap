@@ -1,5 +1,6 @@
 ---
 source: zellij-utils/src/setup.rs
+assertion_line: 877
 expression: "format!(\"{:#?}\", config)"
 ---
 Config {
@@ -8,11 +9,46 @@ Config {
             KeyWithModifier {
                 bare_key: Left,
                 key_modifiers: {
-                    Alt,
+                    Ctrl,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Left,
+                GoToPreviousTab,
+            ],
+            KeyWithModifier {
+                bare_key: Left,
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                GoToPreviousTab,
+            ],
+            KeyWithModifier {
+                bare_key: Down,
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -48,11 +84,59 @@ Config {
             KeyWithModifier {
                 bare_key: Down,
                 key_modifiers: {
-                    Alt,
+                    Super,
                 },
             }: [
-                MoveFocus {
-                    direction: Down,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Up,
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -88,22 +172,47 @@ Config {
             KeyWithModifier {
                 bare_key: Up,
                 key_modifiers: {
-                    Alt,
+                    Super,
                 },
             }: [
-                MoveFocus {
-                    direction: Up,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
                 bare_key: Right,
                 key_modifiers: {
-                    Alt,
+                    Ctrl,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Right,
+                GoToNextTab,
+            ],
+            KeyWithModifier {
+                bare_key: Right,
+                key_modifiers: {
+                    Super,
                 },
+            }: [
+                GoToNextTab,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -174,6 +283,70 @@ Config {
             }: [
                 SwitchToMode {
                     input_mode: Tmux,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
                 },
             ],
             KeyWithModifier {
@@ -361,7 +534,7 @@ Config {
                     Ctrl,
                 },
             }: [
-                Quit,
+                CloseFocus,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -390,10 +563,47 @@ Config {
         },
         Locked: {
             KeyWithModifier {
+                bare_key: Left,
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                GoToPreviousTab,
+            ],
+            KeyWithModifier {
                 bare_key: Down,
                 key_modifiers: {
                     Ctrl,
                     Shift,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Down,
+                key_modifiers: {
+                    Super,
                 },
             }: [
                 KeybindPipe {
@@ -448,6 +658,43 @@ Config {
                     cwd: None,
                     pane_title: None,
                 },
+            ],
+            KeyWithModifier {
+                bare_key: Up,
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Right,
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                GoToNextTab,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -477,12 +724,18 @@ Config {
             KeyWithModifier {
                 bare_key: Left,
                 key_modifiers: {
-                    Alt,
+                    Ctrl,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Left,
+                GoToPreviousTab,
+            ],
+            KeyWithModifier {
+                bare_key: Left,
+                key_modifiers: {
+                    Super,
                 },
+            }: [
+                GoToPreviousTab,
             ],
             KeyWithModifier {
                 bare_key: Down,
@@ -493,6 +746,35 @@ Config {
                     direction: Some(
                         Down,
                     ),
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Down,
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -528,11 +810,30 @@ Config {
             KeyWithModifier {
                 bare_key: Down,
                 key_modifiers: {
-                    Alt,
+                    Super,
                 },
             }: [
-                MoveFocus {
-                    direction: Down,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -544,6 +845,35 @@ Config {
                     direction: Some(
                         Up,
                     ),
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Up,
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -579,11 +909,30 @@ Config {
             KeyWithModifier {
                 bare_key: Up,
                 key_modifiers: {
-                    Alt,
+                    Super,
                 },
             }: [
-                MoveFocus {
-                    direction: Up,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -600,12 +949,18 @@ Config {
             KeyWithModifier {
                 bare_key: Right,
                 key_modifiers: {
-                    Alt,
+                    Ctrl,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Right,
+                GoToNextTab,
+            ],
+            KeyWithModifier {
+                bare_key: Right,
+                key_modifiers: {
+                    Super,
                 },
+            }: [
+                GoToNextTab,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -761,6 +1116,70 @@ Config {
             }: [
                 SwitchToMode {
                     input_mode: Tmux,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
                 },
             ],
             KeyWithModifier {
@@ -1000,7 +1419,7 @@ Config {
                     Ctrl,
                 },
             }: [
-                Quit,
+                CloseFocus,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -1055,12 +1474,18 @@ Config {
             KeyWithModifier {
                 bare_key: Left,
                 key_modifiers: {
-                    Alt,
+                    Ctrl,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Left,
+                GoToPreviousTab,
+            ],
+            KeyWithModifier {
+                bare_key: Left,
+                key_modifiers: {
+                    Super,
                 },
+            }: [
+                GoToPreviousTab,
             ],
             KeyWithModifier {
                 bare_key: Down,
@@ -1068,6 +1493,35 @@ Config {
             }: [
                 MoveFocus {
                     direction: Down,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Down,
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -1103,11 +1557,30 @@ Config {
             KeyWithModifier {
                 bare_key: Down,
                 key_modifiers: {
-                    Alt,
+                    Super,
                 },
             }: [
-                MoveFocus {
-                    direction: Down,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -1116,6 +1589,35 @@ Config {
             }: [
                 MoveFocus {
                     direction: Up,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Up,
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -1151,11 +1653,30 @@ Config {
             KeyWithModifier {
                 bare_key: Up,
                 key_modifiers: {
-                    Alt,
+                    Super,
                 },
             }: [
-                MoveFocus {
-                    direction: Up,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -1169,12 +1690,18 @@ Config {
             KeyWithModifier {
                 bare_key: Right,
                 key_modifiers: {
-                    Alt,
+                    Ctrl,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Right,
+                GoToNextTab,
+            ],
+            KeyWithModifier {
+                bare_key: Right,
+                key_modifiers: {
+                    Super,
                 },
+            }: [
+                GoToNextTab,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -1288,6 +1815,70 @@ Config {
                 TogglePaneEmbedOrFloating,
                 SwitchToMode {
                     input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
                 },
             ],
             KeyWithModifier {
@@ -1560,7 +2151,7 @@ Config {
                     Ctrl,
                 },
             }: [
-                Quit,
+                CloseFocus,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -1679,16 +2270,51 @@ Config {
             KeyWithModifier {
                 bare_key: Left,
                 key_modifiers: {
-                    Alt,
+                    Ctrl,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Left,
+                GoToPreviousTab,
+            ],
+            KeyWithModifier {
+                bare_key: Left,
+                key_modifiers: {
+                    Super,
                 },
+            }: [
+                GoToPreviousTab,
             ],
             KeyWithModifier {
                 bare_key: Down,
                 key_modifiers: {},
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Down,
+                key_modifiers: {
+                    Ctrl,
+                },
             }: [
                 KeybindPipe {
                     name: Some(
@@ -1746,16 +2372,64 @@ Config {
             KeyWithModifier {
                 bare_key: Down,
                 key_modifiers: {
-                    Alt,
+                    Super,
                 },
             }: [
-                MoveFocus {
-                    direction: Down,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
                 bare_key: Up,
                 key_modifiers: {},
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Up,
+                key_modifiers: {
+                    Ctrl,
+                },
             }: [
                 KeybindPipe {
                     name: Some(
@@ -1813,11 +2487,30 @@ Config {
             KeyWithModifier {
                 bare_key: Up,
                 key_modifiers: {
-                    Alt,
+                    Super,
                 },
             }: [
-                MoveFocus {
-                    direction: Up,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -1829,12 +2522,18 @@ Config {
             KeyWithModifier {
                 bare_key: Right,
                 key_modifiers: {
-                    Alt,
+                    Ctrl,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Right,
+                GoToNextTab,
+            ],
+            KeyWithModifier {
+                bare_key: Right,
+                key_modifiers: {
+                    Super,
                 },
+            }: [
+                GoToNextTab,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -2055,6 +2754,70 @@ Config {
             }: [
                 SwitchToMode {
                     input_mode: Tmux,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
                 },
             ],
             KeyWithModifier {
@@ -2338,7 +3101,7 @@ Config {
                     Ctrl,
                 },
             }: [
-                Quit,
+                CloseFocus,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -2446,18 +3209,53 @@ Config {
             KeyWithModifier {
                 bare_key: Left,
                 key_modifiers: {
-                    Alt,
+                    Ctrl,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Left,
+                GoToPreviousTab,
+            ],
+            KeyWithModifier {
+                bare_key: Left,
+                key_modifiers: {
+                    Super,
                 },
+            }: [
+                GoToPreviousTab,
             ],
             KeyWithModifier {
                 bare_key: Down,
                 key_modifiers: {},
             }: [
                 ScrollDown,
+            ],
+            KeyWithModifier {
+                bare_key: Down,
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
             ],
             KeyWithModifier {
                 bare_key: Down,
@@ -2492,11 +3290,30 @@ Config {
             KeyWithModifier {
                 bare_key: Down,
                 key_modifiers: {
-                    Alt,
+                    Super,
                 },
             }: [
-                MoveFocus {
-                    direction: Down,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -2504,6 +3321,35 @@ Config {
                 key_modifiers: {},
             }: [
                 ScrollUp,
+            ],
+            KeyWithModifier {
+                bare_key: Up,
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
             ],
             KeyWithModifier {
                 bare_key: Up,
@@ -2538,11 +3384,30 @@ Config {
             KeyWithModifier {
                 bare_key: Up,
                 key_modifiers: {
-                    Alt,
+                    Super,
                 },
             }: [
-                MoveFocus {
-                    direction: Up,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -2554,12 +3419,18 @@ Config {
             KeyWithModifier {
                 bare_key: Right,
                 key_modifiers: {
-                    Alt,
+                    Ctrl,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Right,
+                GoToNextTab,
+            ],
+            KeyWithModifier {
+                bare_key: Right,
+                key_modifiers: {
+                    Super,
                 },
+            }: [
+                GoToNextTab,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -2666,6 +3537,70 @@ Config {
             ],
             KeyWithModifier {
                 bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
                     'f',
                 ),
                 key_modifiers: {
@@ -2891,7 +3826,7 @@ Config {
                     Ctrl,
                 },
             }: [
-                Quit,
+                CloseFocus,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -2961,11 +3896,46 @@ Config {
             KeyWithModifier {
                 bare_key: Left,
                 key_modifiers: {
-                    Alt,
+                    Ctrl,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Left,
+                GoToPreviousTab,
+            ],
+            KeyWithModifier {
+                bare_key: Left,
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                GoToPreviousTab,
+            ],
+            KeyWithModifier {
+                bare_key: Down,
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -3001,11 +3971,59 @@ Config {
             KeyWithModifier {
                 bare_key: Down,
                 key_modifiers: {
-                    Alt,
+                    Super,
                 },
             }: [
-                MoveFocus {
-                    direction: Down,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Up,
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -3041,22 +4059,47 @@ Config {
             KeyWithModifier {
                 bare_key: Up,
                 key_modifiers: {
-                    Alt,
+                    Super,
                 },
             }: [
-                MoveFocus {
-                    direction: Up,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
                 bare_key: Right,
                 key_modifiers: {
-                    Alt,
+                    Ctrl,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Right,
+                GoToNextTab,
+            ],
+            KeyWithModifier {
+                bare_key: Right,
+                key_modifiers: {
+                    Super,
                 },
+            }: [
+                GoToNextTab,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -3143,6 +4186,70 @@ Config {
             ],
             KeyWithModifier {
                 bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
                     'f',
                 ),
                 key_modifiers: {
@@ -3326,7 +4433,7 @@ Config {
                     Ctrl,
                 },
             }: [
-                Quit,
+                CloseFocus,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -3391,18 +4498,53 @@ Config {
             KeyWithModifier {
                 bare_key: Left,
                 key_modifiers: {
-                    Alt,
+                    Ctrl,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Left,
+                GoToPreviousTab,
+            ],
+            KeyWithModifier {
+                bare_key: Left,
+                key_modifiers: {
+                    Super,
                 },
+            }: [
+                GoToPreviousTab,
             ],
             KeyWithModifier {
                 bare_key: Down,
                 key_modifiers: {},
             }: [
                 ScrollDown,
+            ],
+            KeyWithModifier {
+                bare_key: Down,
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
             ],
             KeyWithModifier {
                 bare_key: Down,
@@ -3437,11 +4579,30 @@ Config {
             KeyWithModifier {
                 bare_key: Down,
                 key_modifiers: {
-                    Alt,
+                    Super,
                 },
             }: [
-                MoveFocus {
-                    direction: Down,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -3449,6 +4610,35 @@ Config {
                 key_modifiers: {},
             }: [
                 ScrollUp,
+            ],
+            KeyWithModifier {
+                bare_key: Up,
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
             ],
             KeyWithModifier {
                 bare_key: Up,
@@ -3483,11 +4673,30 @@ Config {
             KeyWithModifier {
                 bare_key: Up,
                 key_modifiers: {
-                    Alt,
+                    Super,
                 },
             }: [
-                MoveFocus {
-                    direction: Up,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -3499,12 +4708,18 @@ Config {
             KeyWithModifier {
                 bare_key: Right,
                 key_modifiers: {
-                    Alt,
+                    Ctrl,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Right,
+                GoToNextTab,
+            ],
+            KeyWithModifier {
+                bare_key: Right,
+                key_modifiers: {
+                    Super,
                 },
+            }: [
+                GoToNextTab,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -3605,6 +4820,70 @@ Config {
                 key_modifiers: {},
             }: [
                 HalfPageScrollDown,
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -3863,7 +5142,7 @@ Config {
                     Ctrl,
                 },
             }: [
-                Quit,
+                CloseFocus,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -3928,11 +5207,46 @@ Config {
             KeyWithModifier {
                 bare_key: Left,
                 key_modifiers: {
-                    Alt,
+                    Ctrl,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Left,
+                GoToPreviousTab,
+            ],
+            KeyWithModifier {
+                bare_key: Left,
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                GoToPreviousTab,
+            ],
+            KeyWithModifier {
+                bare_key: Down,
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -3968,11 +5282,59 @@ Config {
             KeyWithModifier {
                 bare_key: Down,
                 key_modifiers: {
-                    Alt,
+                    Super,
                 },
             }: [
-                MoveFocus {
-                    direction: Down,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Up,
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -4008,22 +5370,47 @@ Config {
             KeyWithModifier {
                 bare_key: Up,
                 key_modifiers: {
-                    Alt,
+                    Super,
                 },
             }: [
-                MoveFocus {
-                    direction: Up,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
                 bare_key: Right,
                 key_modifiers: {
-                    Alt,
+                    Ctrl,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Right,
+                GoToNextTab,
+            ],
+            KeyWithModifier {
+                bare_key: Right,
+                key_modifiers: {
+                    Super,
                 },
+            }: [
+                GoToNextTab,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -4106,6 +5493,70 @@ Config {
             }: [
                 SwitchToMode {
                     input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
                 },
             ],
             KeyWithModifier {
@@ -4293,7 +5744,7 @@ Config {
                     Ctrl,
                 },
             }: [
-                Quit,
+                CloseFocus,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -4341,11 +5792,46 @@ Config {
             KeyWithModifier {
                 bare_key: Left,
                 key_modifiers: {
-                    Alt,
+                    Ctrl,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Left,
+                GoToPreviousTab,
+            ],
+            KeyWithModifier {
+                bare_key: Left,
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                GoToPreviousTab,
+            ],
+            KeyWithModifier {
+                bare_key: Down,
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -4381,11 +5867,59 @@ Config {
             KeyWithModifier {
                 bare_key: Down,
                 key_modifiers: {
-                    Alt,
+                    Super,
                 },
             }: [
-                MoveFocus {
-                    direction: Down,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Up,
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -4421,22 +5955,47 @@ Config {
             KeyWithModifier {
                 bare_key: Up,
                 key_modifiers: {
-                    Alt,
+                    Super,
                 },
             }: [
-                MoveFocus {
-                    direction: Up,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
                 bare_key: Right,
                 key_modifiers: {
-                    Alt,
+                    Ctrl,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Right,
+                GoToNextTab,
+            ],
+            KeyWithModifier {
+                bare_key: Right,
+                key_modifiers: {
+                    Super,
                 },
+            }: [
+                GoToNextTab,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -4519,6 +6078,70 @@ Config {
             }: [
                 SwitchToMode {
                     input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
                 },
             ],
             KeyWithModifier {
@@ -4706,7 +6329,7 @@ Config {
                     Ctrl,
                 },
             }: [
-                Quit,
+                CloseFocus,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -4754,11 +6377,46 @@ Config {
             KeyWithModifier {
                 bare_key: Left,
                 key_modifiers: {
-                    Alt,
+                    Ctrl,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Left,
+                GoToPreviousTab,
+            ],
+            KeyWithModifier {
+                bare_key: Left,
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                GoToPreviousTab,
+            ],
+            KeyWithModifier {
+                bare_key: Down,
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -4794,11 +6452,59 @@ Config {
             KeyWithModifier {
                 bare_key: Down,
                 key_modifiers: {
-                    Alt,
+                    Super,
                 },
             }: [
-                MoveFocus {
-                    direction: Down,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Up,
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -4834,22 +6540,47 @@ Config {
             KeyWithModifier {
                 bare_key: Up,
                 key_modifiers: {
-                    Alt,
+                    Super,
                 },
             }: [
-                MoveFocus {
-                    direction: Up,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
                 bare_key: Right,
                 key_modifiers: {
-                    Alt,
+                    Ctrl,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Right,
+                GoToNextTab,
+            ],
+            KeyWithModifier {
+                bare_key: Right,
+                key_modifiers: {
+                    Super,
                 },
+            }: [
+                GoToNextTab,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -4991,6 +6722,70 @@ Config {
                 key_modifiers: {},
             }: [
                 Detach,
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -5239,7 +7034,7 @@ Config {
                     Ctrl,
                 },
             }: [
-                Quit,
+                CloseFocus,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -5358,6 +7153,36 @@ Config {
                 },
             ],
             KeyWithModifier {
+                bare_key: Char(
+                    'x',
+                ),
+                key_modifiers: {},
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_kill_current_session",
+                    ),
+                    payload: None,
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
                 bare_key: Esc,
                 key_modifiers: {},
             }: [
@@ -5388,12 +7213,18 @@ Config {
             KeyWithModifier {
                 bare_key: Left,
                 key_modifiers: {
-                    Alt,
+                    Ctrl,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Left,
+                GoToPreviousTab,
+            ],
+            KeyWithModifier {
+                bare_key: Left,
+                key_modifiers: {
+                    Super,
                 },
+            }: [
+                GoToPreviousTab,
             ],
             KeyWithModifier {
                 bare_key: Down,
@@ -5403,6 +7234,35 @@ Config {
                     direction: Some(
                         Down,
                     ),
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Down,
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -5438,11 +7298,30 @@ Config {
             KeyWithModifier {
                 bare_key: Down,
                 key_modifiers: {
-                    Alt,
+                    Super,
                 },
             }: [
-                MoveFocus {
-                    direction: Down,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -5453,6 +7332,35 @@ Config {
                     direction: Some(
                         Up,
                     ),
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Up,
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -5488,11 +7396,30 @@ Config {
             KeyWithModifier {
                 bare_key: Up,
                 key_modifiers: {
-                    Alt,
+                    Super,
                 },
             }: [
-                MoveFocus {
-                    direction: Up,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -5508,12 +7435,18 @@ Config {
             KeyWithModifier {
                 bare_key: Right,
                 key_modifiers: {
-                    Alt,
+                    Ctrl,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Right,
+                GoToNextTab,
+            ],
+            KeyWithModifier {
+                bare_key: Right,
+                key_modifiers: {
+                    Super,
                 },
+            }: [
+                GoToNextTab,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -5584,6 +7517,70 @@ Config {
             }: [
                 SwitchToMode {
                     input_mode: Tmux,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
                 },
             ],
             KeyWithModifier {
@@ -5837,7 +7834,7 @@ Config {
                     Ctrl,
                 },
             }: [
-                Quit,
+                CloseFocus,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -5892,11 +7889,46 @@ Config {
             KeyWithModifier {
                 bare_key: Left,
                 key_modifiers: {
-                    Alt,
+                    Ctrl,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Left,
+                GoToPreviousTab,
+            ],
+            KeyWithModifier {
+                bare_key: Left,
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                GoToPreviousTab,
+            ],
+            KeyWithModifier {
+                bare_key: Down,
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -5932,11 +7964,59 @@ Config {
             KeyWithModifier {
                 bare_key: Down,
                 key_modifiers: {
-                    Alt,
+                    Super,
                 },
             }: [
-                MoveFocus {
-                    direction: Down,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Up,
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -5972,22 +8052,47 @@ Config {
             KeyWithModifier {
                 bare_key: Up,
                 key_modifiers: {
-                    Alt,
+                    Super,
                 },
             }: [
-                MoveFocus {
-                    direction: Up,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
                 bare_key: Right,
                 key_modifiers: {
-                    Alt,
+                    Ctrl,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Right,
+                GoToNextTab,
+            ],
+            KeyWithModifier {
+                bare_key: Right,
+                key_modifiers: {
+                    Super,
                 },
+            }: [
+                GoToNextTab,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -6058,6 +8163,70 @@ Config {
             }: [
                 SwitchToMode {
                     input_mode: Tmux,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
                 },
             ],
             KeyWithModifier {
@@ -6245,7 +8414,7 @@ Config {
                     Ctrl,
                 },
             }: [
-                Quit,
+                CloseFocus,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -6303,12 +8472,18 @@ Config {
             KeyWithModifier {
                 bare_key: Left,
                 key_modifiers: {
-                    Alt,
+                    Ctrl,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Left,
+                GoToPreviousTab,
+            ],
+            KeyWithModifier {
+                bare_key: Left,
+                key_modifiers: {
+                    Super,
                 },
+            }: [
+                GoToPreviousTab,
             ],
             KeyWithModifier {
                 bare_key: Down,
@@ -6319,6 +8494,35 @@ Config {
                 },
                 SwitchToMode {
                     input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Down,
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -6354,11 +8558,30 @@ Config {
             KeyWithModifier {
                 bare_key: Down,
                 key_modifiers: {
-                    Alt,
+                    Super,
                 },
             }: [
-                MoveFocus {
-                    direction: Down,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -6370,6 +8593,35 @@ Config {
                 },
                 SwitchToMode {
                     input_mode: Normal,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Up,
+                key_modifiers: {
+                    Ctrl,
+                },
+            }: [
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -6405,11 +8657,30 @@ Config {
             KeyWithModifier {
                 bare_key: Up,
                 key_modifiers: {
-                    Alt,
+                    Super,
                 },
             }: [
-                MoveFocus {
-                    direction: Up,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -6426,12 +8697,18 @@ Config {
             KeyWithModifier {
                 bare_key: Right,
                 key_modifiers: {
-                    Alt,
+                    Ctrl,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Right,
+                GoToNextTab,
+            ],
+            KeyWithModifier {
+                bare_key: Right,
+                key_modifiers: {
+                    Super,
                 },
+            }: [
+                GoToNextTab,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -6602,6 +8879,70 @@ Config {
                 key_modifiers: {},
             }: [
                 Detach,
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'e',
+                ),
+                key_modifiers: {
+                    Super,
+                },
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Composer",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -6870,7 +9211,7 @@ Config {
                     Ctrl,
                 },
             }: [
-                Quit,
+                CloseFocus,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -6952,6 +9293,9 @@ Config {
         mirror_session: None,
         on_force_close: None,
         scroll_buffer_size: None,
+        auto_lock_after_seconds: Some(
+            30,
+        ),
         copy_command: None,
         copy_clipboard: None,
         copy_on_select: None,

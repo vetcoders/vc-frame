@@ -325,10 +325,10 @@ impl Page {
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new(
-                        "  TOP    = tabs of THIS session (Start here · Shell)",
+                        "  TOP    = this session: (name) · mode chip · tabs — ◉ marks where you are",
                     )
                     .color_substring(3, "TOP")
-                    .color_substring(2, "tabs of THIS session"),
+                    .color_substring(2, "◉ marks where you are"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new(
@@ -452,6 +452,42 @@ impl Page {
                             }
                         })),
                         ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
+                            "Command Composer (Cmd+E)",
+                        )))
+                        .with_hover(TextOrCustomRender::Text(
+                            main_menu_item("Command Composer (Cmd+E)").selected(),
+                        ))
+                        .with_left_click_action(ClickAction::new_change_page({
+                            let link_executable = link_executable.clone();
+                            let zellij_version = zellij_version.clone();
+                            let base_mode = base_mode.clone();
+                            move || {
+                                Page::new_onboarding_composer(
+                                    link_executable.clone(),
+                                    zellij_version.clone(),
+                                    base_mode.clone(),
+                                )
+                            }
+                        })),
+                        ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
+                            "Look, themes & host terminal",
+                        )))
+                        .with_hover(TextOrCustomRender::Text(
+                            main_menu_item("Look, themes & host terminal").selected(),
+                        ))
+                        .with_left_click_action(ClickAction::new_change_page({
+                            let link_executable = link_executable.clone();
+                            let zellij_version = zellij_version.clone();
+                            let base_mode = base_mode.clone();
+                            move || {
+                                Page::new_onboarding_look_and_themes(
+                                    link_executable.clone(),
+                                    zellij_version.clone(),
+                                    base_mode.clone(),
+                                )
+                            }
+                        })),
+                        ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
                             "Advanced tools (optional)",
                         )))
                         .with_hover(TextOrCustomRender::Text(
@@ -497,10 +533,52 @@ impl Page {
                     .color_substring(2, "another room"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("  · Click a session name  →  switch into that room"),
+                    Text::new("How to read a row:").color_range(2, ..),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        "  · 01-06 are counters, not commands · * marks YOUR session, - the others",
+                    )
+                    .color_substring(3, "*"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        "  · The whole block of your session is highlighted; the active tab row pops",
+                    )
+                    .color_substring(2, "highlighted"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        "  · ● = the tab a process is running on right now, · = idle rows",
+                    )
+                    .color_substring(3, "●"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        "  · CPU / MEM line under the header = live host cockpit (refreshes ~5s)",
+                    )
+                    .color_substring(2, "CPU / MEM"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("Drive it:").color_range(2, ..),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  · Click a session name  →  switch into that room (one click)"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new("  · Click a live process under a session  →  jump to that tab"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        "  · Alt+Up / Alt+Down  →  previous / next session (product contract)",
+                    )
+                    .color_substring(3, "Alt+Up / Alt+Down"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        "  · + / -  (rail focused)  →  widen / narrow the rail column",
+                    )
+                    .color_substring(3, "+ / -"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new(
@@ -558,10 +636,40 @@ impl Page {
                         .color_substring(3, "Shell"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("How to read the bar:"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  · ◉ = the tab you are on · ○ = every other tab")
+                        .color_substring(3, "◉")
+                        .color_substring(2, "○"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        "  · Ribbon shades alternate for rhythm only — the marker carries the state",
+                    ),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        "  · Mode chip: ⌁ NORMAL is quiet, ⚿ LOCKED inverts, armed modes light up",
+                    )
+                    .color_substring(3, "⚿ LOCKED")
+                    .color_substring(2, "⌁ NORMAL"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        "  · Right side: Composer chip — click it or press Cmd+E",
+                    )
+                    .color_substring(2, "Composer chip"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new("How to switch:"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new("  · Mouse: click the tab name on the top compact bar"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  · Cmd+Left / Cmd+Right  —  previous / next tab, any mode (contract v3)")
+                        .color_substring(3, "Cmd+Left / Cmd+Right"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new("  · Keyboard: Ctrl+t  (TAB mode), then 1 / 2 or Left/Right, Enter")
@@ -586,7 +694,7 @@ impl Page {
         base_mode: Rc<RefCell<InputMode>>,
     ) -> Self {
         Page::new()
-            .with_title(Text::new("Keyboard + mouse (plain Ctrl scheme)").color_range(0, ..))
+            .with_title(Text::new("Keyboard + mouse (key-contract v3)").color_range(0, ..))
             .with_paragraph(vec![
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new("Modes (status bar shows labels):").color_range(2, ..),
@@ -600,8 +708,11 @@ impl Page {
                         .color_substring(3, "Ctrl+p"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("  Ctrl+o  SESSION attach / rename / kill session")
+                    Text::new("  Ctrl+o  SESSION  then x = kill session (stay in vc-frame)")
                         .color_substring(3, "Ctrl+o"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  Ctrl+t  TAB      then x = kill tab").color_substring(3, "Ctrl+t"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new("  Ctrl+n  new pane immediately").color_substring(3, "Ctrl+n"),
@@ -610,12 +721,34 @@ impl Page {
                     Text::new("  Ctrl+s  SCROLL  scrollback / copy").color_substring(3, "Ctrl+s"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("  Ctrl+g  LOCK    lock input (then Ctrl+arrows to move focus)")
+                    Text::new("  Ctrl+g  LOCK    lock input (auto-lock: auto_lock_after_seconds)")
                         .color_substring(3, "Ctrl+g"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new("  Ctrl+q  close focused pane (does NOT quit the whole session)")
                         .color_substring(3, "Ctrl+q"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("Navigation (contract v3 — one modifier per owner):")
+                        .color_range(2, ..),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  Cmd+Left/Right    previous / next tab (every mode, LOCK too)")
+                        .color_substring(3, "Cmd+Left/Right"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  Cmd+Up/Down       previous / next session (instant, no Enter)")
+                        .color_substring(3, "Cmd+Up/Down"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  Cmd+E             Command Composer — draft in your $EDITOR")
+                        .color_substring(3, "Cmd+E"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        "  LOCK (typing): Ctrl+Alt stay with the pane and writer · Cmd still switches",
+                    )
+                    .color_substring(3, "LOCK"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new("Mouse:").color_range(2, ..),
@@ -625,6 +758,14 @@ impl Page {
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new("  · Click tab names on the top bar"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        "  · Click → open (vc-frame) · Shift+click URL → host hint · Alt+Shift path → system app",
+                    )
+                    .color_substring(3, "Click")
+                    .color_substring(3, "Shift+click URL")
+                    .color_substring(3, "Alt+Shift"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new("  · Scroll wheel over the rail moves selection"),
@@ -679,6 +820,125 @@ impl Page {
                         "The left SESSIONS rail still works from the Shell tab — other rooms stay one click away.",
                     )
                     .color_substring(2, "SESSIONS"),
+                ))]),
+            ])
+            .with_bulletin_list(onboarding_back_bulletin(
+                link_executable,
+                zellij_version,
+                base_mode,
+            ))
+            .with_help(Box::new(esc_go_back_plus_link_hover))
+    }
+
+    fn new_onboarding_composer(
+        link_executable: Rc<RefCell<String>>,
+        zellij_version: String,
+        base_mode: Rc<RefCell<InputMode>>,
+    ) -> Self {
+        Page::new()
+            .with_title(Text::new("Command Composer — think before you run").color_range(0, ..))
+            .with_paragraph(vec![
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        "Long command? Multi-line prompt for an agent? Don't fight the prompt line.",
+                    ),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  1. Press Cmd+E (or click the Composer chip on the top bar)")
+                        .color_substring(3, "Cmd+E"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  2. A floating pane opens your $EDITOR on an empty draft")
+                        .color_substring(2, "$EDITOR"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  3. Write, edit, take your time — then save and quit"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        "  4. The text lands in your shell UNEXECUTED — review it, then press Enter",
+                    )
+                    .color_substring(3, "UNEXECUTED"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        "Save an empty draft to cancel — nothing is sent, nothing runs.",
+                    )
+                    .color_substring(2, "cancel"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        "macOS + Alacritty note: import the shipped preset — it carries the",
+                    ),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("Cmd translation layer; see docs/ALACRITTY_INTEGRATION.md.")
+                        .color_substring(2, "Cmd translation layer"),
+                ))]),
+            ])
+            .with_bulletin_list(onboarding_back_bulletin(
+                link_executable,
+                zellij_version,
+                base_mode,
+            ))
+            .with_help(Box::new(esc_go_back_plus_link_hover))
+    }
+
+    fn new_onboarding_look_and_themes(
+        link_executable: Rc<RefCell<String>>,
+        zellij_version: String,
+        base_mode: Rc<RefCell<InputMode>>,
+    ) -> Self {
+        Page::new()
+            .with_title(Text::new("Look, themes & host terminal").color_range(0, ..))
+            .with_paragraph(vec![
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("The chrome speaks one glyph language everywhere:").color_range(2, ..),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  ◉ / ○   active / inactive tab (top bar)")
+                        .color_substring(3, "◉ / ○"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  * / -   your session / other sessions (left rail)")
+                        .color_substring(3, "* / -"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  ● / ·   running tab / idle row (left rail)")
+                        .color_substring(3, "● / ·"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("  ⚿ / ⌁   input locked / normal (mode chip)")
+                        .color_substring(3, "⚿ / ⌁"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        "One accent color always means \"you are here\"; shades are only rhythm.",
+                    )
+                    .color_substring(2, "you are here"),
+                ))]),
+            ])
+            .with_paragraph(vec![
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("Make it yours:").color_range(2, ..),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        "  · Themes: docs/THEMES_GUIDE.md — the palette contract + author checklist",
+                    )
+                    .color_substring(3, "docs/THEMES_GUIDE.md"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        "  · Host terminal: docs/ALACRITTY_INTEGRATION.md + tools/alacritty preset",
+                    )
+                    .color_substring(3, "docs/ALACRITTY_INTEGRATION.md"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        "  · Editing the active theme file repaints live — no restart needed",
+                    )
+                    .color_substring(2, "repaints live"),
                 ))]),
             ])
             .with_bulletin_list(onboarding_back_bulletin(
@@ -1395,7 +1655,8 @@ fn main_screen_title(version: String, is_release_notes: bool) -> Text {
 
 fn main_screen_help_text(hovering_over_link: bool, menu_item_is_selected: bool) -> Text {
     if hovering_over_link {
-        let help_text = "Help: Click or Shift-Click to open in browser".to_string();
+        let help_text =
+            "Help: Click → open · Shift+click URL → host · Alt+Shift path → system app".to_string();
         Text::new(help_text)
             .color_range(3, 6..=10)
             .color_range(3, 15..=25)
@@ -1416,7 +1677,8 @@ fn main_screen_help_text(hovering_over_link: bool, menu_item_is_selected: bool) 
 
 fn release_notes_main_help(hovering_over_link: bool, menu_item_is_selected: bool) -> Text {
     if hovering_over_link {
-        let help_text = "Help: Click or Shift-Click to open in browser".to_string();
+        let help_text =
+            "Help: Click → open · Shift+click URL → host · Alt+Shift path → system app".to_string();
         Text::new(help_text)
             .color_range(3, 6..=10)
             .color_range(3, 15..=25)
@@ -1436,7 +1698,8 @@ fn release_notes_main_help(hovering_over_link: bool, menu_item_is_selected: bool
 
 fn esc_go_back_plus_link_hover(hovering_over_link: bool, _menu_item_is_selected: bool) -> Text {
     if hovering_over_link {
-        let help_text = "Help: Click or Shift-Click to open in browser".to_string();
+        let help_text =
+            "Help: Click → open · Shift+click URL → host · Alt+Shift path → system app".to_string();
         Text::new(help_text)
             .color_range(3, 6..=10)
             .color_range(3, 15..=25)

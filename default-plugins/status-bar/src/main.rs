@@ -30,6 +30,13 @@ static MORE_MSG: &str = " ... ";
 /// How long the clipboard notification ("Text copied...") stays on the bar
 /// before dismissing itself without requiring user input.
 const CLIPBOARD_HINT_TTL_SECONDS: f64 = 2.0;
+/// Host resource cockpit (moved here from the session rail): context key of
+/// the sampling run_command and the seconds between samples.
+const RESOURCE_SAMPLE_CONTEXT_KEY: &str = "vc_status_resources";
+const RESOURCE_SAMPLE_SECONDS: f64 = 5.0;
+// Portable host sample: total CPU% (per-core percentages summed, like top),
+// used RSS KiB and total RAM KiB — Linux via /proc/meminfo, macOS via sysctl.
+const RESOURCE_SAMPLE_COMMAND: &str = r#"cpu=$(ps -A -o %cpu= | awk '{s+=$1} END {printf "%.0f", s}'); used=$(ps -A -o rss= | awk '{s+=$1} END {print s}'); if [ -r /proc/meminfo ]; then total=$(awk '/^MemTotal:/{print $2}' /proc/meminfo); else total=$(( $(sysctl -n hw.memsize) / 1024 )); fi; printf '%s %s %s' "$cpu" "$used" "$total""#;
 /// Shorthand for `Action::SwitchToMode{input_mode: InputMode::Normal}`.
 const TO_NORMAL: Action = Action::SwitchToMode {
     input_mode: InputMode::Normal,
@@ -46,6 +53,10 @@ struct State {
     classic_ui: bool,
     base_mode_is_locked: bool,
     cached_keybinds: KeybindsVec,
+    // Host resource cockpit ("CPU … · MEM …"), sampled via run_command. None
+    // until the first valid sample; a malformed sample keeps the last line.
+    resource_line: Option<String>,
+    resource_sample_in_flight: bool,
 }
 
 register_plugin!(State);
@@ -205,6 +216,8 @@ impl ZellijPlugin for State {
             .map(|c| c == "true")
             .unwrap_or(false);
         set_selectable(false);
+        // The resource cockpit samples the host via run_command.
+        request_permission(&[PermissionType::RunCommands]);
         subscribe(&[
             EventType::ModeUpdate,
             EventType::TabUpdate,
@@ -214,7 +227,10 @@ impl ZellijPlugin for State {
             EventType::SystemClipboardFailure,
             EventType::InitialKeybinds,
             EventType::Timer,
+            EventType::RunCommandResult,
+            EventType::PermissionRequestResult,
         ]);
+        self.start_resource_sample();
     }
 
     fn update(&mut self, event: Event) -> bool {
@@ -279,6 +295,27 @@ impl ZellijPlugin for State {
                     self.display_system_clipboard_failure = false;
                     should_render = true;
                 }
+                // Timers are a shared stream (clipboard TTLs + the sampling
+                // cadence); the in-flight guard keeps a clipboard-born fire
+                // from stacking a second sample.
+                self.start_resource_sample();
+            },
+            Event::RunCommandResult(exit_code, stdout, _stderr, context)
+                if context.contains_key(RESOURCE_SAMPLE_CONTEXT_KEY) =>
+            {
+                self.resource_sample_in_flight = false;
+                set_timeout(RESOURCE_SAMPLE_SECONDS);
+                if exit_code == Some(0)
+                    && let Some(line) = parse_resource_sample(&stdout)
+                    && self.resource_line.as_deref() != Some(line.as_str())
+                {
+                    self.resource_line = Some(line);
+                    should_render = true;
+                }
+            },
+            Event::PermissionRequestResult(_) => {
+                self.start_resource_sample();
+                should_render = true;
             },
             Event::InputReceived => {
                 if self.text_copy_destination.is_some() || self.display_system_clipboard_failure {
@@ -308,19 +345,33 @@ impl ZellijPlugin for State {
                 PaletteColor::EightBit(color) => format!("\u{1b}[48;5;{}m\u{1b}[0K", color),
             };
             let active_tab = self.tabs.iter().find(|t| t.active);
-            print!(
-                "{}{}",
-                one_line_ui(
-                    &self.mode_info,
-                    active_tab,
-                    cols,
-                    separator,
-                    self.base_mode_is_locked,
-                    self.text_copy_destination,
-                    self.display_system_clipboard_failure,
-                ),
-                fill_bg,
+            // Right edge: host resource cockpit + swap-layout indicator —
+            // the status indicators the top bar gave up. The hint line gets
+            // the remaining columns.
+            let right = self.right_status_segment(active_tab);
+            let ui_cols = cols.saturating_sub(right.len);
+            let line = one_line_ui(
+                &self.mode_info,
+                active_tab,
+                ui_cols,
+                separator,
+                self.base_mode_is_locked,
+                self.text_copy_destination,
+                self.display_system_clipboard_failure,
             );
+            if right.len > 0 && cols > right.len {
+                // Paint the hints, flood the background to EOL, then park
+                // the right segment flush against the edge (CHA, 1-based).
+                print!(
+                    "{}{}\u{1b}[{}G{}",
+                    line,
+                    fill_bg,
+                    cols.saturating_sub(right.len) + 1,
+                    right.part,
+                );
+            } else {
+                print!("{}{}", line, fill_bg);
+            }
             return;
         }
 
@@ -359,6 +410,74 @@ impl ZellijPlugin for State {
 }
 
 impl State {
+    fn start_resource_sample(&mut self) {
+        if self.resource_sample_in_flight {
+            return;
+        }
+        self.resource_sample_in_flight = true;
+        let mut context = BTreeMap::new();
+        context.insert(RESOURCE_SAMPLE_CONTEXT_KEY.to_owned(), "true".to_owned());
+        run_command(&["sh", "-c", RESOURCE_SAMPLE_COMMAND], context);
+    }
+
+    /// The bar's right edge: `CPU … · MEM …` (dim) followed by the swap
+    /// layout chip (BASE / VERTICAL / …) that used to live on the top bar.
+    fn right_status_segment(&self, active_tab: Option<&TabInfo>) -> LinePart {
+        let mut segment = LinePart::default();
+        let palette = self.mode_info.style.colors;
+
+        if let Some(resource_line) = &self.resource_line {
+            let text = format!("{} ", resource_line);
+            segment.append(&LinePart {
+                len: text.chars().count(),
+                part: style!(
+                    palette.text_unselected.emphasis_2,
+                    palette.text_unselected.background
+                )
+                .paint(text)
+                .to_string(),
+            });
+        }
+
+        if let Some(swap_chip) = self.swap_layout_status(active_tab) {
+            segment.append(&swap_chip);
+        }
+
+        segment
+    }
+
+    fn swap_layout_status(&self, active_tab: Option<&TabInfo>) -> Option<LinePart> {
+        let tab = active_tab?;
+        let name = tab.active_swap_layout_name.as_ref()?;
+        let mut label = format!(" {} ", name);
+        label.make_ascii_uppercase();
+        let len = label.chars().count();
+        let palette = self.mode_info.style.colors;
+
+        let styled = match self.mode_info.mode {
+            InputMode::Locked => style!(
+                palette.text_unselected.background,
+                palette.ribbon_unselected.background
+            )
+            .italic(),
+            _ if tab.is_swap_layout_dirty => style!(
+                palette.text_unselected.background,
+                palette.ribbon_unselected.background
+            )
+            .bold(),
+            _ => style!(
+                palette.text_unselected.background,
+                palette.ribbon_selected.background
+            )
+            .bold(),
+        };
+
+        Some(LinePart {
+            part: styled.paint(label).to_string(),
+            len,
+        })
+    }
+
     fn second_line(&self, cols: usize) -> LinePart {
         let active_tab = self.tabs.iter().find(|t| t.active);
 
@@ -394,6 +513,27 @@ impl State {
             LinePart::default()
         }
     }
+}
+
+/// Format the three-number sample ("cpu used_kib total_kib") into the
+/// cockpit line. Returns None on any malformed field so a bad sample never
+/// blanks a previously valid reading.
+fn parse_resource_sample(stdout: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(stdout);
+    let mut parts = text.split_whitespace();
+    let cpu: f64 = parts.next()?.parse().ok()?;
+    let used_kib: f64 = parts.next()?.parse().ok()?;
+    let total_kib: f64 = parts.next()?.parse().ok()?;
+    if total_kib <= 0.0 || cpu < 0.0 || used_kib < 0.0 {
+        return None;
+    }
+    const KIB_PER_GIB: f64 = 1024.0 * 1024.0;
+    Some(format!(
+        "CPU {:.0}% · MEM {:.1}/{:.0}G",
+        cpu,
+        used_kib / KIB_PER_GIB,
+        total_kib / KIB_PER_GIB,
+    ))
 }
 
 pub fn get_common_modifiers(mut keyvec: Vec<&KeyWithModifier>) -> Vec<KeyModifier> {
@@ -636,6 +776,22 @@ pub mod tests {
                 ],
             ),
         ]
+    }
+
+    #[test]
+    fn resource_sample_formats_cpu_and_memory() {
+        // 342% CPU, 8 GiB used of 64 GiB (values in KiB, like ps/meminfo).
+        let sample = parse_resource_sample(b"342 8388608 67108864");
+        assert_eq!(sample.as_deref(), Some("CPU 342% · MEM 8.0/64G"));
+    }
+
+    #[test]
+    fn resource_sample_rejects_malformed_input() {
+        assert_eq!(parse_resource_sample(b""), None, "empty");
+        assert_eq!(parse_resource_sample(b"only two"), None, "non-numeric");
+        assert_eq!(parse_resource_sample(b"12 34"), None, "missing total");
+        assert_eq!(parse_resource_sample(b"12 34 0"), None, "zero total");
+        assert_eq!(parse_resource_sample(b"-5 34 100"), None, "negative cpu");
     }
 
     #[test]

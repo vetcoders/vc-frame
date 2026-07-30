@@ -9,38 +9,21 @@ pub fn tab_line(
     mode_info: &ModeInfo,
     tab_data: TabRenderData,
     cols: usize,
-    toggle_tooltip_key: Option<String>,
-    tooltip_is_active: bool,
-    brand_text: Option<String>,
-    brand_text_short: Option<String>,
+    config: TabLineConfig,
 ) -> Vec<LinePart> {
-    let config = TabLineConfig {
-        session_name: mode_info.session_name.to_owned(),
-        hide_session_name: mode_info.style.hide_session_name,
-        mode: mode_info.mode,
-        active_swap_layout_name: tab_data.active_swap_layout_name,
-        is_swap_layout_dirty: tab_data.is_swap_layout_dirty,
-        toggle_tooltip_key,
-        tooltip_is_active,
-        brand_text,
-        brand_text_short,
-    };
-
     let builder = TabLineBuilder::new(config, mode_info.style.colors, mode_info.capabilities, cols);
     builder.build(tab_data.tabs, tab_data.active_tab_index)
 }
 
 #[derive(Debug, Clone)]
 pub struct TabLineConfig {
-    pub session_name: Option<String>,
-    pub hide_session_name: bool,
     pub mode: InputMode,
-    pub active_swap_layout_name: Option<String>,
-    pub is_swap_layout_dirty: bool,
     pub toggle_tooltip_key: Option<String>,
     pub tooltip_is_active: bool,
     pub brand_text: Option<String>,
     pub brand_text_short: Option<String>,
+    pub live_count: usize,
+    pub left_inset: usize,
 }
 
 fn calculate_total_length(parts: &[LinePart]) -> usize {
@@ -287,21 +270,17 @@ impl TabLinePrefixBuilder {
 
     fn build(
         &self,
-        session_name: Option<&str>,
         mode: InputMode,
         brand_text: Option<&str>,
         brand_text_short: Option<&str>,
     ) -> Vec<LinePart> {
         let mut parts = vec![self.create_brand_part(brand_text, brand_text_short)];
-        let mut used_len = parts.first().map_or(0, |p| p.len);
+        let used_len = parts.first().map_or(0, |p| p.len);
 
-        if let Some(name) = session_name
-            && let Some(name_part) = self.create_session_name_part(name, used_len)
-        {
-            used_len += name_part.len;
-            parts.push(name_part);
-        }
-
+        // Operator's zone order: brand │ mode │ tabs — the mode chip sits
+        // directly after the brand so it never leaves the eye's home
+        // position. The session anchor lives in the rail header
+        // (`SESSIONS N · name`), not on this bar (operator call 2026-07-30).
         if let Some(mode_part) = self.create_mode_part(mode, used_len) {
             parts.push(mode_part);
         }
@@ -316,11 +295,9 @@ impl TabLinePrefixBuilder {
     ) -> LinePart {
         let prefix_text = self.select_brand_text(brand_text, brand_text_short);
         let is_branded = brand_text.is_some();
-        let colors = if is_branded {
-            self.get_brand_colors()
-        } else {
-            self.get_text_colors()
-        };
+        // The brand sits bare on the bar ground (operator call 2026-07-30):
+        // the inverted chip belongs to the MODE, not the wordmark.
+        let colors = self.get_text_colors();
 
         if !is_branded {
             return LinePart {
@@ -379,41 +356,35 @@ impl TabLinePrefixBuilder {
         }
     }
 
-    fn create_session_name_part(&self, name: &str, used_len: usize) -> Option<LinePart> {
-        let name_part = format!("({})", name);
-        let name_part_len = name_part.width();
-
-        if self.cols.saturating_sub(used_len) >= name_part_len {
-            let colors = self.get_text_colors();
-            Some(LinePart {
-                part: style!(colors.text, colors.background)
-                    .bold()
-                    .paint(name_part)
-                    .to_string(),
-                len: name_part_len,
-                tab_index: None,
-            })
-        } else {
-            None
-        }
-    }
-
+    /// Mode chip: one glyph + a three-letter code, the operator-tuned set
+    /// (2026-07-30). `▷ NRM` stays quiet, `⊝ LCK` inverts on the accent,
+    /// every armed mode inverts on the ribbon accent. Glyphs are plain
+    /// text-presentation Unicode — no emoji, no private-use — and lengths
+    /// are measured with `.width()` so the click map never drifts.
     fn create_mode_part(&self, mode: InputMode, used_len: usize) -> Option<LinePart> {
-        let mode_text = format!(" {} ", format!("{:?}", mode).to_uppercase());
+        let (glyph, code) = mode_chip(mode);
+        // The mode chip carries the bar's inversion (operator call
+        // 2026-07-30): always inverse video, with the ground telling the
+        // state apart — neutral base for Normal, the emphasis_1 accent for
+        // Locked, the ribbon accent for every armed mode.
+        let style = match mode {
+            InputMode::Locked => style!(
+                self.palette.text_unselected.background,
+                self.palette.text_unselected.emphasis_1
+            ),
+            InputMode::Normal => style!(
+                self.palette.text_unselected.background,
+                self.palette.text_unselected.base
+            ),
+            _ => style!(
+                self.palette.ribbon_selected.base,
+                self.palette.ribbon_selected.background
+            ),
+        };
+        let mode_text = format!(" {} {} ", glyph, code);
         let mode_len = mode_text.width();
 
         if self.cols.saturating_sub(used_len) >= mode_len {
-            let colors = self.get_text_colors();
-            let style = match mode {
-                InputMode::Locked => {
-                    style!(self.palette.text_unselected.emphasis_3, colors.background)
-                },
-                InputMode::Normal => {
-                    style!(self.palette.text_unselected.emphasis_2, colors.background)
-                },
-                _ => style!(self.palette.text_unselected.emphasis_0, colors.background),
-            };
-
             Some(LinePart {
                 part: style.bold().paint(mode_text).to_string(),
                 len: mode_len,
@@ -431,41 +402,106 @@ impl TabLinePrefixBuilder {
             separator: self.palette.text_unselected.background,
         }
     }
-
-    fn get_brand_colors(&self) -> IndicatorColors {
-        IndicatorColors {
-            text: self.palette.ribbon_selected.base,
-            background: self.palette.ribbon_selected.background,
-            separator: self.palette.text_unselected.background,
-        }
-    }
 }
 
 struct RightSideElementsBuilder {
     palette: Styling,
-    capabilities: PluginCapabilities,
 }
 
 impl RightSideElementsBuilder {
-    fn new(palette: Styling, capabilities: PluginCapabilities) -> Self {
-        Self {
-            palette,
-            capabilities,
-        }
+    fn new(palette: Styling) -> Self {
+        Self { palette }
     }
 
-    fn build(&self, config: &TabLineConfig, available_space: usize) -> Vec<LinePart> {
+    fn build(&self, config: &TabLineConfig) -> Vec<LinePart> {
         let mut elements = Vec::new();
+
+        elements.push(self.create_composer_chip());
+        elements.push(self.create_agents_chip());
 
         if let Some(ref tooltip_key) = config.toggle_tooltip_key {
             elements.push(self.create_tooltip_indicator(tooltip_key, config.tooltip_is_active));
         }
 
-        if let Some(swap_status) = self.create_swap_layout_status(config, available_space) {
-            elements.push(swap_status);
-        }
+        elements.push(self.create_live_chip(config.live_count));
 
         elements
+    }
+
+    /// The Agents station entry point — the NOW-view of the fleet, sibling
+    /// of ䷅ LIVE → Gallery (the WAS-view). ⌬ (U+232C BENZENE RING) is
+    /// EAW-narrow, text-presentation only. Click lands in the station and
+    /// floats the Dispatcher.
+    fn create_agents_chip(&self) -> LinePart {
+        let plain = " · ⌬ Agents";
+        let styled_parts = [
+            style!(
+                self.palette.text_unselected.emphasis_2,
+                self.palette.text_unselected.background
+            )
+            .paint(" · "),
+            style!(
+                self.palette.text_unselected.base,
+                self.palette.text_unselected.background
+            )
+            .bold()
+            .paint("⌬ Agents"),
+        ];
+
+        LinePart {
+            part: AnsiStrings(&styled_parts).to_string(),
+            len: plain.width(),
+            tab_index: Some(crate::AGENTS_CLICK_SENTINEL),
+        }
+    }
+
+    /// Always-visible Composer entry point, clickable via the sentinel
+    /// tab_index. ✍︎ (U+270D + VS15 so no font promotes it to emoji) says
+    /// "drafting" without burning columns on the keycap — onboarding and
+    /// the tooltip teach Alt+e.
+    fn create_composer_chip(&self) -> LinePart {
+        let text = "✍︎ Composer";
+        let styled = style!(
+            self.palette.text_unselected.base,
+            self.palette.text_unselected.background
+        )
+        .bold()
+        .paint(text);
+
+        LinePart {
+            part: styled.to_string(),
+            len: text.width(),
+            tab_index: Some(crate::COMPOSER_CLICK_SENTINEL),
+        }
+    }
+
+    /// The fleet pulse: live agent-process count across every session of
+    /// every vendor — the rail's LIVE counter promoted to the window corner.
+    /// Clicking it opens the Gallery (cross-agent session history).
+    fn create_live_chip(&self, live_count: usize) -> LinePart {
+        let dot_color = if live_count > 0 {
+            self.palette.text_unselected.emphasis_1
+        } else {
+            self.palette.text_unselected.emphasis_2
+        };
+        let label = format!("LIVE {}", live_count);
+        let plain = format!(" · ䷅ {} ", label);
+        let styled_parts = [
+            style!(
+                self.palette.text_unselected.emphasis_2,
+                self.palette.text_unselected.background
+            )
+            .paint(" · "),
+            style!(dot_color, self.palette.text_unselected.background)
+                .bold()
+                .paint(format!("䷅ {} ", label)),
+        ];
+
+        LinePart {
+            part: AnsiStrings(&styled_parts).to_string(),
+            len: plain.width(),
+            tab_index: Some(crate::GALLERY_CLICK_SENTINEL),
+        }
     }
 
     fn create_tooltip_indicator(&self, toggle_key: &str, is_active: bool) -> LinePart {
@@ -484,96 +520,6 @@ impl RightSideElementsBuilder {
             tab_index: None,
         }
     }
-
-    fn create_swap_layout_status(
-        &self,
-        config: &TabLineConfig,
-        max_len: usize,
-    ) -> Option<LinePart> {
-        let swap_layout_name = config.active_swap_layout_name.as_ref()?;
-
-        let mut layout_name = format!(" {} ", swap_layout_name);
-        layout_name.make_ascii_uppercase();
-        let layout_name_len = layout_name.len() + 3;
-
-        let colors = SwapLayoutColors {
-            bg: self.palette.text_unselected.background,
-            fg: self.palette.ribbon_unselected.background,
-            green: self.palette.ribbon_selected.background,
-        };
-
-        let separator = tab_separator(self.capabilities);
-        let styled_parts = self.create_swap_layout_styled_parts(
-            &layout_name,
-            config.mode,
-            config.is_swap_layout_dirty,
-            &colors,
-            separator,
-        );
-
-        let indicator = format!("{}{}{}", styled_parts.0, styled_parts.1, styled_parts.2);
-        let (part, full_len) = (indicator.clone(), layout_name_len);
-        let short_len = layout_name_len + 1;
-
-        if full_len <= max_len {
-            Some(LinePart {
-                part,
-                len: full_len,
-                tab_index: None,
-            })
-        } else if short_len <= max_len && config.mode != InputMode::Locked {
-            Some(LinePart {
-                part: indicator,
-                len: short_len,
-                tab_index: None,
-            })
-        } else {
-            None
-        }
-    }
-
-    fn create_swap_layout_styled_parts(
-        &self,
-        layout_name: &str,
-        mode: InputMode,
-        is_dirty: bool,
-        colors: &SwapLayoutColors,
-        separator: &str,
-    ) -> (String, String, String) {
-        match mode {
-            InputMode::Locked => (
-                style!(colors.bg, colors.fg).paint(separator).to_string(),
-                style!(colors.bg, colors.fg)
-                    .italic()
-                    .paint(layout_name)
-                    .to_string(),
-                style!(colors.fg, colors.bg).paint(separator).to_string(),
-            ),
-            _ if is_dirty => (
-                style!(colors.bg, colors.fg).paint(separator).to_string(),
-                style!(colors.bg, colors.fg)
-                    .bold()
-                    .paint(layout_name)
-                    .to_string(),
-                style!(colors.fg, colors.bg).paint(separator).to_string(),
-            ),
-            _ => (
-                style!(colors.bg, colors.green).paint(separator).to_string(),
-                style!(colors.bg, colors.green)
-                    .bold()
-                    .paint(layout_name)
-                    .to_string(),
-                style!(colors.green, colors.bg).paint(separator).to_string(),
-            ),
-        }
-    }
-}
-
-#[derive(Debug)]
-struct SwapLayoutColors {
-    bg: PaletteColor,
-    fg: PaletteColor,
-    green: PaletteColor,
 }
 
 pub struct TabLineBuilder {
@@ -603,18 +549,29 @@ impl TabLineBuilder {
             self.split_tabs(all_tabs, active_tab_index);
 
         let prefix_builder = TabLinePrefixBuilder::new(self.palette, self.capabilities, self.cols);
-        let session_name = if self.config.hide_session_name {
-            None
-        } else {
-            self.config.session_name.as_deref()
-        };
-
         let mut prefix = prefix_builder.build(
-            session_name,
             self.config.mode,
             self.config.brand_text.as_deref(),
             self.config.brand_text_short.as_deref(),
         );
+        // The 🚥 zone: blank columns before the brand so the bar clears the
+        // macOS traffic lights in the native transparent window. A LinePart
+        // with tab_index None keeps the click map honest — both the tab and
+        // sentinel resolvers walk cumulative lens.
+        let left_inset = self.config.left_inset.min(self.cols / 2);
+        if left_inset > 0 {
+            let colors = self.palette.text_unselected;
+            prefix.insert(
+                0,
+                LinePart {
+                    part: style!(colors.base, colors.background)
+                        .paint(" ".repeat(left_inset))
+                        .to_string(),
+                    len: left_inset,
+                    tab_index: None,
+                },
+            );
+        }
         let prefix_len = calculate_total_length(&prefix);
 
         if prefix_len + active_tab.len > self.cols {
@@ -659,9 +616,8 @@ impl TabLineBuilder {
         let current_len = calculate_total_length(prefix);
 
         if current_len < self.cols {
-            let right_builder = RightSideElementsBuilder::new(self.palette, self.capabilities);
-            let available_space = self.cols.saturating_sub(current_len);
-            let mut right_elements = right_builder.build(&self.config, available_space);
+            let right_builder = RightSideElementsBuilder::new(self.palette);
+            let mut right_elements = right_builder.build(&self.config);
 
             let right_len = calculate_total_length(&right_elements);
 
@@ -699,5 +655,28 @@ pub fn tab_separator(capabilities: PluginCapabilities) -> &'static str {
         ARROW_SEPARATOR
     } else {
         ""
+    }
+}
+
+/// The operator-tuned mode chip set (glyph, three-letter code) — one visual
+/// language for all fourteen input modes. EnterSearch shares FND with Search
+/// on purpose: the extra ↵ marks the typing phase, a separate code would be
+/// an artificial state.
+pub fn mode_chip(mode: InputMode) -> (&'static str, &'static str) {
+    match mode {
+        InputMode::Normal => ("▷", "NRM"),
+        InputMode::Locked => ("⊝", "LCK"),
+        InputMode::Pane => ("◫", "PAN"),
+        InputMode::Tab => ("𝌁", "TAB"),
+        InputMode::Resize => ("⿺", "RES"),
+        InputMode::Move => ("⿻", "MOV"),
+        InputMode::Scroll => ("↕", "SCR"),
+        InputMode::Search => ("⌕", "FND"),
+        InputMode::EnterSearch => ("⌕↵", "FND"),
+        InputMode::RenameTab => ("✎", "RNT"),
+        InputMode::RenamePane => ("✎", "RNP"),
+        InputMode::Session => ("𝌆", "SES"),
+        InputMode::Prompt => ("⟩", "PMT"),
+        InputMode::Tmux => ("ⓣ", "TMX"),
     }
 }

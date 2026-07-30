@@ -12,7 +12,8 @@ layout {
         pane size=1 borderless=true {
             plugin location="compact-bar" {
                 brand_text " 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. "
-                brand_text_short " VC. "
+                // 🚥 zone: clear the macOS traffic lights in the native window
+                left_inset "9"
             }
         }
         pane split_direction="vertical" {
@@ -41,7 +42,7 @@ layout {
     tab name="Shell" hide_floating_panes=true {
         // Banner then interactive zsh — wakes immediately (no suspended Enter void).
         pane command="bash" name="Shell" {
-            args "-lc" "printf '\\n'; printf '  ┌────────────────────────────────────────────────────────────┐\\n'; printf '  │  VIBECRAFTED  ·  SHELL TAB                                  │\\n'; printf '  ├────────────────────────────────────────────────────────────┤\\n'; printf '  │  This is your work shell (not the Guide).                  │\\n'; printf '  │                                                            │\\n'; printf '  │  First commands:                                           │\\n'; printf '  │    vibecrafted start     open / attach operator flow       │\\n'; printf '  │    vibecrafted help      list CLI surfaces                 │\\n'; printf '  │                                                            │\\n'; printf '  │  Chrome (always on screen):                                │\\n'; printf '  │    LEFT  SESSIONS = other sessions / agent rooms (click)   │\\n'; printf '  │    TOP   tabs of THIS session: Start here | Shell          │\\n'; printf '  │    Ctrl+t then 1     back to the Guide map                 │\\n'; printf '  │    click a name on the left rail to jump sessions          │\\n'; printf '  └────────────────────────────────────────────────────────────┘\\n'; printf '\\n'; exec zsh -l"
+            args "-lc" "printf '\\n'; printf '  ┌────────────────────────────────────────────────────────────┐\\n'; printf '  │  VIBECRAFTED  ·  SHELL TAB                                 │\\n'; printf '  ├────────────────────────────────────────────────────────────┤\\n'; printf '  │  This is your work shell (not the Guide).                  │\\n'; printf '  │                                                            │\\n'; printf '  │  First commands:                                           │\\n'; printf '  │    vibecrafted start     open / attach operator flow       │\\n'; printf '  │    vibecrafted help      list CLI surfaces                 │\\n'; printf '  │                                                            │\\n'; printf '  │  Chrome (always on screen):                                │\\n'; printf '  │    LEFT  SESSIONS rail — your session block is lit         │\\n'; printf '  │    TOP   ◉ marks your tab · ⚿ LOCKED / ⌁ NORMAL chip       │\\n'; printf '  │    Alt+←→ tabs · Alt+↑↓ sessions  (Ctrl+arrows still work) │\\n'; printf '  │    Alt+e  Command Composer — draft in $VC_COMPOSER/$EDITOR │\\n'; printf '  │    Ctrl+t then 1  back to the Guide map                    │\\n'; printf '  └────────────────────────────────────────────────────────────┘\\n'; printf '\\n'; exec zsh -l"
         }
     }
 
