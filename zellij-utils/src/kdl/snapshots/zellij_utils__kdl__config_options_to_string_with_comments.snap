@@ -1,5 +1,6 @@
 ---
 source: zellij-utils/src/kdl/mod.rs
+assertion_line: 7270
 expression: fake_document.to_string()
 ---
  
@@ -105,8 +106,8 @@ scroll_buffer_size 100
  
 // Automatically switch this client to Locked mode after this many
 // seconds without keyboard or mouse input
-// Valid values: positive integers (0 = never; unset = 5)
-// Default value: 5
+// Valid values: positive integers (0 or unset = never)
+// Default value in the shipped config template: 30
 // 
 // auto_lock_after_seconds 5
  

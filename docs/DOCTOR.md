@@ -28,7 +28,7 @@ Run `vc-frame doctor` the moment any of these is said out loud:
 |---|---|
 | "the chrome keys from the guide do nothing" | config shadowing — the guide reads the assets, your session reads the frozen dump |
 | "Ctrl+q killed my whole session" | a frozen `Ctrl q → Quit` bind shadowing the shipped `Ctrl q → CloseFocus` |
-| "vc-frame freezes every 5 seconds" | lock stranding — autolock is on, but LOCK mode has no navigation left except `Ctrl+g` |
+| "vc-frame freezes every 30 seconds" | lock stranding — autolock is on, but LOCK mode has no navigation left except `Ctrl+g` |
 | "session `x` / the rail hop do not exist here" | verbs added after the dump was frozen |
 | "I fixed it in the source but nothing changed" | install freshness — the installed binary predates the checkout |
 
@@ -50,7 +50,7 @@ $ vc-frame doctor
     session "x"            missing                (kill current session + hop)
     Alt ←→ / Alt ↑↓        missing                (product tab / session nav)
     locked Ctrl ←→ ↑↓      missing                (optional LOCK bonus)
-[LOCK STRANDING]    WARN      auto_lock_after_seconds 5, LOCK knows only Ctrl+g
+[LOCK STRANDING]    WARN      auto_lock_after_seconds 30, LOCK knows only Ctrl+g
 [INSTALL FRESHNESS] ok        binary matches checkout
 [SHELL]             ok        /bin/zsh (caller environment — not the server process)
     → vc-frame repair key-bindings

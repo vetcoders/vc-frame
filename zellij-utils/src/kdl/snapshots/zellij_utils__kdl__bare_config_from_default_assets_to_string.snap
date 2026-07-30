@@ -373,4 +373,4 @@ load_plugins {
 web_client {
     font "monospace"
 }
-auto_lock_after_seconds 5
+auto_lock_after_seconds 30

@@ -300,11 +300,12 @@ impl InputHandler {
     /// input, switch this client to Locked mode. Fires once per idle period;
     /// any fresh input re-arms it.
     fn auto_lock_if_idle(&mut self) {
-        // Product default: 5s. The default.kdl asset documents it, but that
-        // template only reaches fresh installs — existing user configs
-        // predate the option, so the code-side default is what makes it
-        // real. An explicit 0 still means "never".
-        let timeout_secs = self.options.auto_lock_after_seconds.unwrap_or(5);
+        // Config-only: the code invents no default. The shipped default.kdl
+        // template carries the product value; a config without the option
+        // (or with an explicit 0) never auto-locks.
+        let Some(timeout_secs) = self.options.auto_lock_after_seconds else {
+            return;
+        };
         if timeout_secs == 0 {
             return;
         }

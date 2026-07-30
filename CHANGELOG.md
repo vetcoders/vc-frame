@@ -12,7 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 * feat(clinic): `vc-frame repair key-bindings` — backs up the config, retires the shadowing keybinds block behind a guard comment, and reports exactly which personal binds were lost; `--dry-run` supported (runbook: docs/DOCTOR.md)
 * fix(ipc): typed client receive path (`ClientReceiveOutcome`) distinguishes messages, disconnects, and protocol errors — ends the unknown-message flood that force-logged-out live clients
 * fix(session): CloseTab cleanup debt paid — session verbs, cleanup cap, abandon path, and ghost-session short-circuit; closing a pane is a one-shot action again instead of a session killer
-* feat(input): idle autolock with a 5-second product default (configurable; unset means the default, not never)
+* feat(input): idle autolock driven purely by config — `auto_lock_after_seconds 30` ships in the default config template; the code invents no number, and 0 or unset means never
 * feat(composer): `Alt+e` Command Composer honoring `$VC_COMPOSER`, with an always-visible clickable chip in the compact-bar
 * feat(chrome): compact-bar redesign in rail language — brand chip, inverted mode chip, session anchor, fisheye tab ribbons, fleet-pulse chip, and the Agents station chip opening the dispatcher
 * feat(chrome): `left_inset` compact-bar option so the bar clears the macOS traffic lights in a decoration-free host window

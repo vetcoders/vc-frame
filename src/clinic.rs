@@ -38,14 +38,6 @@ use zellij_utils::input::keybinds::Keybinds;
 use zellij_utils::input::layout::Layout;
 use zellij_utils::input::options::Options;
 
-/// The runtime default when `auto_lock_after_seconds` is absent from the config.
-///
-/// Mirrors `zellij_client::input_handler::auto_lock_if_idle`, where an absent
-/// option means five seconds and an explicit `0` means never. A doctor that
-/// treated "absent" as "off" would clear exactly the configs most likely to be
-/// stranded — the ones written before the option existed.
-const AUTO_LOCK_DEFAULT_SECONDS: u64 = 5;
-
 // ---------------------------------------------------------------- findings ---
 
 /// How loudly a finding should be said, and what it costs at the exit code.
@@ -391,9 +383,7 @@ pub fn diff_keybinds(contract: &Keybinds, effective: &Keybinds) -> KeybindDiff {
 /// purpose: it is the *only* binding upstream LOCK has, so a locked block that
 /// knows nothing else is exactly the stranded shape.
 pub fn lock_stranding(options: &Options, keybinds: &Keybinds) -> Option<u64> {
-    let seconds = options
-        .auto_lock_after_seconds
-        .unwrap_or(AUTO_LOCK_DEFAULT_SECONDS);
+    let seconds = options.auto_lock_after_seconds.unwrap_or(0);
     if seconds == 0 {
         return None;
     }
@@ -1006,11 +996,7 @@ fn diagnose_lock(diagnosis: &mut Diagnosis, options: &Options, keybinds: &Keybin
         ),
         None => diagnosis.ok_notes.push((
             Section::LockStranding,
-            if options
-                .auto_lock_after_seconds
-                .unwrap_or(AUTO_LOCK_DEFAULT_SECONDS)
-                == 0
-            {
+            if options.auto_lock_after_seconds.unwrap_or(0) == 0 {
                 "autolock off".to_owned()
             } else {
                 "LOCK keeps its navigation".to_owned()
@@ -1693,25 +1679,23 @@ theme "vc-frame"
 
     #[test]
     fn a_frozen_locked_block_is_stranded_under_the_shipped_autolock() {
-        // The assets ship `auto_lock_after_seconds 5`, so a user config that
+        // The assets ship `auto_lock_after_seconds 30`, so a user config that
         // says nothing inherits it — and a frozen LOCK block that knows only
-        // Ctrl+g turns that into a frame which appears to freeze every 5s.
+        // Ctrl+g turns that into a frame which appears to freeze every 30s.
         let config = effective(FROZEN_DUMP);
-        assert_eq!(config.options.auto_lock_after_seconds, Some(5));
-        assert_eq!(lock_stranding(&config.options, &config.keybinds), Some(5));
+        assert_eq!(config.options.auto_lock_after_seconds, Some(30));
+        assert_eq!(lock_stranding(&config.options, &config.keybinds), Some(30));
     }
 
     #[test]
-    fn an_unset_autolock_reads_as_five_seconds_not_as_off() {
-        // Mirrors `auto_lock_if_idle`'s `unwrap_or(5)`. A doctor that read
-        // "absent" as "off" would clear exactly the pre-option configs at risk.
+    fn an_unset_autolock_reads_as_off() {
+        // Mirrors `auto_lock_if_idle`: the code invents no default. The
+        // product value lives only in the shipped config template, so an
+        // options set without the key never auto-locks and never strands.
         let config = effective(FROZEN_DUMP);
         let mut options = config.options.clone();
         options.auto_lock_after_seconds = None;
-        assert_eq!(
-            lock_stranding(&options, &config.keybinds),
-            Some(AUTO_LOCK_DEFAULT_SECONDS)
-        );
+        assert_eq!(lock_stranding(&options, &config.keybinds), None);
     }
 
     #[test]

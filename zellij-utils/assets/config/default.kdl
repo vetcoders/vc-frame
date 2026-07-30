@@ -628,9 +628,10 @@ load_plugins {
 
 // Automatically switch this client to Locked mode after this many
 // seconds without keyboard or mouse input
-// Valid values: positive integers (0 = never; unset = 5)
-// Default value: 5
-auto_lock_after_seconds 5
+// This is the only place the product default lives — the code invents
+// no number. Valid values: positive integers (0 or unset = never)
+// Default value in this template: 30
+auto_lock_after_seconds 30
 
 // A command to run (will be wrapped with sh -c and provided the RESURRECT_COMMAND env variable)
 // after Zellij attempts to discover a command inside a pane when resurrecting sessions, the STDOUT

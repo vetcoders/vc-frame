@@ -1,5 +1,6 @@
 ---
 source: zellij-utils/src/setup.rs
+assertion_line: 909
 expression: "format!(\"{:#?}\", config)"
 ---
 Config {
@@ -106,7 +107,7 @@ Config {
         on_force_close: None,
         scroll_buffer_size: None,
         auto_lock_after_seconds: Some(
-            5,
+            30,
         ),
         copy_command: None,
         copy_clipboard: None,

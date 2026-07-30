@@ -483,10 +483,10 @@ web_client {
  
 // Automatically switch this client to Locked mode after this many
 // seconds without keyboard or mouse input
-// Valid values: positive integers (0 = never; unset = 5)
-// Default value: 5
+// Valid values: positive integers (0 or unset = never)
+// Default value in the shipped config template: 30
 // 
-auto_lock_after_seconds 5
+auto_lock_after_seconds 30
  
 // Provide a command to execute when copying text. The text will be piped to
 // the stdin of the program to perform the copy. This can be used with

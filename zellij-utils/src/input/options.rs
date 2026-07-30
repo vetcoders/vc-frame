@@ -93,7 +93,8 @@ pub struct Options {
     pub scroll_buffer_size: Option<usize>,
 
     /// Automatically switch this client to Locked mode after this many
-    /// seconds without keyboard or mouse input (0 = never; unset = 5)
+    /// seconds without keyboard or mouse input (0 or unset = never; the
+    /// shipped config template sets 30)
     #[clap(long, value_parser)]
     #[serde(default)]
     pub auto_lock_after_seconds: Option<u64>,

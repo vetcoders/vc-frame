@@ -721,7 +721,7 @@ impl Page {
                     Text::new("  Ctrl+s  SCROLL  scrollback / copy").color_substring(3, "Ctrl+s"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("  Ctrl+g  LOCK    lock input (auto-lock default 5s idle)")
+                    Text::new("  Ctrl+g  LOCK    lock input (auto-lock: auto_lock_after_seconds)")
                         .color_substring(3, "Ctrl+g"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
