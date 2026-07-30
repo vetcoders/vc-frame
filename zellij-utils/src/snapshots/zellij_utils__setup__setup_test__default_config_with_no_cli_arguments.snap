@@ -191,7 +191,7 @@ Config {
                             command: "sh",
                             args: [
                                 "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; \"${EDITOR:-vim}\" \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
                             ],
                             cwd: None,
                             direction: None,
@@ -884,7 +884,7 @@ Config {
                             command: "sh",
                             args: [
                                 "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; \"${EDITOR:-vim}\" \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
                             ],
                             cwd: None,
                             direction: None,
@@ -1443,7 +1443,7 @@ Config {
                             command: "sh",
                             args: [
                                 "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; \"${EDITOR:-vim}\" \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
                             ],
                             cwd: None,
                             direction: None,
@@ -2242,7 +2242,7 @@ Config {
                             command: "sh",
                             args: [
                                 "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; \"${EDITOR:-vim}\" \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
                             ],
                             cwd: None,
                             direction: None,
@@ -2881,7 +2881,7 @@ Config {
                             command: "sh",
                             args: [
                                 "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; \"${EDITOR:-vim}\" \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
                             ],
                             cwd: None,
                             direction: None,
@@ -3390,7 +3390,7 @@ Config {
                             command: "sh",
                             args: [
                                 "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; \"${EDITOR:-vim}\" \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
                             ],
                             cwd: None,
                             direction: None,
@@ -3887,7 +3887,7 @@ Config {
                             command: "sh",
                             args: [
                                 "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; \"${EDITOR:-vim}\" \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
                             ],
                             cwd: None,
                             direction: None,
@@ -4421,7 +4421,7 @@ Config {
                             command: "sh",
                             args: [
                                 "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; \"${EDITOR:-vim}\" \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
                             ],
                             cwd: None,
                             direction: None,
@@ -4866,7 +4866,7 @@ Config {
                             command: "sh",
                             args: [
                                 "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; \"${EDITOR:-vim}\" \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
                             ],
                             cwd: None,
                             direction: None,
@@ -5369,7 +5369,7 @@ Config {
                             command: "sh",
                             args: [
                                 "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; \"${EDITOR:-vim}\" \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
                             ],
                             cwd: None,
                             direction: None,
@@ -5995,7 +5995,7 @@ Config {
                             command: "sh",
                             args: [
                                 "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; \"${EDITOR:-vim}\" \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
                             ],
                             cwd: None,
                             direction: None,
@@ -6501,7 +6501,7 @@ Config {
                             command: "sh",
                             args: [
                                 "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; \"${EDITOR:-vim}\" \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
                             ],
                             cwd: None,
                             direction: None,
@@ -7076,7 +7076,7 @@ Config {
                             command: "sh",
                             args: [
                                 "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; \"${EDITOR:-vim}\" \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
                             ],
                             cwd: None,
                             direction: None,

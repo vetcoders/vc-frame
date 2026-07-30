@@ -45,8 +45,10 @@ pub const COMPOSER_CLICK_SENTINEL: usize = usize::MAX;
 /// Sentinel tab_index for the ䷅ LIVE fleet chip — click opens the Gallery.
 pub const GALLERY_CLICK_SENTINEL: usize = usize::MAX - 1;
 /// Same drafting contract as the Alt+e keybind in the default config: draft
-/// in $EDITOR, land the text in the underlying pane unexecuted, clean up.
-const COMPOSER_COMMAND: &str = r#"f=$(mktemp "${TMPDIR:-/tmp}/vc-composer.XXXXXX") || exit 1; "${EDITOR:-vim}" "$f"; if [ -s "$f" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars "$(cat "$f")"; fi; rm -f -- "$f""#;
+/// in $VC_COMPOSER (or $EDITOR), land the text in the underlying pane
+/// unexecuted, clean up. VC_COMPOSER expands unquoted on purpose — it is a
+/// command line ("open -W -n -a Pensieve", "pensieve --wait"), not a path.
+const COMPOSER_COMMAND: &str = r#"f=$(mktemp "${TMPDIR:-/tmp}/vc-composer.XXXXXX") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} "$f"; if [ -s "$f" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars "$(cat "$f")"; fi; rm -f -- "$f""#;
 /// Gallery v0: the aicx wizard is the cross-agent session gallery — one
 /// timeline over claude/codex/grok/gemini histories. The chip opens it in a
 /// floating pane; a missing aicx leaves an explanatory line instead of a

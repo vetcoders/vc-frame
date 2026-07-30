@@ -218,7 +218,7 @@ keybinds clear-defaults=true {
         bind "Alt [" { PreviousSwapLayout; }
         bind "Alt ]" { NextSwapLayout; }
         bind "Alt e" {
-            Run "sh" "-c" "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; \"${EDITOR:-vim}\" \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"" {
+            Run "sh" "-c" "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"" {
                 floating true
                 close_on_exit true
                 name "Composer"
