@@ -1,5 +1,6 @@
 use crate::ipc::{
-    ClientToServerMsg, ExitReason, IpcReceiverWithContext, IpcSenderWithContext, ServerToClientMsg,
+    ClientReceiveOutcome, ClientToServerMsg, ExitReason, IpcReceiverWithContext,
+    IpcSenderWithContext, ServerToClientMsg,
 };
 use crate::pane_size::Size;
 use interprocess::local_socket::{ListenerOptions, prelude::*};
@@ -162,6 +163,67 @@ fn client_to_server_message_over_socket() {
         "should be ConnStatus, got: {:?}",
         msg
     );
+
+    client.join().expect("client thread panicked");
+}
+
+#[test]
+fn client_disconnect_is_typed_eof_not_unknown_message() {
+    let (_guard, name) = new_ipc();
+    let listener = bind_listener(&name);
+
+    let client = std::thread::spawn({
+        let name = name.clone();
+        move || {
+            // Connect and drop immediately — peer EOF without a frame.
+            let _stream = connect_stream(&name);
+        }
+    });
+
+    let stream = listener.incoming().next().unwrap().expect("accept failed");
+    let mut receiver: IpcReceiverWithContext<ClientToServerMsg> =
+        IpcReceiverWithContext::new(stream);
+
+    match receiver.recv_client_msg_outcome() {
+        ClientReceiveOutcome::Disconnected => {},
+        other => panic!("expected Disconnected after client hangup, got {other:?}"),
+    }
+
+    client.join().expect("client thread panicked");
+}
+
+#[test]
+fn client_garbage_frame_is_protocol_error_not_disconnect() {
+    let (_guard, name) = new_ipc();
+    let listener = bind_listener(&name);
+
+    let client = std::thread::spawn({
+        let name = name.clone();
+        move || {
+            use std::io::Write;
+            let mut stream = connect_stream(&name);
+            // Length-prefix claims 4 payload bytes of non-protobuf garbage.
+            stream.write_all(&4u32.to_le_bytes()).expect("len");
+            stream.write_all(&[0xff, 0xff, 0xff, 0xff]).expect("body");
+            stream.flush().expect("flush");
+            // Keep the socket open long enough for the server to read.
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    });
+
+    let stream = listener.incoming().next().unwrap().expect("accept failed");
+    let mut receiver: IpcReceiverWithContext<ClientToServerMsg> =
+        IpcReceiverWithContext::new(stream);
+
+    match receiver.recv_client_msg_outcome() {
+        ClientReceiveOutcome::ProtocolError(reason) => {
+            assert!(
+                reason.contains("decode") || reason.contains("conversion"),
+                "reason should name the protocol failure: {reason}"
+            );
+        },
+        other => panic!("expected ProtocolError for garbage frame, got {other:?}"),
+    }
 
     client.join().expect("client thread panicked");
 }

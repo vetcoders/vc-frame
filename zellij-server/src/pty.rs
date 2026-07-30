@@ -3819,25 +3819,14 @@ pub fn get_default_shell() -> PathBuf {
 
 #[cfg(not(windows))]
 fn user_login_shell() -> Option<PathBuf> {
-    // Prefer getpwuid — works when the server was started without a login shell.
-    // Safety: getpwuid returns a static pointer; we only read pw_shell and copy.
-    unsafe {
-        let uid = libc::getuid();
-        let passwd = libc::getpwuid(uid);
-        if passwd.is_null() {
-            return None;
-        }
-        let shell_ptr = (*passwd).pw_shell;
-        if shell_ptr.is_null() {
-            return None;
-        }
-        let c_str = std::ffi::CStr::from_ptr(shell_ptr);
-        let shell = c_str.to_string_lossy();
-        if shell.is_empty() {
-            return None;
-        }
-        Some(PathBuf::from(shell.as_ref()))
+    // Reentrant passwd lookup via nix (getpwuid_r under the hood). Avoids the
+    // non-reentrant getpwuid static buffer and keeps this module free of bare
+    // `unsafe` blocks for shell resolution.
+    let user = nix::unistd::User::from_uid(nix::unistd::Uid::current()).ok()??;
+    if user.shell.as_os_str().is_empty() {
+        return None;
     }
+    Some(user.shell)
 }
 
 #[cfg(windows)]

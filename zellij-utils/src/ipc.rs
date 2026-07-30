@@ -366,16 +366,42 @@ where
         }
     }
 
-    pub fn recv_client_msg(&mut self) -> Option<(ClientToServerMsg, ErrorContext)> {
+    /// Typed client receive: preserve the distinction between a normal
+    /// disconnect, a protocol failure, and a usable message.
+    ///
+    /// The historical `Option` surface collapsed EOF, decode errors, and
+    /// conversion failures into `None`, which made the server route loop treat
+    /// a clean disconnect as "unknown message" and spin until logout.
+    pub fn recv_client_msg_outcome(&mut self) -> ClientReceiveOutcome {
         match read_protobuf_message::<ProtoClientToServerMsg>(&mut self.receiver) {
             Ok(proto_msg) => match proto_msg.try_into() {
-                Ok(rust_msg) => Some((rust_msg, ErrorContext::default())),
+                Ok(rust_msg) => {
+                    ClientReceiveOutcome::Message(Box::new(rust_msg), ErrorContext::default())
+                },
                 Err(e) => {
                     warn!("Error converting protobuf to ClientToServerMsg: {:?}", e);
-                    None
+                    ClientReceiveOutcome::ProtocolError(format!(
+                        "protobuf → ClientToServerMsg conversion failed: {e:?}"
+                    ))
                 },
             },
-            Err(_e) => None,
+            Err(e) => {
+                if ipc_error_is_disconnect(&e) {
+                    ClientReceiveOutcome::Disconnected
+                } else {
+                    warn!("Error reading ClientToServerMsg protobuf: {:?}", e);
+                    ClientReceiveOutcome::ProtocolError(format!(
+                        "ClientToServerMsg decode failed: {e}"
+                    ))
+                }
+            },
+        }
+    }
+
+    pub fn recv_client_msg(&mut self) -> Option<(ClientToServerMsg, ErrorContext)> {
+        match self.recv_client_msg_outcome() {
+            ClientReceiveOutcome::Message(msg, ctx) => Some((*msg, ctx)),
+            ClientReceiveOutcome::Disconnected | ClientReceiveOutcome::ProtocolError(_) => None,
         }
     }
 
@@ -403,6 +429,39 @@ where
         self.try_get_sender()
             .expect("failed to clone IPC receiver stream")
     }
+}
+
+/// Outcome of a typed client → server receive.
+///
+/// Callers that care about availability (the server route loop) must match on
+/// this enum. Collapsing everything into `Option::None` is how clean
+/// disconnects were misread as unknown messages.
+#[derive(Debug)]
+pub enum ClientReceiveOutcome {
+    /// Boxed: `ClientToServerMsg` is large; keep the enum stack-small.
+    Message(Box<ClientToServerMsg>, ErrorContext),
+    /// Peer closed the socket (EOF / broken pipe / reset). End the route
+    /// without a retry loop.
+    Disconnected,
+    /// Decode or conversion failure. Fail closed; do not spin.
+    ProtocolError(String),
+}
+
+fn ipc_error_is_disconnect(error: &anyError) -> bool {
+    use std::io::ErrorKind;
+    for cause in error.chain() {
+        if let Some(io_error) = cause.downcast_ref::<io::Error>() {
+            match io_error.kind() {
+                ErrorKind::UnexpectedEof
+                | ErrorKind::ConnectionReset
+                | ErrorKind::BrokenPipe
+                | ErrorKind::ConnectionAborted
+                | ErrorKind::NotConnected => return true,
+                _ => {},
+            }
+        }
+    }
+    false
 }
 
 // Protobuf wire format utilities

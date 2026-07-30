@@ -28,7 +28,10 @@ use zellij_utils::{
         actions::{Action, SearchDirection, SearchOption},
         command::TerminalAction,
     },
-    ipc::{ClientToServerMsg, ExitReason, IpcReceiverWithContext, ServerToClientMsg},
+    ipc::{
+        ClientReceiveOutcome, ClientToServerMsg, ExitReason, IpcReceiverWithContext,
+        ServerToClientMsg,
+    },
 };
 
 use crate::ClientId;
@@ -2281,11 +2284,10 @@ pub(crate) fn route_thread_main(
     let mut retry_queue = VecDeque::new();
     let err_context = || format!("failed to handle instruction for client {client_id}");
     let mut seen_cli_pipes = HashSet::new();
-    let mut consecutive_unknown_messages_received = 0;
     'route_loop: loop {
-        match receiver.recv_client_msg() {
-            Some((instruction, err_ctx)) => {
-                consecutive_unknown_messages_received = 0;
+        match receiver.recv_client_msg_outcome() {
+            ClientReceiveOutcome::Message(instruction, err_ctx) => {
+                let instruction = *instruction;
                 err_ctx.update_thread_ctx();
                 let mut handle_instruction = |instruction: ClientToServerMsg,
                                               mut retry_queue: Option<
@@ -2787,32 +2789,29 @@ pub(crate) fn route_thread_main(
                 if should_break {
                     break 'route_loop;
                 }
+                // signal to the client that the action has finished processing and it can either
+                // exit (if it's a cli client) or allow the user to perform another action (if it's
+                // an actively connected user)
+                let _ = os_input.send_to_client(client_id, ServerToClientMsg::UnblockInputThread);
             },
-            None => {
-                consecutive_unknown_messages_received += 1;
-                if consecutive_unknown_messages_received == 1 {
-                    log::error!("Received unknown message from client.");
-                }
-                if consecutive_unknown_messages_received >= 1000 {
-                    log::error!(
-                        "Client sent over 1000 consecutive unknown messages, this is probably an infinite loop, logging client out"
-                    );
-                    let _ = os_input.send_to_client(
-                        client_id,
-                        ServerToClientMsg::Exit {
-                            exit_reason: ExitReason::Error("Received empty message".to_string()),
-                        },
-                    );
-                    let _ = to_server.send(ServerInstruction::RemoveClient(client_id));
-                    break 'route_loop;
-                }
+            ClientReceiveOutcome::Disconnected => {
+                // Clean EOF / broken pipe — end the route without the historical
+                // "unknown message" retry loop that eventually forced logout.
+                log::info!("Client {client_id} disconnected");
+                break 'route_loop;
+            },
+            ClientReceiveOutcome::ProtocolError(reason) => {
+                log::error!("Client {client_id} protocol error: {reason}");
+                let _ = os_input.send_to_client(
+                    client_id,
+                    ServerToClientMsg::Exit {
+                        exit_reason: ExitReason::Error(format!("Protocol error: {reason}")),
+                    },
+                );
+                let _ = to_server.send(ServerInstruction::RemoveClient(client_id));
+                break 'route_loop;
             },
         }
-
-        // signal to the client that the action has finished processing and it can either exit (if
-        // it's a cli client) or allow the user to perform another action (if it's an actively
-        // connected user)
-        let _ = os_input.send_to_client(client_id, ServerToClientMsg::UnblockInputThread);
     }
     // route thread exited, make sure we clean up
     let _ = to_server.send(ServerInstruction::RemoveClient(client_id));

@@ -9,8 +9,10 @@ the guide describes a frame you are not running.
 The clinic has two roles and they never blur:
 
 - **`vc-frame doctor` — the diagnostician.** Read-only. Reads the config,
-  compares the effective contract against the one shipped in the assets, and
-  reports. It never writes a byte.
+  applies the same layout overlay startup uses (`default_layout` /
+  layout_dir), compares that **session-effective** contract against the one
+  shipped in the assets, and reports. It never writes a byte. Config-only
+  green is forbidden: a layout can inject keybinds after the config parse.
 - **`vc-frame repair key-bindings` — the therapist.** Writes exactly one
   file, the user config, and only after a timestamped backup.
 
@@ -49,7 +51,7 @@ $ vc-frame doctor
     locked Ctrl ←→ ↑↓      missing                (tab / session navigation)
 [LOCK STRANDING]    WARN      auto_lock_after_seconds 5, LOCK knows only Ctrl+g
 [INSTALL FRESHNESS] ok        binary matches checkout
-[SHELL]             INFO      not in the server env; resolved from passwd
+[SHELL]             ok        /bin/zsh (caller environment — not the server process)
     → vc-frame repair key-bindings
 exit 2
 
@@ -77,7 +79,8 @@ right about it.
 | `config-shadowing` | WARN | contract verbs simply absent: session `x`, session `r` (rail), LOCK navigation | same, or add the binds by hand |
 | `lock-stranding` | WARN | `auto_lock_after_seconds > 0` while LOCK has no navigation beyond `Ctrl+g` — the frame appears to freeze every N seconds | repair, or set `auto_lock_after_seconds 0` |
 | `install-freshness` | WARN | the installed binary is older than the checkout — a fix in the source that is not in the binary looks exactly like a fix that does not work | `make install` |
-| `shell` | INFO | no `SHELL` in the server environment; the login shell was resolved from passwd | none; informational |
+| `shell` | INFO | no `SHELL` in the **caller** environment (the process running `doctor`); the live server has its own env → passwd → `/bin/sh` chain | none; informational |
+| `config-shadowing` | WARN | selected layout could not be analysed — doctor refuses to claim a match because layout may override keybinds | fix `default_layout` / `layout_dir`, or drop them for the built-in default |
 | `config-parse` | ERROR | the config does not parse — vc-frame is running on defaults and your file is doing nothing | fix the reported KDL error |
 
 Exit codes are the contract:

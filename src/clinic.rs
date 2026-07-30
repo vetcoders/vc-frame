@@ -31,9 +31,11 @@ use std::time::SystemTime;
 use kdl::{KdlDocument, KdlNode};
 use zellij_utils::cli::{CliArgs, RepairCli};
 use zellij_utils::data::{BareKey, InputMode, KeyWithModifier};
+use zellij_utils::home::{find_default_config_dir, get_layout_dir};
 use zellij_utils::input::actions::Action;
 use zellij_utils::input::config::{Config, ConfigError, DEFAULT_CONFIG_FILE_NAME};
 use zellij_utils::input::keybinds::Keybinds;
+use zellij_utils::input::layout::Layout;
 use zellij_utils::input::options::Options;
 
 /// The runtime default when `auto_lock_after_seconds` is absent from the config.
@@ -219,8 +221,13 @@ pub struct BindGroup {
 }
 
 impl BindGroup {
-    /// True when this bind can tear down the session while the contract's
+    /// True when this bind tears down the whole session while the contract's
     /// cannot — the one class that earns CRITICAL.
+    ///
+    /// Scope is intentionally narrow: only [`Action::Quit`]. Other
+    /// session-damaging verbs (`CloseTab`, `CloseFocus`, kill-session, …)
+    /// stay WARN until a fuller taxonomy lands. Do not read this as
+    /// "every destructive action".
     pub fn is_destructive_divergence(&self) -> bool {
         quits(&self.actual) && !quits(&self.contract)
     }
@@ -616,7 +623,7 @@ fn diagnose(config_path: Option<&Path>, raw: Option<&str>) -> Diagnosis {
 }
 
 fn diagnose_config(diagnosis: &mut Diagnosis, path: &Path, raw: &str, contract: &Config) {
-    let effective = match Config::from_kdl(raw, Some(contract.clone())) {
+    let config_only = match Config::from_kdl(raw, Some(contract.clone())) {
         Ok(config) => config,
         Err(error) => {
             diagnosis.findings.push(
@@ -642,6 +649,29 @@ fn diagnose_config(diagnosis: &mut Diagnosis, path: &Path, raw: &str, contract: 
     diagnosis
         .ok_notes
         .push((Section::ConfigParse, "well defined".to_owned()));
+
+    // Startup runs Layout::from_* after config parse and merges layout-side
+    // config (including keybinds) into the session. Doctor must use that same
+    // session-effective surface — config-only green is a false green.
+    let (effective, layout_label) = match apply_session_layout(config_only.clone()) {
+        Ok((merged, label)) => (merged, Some(label)),
+        Err(error) => {
+            diagnosis.findings.push(
+                Finding::new(
+                    Section::ConfigShadowing,
+                    Severity::Warn,
+                    "layout not analysed — session keybinds may differ from this report"
+                        .to_owned(),
+                    "fix default_layout / layout_dir, or remove them to use the built-in default",
+                )
+                .with_detail(vec![
+                    format!("layout resolve error: {error}"),
+                    "startup applies the selected layout on top of the config; without a readable layout the clinic cannot claim the effective contract matches the assets".to_owned(),
+                ]),
+            );
+            (config_only, None)
+        },
+    };
 
     let shape = inspect_shadowing(raw).unwrap_or_default();
     let diff = diff_keybinds(&contract.keybinds, &effective.keybinds);
@@ -739,11 +769,16 @@ fn diagnose_config(diagnosis: &mut Diagnosis, path: &Path, raw: &str, contract: 
                 )),
             );
         }
-    } else if diff.is_clean() {
+    } else if diff.is_clean()
+        && let Some(label) = layout_label.as_ref()
+    {
         diagnosis.ok_notes.push((
             Section::ConfigShadowing,
-            "the effective contract matches the assets".to_owned(),
+            format!(
+                "session-effective contract (config + layout `{label}`) matches the assets"
+            ),
         ));
+        // layout_label == None: layout failed; the WARN above already forbids green.
     }
 
     if !diff.extra.is_empty() {
@@ -761,6 +796,26 @@ fn diagnose_config(diagnosis: &mut Diagnosis, path: &Path, raw: &str, contract: 
     }
 
     diagnose_lock(diagnosis, &effective.options, &effective.keybinds);
+}
+
+/// Apply the same layout overlay startup uses: `default_layout` (or the
+/// built-in `default` asset) merged through [`Layout::from_path_or_default`].
+///
+/// Returns the merged config and a short layout label for the report.
+fn apply_session_layout(config: Config) -> Result<(Config, String), ConfigError> {
+    let layout_dir = config
+        .options
+        .layout_dir
+        .clone()
+        .or_else(|| get_layout_dir(find_default_config_dir()))
+        .map(|dir| dir.canonicalize().unwrap_or(dir));
+    let chosen = config.options.default_layout.clone();
+    let label = chosen
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "default".to_owned());
+    let (_, merged) = Layout::from_path_or_default(chosen.as_ref(), layout_dir, config)?;
+    Ok((merged, label))
 }
 
 /// How many evidence lines a finding may carry.
@@ -934,26 +989,30 @@ fn diagnose_freshness(diagnosis: &mut Diagnosis) {
 }
 
 fn diagnose_shell(diagnosis: &mut Diagnosis) {
+    // This is the *caller's* environment (the process running `doctor`), not
+    // proof of the live server's SHELL. The server has its own env → passwd →
+    // /bin/sh chain; do not imply this line audited that process.
     let shell = std::env::var("SHELL").unwrap_or_default();
     if shell.is_empty() {
         diagnosis.findings.push(
             Finding::new(
                 Section::Shell,
                 Severity::Info,
-                "no SHELL in this environment; the login shell resolves from passwd",
+                "no SHELL in the caller environment; the server falls back to passwd then /bin/sh",
                 "none; informational",
             )
             .with_detail(vec![
-                "a host preset that launches vc-frame directly never passes a login \
-                 shell through — the server reconstructs it from the passwd database \
-                 before falling back to /bin/sh"
+                "this line reads the doctor process, not a running server — a host \
+                 preset that launches vc-frame directly may still reconstruct the \
+                 login shell from passwd before /bin/sh"
                     .to_owned(),
             ]),
         );
     } else {
-        diagnosis
-            .ok_notes
-            .push((Section::Shell, format!("{shell} (from the environment)")));
+        diagnosis.ok_notes.push((
+            Section::Shell,
+            format!("{shell} (caller environment — not the server process)"),
+        ));
     }
 }
 
@@ -1689,6 +1748,76 @@ theme "vc-frame"
             healthy.in_section(Section::LockStranding).is_empty(),
             "{:#?}",
             healthy.in_section(Section::LockStranding)
+        );
+        let ok = healthy
+            .ok_notes
+            .iter()
+            .find(|(section, _)| *section == Section::ConfigShadowing)
+            .map(|(_, note)| note.as_str())
+            .unwrap_or("");
+        assert!(
+            ok.contains("session-effective contract"),
+            "green must name the layout-aware path, got {ok:?}"
+        );
+    }
+
+    /// A layout that injects keybinds is part of session truth. Config-only
+    /// analysis would report green; session-effective must catch the Quit.
+    #[test]
+    fn layout_supplied_keybinds_enter_the_session_effective_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout_dir = dir.path().join("layouts");
+        std::fs::create_dir_all(&layout_dir).unwrap();
+        std::fs::write(
+            layout_dir.join("evil.kdl"),
+            r#"
+layout {
+    pane
+}
+keybinds {
+    shared_except "locked" {
+        bind "Ctrl q" { Quit; }
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let raw = format!(
+            r#"
+default_layout "evil"
+layout_dir "{}"
+"#,
+            layout_dir.display()
+        );
+        let diagnosis = diagnose(Some(Path::new("/tmp/config.kdl")), Some(&raw));
+        let shadowing = diagnosis.in_section(Section::ConfigShadowing);
+        assert!(
+            shadowing.iter().any(|f| f.severity == Severity::Critical
+                && f.title.contains("Ctrl q")
+                && f.title.contains("Quit")),
+            "layout-injected Quit must be CRITICAL, got {shadowing:#?}"
+        );
+        assert_eq!(diagnosis.exit_code(), 2, "{diagnosis:#?}");
+    }
+
+    #[test]
+    fn shell_status_names_the_caller_not_the_server() {
+        let diagnosis = diagnose(None, None);
+        let from_ok = diagnosis
+            .ok_notes
+            .iter()
+            .find(|(section, _)| *section == Section::Shell)
+            .map(|(_, text)| text.as_str());
+        let from_finding = diagnosis
+            .findings
+            .iter()
+            .find(|f| f.section == Section::Shell)
+            .map(|f| f.title.as_str());
+        let shell_text = from_ok.or(from_finding).unwrap_or("");
+        assert!(
+            shell_text.contains("caller"),
+            "shell line must not claim server truth, got {shell_text:?}"
         );
     }
 
