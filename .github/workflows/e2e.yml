@@ -25,8 +25,11 @@ jobs:
           PASSWORD_ACCESS: true
           USER_PASSWORD: test
           USER_NAME: test
+        # the 127.0.0.1 prefix is mandatory: this job runs on a self-hosted runner with a
+        # public IPv4, and docker publish DNATs into the FORWARD path, which ufw (INPUT only)
+        # does not filter. without it, this password-auth ssh service is exposed to the internet.
         ports:
-          - 2222:2222
+          - 127.0.0.1:2222:2222
         options: -v ${{ github.workspace }}/target:/usr/src/zellij --name ssh
     steps:
     - uses: actions/checkout@v4
