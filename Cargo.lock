@@ -4017,6 +4017,7 @@ dependencies = [
  "insta",
  "interprocess",
  "isahc",
+ "kdl",
  "log",
  "miette",
  "names",

@@ -1,3 +1,4 @@
+mod clinic;
 mod commands;
 mod run_triage_cli;
 #[cfg(test)]
@@ -25,6 +26,16 @@ fn main() {
     if opts.build_info {
         println!("{}", zellij_utils::build_info::build_info().to_json());
         std::process::exit(0);
+    }
+
+    // The clinic diagnoses and treats the config itself, so it must answer
+    // before any client, server or IPC work — a frozen config is exactly the
+    // state in which the rest of the startup path is not to be trusted.
+    if let Some(Command::Doctor(doctor_cli)) = &opts.command {
+        std::process::exit(clinic::doctor(&opts, doctor_cli.json));
+    }
+    if let Some(Command::Repair(repair_cli)) = &opts.command {
+        std::process::exit(clinic::repair(&opts, repair_cli));
     }
 
     {

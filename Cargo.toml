@@ -28,6 +28,7 @@ clap = { workspace = true }
 dialoguer = { workspace = true }
 humantime = { workspace = true }
 interprocess = { workspace = true }
+kdl = { workspace = true }
 log = { workspace = true }
 miette = { workspace = true }
 names = { workspace = true }
