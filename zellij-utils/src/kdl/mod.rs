@@ -3383,7 +3383,7 @@ impl Options {
             " ",
             "// Automatically switch this client to Locked mode after this many",
             "// seconds without keyboard or mouse input",
-            "// Valid values: positive integers (0 or unset = never)",
+            "// Valid values: positive integers (0 = never; unset = 5)",
             "// Default value: 5",
             "// ",
         );
