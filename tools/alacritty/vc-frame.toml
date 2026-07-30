@@ -56,23 +56,15 @@ bindings = [
 
 # ─── option_as_alt survival kit ─────────────────────────────────────────────
 # `option_as_alt = "Both"` takes the whole Option layer away from macOS text
-# input. Two things break and both are re-injected explicitly below:
+# input. Locale characters typed with Option are re-injected below (Polish
+# shown — the operator's daily layer; adapt or delete for your locale).
+# Without these, Option+letter reaches vc-frame as Alt and the diacritic
+# never appears.
 #
-# 1. Word-jump: Option+Left/Right would send ESC[1;3D / ESC[1;3C, which most
-#    shells don't bind — leaking literal ";3D" into the prompt.
-[[keyboard.bindings]]
-key = "Left"
-mods = "Alt"
-chars = "\u001Bb"
-
-[[keyboard.bindings]]
-key = "Right"
-mods = "Alt"
-chars = "\u001Bf"
-
-# 2. Locale characters typed with Option (Polish shown — the operator's daily
-#    layer; adapt or delete for your locale). Without these, Option+letter
-#    reaches vc-frame as Alt and the diacritic never appears.
+# Word-jump is NOT host-bound: Alt+Left/Right are the product key-contract
+# for tabs in unlocked modes, and LOCK-mode word-jump is done inside
+# vc-frame (`Write 27 98/102` in assets/config/default.kdl). Host chars for
+# Alt+arrows would steal those keys from vc-frame.
 [[keyboard.bindings]]
 key = "A"
 mods = "Alt"
@@ -170,16 +162,32 @@ key = "Enter"
 mods = "Shift"
 chars = "\u001B\r"
 
+# ─── Host URL / hyperlink hints ─────────────────────────────────────────────
+# While mouse-reporting is active, Alacritty requires Shift to activate hints.
+# That is the official host-side browser/open gesture:
+#   Shift+click URL / OSC 8 hyperlink → open (macOS `open`)
+# vc-frame still owns bare Click and Alt+Shift / Ctrl+Shift for paths without
+# OSC 8. Keep mouse.enabled = true — without it Shift+click is a lottery of
+# Alacritty defaults across versions.
+[[hints.enabled]]
+regex = "(ipfs:|ipns:|magnet:|mailto:|gemini://|gopher://|https://|http://|news:|file:|git://|ssh:|ftp://)[^\u0000-\u001F\u007F-\u009F<>\"\\s{-}\\^⟨⟩`]+"
+hyperlinks = true
+post_processing = true
+# macOS: `open` resolves http → browser and file:// → system app (Pensieve, etc.)
+command = "open"
+mouse = { enabled = true }
+binding = { key = "U", mods = "Control|Shift" }
+
 # ─── What is deliberately NOT here ──────────────────────────────────────────
-# - No Shift+click bindings: terminals reserve bare Shift+click to bypass
-#   mouse reporting, so it can never reach vc-frame. That is why the
-#   external-open gestures are Alt+Shift+click and Ctrl+Shift+click.
+# - No bare Shift+click *keyboard* bindings: terminals reserve Shift+click to
+#   bypass mouse reporting so host hints can fire (see [hints] above).
+# - No Alt+Left/Right host chars: those keys are the vc-frame product contract
+#   (tabs / LOCK word-jump). Diacritics stay Option+letter only.
 # - No colors: vc-frame themes carry their own RGB. If you want the window
 #   background to match the chrome ground, import a matching Alacritty theme
 #   generated from your vc-frame theme (see docs/THEMES_GUIDE.md roadmap).
-# - Ctrl+Left/Right/Up/Down are consumed by vc-frame (LOCK-mode tab and
-#   session navigation). On macOS, System Settings > Keyboard > Shortcuts >
-#   Mission Control steals Ctrl+Left/Right at the OS level — disable those
-#   two shortcuts or the keys never reach any terminal.
+# - Ctrl+arrows remain optional LOCK bonus binds in vc-frame. Mission Control
+#   may own them on macOS; the declared product contract is Alt+arrows, so
+#   operators may leave Mission Control defaults alone.
 
 # 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by VetCoders (c)2024-2026 LibraxisAI

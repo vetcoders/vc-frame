@@ -6,6 +6,8 @@ keybinds {
     }
     locked {
         bind "Ctrl g" { SwitchToMode "Normal"; }
+        // Ctrl+arrows stay as a LOCK bonus when the OS does not steal them.
+        // Public product contract is Alt+arrows (see shared_except "locked").
         bind "Ctrl Left" { GoToPreviousTab; }
         bind "Ctrl Right" { GoToNextTab; }
         bind "Ctrl Up" {
@@ -20,6 +22,11 @@ keybinds {
                 payload "down"
             };
         }
+        // LOCK is the typing mode (autolock 5s): Alt+Left/Right word-jump into
+        // the shell. Alt+Up/Down unbound → pass-through. Tab/session nav lives
+        // in shared_except "locked" as Alt+arrows.
+        bind "Alt Left" { Write 27 98; }
+        bind "Alt Right" { Write 27 102; }
     }
     resize {
         bind "Ctrl n" { SwitchToMode "Normal"; }
@@ -245,10 +252,27 @@ keybinds {
         bind "Alt n" { NewPane; }
         bind "Alt i" { MoveTab "Left"; }
         bind "Alt o" { MoveTab "Right"; }
-        bind "Alt h" "Alt Left" { MoveFocusOrTab "Left"; }
-        bind "Alt l" "Alt Right" { MoveFocusOrTab "Right"; }
-        bind "Alt j" "Alt Down" { MoveFocus "Down"; }
-        bind "Alt k" "Alt Up" { MoveFocus "Up"; }
+        // Product key-contract (Monica-ready): Alt+arrows = tabs / sessions.
+        // Mission Control can keep Ctrl+arrows; Alt reaches the terminal.
+        bind "Alt Left" { GoToPreviousTab; }
+        bind "Alt Right" { GoToNextTab; }
+        bind "Alt Up" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "up"
+            };
+        }
+        bind "Alt Down" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "down"
+            };
+        }
+        // Letter Alt still moves focus (vim-adjacent); arrows are not double-bound.
+        bind "Alt h" { MoveFocusOrTab "Left"; }
+        bind "Alt l" { MoveFocusOrTab "Right"; }
+        bind "Alt j" { MoveFocus "Down"; }
+        bind "Alt k" { MoveFocus "Up"; }
         bind "Alt =" "Alt +" { Resize "Increase"; }
         bind "Alt -" { Resize "Decrease"; }
         bind "Alt [" { PreviousSwapLayout; }

@@ -33,22 +33,27 @@ of sending Alt. Casualties: `Alt+e` (Command Composer) and the
 `Alt+Shift+click` external-open gesture — they simply never reach vc-frame.
 This is the single most common "Composer does not work" cause.
 
-### 2. Never bind bare Shift+click
+### 2. Never bind bare Shift+click for *app* handlers
 
 Terminals — Alacritty included — reserve bare `Shift+click` to **bypass
 mouse reporting** (so users can select text natively even when an app owns
-the mouse). A plain `Shift+click` therefore cannot reach vc-frame, ever.
-This is why the external-open gesture exists twice: `Alt+Shift+click` and
-`Ctrl+Shift+click` are equivalent. Do not try to "fix" Shift in host
-bindings; it is terminal physics.
+the mouse). A plain `Shift+click` therefore cannot reach vc-frame, ever —
+and that is intentional. The preset enables Alacritty **hints** with
+`mouse.enabled = true` so `Shift+click` on a URL / OSC 8 hyperlink opens
+via the host (`open` on macOS). vc-frame still owns bare Click and
+`Alt+Shift` / `Ctrl+Shift` for paths without OSC 8. Do not try to "fix"
+Shift into an app binding; it is terminal physics that becomes the host
+browser gesture.
 
-### 3. Free Ctrl+Arrows from the OS
+### 3. Do not steal Alt+arrows in the host
 
-vc-frame LOCK-mode navigation: `Ctrl+←/→` previous/next tab, `Ctrl+↑/↓`
-previous/next session. On macOS, Mission Control claims `Ctrl+←/→` at the
-OS level — System Settings → Keyboard → Keyboard Shortcuts → Mission
-Control, disable "Move left/right a space" (or remap them). Until then the
-events never reach any terminal, and no Alacritty setting can help.
+**Product key-contract:** `Alt+←/→` previous/next tab, `Alt+↑/↓`
+previous/next session (unlocked modes). LOCK is typing mode: `Alt+←/→`
+word-jump inside vc-frame; Ctrl+arrows remain an optional bonus when the
+OS does not claim them. The preset must **not** bind `Alt+Left/Right` to
+host `chars` — that would steal the product contract. Mission Control may
+keep its default Ctrl+arrow Spaces shortcuts; operators no longer need to
+disable them for the declared contract to work.
 
 ### 4. Width-1 glyph rendering
 
@@ -98,8 +103,9 @@ chrome ground can never drift apart.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `Alt+e` types `ę` / opens nothing | Option not sending Alt | `option_as_alt = "Both"` |
-| `Shift+click` on a link does nothing | terminal-level mouse-reporting bypass | use `Alt+Shift` or `Ctrl+Shift` click |
-| `Ctrl+←/→` switches macOS Spaces | Mission Control owns the shortcut | disable in System Settings |
+| `Alt+←/→` types word-jump / does nothing for tabs | host still binds Alt+arrows as `chars` | remove host Alt+Left/Right binds; use the shipped preset |
+| `Shift+click` on a URL does nothing | hints missing / mouse disabled | import preset `[hints]` with `mouse.enabled = true` |
+| `Ctrl+←/→` switches macOS Spaces | Mission Control owns the shortcut | expected; product contract is Alt+arrows — leave MC alone |
 | Chrome glyphs show as boxes | font lacks Misc Symbols coverage | pick a fuller monospace / Nerd Font |
 | Thin colored border around the chrome | host padding + opaque mismatched background | keep the preset's `blur`/`opacity`, or match theme ground / zero the padding |
 | Chrome keys from the guide do nothing / `Ctrl+q` kills the whole session | frozen `clear-defaults` keybinds in the user config shadow the shipped contract | `vc-frame doctor`, then `vc-frame repair key-bindings` (see [DOCTOR.md](DOCTOR.md)) |

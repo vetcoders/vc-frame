@@ -181,10 +181,25 @@ keybinds clear-defaults=true {{
         bind "{secondary_modifier} f" {{ ToggleFloatingPanes; }}
         bind "{secondary_modifier} i" {{ MoveTab "Left"; }}
         bind "{secondary_modifier} o" {{ MoveTab "Right"; }}
-        bind "{secondary_modifier} h" "{secondary_modifier} Left" {{ MoveFocusOrTab "Left"; }}
-        bind "{secondary_modifier} l" "{secondary_modifier} Right" {{ MoveFocusOrTab "Right"; }}
-        bind "{secondary_modifier} j" "{secondary_modifier} Down" {{ MoveFocus "Down"; }}
-        bind "{secondary_modifier} k" "{secondary_modifier} Up" {{ MoveFocus "Up"; }}
+        // Product contract: secondary+arrows = tabs / sessions; letters keep focus.
+        bind "{secondary_modifier} Left" {{ GoToPreviousTab; }}
+        bind "{secondary_modifier} Right" {{ GoToNextTab; }}
+        bind "{secondary_modifier} Up" {{
+            MessagePlugin "session-rail" {{
+                name "vc_rail_nav"
+                payload "up"
+            }};
+        }}
+        bind "{secondary_modifier} Down" {{
+            MessagePlugin "session-rail" {{
+                name "vc_rail_nav"
+                payload "down"
+            }};
+        }}
+        bind "{secondary_modifier} h" {{ MoveFocusOrTab "Left"; }}
+        bind "{secondary_modifier} l" {{ MoveFocusOrTab "Right"; }}
+        bind "{secondary_modifier} j" {{ MoveFocus "Down"; }}
+        bind "{secondary_modifier} k" {{ MoveFocus "Up"; }}
         bind "{secondary_modifier} =" "{secondary_modifier} +" {{ Resize "Increase"; }}
         bind "{secondary_modifier} -" {{ Resize "Decrease"; }}
         bind "{secondary_modifier} [" {{ PreviousSwapLayout; }}
@@ -428,10 +443,25 @@ keybinds clear-defaults=true {{
         bind "{secondary_modifier} n" {{ NewPane; }}
         bind "{secondary_modifier} i" {{ MoveTab "Left"; }}
         bind "{secondary_modifier} o" {{ MoveTab "Right"; }}
-        bind "{secondary_modifier} h" "{secondary_modifier} Left" {{ MoveFocusOrTab "Left"; }}
-        bind "{secondary_modifier} l" "{secondary_modifier} Right" {{ MoveFocusOrTab "Right"; }}
-        bind "{secondary_modifier} j" "{secondary_modifier} Down" {{ MoveFocus "Down"; }}
-        bind "{secondary_modifier} k" "{secondary_modifier} Up" {{ MoveFocus "Up"; }}
+        // Product contract: secondary+arrows = tabs / sessions; letters keep focus.
+        bind "{secondary_modifier} Left" {{ GoToPreviousTab; }}
+        bind "{secondary_modifier} Right" {{ GoToNextTab; }}
+        bind "{secondary_modifier} Up" {{
+            MessagePlugin "session-rail" {{
+                name "vc_rail_nav"
+                payload "up"
+            }};
+        }}
+        bind "{secondary_modifier} Down" {{
+            MessagePlugin "session-rail" {{
+                name "vc_rail_nav"
+                payload "down"
+            }};
+        }}
+        bind "{secondary_modifier} h" {{ MoveFocusOrTab "Left"; }}
+        bind "{secondary_modifier} l" {{ MoveFocusOrTab "Right"; }}
+        bind "{secondary_modifier} j" {{ MoveFocus "Down"; }}
+        bind "{secondary_modifier} k" {{ MoveFocus "Up"; }}
         bind "{secondary_modifier} =" "{secondary_modifier} +" {{ Resize "Increase"; }}
         bind "{secondary_modifier} -" {{ Resize "Decrease"; }}
         bind "{secondary_modifier} [" {{ PreviousSwapLayout; }}
@@ -654,10 +684,25 @@ keybinds clear-defaults=true {{
         bind "{secondary_modifier} f" {{ ToggleFloatingPanes; }}
         bind "{secondary_modifier} i" {{ MoveTab "Left"; }}
         bind "{secondary_modifier} o" {{ MoveTab "Right"; }}
-        bind "{secondary_modifier} h" "{secondary_modifier} Left" {{ MoveFocusOrTab "Left"; }}
-        bind "{secondary_modifier} l" "{secondary_modifier} Right" {{ MoveFocusOrTab "Right"; }}
-        bind "{secondary_modifier} j" "{secondary_modifier} Down" {{ MoveFocus "Down"; }}
-        bind "{secondary_modifier} k" "{secondary_modifier} Up" {{ MoveFocus "Up"; }}
+        // Product contract: secondary+arrows = tabs / sessions; letters keep focus.
+        bind "{secondary_modifier} Left" {{ GoToPreviousTab; }}
+        bind "{secondary_modifier} Right" {{ GoToNextTab; }}
+        bind "{secondary_modifier} Up" {{
+            MessagePlugin "session-rail" {{
+                name "vc_rail_nav"
+                payload "up"
+            }};
+        }}
+        bind "{secondary_modifier} Down" {{
+            MessagePlugin "session-rail" {{
+                name "vc_rail_nav"
+                payload "down"
+            }};
+        }}
+        bind "{secondary_modifier} h" {{ MoveFocusOrTab "Left"; }}
+        bind "{secondary_modifier} l" {{ MoveFocusOrTab "Right"; }}
+        bind "{secondary_modifier} j" {{ MoveFocus "Down"; }}
+        bind "{secondary_modifier} k" {{ MoveFocus "Up"; }}
         bind "{secondary_modifier} =" "{secondary_modifier} +" {{ Resize "Increase"; }}
         bind "{secondary_modifier} -" {{ Resize "Decrease"; }}
         bind "{secondary_modifier} [" {{ PreviousSwapLayout; }}
@@ -1281,10 +1326,25 @@ keybinds clear-defaults=true {{
         bind "{secondary_modifier} n" {{ NewPane; }}
         bind "{secondary_modifier} i" {{ MoveTab "Left"; }}
         bind "{secondary_modifier} o" {{ MoveTab "Right"; }}
-        bind "{secondary_modifier} h" "{secondary_modifier} Left" {{ MoveFocusOrTab "Left"; }}
-        bind "{secondary_modifier} l" "{secondary_modifier} Right" {{ MoveFocusOrTab "Right"; }}
-        bind "{secondary_modifier} j" "{secondary_modifier} Down" {{ MoveFocus "Down"; }}
-        bind "{secondary_modifier} k" "{secondary_modifier} Up" {{ MoveFocus "Up"; }}
+        // Product contract: secondary+arrows = tabs / sessions; letters keep focus.
+        bind "{secondary_modifier} Left" {{ GoToPreviousTab; }}
+        bind "{secondary_modifier} Right" {{ GoToNextTab; }}
+        bind "{secondary_modifier} Up" {{
+            MessagePlugin "session-rail" {{
+                name "vc_rail_nav"
+                payload "up"
+            }};
+        }}
+        bind "{secondary_modifier} Down" {{
+            MessagePlugin "session-rail" {{
+                name "vc_rail_nav"
+                payload "down"
+            }};
+        }}
+        bind "{secondary_modifier} h" {{ MoveFocusOrTab "Left"; }}
+        bind "{secondary_modifier} l" {{ MoveFocusOrTab "Right"; }}
+        bind "{secondary_modifier} j" {{ MoveFocus "Down"; }}
+        bind "{secondary_modifier} k" {{ MoveFocus "Up"; }}
         bind "{secondary_modifier} =" "{secondary_modifier} +" {{ Resize "Increase"; }}
         bind "{secondary_modifier} -" {{ Resize "Decrease"; }}
         bind "{secondary_modifier} [" {{ PreviousSwapLayout; }}

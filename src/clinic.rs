@@ -774,9 +774,7 @@ fn diagnose_config(diagnosis: &mut Diagnosis, path: &Path, raw: &str, contract: 
     {
         diagnosis.ok_notes.push((
             Section::ConfigShadowing,
-            format!(
-                "session-effective contract (config + layout `{label}`) matches the assets"
-            ),
+            format!("session-effective contract (config + layout `{label}`) matches the assets"),
         ));
         // layout_label == None: layout failed; the WARN above already forbids green.
     }
@@ -833,8 +831,35 @@ const EVIDENCE_LIMIT: usize = 16;
 /// `session r`, the rail hop inside LOCK. Those are the concrete losses an
 /// operator can recognise, so they lead the evidence.
 fn is_headline(group: &BindGroup) -> bool {
-    group.modes.contains(&InputMode::Locked)
-        || actions_signature(&group.contract).contains("session-rail")
+    headline_priority(group).is_some()
+}
+
+/// Lower = more important. Operator-recognisable fork verbs first, then LOCK
+/// nav, then other session-rail traffic. Without ranking, Alt product binds
+/// crowd out `session x` / `session r` under the evidence cap.
+fn headline_priority(group: &BindGroup) -> Option<u8> {
+    let sig = actions_signature(&group.contract);
+    let key = group.key.to_kdl();
+    let session_mode = group.modes.len() == 1 && group.modes[0] == InputMode::Session;
+    if session_mode && (key == "x" || key == "r") && sig.contains("session-rail") {
+        return Some(0);
+    }
+    if group.modes.contains(&InputMode::Locked)
+        && (key.contains("Ctrl") || key.contains("Alt"))
+        && (sig.contains("GoToPreviousTab")
+            || sig.contains("GoToNextTab")
+            || sig.contains("session-rail")
+            || sig.contains("Write"))
+    {
+        return Some(1);
+    }
+    if group.modes.contains(&InputMode::Locked) {
+        return Some(2);
+    }
+    if sig.contains("session-rail") {
+        return Some(3);
+    }
+    None
 }
 
 /// Truncate to [`EVIDENCE_LIMIT`], saying how much was left out.
@@ -852,9 +877,9 @@ fn cap_evidence(mut lines: Vec<String>) -> Vec<String> {
 /// The evidence lines for a shadowing finding.
 ///
 /// Every dangerous divergence, then every verb this fork added that is now
-/// missing, then a count of the rest. The long tail of a frozen dump *is* the
-/// whole upstream contract — a count says that better than a sample of
-/// `resize H` and `tmux %` ever could.
+/// missing (ranked), then a count of the rest. The long tail of a frozen dump
+/// *is* the whole upstream contract — a count says that better than a sample
+/// of `resize H` and `tmux %` ever could.
 fn shadow_evidence(diff: &KeybindDiff) -> Vec<String> {
     let mut detail: Vec<String> = diff
         .destructive()
@@ -863,31 +888,40 @@ fn shadow_evidence(diff: &KeybindDiff) -> Vec<String> {
         .collect();
     let named = detail.len();
 
+    let mut headlines: Vec<(u8, String)> = Vec::new();
     let mut rest = 0usize;
     for group in diff
         .divergent
         .iter()
         .filter(|group| !group.is_destructive_divergence())
     {
-        if is_headline(group) {
-            detail.push(group.render_divergent());
-        } else {
-            rest += 1;
+        match headline_priority(group) {
+            Some(rank) => headlines.push((rank, group.render_divergent())),
+            None => rest += 1,
         }
     }
     for group in &diff.missing {
-        if is_headline(group) {
-            detail.push(group.render_missing());
-        } else {
-            rest += 1;
+        match headline_priority(group) {
+            Some(rank) => headlines.push((rank, group.render_missing())),
+            None => rest += 1,
         }
     }
+    headlines.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    detail.extend(headlines.into_iter().map(|(_, line)| line));
 
     if detail.len() == named && rest == 0 {
         detail.push("no divergence yet — but the block is frozen at today's contract".to_owned());
         return detail;
     }
-    detail = cap_evidence(detail);
+    // One readable list: keep the first EVIDENCE_LIMIT lines, then a single
+    // "… and N more" that folds both headline overflow and the non-headline
+    // long tail. Two footers used to fire when the fork's own verbs alone
+    // exceeded the cap (Alt product contract added more LOCK headlines).
+    if detail.len() > EVIDENCE_LIMIT {
+        let dropped = detail.len() - EVIDENCE_LIMIT;
+        detail.truncate(EVIDENCE_LIMIT);
+        rest += dropped;
+    }
     if rest > 0 {
         detail.push(format!(
             "… and {rest} more contract bind(s) shadowed — one command cures all of them"

@@ -570,9 +570,9 @@ impl Page {
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new(
-                        "  · Ctrl+Up / Ctrl+Down  →  previous / next session — works even in LOCK",
+                        "  · Alt+Up / Alt+Down  →  previous / next session (product contract)",
                     )
-                    .color_substring(3, "Ctrl+Up / Ctrl+Down"),
+                    .color_substring(3, "Alt+Up / Alt+Down"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new(
@@ -668,8 +668,8 @@ impl Page {
                     Text::new("  · Mouse: click the tab name on the top compact bar"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("  · Ctrl+Left / Ctrl+Right  —  previous / next tab, even in LOCK")
-                        .color_substring(3, "Ctrl+Left / Ctrl+Right"),
+                    Text::new("  · Alt+Left / Alt+Right  —  previous / next tab (product contract)")
+                        .color_substring(3, "Alt+Left / Alt+Right"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new("  · Keyboard: Ctrl+t  (TAB mode), then 1 / 2 or Left/Right, Enter")
@@ -694,7 +694,7 @@ impl Page {
         base_mode: Rc<RefCell<InputMode>>,
     ) -> Self {
         Page::new()
-            .with_title(Text::new("Keyboard + mouse (plain Ctrl scheme)").color_range(0, ..))
+            .with_title(Text::new("Keyboard + mouse (Alt product contract)").color_range(0, ..))
             .with_paragraph(vec![
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new("Modes (status bar shows labels):").color_range(2, ..),
@@ -729,19 +729,26 @@ impl Page {
                         .color_substring(3, "Ctrl+q"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("Always on — even in LOCK:").color_range(2, ..),
+                    Text::new("Navigation (product contract — works with Mission Control defaults):")
+                        .color_range(2, ..),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("  Ctrl+Left/Right   previous / next tab")
-                        .color_substring(3, "Ctrl+Left/Right"),
+                    Text::new("  Alt+Left/Right    previous / next tab")
+                        .color_substring(3, "Alt+Left/Right"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("  Ctrl+Up/Down      previous / next session (instant, no Enter)")
-                        .color_substring(3, "Ctrl+Up/Down"),
+                    Text::new("  Alt+Up/Down       previous / next session (instant, no Enter)")
+                        .color_substring(3, "Alt+Up/Down"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new("  Alt+e             Command Composer — draft in your $EDITOR")
                         .color_substring(3, "Alt+e"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        "  LOCK (typing): Alt+Left/Right word-jump · Ctrl+arrows optional bonus",
+                    )
+                    .color_substring(3, "LOCK"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new("Mouse:").color_range(2, ..),
@@ -754,12 +761,11 @@ impl Page {
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new(
-                        "  · Alt+Shift+click / Ctrl+Shift+click a path or URL  →  open outside",
+                        "  · Click → open (vc-frame) · Shift+click URL → host hint · Alt+Shift path → system app",
                     )
-                    .color_substring(3, "Alt+Shift+click / Ctrl+Shift+click"),
-                ))]),
-                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("    (files land in your system editor, links in the browser)"),
+                    .color_substring(3, "Click")
+                    .color_substring(3, "Shift+click URL")
+                    .color_substring(3, "Alt+Shift"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new("  · Scroll wheel over the rail moves selection"),
@@ -1649,7 +1655,8 @@ fn main_screen_title(version: String, is_release_notes: bool) -> Text {
 
 fn main_screen_help_text(hovering_over_link: bool, menu_item_is_selected: bool) -> Text {
     if hovering_over_link {
-        let help_text = "Help: Click or Shift-Click to open in browser".to_string();
+        let help_text =
+            "Help: Click → open · Shift+click URL → host · Alt+Shift path → system app".to_string();
         Text::new(help_text)
             .color_range(3, 6..=10)
             .color_range(3, 15..=25)
@@ -1670,7 +1677,8 @@ fn main_screen_help_text(hovering_over_link: bool, menu_item_is_selected: bool) 
 
 fn release_notes_main_help(hovering_over_link: bool, menu_item_is_selected: bool) -> Text {
     if hovering_over_link {
-        let help_text = "Help: Click or Shift-Click to open in browser".to_string();
+        let help_text =
+            "Help: Click → open · Shift+click URL → host · Alt+Shift path → system app".to_string();
         Text::new(help_text)
             .color_range(3, 6..=10)
             .color_range(3, 15..=25)
@@ -1690,7 +1698,8 @@ fn release_notes_main_help(hovering_over_link: bool, menu_item_is_selected: bool
 
 fn esc_go_back_plus_link_hover(hovering_over_link: bool, _menu_item_is_selected: bool) -> Text {
     if hovering_over_link {
-        let help_text = "Help: Click or Shift-Click to open in browser".to_string();
+        let help_text =
+            "Help: Click → open · Shift+click URL → host · Alt+Shift path → system app".to_string();
         Text::new(help_text)
             .color_range(3, 6..=10)
             .color_range(3, 15..=25)
