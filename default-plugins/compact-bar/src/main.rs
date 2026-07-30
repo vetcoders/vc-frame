@@ -713,8 +713,6 @@ impl State {
 
         let tab_data = self.prepare_tab_data();
         let config = crate::line::TabLineConfig {
-            session_name: self.mode_info.session_name.to_owned(),
-            hide_session_name: self.mode_info.style.hide_session_name,
             mode: self.mode_info.mode,
             toggle_tooltip_key: self.toggle_tooltip_key.clone(),
             tooltip_is_active: self.tooltip_is_active,

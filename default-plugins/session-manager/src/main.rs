@@ -1203,12 +1203,30 @@ impl State {
         let (rail_rows, bucket_rows) = all_rows.split_at(bucket_row_start);
 
         // The LIVE number moved to the compact-bar's fleet chip; the header
-        // keeps only the session count and slots in under the traffic lights.
+        // keeps the session count and the current-session anchor — the top
+        // bar carries brand │ mode │ tabs only (operator call 2026-07-30),
+        // so "where am I" lives here, right above the session list.
         let session_count = working_session_indices(&self.sessions.session_ui_infos).len();
-        let header = fit_rail_line(&format!("SESSIONS {}", session_count), cols);
+        let mut header_text = format!("SESSIONS {}", session_count);
+        let anchor_start = header_text.width() + 3; // " · " before the name
+        if let Some(current) = self
+            .sessions
+            .session_ui_infos
+            .iter()
+            .find(|s| s.is_current_session)
+        {
+            header_text.push_str(&format!(" · {}", current.name));
+        }
+        let header = fit_rail_line(&header_text, cols);
+        let header_width = header.width();
         let mut header = Text::new(header);
         if cols >= 8 {
             header = header.color_range(1, 0..8);
+        }
+        if header_width > anchor_start {
+            // The anchor takes the same accent as SESSIONS — one hue for
+            // "you are here", per the THEMES_GUIDE doctrine.
+            header = header.color_range(1, anchor_start..);
         }
         print_text_with_coordinates(header, 0, 0, None, None);
 

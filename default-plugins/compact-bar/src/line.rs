@@ -17,8 +17,6 @@ pub fn tab_line(
 
 #[derive(Debug, Clone)]
 pub struct TabLineConfig {
-    pub session_name: Option<String>,
-    pub hide_session_name: bool,
     pub mode: InputMode,
     pub toggle_tooltip_key: Option<String>,
     pub tooltip_is_active: bool,
@@ -272,26 +270,19 @@ impl TabLinePrefixBuilder {
 
     fn build(
         &self,
-        session_name: Option<&str>,
         mode: InputMode,
         brand_text: Option<&str>,
         brand_text_short: Option<&str>,
     ) -> Vec<LinePart> {
         let mut parts = vec![self.create_brand_part(brand_text, brand_text_short)];
-        let mut used_len = parts.first().map_or(0, |p| p.len);
+        let used_len = parts.first().map_or(0, |p| p.len);
 
-        // Operator's zone order: brand │ mode │ session │ tabs — the mode
-        // chip sits directly after the brand so it never leaves the eye's
-        // home position.
+        // Operator's zone order: brand │ mode │ tabs — the mode chip sits
+        // directly after the brand so it never leaves the eye's home
+        // position. The session anchor lives in the rail header
+        // (`SESSIONS N · name`), not on this bar (operator call 2026-07-30).
         if let Some(mode_part) = self.create_mode_part(mode, used_len) {
-            used_len += mode_part.len;
             parts.push(mode_part);
-        }
-
-        if let Some(name) = session_name
-            && let Some(name_part) = self.create_session_name_part(name, used_len)
-        {
-            parts.push(name_part);
         }
 
         parts
@@ -362,31 +353,6 @@ impl TabLinePrefixBuilder {
             },
             (Some(long_brand), _) if long_brand.width() + 2 <= self.cols => long_brand.to_owned(),
             _ => default_brand,
-        }
-    }
-
-    fn create_session_name_part(&self, name: &str, used_len: usize) -> Option<LinePart> {
-        let tinted = format!(" {} ", name);
-        let name_part_len = tinted.width() + 2; // flanking │ rules
-
-        if self.cols.saturating_sub(used_len) >= name_part_len {
-            // The session name sits bare on the bar ground (operator call
-            // 2026-07-30) — no tint block; the dim │ rules carry the
-            // segment boundaries and the inverted weight stays on the MODE.
-            let rule_color = self.palette.text_unselected.emphasis_2;
-            let colors = self.get_text_colors();
-            let styled_parts = [
-                style!(rule_color, colors.background).paint("│"),
-                style!(colors.text, colors.background).bold().paint(tinted),
-                style!(rule_color, colors.background).paint("│"),
-            ];
-            Some(LinePart {
-                part: AnsiStrings(&styled_parts).to_string(),
-                len: name_part_len,
-                tab_index: None,
-            })
-        } else {
-            None
         }
     }
 
@@ -583,14 +549,7 @@ impl TabLineBuilder {
             self.split_tabs(all_tabs, active_tab_index);
 
         let prefix_builder = TabLinePrefixBuilder::new(self.palette, self.capabilities, self.cols);
-        let session_name = if self.config.hide_session_name {
-            None
-        } else {
-            self.config.session_name.as_deref()
-        };
-
         let mut prefix = prefix_builder.build(
-            session_name,
             self.config.mode,
             self.config.brand_text.as_deref(),
             self.config.brand_text_short.as_deref(),
