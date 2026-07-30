@@ -1,5 +1,6 @@
 ---
 source: zellij-utils/src/setup.rs
+assertion_line: 893
 expression: "format!(\"{:#?}\", config)"
 ---
 Config {
@@ -11,9 +12,7 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Left,
-                },
+                GoToPreviousTab,
             ],
             KeyWithModifier {
                 bare_key: Down,
@@ -51,8 +50,27 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocus {
-                    direction: Down,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -91,8 +109,27 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocus {
-                    direction: Up,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -101,9 +138,7 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Right,
-                },
+                GoToNextTab,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -430,6 +465,21 @@ Config {
                 GoToPreviousTab,
             ],
             KeyWithModifier {
+                bare_key: Left,
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                Write {
+                    key_with_modifier: None,
+                    bytes: [
+                        27,
+                        98,
+                    ],
+                    is_kitty_keyboard_protocol: false,
+                },
+            ],
+            KeyWithModifier {
                 bare_key: Down,
                 key_modifiers: {
                     Ctrl,
@@ -556,6 +606,21 @@ Config {
                 GoToNextTab,
             ],
             KeyWithModifier {
+                bare_key: Right,
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                Write {
+                    key_with_modifier: None,
+                    bytes: [
+                        27,
+                        102,
+                    ],
+                    is_kitty_keyboard_protocol: false,
+                },
+            ],
+            KeyWithModifier {
                 bare_key: Char(
                     'g',
                 ),
@@ -586,9 +651,7 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Left,
-                },
+                GoToPreviousTab,
             ],
             KeyWithModifier {
                 bare_key: Down,
@@ -637,8 +700,27 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocus {
-                    direction: Down,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -688,8 +770,27 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocus {
-                    direction: Up,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -709,9 +810,7 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Right,
-                },
+                GoToNextTab,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -1196,9 +1295,7 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Left,
-                },
+                GoToPreviousTab,
             ],
             KeyWithModifier {
                 bare_key: Down,
@@ -1244,8 +1341,27 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocus {
-                    direction: Down,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -1292,8 +1408,27 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocus {
-                    direction: Up,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -1310,9 +1445,7 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Right,
-                },
+                GoToNextTab,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -1852,9 +1985,7 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Left,
-                },
+                GoToPreviousTab,
             ],
             KeyWithModifier {
                 bare_key: Down,
@@ -1919,8 +2050,27 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocus {
-                    direction: Down,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -1986,8 +2136,27 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocus {
-                    direction: Up,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -2002,9 +2171,7 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Right,
-                },
+                GoToNextTab,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -2651,9 +2818,7 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Left,
-                },
+                GoToPreviousTab,
             ],
             KeyWithModifier {
                 bare_key: Down,
@@ -2697,8 +2862,27 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocus {
-                    direction: Down,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -2743,8 +2927,27 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocus {
-                    direction: Up,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -2759,9 +2962,7 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Right,
-                },
+                GoToNextTab,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -3198,9 +3399,7 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Left,
-                },
+                GoToPreviousTab,
             ],
             KeyWithModifier {
                 bare_key: Down,
@@ -3238,8 +3437,27 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocus {
-                    direction: Down,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -3278,8 +3496,27 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocus {
-                    direction: Up,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -3288,9 +3525,7 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Right,
-                },
+                GoToNextTab,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -3660,9 +3895,7 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Left,
-                },
+                GoToPreviousTab,
             ],
             KeyWithModifier {
                 bare_key: Down,
@@ -3706,8 +3939,27 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocus {
-                    direction: Down,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -3752,8 +4004,27 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocus {
-                    direction: Up,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -3768,9 +4039,7 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Right,
-                },
+                GoToNextTab,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -4229,9 +4498,7 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Left,
-                },
+                GoToPreviousTab,
             ],
             KeyWithModifier {
                 bare_key: Down,
@@ -4269,8 +4536,27 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocus {
-                    direction: Down,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -4309,8 +4595,27 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocus {
-                    direction: Up,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -4319,9 +4624,7 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Right,
-                },
+                GoToNextTab,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -4674,9 +4977,7 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Left,
-                },
+                GoToPreviousTab,
             ],
             KeyWithModifier {
                 bare_key: Down,
@@ -4714,8 +5015,27 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocus {
-                    direction: Down,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -4754,8 +5074,27 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocus {
-                    direction: Up,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -4764,9 +5103,7 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Right,
-                },
+                GoToNextTab,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -5119,9 +5456,7 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Left,
-                },
+                GoToPreviousTab,
             ],
             KeyWithModifier {
                 bare_key: Down,
@@ -5159,8 +5494,27 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocus {
-                    direction: Down,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -5199,8 +5553,27 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocus {
-                    direction: Up,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -5209,9 +5582,7 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Right,
-                },
+                GoToNextTab,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -5815,9 +6186,7 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Left,
-                },
+                GoToPreviousTab,
             ],
             KeyWithModifier {
                 bare_key: Down,
@@ -5865,8 +6234,27 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocus {
-                    direction: Down,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -5915,8 +6303,27 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocus {
-                    direction: Up,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -5935,9 +6342,7 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Right,
-                },
+                GoToNextTab,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -6351,9 +6756,7 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Left,
-                },
+                GoToPreviousTab,
             ],
             KeyWithModifier {
                 bare_key: Down,
@@ -6391,8 +6794,27 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocus {
-                    direction: Down,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -6431,8 +6853,27 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocus {
-                    direction: Up,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -6441,9 +6882,7 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Right,
-                },
+                GoToNextTab,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -6794,9 +7233,7 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Left,
-                },
+                GoToPreviousTab,
             ],
             KeyWithModifier {
                 bare_key: Down,
@@ -6845,8 +7282,27 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocus {
-                    direction: Down,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "down",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -6896,8 +7352,27 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocus {
-                    direction: Up,
+                KeybindPipe {
+                    name: Some(
+                        "vc_rail_nav",
+                    ),
+                    payload: Some(
+                        "up",
+                    ),
+                    args: None,
+                    plugin: Some(
+                        "session-rail",
+                    ),
+                    plugin_id: None,
+                    configuration: None,
+                    launch_new: false,
+                    skip_cache: false,
+                    floating: Some(
+                        false,
+                    ),
+                    in_place: None,
+                    cwd: None,
+                    pane_title: None,
                 },
             ],
             KeyWithModifier {
@@ -6917,9 +7392,7 @@ Config {
                     Alt,
                 },
             }: [
-                MoveFocusOrTab {
-                    direction: Right,
-                },
+                GoToNextTab,
             ],
             KeyWithModifier {
                 bare_key: Char(

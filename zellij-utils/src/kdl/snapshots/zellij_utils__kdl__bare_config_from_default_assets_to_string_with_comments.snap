@@ -1,10 +1,12 @@
 ---
 source: zellij-utils/src/kdl/mod.rs
+assertion_line: 7331
 expression: fake_config_stringified
 ---
 keybinds clear-defaults=true {
     locked {
         bind "Ctrl left" { GoToPreviousTab; }
+        bind "Alt left" { Write 27 98; }
         bind "Ctrl down" {
             MessagePlugin "session-rail" {
                 name "vc_rail_nav"
@@ -20,6 +22,7 @@ keybinds clear-defaults=true {
             }
         }
         bind "Ctrl right" { GoToNextTab; }
+        bind "Alt right" { Write 27 102; }
         bind "Ctrl g" { SwitchToMode "normal"; }
     }
     pane {
@@ -214,10 +217,22 @@ keybinds clear-defaults=true {
         }
     }
     shared_except "locked" {
-        bind "Alt left" { MoveFocusOrTab "left"; }
-        bind "Alt down" { MoveFocus "down"; }
-        bind "Alt up" { MoveFocus "up"; }
-        bind "Alt right" { MoveFocusOrTab "right"; }
+        bind "Alt left" { GoToPreviousTab; }
+        bind "Alt down" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "down"
+                floating false
+            }
+        }
+        bind "Alt up" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "up"
+                floating false
+            }
+        }
+        bind "Alt right" { GoToNextTab; }
         bind "Alt +" { Resize "Increase"; }
         bind "Alt -" { Resize "Decrease"; }
         bind "Alt =" { Resize "Increase"; }
