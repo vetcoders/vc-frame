@@ -229,6 +229,73 @@ fn client_garbage_frame_is_protocol_error_not_disconnect() {
 }
 
 #[test]
+fn eof_inside_the_length_prefix_is_protocol_error_not_disconnect() {
+    let (_guard, name) = new_ipc();
+    let listener = bind_listener(&name);
+
+    let client = std::thread::spawn({
+        let name = name.clone();
+        move || {
+            use std::io::Write;
+            let mut stream = connect_stream(&name);
+            // Two of the four length-prefix bytes, then hang up.
+            stream.write_all(&[0x08, 0x00]).expect("partial prefix");
+            stream.flush().expect("flush");
+        }
+    });
+
+    let stream = listener.incoming().next().unwrap().expect("accept failed");
+    let mut receiver: IpcReceiverWithContext<ClientToServerMsg> =
+        IpcReceiverWithContext::new(stream);
+
+    match receiver.recv_client_msg_outcome() {
+        ClientReceiveOutcome::ProtocolError(reason) => {
+            assert!(
+                reason.contains("truncated"),
+                "reason should name the truncation: {reason}"
+            );
+        },
+        other => panic!("expected ProtocolError for a torn prefix, got {other:?}"),
+    }
+
+    client.join().expect("client thread panicked");
+}
+
+#[test]
+fn eof_inside_the_payload_is_protocol_error_not_disconnect() {
+    let (_guard, name) = new_ipc();
+    let listener = bind_listener(&name);
+
+    let client = std::thread::spawn({
+        let name = name.clone();
+        move || {
+            use std::io::Write;
+            let mut stream = connect_stream(&name);
+            // The prefix promises 64 bytes; only 3 arrive before the hangup.
+            stream.write_all(&64u32.to_le_bytes()).expect("len");
+            stream.write_all(&[0x01, 0x02, 0x03]).expect("partial body");
+            stream.flush().expect("flush");
+        }
+    });
+
+    let stream = listener.incoming().next().unwrap().expect("accept failed");
+    let mut receiver: IpcReceiverWithContext<ClientToServerMsg> =
+        IpcReceiverWithContext::new(stream);
+
+    match receiver.recv_client_msg_outcome() {
+        ClientReceiveOutcome::ProtocolError(reason) => {
+            assert!(
+                reason.contains("truncated"),
+                "reason should name the truncation: {reason}"
+            );
+        },
+        other => panic!("expected ProtocolError for a torn payload, got {other:?}"),
+    }
+
+    client.join().expect("client thread panicked");
+}
+
+#[test]
 fn server_to_client_message_over_socket() {
     let (_guard, name) = new_ipc();
     let listener = bind_listener(&name);

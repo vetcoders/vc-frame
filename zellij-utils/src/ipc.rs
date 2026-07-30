@@ -466,13 +466,47 @@ fn ipc_error_is_disconnect(error: &anyError) -> bool {
 
 // Protobuf wire format utilities
 fn read_protobuf_message<T: Message + Default>(reader: &mut impl Read) -> Result<T> {
-    // Read length-prefixed protobuf message
+    // Read length-prefixed protobuf message. EOF is only a clean disconnect
+    // when it lands BETWEEN frames (zero bytes read); an EOF in the middle
+    // of the 4-byte prefix or the payload means the peer died mid-sentence —
+    // that is a protocol truncation (`InvalidData`, mapped to
+    // `ProtocolError`), not a `Disconnected`.
     let mut len_bytes = [0u8; 4];
-    reader.read_exact(&mut len_bytes)?;
+    let mut filled = 0usize;
+    while filled < len_bytes.len() {
+        match reader.read(&mut len_bytes[filled..]) {
+            Ok(0) if filled == 0 => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "clean EOF between frames",
+                )
+                .into());
+            },
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("truncated frame: EOF after {filled} of 4 length-prefix bytes"),
+                )
+                .into());
+            },
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
     let len = u32::from_le_bytes(len_bytes) as usize;
 
     let mut buf = vec![0u8; len];
-    reader.read_exact(&mut buf)?;
+    if let Err(e) = reader.read_exact(&mut buf) {
+        if e.kind() == io::ErrorKind::UnexpectedEof {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("truncated frame: EOF inside a {len}-byte payload"),
+            )
+            .into());
+        }
+        return Err(e.into());
+    }
 
     T::decode(&buf[..]).map_err(Into::into)
 }

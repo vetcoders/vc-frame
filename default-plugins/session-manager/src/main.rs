@@ -865,9 +865,9 @@ fn format_process_tab_rail_entry(tab: &TabUiInfo) -> String {
     text
 }
 
-// Direct rail navigation (vc_rail_nav pipe): product contract is Alt+Up/Down
-// outside LOCK; LOCK keeps Ctrl+Up/Down as an optional bonus; tab-mode
-// Up/Down and bare arrows on a focused rail also hit this path. The target
+// Direct rail navigation (vc_rail_nav pipe): product contract v3 is
+// Cmd/Super+Up/Down in every mode (Ctrl+Up/Down mirrors it outside LOCK);
+// tab-mode Up/Down and bare arrows on a focused rail also hit this path. The target
 // is resolved relative to the *current* session with wrap-around, so every
 // rail instance receiving the broadcast computes the same destination and
 // the switch stays idempotent. Navigation walks the *working* sessions in
@@ -889,6 +889,35 @@ fn relative_session_target(sessions: &[SessionUiInfo], offset: isize) -> Option<
     sessions
         .get(working[target_pos])
         .map(|session| session.name.clone())
+}
+
+/// Where the client should land after killing the current session: the next
+/// working session in nav order first, then any other working session (the
+/// nav helper cannot even find "here" when the current session is a bucket),
+/// then any other bucket — an f/x/n drawer is still a live session, and
+/// hopping into it beats killing the whole client. Only a true "nothing else
+/// is alive" returns `None`.
+///
+/// Navigation may skip buckets; the kill path must not — that asymmetry is
+/// deliberate. Collapsing both onto [`relative_session_target`] was how
+/// killing a session next to live buckets took the client down with it.
+fn kill_fallback_target(sessions: &[SessionUiInfo]) -> Option<String> {
+    if let Some(target) = relative_session_target(sessions, 1) {
+        return Some(target);
+    }
+    let current_index = sessions.iter().position(|s| s.is_current_session);
+    let is_other = |index: usize| Some(index) != current_index;
+    if let Some(index) = working_session_indices(sessions)
+        .into_iter()
+        .find(|&index| is_other(index))
+    {
+        return Some(sessions[index].name.clone());
+    }
+    sessions
+        .iter()
+        .enumerate()
+        .find(|&(index, _)| is_other(index))
+        .map(|(_, session)| session.name.clone())
 }
 
 /// Working sessions in rail order — bucket sessions are pinned separately and
@@ -1579,7 +1608,7 @@ impl State {
             return;
         };
 
-        if let Some(target) = relative_session_target(&self.sessions.session_ui_infos, 1) {
+        if let Some(target) = kill_fallback_target(&self.sessions.session_ui_infos) {
             // Hop first so the client stays inside vc-frame, then kill the old server.
             switch_session_with_focus(&target, None, None);
             match kill_sessions(std::slice::from_ref(&current_name)) {
@@ -2714,6 +2743,56 @@ mod rail_tests {
             creation_time: Duration::from_secs(secs),
             ..session(name, is_current_session)
         }
+    }
+
+    /// Killing next to live buckets must hop into a bucket, never take the
+    /// client down: buckets are invisible to navigation, not to the kill path.
+    #[test]
+    fn kill_next_to_buckets_hops_into_a_bucket_instead_of_dying() {
+        let sessions = vec![
+            session("work", true),
+            session("Finalized runs", false),
+            session("Needs attention", false),
+        ];
+        // Navigation deliberately sees nothing…
+        assert_eq!(relative_session_target(&sessions, 1), None);
+        // …but the kill path still finds a live session to land on.
+        assert_eq!(
+            kill_fallback_target(&sessions),
+            Some("Finalized runs".to_owned())
+        );
+    }
+
+    /// When the CURRENT session is a bucket, nav cannot even locate "here";
+    /// the kill path must still prefer a working session over dying.
+    #[test]
+    fn kill_from_inside_a_bucket_prefers_a_working_session() {
+        let sessions = vec![
+            session("Failed runs", true),
+            session("work", false),
+            session("Finalized runs", false),
+        ];
+        assert_eq!(kill_fallback_target(&sessions), Some("work".to_owned()));
+    }
+
+    /// Two working sessions: the kill path follows the same wrap-around
+    /// order the rail nav uses.
+    #[test]
+    fn kill_with_working_neighbours_follows_nav_order() {
+        let sessions = vec![
+            session("alpha", true),
+            session("beta", false),
+            session("Finalized runs", false),
+        ];
+        assert_eq!(kill_fallback_target(&sessions), Some("beta".to_owned()));
+    }
+
+    /// Only when nothing else is alive may the kill path return None —
+    /// that is the one case where the confirmation overlay is honest.
+    #[test]
+    fn kill_of_the_truly_last_session_returns_none() {
+        let sessions = vec![session("only", true)];
+        assert_eq!(kill_fallback_target(&sessions), None);
     }
 
     /// The rail contract: slot = launch order. The session started first holds

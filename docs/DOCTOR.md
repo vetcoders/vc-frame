@@ -68,9 +68,14 @@ $ vc-frame doctor
 exit 0
 ```
 
-The restart is not ceremony: a running session holds the config it started
-with. Until you restart, `doctor` will keep reporting the old contract and be
-right about it.
+The restart is not ceremony — but be precise about what `doctor` judges:
+it reads the **on-disk config**, i.e. the contract the *next* session will
+load (the report says so in its `scope:` line, `--json` in the `scope`
+field). Right after `repair` the doctor therefore already returns `0` —
+that green is about the next session, while every *running* session keeps
+the frozen contract it started with until you restart or resurrect it. A
+green doctor plus an unrestarted session is the one combination where the
+frame still misbehaves; the restart closes exactly that gap.
 
 ## Findings
 

@@ -121,6 +121,11 @@ struct State {
     // Fleet pulse: live agent-process count across every session (the rail's
     // LIVE number promoted to the bar). Fed by SessionUpdate.
     live_count: usize,
+
+    // ⌬ Agents chip: the Dispatcher spawn is deferred until a TabUpdate
+    // confirms the Agents tab is the active one. Firing it in the same
+    // click raced tab creation and floated the shell over the wrong tab.
+    pending_dispatcher_spawn: bool,
 }
 
 struct TabRenderData {
@@ -331,6 +336,19 @@ impl State {
 
             self.active_tab_idx = active_tab_idx;
             self.tabs = tabs;
+
+            // Deferred half of the ⌬ Agents click: the server has now told
+            // us which tab is active. Spawn the Dispatcher only when that
+            // tab is the Agents station — the float lands where it belongs.
+            if self.pending_dispatcher_spawn
+                && self
+                    .tabs
+                    .iter()
+                    .any(|tab| tab.active && tab.name == AGENTS_TAB_NAME)
+            {
+                self.pending_dispatcher_spawn = false;
+                open_dispatcher();
+            }
             should_render
         } else {
             false
@@ -469,7 +487,7 @@ impl State {
         None
     }
 
-    fn handle_tab_click(&self, col: usize) {
+    fn handle_tab_click(&mut self, col: usize) {
         if self.sentinel_clicked(col, COMPOSER_CLICK_SENTINEL) {
             open_composer();
             return;
@@ -489,16 +507,17 @@ impl State {
 
     /// Click path of the ⌬ Agents chip: land in the Agents station tab
     /// (creating it on first use) and float the Dispatcher shell over it —
-    /// "klikasz i masz gdzie pisać". Known v0 wrinkle: tab creation and the
-    /// floating pane race through separate server paths, so on the very
-    /// first click the Dispatcher may float over the tab you came from.
-    fn open_agents_station(&self) {
+    /// "klikasz i masz gdzie pisać". The spawn is NOT fired here: tab
+    /// creation and pane creation travel separate server paths, so the
+    /// Dispatcher only opens once [`handle_tab_update`] confirms the Agents
+    /// tab is active. No more first-click float over the wrong tab.
+    fn open_agents_station(&mut self) {
         if self.tabs.iter().any(|tab| tab.name == AGENTS_TAB_NAME) {
             go_to_tab_name(AGENTS_TAB_NAME);
         } else {
             new_tab(Some(AGENTS_TAB_NAME), None);
         }
-        open_dispatcher();
+        self.pending_dispatcher_spawn = true;
     }
 
     fn sentinel_clicked(&self, col: usize, sentinel: usize) -> bool {

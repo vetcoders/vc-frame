@@ -542,11 +542,21 @@ fn user_config_path(opts: &CliArgs) -> Option<PathBuf> {
 /// Diagnose the install. Reads; never writes. Returns the exit code.
 pub fn doctor(opts: &CliArgs, json: bool) -> i32 {
     let config_path = user_config_path(opts);
-    let raw = config_path
+    // Three distinct truths, never collapsed: no file at all, a file that
+    // reads, and a file that EXISTS but cannot be read (permissions,
+    // non-UTF-8). The last one used to silently masquerade as "no config —
+    // running the shipped contract", which is exactly the lie a doctor
+    // must not tell.
+    let read = config_path
         .as_ref()
         .filter(|path| path.exists())
-        .and_then(|path| std::fs::read_to_string(path).ok());
-    let diagnosis = diagnose(config_path.as_deref(), raw.as_deref());
+        .map(std::fs::read_to_string);
+    let (raw, read_error) = match read {
+        Some(Ok(text)) => (Some(text), None),
+        Some(Err(error)) => (None, Some(error.to_string())),
+        None => (None, None),
+    };
+    let diagnosis = diagnose_full(config_path.as_deref(), raw.as_deref(), read_error);
     let exit_code = diagnosis.exit_code();
     let mut out = std::io::stdout().lock();
     let rendered = if json {
@@ -558,10 +568,29 @@ pub fn doctor(opts: &CliArgs, json: bool) -> i32 {
     exit_code
 }
 
-/// The whole diagnosis, from a config path and its text. Pure enough to test:
-/// the only environment it reads is the install freshness and `$SHELL`.
-fn diagnose(config_path: Option<&Path>, raw: Option<&str>) -> Diagnosis {
+/// The whole diagnosis, from a config path, its text, and the one input the
+/// text cannot carry: whether an existing config file failed to read. A read
+/// failure is an ERROR finding (exit 2), never "no config". Pure enough to
+/// test: the only environment it reads is install freshness and `$SHELL`.
+fn diagnose_full(
+    config_path: Option<&Path>,
+    raw: Option<&str>,
+    read_error: Option<String>,
+) -> Diagnosis {
     let mut diagnosis = Diagnosis::default();
+
+    if let (Some(path), Some(error)) = (config_path, read_error.as_ref()) {
+        diagnosis.findings.push(Finding::new(
+            Section::ConfigParse,
+            Severity::Error,
+            format!(
+                "config at {} exists but cannot be read: {error}",
+                path.display()
+            ),
+            "fix the file's permissions/encoding — the doctor cannot judge a config it cannot read",
+        ));
+        return diagnosis;
+    }
 
     let contract = match Config::from_default_assets() {
         Ok(config) => config,
@@ -1059,6 +1088,12 @@ fn diagnose_shell(diagnosis: &mut Diagnosis) {
 
 fn render_report(diagnosis: &Diagnosis, exit_code: i32) -> String {
     let mut out = String::from("── vc-frame doctor ──\n");
+    // Honest scope: the doctor judges the on-disk config — the contract the
+    // NEXT session will load. A running session keeps the contract it
+    // started with until it is restarted/resurrected.
+    out.push_str(
+        "scope: next-session config (live sessions keep the contract they started with)\n",
+    );
     for section in Section::ORDER {
         let findings = diagnosis.in_section(section);
         let bracket = format!("[{}]", section.header());
@@ -1119,6 +1154,9 @@ fn render_json(diagnosis: &Diagnosis, exit_code: i32) -> String {
         .collect();
     let document = serde_json::json!({
         "version": 1,
+        // The verdict is about the on-disk config — what the NEXT session
+        // loads. Live sessions keep the contract they started with.
+        "scope": "next-session",
         "exit_code": exit_code,
         "findings": findings,
     });
@@ -1411,6 +1449,58 @@ pub fn backup_path(config_path: &Path, now: SystemTime) -> PathBuf {
     backup
 }
 
+/// [`backup_path`], made collision-proof: the stamp has one-second
+/// resolution, so two repairs inside the same second (or a re-run after a
+/// restore) would silently overwrite the previous backup. If the name is
+/// taken, append `-2`, `-3`, … until it is not.
+fn unique_backup_path(config_path: &Path, now: SystemTime) -> PathBuf {
+    let base = backup_path(config_path, now);
+    let base_name = base
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config.kdl.bak")
+        .to_owned();
+    let mut candidate = base.clone();
+    let mut n = 1usize;
+    while candidate.exists() {
+        n += 1;
+        candidate = base.with_file_name(format!("{base_name}-{n}"));
+    }
+    candidate
+}
+
+/// Write via a temp file in the same directory + fsync + atomic rename.
+///
+/// A bare `fs::write` truncates first: a crash or a full disk between the
+/// truncate and the write leaves the operator's ACTIVE config empty. The
+/// rename either installs the whole new text or leaves the old file
+/// untouched — never a half-config. Permissions are carried over from the
+/// original so a `0600` config stays `0600`.
+fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let dir = path.parent().filter(|p| !p.as_os_str().is_empty());
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(DEFAULT_CONFIG_FILE_NAME);
+    let tmp = dir
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(".{file_name}.tmp-{}", std::process::id()));
+    let result = (|| {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        if let Ok(meta) = std::fs::metadata(path) {
+            let _ = std::fs::set_permissions(&tmp, meta.permissions());
+        }
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
 /// `YYYYMMDD-HHMMSS` in UTC, without pulling in a date library.
 fn timestamp(now: SystemTime) -> String {
     let stamp = humantime::format_rfc3339_seconds(now).to_string();
@@ -1479,7 +1569,7 @@ fn repair_key_bindings_at(
         .map(|config| config.options)
         .unwrap_or_else(|_| contract.options.clone());
 
-    let backup = backup_path(path, now);
+    let backup = unique_backup_path(path, now);
     let backup_name = backup
         .file_name()
         .and_then(|name| name.to_str())
@@ -1538,10 +1628,11 @@ fn repair_key_bindings_at(
                 .and_then(|name| name.to_str())
                 .unwrap_or("config.kdl")
         );
-        if let Err(error) = std::fs::write(path, plan.new_text.as_bytes()) {
+        if let Err(error) = write_atomically(path, plan.new_text.as_bytes()) {
             let _ = writeln!(
                 out,
-                "failed to write {}: {error}. The backup at {} holds your config.",
+                "failed to write {}: {error}. Your config is untouched; the backup at {} \
+                 holds a second copy.",
                 path.display(),
                 backup.display()
             );
@@ -1572,6 +1663,11 @@ fn repair_key_bindings_at(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// Test seam: [`diagnose_full`] without a read error — the common case.
+    fn diagnose(config_path: Option<&Path>, raw: Option<&str>) -> Diagnosis {
+        diagnose_full(config_path, raw, None)
+    }
 
     /// A shortened but realistic frozen dump: the exact shape that cost a
     /// morning — `clear-defaults=true`, LOCK knowing only `Ctrl g`, and
@@ -1839,6 +1935,44 @@ layout_dir "{}"
     }
 
     #[test]
+    fn two_repairs_in_the_same_second_keep_both_backups() {
+        // The backup stamp has one-second resolution; the second repair
+        // must step aside (-2 suffix), never overwrite the first backup.
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.kdl");
+        std::fs::write(&config, "// mine\n").unwrap();
+        let now = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_785_400_000);
+        let first = unique_backup_path(&config, now);
+        std::fs::write(&first, "first backup").unwrap();
+        let second = unique_backup_path(&config, now);
+        assert_ne!(first, second, "same-second backups must not collide");
+        assert!(
+            second.to_string_lossy().ends_with("-2"),
+            "expected a -2 suffix, got {}",
+            second.display()
+        );
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "first backup");
+    }
+
+    #[test]
+    fn the_repair_write_replaces_the_file_wholesale() {
+        // write_atomically goes through a temp file + rename: afterwards the
+        // target holds exactly the new text and no temp litter remains.
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.kdl");
+        std::fs::write(&config, "old text that is longer than the new one").unwrap();
+        write_atomically(&config, b"new").unwrap();
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), "new");
+        let litter: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp-"))
+            .collect();
+        assert!(litter.is_empty(), "temp files left behind: {litter:?}");
+    }
+
+    #[test]
     fn shell_status_names_the_caller_not_the_server() {
         let diagnosis = diagnose(None, None);
         let from_ok = diagnosis
@@ -1908,6 +2042,41 @@ layout_dir "{}"
             &again.in_section(Section::ConfigShadowing)[0].detail,
             detail
         );
+    }
+
+    #[test]
+    fn an_unreadable_config_is_an_error_not_a_missing_config() {
+        // A file that exists but cannot be read (permissions, non-UTF-8)
+        // must never masquerade as "no config — running the shipped
+        // contract". That false green would clear exactly the installs
+        // most in need of a doctor.
+        let diagnosis = diagnose_full(
+            Some(Path::new("/tmp/config.kdl")),
+            None,
+            Some("permission denied (os error 13)".to_owned()),
+        );
+        let parse = diagnosis.in_section(Section::ConfigParse);
+        assert_eq!(parse.len(), 1, "{parse:#?}");
+        assert_eq!(parse[0].severity, Severity::Error);
+        assert!(parse[0].title.contains("cannot be read"), "{:#?}", parse[0]);
+        assert_eq!(diagnosis.exit_code(), 2);
+        let report = render_report(&diagnosis, diagnosis.exit_code());
+        assert!(
+            !report.contains("running the shipped contract"),
+            "an unreadable config must not read as a clean install: {report}"
+        );
+    }
+
+    #[test]
+    fn the_report_names_its_next_session_scope() {
+        let diagnosis = diagnose(None, None);
+        let report = render_report(&diagnosis, diagnosis.exit_code());
+        assert!(
+            report.contains("scope: next-session config"),
+            "the doctor must say what its verdict applies to: {report}"
+        );
+        let json = render_json(&diagnosis, diagnosis.exit_code());
+        assert!(json.contains("\"scope\": \"next-session\""), "{json}");
     }
 
     #[test]
