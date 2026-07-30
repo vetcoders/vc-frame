@@ -5,7 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
-* fix(install): on Unix, copy through retained file descriptors into a private stage, adopt and verify the macOS codesign inode, then atomically publish vc-frame updates with explicit durability reporting; Windows retains the existing non-atomic copy fallback
+
+## [0.47.2] - 2026-07-30
+* feat(input): Alt-arrows product key contract — `Alt+←/→` previous/next tab and `Alt+↑/↓` previous/next session in every unlocked mode; in LOCK, `Alt+←/→` becomes writer word-jump (`ESC b`/`ESC f`); Ctrl+arrows are returned to the OS (Mission Control keeps its defaults)
+* feat(clinic): `vc-frame doctor` — read-only diagnosis of config shadowing (frozen `clear-defaults` keybind dumps), lock stranding, install freshness, shell drift, and config parse errors; session-effective analysis (config + layout overlay), `--json` with machine-readable remedies, exit codes 0/1/2
+* feat(clinic): `vc-frame repair key-bindings` — backs up the config, retires the shadowing keybinds block behind a guard comment, and reports exactly which personal binds were lost; `--dry-run` supported (runbook: docs/DOCTOR.md)
+* fix(ipc): typed client receive path (`ClientReceiveOutcome`) distinguishes messages, disconnects, and protocol errors — ends the unknown-message flood that force-logged-out live clients
+* fix(session): CloseTab cleanup debt paid — session verbs, cleanup cap, abandon path, and ghost-session short-circuit; closing a pane is a one-shot action again instead of a session killer
+* feat(input): idle autolock with a 5-second product default (configurable; unset means the default, not never)
+* feat(composer): `Alt+e` Command Composer honoring `$VC_COMPOSER`, with an always-visible clickable chip in the compact-bar
+* feat(chrome): compact-bar redesign in rail language — brand chip, inverted mode chip, session anchor, fisheye tab ribbons, fleet-pulse chip, and the Agents station chip opening the dispatcher
+* feat(chrome): `left_inset` compact-bar option so the bar clears the macOS traffic lights in a decoration-free host window
+* feat(rail): CPU/MEM resource cockpit line, launch-order session listing, one-click activation, palette ink, and tunable width; editor panes render with the accent frame color
+* feat(mouse): URL highlights open in the browser on click; Shift-modified click opens highlights outside the process
+* fix(perf): cap the runaway vectors behind the observed 6 GB / 1200% CPU incidents; stop losing frames and mouse clicks under layout gates
+* fix(permissions): permission requests from builtin plugins are granted silently instead of dead-locking in non-focusable bars
+* fix(pty): resolve the default shell from the user database via `nix` without unsafe calls
+* fix(triage): reject non-canonical receipt paths on Linux, scope the e2e timeout to triage runs only, and gate CI for pull requests targeting develop (#4, #5)
+* docs: DOCTOR.md clinic runbook, THEMES_GUIDE.md chrome semantic contract, ALACRITTY_INTEGRATION.md host requirements + shipped Alacritty preset
+
+## [0.47.1] - 2026-07-28
+* fix(runtime): truthful session shutdown — required shutdown ACK over the protocol, fenced viewer creation, recovery of fenced pending viewers, and bounded teardown
+* fix(session): reject socket path escapes; prevent random socket-path process exits
+* fix(layout): atomic pane/tab layout allocation with transactional handoffs and exact rollback ownership
+* fix(install): copy through retained file descriptors into a private stage, adopt and verify the macOS codesign inode, then atomically publish vc-frame updates with explicit durability reporting; Windows retains the existing non-atomic copy fallback
+* fix(release): require the exact signed asset set and distinguish CI matrix artifacts
+* fix(session-manager): stable name-sorted session rail order
 * feat: allow tabs to have different sizes if clients aren't focused on the same one (https://github.com/zellij-org/zellij/pull/5133)
 * feat: PWA support for the web client (manifest + icons + iOS meta tags) so the page can be installed as a standalone app (https://github.com/zellij-org/zellij/pull/5184)
 

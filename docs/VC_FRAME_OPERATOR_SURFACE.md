@@ -30,6 +30,29 @@ system:
 The `session-rail` plugin alias in `zellij-utils/assets/config/default.kdl`
 points at `zellij:session-manager` with `rail true`.
 
+The operator entrypoint layout (`vibecrafted`) replaces the top `tab-bar` with
+the redesigned `compact-bar`: brand chip, inverted mode chip, session anchor,
+fisheye tab ribbons, fleet-pulse chip, the Agents station chip, and the
+Command Composer chip (`Alt+e`). Its `left_inset` option clears the macOS
+traffic lights in a decoration-free host window.
+
+## Key Contract
+
+The shipped defaults promise one navigation language:
+
+- `Alt+←/→` — previous/next tab (every unlocked mode)
+- `Alt+↑/↓` — previous/next session (every unlocked mode)
+- in LOCK, `Alt+←/→` is writer word-jump (`ESC b` / `ESC f`)
+- Ctrl+arrows belong to the OS; Mission Control keeps its defaults
+
+If declared keys do nothing, the usual culprit is a frozen
+`keybinds clear-defaults=true` dump in the user config shadowing the shipped
+contract. `vc-frame doctor` diagnoses it (read-only, `--json`, exit 0/1/2) and
+`vc-frame repair key-bindings` fixes it with a backup and an explicit report
+of any personal binds lost. Full runbook: [DOCTOR.md](DOCTOR.md). Host-side
+requirements (macOS `option_as_alt`, hints, glyph width) live in
+[ALACRITTY_INTEGRATION.md](ALACRITTY_INTEGRATION.md).
+
 ## Try It From Source
 
 ```bash
