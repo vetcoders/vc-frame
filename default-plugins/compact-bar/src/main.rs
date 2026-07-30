@@ -44,6 +44,19 @@ const MSG_LAUNCH_TOOLTIP: &str = "launch_tooltip_if_not_launched";
 pub const COMPOSER_CLICK_SENTINEL: usize = usize::MAX;
 /// Sentinel tab_index for the ䷅ LIVE fleet chip — click opens the Gallery.
 pub const GALLERY_CLICK_SENTINEL: usize = usize::MAX - 1;
+/// Sentinel tab_index for the ⌬ Agents chip — click lands in the Agents
+/// station (the NOW-view of the fleet; ䷅ LIVE → Gallery is the WAS-view)
+/// and floats the Dispatcher shell over it.
+pub const AGENTS_CLICK_SENTINEL: usize = usize::MAX - 2;
+/// The per-session station tab where dispatched agents stack up. One tab,
+/// many stacked panes: a collapsed title-bar is a list row, an expanded
+/// pane is the agent's full terminal.
+const AGENTS_TAB_NAME: &str = "Agents";
+/// The Dispatcher is a bare login shell in a named floating pane — dispatch
+/// is typing vibecrafted CLI commands (`vc-init codex`) into it. Deliberate
+/// zsh fallback: the server may run without SHELL in its env, and /bin/sh
+/// with no profile is exactly the trap we refuse to spawn.
+const DISPATCHER_COMMAND: &str = r#"exec "${SHELL:-/bin/zsh}" -l"#;
 /// Same drafting contract as the Alt+e keybind in the default config: draft
 /// in $VC_COMPOSER (or $EDITOR), land the text in the underlying pane
 /// unexecuted, clean up. VC_COMPOSER expands unquoted on purpose — it is a
@@ -465,9 +478,27 @@ impl State {
             open_gallery();
             return;
         }
+        if self.sentinel_clicked(col, AGENTS_CLICK_SENTINEL) {
+            self.open_agents_station();
+            return;
+        }
         if let Some(tab_idx) = get_tab_to_focus(&self.tab_line, self.active_tab_idx, col) {
             switch_tab_to(tab_idx.try_into().unwrap());
         }
+    }
+
+    /// Click path of the ⌬ Agents chip: land in the Agents station tab
+    /// (creating it on first use) and float the Dispatcher shell over it —
+    /// "klikasz i masz gdzie pisać". Known v0 wrinkle: tab creation and the
+    /// floating pane race through separate server paths, so on the very
+    /// first click the Dispatcher may float over the tab you came from.
+    fn open_agents_station(&self) {
+        if self.tabs.iter().any(|tab| tab.name == AGENTS_TAB_NAME) {
+            go_to_tab_name(AGENTS_TAB_NAME);
+        } else {
+            new_tab(Some(AGENTS_TAB_NAME), None);
+        }
+        open_dispatcher();
     }
 
     fn sentinel_clicked(&self, col: usize, sentinel: usize) -> bool {
@@ -484,6 +515,17 @@ impl State {
     fn scroll_tab_up(&self) {
         let next_tab = min(self.active_tab_idx + 1, self.tabs.len());
         switch_tab_to(next_tab as u32);
+    }
+}
+
+/// The Dispatcher: a named floating login shell — the operator's dispatch
+/// console (vibecrafted CLI is the dispatch language, the pane is the desk).
+fn open_dispatcher() {
+    let command = CommandToRun::new_with_args("sh", vec!["-c", DISPATCHER_COMMAND]);
+    if let Some(PaneId::Terminal(terminal_pane_id)) =
+        open_command_pane_floating(command, None, BTreeMap::new())
+    {
+        rename_terminal_pane(terminal_pane_id, "Dispatcher");
     }
 }
 

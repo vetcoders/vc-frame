@@ -468,6 +468,7 @@ impl RightSideElementsBuilder {
         let mut elements = Vec::new();
 
         elements.push(self.create_composer_chip());
+        elements.push(self.create_agents_chip());
 
         if let Some(ref tooltip_key) = config.toggle_tooltip_key {
             elements.push(self.create_tooltip_indicator(tooltip_key, config.tooltip_is_active));
@@ -476,6 +477,33 @@ impl RightSideElementsBuilder {
         elements.push(self.create_live_chip(config.live_count));
 
         elements
+    }
+
+    /// The Agents station entry point — the NOW-view of the fleet, sibling
+    /// of ䷅ LIVE → Gallery (the WAS-view). ⌬ (U+232C BENZENE RING) is
+    /// EAW-narrow, text-presentation only. Click lands in the station and
+    /// floats the Dispatcher.
+    fn create_agents_chip(&self) -> LinePart {
+        let plain = " · ⌬ Agents";
+        let styled_parts = [
+            style!(
+                self.palette.text_unselected.emphasis_2,
+                self.palette.text_unselected.background
+            )
+            .paint(" · "),
+            style!(
+                self.palette.text_unselected.base,
+                self.palette.text_unselected.background
+            )
+            .bold()
+            .paint("⌬ Agents"),
+        ];
+
+        LinePart {
+            part: AnsiStrings(&styled_parts).to_string(),
+            len: plain.width(),
+            tab_index: Some(crate::AGENTS_CLICK_SENTINEL),
+        }
     }
 
     /// Always-visible Composer entry point, clickable via the sentinel
