@@ -58,28 +58,32 @@ color index. Components rendered through the `Text` API resolve
 | `base` | Primary ink: session names, rail tab names, bar text |
 | `background` | Chrome background: compact-bar, rail, status-bar |
 | `emphasis_0` | Reserved (free for plugin-specific accents) |
-| `emphasis_1` | **The accent — "you are here".** Rail current-session name, `⚿ LOCKED` chip background, active `●` tab dot |
+| `emphasis_1` | **The accent — "you are here".** Rail current-session name, `⚿ LOCKED` chip background |
 | `emphasis_2` | Dim chrome: rail ordinals, `-` session markers, `·` separators, resource cockpit line, `⌁ NORMAL` |
 | `emphasis_3` | Alarm: bell flash |
 
 ### `text_selected` — selection and the block highlight
 
 `background` is the full-width bar behind: rail hover, keyboard selection,
-and the current-session **block tint** (the whole block of the session you
-are in, header plus its process rows). Emphasis slots mirror
-`text_unselected` so accents survive selection.
+the current-session **block tint** (the whole block of the session you
+are in, header plus its process rows), and the **active tab chip** on the
+compact-bar (bold ink, `●` marker — one step lighter than the rhythm
+shades, never a full inversion). Emphasis slots mirror `text_unselected`
+so accents survive selection.
 
-### `ribbon_selected` — "this is active"
+### `ribbon_selected` — "this is armed"
 
-`background`/`base` paint the active tab chip on the compact-bar and the
-armed-mode chip (PANE, TAB, SESSION, …). This must contrast with **both**
-`ribbon_unselected` shades, or the active tab becomes guesswork.
+`background`/`base` paint the armed-mode chip (PANE, TAB, SESSION, …) and
+the inverted LOCK chip. This is the hard inversion of the bar — it belongs
+to the MODE alone; the active tab uses the softer `text_selected` surface.
 
 ### `ribbon_unselected` — inactive ribbons
 
-`background`/`base` for inactive tab chips; `emphasis_1` is the alternate
-ribbon shade (visual rhythm only — see doctrine below); `emphasis_3` is the
-bell flash on an inactive tab.
+`background`/`base` for inactive tab chips (dim ink); `emphasis_1` is the
+alternate ribbon shade — pure visual rhythm, so keep it one close step
+from `background`: the ink is shared across all tabs, and a shade that
+drifts toward the ink luminance breaks contrast (see doctrine below);
+`emphasis_3` is the bell flash on an inactive tab.
 
 ### Frames and the rest
 
@@ -98,10 +102,13 @@ never will.
 
 1. **Single accent over grayscale.** One accent color (`emphasis_1`) means
    "you are here", everywhere. Everything else is ink, dim ink, or ground.
-2. **State is a glyph, not a shade.** Active tab: `◉`. Inactive: `○`.
-   Current session: `*`. Others: `-`. Locked: `⚿`. Normal: `⌁`. Alternating
-   ribbon shades are rhythm — they carry no state, so recoloring them can
-   never lie about focus.
+2. **State is a glyph and a weight, not a shade.** Active tab: `●` in bold
+   on the block tint. Inactive: `○` in dim, one shared ink color for the
+   whole zone. Current session: `*`. Others: `-`. Locked: `⚿`. Normal:
+   `⌁`. Alternating ribbon shades are rhythm — they carry no state, so
+   recoloring them can never lie about focus. Chip edges are half-block
+   seams (`▐`/`▌`, fg = chip, bg = ground): the boundary between two tabs
+   is split 50|50 on the border line, never a painted-on rule.
 3. **Three highlight levels.** Ground < block tint (`text_selected`
    background) < inversion (accent background). The rail uses all three:
    plain rows, the current-session block, the active tab row inside it.
@@ -118,8 +125,9 @@ Four decisions produce a coherent theme; everything else derives:
    shades near it).
 2. **Ink** — `text_unselected.base`, readable on ground.
 3. **Accent** — `text_unselected.emphasis_1` *and*
-   `ribbon_selected.background`: one hue for "you are here" and "this tab
-   is active" keeps the whole chrome speaking one language.
+   `ribbon_selected.background`: one hue for "you are here" and the armed
+   MODE chip keeps the whole chrome speaking one language. The active tab
+   does not take the accent — it sits on the block tint with bold ink.
 4. **Alarm** — `emphasis_3`, reserved for bells; nothing else may use it.
 
 Then set `text_selected.background` to a step between ground and accent

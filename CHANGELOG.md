@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 * feat(input): idle autolock driven purely by config — `auto_lock_after_seconds 30` ships in the default config template; the code invents no number, and 0 or unset means never
 * feat(composer): `Alt+e` Command Composer honoring `$VC_COMPOSER`, with an always-visible clickable chip in the compact-bar
 * feat(chrome): compact-bar redesign in rail language — brand chip, inverted mode chip, session anchor, fisheye tab ribbons, fleet-pulse chip, and the Agents station chip opening the dispatcher
+* fix(chrome): one ink color across the tab zone — state is dim/bold plus the ○/● marker, the active tab sits on the block tint (not a full inversion), alternate shades are a close rhythm step, and chip edges are half-block seams split 50|50 on the boundary line
 * feat(chrome): `left_inset` compact-bar option so the bar clears the macOS traffic lights in a decoration-free host window
 * feat(rail): CPU/MEM resource cockpit line, launch-order session listing, one-click activation, palette ink, and tunable width; editor panes render with the accent frame color
 * feat(mouse): URL highlights open in the browser on click; Shift-modified click opens highlights outside the process
