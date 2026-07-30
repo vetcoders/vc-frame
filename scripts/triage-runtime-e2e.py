@@ -249,11 +249,25 @@ def validate_build_info(
     )
 
 
+# Ordinary inventory / attach / kill-session probes stay short so a stalled
+# session CLI fails closed inside helper budgets (15s wait loops, etc.).
+COMMAND_TIMEOUT_SECS = 30
+# Nested CLI budgets in src/run_triage_cli.rs for a full triage-run transfer:
+#   CLI_COMMAND_TIMEOUT = 10s (inventory / capture / close chain)
+#   NEW_TAB_COMMAND_TIMEOUT = 30s
+#   VIEWER_CREATION_RECONCILIATION_TIMEOUT = 30s
+# Matching the outer harness to 30s races those inner budgets and kills
+# transfers mid-viewer-creation on slower Linux runners (ops-linux
+# TimeoutExpired on triage-run for the exit-2 case). Only triage() uses this.
+TRIAGE_COMMAND_TIMEOUT_SECS = 120
+
+
 def command(
     binary: pathlib.Path,
     env: dict[str, str],
     *args: str,
     expect_success: bool | None = True,
+    timeout: float = COMMAND_TIMEOUT_SECS,
 ) -> subprocess.CompletedProcess[str]:
     try:
         result = subprocess.run(
@@ -263,7 +277,7 @@ def command(
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=30,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired as error:
         raise AssertionError(f"command timed out: {binary} {' '.join(args)}") from error
@@ -1596,7 +1610,13 @@ def triage(
         pane_id=pane_id,
         transcript=transcript,
     )
-    return command(binary, env, *args, expect_success=expect_success)
+    return command(
+        binary,
+        env,
+        *args,
+        expect_success=expect_success,
+        timeout=TRIAGE_COMMAND_TIMEOUT_SECS,
+    )
 
 
 def write_runtime_transcript_manifest(

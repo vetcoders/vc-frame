@@ -2,9 +2,13 @@ name: Rust
 
 on:
   push:
+    # Direct delivery only. Do not add `develop` here: the open develop→main
+    # PR already re-runs on every develop push, and a second push trigger would
+    # double the self-hosted fleet load.
     branches: [main]
   pull_request:
-    branches: [main]
+    # Feature branches targeting develop need the same gate as main-bound PRs.
+    branches: [main, develop]
   workflow_dispatch:
 
 concurrency:

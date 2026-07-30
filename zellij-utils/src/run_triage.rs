@@ -668,6 +668,17 @@ fn validate_canonical_receipt_path(path: &Path) -> Result<PathBuf, String> {
     if !path.is_absolute() {
         return Err("viewer creation receipt path is not absolute".to_owned());
     }
+    // Path component iteration silently drops CurDir (`.`) and collapses `//`,
+    // so Path equality alone cannot reject `/tmp/x/./y` or `/tmp/x//y`. On Linux
+    // tempdirs are already realpath-clean, so a component-only check would accept
+    // those forms; require the OsStr form to match the realpath byte-for-byte.
+    // ParentDir (`..`) is still visible in components and is rejected first.
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err("viewer creation receipt path is not canonical".to_owned());
+    }
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|_| "viewer creation receipt is unreadable".to_owned())?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -675,7 +686,7 @@ fn validate_canonical_receipt_path(path: &Path) -> Result<PathBuf, String> {
     }
     let canonical = std::fs::canonicalize(path)
         .map_err(|_| "viewer creation receipt cannot be canonicalized".to_owned())?;
-    if canonical != path {
+    if canonical.as_os_str() != path.as_os_str() {
         return Err("viewer creation receipt path is not canonical".to_owned());
     }
     Ok(canonical)
@@ -1858,9 +1869,33 @@ mod tests {
         assert!(symlink_fence.canonicalized().is_err());
         assert!(read_bound_receipt(&directory.path().join("receipt-link.json")).is_err());
 
+        // CurDir (`.`) is dropped by Path::components; still must fail closed via
+        // OsStr identity against realpath (the Linux regression this covers).
         let noncanonical_path = directory.path().join(".").join("transfer.json");
+        assert_ne!(
+            noncanonical_path.as_os_str(),
+            fence.receipt_path.as_os_str(),
+            "fixture must keep a lexically non-identical path form"
+        );
         let noncanonical_fence = ViewerCreationFence::new(noncanonical_path, &receipt);
         assert!(noncanonical_fence.canonicalized().is_err());
+
+        // ParentDir (`..`) is visible in components and must also fail closed.
+        let nested = directory.path().join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let via_parent = nested.join("..").join("transfer.json");
+        let parent_fence = ViewerCreationFence::new(via_parent, &receipt);
+        assert!(parent_fence.canonicalized().is_err());
+
+        // Collapsed double-slash is also non-identical as OsStr on Unix.
+        let double_slash = PathBuf::from(format!(
+            "{}//transfer.json",
+            directory.path().to_string_lossy().trim_end_matches('/')
+        ));
+        if double_slash.as_os_str() != fence.receipt_path.as_os_str() {
+            let slash_fence = ViewerCreationFence::new(double_slash, &receipt);
+            assert!(slash_fence.canonicalized().is_err());
+        }
     }
 
     #[cfg(unix)]

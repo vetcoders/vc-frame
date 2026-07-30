@@ -743,41 +743,57 @@ mod tests {
     use std::io::Read;
 
     fn open_file_descriptor_count() -> usize {
-        let fd_directory = if std::path::Path::new("/proc/self/fd").is_dir() {
-            "/proc/self/fd"
-        } else {
-            "/dev/fd"
+        // Prefer a closed-form probe that does not open /dev/fd (macOS /dev/fd
+        // enumeration is noisy under parallel cargo-test threads).
+        let mut open = 0usize;
+        for fd in 0..1024 {
+            // SAFETY: F_GETFD on an arbitrary candidate fd is a pure query; EBADF
+            // means the slot is closed and is the expected non-open result.
+            let result = fcntl(fd, FcntlArg::F_GETFD);
+            if result.is_ok() {
+                open += 1;
+            }
+        }
+        open
+    }
+
+    fn reject_missing_command(terminal_id: u32) {
+        let command = RunCommand {
+            command: format!("/definitely/not/a/real/vc-frame-command-{terminal_id}").into(),
+            ..Default::default()
         };
-        std::fs::read_dir(fd_directory)
-            .expect("open file descriptor directory")
-            .count()
+        let error = handle_terminal(command, None, None, Box::new(|_, _, _| {}), terminal_id)
+            .expect_err("a missing executable must be rejected");
+        assert!(
+            error.downcast_ref::<ZellijError>().is_some(),
+            "the missing-command source must be preserved: {error:#}"
+        );
     }
 
     #[test]
     fn repeated_missing_commands_do_not_leak_pty_file_descriptors() {
-        // The Rust test harness runs this alongside tests which legitimately
-        // open process-wide descriptors. Keep a bounded allowance for that
-        // noise while still catching the original per-attempt leak: leaking
-        // one descriptor for each of the 128 rejected commands exceeds this
-        // ceiling by a wide margin.
-        const PARALLEL_TEST_FD_ALLOWANCE: usize = 32;
-        let before = open_file_descriptor_count();
-        for terminal_id in 0..128 {
-            let command = RunCommand {
-                command: format!("/definitely/not/a/real/vc-frame-command-{terminal_id}").into(),
-                ..Default::default()
-            };
-            let error = handle_terminal(command, None, None, Box::new(|_, _, _| {}), terminal_id)
-                .expect_err("a missing executable must be rejected");
-            assert!(
-                error.downcast_ref::<ZellijError>().is_some(),
-                "the missing-command source must be preserved: {error:#}"
-            );
-        }
-        let after = open_file_descriptor_count();
+        // Missing executables are rejected before openpty (see handle_terminal).
+        // Assert no *proportional* FD growth across batches: an absolute
+        // before/after delta is racy under parallel cargo-test threads that
+        // share this process's FD table (seen on dragon-macos as before=15,
+        // after=18 with zero PTY involvement). Develop later raised the
+        // absolute allowance to 32; proportional batches still catch real
+        // per-attempt PTY leaks without that noise floor.
+        let measure = |start_id: u32, iters: u32| -> isize {
+            let before = open_file_descriptor_count() as isize;
+            for terminal_id in start_id..(start_id + iters) {
+                reject_missing_command(terminal_id);
+            }
+            let after = open_file_descriptor_count() as isize;
+            after - before
+        };
+
+        let small = measure(0, 16);
+        let large = measure(16, 128);
         assert!(
-            after <= before + PARALLEL_TEST_FD_ALLOWANCE,
-            "128 rejected commands leaked file descriptors: before={before}, after={after}"
+            large <= small.max(0) + 4,
+            "rejected missing commands grew open FDs with iteration count \
+             (PTY leak): small_batch_delta={small}, large_batch_delta={large}"
         );
     }
 
