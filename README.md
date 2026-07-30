@@ -81,7 +81,7 @@ For more build commands, see [CONTRIBUTING.md](CONTRIBUTING.md).
 ## Configuration
 vc-frame keeps compatibility with Zellij configuration and layout concepts. For inherited syntax, see the [upstream Zellij configuration documentation](https://zellij.dev/documentation/configuration.html). For vc-frame-specific default surface and theme behavior, see [docs/VC_FRAME_OPERATOR_SURFACE.md](docs/VC_FRAME_OPERATOR_SURFACE.md).
 
-The product key contract: `Alt+←/→` previous/next tab and `Alt+↑/↓` previous/next session in every unlocked mode; in LOCK, `Alt+←/→` is writer word-jump. Ctrl+arrows stay with the OS. Host terminal requirements (macOS `option_as_alt`, hints, glyph width) live in [docs/ALACRITTY_INTEGRATION.md](docs/ALACRITTY_INTEGRATION.md).
+The product key contract (v3) — one modifier per owner: `Cmd+←/→` previous/next tab, `Cmd+↑/↓` previous/next session and `Cmd+E` Command Composer in **every** mode, LOCK included (Cmd/Super is empty real estate in the terminal, so nothing a pane runs can collide with it); `Ctrl+arrows` mirror the switcher outside LOCK and belong to the pane inside it; `Alt` belongs entirely to the writer (diacritics, word-jump). Host terminal requirements (the Cmd translation layer, hints, glyph width) live in [docs/ALACRITTY_INTEGRATION.md](docs/ALACRITTY_INTEGRATION.md).
 
 If keys from the guide do nothing — or closing a pane kills a whole session — your user config is probably shadowing the shipped contract with a frozen `keybinds clear-defaults=true` dump. Run `vc-frame doctor` to diagnose and `vc-frame repair key-bindings` to fix it; see [docs/DOCTOR.md](docs/DOCTOR.md).
 

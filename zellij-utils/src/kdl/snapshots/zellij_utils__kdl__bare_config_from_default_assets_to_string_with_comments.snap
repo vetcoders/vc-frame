@@ -5,24 +5,6 @@ expression: fake_config_stringified
 ---
 keybinds clear-defaults=true {
     locked {
-        bind "Ctrl left" { GoToPreviousTab; }
-        bind "Alt left" { Write 27 98; }
-        bind "Ctrl down" {
-            MessagePlugin "session-rail" {
-                name "vc_rail_nav"
-                payload "down"
-                floating false
-            }
-        }
-        bind "Ctrl up" {
-            MessagePlugin "session-rail" {
-                name "vc_rail_nav"
-                payload "up"
-                floating false
-            }
-        }
-        bind "Ctrl right" { GoToNextTab; }
-        bind "Alt right" { Write 27 102; }
         bind "Ctrl g" { SwitchToMode "normal"; }
     }
     pane {
@@ -201,7 +183,15 @@ keybinds clear-defaults=true {
         }
     }
     shared {
+        bind "Super left" { GoToPreviousTab; }
         bind "Ctrl Shift down" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "down"
+                floating false
+            }
+        }
+        bind "Super down" {
             MessagePlugin "session-rail" {
                 name "vc_rail_nav"
                 payload "down"
@@ -215,30 +205,45 @@ keybinds clear-defaults=true {
                 floating false
             }
         }
-    }
-    shared_except "locked" {
-        bind "Alt left" { GoToPreviousTab; }
-        bind "Alt down" {
-            MessagePlugin "session-rail" {
-                name "vc_rail_nav"
-                payload "down"
-                floating false
-            }
-        }
-        bind "Alt up" {
+        bind "Super up" {
             MessagePlugin "session-rail" {
                 name "vc_rail_nav"
                 payload "up"
                 floating false
             }
         }
-        bind "Alt right" { GoToNextTab; }
+        bind "Super right" { GoToNextTab; }
+    }
+    shared_except "locked" {
+        bind "Ctrl left" { GoToPreviousTab; }
+        bind "Ctrl down" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "down"
+                floating false
+            }
+        }
+        bind "Ctrl up" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "up"
+                floating false
+            }
+        }
+        bind "Ctrl right" { GoToNextTab; }
         bind "Alt +" { Resize "Increase"; }
         bind "Alt -" { Resize "Decrease"; }
         bind "Alt =" { Resize "Increase"; }
         bind "Alt [" { PreviousSwapLayout; }
         bind "Alt ]" { NextSwapLayout; }
         bind "Alt e" {
+            Run "sh" "-c" "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"" {
+                floating true
+                close_on_exit true
+                name "Composer"
+            }
+        }
+        bind "Super e" {
             Run "sh" "-c" "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"" {
                 floating true
                 close_on_exit true

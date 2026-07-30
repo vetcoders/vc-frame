@@ -7,13 +7,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 ## [Unreleased]
 
 ## [0.47.2] - 2026-07-30
-* feat(input): Alt-arrows product key contract — `Alt+←/→` previous/next tab and `Alt+↑/↓` previous/next session in every unlocked mode; in LOCK, `Alt+←/→` becomes writer word-jump (`ESC b`/`ESC f`); Ctrl+arrows are returned to the OS (Mission Control keeps its defaults)
+* feat(input): key-contract v3 — one modifier per owner: `Cmd/Super+←/→` tabs, `Cmd/Super+↑/↓` sessions and `Cmd+E` Composer in **every** mode including LOCK (Super never collides with anything a pane reads); `Ctrl+arrows` mirror the switcher outside LOCK and pass through inside it; `Alt` belongs entirely to the writer (diacritics layer, host-side word-jump) — the shipped Alacritty preset carries the Cmd→kitty-CSI-u translation layer
 * feat(clinic): `vc-frame doctor` — read-only diagnosis of config shadowing (frozen `clear-defaults` keybind dumps), lock stranding, install freshness, shell drift, and config parse errors; session-effective analysis (config + layout overlay), `--json` with machine-readable remedies, exit codes 0/1/2
 * feat(clinic): `vc-frame repair key-bindings` — backs up the config, retires the shadowing keybinds block behind a guard comment, and reports exactly which personal binds were lost; `--dry-run` supported (runbook: docs/DOCTOR.md)
 * fix(ipc): typed client receive path (`ClientReceiveOutcome`) distinguishes messages, disconnects, and protocol errors — ends the unknown-message flood that force-logged-out live clients
 * fix(session): CloseTab cleanup debt paid — session verbs, cleanup cap, abandon path, and ghost-session short-circuit; closing a pane is a one-shot action again instead of a session killer
 * feat(input): idle autolock driven purely by config — `auto_lock_after_seconds 30` ships in the default config template; the code invents no number, and 0 or unset means never
-* feat(composer): `Alt+e` Command Composer honoring `$VC_COMPOSER`, with an always-visible clickable chip in the compact-bar
+* feat(composer): `Cmd+E` (with `Alt+e` fallback for hosts without a Super channel) Command Composer honoring `$VC_COMPOSER`, with an always-visible clickable chip in the compact-bar
 * feat(chrome): compact-bar redesign in rail language — brand chip, inverted mode chip, session anchor, fisheye tab ribbons, fleet-pulse chip, and the Agents station chip opening the dispatcher
 * fix(chrome): one ink color across the tab zone — state is dim/bold plus the ○/● marker, the active tab sits on the block tint (not a full inversion), alternate shades are a close rhythm step, and chip edges are half-block seams split 50|50 on the boundary line
 * feat(chrome): `left_inset` compact-bar option so the bar clears the macOS traffic lights in a decoration-free host window

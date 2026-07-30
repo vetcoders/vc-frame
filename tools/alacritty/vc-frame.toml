@@ -155,6 +155,54 @@ key = "Z"
 mods = "Alt|Shift"
 chars = "Ż"
 
+# ─── Cmd → vc-frame: the product switcher (key-contract v3) ─────────────────
+# Cmd+arrows and Cmd+E are empty real estate in every terminal — no shell,
+# no TUI and no diacritics layer ever sees them. The host translates them
+# into kitty CSI-u sequences with the super bit (modifier param 9 = 1+8);
+# the vc-frame keyboard parser decodes these natively as Super+key, so the
+# switcher works in EVERY mode, LOCK included.
+#   Cmd+←/→  previous/next tab
+#   Cmd+↑/↓  previous/next session
+#   Cmd+E    Command Composer
+[[keyboard.bindings]]
+key = "Left"
+mods = "Command"
+chars = "\u001B[1;9D"
+
+[[keyboard.bindings]]
+key = "Right"
+mods = "Command"
+chars = "\u001B[1;9C"
+
+[[keyboard.bindings]]
+key = "Up"
+mods = "Command"
+chars = "\u001B[1;9A"
+
+[[keyboard.bindings]]
+key = "Down"
+mods = "Command"
+chars = "\u001B[1;9B"
+
+[[keyboard.bindings]]
+key = "E"
+mods = "Command"
+chars = "\u001B[101;9u"
+
+# Word-jump for the writer: Alt+arrows are NOT product keys (contract v3
+# moved the switcher to Cmd), so the host may translate them for the shell.
+# Without these, option_as_alt="Both" sends ESC[1;3D / ESC[1;3C which most
+# shells don't bind, leaking literal ";3D" into the prompt.
+[[keyboard.bindings]]
+key = "Left"
+mods = "Alt"
+chars = "\u001Bb"
+
+[[keyboard.bindings]]
+key = "Right"
+mods = "Alt"
+chars = "\u001Bf"
+
 # Multiline drafting: Shift+Enter inserts a newline instead of submitting
 # (pairs with the Composer flow for quick inline multi-line commands).
 [[keyboard.bindings]]
@@ -174,15 +222,23 @@ regex = "(ipfs:|ipns:|magnet:|mailto:|gemini://|gopher://|https://|http://|news:
 hyperlinks = true
 post_processing = true
 # macOS: `open` resolves http → browser and file:// → system app (Pensieve, etc.)
-command = "open"
-mouse = { enabled = true }
+# Env-driven opener layer: set VC_OPENER in your shell profile to route
+# links/files into your app of choice (e.g. "pensieve --wait", an editor,
+# a specific browser); unset it and macOS `open` resolves the default app.
+# The login zsh (-l) loads your profile, so PATH and VC_OPENER are yours.
+command = { program = "/bin/zsh", args = ["-lc", "exec ${VC_OPENER:-open} \"$0\""] }
+# iTerm-style: hold Cmd and click a link to open it. When an app owns the
+# mouse (reporting active), Shift+Cmd+click is the guaranteed fallback.
+mouse = { enabled = true, mods = "Command" }
 binding = { key = "U", mods = "Control|Shift" }
 
 # ─── What is deliberately NOT here ──────────────────────────────────────────
 # - No bare Shift+click *keyboard* bindings: terminals reserve Shift+click to
 #   bypass mouse reporting so host hints can fire (see [hints] above).
-# - No Alt+Left/Right host chars: those keys are the vc-frame product contract
-#   (tabs / LOCK word-jump). Diacritics stay Option+letter only.
+# - No Ctrl+arrow host bindings: outside LOCK the engine binds them as the
+#   muscle-memory switcher lane; in LOCK they belong to the pane. Whether
+#   macOS Mission Control eats them first is the operator's OS-level call —
+#   the contract lane that always works is Cmd (see above).
 # - No colors: vc-frame themes carry their own RGB. If you want the window
 #   background to match the chrome ground, import a matching Alacritty theme
 #   generated from your vc-frame theme (see docs/THEMES_GUIDE.md roadmap).

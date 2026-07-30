@@ -45,15 +45,25 @@ via the host (`open` on macOS). vc-frame still owns bare Click and
 Shift into an app binding; it is terminal physics that becomes the host
 browser gesture.
 
-### 3. Do not steal Alt+arrows in the host
+### 3. Ship the Cmd translation layer (key-contract v3)
 
-**Product key-contract:** `Alt+←/→` previous/next tab, `Alt+↑/↓`
-previous/next session (unlocked modes). LOCK is typing mode: `Alt+←/→`
-word-jump inside vc-frame; Ctrl+arrows remain an optional bonus when the
-OS does not claim them. The preset must **not** bind `Alt+Left/Right` to
-host `chars` — that would steal the product contract. Mission Control may
-keep its default Ctrl+arrow Spaces shortcuts; operators no longer need to
-disable them for the declared contract to work.
+**Product key-contract v3 — one modifier per owner:**
+
+| Modifier | Owner | Keys |
+|---|---|---|
+| **Cmd (Super)** | vc-frame switcher, **every mode incl. LOCK** | `Cmd+←/→` tabs, `Cmd+↑/↓` sessions, `Cmd+E` Composer |
+| **Ctrl** | muscle-memory switcher lane outside LOCK; the pane inside LOCK | `Ctrl+←/→/↑/↓` (unlocked only) |
+| **Alt (Option)** | the writer — diacritics layer + word-jump | host-side `chars`, never product keys |
+
+Terminal apps never receive Cmd natively, so the preset translates it into
+kitty CSI-u sequences with the super bit (`ESC[1;9D`, `ESC[101;9u`, …) —
+the vc-frame keyboard parser decodes these as first-class `Super` keys (the
+same modifier the Configuration plugin offers for leader rebinding). Cmd
+is empty real estate in the terminal: no shell, TUI or diacritics layer
+ever sees it, which is what lets the switcher stay alive in LOCK.
+
+Alt+arrows are **not** product keys anymore — the preset may (and does)
+translate them to `ESC b`/`ESC f` word-jump for the shell.
 
 ### 4. Width-1 glyph rendering
 
@@ -102,10 +112,10 @@ chrome ground can never drift apart.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `Alt+e` types `ę` / opens nothing | Option not sending Alt | `option_as_alt = "Both"` |
-| `Alt+←/→` types word-jump / does nothing for tabs | host still binds Alt+arrows as `chars` | remove host Alt+Left/Right binds; use the shipped preset |
+| `Cmd+←/→` / `Cmd+E` do nothing | Cmd translation layer missing | import the shipped preset (the `mods = "Command"` bindings) |
+| `Alt+e` types `ę` | the diacritics layer owns Alt+letters | by design — Composer is `Cmd+E` (or the bar chip) |
 | `Shift+click` on a URL does nothing | hints missing / mouse disabled | import preset `[hints]` with `mouse.enabled = true` |
-| `Ctrl+←/→` switches macOS Spaces | Mission Control owns the shortcut | expected; product contract is Alt+arrows — leave MC alone |
+| `Ctrl+←/→` switches macOS Spaces | Mission Control owns the shortcut | expected; the always-works lane is `Cmd+arrows` — leave MC alone |
 | Chrome glyphs show as boxes | font lacks Misc Symbols coverage | pick a fuller monospace / Nerd Font |
 | Thin colored border around the chrome | host padding + opaque mismatched background | keep the preset's `blur`/`opacity`, or match theme ground / zero the padding |
 | Chrome keys from the guide do nothing / `Ctrl+q` kills the whole session | frozen `clear-defaults` keybinds in the user config shadow the shipped contract | `vc-frame doctor`, then `vc-frame repair key-bindings` (see [DOCTOR.md](DOCTOR.md)) |

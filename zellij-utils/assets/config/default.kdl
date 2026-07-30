@@ -6,27 +6,11 @@ keybinds {
     }
     locked {
         bind "Ctrl g" { SwitchToMode "Normal"; }
-        // Ctrl+arrows stay as a LOCK bonus when the OS does not steal them.
-        // Public product contract is Alt+arrows (see shared_except "locked").
-        bind "Ctrl Left" { GoToPreviousTab; }
-        bind "Ctrl Right" { GoToNextTab; }
-        bind "Ctrl Up" {
-            MessagePlugin "session-rail" {
-                name "vc_rail_nav"
-                payload "up"
-            };
-        }
-        bind "Ctrl Down" {
-            MessagePlugin "session-rail" {
-                name "vc_rail_nav"
-                payload "down"
-            };
-        }
-        // LOCK is the typing mode (autolock 5s): Alt+Left/Right word-jump into
-        // the shell. Alt+Up/Down unbound → pass-through. Tab/session nav lives
-        // in shared_except "locked" as Alt+arrows.
-        bind "Alt Left" { Write 27 98; }
-        bind "Alt Right" { Write 27 102; }
+        // LOCK is the typing mode: Ctrl and Alt pass through untouched —
+        // Ctrl belongs to the shell/apps, Alt belongs to the writer
+        // (diacritics, word-jump — host-side). The only navigation that
+        // stays alive in LOCK is the Super (Cmd) switcher in `shared`,
+        // because Super never collides with anything a pane can read.
     }
     resize {
         bind "Ctrl n" { SwitchToMode "Normal"; }
@@ -229,6 +213,26 @@ keybinds {
         bind "x" { CloseFocus; SwitchToMode "Normal"; }
     }
     shared {
+        // Product key-contract v3: the global switcher lives on Super (Cmd).
+        // Cmd+arrows are empty real estate in every terminal — no shell, no
+        // TUI and no writer layer ever sees them — so the switcher works in
+        // EVERY mode, LOCK included. On macOS+Alacritty the shipped preset
+        // translates Cmd+arrows/Cmd+E into kitty CSI-u sequences with the
+        // super bit; the client keyboard parser decodes them natively.
+        bind "Super Left" { GoToPreviousTab; }
+        bind "Super Right" { GoToNextTab; }
+        bind "Super Up" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "up"
+            };
+        }
+        bind "Super Down" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "down"
+            };
+        }
         // direct session-rail hop, deliberately alive in locked mode too:
         // the keybind pipes to the rail plugin, so no unlock round-trip
         bind "Ctrl Shift Up" {
@@ -252,17 +256,19 @@ keybinds {
         bind "Alt n" { NewPane; }
         bind "Alt i" { MoveTab "Left"; }
         bind "Alt o" { MoveTab "Right"; }
-        // Product key-contract (Monica-ready): Alt+arrows = tabs / sessions.
-        // Mission Control can keep Ctrl+arrows; Alt reaches the terminal.
-        bind "Alt Left" { GoToPreviousTab; }
-        bind "Alt Right" { GoToNextTab; }
-        bind "Alt Up" {
+        // Unlocked muscle-memory lane: Ctrl+arrows mirror the Super switcher
+        // outside LOCK. In LOCK they pass through to the pane — Ctrl belongs
+        // to the shell there. Alt+arrows are deliberately NOT bound anywhere:
+        // Alt is the writer's layer (diacritics, host-side word-jump).
+        bind "Ctrl Left" { GoToPreviousTab; }
+        bind "Ctrl Right" { GoToNextTab; }
+        bind "Ctrl Up" {
             MessagePlugin "session-rail" {
                 name "vc_rail_nav"
                 payload "up"
             };
         }
-        bind "Alt Down" {
+        bind "Ctrl Down" {
             MessagePlugin "session-rail" {
                 name "vc_rail_nav"
                 payload "down"
@@ -284,7 +290,10 @@ keybinds {
         // underlying pane's input, unexecuted — pressing Enter stays a human
         // decision. VC_COMPOSER expands unquoted on purpose: it is a command
         // line ("open -W -n -a Pensieve", "pensieve --wait"), not a path.
-        bind "Alt e" {
+        // Two doors, one Composer: Super+e (Cmd+E) is the macOS product key
+        // — it never collides with a diacritics layer; Alt+e stays for hosts
+        // without a Super channel (Linux, plain terminals).
+        bind "Super e" "Alt e" {
             Run "sh" "-c" "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"" {
                 floating true
                 close_on_exit true

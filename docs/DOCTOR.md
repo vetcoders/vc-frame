@@ -136,7 +136,7 @@ risk below.
 | 2 | stranded in LOCK: autolock is an *option*, independent of keybinds; upstream LOCK knows only `Ctrl+g`, so no rail hop and no tab navigation | HIGH |
 | 3 | session verbs vanish: `x` (kill current + hop), `r` (rail) do not exist upstream | MEDIUM |
 | 4 | the guide describes the asset contract while a different one is in force | MEDIUM |
-| 5 | upstream `Alt+arrows` are pane focus; asset product contract is tabs/sessions | LOW |
+| 5 | upstream binds no `Super/Cmd` keys; asset product contract is the Cmd switcher (tabs/sessions, every mode) | LOW |
 | 6 | Ctrl+arrows optional LOCK bonus — Mission Control may keep Spaces defaults | LOW |
 
 If you take the raw path, pair it with `auto_lock_after_seconds 0` — or know

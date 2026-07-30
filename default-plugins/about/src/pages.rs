@@ -452,10 +452,10 @@ impl Page {
                             }
                         })),
                         ActiveComponent::new(TextOrCustomRender::Text(main_menu_item(
-                            "Command Composer (Alt+e)",
+                            "Command Composer (Cmd+E)",
                         )))
                         .with_hover(TextOrCustomRender::Text(
-                            main_menu_item("Command Composer (Alt+e)").selected(),
+                            main_menu_item("Command Composer (Cmd+E)").selected(),
                         ))
                         .with_left_click_action(ClickAction::new_change_page({
                             let link_executable = link_executable.clone();
@@ -657,9 +657,9 @@ impl Page {
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new(
-                        "  · Right side: Alt+e Composer chip — click it or press the keys",
+                        "  · Right side: Composer chip — click it or press Cmd+E",
                     )
-                    .color_substring(2, "Alt+e Composer"),
+                    .color_substring(2, "Composer chip"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new("How to switch:"),
@@ -668,8 +668,8 @@ impl Page {
                     Text::new("  · Mouse: click the tab name on the top compact bar"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("  · Alt+Left / Alt+Right  —  previous / next tab (product contract)")
-                        .color_substring(3, "Alt+Left / Alt+Right"),
+                    Text::new("  · Cmd+Left / Cmd+Right  —  previous / next tab, any mode (contract v3)")
+                        .color_substring(3, "Cmd+Left / Cmd+Right"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new("  · Keyboard: Ctrl+t  (TAB mode), then 1 / 2 or Left/Right, Enter")
@@ -694,7 +694,7 @@ impl Page {
         base_mode: Rc<RefCell<InputMode>>,
     ) -> Self {
         Page::new()
-            .with_title(Text::new("Keyboard + mouse (Alt product contract)").color_range(0, ..))
+            .with_title(Text::new("Keyboard + mouse (key-contract v3)").color_range(0, ..))
             .with_paragraph(vec![
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new("Modes (status bar shows labels):").color_range(2, ..),
@@ -729,24 +729,24 @@ impl Page {
                         .color_substring(3, "Ctrl+q"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("Navigation (product contract — works with Mission Control defaults):")
+                    Text::new("Navigation (contract v3 — one modifier per owner):")
                         .color_range(2, ..),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("  Alt+Left/Right    previous / next tab")
-                        .color_substring(3, "Alt+Left/Right"),
+                    Text::new("  Cmd+Left/Right    previous / next tab (every mode, LOCK too)")
+                        .color_substring(3, "Cmd+Left/Right"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("  Alt+Up/Down       previous / next session (instant, no Enter)")
-                        .color_substring(3, "Alt+Up/Down"),
+                    Text::new("  Cmd+Up/Down       previous / next session (instant, no Enter)")
+                        .color_substring(3, "Cmd+Up/Down"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("  Alt+e             Command Composer — draft in your $EDITOR")
-                        .color_substring(3, "Alt+e"),
+                    Text::new("  Cmd+E             Command Composer — draft in your $EDITOR")
+                        .color_substring(3, "Cmd+E"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new(
-                        "  LOCK (typing): Alt+Left/Right word-jump · Ctrl+arrows optional bonus",
+                        "  LOCK (typing): Ctrl+Alt stay with the pane and writer · Cmd still switches",
                     )
                     .color_substring(3, "LOCK"),
                 ))]),
@@ -844,8 +844,8 @@ impl Page {
                     ),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("  1. Press Alt+e (or click the Composer chip on the top bar)")
-                        .color_substring(3, "Alt+e"),
+                    Text::new("  1. Press Cmd+E (or click the Composer chip on the top bar)")
+                        .color_substring(3, "Cmd+E"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new("  2. A floating pane opens your $EDITOR on an empty draft")
@@ -868,12 +868,12 @@ impl Page {
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new(
-                        "macOS + Alacritty note: Option must act as Alt (option_as_alt \"Both\") —",
-                    )
-                    .color_substring(2, "option_as_alt"),
+                        "macOS + Alacritty note: import the shipped preset — it carries the",
+                    ),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("see docs/ALACRITTY_INTEGRATION.md for the shipped host preset."),
+                    Text::new("Cmd translation layer; see docs/ALACRITTY_INTEGRATION.md.")
+                        .color_substring(2, "Cmd translation layer"),
                 ))]),
             ])
             .with_bulletin_list(onboarding_back_bulletin(

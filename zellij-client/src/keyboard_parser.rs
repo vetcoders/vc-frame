@@ -1231,6 +1231,28 @@ pub fn can_parse_keys_with_ctrl_modifier() {
 }
 
 #[test]
+pub fn can_parse_arrows_and_composer_key_with_super_modifier() {
+    // The key-contract v3 wire format: the Alacritty preset translates
+    // Cmd+arrows / Cmd+E into these exact sequences (kitty CSI-u, super
+    // bit = 8 → modifier param 9). If this test breaks, the Cmd switcher
+    // dies host-wide.
+    use zellij_utils::data::BareKey;
+    for (seq, bare, label) in [
+        ("\u{1b}[1;9D", BareKey::Left, "Super+Left"),
+        ("\u{1b}[1;9C", BareKey::Right, "Super+Right"),
+        ("\u{1b}[1;9A", BareKey::Up, "Super+Up"),
+        ("\u{1b}[1;9B", BareKey::Down, "Super+Down"),
+        ("\u{1b}[101;9u", BareKey::Char('e'), "Super+e (Composer)"),
+    ] {
+        assert_eq!(
+            parse_for_test(seq.as_bytes()),
+            Some(KeyWithModifier::new(bare).with_super_modifier()),
+            "Can parse {label} from the preset wire sequence"
+        );
+    }
+}
+
+#[test]
 pub fn can_parse_keys_with_super_modifier() {
     use zellij_utils::data::BareKey;
     let key = "\u{1b}[97;9u";

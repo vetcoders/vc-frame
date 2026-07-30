@@ -33,17 +33,21 @@ points at `zellij:session-manager` with `rail true`.
 The operator entrypoint layout (`vibecrafted`) replaces the top `tab-bar` with
 the redesigned `compact-bar`: brand chip, inverted mode chip, session anchor,
 fisheye tab ribbons, fleet-pulse chip, the Agents station chip, and the
-Command Composer chip (`Alt+e`). Its `left_inset` option clears the macOS
+Command Composer chip (`Cmd+E`). Its `left_inset` option clears the macOS
 traffic lights in a decoration-free host window.
 
 ## Key Contract
 
-The shipped defaults promise one navigation language:
+The shipped defaults promise one navigation language — one modifier per
+owner (contract v3):
 
-- `Alt+←/→` — previous/next tab (every unlocked mode)
-- `Alt+↑/↓` — previous/next session (every unlocked mode)
-- in LOCK, `Alt+←/→` is writer word-jump (`ESC b` / `ESC f`)
-- Ctrl+arrows belong to the OS; Mission Control keeps its defaults
+- `Cmd+←/→` — previous/next tab, **every mode including LOCK**
+- `Cmd+↑/↓` — previous/next session, **every mode including LOCK**
+- `Cmd+E` — Command Composer
+- `Ctrl+arrows` — the same switcher outside LOCK; inside LOCK they pass
+  through to the pane (the shell owns Ctrl there)
+- `Alt` — belongs entirely to the writer: diacritics layer and host-side
+  word-jump; vc-frame binds no Alt+arrow keys
 
 If declared keys do nothing, the usual culprit is a frozen
 `keybinds clear-defaults=true` dump in the user config shadowing the shipped

@@ -817,9 +817,9 @@ const EVIDENCE_LIMIT: usize = 16;
 /// Is this one of the verbs this fork added — the ones a frozen dump or an
 /// upstream-shaped config cannot possibly have?
 ///
-/// Order of recognition: `session x` / `session r`, the public Alt product
-/// tab/session contract, then LOCK bonus nav. Those are the concrete losses
-/// an operator can recognise, so they lead the evidence.
+/// Order of recognition: `session x` / `session r`, the public Super/Ctrl
+/// product tab/session contract, then LOCK-mode nav. Those are the concrete
+/// losses an operator can recognise, so they lead the evidence.
 fn is_headline(group: &BindGroup) -> bool {
     headline_priority(group).is_some()
 }
@@ -827,16 +827,15 @@ fn is_headline(group: &BindGroup) -> bool {
 /// Lower = more important.
 ///
 /// 0 — fork session verbs (`session x` / `session r`)
-/// 1 — public product Alt arrows (tabs / session rail outside LOCK)
-/// 2 — LOCK bonus / word-jump (Ctrl or Alt arrows while locked)
+/// 1 — public product switcher (Super/Cmd global + Ctrl unlocked lane)
+/// 2 — legacy LOCK nav (Ctrl/Alt arrows from pre-v3 dumps)
 /// 3 — other LOCK binds
 /// 4 — other session-rail traffic
 ///
 /// Without ranking, a frozen dump's ~170 shadowed binds bury the product
-/// contract under upstream resize/tmux noise. Alt product binds used to fall
-/// off the headline list entirely because they live in `shared_except
-/// "locked"` (not LOCK mode) — that was a silent dual-truth after the
-/// Alt-arrows wave.
+/// contract under upstream resize/tmux noise. Product binds used to fall
+/// off the headline list entirely because they live outside LOCK mode —
+/// that was a silent dual-truth after the first key-contract wave.
 fn headline_priority(group: &BindGroup) -> Option<u8> {
     let sig = actions_signature(&group.contract);
     let key = group.key.to_kdl();
@@ -844,15 +843,16 @@ fn headline_priority(group: &BindGroup) -> Option<u8> {
     if session_mode && (key == "x" || key == "r") && sig.contains("session-rail") {
         return Some(0);
     }
-    // Public product contract: Alt → tabs / sessions (unlocked modes).
-    let is_alt_product_nav = key.contains("Alt")
+    // Public product contract v3: Super (Cmd) is the global switcher in
+    // every mode incl. LOCK; Ctrl arrows mirror it outside LOCK.
+    let is_product_nav = (key.contains("Super") || key.contains("Ctrl"))
         && (sig.contains("GoToPreviousTab")
             || sig.contains("GoToNextTab")
             || sig.contains("session-rail"));
-    if is_alt_product_nav {
+    if is_product_nav {
         return Some(1);
     }
-    // LOCK bonus (Ctrl arrows) and LOCK word-jump (Alt arrows → Write).
+    // Legacy LOCK nav from pre-v3 dumps (Ctrl/Alt arrows, Write word-jump).
     if group.modes.contains(&InputMode::Locked)
         && (key.contains("Ctrl") || key.contains("Alt"))
         && (sig.contains("GoToPreviousTab")
@@ -1653,9 +1653,9 @@ theme "vc-frame"
             missing.contains("session x → MessagePlugin \"session-rail\""),
             "{missing}"
         );
-        // The rail navigation inside LOCK.
-        assert!(missing.contains("locked Ctrl up"), "{missing}");
-        assert!(missing.contains("locked Ctrl down"), "{missing}");
+        // The global Super switcher — alive in LOCK too (contract v3).
+        assert!(missing.contains("Super up"), "{missing}");
+        assert!(missing.contains("Super down"), "{missing}");
     }
 
     #[test]
@@ -1878,7 +1878,7 @@ layout_dir "{}"
         // The destructive divergence always leads.
         assert!(detail[0].contains("Ctrl q → Quit"), "{detail:#?}");
         // Every verb this fork added and the config now lacks is named —
-        // product Alt contract first among navigation, LOCK Ctrl as bonus.
+        // the Super/Ctrl product switcher first among navigation (v3).
         let named = detail.join("\n");
         assert!(
             named.contains("session x → MessagePlugin \"session-rail\""),
@@ -1889,16 +1889,16 @@ layout_dir "{}"
             "{named}"
         );
         assert!(
-            named.contains("Alt left") && named.contains("GoToPreviousTab"),
-            "public Alt tab contract must survive the evidence cap, got {named}"
+            named.contains("Super left") && named.contains("GoToPreviousTab"),
+            "public Super tab contract must survive the evidence cap, got {named}"
         );
         assert!(
-            named.contains("Alt right") && named.contains("GoToNextTab"),
-            "public Alt tab contract must survive the evidence cap, got {named}"
+            named.contains("Super right") && named.contains("GoToNextTab"),
+            "public Super tab contract must survive the evidence cap, got {named}"
         );
         assert!(
-            named.contains("locked Ctrl up") || named.contains("locked Ctrl down"),
-            "LOCK Ctrl bonus should still be named when room remains, got {named}"
+            named.contains("Ctrl left") || named.contains("Ctrl right"),
+            "the unlocked Ctrl mirror lane should still be named, got {named}"
         );
         // The upstream long tail is a count, not a sample.
         assert!(!named.contains("resize H"), "{named}");
