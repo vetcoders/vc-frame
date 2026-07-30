@@ -250,7 +250,7 @@ jobs:
             runner: [self-hosted, ops-linux]
             target: x86_64-unknown-linux-musl
           - build: linux musl aarch64
-            runner: [self-hosted, ops-linux]
+            runner: [self-hosted, linux-vetcoders]
             target: aarch64-unknown-linux-musl
 #          - build: linux musl riscv64
 #            runner: [self-hosted, ops-linux]
@@ -505,7 +505,7 @@ jobs:
             runner: [self-hosted, ops-linux]
             target: x86_64-unknown-linux-musl
           - build: linux musl aarch64
-            runner: [self-hosted, ops-linux]
+            runner: [self-hosted, linux-vetcoders]
             target: aarch64-unknown-linux-musl
 #          - build: linux musl riscv64
 #            runner: [self-hosted, ops-linux]
