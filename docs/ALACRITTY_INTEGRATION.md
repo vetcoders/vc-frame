@@ -102,6 +102,7 @@ chrome ground can never drift apart.
 | `Ctrl+←/→` switches macOS Spaces | Mission Control owns the shortcut | disable in System Settings |
 | Chrome glyphs show as boxes | font lacks Misc Symbols coverage | pick a fuller monospace / Nerd Font |
 | Thin colored border around the chrome | host padding + opaque mismatched background | keep the preset's `blur`/`opacity`, or match theme ground / zero the padding |
+| Chrome keys from the guide do nothing / `Ctrl+q` kills the whole session | frozen `clear-defaults` keybinds in the user config shadow the shipped contract | `vc-frame doctor`, then `vc-frame repair key-bindings` (see [DOCTOR.md](DOCTOR.md)) |
 
 ---
 
