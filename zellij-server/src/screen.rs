@@ -2653,11 +2653,7 @@ impl Screen {
         }
     }
 
-    fn abandon_layout_cleanup(
-        &mut self,
-        transaction_id: LayoutTransactionId,
-        reason: &str,
-    ) {
+    fn abandon_layout_cleanup(&mut self, transaction_id: LayoutTransactionId, reason: &str) {
         if let Some(cleanup) = self.pending_layout_cleanup.get_mut(&transaction_id) {
             let remaining = cleanup.pane_ids();
             log::error!(

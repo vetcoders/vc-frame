@@ -712,8 +712,7 @@ impl Page {
                         .color_substring(3, "Ctrl+o"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("  Ctrl+t  TAB      then x = kill tab")
-                        .color_substring(3, "Ctrl+t"),
+                    Text::new("  Ctrl+t  TAB      then x = kill tab").color_substring(3, "Ctrl+t"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new("  Ctrl+n  new pane immediately").color_substring(3, "Ctrl+n"),

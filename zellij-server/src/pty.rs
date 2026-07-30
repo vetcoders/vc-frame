@@ -3798,10 +3798,10 @@ fn send_command_not_found_to_screen(
 
 #[cfg(not(windows))]
 pub fn get_default_shell() -> PathBuf {
-    if let Ok(shell) = std::env::var("SHELL") {
-        if !shell.is_empty() {
-            return PathBuf::from(shell);
-        }
+    if let Ok(shell) = std::env::var("SHELL")
+        && !shell.is_empty()
+    {
+        return PathBuf::from(shell);
     }
     // Alacritty host presets often launch vc-frame as terminal.shell, so the
     // server process never inherits a login-shell SHELL. Reconstruct from the
