@@ -712,17 +712,18 @@ impl State {
         }
 
         let tab_data = self.prepare_tab_data();
-        self.tab_line = tab_line(
-            &self.mode_info,
-            tab_data,
-            cols,
-            self.toggle_tooltip_key.clone(),
-            self.tooltip_is_active,
-            self.brand_text.clone(),
-            self.brand_text_short.clone(),
-            self.live_count,
-            self.left_inset,
-        );
+        let config = crate::line::TabLineConfig {
+            session_name: self.mode_info.session_name.to_owned(),
+            hide_session_name: self.mode_info.style.hide_session_name,
+            mode: self.mode_info.mode,
+            toggle_tooltip_key: self.toggle_tooltip_key.clone(),
+            tooltip_is_active: self.tooltip_is_active,
+            brand_text: self.brand_text.clone(),
+            brand_text_short: self.brand_text_short.clone(),
+            live_count: self.live_count,
+            left_inset: self.left_inset,
+        };
+        self.tab_line = tab_line(&self.mode_info, tab_data, cols, config);
 
         let output = self
             .tab_line

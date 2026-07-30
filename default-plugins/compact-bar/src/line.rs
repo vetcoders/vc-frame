@@ -9,25 +9,8 @@ pub fn tab_line(
     mode_info: &ModeInfo,
     tab_data: TabRenderData,
     cols: usize,
-    toggle_tooltip_key: Option<String>,
-    tooltip_is_active: bool,
-    brand_text: Option<String>,
-    brand_text_short: Option<String>,
-    live_count: usize,
-    left_inset: usize,
+    config: TabLineConfig,
 ) -> Vec<LinePart> {
-    let config = TabLineConfig {
-        session_name: mode_info.session_name.to_owned(),
-        hide_session_name: mode_info.style.hide_session_name,
-        mode: mode_info.mode,
-        toggle_tooltip_key,
-        tooltip_is_active,
-        brand_text,
-        brand_text_short,
-        live_count,
-        left_inset,
-    };
-
     let builder = TabLineBuilder::new(config, mode_info.style.colors, mode_info.capabilities, cols);
     builder.build(tab_data.tabs, tab_data.active_tab_index)
 }
