@@ -11,6 +11,7 @@ use ansi_term::{
 
 use std::collections::BTreeMap;
 use std::fmt::{Display, Error, Formatter};
+use unicode_width::UnicodeWidthStr;
 use zellij_tile::prelude::actions::Action;
 use zellij_tile::prelude::*;
 use zellij_tile_utils::{palette_match, style};
@@ -460,8 +461,11 @@ impl State {
         } else {
             " "
         };
+        // Grid columns, not chars: ䷅ (U+4DC5) is East-Asian-Wide and takes
+        // TWO cells. Counting it as one made the bar overflow the right edge
+        // by a column on every render — a wrap, a scroll, a jumping screen.
         segment.append(&LinePart {
-            len: live_text.chars().count() + live_suffix.chars().count(),
+            len: live_text.width() + live_suffix.width(),
             part: format!(
                 "{}{}",
                 style!(live_color, palette.text_unselected.background)
@@ -478,7 +482,7 @@ impl State {
         if let Some(resource_line) = &self.resource_line {
             let text = format!("{} ", resource_line);
             segment.append(&LinePart {
-                len: text.chars().count(),
+                len: text.width(),
                 part: style!(
                     palette.text_unselected.emphasis_2,
                     palette.text_unselected.background
