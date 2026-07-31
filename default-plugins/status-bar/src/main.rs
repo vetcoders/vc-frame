@@ -381,16 +381,17 @@ impl ZellijPlugin for State {
                 self.text_copy_destination,
                 self.display_system_clipboard_failure,
             );
-            if right.len > 0 && cols > right.len {
-                // Paint the hints, flood the background to EOL, then park
-                // the right segment flush against the edge (CHA, 1-based).
-                print!(
-                    "{}{}\u{1b}[{}G{}",
-                    line,
-                    fill_bg,
-                    cols.saturating_sub(right.len) + 1,
-                    right.part,
-                );
+            if right.len > 0 && cols > line.len + right.len {
+                // Right-align the status segment by PRINTING FORWARD only:
+                // hints, a background-styled spacer, the segment, then EL
+                // for the final column. The previous shape (EL, then CHA
+                // back, then text) corrupted the composed frame on every
+                // render — the climbing/ghosting chrome of 2026-07-31,
+                // bisected to exactly that print. No cursor motion, no
+                // write into the last cell: nothing left to go wrong.
+                let pad = cols.saturating_sub(line.len + right.len + 1);
+                let spacer = style!(background, background).paint(" ".repeat(pad));
+                print!("{}{}{}{}", line, spacer, right.part, fill_bg);
             } else {
                 print!("{}{}", line, fill_bg);
             }
@@ -455,9 +456,9 @@ impl State {
         } else {
             palette.text_unselected.emphasis_2
         };
-        let live_text = format!("䷅ LIVE {}", self.live_count);
+        let live_text = format!("LIVE {}", self.live_count);
         let live_suffix = if self.resource_line.is_some() {
-            " · "
+            " | "
         } else {
             " "
         };
@@ -583,7 +584,7 @@ fn parse_resource_sample(stdout: &[u8]) -> Option<String> {
     }
     const KIB_PER_GIB: f64 = 1024.0 * 1024.0;
     Some(format!(
-        "CPU {:.0}% · MEM {:.1}/{:.0}G · HDD {:.0}G",
+        "CPU {:.0}% | MEM {:.1}/{:.0}G | HDD {:.0}G",
         cpu,
         used_kib / KIB_PER_GIB,
         total_kib / KIB_PER_GIB,
