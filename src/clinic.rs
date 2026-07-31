@@ -91,6 +91,8 @@ pub enum Section {
     ConfigShadowing,
     LockStranding,
     InstallFreshness,
+    AssetIntegrity,
+    HostTerminal,
     Shell,
     ConfigParse,
 }
@@ -102,6 +104,8 @@ impl Section {
             Section::ConfigShadowing => "config-shadowing",
             Section::LockStranding => "lock-stranding",
             Section::InstallFreshness => "install-freshness",
+            Section::AssetIntegrity => "asset-integrity",
+            Section::HostTerminal => "host-terminal",
             Section::Shell => "shell",
             Section::ConfigParse => "config-parse",
         }
@@ -112,15 +116,19 @@ impl Section {
             Section::ConfigShadowing => "CONFIG SHADOWING",
             Section::LockStranding => "LOCK STRANDING",
             Section::InstallFreshness => "INSTALL FRESHNESS",
+            Section::AssetIntegrity => "ASSET INTEGRITY",
+            Section::HostTerminal => "HOST TERMINAL",
             Section::Shell => "SHELL",
             Section::ConfigParse => "CONFIG PARSE",
         }
     }
 
-    const ORDER: [Section; 5] = [
+    const ORDER: [Section; 7] = [
         Section::ConfigShadowing,
         Section::LockStranding,
         Section::InstallFreshness,
+        Section::AssetIntegrity,
+        Section::HostTerminal,
         Section::Shell,
         Section::ConfigParse,
     ];
@@ -637,6 +645,8 @@ fn diagnose_full(
     }
 
     diagnose_freshness(&mut diagnosis);
+    diagnose_assets(&mut diagnosis);
+    diagnose_host_terminal(&mut diagnosis);
     diagnose_shell(&mut diagnosis);
     diagnosis
 }
@@ -1053,6 +1063,235 @@ fn diagnose_freshness(diagnosis: &mut Diagnosis) {
         diagnosis
             .ok_notes
             .push((Section::InstallFreshness, freshness.diagnostic_line()));
+    }
+}
+
+fn diagnose_assets(diagnosis: &mut Diagnosis) {
+    use zellij_utils::asset_integrity::{PluginReceiptCheck, verify_embedded_plugins};
+    match verify_embedded_plugins() {
+        PluginReceiptCheck::NotApplicable(reason) => {
+            diagnosis
+                .ok_notes
+                .push((Section::AssetIntegrity, reason.to_owned()));
+        },
+        PluginReceiptCheck::Report {
+            verified,
+            mismatched,
+            unreceipted,
+            unembedded,
+        } => {
+            if mismatched.is_empty() && unreceipted.is_empty() && unembedded.is_empty() {
+                diagnosis.ok_notes.push((
+                    Section::AssetIntegrity,
+                    format!(
+                        "{} embedded plugins match the shipped SHA-256 receipt",
+                        verified.len()
+                    ),
+                ));
+                return;
+            }
+            if !mismatched.is_empty() {
+                diagnosis.findings.push(
+                    Finding::new(
+                        Section::AssetIntegrity,
+                        Severity::Critical,
+                        "embedded plugin bytes disagree with this binary's own receipt",
+                        "reinstall vc-frame (make install) — this build mixes plugin generations",
+                    )
+                    .with_detail(mismatched),
+                );
+            }
+            if !unreceipted.is_empty() || !unembedded.is_empty() {
+                let mut detail = Vec::new();
+                if !unreceipted.is_empty() {
+                    detail.push(format!(
+                        "embedded but missing from the receipt: {}",
+                        unreceipted.join(", ")
+                    ));
+                }
+                if !unembedded.is_empty() {
+                    detail.push(format!(
+                        "in the receipt but not embedded: {}",
+                        unembedded.join(", ")
+                    ));
+                }
+                diagnosis.findings.push(
+                    Finding::new(
+                        Section::AssetIntegrity,
+                        Severity::Warn,
+                        "the plugin receipt and the embedded plugin set disagree",
+                        "rebuild plugin assets (make plugins-assets) and reinstall",
+                    )
+                    .with_detail(detail),
+                );
+            }
+        },
+    }
+}
+
+/// Where the host terminal's own keyboard config can eat vc-frame's contract
+/// before the app ever sees the key. Reads only what it can prove: the
+/// caller's environment plus the host config file when it is findable.
+fn diagnose_host_terminal(diagnosis: &mut Diagnosis) {
+    let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default();
+    let in_alacritty = std::env::var("ALACRITTY_WINDOW_ID").is_ok()
+        || term_program.eq_ignore_ascii_case("alacritty");
+
+    if !in_alacritty {
+        if term_program.is_empty() {
+            diagnosis.ok_notes.push((
+                Section::HostTerminal,
+                "host terminal not identified from the caller environment — key \
+                 interception not audited"
+                    .to_owned(),
+            ));
+        } else {
+            diagnosis.ok_notes.push((
+                Section::HostTerminal,
+                format!(
+                    "{term_program} (caller environment) — its own shortcuts fire before \
+                     vc-frame; this doctor cannot read that app's bindings"
+                ),
+            ));
+        }
+        return;
+    }
+
+    let Some(config_path) = alacritty_config_path() else {
+        diagnosis.findings.push(Finding::new(
+            Section::HostTerminal,
+            Severity::Info,
+            "running under Alacritty but no alacritty.toml was found",
+            "none; with no config Alacritty keeps macOS Option composing — the Alt \
+             writer layer may emit accented glyphs instead of Alt keys",
+        ));
+        return;
+    };
+    let Ok(raw) = std::fs::read_to_string(&config_path) else {
+        diagnosis.findings.push(Finding::new(
+            Section::HostTerminal,
+            Severity::Warn,
+            format!(
+                "Alacritty config at {} exists but cannot be read",
+                config_path.display()
+            ),
+            "fix the file's permissions — key interception cannot be audited",
+        ));
+        return;
+    };
+
+    let shape = alacritty_key_shape(&raw);
+    if !shape.option_as_alt {
+        diagnosis.findings.push(
+            Finding::new(
+                Section::HostTerminal,
+                Severity::Critical,
+                "Alacritty does not map Option to Alt — the Alt writer layer is dead on macOS",
+                "set `option_as_alt = \"Both\"` in alacritty.toml",
+            )
+            .with_detail(vec![format!("scanned {}", config_path.display())]),
+        );
+    }
+    if shape.super_bindings.is_empty() {
+        diagnosis.ok_notes.push((
+            Section::HostTerminal,
+            format!(
+                "Alacritty ({}) declares no Command/Super bindings — the global \
+                 switcher reaches vc-frame",
+                config_path.display()
+            ),
+        ));
+    } else {
+        diagnosis.findings.push(
+            Finding::new(
+                Section::HostTerminal,
+                Severity::Warn,
+                "Alacritty binds Command/Super keys — the terminal fires them before vc-frame",
+                "remove or rebind the listed entries if the global switcher misses keys",
+            )
+            .with_detail(shape.super_bindings),
+        );
+    }
+}
+
+/// The standard Alacritty config locations, first hit wins — mirrors
+/// Alacritty's own lookup order closely enough to audit the common installs.
+fn alacritty_config_path() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    let xdg = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| format!("{home}/.config"));
+    [
+        format!("{xdg}/alacritty/alacritty.toml"),
+        format!("{home}/.alacritty.toml"),
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .find(|path| path.exists())
+}
+
+struct AlacrittyKeyShape {
+    option_as_alt: bool,
+    super_bindings: Vec<String>,
+}
+
+/// Text-level scan of alacritty.toml — deliberately not a TOML parser. The
+/// doctor needs two truths (is Option mapped to Alt, which bindings claim the
+/// Command/Super mod) and a text scan states them without a new dependency;
+/// anything it cannot prove it simply does not report.
+fn alacritty_key_shape(raw: &str) -> AlacrittyKeyShape {
+    let mut option_as_alt = false;
+    let mut super_bindings = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed.starts_with("option_as_alt") && !trimmed.ends_with("\"None\"") {
+            option_as_alt = true;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.contains("mods")
+            && (lower.contains("command") || lower.contains("super"))
+            && lower.contains("key")
+        {
+            super_bindings.push(trimmed.to_owned());
+        }
+    }
+    AlacrittyKeyShape {
+        option_as_alt,
+        super_bindings,
+    }
+}
+
+#[cfg(test)]
+mod host_terminal_tests {
+    use super::alacritty_key_shape;
+
+    #[test]
+    fn option_as_alt_both_counts_as_mapped() {
+        let shape = alacritty_key_shape("option_as_alt = \"Both\"\n");
+        assert!(shape.option_as_alt);
+        assert!(shape.super_bindings.is_empty());
+    }
+
+    #[test]
+    fn option_as_alt_none_or_absent_reads_as_unmapped() {
+        assert!(!alacritty_key_shape("option_as_alt = \"None\"\n").option_as_alt);
+        assert!(!alacritty_key_shape("[window]\ndecorations = \"none\"\n").option_as_alt);
+    }
+
+    #[test]
+    fn a_commented_line_proves_nothing() {
+        assert!(!alacritty_key_shape("# option_as_alt = \"Both\"\n").option_as_alt);
+    }
+
+    #[test]
+    fn command_bindings_are_listed_verbatim() {
+        let toml = "[keyboard]\nbindings = [\n\
+                    { key = \"N\", mods = \"Command\", action = \"CreateNewWindow\" },\n\
+                    { key = \"K\", mods = \"Control\", chars = \"x\" },\n]\n";
+        let shape = alacritty_key_shape(toml);
+        assert_eq!(shape.super_bindings.len(), 1);
+        assert!(shape.super_bindings[0].contains("Command"));
     }
 }
 

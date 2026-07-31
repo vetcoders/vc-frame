@@ -5,6 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
+* feat(clinic): `asset-integrity` doctor section — the binary hashes its embedded plugins at runtime against its own SHA-256 receipt (`SHA256SUMS`), so a build that mixes plugin generations says so instead of "jakoś działa" (CRITICAL → `make install`)
+* feat(clinic): `host-terminal` doctor section — names the host terminal, and under Alacritty audits `option_as_alt` (absent/None = the Alt writer layer is dead on macOS, CRITICAL) plus Command/Super bindings the terminal intercepts before vc-frame (WARN, listed verbatim)
+* feat(chrome): tab chips speak the exact status-bar chip language (`color_elements()` recipe) — active ◉ on the ribbon accent, inactive ○ on ribbon ground, bold everywhere, chips separated by bar ground instead of half-block seams
 
 ## [0.47.2] - 2026-07-30
 * feat(input): key-contract v3 — one modifier per owner: `Cmd/Super+←/→` tabs, `Cmd/Super+↑/↓` sessions and `Cmd+E` Composer in **every** mode including LOCK (Super never collides with anything a pane reads); `Ctrl+arrows` mirror the switcher outside LOCK and pass through inside it; `Alt` belongs entirely to the writer (diacritics layer, host-side word-jump) — the shipped Alacritty preset carries the Cmd→kitty-CSI-u translation layer
