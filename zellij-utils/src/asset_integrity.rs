@@ -69,6 +69,11 @@ pub enum PluginReceiptCheck {
     },
 }
 
+/// Receipt entries built for the test suites and deliberately never
+/// embedded in the release binary — their absence is a known exception,
+/// not drift, so the doctor must not warn on them.
+const TEST_ONLY_RECEIPT_ENTRIES: [&str; 1] = ["fixture-plugin-for-tests.wasm"];
+
 /// Hash every embedded plugin and compare against the embedded receipt.
 pub fn verify_embedded_plugins() -> PluginReceiptCheck {
     #[cfg(all(feature = "plugins_from_target", debug_assertions))]
@@ -79,13 +84,17 @@ pub fn verify_embedded_plugins() -> PluginReceiptCheck {
     }
     #[cfg(any(not(feature = "plugins_from_target"), not(debug_assertions)))]
     {
+        let mut receipt = parse_receipt(PLUGIN_RECEIPT);
+        for test_only in TEST_ONLY_RECEIPT_ENTRIES {
+            receipt.remove(test_only);
+        }
         verify_map_against_receipt(
             crate::consts::ASSET_MAP.iter().filter_map(|(path, bytes)| {
                 let name = path.file_name()?.to_str()?;
                 name.ends_with(".wasm")
                     .then(|| (name.to_owned(), bytes.as_slice()))
             }),
-            &parse_receipt(PLUGIN_RECEIPT),
+            &receipt,
         )
     }
 }
@@ -226,5 +235,19 @@ mod tests {
     fn garbage_receipt_lines_are_skipped_not_fatal() {
         let receipt = parse_receipt("not-a-sha  x.wasm\n\ndeadbeef short.wasm\n");
         assert!(receipt.is_empty());
+    }
+
+    #[test]
+    fn test_only_receipt_entries_cover_the_shipped_fixture() {
+        // The shipped receipt carries the e2e fixture plugin; the release
+        // binary deliberately never embeds it. The exception list must name
+        // it, or every clean build warns "in the receipt but not embedded".
+        let receipt = parse_receipt(PLUGIN_RECEIPT);
+        for test_only in TEST_ONLY_RECEIPT_ENTRIES {
+            assert!(
+                receipt.contains_key(test_only),
+                "{test_only} vanished from SHA256SUMS — drop it from TEST_ONLY_RECEIPT_ENTRIES"
+            );
+        }
     }
 }
