@@ -103,6 +103,12 @@ struct State {
     is_first_run: bool,
     own_tab_index: Option<usize>,
     own_client_id: u16,
+    // Last (mode, coordinates) actually sent to the server. Repositioning is
+    // idempotent against this: a persistent tooltip receives ModeUpdate
+    // broadcasts that its own coordinate/rename calls trigger, and resending
+    // on every echo made a self-sustaining ~12/s reposition storm (the
+    // jumping screen of 2026-07-31).
+    last_sent_tooltip_state: Option<(InputMode, FloatingPaneCoordinates)>,
 
     // Keybinding cache
     cached_keybinds: KeybindsVec,
@@ -586,11 +592,16 @@ impl State {
         args
     }
 
-    fn update_tooltip_for_mode_change(&self, new_mode: InputMode) {
+    fn update_tooltip_for_mode_change(&mut self, new_mode: InputMode) {
         if let Some(plugin_id) = self.own_plugin_id {
             let coordinates = self.calculate_tooltip_coordinates();
+            let next_state = (new_mode, coordinates.clone());
+            if self.last_sent_tooltip_state.as_ref() == Some(&next_state) {
+                return;
+            }
             change_floating_panes_coordinates(vec![(PaneId::Plugin(plugin_id), coordinates)]);
             rename_plugin_pane(plugin_id, format!("{:?}", new_mode));
+            self.last_sent_tooltip_state = Some(next_state);
         }
     }
 
