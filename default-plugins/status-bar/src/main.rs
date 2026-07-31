@@ -35,8 +35,13 @@ const CLIPBOARD_HINT_TTL_SECONDS: f64 = 2.0;
 const RESOURCE_SAMPLE_CONTEXT_KEY: &str = "vc_status_resources";
 const RESOURCE_SAMPLE_SECONDS: f64 = 5.0;
 // Portable host sample: total CPU% (per-core percentages summed, like top),
-// used RSS KiB and total RAM KiB — Linux via /proc/meminfo, macOS via sysctl.
-const RESOURCE_SAMPLE_COMMAND: &str = r#"cpu=$(ps -A -o %cpu= | awk '{s+=$1} END {printf "%.0f", s}'); used=$(ps -A -o rss= | awk '{s+=$1} END {print s}'); if [ -r /proc/meminfo ]; then total=$(awk '/^MemTotal:/{print $2}' /proc/meminfo); else total=$(( $(sysctl -n hw.memsize) / 1024 )); fi; printf '%s %s %s' "$cpu" "$used" "$total""#;
+// used RSS KiB and total RAM KiB — Linux via /proc/meminfo, macOS via sysctl —
+// plus available KiB on the root filesystem (df POSIX output, field 4).
+const RESOURCE_SAMPLE_COMMAND: &str = r#"cpu=$(ps -A -o %cpu= | awk '{s+=$1} END {printf "%.0f", s}'); used=$(ps -A -o rss= | awk '{s+=$1} END {print s}'); if [ -r /proc/meminfo ]; then total=$(awk '/^MemTotal:/{print $2}' /proc/meminfo); else total=$(( $(sysctl -n hw.memsize) / 1024 )); fi; disk=$(df -P -k / | awk 'NR==2 {print $4}'); printf '%s %s %s %s' "$cpu" "$used" "$total" "$disk""#;
+/// Status-bucket session names — wire contract with the triage reaper, kept
+/// identical to `run_triage.rs`. Bucket sessions never count toward the
+/// fleet pulse.
+const BUCKET_SESSION_NAMES: [&str; 3] = ["Finalized runs", "Failed runs", "Needs attention"];
 /// Shorthand for `Action::SwitchToMode{input_mode: InputMode::Normal}`.
 const TO_NORMAL: Action = Action::SwitchToMode {
     input_mode: InputMode::Normal,
@@ -53,10 +58,14 @@ struct State {
     classic_ui: bool,
     base_mode_is_locked: bool,
     cached_keybinds: KeybindsVec,
-    // Host resource cockpit ("CPU … · MEM …"), sampled via run_command. None
-    // until the first valid sample; a malformed sample keeps the last line.
+    // Host resource cockpit ("CPU … · MEM … · HDD …"), sampled via
+    // run_command. None until the first valid sample; a malformed sample
+    // keeps the last line.
     resource_line: Option<String>,
     resource_sample_in_flight: bool,
+    // Fleet pulse: live agent-process count across every session, fed by
+    // SessionUpdate. A pure status — nothing rides on it, nothing to click.
+    live_count: usize,
 }
 
 register_plugin!(State);
@@ -216,8 +225,12 @@ impl ZellijPlugin for State {
             .map(|c| c == "true")
             .unwrap_or(false);
         set_selectable(false);
-        // The resource cockpit samples the host via run_command.
-        request_permission(&[PermissionType::RunCommands]);
+        // The resource cockpit samples the host via run_command; the fleet
+        // pulse needs the cross-session snapshot (SessionUpdate).
+        request_permission(&[
+            PermissionType::RunCommands,
+            PermissionType::ReadApplicationState,
+        ]);
         subscribe(&[
             EventType::ModeUpdate,
             EventType::TabUpdate,
@@ -228,6 +241,7 @@ impl ZellijPlugin for State {
             EventType::InitialKeybinds,
             EventType::Timer,
             EventType::RunCommandResult,
+            EventType::SessionUpdate,
             EventType::PermissionRequestResult,
         ]);
         self.start_resource_sample();
@@ -310,6 +324,13 @@ impl ZellijPlugin for State {
                     && self.resource_line.as_deref() != Some(line.as_str())
                 {
                     self.resource_line = Some(line);
+                    should_render = true;
+                }
+            },
+            Event::SessionUpdate(sessions, _) => {
+                let live_count = fleet_live_count(&sessions);
+                if self.live_count != live_count {
+                    self.live_count = live_count;
                     should_render = true;
                 }
             },
@@ -420,11 +441,39 @@ impl State {
         run_command(&["sh", "-c", RESOURCE_SAMPLE_COMMAND], context);
     }
 
-    /// The bar's right edge: `CPU … · MEM …` (dim) followed by the swap
-    /// layout chip (BASE / VERTICAL / …) that used to live on the top bar.
+    /// The bar's right edge — pure statuses, zero tools (operator call
+    /// 2026-07-31): `䷅ LIVE n` (the fleet pulse, moved down from the top
+    /// bar, carrying no click), the host cockpit `CPU … · MEM … · HDD …`
+    /// (dim), and the swap layout chip (BASE / VERTICAL / …).
     fn right_status_segment(&self, active_tab: Option<&TabInfo>) -> LinePart {
         let mut segment = LinePart::default();
         let palette = self.mode_info.style.colors;
+
+        let live_color = if self.live_count > 0 {
+            palette.text_unselected.emphasis_1
+        } else {
+            palette.text_unselected.emphasis_2
+        };
+        let live_text = format!("䷅ LIVE {}", self.live_count);
+        let live_suffix = if self.resource_line.is_some() {
+            " · "
+        } else {
+            " "
+        };
+        segment.append(&LinePart {
+            len: live_text.chars().count() + live_suffix.chars().count(),
+            part: format!(
+                "{}{}",
+                style!(live_color, palette.text_unselected.background)
+                    .bold()
+                    .paint(live_text),
+                style!(
+                    palette.text_unselected.emphasis_2,
+                    palette.text_unselected.background
+                )
+                .paint(live_suffix),
+            ),
+        });
 
         if let Some(resource_line) = &self.resource_line {
             let text = format!("{} ", resource_line);
@@ -515,25 +564,50 @@ impl State {
     }
 }
 
-/// Format the three-number sample ("cpu used_kib total_kib") into the
-/// cockpit line. Returns None on any malformed field so a bad sample never
-/// blanks a previously valid reading.
+/// Format the four-number sample ("cpu used_kib total_kib disk_avail_kib")
+/// into the cockpit line. Returns None on any malformed field so a bad
+/// sample never blanks a previously valid reading.
 fn parse_resource_sample(stdout: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(stdout);
     let mut parts = text.split_whitespace();
     let cpu: f64 = parts.next()?.parse().ok()?;
     let used_kib: f64 = parts.next()?.parse().ok()?;
     let total_kib: f64 = parts.next()?.parse().ok()?;
-    if total_kib <= 0.0 || cpu < 0.0 || used_kib < 0.0 {
+    let disk_avail_kib: f64 = parts.next()?.parse().ok()?;
+    if total_kib <= 0.0 || cpu < 0.0 || used_kib < 0.0 || disk_avail_kib < 0.0 {
         return None;
     }
     const KIB_PER_GIB: f64 = 1024.0 * 1024.0;
     Some(format!(
-        "CPU {:.0}% · MEM {:.1}/{:.0}G",
+        "CPU {:.0}% · MEM {:.1}/{:.0}G · HDD {:.0}G",
         cpu,
         used_kib / KIB_PER_GIB,
         total_kib / KIB_PER_GIB,
+        disk_avail_kib / KIB_PER_GIB,
     ))
+}
+
+/// The fleet pulse, recomputed from the same predicate the rail uses: a tab
+/// is "live" when it holds at least one non-plugin pane that has not exited
+/// and is not held. Bucket sessions are pinned drawers, not fleet.
+fn fleet_live_count(sessions: &[SessionInfo]) -> usize {
+    sessions
+        .iter()
+        .filter(|session| !BUCKET_SESSION_NAMES.contains(&session.name.as_str()))
+        .map(|session| {
+            session
+                .tabs
+                .iter()
+                .filter(|tab| {
+                    session.panes.panes.get(&tab.position).is_some_and(|panes| {
+                        panes
+                            .iter()
+                            .any(|pane| !pane.is_plugin && !pane.exited && !pane.is_held)
+                    })
+                })
+                .count()
+        })
+        .sum()
 }
 
 pub fn get_common_modifiers(mut keyvec: Vec<&KeyWithModifier>) -> Vec<KeyModifier> {
@@ -779,10 +853,10 @@ pub mod tests {
     }
 
     #[test]
-    fn resource_sample_formats_cpu_and_memory() {
-        // 342% CPU, 8 GiB used of 64 GiB (values in KiB, like ps/meminfo).
-        let sample = parse_resource_sample(b"342 8388608 67108864");
-        assert_eq!(sample.as_deref(), Some("CPU 342% · MEM 8.0/64G"));
+    fn resource_sample_formats_cpu_memory_and_disk() {
+        // 342% CPU, 8 GiB used of 64 GiB, 13 GiB free on / (KiB inputs).
+        let sample = parse_resource_sample(b"342 8388608 67108864 13631488");
+        assert_eq!(sample.as_deref(), Some("CPU 342% · MEM 8.0/64G · HDD 13G"));
     }
 
     #[test]
@@ -790,8 +864,14 @@ pub mod tests {
         assert_eq!(parse_resource_sample(b""), None, "empty");
         assert_eq!(parse_resource_sample(b"only two"), None, "non-numeric");
         assert_eq!(parse_resource_sample(b"12 34"), None, "missing total");
-        assert_eq!(parse_resource_sample(b"12 34 0"), None, "zero total");
-        assert_eq!(parse_resource_sample(b"-5 34 100"), None, "negative cpu");
+        assert_eq!(parse_resource_sample(b"12 34 100"), None, "missing disk");
+        assert_eq!(parse_resource_sample(b"12 34 0 55"), None, "zero total");
+        assert_eq!(parse_resource_sample(b"-5 34 100 55"), None, "negative cpu");
+        assert_eq!(
+            parse_resource_sample(b"12 34 100 -1"),
+            None,
+            "negative disk"
+        );
     }
 
     #[test]

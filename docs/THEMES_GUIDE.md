@@ -65,17 +65,16 @@ color index. Components rendered through the `Text` API resolve
 ### `text_selected` — selection and the block highlight
 
 `background` is the full-width bar behind: rail hover, keyboard selection,
-the current-session **block tint** (the whole block of the session you
-are in, header plus its process rows), and the **active tab chip** on the
-compact-bar (bold ink, `●` marker — one step lighter than the rhythm
-shades, never a full inversion). Emphasis slots mirror `text_unselected`
-so accents survive selection.
+and the current-session **block tint** (the whole block of the session you
+are in, header plus its process rows). Emphasis slots mirror
+`text_unselected` so accents survive selection.
 
-### `ribbon_selected` — "this is armed"
+### `ribbon_selected` — "this is armed / this is where you are"
 
-`background`/`base` paint the armed-mode chip (PANE, TAB, SESSION, …) and
-the inverted LOCK chip. This is the hard inversion of the bar — it belongs
-to the MODE alone; the active tab uses the softer `text_selected` surface.
+`background`/`base` paint the armed-mode chip (PANE, TAB, SESSION, …), the
+inverted LOCK chip, and the **active tab chip** (`◉`, bold) — the same
+hard inversion the bottom bar's selected ribbon uses, so the whole chrome
+answers "where am I" with one surface.
 
 ### `ribbon_unselected` — inactive ribbons
 
