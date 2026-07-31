@@ -674,7 +674,13 @@ fn rail_ordinal_key_to_index(character: char) -> Option<usize> {
 }
 
 fn format_session_rail_entry(session: &SessionUiInfo, ordinal: usize) -> String {
-    let status = if session.is_current_session { "*" } else { "-" };
+    // The fisheye is the one "you are here" glyph across the whole chrome —
+    // the same ◉/○ pair the tab chips carry.
+    let status = if session.is_current_session {
+        "◉"
+    } else {
+        "○"
+    };
     format!("{:02} {} {}", ordinal, status, session.name)
 }
 
@@ -828,7 +834,7 @@ fn format_bucket_rail_entry(
     viewer_tabs: usize,
     is_current_session: bool,
 ) -> String {
-    let status = if is_current_session { "*" } else { "-" };
+    let status = if is_current_session { "◉" } else { "○" };
     let historical_count = historical_count
         .map(|count| {
             if history_is_complete {
@@ -1389,8 +1395,8 @@ impl State {
 
         for bucket_row in &bucket_rows[bucket_rows.len() - pinned_rows..] {
             let mut text = Text::new(fit_bucket_rail_line(&bucket_row.text, cols));
-            // Same accent column as session status (`*`/`-` at index 3 in
-            // `"01 * name"` / `" f - Finalized…"`) — color_range(1, 3..4).
+            // Same accent column as session status (`◉`/`○` at index 3 in
+            // `"01 ◉ name"` / `" f ○ Finalized…"`) — color_range(1, 3..4).
             if cols >= 4 {
                 text = text.color_range(1, 3..4);
             }
@@ -2939,11 +2945,11 @@ mod rail_tests {
     fn rail_entries_include_ordinal_status_and_name() {
         assert_eq!(
             format_session_rail_entry(&session("alpha", true), 1),
-            "01 * alpha"
+            "01 ◉ alpha"
         );
         assert_eq!(
             format_session_rail_entry(&session("beta", false), 12),
-            "12 - beta"
+            "12 ○ beta"
         );
     }
 
@@ -3001,11 +3007,11 @@ mod rail_tests {
         let (view_from_alpha, view_from_zeta) = two_views_of_the_same_inventory();
         assert_eq!(
             working_row_texts(&view_from_alpha.session_ui_infos),
-            vec!["01 * alpha", "02 - mid", "03 - zeta"]
+            vec!["01 ◉ alpha", "02 ○ mid", "03 ○ zeta"]
         );
         assert_eq!(
             working_row_texts(&view_from_zeta.session_ui_infos),
-            vec!["01 - alpha", "02 - mid", "03 * zeta"]
+            vec!["01 ○ alpha", "02 ○ mid", "03 ◉ zeta"]
         );
     }
 
@@ -3063,8 +3069,8 @@ mod rail_tests {
             "only the two working sessions may precede the buckets"
         );
         assert!(rows[bucket_start..].iter().all(|row| row.is_bucket()));
-        assert_eq!(rows[0].text, "01 * aaa");
-        assert_eq!(rows[1].text, "02 - zzz");
+        assert_eq!(rows[0].text, "01 ◉ aaa");
+        assert_eq!(rows[1].text, "02 ○ zzz");
     }
 
     #[test]
@@ -3083,14 +3089,14 @@ mod rail_tests {
         assert_eq!(
             text,
             vec![
-                "01 * alpha",
+                "01 ◉ alpha",
                 "   ● impl-260718-120000-01000 · claude",
                 "   · audit-260718-130000-02000 · codex +1",
-                "02 - beta",
+                "02 ○ beta",
                 // the buckets are always pinned to the tail of the rail
-                " f -   ? · Finalized · t0",
-                " x -   ? · Failed · t0",
-                " n -   ? · Needs attention · t0",
+                " f ○   ? · Finalized · t0",
+                " x ○   ? · Failed · t0",
+                " n ○   ? · Needs attention · t0",
             ]
         );
         assert_eq!(rows.iter().filter(|row| row.is_live_process()).count(), 2);
@@ -3212,9 +3218,9 @@ mod rail_tests {
         assert_eq!(
             buckets,
             vec![
-                " f -  97 · Finalized · t0",
-                " x - 176 · Failed · t0",
-                " n - 408 · Needs attention · t0",
+                " f ○  97 · Finalized · t0",
+                " x ○ 176 · Failed · t0",
+                " n ○ 408 · Needs attention · t0",
             ]
         );
     }
@@ -3240,9 +3246,9 @@ mod rail_tests {
         assert_eq!(
             buckets,
             vec![
-                " f - ≥97 · Finalized · t0",
-                " x - ≥176 · Failed · t0",
-                " n - ≥408 · Needs attention · t0",
+                " f ○ ≥97 · Finalized · t0",
+                " x ○ ≥176 · Failed · t0",
+                " n ○ ≥408 · Needs attention · t0",
             ]
         );
         assert!(
@@ -3375,9 +3381,9 @@ mod rail_tests {
                 .map(|row| row.text.as_str())
                 .collect::<Vec<_>>(),
             vec![
-                " f -  ≥4 · Finalized · t0",
-                " x -  ≥3 · Failed · t0",
-                " n -  ≥3 · Needs attention · t0",
+                " f ○  ≥4 · Finalized · t0",
+                " x ○  ≥3 · Failed · t0",
+                " n ○  ≥3 · Needs attention · t0",
             ]
         );
 
@@ -3421,9 +3427,9 @@ mod rail_tests {
                 .map(|row| row.text.as_str())
                 .collect::<Vec<_>>(),
             vec![
-                " f -  ≥4 · Finalized · t0",
-                " x -  ≥3 · Failed · t0",
-                " n -  ≥3 · Needs attention · t0",
+                " f ○  ≥4 · Finalized · t0",
+                " x ○  ≥3 · Failed · t0",
+                " n ○  ≥3 · Needs attention · t0",
             ]
         );
         assert!(state.pipe(settlement_pipe(accepted.clone())));
@@ -3540,7 +3546,7 @@ mod rail_tests {
             .expect("needs-attention bucket");
 
         assert_eq!(
-            needs_attention.text, " n - 408 · Needs attention · t1",
+            needs_attention.text, " n ○ 408 · Needs attention · t1",
             "historical n=408 is primary; finalized latest and one viewer tab are not"
         );
     }
@@ -3561,9 +3567,9 @@ mod rail_tests {
             })
             .expect("finalized bucket");
 
-        assert_eq!(finalized.text, " f -   ? · Finalized · t2");
+        assert_eq!(finalized.text, " f ○   ? · Finalized · t2");
         assert!(
-            !finalized.text.contains(" f -   2 "),
+            !finalized.text.contains(" f ○   2 "),
             "viewer inventory must never masquerade as settlement truth"
         );
     }
@@ -3602,11 +3608,11 @@ mod rail_tests {
         assert_eq!(
             text,
             vec![
-                "01 * alpha",
-                "02 - beta",
-                " f -   ? · Finalized · t3",
-                " x -   ? · Failed · t2",
-                " n -   ? · Needs attention · t1",
+                "01 ◉ alpha",
+                "02 ○ beta",
+                " f ○   ? · Finalized · t3",
+                " x ○   ? · Failed · t2",
+                " n ○   ? · Needs attention · t1",
             ]
         );
     }
@@ -3636,9 +3642,9 @@ mod rail_tests {
         assert_eq!(
             buckets,
             vec![
-                " f -   ? · Finalized · t0",
-                " x -   ? · Failed · t0",
-                " n -   ? · Needs attention · t1",
+                " f ○   ? · Finalized · t0",
+                " x ○   ? · Failed · t0",
+                " n ○   ? · Needs attention · t1",
             ]
         );
     }
@@ -3649,9 +3655,9 @@ mod rail_tests {
         let buckets: Vec<&SessionRailRow> = rows.iter().filter(|row| row.is_bucket()).collect();
 
         assert_eq!(buckets.len(), 3);
-        assert_eq!(buckets[0].text, " f -   ? · Finalized · t0");
-        assert_eq!(buckets[1].text, " x -   ? · Failed · t0");
-        assert_eq!(buckets[2].text, " n -   ? · Needs attention · t0");
+        assert_eq!(buckets[0].text, " f ○   ? · Finalized · t0");
+        assert_eq!(buckets[1].text, " x ○   ? · Failed · t0");
+        assert_eq!(buckets[2].text, " n ○   ? · Needs attention · t0");
         assert!(matches!(
             buckets[0].kind,
             SessionRailRowKind::Bucket {
@@ -3756,32 +3762,32 @@ mod rail_tests {
     fn bucket_rail_lines_keep_secondary_viewer_suffix_when_truncated() {
         // Wide enough: untouched, padded like any rail line.
         assert_eq!(
-            fit_bucket_rail_line(" n - 408 · Needs attention · t12", 34),
-            " n - 408 · Needs attention · t12  "
+            fit_bucket_rail_line(" n ○ 408 · Needs attention · t12", 34),
+            " n ○ 408 · Needs attention · t12  "
         );
         // Narrow: the label loses letters, explicit viewer telemetry survives.
         assert_eq!(
-            fit_bucket_rail_line(" n - 408 · Needs attention · t12", 24),
-            " n - 408 · Needs a · t12"
+            fit_bucket_rail_line(" n ○ 408 · Needs attention · t12", 24),
+            " n ○ 408 · Needs a · t12"
         );
         // Shorter drawers at the same width pad instead of truncating.
         assert_eq!(
-            fit_bucket_rail_line(" x - 176 · Failed · t2", 24),
-            " x - 176 · Failed · t2  "
+            fit_bucket_rail_line(" x ○ 176 · Failed · t2", 24),
+            " x ○ 176 · Failed · t2  "
         );
         // Degenerate width: falls back to plain clipping, no suffix games.
         assert_eq!(
-            fit_bucket_rail_line(" n - 408 · Needs attention · t12", 4),
-            " n -"
+            fit_bucket_rail_line(" n ○ 408 · Needs attention · t12", 4),
+            " n ○"
         );
-        let huge = fit_bucket_rail_line(" f - 18446744073709551615 · Finalized · t0", 24);
-        assert_eq!(huge.trim_end(), " f - …");
+        let huge = fit_bucket_rail_line(" f ○ 18446744073709551615 · Finalized · t0", 24);
+        assert_eq!(huge.trim_end(), " f ○ …");
         assert!(
             !huge.chars().any(|character| character.is_ascii_digit()),
             "an overflowing count must be omitted, never clipped into a smaller exact number"
         );
         // Non-bucket text is untouched by the suffix rule.
-        assert_eq!(fit_bucket_rail_line("01 * alpha", 6), "01 * a");
+        assert_eq!(fit_bucket_rail_line("01 ◉ alpha", 6), "01 ◉ a");
     }
 
     #[test]
@@ -3990,8 +3996,10 @@ mod rail_tests {
 
     #[test]
     fn bucket_and_session_status_share_accent_column_index_3() {
-        // Session: "01 * alpha" — status `*` at byte index 3.
-        // Bucket:  " f -  97 · Finalized · t0" — status `-` at byte index 3.
+        // Session: "01 ◉ alpha" — status fisheye at display column 3.
+        // Bucket:  " f ○  97 · Finalized · t0" — status ring at column 3.
+        // The markers are multi-byte, so the accent column is a CHAR index —
+        // the same unit color_range(1, 3..4) speaks.
         let session_text = session_rail_rows(&[session("alpha", true)])
             .into_iter()
             .find(|r| matches!(r.kind, SessionRailRowKind::Session(_)))
@@ -3999,19 +4007,14 @@ mod rail_tests {
             .text;
         let bucket_text = format_bucket_rail_entry(BucketKind::Finalized, Some(97), true, 0, false);
         assert_eq!(
-            session_text.as_bytes().get(3),
-            Some(&b'*'),
+            session_text.chars().nth(3),
+            Some('◉'),
             "session status column"
         );
         assert_eq!(
-            bucket_text.as_bytes().get(3),
-            Some(&b'-'),
+            bucket_text.chars().nth(3),
+            Some('○'),
             "bucket status column (same index as session)"
-        );
-        assert_eq!(
-            session_text.as_bytes().get(3).map(|_| 3),
-            bucket_text.as_bytes().get(3).map(|_| 3),
-            "color_range(1, 3..4) targets the same column for both"
         );
     }
 

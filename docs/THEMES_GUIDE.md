@@ -111,6 +111,9 @@ never will.
    state, so recoloring them can never lie about focus. Chips are
    separated by one cell of bar ground on each side: the seam is
    breathing room, never a painted-on rule and never a half-block.
+   The same `◉`/`○` pair marks the rail: current session `◉`, every
+   other session and bucket row `○` — one "you are here" glyph across
+   the whole chrome. Locked: `⊝`. Normal: `▷`.
 3. **Three highlight levels.** Ground < block tint (`text_selected`
    background) < inversion (accent background). The rail uses all three:
    plain rows, the current-session block, the active tab row inside it.

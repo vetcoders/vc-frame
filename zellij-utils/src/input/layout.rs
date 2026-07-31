@@ -1513,9 +1513,9 @@ impl Layout {
     }
     #[cfg(target_family = "wasm")]
     pub fn from_url(_url: &str, _config: Config) -> Result<(Layout, Config), ConfigError> {
-        Err(ConfigError::DownloadError(format!(
-            "Unsupported platform, cannot download layout from the web"
-        )))
+        Err(ConfigError::DownloadError(
+            "Unsupported platform, cannot download layout from the web".to_string(),
+        ))
     }
     pub fn from_path_or_default_without_config(
         layout_path: Option<&PathBuf>,
