@@ -713,7 +713,7 @@ const CHROME_TAB_NAMES: [&str; 2] = ["Start here", "Shell"];
 
 /// Char offset of `needle` in `haystack`, searching from char offset `from`.
 /// Text::color_range speaks char offsets, while `str::find` returns bytes —
-/// this bridges the two for rows containing multi-byte glyphs (`●`, `·`).
+/// this bridges the two for rows containing multi-byte glyphs (`◉`, `·`).
 fn char_offset_of(haystack: &str, needle: &str, from: usize) -> Option<usize> {
     let byte_start = if from == 0 {
         0
@@ -855,7 +855,7 @@ fn format_bucket_rail_entry(
 }
 
 fn format_process_tab_rail_entry(tab: &TabUiInfo) -> String {
-    let activity = if tab.is_active { "●" } else { "·" };
+    let activity = if tab.is_active { "◉" } else { "·" };
     let mut text = format!("   {} {}", activity, tab.name);
     if let Some(process_label) = tab.primary_process_label()
         && process_label != tab.name
@@ -1326,7 +1326,7 @@ impl State {
                         .session_ui_infos
                         .get(session_index)
                         .is_some_and(|session| session.is_current_session);
-                    let is_active_tab_row = fitted.chars().nth(3) == Some('●');
+                    let is_active_tab_row = fitted.chars().nth(3) == Some('◉');
                     if cols >= 4 {
                         // Active tab dot gets the accent, idle dot stays dim;
                         // the trailing "· command +N" diagnostics dim away so
@@ -3090,7 +3090,7 @@ mod rail_tests {
             text,
             vec![
                 "01 ◉ alpha",
-                "   ● impl-260718-120000-01000 · claude",
+                "   ◉ impl-260718-120000-01000 · claude",
                 "   · audit-260718-130000-02000 · codex +1",
                 "02 ○ beta",
                 // the buckets are always pinned to the tail of the rail
@@ -3106,7 +3106,7 @@ mod rail_tests {
     fn rail_does_not_repeat_process_label_when_tab_already_names_the_agent() {
         let tab = TabUiInfo::for_rail_test("claude", true, "claude", 1);
 
-        assert_eq!(format_process_tab_rail_entry(&tab), "   ● claude");
+        assert_eq!(format_process_tab_rail_entry(&tab), "   ◉ claude");
     }
 
     fn bucket_session(name: &str, tabs: usize) -> SessionUiInfo {
@@ -4020,8 +4020,8 @@ mod rail_tests {
 
     #[test]
     fn char_offset_of_speaks_chars_not_bytes() {
-        // "   ● tab · cmd" — the dot separator sits after multi-byte `●`.
-        let row = "   ● tab · cmd";
+        // "   ◉ tab · cmd" — the dot separator sits after multi-byte `◉`.
+        let row = "   ◉ tab · cmd";
         assert_eq!(char_offset_of(row, " · ", 4), Some(8));
         assert_eq!(char_offset_of(row, " · ", 0), Some(8));
         assert_eq!(char_offset_of(row, "missing", 0), None);
