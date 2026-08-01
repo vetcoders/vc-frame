@@ -59,7 +59,7 @@ struct State {
     classic_ui: bool,
     base_mode_is_locked: bool,
     cached_keybinds: KeybindsVec,
-    // Host resource cockpit ("CPU … · MEM … · HDD …"), sampled via
+    // Host resource cockpit ("CPU … | MEM … | DISK …"), sampled via
     // run_command. None until the first valid sample; a malformed sample
     // keeps the last line.
     resource_line: Option<String>,
@@ -132,7 +132,7 @@ fn color_elements(palette: Styling, different_color_alternates: bool) -> Colored
             )
             .bold(),
             char_shortcut: style!(
-                palette.ribbon_selected.emphasis_0,
+                palette.ribbon_selected.emphasis_1,
                 palette.ribbon_selected.background
             )
             .bold(),
@@ -156,7 +156,7 @@ fn color_elements(palette: Styling, different_color_alternates: bool) -> Colored
             )
             .bold(),
             char_shortcut: style!(
-                palette.ribbon_unselected.emphasis_0,
+                palette.ribbon_unselected.emphasis_1,
                 palette.ribbon_unselected.background
             )
             .bold(),
@@ -176,7 +176,7 @@ fn color_elements(palette: Styling, different_color_alternates: bool) -> Colored
             prefix_separator: style!(background, alternate_background_color),
             char_left_separator: style!(background, alternate_background_color).bold(),
             char_shortcut: style!(
-                palette.ribbon_unselected.emphasis_0,
+                palette.ribbon_unselected.emphasis_1,
                 alternate_background_color
             )
             .bold(),
@@ -444,56 +444,76 @@ impl State {
     }
 
     /// The bar's right edge — pure statuses, zero tools (operator call
-    /// 2026-07-31): `䷅ LIVE n` (the fleet pulse, moved down from the top
-    /// bar, carrying no click), the host cockpit `CPU … · MEM … · HDD …`
-    /// (dim), and the swap layout chip (BASE / VERTICAL / …).
+    /// 2026-07-31 / close-out Fork IV): fleet LIVE, host cockpit, and a
+    /// HEALTH chip. All glyphs are single-cell ASCII/emoji-safe tokens so we
+    /// never re-introduce the ䷅ (U+4DC5, width 2) jumping-screen class.
     fn right_status_segment(&self, active_tab: Option<&TabInfo>) -> LinePart {
         let mut segment = LinePart::default();
         let palette = self.mode_info.style.colors;
+        let dim = style!(
+            palette.text_unselected.emphasis_2,
+            palette.text_unselected.background
+        );
+        let hot = style!(
+            palette.text_unselected.emphasis_1,
+            palette.text_unselected.background
+        )
+        .bold();
 
-        let live_color = if self.live_count > 0 {
-            palette.text_unselected.emphasis_1
-        } else {
-            palette.text_unselected.emphasis_2
-        };
+        // LIVE = fleet pulse (agent process tabs across sessions).
         let live_text = format!("LIVE {}", self.live_count);
-        let live_suffix = if self.resource_line.is_some() {
-            " | "
+        let live_part = if self.live_count > 0 {
+            hot.paint(live_text).to_string()
         } else {
-            " "
+            dim.paint(live_text).to_string()
         };
-        // Grid columns, not chars: ䷅ (U+4DC5) is East-Asian-Wide and takes
-        // TWO cells. Counting it as one made the bar overflow the right edge
-        // by a column on every render — a wrap, a scroll, a jumping screen.
         segment.append(&LinePart {
-            len: live_text.width() + live_suffix.width(),
-            part: format!(
-                "{}{}",
-                style!(live_color, palette.text_unselected.background)
-                    .bold()
-                    .paint(live_text),
-                style!(
-                    palette.text_unselected.emphasis_2,
-                    palette.text_unselected.background
-                )
-                .paint(live_suffix),
-            ),
+            len: format!("LIVE {}", self.live_count).width(),
+            part: live_part,
         });
 
+        // Resource cockpit already carries CPU | MEM | DISK from the sample.
         if let Some(resource_line) = &self.resource_line {
-            let text = format!("{} ", resource_line);
+            let sep = " | ";
+            let text = format!("{}{}", sep, resource_line);
             segment.append(&LinePart {
                 len: text.width(),
-                part: style!(
-                    palette.text_unselected.emphasis_2,
+                part: dim.paint(text).to_string(),
+            });
+        }
+
+        // HEALTH: green `ok` when the sample is present and live_count is
+        // finite; `!` when we have no sample yet (honest unknown).
+        {
+            let sep = " | ";
+            let (label, emphasis) = if self.resource_line.is_some() {
+                ("HEALTH ok", true)
+            } else {
+                ("HEALTH ?", false)
+            };
+            let text = format!("{}{}", sep, label);
+            let painted = if emphasis {
+                style!(
+                    palette.text_unselected.emphasis_1,
                     palette.text_unselected.background
                 )
-                .paint(text)
-                .to_string(),
+                .paint(text.clone())
+                .to_string()
+            } else {
+                dim.paint(text.clone()).to_string()
+            };
+            segment.append(&LinePart {
+                len: text.width(),
+                part: painted,
             });
         }
 
         if let Some(swap_chip) = self.swap_layout_status(active_tab) {
+            let sep = LinePart {
+                len: 1,
+                part: dim.paint(" ").to_string(),
+            };
+            segment.append(&sep);
             segment.append(&swap_chip);
         }
 
@@ -584,7 +604,7 @@ fn parse_resource_sample(stdout: &[u8]) -> Option<String> {
     }
     const KIB_PER_GIB: f64 = 1024.0 * 1024.0;
     Some(format!(
-        "CPU {:.0}% | MEM {:.1}/{:.0}G | HDD {:.0}G",
+        "CPU {:.0}% | MEM {:.1}/{:.0}G | DISK {:.0}G",
         cpu,
         used_kib / KIB_PER_GIB,
         total_kib / KIB_PER_GIB,
@@ -701,7 +721,7 @@ pub fn style_key_with_modifier(
 
     let text_color = palette_match!(palette.text_unselected.base);
     let green_color = palette_match!(palette.text_unselected.emphasis_2);
-    let orange_color = palette_match!(palette.text_unselected.emphasis_0);
+    let orange_color = palette_match!(palette.text_unselected.emphasis_1);
     let mut ret = vec![];
 
     let common_modifiers = get_common_modifiers(keyvec.iter().collect());
@@ -861,7 +881,7 @@ pub mod tests {
     fn resource_sample_formats_cpu_memory_and_disk() {
         // 342% CPU, 8 GiB used of 64 GiB, 13 GiB free on / (KiB inputs).
         let sample = parse_resource_sample(b"342 8388608 67108864 13631488");
-        assert_eq!(sample.as_deref(), Some("CPU 342% · MEM 8.0/64G · HDD 13G"));
+        assert_eq!(sample.as_deref(), Some("CPU 342% | MEM 8.0/64G | DISK 13G"));
     }
 
     #[test]

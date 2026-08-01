@@ -299,46 +299,118 @@ fn key_indicators(
     separator: &str,
     mode_info: &ModeInfo,
 ) -> LinePart {
-    // Print full-width hints
-    let (shared_modifiers, mut line_part) = superkey(palette, separator, mode_info);
-    for key in keys {
-        let line_empty = line_part.len == 0;
-        let key = long_mode_shortcut(key, palette, separator, &shared_modifiers, line_empty);
-        line_part.part = format!("{}{}", line_part.part, key.part);
-        line_part.len += key.len;
-    }
-    if line_part.len < max_len {
-        return line_part;
-    }
+    // Dense chips first (`g LOCK`), then classic long / short-mod / letter-only.
+    // On overflow: drop least-important tiles (Quit → … → Lock) instead of
+    // blanking the whole bar or clipping the right edge (Fork I close-out).
+    let (shared_modifiers, _) = superkey(palette, separator, mode_info);
 
-    // Full-width doesn't fit, try shortened modifiers (eg. "^C" instead of "Ctrl")
-    line_part = superkey(palette, separator, mode_info).1;
-    for key in keys {
-        let line_empty = line_part.len == 0;
-        let key =
-            shortened_modifier_shortcut(key, palette, separator, &shared_modifiers, line_empty);
-        line_part.part = format!("{}{}", line_part.part, key.part);
-        line_part.len += key.len;
-    }
-    if line_part.len < max_len {
-        return line_part;
-    }
+    let renderers: [Box<dyn Fn(&KeyShortcut, bool) -> LinePart>; 4] = [
+        Box::new(|key, first| dense_mode_shortcut(key, palette, separator, &shared_modifiers, first)),
+        Box::new(|key, first| long_mode_shortcut(key, palette, separator, &shared_modifiers, first)),
+        Box::new(|key, first| {
+            shortened_modifier_shortcut(key, palette, separator, &shared_modifiers, first)
+        }),
+        Box::new(|key, first| short_mode_shortcut(key, palette, separator, &shared_modifiers, first)),
+    ];
 
-    // Full-width doesn't fit, try shortened hints (just keybindings, no meanings/actions)
-    line_part = superkey(palette, separator, mode_info).1;
-    for key in keys {
-        let line_empty = line_part.len == 0;
-        let key = short_mode_shortcut(key, palette, separator, &shared_modifiers, line_empty);
-        line_part.part = format!("{}{}", line_part.part, key.part);
-        line_part.len += key.len;
-    }
-    if line_part.len < max_len {
-        return line_part;
-    }
+    // Least → most important for dropping.
+    let importance = |action: KeyAction| -> u8 {
+        match action {
+            KeyAction::Quit => 0,
+            KeyAction::Resize => 1,
+            KeyAction::Tmux => 2,
+            KeyAction::Search => 3,
+            KeyAction::Move => 4,
+            KeyAction::Session => 5,
+            KeyAction::Tab => 6,
+            KeyAction::Pane => 7,
+            KeyAction::Lock | KeyAction::Unlock => 8,
+        }
+    };
 
-    // Shortened doesn't fit, print nothing
-    line_part = LinePart::default();
-    line_part
+    for renderer in &renderers {
+        let mut active: Vec<usize> = (0..keys.len()).collect();
+        loop {
+            let (_, mut line_part) = superkey(palette, separator, mode_info);
+            for &idx in &active {
+                let line_empty = line_part.len == 0;
+                let tile = renderer(&keys[idx], line_empty);
+                if tile.len == 0 {
+                    continue;
+                }
+                line_part.part = format!("{}{}", line_part.part, tile.part);
+                line_part.len += tile.len;
+            }
+            if line_part.len <= max_len {
+                return line_part;
+            }
+            // Drop the least important remaining tile.
+            let drop_at = active
+                .iter()
+                .copied()
+                .min_by_key(|&i| importance(keys[i].action));
+            match drop_at {
+                Some(i) if active.len() > 1 => {
+                    active.retain(|&x| x != i);
+                },
+                _ => {
+                    // Nothing left to drop — return best effort if non-empty.
+                    if line_part.len > 0 {
+                        return line_part;
+                    }
+                    break;
+                },
+            }
+        }
+    }
+    LinePart::default()
+}
+
+/// Dense chip: `g LOCK` — letter + full mode name, no angle brackets.
+fn dense_mode_shortcut(
+    key: &KeyShortcut,
+    palette: ColoredElements,
+    separator: &str,
+    common_modifiers: &[KeyModifier],
+    first_tile: bool,
+) -> LinePart {
+    let key_hint = key.full_text();
+    let has_common_modifiers = !common_modifiers.is_empty();
+    let key_binding = match (&key.mode, &key.key) {
+        (KeyMode::Disabled, None) => "".to_string(),
+        (_, None) => return LinePart::default(),
+        (_, Some(_)) => key.letter_shortcut(common_modifiers),
+    };
+    let colors = match key.mode {
+        KeyMode::Unselected => palette.unselected,
+        KeyMode::UnselectedAlternate => palette.unselected_alternate,
+        KeyMode::Selected => palette.selected,
+        KeyMode::Disabled => palette.disabled,
+    };
+    let start_separator = if !has_common_modifiers && first_tile {
+        ""
+    } else {
+        separator
+    };
+    let prefix_separator = colors.prefix_separator.paint(start_separator);
+    let char_shortcut = colors.char_shortcut.paint(key_binding.to_string());
+    let styled_text = colors.styled_text.paint(format!(" {} ", key_hint));
+    let suffix_separator = colors.suffix_separator.paint(separator);
+    LinePart {
+        part: AnsiStrings(&[
+            prefix_separator,
+            char_shortcut,
+            styled_text,
+            suffix_separator,
+        ])
+        .to_string(),
+        len: start_separator.chars().count()
+            + key_binding.chars().count()
+            + 1
+            + key_hint.chars().count()
+            + 1
+            + separator.chars().count(),
+    }
 }
 
 fn swap_layout_keycode(mode_info: &ModeInfo) -> LinePart {
@@ -1085,7 +1157,7 @@ mod tests {
 
         assert_eq!(
             ret,
-            " Ctrl + >> <a> PANE >> <b> RESIZE >> <c> MOVE >".to_string()
+            " Ctrl + >>a PANE >>b RESIZE >>c MOVE >".to_string()
         );
     }
 
@@ -1109,7 +1181,7 @@ mod tests {
 
         assert_eq!(
             ret,
-            " <Ctrl a> PANE >> <Ctrl b> RESIZE >> <c> MOVE >".to_string()
+            "Ctrl a PANE >>Ctrl b RESIZE >>c MOVE >".to_string()
         );
     }
 
@@ -1135,7 +1207,7 @@ mod tests {
 
         assert_eq!(
             ret,
-            " <Ctrl a> LOCK >> <BACKSPACE> PANE >> <ENTER> TAB >> <TAB> RESIZE >> <←> MOVE >"
+            "Ctrl a LOCK >>BACKSPACE PANE >>ENTER TAB >>TAB RESIZE >>← MOVE >"
                 .to_string()
         );
     }
@@ -1160,7 +1232,7 @@ mod tests {
         let ret = first_line(&mode_info, None, 50, ">");
         let ret = unstyle(ret);
 
-        assert_eq!(ret, " Ctrl + >> a >> b >> c >> d >> e >".to_string());
+        assert_eq!(ret, " Ctrl + >>a LOCK >>b PANE >>c TAB >>e MOVE >".to_string());
     }
 
     #[test]
@@ -1181,6 +1253,6 @@ mod tests {
         let ret = first_line(&mode_info, None, 30, "");
         let ret = unstyle(ret);
 
-        assert_eq!(ret, " Ctrl +  a  b  c ".to_string());
+        assert_eq!(ret, " Ctrl + a PANE c MOVE ".to_string());
     }
 }

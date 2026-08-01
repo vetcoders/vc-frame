@@ -615,6 +615,9 @@ fn diagnose_full(
         },
     };
 
+    diagnose_config_resolution(&mut diagnosis, config_path);
+    diagnose_version_receipt(&mut diagnosis);
+
     match (config_path, raw) {
         (Some(path), Some(raw)) => {
             diagnose_config(&mut diagnosis, path, raw, &contract);
@@ -649,6 +652,102 @@ fn diagnose_full(
     diagnose_host_terminal(&mut diagnosis);
     diagnose_shell(&mut diagnosis);
     diagnosis
+}
+
+/// List every config-dir candidate and mark which one won — the operator
+/// must never have to guess why a session is chrome-less.
+fn diagnose_config_resolution(diagnosis: &mut Diagnosis, winner: Option<&Path>) {
+    use zellij_utils::home::{default_config_dirs, frontier_config_dir, home_config_dir};
+
+    let mut lines = Vec::new();
+    if let Ok(env) = std::env::var("VC_FRAME_CONFIG_DIR") {
+        lines.push(format!("env VC_FRAME_CONFIG_DIR={env}"));
+    } else {
+        lines.push("env VC_FRAME_CONFIG_DIR=(unset)".to_owned());
+    }
+    for (label, path) in [
+        ("home", home_config_dir()),
+        ("frontier", frontier_config_dir()),
+    ] {
+        match path {
+            Some(p) => {
+                let kdl = p.join("config.kdl");
+                let mark = if kdl.is_file() {
+                    "config.kdl present"
+                } else if p.exists() {
+                    "dir exists, no config.kdl"
+                } else {
+                    "missing"
+                };
+                lines.push(format!("{label}: {} [{mark}]", p.display()));
+            },
+            None => lines.push(format!("{label}: (none)")),
+        }
+    }
+    // Remaining candidates from the shared list (XDG + system).
+    for (idx, cand) in default_config_dirs().into_iter().flatten().enumerate() {
+        let label = format!("candidate[{idx}]");
+        let kdl = cand.join("config.kdl");
+        let mark = if kdl.is_file() {
+            "config.kdl present"
+        } else if cand.exists() {
+            "dir exists, no config.kdl"
+        } else {
+            "missing"
+        };
+        // Skip duplicates already printed as home/frontier.
+        let already = lines.iter().any(|line| line.contains(&cand.display().to_string()));
+        if !already {
+            lines.push(format!("{label}: {} [{mark}]", cand.display()));
+        }
+    }
+    match winner {
+        Some(path) => lines.push(format!("WINNER → {}", path.display())),
+        None => lines.push("WINNER → (shipped assets only)".to_owned()),
+    }
+    diagnosis.ok_notes.push((
+        Section::ConfigParse,
+        format!("config resolution\n  {}", lines.join("\n  ")),
+    ));
+}
+
+/// Always surface the binary's build identity + plugin receipt summary so
+/// mixed generations cannot silently "jakoś działa".
+fn diagnose_version_receipt(diagnosis: &mut Diagnosis) {
+    use zellij_utils::asset_integrity::{PluginReceiptCheck, verify_embedded_plugins};
+    use zellij_utils::build_info::build_info;
+    use zellij_utils::consts::{CLIENT_SERVER_CONTRACT_VERSION, VERSION};
+
+    let info = build_info();
+    let version_line = format!(
+        "bin {VERSION} · contract_version_{CLIENT_SERVER_CONTRACT_VERSION} · build {}",
+        info.human_version()
+    );
+    let receipt_line = match verify_embedded_plugins() {
+        PluginReceiptCheck::NotApplicable(reason) => format!("plugins: n/a ({reason})"),
+        PluginReceiptCheck::Report {
+            verified,
+            mismatched,
+            unreceipted,
+            unembedded,
+        } => {
+            if mismatched.is_empty() && unreceipted.is_empty() && unembedded.is_empty() {
+                format!("plugins: {} verified against receipt", verified.len())
+            } else {
+                format!(
+                    "plugins: {} ok, {} mismatch, {} unreceipted, {} unembedded",
+                    verified.len(),
+                    mismatched.len(),
+                    unreceipted.len(),
+                    unembedded.len()
+                )
+            }
+        },
+    };
+    diagnosis.ok_notes.push((
+        Section::AssetIntegrity,
+        format!("{version_line} · {receipt_line}"),
+    ));
 }
 
 fn diagnose_config(diagnosis: &mut Diagnosis, path: &Path, raw: &str, contract: &Config) {
