@@ -696,7 +696,9 @@ fn diagnose_config_resolution(diagnosis: &mut Diagnosis, winner: Option<&Path>) 
             "missing"
         };
         // Skip duplicates already printed as home/frontier.
-        let already = lines.iter().any(|line| line.contains(&cand.display().to_string()));
+        let already = lines
+            .iter()
+            .any(|line| line.contains(&cand.display().to_string()));
         if !already {
             lines.push(format!("{label}: {} [{mark}]", cand.display()));
         }

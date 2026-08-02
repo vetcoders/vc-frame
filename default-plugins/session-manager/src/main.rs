@@ -1013,8 +1013,8 @@ fn bucket_rail_rows(
                 })
                 .unwrap_or(0);
             // Open-now counts (latest_by_run), not all-time historical_transitions.
-            let live_count = settlement_history
-                .map(|snapshot| snapshot.latest_by_run.historical_count(bucket));
+            let live_count =
+                settlement_history.map(|snapshot| snapshot.latest_by_run.historical_count(bucket));
             let truth_is_exact = !settlement_feed_degraded
                 && settlement_history.is_some_and(SettlementHistory::is_complete);
             let is_current_session = session.is_some_and(|session| session.is_current_session);
@@ -3212,11 +3212,7 @@ mod rail_tests {
 
         assert_eq!(
             buckets,
-            vec![
-                " f ○  12 · final",
-                " x ○   7 · fail",
-                " n ○   3 · needs",
-            ]
+            vec![" f ○  12 · final", " x ○   7 · fail", " n ○   3 · needs",]
         );
     }
 
@@ -3240,11 +3236,7 @@ mod rail_tests {
 
         assert_eq!(
             buckets,
-            vec![
-                " f ○ ~12 · final",
-                " x ○ ~7 · fail",
-                " n ○ ~3 · needs",
-            ]
+            vec![" f ○ ~12 · final", " x ○ ~7 · fail", " n ○ ~3 · needs",]
         );
         assert!(
             SettlementHistory::parse(&settlement_payload_for(
@@ -3375,11 +3367,7 @@ mod rail_tests {
                 .filter(|row| row.is_bucket())
                 .map(|row| row.text.as_str())
                 .collect::<Vec<_>>(),
-            vec![
-                " f ○ ~2 · final",
-                " x ○ ~1 · fail",
-                " n ○ ~1 · needs",
-            ]
+            vec![" f ○ ~2 · final", " x ○ ~1 · fail", " n ○ ~1 · needs",]
         );
 
         // An exact canonical replay is both an integrity confirmation and a
@@ -3421,11 +3409,7 @@ mod rail_tests {
                 .filter(|row| row.is_bucket())
                 .map(|row| row.text.as_str())
                 .collect::<Vec<_>>(),
-            vec![
-                " f ○ ~2 · final",
-                " x ○ ~1 · fail",
-                " n ○ ~1 · needs",
-            ]
+            vec![" f ○ ~2 · final", " x ○ ~1 · fail", " n ○ ~1 · needs",]
         );
         assert!(state.pipe(settlement_pipe(accepted.clone())));
         assert!(!state.settlement_feed_degraded);
@@ -3580,10 +3564,10 @@ mod rail_tests {
     }
 
     #[test]
-    fn bucket_rail_labels_describe_settlement_outcomes() {
-        assert_eq!(BucketKind::Finalized.rail_label(), "Finalized");
-        assert_eq!(BucketKind::Failed.rail_label(), "Failed");
-        assert_eq!(BucketKind::NeedsAttention.rail_label(), "Needs attention");
+    fn bucket_short_rail_labels_match_the_dense_contract() {
+        assert_eq!(BucketKind::Finalized.short_rail_label(), "final");
+        assert_eq!(BucketKind::Failed.short_rail_label(), "fail");
+        assert_eq!(BucketKind::NeedsAttention.short_rail_label(), "needs");
     }
 
     #[test]
@@ -3636,11 +3620,7 @@ mod rail_tests {
             .collect();
         assert_eq!(
             buckets,
-            vec![
-                " f ○   ? · final",
-                " x ○   ? · fail",
-                " n ○   ? · needs",
-            ]
+            vec![" f ○   ? · final", " x ○   ? · fail", " n ○   ? · needs",]
         );
     }
 
@@ -3771,10 +3751,7 @@ mod rail_tests {
             " x ○ 176 · fail         "
         );
         // Degenerate width: head only.
-        assert_eq!(
-            fit_bucket_rail_line(" n ○ 408 · needs", 4),
-            " n ○"
-        );
+        assert_eq!(fit_bucket_rail_line(" n ○ 408 · needs", 4), " n ○");
         let huge = fit_bucket_rail_line(" f ○ 18446744073709551615 · final", 24);
         assert_eq!(huge.trim_end(), " f ○ …");
         assert!(

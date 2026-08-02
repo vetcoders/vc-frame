@@ -305,12 +305,18 @@ fn key_indicators(
     let (shared_modifiers, _) = superkey(palette, separator, mode_info);
 
     let renderers: [Box<dyn Fn(&KeyShortcut, bool) -> LinePart>; 4] = [
-        Box::new(|key, first| dense_mode_shortcut(key, palette, separator, &shared_modifiers, first)),
-        Box::new(|key, first| long_mode_shortcut(key, palette, separator, &shared_modifiers, first)),
+        Box::new(|key, first| {
+            dense_mode_shortcut(key, palette, separator, &shared_modifiers, first)
+        }),
+        Box::new(|key, first| {
+            long_mode_shortcut(key, palette, separator, &shared_modifiers, first)
+        }),
         Box::new(|key, first| {
             shortened_modifier_shortcut(key, palette, separator, &shared_modifiers, first)
         }),
-        Box::new(|key, first| short_mode_shortcut(key, palette, separator, &shared_modifiers, first)),
+        Box::new(|key, first| {
+            short_mode_shortcut(key, palette, separator, &shared_modifiers, first)
+        }),
     ];
 
     // Least → most important for dropping.
@@ -1155,10 +1161,7 @@ mod tests {
         let ret = first_line(&mode_info, None, 500, ">");
         let ret = unstyle(ret);
 
-        assert_eq!(
-            ret,
-            " Ctrl + >>a PANE >>b RESIZE >>c MOVE >".to_string()
-        );
+        assert_eq!(ret, " Ctrl + >>a PANE >>b RESIZE >>c MOVE >".to_string());
     }
 
     #[test]
@@ -1179,10 +1182,7 @@ mod tests {
         let ret = first_line(&mode_info, None, 500, ">");
         let ret = unstyle(ret);
 
-        assert_eq!(
-            ret,
-            "Ctrl a PANE >>Ctrl b RESIZE >>c MOVE >".to_string()
-        );
+        assert_eq!(ret, "Ctrl a PANE >>Ctrl b RESIZE >>c MOVE >".to_string());
     }
 
     #[test]
@@ -1207,8 +1207,7 @@ mod tests {
 
         assert_eq!(
             ret,
-            "Ctrl a LOCK >>BACKSPACE PANE >>ENTER TAB >>TAB RESIZE >>← MOVE >"
-                .to_string()
+            "Ctrl a LOCK >>BACKSPACE PANE >>ENTER TAB >>TAB RESIZE >>← MOVE >".to_string()
         );
     }
 
@@ -1232,7 +1231,10 @@ mod tests {
         let ret = first_line(&mode_info, None, 50, ">");
         let ret = unstyle(ret);
 
-        assert_eq!(ret, " Ctrl + >>a LOCK >>b PANE >>c TAB >>e MOVE >".to_string());
+        assert_eq!(
+            ret,
+            " Ctrl + >>a LOCK >>b PANE >>c TAB >>e MOVE >".to_string()
+        );
     }
 
     #[test]
