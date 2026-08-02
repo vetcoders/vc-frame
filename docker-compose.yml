@@ -48,7 +48,4 @@ services:
     # runs `ssh-keygen -A` on every start; with a read-only rootfs that fails,
     # /config/ssh_host_keys stays empty and sshd starts with no host key.
     # Confining the rootfs needs tmpfs mounts on /etc/ssh + /run — separate change.
-    security_opt:
-      - no-new-privileges:true
-    read_only: true
     restart: unless-stopped

@@ -120,9 +120,13 @@ if ps -eo args= | grep -Eq '([v]c-frame|[z]ellij) --server .*/vc-frame-e2e/socke
 fi
 rm -rf {E2E_SOCKET_DIR} {E2E_CACHE_DIR}
 mkdir -p {E2E_SOCKET_DIR} {E2E_CACHE_DIR}
-ln -sf /usr/src/zellij/$(uname -m)-unknown-linux-musl/release/vc-frame {ZELLIJ_EXECUTABLE_LOCATION}
 "#
     )
+    // NOTE: the arch-independent /usr/src/zellij/zellij symlink is created on the HOST
+    // — by the workflow step "Publish arch-stable binary path for the container", or
+    // by the local docker-compose flow in CONTRIBUTING.md. The mount is :ro, so the
+    // container must not (and cannot) write it; an `ln -sf` here would fail and, as
+    // the script's last command, poison the cleanup exit status.
 }
 
 fn cleanup_remote_runtime(sess: &ssh2::Session) -> Result<(), String> {
@@ -135,12 +139,27 @@ fn cleanup_remote_runtime(sess: &ssh2::Session) -> Result<(), String> {
 
     let mut stdout = String::new();
     channel
-        .write_all(b"rm -rf ~/.cache/zellij/permissions.kdl\n")
-        .unwrap();
-    // NOTE: the arch-independent /usr/src/zellij/zellij symlink is created on the HOST
-    // — by the workflow step "Publish arch-stable binary path for the container", or
-    // by the local docker-compose flow in CONTRIBUTING.md. The mount is :ro, so the
-    // container must not try to write it.
+        .read_to_string(&mut stdout)
+        .map_err(|error| format!("failed to read remote cleanup stdout: {error}"))?;
+    let mut stderr = String::new();
+    channel
+        .stderr()
+        .read_to_string(&mut stderr)
+        .map_err(|error| format!("failed to read remote cleanup stderr: {error}"))?;
+    channel
+        .wait_close()
+        .map_err(|error| format!("failed to close remote cleanup channel: {error}"))?;
+    let exit_status = channel
+        .exit_status()
+        .map_err(|error| format!("failed to read remote cleanup exit status: {error}"))?;
+
+    if exit_status == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "remote cleanup exited with status {exit_status}; stdout={stdout:?}; stderr={stderr:?}"
+        ))
+    }
 }
 
 fn start_zellij(channel: &mut ssh2::Channel) {
