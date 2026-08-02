@@ -12715,7 +12715,17 @@ pub fn copy_pane_scrollback_action_pipes_focused_pane_full_scrollback_to_copy_co
         InputMode::Normal,
     )
     .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    // The copy command is a separate process; on a cold hosted CI runner
+    // powershell.exe alone can take seconds to start. Poll for the fully
+    // written file (the last line is the completion marker — `cat > file`
+    // creates the file long before it is complete) instead of a fixed sleep.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        match std::fs::read_to_string(&copied_text_path) {
+            Ok(copied) if copied.contains("copy-current-pane-line-9") => break,
+            _ => std::thread::sleep(std::time::Duration::from_millis(100)),
+        }
+    }
 
     mock_screen.teardown(vec![server_thread, screen_thread]);
     let copied_text = std::fs::read_to_string(copied_text_path).unwrap();
