@@ -32,9 +32,31 @@ points at `zellij:session-manager` with `rail true`.
 
 The operator entrypoint layout (`vibecrafted`) replaces the top `tab-bar` with
 the redesigned `compact-bar`: brand chip, inverted mode chip, session anchor,
-fisheye tab ribbons, fleet-pulse chip, the Agents station chip, and the
-Command Composer chip (`Cmd+E`). Its `left_inset` option clears the macOS
-traffic lights in a decoration-free host window.
+fisheye tab ribbons, the Quick cmd station chip, and the Command Composer chip
+(`Cmd+E`). Its `left_inset` option clears the macOS traffic lights in a
+decoration-free host window. The bottom `status-bar` owns pure status: the
+fleet `LIVE` count, host CPU/memory/disk cockpit, health, and layout state.
+
+`LIVE` has a bounded background-cost contract. The server derives the count
+once from the session snapshot it already owns and sends a small scalar message
+only to the status-bar plugin/client pairs viewing active tabs. When a client
+switches tabs, the server sends an exact plugin/client deactivation signal to
+the status bar it left; sampling does not rely on the tab-global `Visible`
+event, which cannot distinguish multiple clients in one session. Per-tab
+status bars never subscribe to the full cross-session `SessionUpdate`, and
+unrelated `CustomMessage` consumers are not awakened. Host resource sampling
+also runs only in active status-bar instances, and clipboard timers cannot
+create extra sampling cadences. These lifecycle messages describe refreshable
+current state, so they bypass the shared pending-plugin event cache: an already
+ready exact target receives them immediately even while another client instance
+is loading. A not-yet-ready status bar starts idle and requests a fresh server
+snapshot after it loads successfully. A failed or disconnected attach therefore
+cannot leave a cached lifecycle signal blocking healthy status-bar instances.
+The lifecycle recognizer covers the canonical `vc-frame:status-bar`, the legacy
+`zellij:status-bar`, the default `status-bar` alias, and renamed aliases that
+resolve to that built-in plugin. An unrelated `file:` or remote plugin is not
+treated as the built-in status bar merely because its filename looks similar;
+custom replacements must implement and wire their own sampling lifecycle.
 
 ## Key Contract
 

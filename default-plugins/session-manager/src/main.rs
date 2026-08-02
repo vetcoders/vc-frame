@@ -1232,10 +1232,10 @@ impl State {
         let bucket_row_start = all_rows.iter().position(|row| row.is_bucket()).unwrap_or(0);
         let (rail_rows, bucket_rows) = all_rows.split_at(bucket_row_start);
 
-        // The LIVE number moved to the compact-bar's fleet chip; the header
-        // keeps the session count and the current-session anchor — the top
-        // bar carries brand │ mode │ tabs only (operator call 2026-07-30),
-        // so "where am I" lives here, right above the session list.
+        // The LIVE number lives in the bottom status-bar's fleet chip; the
+        // header keeps the session count and the current-session anchor — the
+        // top bar carries brand │ mode │ tabs only, so "where am I" lives
+        // here, right above the session list.
         let session_count = working_session_indices(&self.sessions.session_ui_infos).len();
         let mut header_text = format!("SESSIONS {}", session_count);
         let anchor_start = header_text.width() + 3; // " · " before the name

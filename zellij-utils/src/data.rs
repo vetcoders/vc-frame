@@ -968,7 +968,8 @@ pub enum Event {
     InputReceived,
     /// This plugin became visible or invisible
     Visible(bool),
-    /// A message from one of the plugin's workers
+    /// A namespaced message delivered to a plugin. Workers use this to message
+    /// their own plugin; the host may also send ID-targeted internal signals.
     CustomMessage(
         String, // message
         String, // payload
