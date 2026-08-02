@@ -77,11 +77,7 @@ pub enum PluginReceiptCheck {
 /// of [`verify_embedded_plugins`]): in a `plugins_from_target` debug build
 /// that branch is compiled out, and without the mirror this const would trip
 /// `-D dead_code`.
-#[cfg(any(
-    not(feature = "plugins_from_target"),
-    not(debug_assertions),
-    test
-))]
+#[cfg(any(not(feature = "plugins_from_target"), not(debug_assertions), test))]
 const TEST_ONLY_RECEIPT_ENTRIES: [&str; 1] = ["fixture-plugin-for-tests.wasm"];
 
 /// Hash every embedded plugin and compare against the embedded receipt.
