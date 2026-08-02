@@ -22,7 +22,7 @@ jobs:
   test-e2e:
     name: Build generic binary and run tests on it
     timeout-minutes: 90
-    runs-on: [macos-latest, ubuntu -latest, windows-latest]
+    runs-on: ubuntu-latest
     environment: cachix
 
     services:

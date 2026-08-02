@@ -70,7 +70,7 @@ jobs:
   build-windows:
     name: Build (Windows)
     timeout-minutes: 60
-    runs-on: [self-hosted, windows]
+    runs-on: windows-latest
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -199,7 +199,7 @@ jobs:
   test-windows:
     name: Test (Windows)
     timeout-minutes: 60
-    runs-on: [self-hosted, windows]
+    runs-on: windows-latest
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -229,7 +229,7 @@ jobs:
   test-no-web:
     name: Test (No Web)
     timeout-minutes: 90
-    runs-on: [self-hosted, linux-vetcoders]
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -254,7 +254,7 @@ jobs:
   format:
     name: Check Formatting
     timeout-minutes: 15
-    runs-on: [self-hosted, linux-vetcoders]
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
