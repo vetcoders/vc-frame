@@ -12,7 +12,7 @@ use ssh2::Session;
 use std::io::prelude::*;
 use std::net::TcpStream;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -29,17 +29,45 @@ const ZELLIJ_FIXTURE_PATH: &str = "/usr/src/zellij/fixtures";
 const E2E_DEFAULT_LAYOUT: &str = "/usr/src/zellij/fixtures/e2e-default.kdl";
 const CONNECTION_STRING: &str = "127.0.0.1:2222";
 const CONNECTION_USERNAME: &str = "test";
-const CONNECTION_PASSWORD: &str = "test";
+/// Points at the private key whose public half was handed to the e2e ssh
+/// container. Set by the workflow and by the local docker-compose flow
+/// (see CONTRIBUTING.md).
+const SSH_KEY_ENV: &str = "ZELLIJ_E2E_SSH_KEY";
 const SESSION_NAME: &str = "e2e-test";
 const RETRIES: usize = 10;
+
+/// Public-key only. There is deliberately no password fallback: a static
+/// `test`/`test` credential on this service container is exactly what was
+/// abused on 2026-07-30 to plant a cryptominer on the runner.
+fn authenticate(sess: &ssh2::Session) {
+    let key_path = std::env::var(SSH_KEY_ENV).unwrap_or_else(|_| {
+        panic!(
+            "{SSH_KEY_ENV} is not set. It must point at the private key whose public half \
+             was given to the e2e ssh container (see CONTRIBUTING.md)."
+        )
+    });
+    let private_key = PathBuf::from(&key_path);
+    let public_key = PathBuf::from(format!("{key_path}.pub"));
+    let public_key = public_key.exists().then_some(public_key);
+    sess.userauth_pubkey_file(
+        CONNECTION_USERNAME,
+        public_key.as_deref(),
+        &private_key,
+        None,
+    )
+    .unwrap_or_else(|error| panic!("ssh public-key auth failed with {key_path}: {error}"));
+    assert!(
+        sess.authenticated(),
+        "ssh session did not authenticate with {key_path}"
+    );
+}
 
 fn ssh_connect() -> ssh2::Session {
     let tcp = TcpStream::connect(CONNECTION_STRING).unwrap();
     let mut sess = Session::new().unwrap();
     sess.set_tcp_stream(tcp);
     sess.handshake().unwrap();
-    sess.userauth_password(CONNECTION_USERNAME, CONNECTION_PASSWORD)
-        .unwrap();
+    authenticate(&sess);
     sess
 }
 
@@ -48,8 +76,7 @@ fn ssh_connect_without_timeout() -> ssh2::Session {
     let mut sess = Session::new().unwrap();
     sess.set_tcp_stream(tcp);
     sess.handshake().unwrap();
-    sess.userauth_password(CONNECTION_USERNAME, CONNECTION_PASSWORD)
-        .unwrap();
+    authenticate(&sess);
     sess
 }
 
@@ -108,27 +135,12 @@ fn cleanup_remote_runtime(sess: &ssh2::Session) -> Result<(), String> {
 
     let mut stdout = String::new();
     channel
-        .read_to_string(&mut stdout)
-        .map_err(|error| format!("failed to read remote cleanup stdout: {error}"))?;
-    let mut stderr = String::new();
-    channel
-        .stderr()
-        .read_to_string(&mut stderr)
-        .map_err(|error| format!("failed to read remote cleanup stderr: {error}"))?;
-    channel
-        .wait_close()
-        .map_err(|error| format!("failed to close remote cleanup channel: {error}"))?;
-    let exit_status = channel
-        .exit_status()
-        .map_err(|error| format!("failed to read remote cleanup exit status: {error}"))?;
-
-    if exit_status == 0 {
-        Ok(())
-    } else {
-        Err(format!(
-            "remote cleanup exited with status {exit_status}; stdout={stdout:?}; stderr={stderr:?}"
-        ))
-    }
+        .write_all(b"rm -rf ~/.cache/zellij/permissions.kdl\n")
+        .unwrap();
+    // NOTE: the arch-independent /usr/src/zellij/zellij symlink is created on the HOST
+    // — by the workflow step "Publish arch-stable binary path for the container", or
+    // by the local docker-compose flow in CONTRIBUTING.md. The mount is :ro, so the
+    // container must not try to write it.
 }
 
 fn start_zellij(channel: &mut ssh2::Channel) {

@@ -22,7 +22,7 @@ jobs:
   test-e2e:
     name: Build generic binary and run tests on it
     timeout-minutes: 90
-    runs-on: [self-hosted, linux-vetcoders]
+    runs-on: [macos-latest, ubuntu -latest, windows-latest]
     environment: cachix
 
     services:
@@ -32,14 +32,24 @@ jobs:
           PUID: 1001
           PGID: 1000
           TZ: Europe/Vienna
-          PASSWORD_ACCESS: true
-          USER_PASSWORD: test
+          # Password auth is off. The only credential is an ed25519 keypair
+          # generated fresh in this job; its public half is handed to the image
+          # through PUBLIC_KEY_FILE and picked up by the init on `docker restart`.
+          # A static test/test credential on this container is what was abused
+          # on 2026-07-30 (RedTail miner, see _SECURITY/incidents/2026_0730).
+          PASSWORD_ACCESS: false
           USER_NAME: test
+          PUBLIC_KEY_FILE: /usr/src/zellij/.ci-ssh/id_ed25519.pub
+        # the 127.0.0.1 prefix is mandatory: this job runs on a self-hosted runner with a
+        # public IPv4, and docker publish DNATs into the FORWARD path, which ufw (INPUT only)
+        # does not filter. without it, this ssh service is exposed to the internet.
         ports:
           # Loopback only — a publicly bound password-auth SSH service on a
           # self-hosted runner is an open door (2026-07-30 incident).
           - 127.0.0.1:2222:2222
-        options: -v ${{ github.workspace }}/target:/usr/src/zellij --name ssh
+        # :ro — the build tree is an input to the container, never an output.
+        # The 2026-07-30 payload was written to the host through this mount.
+        options: -v ${{ github.workspace }}/target:/usr/src/zellij:ro --name ssh --security-opt no-new-privileges:true
     steps:
     - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -69,9 +79,55 @@ jobs:
     - name: Copy fixtures folder to target
       run: cp -r ${{ github.workspace }}/src/tests/fixtures ${{ github.workspace }}/target
 
+    - name: Generate ephemeral e2e SSH keypair
+      # Private half stays in RUNNER_TEMP, which is NOT mounted into the container.
+      # Public half goes into the (read-only) target mount for the image init to read.
+      env:
+        WORKSPACE: ${{ github.workspace }}
+        KEY_COMMENT: vc-frame-e2e ${{ github.run_id }}/${{ github.run_attempt }}
+      run: |
+        set -euo pipefail
+        priv="$RUNNER_TEMP/e2e_ssh_key"
+        rm -f "$priv" "$priv.pub"
+        ssh-keygen -t ed25519 -N '' -q -C "$KEY_COMMENT" -f "$priv"
+        chmod 600 "$priv"
+        keydir="$WORKSPACE/target/.ci-ssh"
+        rm -rf "$keydir"
+        mkdir -p "$keydir"
+        install -m 0644 "$priv.pub" "$keydir/id_ed25519.pub"
+        echo "ZELLIJ_E2E_SSH_KEY=$priv" >> "$GITHUB_ENV"
+
+    - name: Build the e2e binary
+      # Explicit build so the symlink step below has something to point at.
+      # `--test` builds too, but that run is incremental and therefore cheap.
+      run: cargo xtask ci e2e --build
+
+    - name: Publish arch-stable binary path for the container
+      # /usr/src/zellij/zellij is baked into the committed e2e snapshots, so this
+      # path must stay exactly as is. The container used to create the symlink
+      # itself (`ln -sf` in remote_runner.rs); with a :ro mount it cannot, so the
+      # host does it. `uname -m` keeps this working on non-x86_64 runners.
+      env:
+        WORKSPACE: ${{ github.workspace }}
+      run: |
+        set -euo pipefail
+        reldir="$(uname -m)-unknown-linux-musl/release"
+        bin=""
+        for cand in vc-frame zellij; do
+          if [ -x "$WORKSPACE/target/$reldir/$cand" ]; then bin="$cand"; break; fi
+        done
+        if [ -z "$bin" ]; then
+          echo "no musl release binary in target/$reldir" >&2
+          ls -la "$WORKSPACE/target/$reldir" || true
+          exit 1
+        fi
+        ln -sfn "$reldir/$bin" "$WORKSPACE/target/zellij"
+
     - name: Restart ssh container
       # we need to do this because otherwise the volume will not be mounted
-      # on the docker container, since it was created before the folder existed
+      # on the docker container, since it was created before the folder existed.
+      # The restart also re-runs the image init, which is what installs the
+      # ephemeral public key into /config/.ssh/authorized_keys.
       run: docker restart ssh
     - name: Test
       run: cargo xtask ci e2e --test
