@@ -11,6 +11,7 @@ use ansi_term::{
 
 use std::collections::BTreeMap;
 use std::fmt::{Display, Error, Formatter};
+use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
 use zellij_tile::prelude::actions::Action;
 use zellij_tile::prelude::*;
@@ -35,14 +36,17 @@ const CLIPBOARD_HINT_TTL_SECONDS: f64 = 2.0;
 /// the sampling run_command and the seconds between samples.
 const RESOURCE_SAMPLE_CONTEXT_KEY: &str = "vc_status_resources";
 const RESOURCE_SAMPLE_SECONDS: f64 = 5.0;
+/// Lightweight server-to-plugin signal carrying the fleet's live terminal-tab
+/// count. Keep this wire name in sync with `zellij-server/src/screen.rs`.
+const VC_FLEET_LIVE_COUNT_MESSAGE: &str = "vc.fleet-live-count.v1";
+/// Exact per-plugin/client lifecycle signal emitted by Screen. Generic
+/// `Visible` is tab-global and cannot distinguish clients viewing different
+/// tabs in a non-mirrored session.
+const VC_STATUS_BAR_VISIBILITY_MESSAGE: &str = "vc.status-bar-visibility.v1";
 // Portable host sample: total CPU% (per-core percentages summed, like top),
 // used RSS KiB and total RAM KiB — Linux via /proc/meminfo, macOS via sysctl —
 // plus available KiB on the root filesystem (df POSIX output, field 4).
 const RESOURCE_SAMPLE_COMMAND: &str = r#"cpu=$(ps -A -o %cpu= | awk '{s+=$1} END {printf "%.0f", s}'); used=$(ps -A -o rss= | awk '{s+=$1} END {print s}'); if [ -r /proc/meminfo ]; then total=$(awk '/^MemTotal:/{print $2}' /proc/meminfo); else total=$(( $(sysctl -n hw.memsize) / 1024 )); fi; disk=$(df -P -k / | awk 'NR==2 {print $4}'); printf '%s %s %s %s' "$cpu" "$used" "$total" "$disk""#;
-/// Status-bucket session names — wire contract with the triage reaper, kept
-/// identical to `run_triage.rs`. Bucket sessions never count toward the
-/// fleet pulse.
-const BUCKET_SESSION_NAMES: [&str; 3] = ["Finalized runs", "Failed runs", "Needs attention"];
 /// Shorthand for `Action::SwitchToMode{input_mode: InputMode::Normal}`.
 const TO_NORMAL: Action = Action::SwitchToMode {
     input_mode: InputMode::Normal,
@@ -55,7 +59,7 @@ struct State {
     mode_info: ModeInfo,
     text_copy_destination: Option<CopyDestination>,
     display_system_clipboard_failure: bool,
-    pending_clipboard_hint_timers: usize,
+    clipboard_hint_deadline: Option<Instant>,
     classic_ui: bool,
     base_mode_is_locked: bool,
     cached_keybinds: KeybindsVec,
@@ -64,8 +68,10 @@ struct State {
     // keeps the last line.
     resource_line: Option<String>,
     resource_sample_in_flight: bool,
-    // Fleet pulse: live agent-process count across every session, fed by
-    // SessionUpdate. A pure status — nothing rides on it, nothing to click.
+    resource_sample_due: Option<Instant>,
+    is_visible: bool,
+    // Fleet pulse: the server computes this once from its existing session
+    // snapshot and sends only a scalar custom message to per-tab chrome.
     live_count: usize,
 }
 
@@ -226,26 +232,11 @@ impl ZellijPlugin for State {
             .map(|c| c == "true")
             .unwrap_or(false);
         set_selectable(false);
-        // The resource cockpit samples the host via run_command; the fleet
-        // pulse needs the cross-session snapshot (SessionUpdate).
-        request_permission(&[
-            PermissionType::RunCommands,
-            PermissionType::ReadApplicationState,
-        ]);
-        subscribe(&[
-            EventType::ModeUpdate,
-            EventType::TabUpdate,
-            EventType::PaneUpdate,
-            EventType::CopyToClipboard,
-            EventType::InputReceived,
-            EventType::SystemClipboardFailure,
-            EventType::InitialKeybinds,
-            EventType::Timer,
-            EventType::RunCommandResult,
-            EventType::SessionUpdate,
-            EventType::PermissionRequestResult,
-        ]);
-        self.start_resource_sample();
+        request_permission(&status_bar_permissions());
+        subscribe(&status_bar_subscriptions());
+        // Attach loads a client instance for plugins in every tab, including
+        // hidden tabs. Stay idle until Screen targets this active status-bar
+        // with the fleet heartbeat or its exact lifecycle signal.
     }
 
     fn update(&mut self, event: Event) -> bool {
@@ -277,6 +268,9 @@ impl ZellijPlugin for State {
                 self.tabs = tabs;
             },
             Event::CopyToClipboard(copy_destination) => {
+                if !self.is_visible {
+                    return false;
+                }
                 match self.text_copy_destination {
                     Some(text_copy_destination) => {
                         if text_copy_destination != copy_destination {
@@ -288,38 +282,49 @@ impl ZellijPlugin for State {
                     },
                 }
                 self.text_copy_destination = Some(copy_destination);
-                self.pending_clipboard_hint_timers += 1;
+                self.clipboard_hint_deadline =
+                    Some(Instant::now() + Duration::from_secs_f64(CLIPBOARD_HINT_TTL_SECONDS));
                 set_timeout(CLIPBOARD_HINT_TTL_SECONDS);
             },
             Event::SystemClipboardFailure => {
+                if !self.is_visible {
+                    return false;
+                }
                 should_render = true;
                 self.display_system_clipboard_failure = true;
-                self.pending_clipboard_hint_timers += 1;
+                self.clipboard_hint_deadline =
+                    Some(Instant::now() + Duration::from_secs_f64(CLIPBOARD_HINT_TTL_SECONDS));
                 set_timeout(CLIPBOARD_HINT_TTL_SECONDS);
             },
             Event::Timer(_) => {
-                // only the timer set by the most recent notification may
-                // dismiss it - earlier timers are stale (the TTL restarted)
-                self.pending_clipboard_hint_timers =
-                    self.pending_clipboard_hint_timers.saturating_sub(1);
-                if self.pending_clipboard_hint_timers == 0
-                    && (self.text_copy_destination.is_some()
-                        || self.display_system_clipboard_failure)
+                let now = Instant::now();
+                if self
+                    .clipboard_hint_deadline
+                    .is_some_and(|deadline| now >= deadline)
                 {
+                    self.clipboard_hint_deadline = None;
                     self.text_copy_destination = None;
                     self.display_system_clipboard_failure = false;
                     should_render = true;
                 }
-                // Timers are a shared stream (clipboard TTLs + the sampling
-                // cadence); the in-flight guard keeps a clipboard-born fire
-                // from stacking a second sample.
-                self.start_resource_sample();
+                if self.is_visible
+                    && self
+                        .resource_sample_due
+                        .is_some_and(|deadline| now >= deadline)
+                {
+                    self.resource_sample_due = None;
+                    self.start_resource_sample();
+                }
             },
             Event::RunCommandResult(exit_code, stdout, _stderr, context)
                 if context.contains_key(RESOURCE_SAMPLE_CONTEXT_KEY) =>
             {
                 self.resource_sample_in_flight = false;
-                set_timeout(RESOURCE_SAMPLE_SECONDS);
+                if self.is_visible {
+                    self.schedule_resource_sample();
+                } else {
+                    self.resource_sample_due = None;
+                }
                 if exit_code == Some(0)
                     && let Some(line) = parse_resource_sample(&stdout)
                     && self.resource_line.as_deref() != Some(line.as_str())
@@ -328,15 +333,26 @@ impl ZellijPlugin for State {
                     should_render = true;
                 }
             },
-            Event::SessionUpdate(sessions, _) => {
-                let live_count = fleet_live_count(&sessions);
-                if self.live_count != live_count {
-                    self.live_count = live_count;
-                    should_render = true;
+            Event::CustomMessage(message, payload) if message == VC_FLEET_LIVE_COUNT_MESSAGE => {
+                // Screen targets this message only at status-bars on active
+                // tabs. Treat it as a positive visibility heartbeat as well.
+                let became_visible = self.set_visibility(true);
+                let live_count_changed = self.apply_fleet_live_count(&payload);
+                should_render = became_visible || live_count_changed;
+            },
+            Event::CustomMessage(message, payload)
+                if message == VC_STATUS_BAR_VISIBILITY_MESSAGE =>
+            {
+                match payload.as_str() {
+                    "true" => should_render = self.set_visibility(true),
+                    "false" => should_render = self.set_visibility(false),
+                    _ => {},
                 }
             },
             Event::PermissionRequestResult(_) => {
-                self.start_resource_sample();
+                if self.is_visible {
+                    self.start_resource_sample();
+                }
                 should_render = true;
             },
             Event::InputReceived => {
@@ -345,6 +361,7 @@ impl ZellijPlugin for State {
                 }
                 self.text_copy_destination = None;
                 self.display_system_clipboard_failure = false;
+                self.clipboard_hint_deadline = None;
             },
             _ => {},
         };
@@ -434,13 +451,47 @@ impl ZellijPlugin for State {
 
 impl State {
     fn start_resource_sample(&mut self) {
-        if self.resource_sample_in_flight {
+        if !self.is_visible || self.resource_sample_in_flight {
             return;
         }
+        self.resource_sample_due = None;
         self.resource_sample_in_flight = true;
         let mut context = BTreeMap::new();
         context.insert(RESOURCE_SAMPLE_CONTEXT_KEY.to_owned(), "true".to_owned());
         run_command(&["sh", "-c", RESOURCE_SAMPLE_COMMAND], context);
+    }
+
+    fn set_visibility(&mut self, is_visible: bool) -> bool {
+        if self.is_visible == is_visible {
+            return false;
+        }
+        self.is_visible = is_visible;
+        if is_visible {
+            self.start_resource_sample();
+        } else {
+            self.resource_sample_due = None;
+            self.clipboard_hint_deadline = None;
+            self.text_copy_destination = None;
+            self.display_system_clipboard_failure = false;
+        }
+        true
+    }
+
+    fn schedule_resource_sample(&mut self) {
+        self.resource_sample_due =
+            Some(Instant::now() + Duration::from_secs_f64(RESOURCE_SAMPLE_SECONDS));
+        set_timeout(RESOURCE_SAMPLE_SECONDS);
+    }
+
+    fn apply_fleet_live_count(&mut self, payload: &str) -> bool {
+        let Ok(live_count) = payload.parse::<usize>() else {
+            return false;
+        };
+        if self.live_count == live_count {
+            return false;
+        }
+        self.live_count = live_count;
+        true
     }
 
     /// The bar's right edge — pure statuses, zero tools (operator call
@@ -612,27 +663,24 @@ fn parse_resource_sample(stdout: &[u8]) -> Option<String> {
     ))
 }
 
-/// The fleet pulse, recomputed from the same predicate the rail uses: a tab
-/// is "live" when it holds at least one non-plugin pane that has not exited
-/// and is not held. Bucket sessions are pinned drawers, not fleet.
-fn fleet_live_count(sessions: &[SessionInfo]) -> usize {
-    sessions
-        .iter()
-        .filter(|session| !BUCKET_SESSION_NAMES.contains(&session.name.as_str()))
-        .map(|session| {
-            session
-                .tabs
-                .iter()
-                .filter(|tab| {
-                    session.panes.panes.get(&tab.position).is_some_and(|panes| {
-                        panes
-                            .iter()
-                            .any(|pane| !pane.is_plugin && !pane.exited && !pane.is_held)
-                    })
-                })
-                .count()
-        })
-        .sum()
+fn status_bar_permissions() -> Vec<PermissionType> {
+    vec![PermissionType::RunCommands]
+}
+
+fn status_bar_subscriptions() -> Vec<EventType> {
+    vec![
+        EventType::ModeUpdate,
+        EventType::TabUpdate,
+        EventType::PaneUpdate,
+        EventType::CopyToClipboard,
+        EventType::InputReceived,
+        EventType::SystemClipboardFailure,
+        EventType::InitialKeybinds,
+        EventType::Timer,
+        EventType::RunCommandResult,
+        EventType::CustomMessage,
+        EventType::PermissionRequestResult,
+    ]
 }
 
 pub fn get_common_modifiers(mut keyvec: Vec<&KeyWithModifier>) -> Vec<KeyModifier> {
@@ -897,6 +945,163 @@ pub mod tests {
             None,
             "negative disk"
         );
+    }
+
+    #[test]
+    fn status_bar_never_subscribes_to_full_session_snapshots() {
+        assert!(
+            !status_bar_subscriptions().contains(&EventType::SessionUpdate),
+            "per-tab status bars must never receive full cross-session snapshots"
+        );
+        assert!(status_bar_subscriptions().contains(&EventType::CustomMessage));
+        assert!(
+            !status_bar_subscriptions().contains(&EventType::Visible),
+            "tab-global visibility must not control a per-client sampler"
+        );
+        assert!(
+            !status_bar_permissions().contains(&PermissionType::ReadApplicationState),
+            "the scalar fleet message must not require cross-session read access"
+        );
+    }
+
+    #[test]
+    fn fleet_live_count_accepts_only_valid_changed_scalars() {
+        let mut state = State {
+            is_visible: true,
+            live_count: 3,
+            ..Default::default()
+        };
+
+        assert!(state.update(Event::CustomMessage(
+            VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
+            "4".to_owned(),
+        )));
+        assert_eq!(state.live_count, 4);
+
+        assert!(!state.update(Event::CustomMessage(
+            VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
+            "4".to_owned(),
+        )));
+        assert!(!state.update(Event::CustomMessage(
+            VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
+            "not-a-number".to_owned(),
+        )));
+        assert_eq!(
+            state.live_count, 4,
+            "invalid input must keep last good value"
+        );
+    }
+
+    #[test]
+    fn clipboard_timer_does_not_start_or_rearm_resource_sampling() {
+        let resource_due = Instant::now() + Duration::from_secs(60);
+        let mut state = State {
+            is_visible: true,
+            text_copy_destination: Some(CopyDestination::Command),
+            clipboard_hint_deadline: Some(Instant::now() - Duration::from_secs(1)),
+            resource_sample_due: Some(resource_due),
+            ..Default::default()
+        };
+
+        assert!(state.update(Event::Timer(CLIPBOARD_HINT_TTL_SECONDS)));
+        assert_eq!(state.text_copy_destination, None);
+        assert_eq!(state.resource_sample_due, Some(resource_due));
+        assert!(!state.resource_sample_in_flight);
+    }
+
+    #[test]
+    fn stale_timer_is_a_noop_before_either_deadline() {
+        let clipboard_deadline = Instant::now() + Duration::from_secs(30);
+        let resource_due = Instant::now() + Duration::from_secs(60);
+        let mut state = State {
+            is_visible: true,
+            text_copy_destination: Some(CopyDestination::Command),
+            clipboard_hint_deadline: Some(clipboard_deadline),
+            resource_sample_due: Some(resource_due),
+            ..Default::default()
+        };
+
+        assert!(!state.update(Event::Timer(0.1)));
+        assert_eq!(state.clipboard_hint_deadline, Some(clipboard_deadline));
+        assert_eq!(state.resource_sample_due, Some(resource_due));
+        assert!(!state.resource_sample_in_flight);
+    }
+
+    #[test]
+    fn hidden_status_bar_never_starts_or_rearms_resource_sampling() {
+        let mut state = State {
+            is_visible: false,
+            resource_sample_in_flight: true,
+            ..Default::default()
+        };
+        let mut context = BTreeMap::new();
+        context.insert(RESOURCE_SAMPLE_CONTEXT_KEY.to_owned(), "true".to_owned());
+
+        assert!(state.update(Event::RunCommandResult(
+            Some(0),
+            b"10 1048576 8388608 2097152".to_vec(),
+            vec![],
+            context,
+        )));
+        assert!(!state.resource_sample_in_flight);
+        assert_eq!(state.resource_sample_due, None);
+
+        state.start_resource_sample();
+        assert!(!state.resource_sample_in_flight);
+        assert_eq!(state.resource_sample_due, None);
+    }
+
+    #[test]
+    fn fresh_status_bar_is_idle_until_a_visibility_signal() {
+        let mut state = State::default();
+
+        assert!(!state.is_visible);
+        state.start_resource_sample();
+        assert!(!state.resource_sample_in_flight);
+        assert_eq!(state.resource_sample_due, None);
+    }
+
+    #[test]
+    fn targeted_fleet_message_resumes_status_bar_after_reattach() {
+        let mut state = State {
+            is_visible: false,
+            live_count: 1,
+            ..Default::default()
+        };
+
+        assert!(state.update(Event::CustomMessage(
+            VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
+            "2".to_owned(),
+        )));
+        assert!(state.is_visible);
+        assert!(state.resource_sample_in_flight);
+        assert_eq!(state.live_count, 2);
+    }
+
+    #[test]
+    fn targeted_visibility_message_stops_only_that_status_bar_instance() {
+        let mut state = State {
+            is_visible: true,
+            resource_sample_due: Some(Instant::now() + Duration::from_secs(5)),
+            text_copy_destination: Some(CopyDestination::Command),
+            clipboard_hint_deadline: Some(Instant::now() + Duration::from_secs(2)),
+            ..Default::default()
+        };
+
+        assert!(state.update(Event::CustomMessage(
+            VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
+            "false".to_owned(),
+        )));
+        assert!(!state.is_visible);
+        assert_eq!(state.resource_sample_due, None);
+        assert_eq!(state.clipboard_hint_deadline, None);
+        assert_eq!(state.text_copy_destination, None);
+
+        assert!(!state.update(Event::CustomMessage(
+            VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
+            "invalid".to_owned(),
+        )));
+        assert!(!state.is_visible);
     }
 
     #[test]
