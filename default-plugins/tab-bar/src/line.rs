@@ -229,6 +229,7 @@ pub struct TabLineParams<'a> {
     pub mode_info: &'a ModeInfo,
     pub hide_swap_layout_indicator: bool,
     pub background: &'a PaletteColor,
+    pub left_inset: usize,
 }
 
 pub fn tab_line(params: TabLineParams) -> Vec<LinePart> {
@@ -244,6 +245,7 @@ pub fn tab_line(params: TabLineParams) -> Vec<LinePart> {
         mode_info,
         hide_swap_layout_indicator,
         background,
+        left_inset,
     } = params;
     let mut tabs_after_active = all_tabs.split_off(active_tab_index);
     let mut tabs_before_active = all_tabs;
@@ -256,6 +258,22 @@ pub fn tab_line(params: TabLineParams) -> Vec<LinePart> {
         true => tab_line_prefix(None, palette, cols),
         false => tab_line_prefix(session_name, palette, cols),
     };
+    // The 🚥 zone: blank columns before the prefix so the bar clears the
+    // macOS traffic lights — mirrors compact-bar's TabLineBuilder::build.
+    let left_inset = left_inset.min(cols / 2);
+    if left_inset > 0 {
+        let colors = palette.text_unselected;
+        prefix.insert(
+            0,
+            LinePart {
+                part: style!(colors.base, colors.background)
+                    .paint(" ".repeat(left_inset))
+                    .to_string(),
+                len: left_inset,
+                tab_index: None,
+            },
+        );
+    }
 
     let mut swap_layout_indicator = if hide_swap_layout_indicator {
         None

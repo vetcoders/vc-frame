@@ -549,9 +549,9 @@ impl Page {
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new(
-                        "  · ● = the tab a process is running on right now, · = idle rows",
+                        "  · ◉ = the tab a process is running on right now, · = idle rows",
                     )
-                    .color_substring(3, "●"),
+                    .color_substring(3, "◉"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new(
@@ -904,8 +904,8 @@ impl Page {
                         .color_substring(3, "* / -"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("  ● / ·   running tab / idle row (left rail)")
-                        .color_substring(3, "● / ·"),
+                    Text::new("  ◉ / ·   running tab / idle row (left rail)")
+                        .color_substring(3, "◉ / ·"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new("  ⚿ / ⌁   input locked / normal (mode chip)")

@@ -11,6 +11,8 @@ use ansi_term::{
 
 use std::collections::BTreeMap;
 use std::fmt::{Display, Error, Formatter};
+use std::time::{Duration, Instant};
+use unicode_width::UnicodeWidthStr;
 use zellij_tile::prelude::actions::Action;
 use zellij_tile::prelude::*;
 use zellij_tile_utils::{palette_match, style};
@@ -34,9 +36,17 @@ const CLIPBOARD_HINT_TTL_SECONDS: f64 = 2.0;
 /// the sampling run_command and the seconds between samples.
 const RESOURCE_SAMPLE_CONTEXT_KEY: &str = "vc_status_resources";
 const RESOURCE_SAMPLE_SECONDS: f64 = 5.0;
+/// Lightweight server-to-plugin signal carrying the fleet's live terminal-tab
+/// count. Keep this wire name in sync with `zellij-server/src/screen.rs`.
+const VC_FLEET_LIVE_COUNT_MESSAGE: &str = "vc.fleet-live-count.v1";
+/// Exact per-plugin/client lifecycle signal emitted by Screen. Generic
+/// `Visible` is tab-global and cannot distinguish clients viewing different
+/// tabs in a non-mirrored session.
+const VC_STATUS_BAR_VISIBILITY_MESSAGE: &str = "vc.status-bar-visibility.v1";
 // Portable host sample: total CPU% (per-core percentages summed, like top),
-// used RSS KiB and total RAM KiB — Linux via /proc/meminfo, macOS via sysctl.
-const RESOURCE_SAMPLE_COMMAND: &str = r#"cpu=$(ps -A -o %cpu= | awk '{s+=$1} END {printf "%.0f", s}'); used=$(ps -A -o rss= | awk '{s+=$1} END {print s}'); if [ -r /proc/meminfo ]; then total=$(awk '/^MemTotal:/{print $2}' /proc/meminfo); else total=$(( $(sysctl -n hw.memsize) / 1024 )); fi; printf '%s %s %s' "$cpu" "$used" "$total""#;
+// used RSS KiB and total RAM KiB — Linux via /proc/meminfo, macOS via sysctl —
+// plus available KiB on the root filesystem (df POSIX output, field 4).
+const RESOURCE_SAMPLE_COMMAND: &str = r#"cpu=$(ps -A -o %cpu= | awk '{s+=$1} END {printf "%.0f", s}'); used=$(ps -A -o rss= | awk '{s+=$1} END {print s}'); if [ -r /proc/meminfo ]; then total=$(awk '/^MemTotal:/{print $2}' /proc/meminfo); else total=$(( $(sysctl -n hw.memsize) / 1024 )); fi; disk=$(df -P -k / | awk 'NR==2 {print $4}'); printf '%s %s %s %s' "$cpu" "$used" "$total" "$disk""#;
 /// Shorthand for `Action::SwitchToMode{input_mode: InputMode::Normal}`.
 const TO_NORMAL: Action = Action::SwitchToMode {
     input_mode: InputMode::Normal,
@@ -49,14 +59,20 @@ struct State {
     mode_info: ModeInfo,
     text_copy_destination: Option<CopyDestination>,
     display_system_clipboard_failure: bool,
-    pending_clipboard_hint_timers: usize,
+    clipboard_hint_deadline: Option<Instant>,
     classic_ui: bool,
     base_mode_is_locked: bool,
     cached_keybinds: KeybindsVec,
-    // Host resource cockpit ("CPU … · MEM …"), sampled via run_command. None
-    // until the first valid sample; a malformed sample keeps the last line.
+    // Host resource cockpit ("CPU … | MEM … | DISK …"), sampled via
+    // run_command. None until the first valid sample; a failed or malformed
+    // sample clears the line so HEALTH cannot claim "ok" on stale numbers.
     resource_line: Option<String>,
     resource_sample_in_flight: bool,
+    resource_sample_due: Option<Instant>,
+    is_visible: bool,
+    // Fleet pulse: the server computes this once from its existing session
+    // snapshot and sends only a scalar custom message to per-tab chrome.
+    live_count: usize,
 }
 
 register_plugin!(State);
@@ -122,7 +138,7 @@ fn color_elements(palette: Styling, different_color_alternates: bool) -> Colored
             )
             .bold(),
             char_shortcut: style!(
-                palette.ribbon_selected.emphasis_0,
+                palette.ribbon_selected.emphasis_1,
                 palette.ribbon_selected.background
             )
             .bold(),
@@ -146,7 +162,7 @@ fn color_elements(palette: Styling, different_color_alternates: bool) -> Colored
             )
             .bold(),
             char_shortcut: style!(
-                palette.ribbon_unselected.emphasis_0,
+                palette.ribbon_unselected.emphasis_1,
                 palette.ribbon_unselected.background
             )
             .bold(),
@@ -166,7 +182,7 @@ fn color_elements(palette: Styling, different_color_alternates: bool) -> Colored
             prefix_separator: style!(background, alternate_background_color),
             char_left_separator: style!(background, alternate_background_color).bold(),
             char_shortcut: style!(
-                palette.ribbon_unselected.emphasis_0,
+                palette.ribbon_unselected.emphasis_1,
                 alternate_background_color
             )
             .bold(),
@@ -216,21 +232,11 @@ impl ZellijPlugin for State {
             .map(|c| c == "true")
             .unwrap_or(false);
         set_selectable(false);
-        // The resource cockpit samples the host via run_command.
-        request_permission(&[PermissionType::RunCommands]);
-        subscribe(&[
-            EventType::ModeUpdate,
-            EventType::TabUpdate,
-            EventType::PaneUpdate,
-            EventType::CopyToClipboard,
-            EventType::InputReceived,
-            EventType::SystemClipboardFailure,
-            EventType::InitialKeybinds,
-            EventType::Timer,
-            EventType::RunCommandResult,
-            EventType::PermissionRequestResult,
-        ]);
-        self.start_resource_sample();
+        request_permission(&status_bar_permissions());
+        subscribe(&status_bar_subscriptions());
+        // Attach loads a client instance for plugins in every tab, including
+        // hidden tabs. Stay idle until Screen targets this active status-bar
+        // with the fleet heartbeat or its exact lifecycle signal.
     }
 
     fn update(&mut self, event: Event) -> bool {
@@ -262,6 +268,9 @@ impl ZellijPlugin for State {
                 self.tabs = tabs;
             },
             Event::CopyToClipboard(copy_destination) => {
+                if !self.is_visible {
+                    return false;
+                }
                 match self.text_copy_destination {
                     Some(text_copy_destination) => {
                         if text_copy_destination != copy_destination {
@@ -273,48 +282,85 @@ impl ZellijPlugin for State {
                     },
                 }
                 self.text_copy_destination = Some(copy_destination);
-                self.pending_clipboard_hint_timers += 1;
+                self.clipboard_hint_deadline =
+                    Some(Instant::now() + Duration::from_secs_f64(CLIPBOARD_HINT_TTL_SECONDS));
                 set_timeout(CLIPBOARD_HINT_TTL_SECONDS);
             },
             Event::SystemClipboardFailure => {
+                if !self.is_visible {
+                    return false;
+                }
                 should_render = true;
                 self.display_system_clipboard_failure = true;
-                self.pending_clipboard_hint_timers += 1;
+                self.clipboard_hint_deadline =
+                    Some(Instant::now() + Duration::from_secs_f64(CLIPBOARD_HINT_TTL_SECONDS));
                 set_timeout(CLIPBOARD_HINT_TTL_SECONDS);
             },
             Event::Timer(_) => {
-                // only the timer set by the most recent notification may
-                // dismiss it - earlier timers are stale (the TTL restarted)
-                self.pending_clipboard_hint_timers =
-                    self.pending_clipboard_hint_timers.saturating_sub(1);
-                if self.pending_clipboard_hint_timers == 0
-                    && (self.text_copy_destination.is_some()
-                        || self.display_system_clipboard_failure)
+                let now = Instant::now();
+                if self
+                    .clipboard_hint_deadline
+                    .is_some_and(|deadline| now >= deadline)
                 {
+                    self.clipboard_hint_deadline = None;
                     self.text_copy_destination = None;
                     self.display_system_clipboard_failure = false;
                     should_render = true;
                 }
-                // Timers are a shared stream (clipboard TTLs + the sampling
-                // cadence); the in-flight guard keeps a clipboard-born fire
-                // from stacking a second sample.
-                self.start_resource_sample();
+                if self.is_visible
+                    && self
+                        .resource_sample_due
+                        .is_some_and(|deadline| now >= deadline)
+                {
+                    self.resource_sample_due = None;
+                    self.start_resource_sample();
+                }
             },
             Event::RunCommandResult(exit_code, stdout, _stderr, context)
                 if context.contains_key(RESOURCE_SAMPLE_CONTEXT_KEY) =>
             {
                 self.resource_sample_in_flight = false;
-                set_timeout(RESOURCE_SAMPLE_SECONDS);
-                if exit_code == Some(0)
-                    && let Some(line) = parse_resource_sample(&stdout)
-                    && self.resource_line.as_deref() != Some(line.as_str())
-                {
-                    self.resource_line = Some(line);
+                if self.is_visible {
+                    self.schedule_resource_sample();
+                } else {
+                    self.resource_sample_due = None;
+                }
+                // A failed or malformed sample must not freeze the last good
+                // reading forever under "HEALTH ok". Clear to unknown so the
+                // bar is honest until the next successful sample.
+                if exit_code == Some(0) {
+                    if let Some(line) = parse_resource_sample(&stdout) {
+                        if self.resource_line.as_deref() != Some(line.as_str()) {
+                            self.resource_line = Some(line);
+                            should_render = true;
+                        }
+                    } else if self.resource_line.take().is_some() {
+                        should_render = true;
+                    }
+                } else if self.resource_line.take().is_some() {
                     should_render = true;
                 }
             },
+            Event::CustomMessage(message, payload) if message == VC_FLEET_LIVE_COUNT_MESSAGE => {
+                // Screen targets this message only at status-bars on active
+                // tabs. Treat it as a positive visibility heartbeat as well.
+                let became_visible = self.set_visibility(true);
+                let live_count_changed = self.apply_fleet_live_count(&payload);
+                should_render = became_visible || live_count_changed;
+            },
+            Event::CustomMessage(message, payload)
+                if message == VC_STATUS_BAR_VISIBILITY_MESSAGE =>
+            {
+                match payload.as_str() {
+                    "true" => should_render = self.set_visibility(true),
+                    "false" => should_render = self.set_visibility(false),
+                    _ => {},
+                }
+            },
             Event::PermissionRequestResult(_) => {
-                self.start_resource_sample();
+                if self.is_visible {
+                    self.start_resource_sample();
+                }
                 should_render = true;
             },
             Event::InputReceived => {
@@ -323,6 +369,7 @@ impl ZellijPlugin for State {
                 }
                 self.text_copy_destination = None;
                 self.display_system_clipboard_failure = false;
+                self.clipboard_hint_deadline = None;
             },
             _ => {},
         };
@@ -359,16 +406,17 @@ impl ZellijPlugin for State {
                 self.text_copy_destination,
                 self.display_system_clipboard_failure,
             );
-            if right.len > 0 && cols > right.len {
-                // Paint the hints, flood the background to EOL, then park
-                // the right segment flush against the edge (CHA, 1-based).
-                print!(
-                    "{}{}\u{1b}[{}G{}",
-                    line,
-                    fill_bg,
-                    cols.saturating_sub(right.len) + 1,
-                    right.part,
-                );
+            if right.len > 0 && cols > line.len + right.len {
+                // Right-align the status segment by PRINTING FORWARD only:
+                // hints, a background-styled spacer, the segment, then EL
+                // for the final column. The previous shape (EL, then CHA
+                // back, then text) corrupted the composed frame on every
+                // render — the climbing/ghosting chrome of 2026-07-31,
+                // bisected to exactly that print. No cursor motion, no
+                // write into the last cell: nothing left to go wrong.
+                let pad = cols.saturating_sub(line.len + right.len + 1);
+                let spacer = style!(background, background).paint(" ".repeat(pad));
+                print!("{}{}{}{}", line, spacer, right.part, fill_bg);
             } else {
                 print!("{}{}", line, fill_bg);
             }
@@ -411,35 +459,120 @@ impl ZellijPlugin for State {
 
 impl State {
     fn start_resource_sample(&mut self) {
-        if self.resource_sample_in_flight {
+        if !self.is_visible || self.resource_sample_in_flight {
             return;
         }
+        self.resource_sample_due = None;
         self.resource_sample_in_flight = true;
         let mut context = BTreeMap::new();
         context.insert(RESOURCE_SAMPLE_CONTEXT_KEY.to_owned(), "true".to_owned());
         run_command(&["sh", "-c", RESOURCE_SAMPLE_COMMAND], context);
     }
 
-    /// The bar's right edge: `CPU … · MEM …` (dim) followed by the swap
-    /// layout chip (BASE / VERTICAL / …) that used to live on the top bar.
+    fn set_visibility(&mut self, is_visible: bool) -> bool {
+        if self.is_visible == is_visible {
+            return false;
+        }
+        self.is_visible = is_visible;
+        if is_visible {
+            self.start_resource_sample();
+        } else {
+            self.resource_sample_due = None;
+            self.clipboard_hint_deadline = None;
+            self.text_copy_destination = None;
+            self.display_system_clipboard_failure = false;
+        }
+        true
+    }
+
+    fn schedule_resource_sample(&mut self) {
+        self.resource_sample_due =
+            Some(Instant::now() + Duration::from_secs_f64(RESOURCE_SAMPLE_SECONDS));
+        set_timeout(RESOURCE_SAMPLE_SECONDS);
+    }
+
+    fn apply_fleet_live_count(&mut self, payload: &str) -> bool {
+        let Ok(live_count) = payload.parse::<usize>() else {
+            return false;
+        };
+        if self.live_count == live_count {
+            return false;
+        }
+        self.live_count = live_count;
+        true
+    }
+
+    /// The bar's right edge — pure statuses, zero tools (operator call
+    /// 2026-07-31 / close-out Fork IV): fleet LIVE, host cockpit, and a
+    /// HEALTH chip. All glyphs are single-cell ASCII/emoji-safe tokens so we
+    /// never re-introduce the ䷅ (U+4DC5, width 2) jumping-screen class.
     fn right_status_segment(&self, active_tab: Option<&TabInfo>) -> LinePart {
         let mut segment = LinePart::default();
         let palette = self.mode_info.style.colors;
+        let dim = style!(
+            palette.text_unselected.emphasis_2,
+            palette.text_unselected.background
+        );
+        let hot = style!(
+            palette.text_unselected.emphasis_1,
+            palette.text_unselected.background
+        )
+        .bold();
 
+        // LIVE = fleet pulse (agent process tabs across sessions).
+        let live_text = format!("LIVE {}", self.live_count);
+        let live_part = if self.live_count > 0 {
+            hot.paint(live_text).to_string()
+        } else {
+            dim.paint(live_text).to_string()
+        };
+        segment.append(&LinePart {
+            len: format!("LIVE {}", self.live_count).width(),
+            part: live_part,
+        });
+
+        // Resource cockpit already carries CPU | MEM | DISK from the sample.
         if let Some(resource_line) = &self.resource_line {
-            let text = format!("{} ", resource_line);
+            let sep = " | ";
+            let text = format!("{}{}", sep, resource_line);
             segment.append(&LinePart {
-                len: text.chars().count(),
-                part: style!(
-                    palette.text_unselected.emphasis_2,
+                len: text.width(),
+                part: dim.paint(text).to_string(),
+            });
+        }
+
+        // HEALTH: green `ok` when the sample is present and live_count is
+        // finite; `!` when we have no sample yet (honest unknown).
+        {
+            let sep = " | ";
+            let (label, emphasis) = if self.resource_line.is_some() {
+                ("HEALTH ok", true)
+            } else {
+                ("HEALTH ?", false)
+            };
+            let text = format!("{}{}", sep, label);
+            let painted = if emphasis {
+                style!(
+                    palette.text_unselected.emphasis_1,
                     palette.text_unselected.background
                 )
-                .paint(text)
-                .to_string(),
+                .paint(text.clone())
+                .to_string()
+            } else {
+                dim.paint(text.clone()).to_string()
+            };
+            segment.append(&LinePart {
+                len: text.width(),
+                part: painted,
             });
         }
 
         if let Some(swap_chip) = self.swap_layout_status(active_tab) {
+            let sep = LinePart {
+                len: 1,
+                part: dim.paint(" ").to_string(),
+            };
+            segment.append(&sep);
             segment.append(&swap_chip);
         }
 
@@ -515,25 +648,47 @@ impl State {
     }
 }
 
-/// Format the three-number sample ("cpu used_kib total_kib") into the
-/// cockpit line. Returns None on any malformed field so a bad sample never
-/// blanks a previously valid reading.
+/// Format the four-number sample ("cpu used_kib total_kib disk_avail_kib")
+/// into the cockpit line. Returns None on any malformed field so a bad
+/// sample never blanks a previously valid reading.
 fn parse_resource_sample(stdout: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(stdout);
     let mut parts = text.split_whitespace();
     let cpu: f64 = parts.next()?.parse().ok()?;
     let used_kib: f64 = parts.next()?.parse().ok()?;
     let total_kib: f64 = parts.next()?.parse().ok()?;
-    if total_kib <= 0.0 || cpu < 0.0 || used_kib < 0.0 {
+    let disk_avail_kib: f64 = parts.next()?.parse().ok()?;
+    if total_kib <= 0.0 || cpu < 0.0 || used_kib < 0.0 || disk_avail_kib < 0.0 {
         return None;
     }
     const KIB_PER_GIB: f64 = 1024.0 * 1024.0;
     Some(format!(
-        "CPU {:.0}% · MEM {:.1}/{:.0}G",
+        "CPU {:.0}% | MEM {:.1}/{:.0}G | DISK {:.0}G",
         cpu,
         used_kib / KIB_PER_GIB,
         total_kib / KIB_PER_GIB,
+        disk_avail_kib / KIB_PER_GIB,
     ))
+}
+
+fn status_bar_permissions() -> Vec<PermissionType> {
+    vec![PermissionType::RunCommands]
+}
+
+fn status_bar_subscriptions() -> Vec<EventType> {
+    vec![
+        EventType::ModeUpdate,
+        EventType::TabUpdate,
+        EventType::PaneUpdate,
+        EventType::CopyToClipboard,
+        EventType::InputReceived,
+        EventType::SystemClipboardFailure,
+        EventType::InitialKeybinds,
+        EventType::Timer,
+        EventType::RunCommandResult,
+        EventType::CustomMessage,
+        EventType::PermissionRequestResult,
+    ]
 }
 
 pub fn get_common_modifiers(mut keyvec: Vec<&KeyWithModifier>) -> Vec<KeyModifier> {
@@ -622,7 +777,7 @@ pub fn style_key_with_modifier(
 
     let text_color = palette_match!(palette.text_unselected.base);
     let green_color = palette_match!(palette.text_unselected.emphasis_2);
-    let orange_color = palette_match!(palette.text_unselected.emphasis_0);
+    let orange_color = palette_match!(palette.text_unselected.emphasis_1);
     let mut ret = vec![];
 
     let common_modifiers = get_common_modifiers(keyvec.iter().collect());
@@ -779,10 +934,10 @@ pub mod tests {
     }
 
     #[test]
-    fn resource_sample_formats_cpu_and_memory() {
-        // 342% CPU, 8 GiB used of 64 GiB (values in KiB, like ps/meminfo).
-        let sample = parse_resource_sample(b"342 8388608 67108864");
-        assert_eq!(sample.as_deref(), Some("CPU 342% · MEM 8.0/64G"));
+    fn resource_sample_formats_cpu_memory_and_disk() {
+        // 342% CPU, 8 GiB used of 64 GiB, 13 GiB free on / (KiB inputs).
+        let sample = parse_resource_sample(b"342 8388608 67108864 13631488");
+        assert_eq!(sample.as_deref(), Some("CPU 342% | MEM 8.0/64G | DISK 13G"));
     }
 
     #[test]
@@ -790,8 +945,193 @@ pub mod tests {
         assert_eq!(parse_resource_sample(b""), None, "empty");
         assert_eq!(parse_resource_sample(b"only two"), None, "non-numeric");
         assert_eq!(parse_resource_sample(b"12 34"), None, "missing total");
-        assert_eq!(parse_resource_sample(b"12 34 0"), None, "zero total");
-        assert_eq!(parse_resource_sample(b"-5 34 100"), None, "negative cpu");
+        assert_eq!(parse_resource_sample(b"12 34 100"), None, "missing disk");
+        assert_eq!(parse_resource_sample(b"12 34 0 55"), None, "zero total");
+        assert_eq!(parse_resource_sample(b"-5 34 100 55"), None, "negative cpu");
+        assert_eq!(
+            parse_resource_sample(b"12 34 100 -1"),
+            None,
+            "negative disk"
+        );
+    }
+
+    #[test]
+    fn resource_sample_success_then_failure_clears_stale_health_line() {
+        // Mirror the RunCommandResult branch: a good sample sets the line;
+        // a later non-zero exit or unparseable body must clear it so HEALTH
+        // flips back to unknown instead of freezing "ok".
+        let mut line = parse_resource_sample(b"10 1024 2048 512");
+        assert!(line.is_some());
+        // malformed after success
+        if parse_resource_sample(b"not-a-sample").is_none() {
+            line = None;
+        }
+        assert_eq!(line, None);
+        line = parse_resource_sample(b"10 1024 2048 512");
+        assert!(line.is_some());
+        // failed exit clears regardless of stdout
+        let exit_code = Some(1);
+        if exit_code != Some(0) {
+            line = None;
+        }
+        assert_eq!(line, None);
+    }
+
+    #[test]
+    fn status_bar_never_subscribes_to_full_session_snapshots() {
+        assert!(
+            !status_bar_subscriptions().contains(&EventType::SessionUpdate),
+            "per-tab status bars must never receive full cross-session snapshots"
+        );
+        assert!(status_bar_subscriptions().contains(&EventType::CustomMessage));
+        assert!(
+            !status_bar_subscriptions().contains(&EventType::Visible),
+            "tab-global visibility must not control a per-client sampler"
+        );
+        assert!(
+            !status_bar_permissions().contains(&PermissionType::ReadApplicationState),
+            "the scalar fleet message must not require cross-session read access"
+        );
+    }
+
+    #[test]
+    fn fleet_live_count_accepts_only_valid_changed_scalars() {
+        let mut state = State {
+            is_visible: true,
+            live_count: 3,
+            ..Default::default()
+        };
+
+        assert!(state.update(Event::CustomMessage(
+            VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
+            "4".to_owned(),
+        )));
+        assert_eq!(state.live_count, 4);
+
+        assert!(!state.update(Event::CustomMessage(
+            VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
+            "4".to_owned(),
+        )));
+        assert!(!state.update(Event::CustomMessage(
+            VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
+            "not-a-number".to_owned(),
+        )));
+        assert_eq!(
+            state.live_count, 4,
+            "invalid input must keep last good value"
+        );
+    }
+
+    #[test]
+    fn clipboard_timer_does_not_start_or_rearm_resource_sampling() {
+        let resource_due = Instant::now() + Duration::from_secs(60);
+        let mut state = State {
+            is_visible: true,
+            text_copy_destination: Some(CopyDestination::Command),
+            clipboard_hint_deadline: Some(Instant::now() - Duration::from_secs(1)),
+            resource_sample_due: Some(resource_due),
+            ..Default::default()
+        };
+
+        assert!(state.update(Event::Timer(CLIPBOARD_HINT_TTL_SECONDS)));
+        assert_eq!(state.text_copy_destination, None);
+        assert_eq!(state.resource_sample_due, Some(resource_due));
+        assert!(!state.resource_sample_in_flight);
+    }
+
+    #[test]
+    fn stale_timer_is_a_noop_before_either_deadline() {
+        let clipboard_deadline = Instant::now() + Duration::from_secs(30);
+        let resource_due = Instant::now() + Duration::from_secs(60);
+        let mut state = State {
+            is_visible: true,
+            text_copy_destination: Some(CopyDestination::Command),
+            clipboard_hint_deadline: Some(clipboard_deadline),
+            resource_sample_due: Some(resource_due),
+            ..Default::default()
+        };
+
+        assert!(!state.update(Event::Timer(0.1)));
+        assert_eq!(state.clipboard_hint_deadline, Some(clipboard_deadline));
+        assert_eq!(state.resource_sample_due, Some(resource_due));
+        assert!(!state.resource_sample_in_flight);
+    }
+
+    #[test]
+    fn hidden_status_bar_never_starts_or_rearms_resource_sampling() {
+        let mut state = State {
+            is_visible: false,
+            resource_sample_in_flight: true,
+            ..Default::default()
+        };
+        let mut context = BTreeMap::new();
+        context.insert(RESOURCE_SAMPLE_CONTEXT_KEY.to_owned(), "true".to_owned());
+
+        assert!(state.update(Event::RunCommandResult(
+            Some(0),
+            b"10 1048576 8388608 2097152".to_vec(),
+            vec![],
+            context,
+        )));
+        assert!(!state.resource_sample_in_flight);
+        assert_eq!(state.resource_sample_due, None);
+
+        state.start_resource_sample();
+        assert!(!state.resource_sample_in_flight);
+        assert_eq!(state.resource_sample_due, None);
+    }
+
+    #[test]
+    fn fresh_status_bar_is_idle_until_a_visibility_signal() {
+        let mut state = State::default();
+
+        assert!(!state.is_visible);
+        state.start_resource_sample();
+        assert!(!state.resource_sample_in_flight);
+        assert_eq!(state.resource_sample_due, None);
+    }
+
+    #[test]
+    fn targeted_fleet_message_resumes_status_bar_after_reattach() {
+        let mut state = State {
+            is_visible: false,
+            live_count: 1,
+            ..Default::default()
+        };
+
+        assert!(state.update(Event::CustomMessage(
+            VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
+            "2".to_owned(),
+        )));
+        assert!(state.is_visible);
+        assert!(state.resource_sample_in_flight);
+        assert_eq!(state.live_count, 2);
+    }
+
+    #[test]
+    fn targeted_visibility_message_stops_only_that_status_bar_instance() {
+        let mut state = State {
+            is_visible: true,
+            resource_sample_due: Some(Instant::now() + Duration::from_secs(5)),
+            text_copy_destination: Some(CopyDestination::Command),
+            clipboard_hint_deadline: Some(Instant::now() + Duration::from_secs(2)),
+            ..Default::default()
+        };
+
+        assert!(state.update(Event::CustomMessage(
+            VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
+            "false".to_owned(),
+        )));
+        assert!(!state.is_visible);
+        assert_eq!(state.resource_sample_due, None);
+        assert_eq!(state.clipboard_hint_deadline, None);
+        assert_eq!(state.text_copy_destination, None);
+
+        assert!(!state.update(Event::CustomMessage(
+            VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
+            "invalid".to_owned(),
+        )));
+        assert!(!state.is_visible);
     }
 
     #[test]

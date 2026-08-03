@@ -11,3 +11,6 @@ target/
 /.antigravitycli
 *.log
 /build/
+# Ephemeral e2e ssh keypair (see docker-compose.yml / CONTRIBUTING.md).
+# This holds a PRIVATE key and must never reach a public repository.
+/.ci-ssh/

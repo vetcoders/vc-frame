@@ -1,6 +1,9 @@
 layout {
     pane size=1 borderless=true {
-        plugin location="tab-bar"
+        plugin location="tab-bar" {
+            // 🚥 zone: clear the macOS traffic lights in the native window
+            left_inset "9"
+        }
     }
     pane split_direction="vertical" {
         pane size=24 borderless=true {

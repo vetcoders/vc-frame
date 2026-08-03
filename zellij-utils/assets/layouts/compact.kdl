@@ -1,6 +1,9 @@
 layout {
     pane
     pane size=1 borderless=true {
-        plugin location="compact-bar"
+        plugin location="compact-bar" {
+            // 🚥 zone: clear the macOS traffic lights in the native window
+            left_inset "9"
+        }
     }
 }

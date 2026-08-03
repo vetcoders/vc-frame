@@ -1,9 +1,10 @@
 use super::{
     ActiveLayoutTransaction, CopyOptions, DurableTabLayoutGeneration, LayoutPreparationCleanup,
     LayoutTabOwner, Screen, ScreenInstruction, ScreenLayoutTransactionKind, TabOverrideResult,
-    register_viewer_creation_post_install_test_hook, reject_after_apply_prepare_for_test,
-    reserve_durable_tab_layout_recovery, reserve_new_durable_tab_layout_generation,
-    screen_thread_main,
+    VC_FLEET_LIVE_COUNT_MESSAGE, VC_STATUS_BAR_VISIBILITY_MESSAGE, fleet_live_count,
+    is_status_bar_plugin_run, register_viewer_creation_post_install_test_hook,
+    reject_after_apply_prepare_for_test, reserve_durable_tab_layout_recovery,
+    reserve_new_durable_tab_layout_generation, screen_thread_main, session_update_events,
 };
 use crate::panes::PaneId;
 use crate::{
@@ -18,7 +19,8 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use zellij_utils::cli::CliAction;
 use zellij_utils::data::{
-    Event, EventType, ListPanesResponse, ListTabsResponse, Resize, Style, TabPlacement, WebSharing,
+    Event, EventType, ListPanesResponse, ListTabsResponse, PaneInfo, PaneManifest, Resize,
+    SessionInfo, Style, TabInfo, TabPlacement, WebSharing,
 };
 use zellij_utils::errors::{ErrorContext, prelude::*};
 use zellij_utils::input::actions::Action;
@@ -38,7 +40,7 @@ use zellij_utils::run_triage::{BucketKind, ViewerCreationFence, ViewerCreationFe
 use crate::background_jobs::BackgroundJob;
 use crate::os_input_output::AsyncReader;
 use crate::pty_writer::PtyWriteInstruction;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
@@ -71,6 +73,273 @@ fn normalize_layout_debug(output: String) -> String {
         .filter(|line| line.trim() != "tab_instance_id: None,")
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn fleet_session(name: &str, panes: &[(bool, bool, bool)]) -> SessionInfo {
+    let tabs = panes
+        .iter()
+        .enumerate()
+        .map(|(position, _)| TabInfo {
+            position,
+            ..Default::default()
+        })
+        .collect();
+    let panes = panes
+        .iter()
+        .enumerate()
+        .map(|(position, (is_plugin, exited, is_held))| {
+            (
+                position,
+                vec![PaneInfo {
+                    is_plugin: *is_plugin,
+                    exited: *exited,
+                    is_held: *is_held,
+                    ..Default::default()
+                }],
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    SessionInfo {
+        name: name.to_owned(),
+        tabs,
+        panes: PaneManifest { panes },
+        ..Default::default()
+    }
+}
+
+#[test]
+fn fleet_live_count_excludes_drawers_plugins_and_stopped_panes() {
+    let sessions = vec![
+        fleet_session(
+            "working",
+            &[
+                (false, false, false),
+                (true, false, false),
+                (false, true, false),
+                (false, false, true),
+            ],
+        ),
+        fleet_session(
+            BucketKind::Finalized.session_name(),
+            &[(false, false, false)],
+        ),
+        fleet_session(BucketKind::Failed.session_name(), &[(false, false, false)]),
+        fleet_session(
+            BucketKind::NeedsAttention.session_name(),
+            &[(false, false, false)],
+        ),
+        fleet_session("another", &[(false, false, false)]),
+    ];
+
+    assert_eq!(fleet_live_count(&sessions), 2);
+}
+
+#[test]
+fn fleet_live_count_message_targets_only_local_status_bars() {
+    let updates = session_update_events(
+        vec![
+            fleet_session("working", &[(false, false, false)]),
+            fleet_session("peer", &[(false, false, false)]),
+        ],
+        vec![],
+        vec![(42, 1)],
+        vec![(41, 1)],
+    );
+
+    assert!(matches!(
+        updates.first(),
+        Some((None, None, Event::SessionUpdate(_, _)))
+    ));
+    assert_eq!(updates.len(), 3);
+    assert!(matches!(
+        updates.get(1),
+        Some((
+            Some(41),
+            Some(1),
+            Event::CustomMessage(message, payload),
+        )) if message == VC_STATUS_BAR_VISIBILITY_MESSAGE && payload == "false"
+    ));
+    assert!(matches!(
+        updates.get(2),
+        Some((
+            Some(42),
+            Some(1),
+            Event::CustomMessage(message, payload),
+        )) if message == VC_FLEET_LIVE_COUNT_MESSAGE && payload == "2"
+    ));
+    assert!(updates.iter().all(|(plugin_id, _, event)| {
+        !matches!(event, Event::CustomMessage(_, _)) || plugin_id.is_some()
+    }));
+}
+
+#[test]
+fn status_bar_plugin_run_accepts_builtin_urls_and_resolved_aliases_only() {
+    let builtin =
+        Run::Plugin(RunPluginOrAlias::from_url("vc-frame:status-bar", &None, None, None).unwrap());
+    let legacy_builtin =
+        Run::Plugin(RunPluginOrAlias::from_url("zellij:status-bar", &None, None, None).unwrap());
+    let default_alias =
+        Run::Plugin(RunPluginOrAlias::from_url("status-bar", &None, None, None).unwrap());
+    let mut renamed_alias = RunPluginOrAlias::from_url("my-status", &None, None, None).unwrap();
+    if let RunPluginOrAlias::Alias(alias) = &mut renamed_alias {
+        alias.run_plugin = RunPluginOrAlias::from_url("vc-frame:status-bar", &None, None, None)
+            .unwrap()
+            .get_run_plugin();
+    }
+    let renamed_alias = Run::Plugin(renamed_alias);
+    let mut shadowed_default_alias =
+        RunPluginOrAlias::from_url("status-bar", &None, None, None).unwrap();
+    if let RunPluginOrAlias::Alias(alias) = &mut shadowed_default_alias {
+        alias.run_plugin =
+            RunPluginOrAlias::from_url("file:///custom-status-bar.wasm", &None, None, None)
+                .unwrap()
+                .get_run_plugin();
+    }
+    let shadowed_default_alias = Run::Plugin(shadowed_default_alias);
+    let worker =
+        Run::Plugin(RunPluginOrAlias::from_url("file:///worker.wasm", &None, None, None).unwrap());
+    let compact_bar =
+        Run::Plugin(RunPluginOrAlias::from_url("vc-frame:compact-bar", &None, None, None).unwrap());
+
+    assert!(is_status_bar_plugin_run(Some(&builtin)));
+    assert!(is_status_bar_plugin_run(Some(&legacy_builtin)));
+    assert!(is_status_bar_plugin_run(Some(&default_alias)));
+    assert!(is_status_bar_plugin_run(Some(&renamed_alias)));
+    assert!(!is_status_bar_plugin_run(Some(&shadowed_default_alias)));
+    assert!(!is_status_bar_plugin_run(Some(&worker)));
+    assert!(!is_status_bar_plugin_run(Some(&compact_bar)));
+    assert!(!is_status_bar_plugin_run(None));
+}
+
+fn new_tab_with_status_bar_and_worker(
+    screen: &mut Screen,
+    tab_id: usize,
+    terminal_id: u32,
+    status_bar_id: u32,
+    worker_id: u32,
+) {
+    let status_bar = RunPluginOrAlias::from_url("status-bar", &None, None, None).unwrap();
+    let worker = RunPluginOrAlias::from_url("file:///worker.wasm", &None, None, None).unwrap();
+    let layout = TiledPaneLayout {
+        children: vec![
+            TiledPaneLayout::default(),
+            TiledPaneLayout {
+                run: Some(Run::Plugin(status_bar.clone())),
+                ..Default::default()
+            },
+            TiledPaneLayout {
+                run: Some(Run::Plugin(worker.clone())),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let mut plugin_ids = HashMap::new();
+    plugin_ids.insert(status_bar, vec![status_bar_id]);
+    plugin_ids.insert(worker, vec![worker_id]);
+
+    screen
+        .new_tab(
+            tab_id,
+            (vec![], vec![]),
+            None,
+            Some(1),
+            TabPlacement::Append,
+        )
+        .unwrap();
+    screen
+        .apply_layout(
+            layout,
+            vec![],
+            vec![(terminal_id, None)],
+            vec![],
+            plugin_ids,
+            tab_id,
+            true,
+            (1, false),
+            None,
+        )
+        .unwrap();
+}
+
+#[test]
+fn active_status_bar_targets_exclude_hidden_tabs_and_other_plugins() {
+    let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
+    let (to_plugin, _plugin_receiver): ChannelWithContext<PluginInstruction> =
+        channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    new_tab_with_status_bar_and_worker(&mut screen, 0, 1, 42, 99);
+    new_tab_with_status_bar_and_worker(&mut screen, 1, 2, 43, 100);
+
+    assert_eq!(
+        screen.active_status_bar_plugin_targets(),
+        BTreeSet::from([(43, 1)])
+    );
+    screen.active_tab_ids.insert(2, 0);
+    assert_eq!(
+        screen.active_status_bar_plugin_targets(),
+        BTreeSet::from([(42, 2), (43, 1)])
+    );
+}
+
+#[test]
+fn status_bar_target_transition_hides_only_the_client_that_switched_tabs() {
+    let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
+    let (to_plugin, _plugin_receiver): ChannelWithContext<PluginInstruction> =
+        channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    new_tab_with_status_bar_and_worker(&mut screen, 0, 1, 42, 99);
+    new_tab_with_status_bar_and_worker(&mut screen, 1, 2, 43, 100);
+    screen.active_tab_ids = BTreeMap::from([(1, 0), (2, 0)]);
+    screen.active_status_bar_plugin_targets_cache.clear();
+
+    let (initially_active, initially_hidden) = screen.status_bar_plugin_target_transition();
+    assert_eq!(initially_active, vec![(42, 1), (42, 2)]);
+    assert!(initially_hidden.is_empty());
+
+    screen.active_tab_ids.insert(1, 1);
+    let (active_after_switch, hidden_after_switch) = screen.status_bar_plugin_target_transition();
+    assert_eq!(active_after_switch, vec![(42, 2), (43, 1)]);
+    assert_eq!(hidden_after_switch, vec![(42, 1)]);
+
+    let updates = session_update_events(
+        vec![fleet_session("working", &[(false, false, false)])],
+        vec![],
+        active_after_switch,
+        hidden_after_switch,
+    );
+    let custom_targets = updates
+        .into_iter()
+        .filter_map(|(plugin_id, client_id, event)| match event {
+            Event::CustomMessage(message, payload) => {
+                Some((plugin_id, client_id, message, payload))
+            },
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        custom_targets,
+        vec![
+            (
+                Some(42),
+                Some(1),
+                VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
+                "false".to_owned(),
+            ),
+            (
+                Some(42),
+                Some(2),
+                VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
+                "1".to_owned(),
+            ),
+            (
+                Some(43),
+                Some(1),
+                VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
+                "1".to_owned(),
+            ),
+        ]
+    );
 }
 
 fn assert_layout_transaction_rejected(
@@ -12446,10 +12715,29 @@ pub fn copy_pane_scrollback_action_pipes_focused_pane_full_scrollback_to_copy_co
         InputMode::Normal,
     )
     .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    // The copy command is a separate process; on a cold hosted CI runner
+    // powershell.exe alone can take seconds to start. Poll for the fully
+    // written file (the last line is the completion marker — `cat > file`
+    // creates the file long before it is complete) instead of a fixed sleep.
+    // Keep the deadline above CopyCommand's internal reaper timeout so a slow
+    // but successful child is still observed.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
+    while std::time::Instant::now() < deadline {
+        match std::fs::read_to_string(&copied_text_path) {
+            Ok(copied) if copied.contains("copy-current-pane-line-9") => break,
+            _ => std::thread::sleep(std::time::Duration::from_millis(100)),
+        }
+    }
 
     mock_screen.teardown(vec![server_thread, screen_thread]);
-    let copied_text = std::fs::read_to_string(copied_text_path).unwrap();
+    let copied_text = std::fs::read_to_string(&copied_text_path).unwrap_or_else(|error| {
+        panic!(
+            "copy command never produced {}: {error} (path exists={}, is_file={})",
+            copied_text_path.display(),
+            copied_text_path.exists(),
+            copied_text_path.is_file(),
+        )
+    });
     assert!(
         copied_text.contains("copy-current-pane-line-0"),
         "copy must include full scrollback, not only the viewport: {copied_text:?}"

@@ -1,4 +1,13 @@
 ---
+# Local-dev twin of .github/workflows/e2e.yml — keep the two in sync.
+#
+# Usage (see CONTRIBUTING.md):
+#   ssh-keygen -t ed25519 -N '' -f .ci-ssh/id_ed25519
+#   export ZELLIJ_E2E_SSH_KEY="$PWD/.ci-ssh/id_ed25519"
+#   docker compose up -d
+#   cargo xtask ci e2e --build     # also publishes the target/zellij symlink
+#   docker compose restart         # image init installs the public key
+#   cargo xtask ci e2e --test
 version: "2.1"
 services:
   zellij-e2e:
@@ -9,19 +18,34 @@ services:
       PUID: 1000
       PGID: 1000
       TZ: Europe/Vienna
-      PASSWORD_ACCESS: true
-      USER_PASSWORD: test
+      # No password auth, no static credential — key only. A static test/test
+      # login on this container is what was abused on 2026-07-30 to plant a
+      # cryptominer on the CI runner.
+      PASSWORD_ACCESS: "false"
       USER_NAME: test
+      PUBLIC_KEY_FILE: /ci-ssh/id_ed25519.pub
     volumes:
+      # :ro — the build tree is an input to the container, never an output.
+      # The 2026-07-30 payload was written to the host through this mount.
       - type: bind
         source: ./target
         target: /usr/src/zellij
+        read_only: true
       - type: bind
         source: ./src/tests/fixtures
         target: /usr/src/zellij/fixtures
+        read_only: true
+      - type: bind
+        source: ./.ci-ssh
+        target: /ci-ssh
+        read_only: true
     ports:
       - "127.0.0.1:2222:2222/tcp"
     security_opt:
       - no-new-privileges:true
-    read_only: true
+    # NOTE: a read-only container ROOTFS (`read_only: true` at service level) is
+    # deliberately absent. The image init writes /etc/sudoers, /etc/shadow and
+    # runs `ssh-keygen -A` on every start; with a read-only rootfs that fails,
+    # /config/ssh_host_keys stays empty and sshd starts with no host key.
+    # Confining the rootfs needs tmpfs mounts on /etc/ssh + /run — separate change.
     restart: unless-stopped
