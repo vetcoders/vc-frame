@@ -2006,6 +2006,19 @@ def signal_exact_owned_group_member(
         )
         if member is None:
             if expected_stopped_parent is not None:
+                parent = next(
+                    (
+                        current
+                        for current in last_members
+                        if int(current["pid"]) == expected_stopped_parent
+                    ),
+                    None,
+                )
+                # Short-lived children can exit between inventory and signal
+                # while the stopped parent still freezes the subtree. That is
+                # a benign reap, not a lost/reparented PID — re-inventory.
+                if parent is not None and "T" in str(parent.get("state", "")):
+                    return False
                 raise OwnedProcessGroupRefusal(
                     f"refusing {signal_name} for missing pinned member "
                     f"{member_pid}: stopped parent={expected_stopped_parent}, "
@@ -2276,7 +2289,7 @@ def stop_owned_process_group(
             continue
 
         expected_parent = int(target["ppid"])
-        signal_exact_owned_group_member(
+        signalled = signal_exact_owned_group_member(
             process,
             target_pid,
             signal.SIGSTOP,
@@ -2284,6 +2297,11 @@ def stop_owned_process_group(
             require_running=True,
             expected_stopped_parent=expected_parent,
         )
+        if not signalled:
+            # Target reaped under the frozen parent between inventory and
+            # signal; re-inventory rather than waiting on a dead PID.
+            time.sleep(0.001)
+            continue
         wait_for_owned_member_quiescence(
             process,
             target_pid,
@@ -2427,7 +2445,7 @@ def kill_owned_process_group(
             process.kill()
             return
         expected_parent = int(member["ppid"])
-        signal_exact_owned_group_member(
+        signalled = signal_exact_owned_group_member(
             process,
             member_pid,
             signal.SIGKILL,
@@ -2435,6 +2453,8 @@ def kill_owned_process_group(
             require_stopped=True,
             expected_stopped_parent=expected_parent,
         )
+        if not signalled:
+            continue
         wait_for_owned_member_quiescence(
             process,
             member_pid,
