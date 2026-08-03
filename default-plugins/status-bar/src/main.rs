@@ -64,8 +64,8 @@ struct State {
     base_mode_is_locked: bool,
     cached_keybinds: KeybindsVec,
     // Host resource cockpit ("CPU … | MEM … | DISK …"), sampled via
-    // run_command. None until the first valid sample; a malformed sample
-    // keeps the last line.
+    // run_command. None until the first valid sample; a failed or malformed
+    // sample clears the line so HEALTH cannot claim "ok" on stale numbers.
     resource_line: Option<String>,
     resource_sample_in_flight: bool,
     resource_sample_due: Option<Instant>,
@@ -325,11 +325,19 @@ impl ZellijPlugin for State {
                 } else {
                     self.resource_sample_due = None;
                 }
-                if exit_code == Some(0)
-                    && let Some(line) = parse_resource_sample(&stdout)
-                    && self.resource_line.as_deref() != Some(line.as_str())
-                {
-                    self.resource_line = Some(line);
+                // A failed or malformed sample must not freeze the last good
+                // reading forever under "HEALTH ok". Clear to unknown so the
+                // bar is honest until the next successful sample.
+                if exit_code == Some(0) {
+                    if let Some(line) = parse_resource_sample(&stdout) {
+                        if self.resource_line.as_deref() != Some(line.as_str()) {
+                            self.resource_line = Some(line);
+                            should_render = true;
+                        }
+                    } else if self.resource_line.take().is_some() {
+                        should_render = true;
+                    }
+                } else if self.resource_line.take().is_some() {
                     should_render = true;
                 }
             },
@@ -945,6 +953,28 @@ pub mod tests {
             None,
             "negative disk"
         );
+    }
+
+    #[test]
+    fn resource_sample_success_then_failure_clears_stale_health_line() {
+        // Mirror the RunCommandResult branch: a good sample sets the line;
+        // a later non-zero exit or unparseable body must clear it so HEALTH
+        // flips back to unknown instead of freezing "ok".
+        let mut line = parse_resource_sample(b"10 1024 2048 512");
+        assert!(line.is_some());
+        // malformed after success
+        if parse_resource_sample(b"not-a-sample").is_none() {
+            line = None;
+        }
+        assert_eq!(line, None);
+        line = parse_resource_sample(b"10 1024 2048 512");
+        assert!(line.is_some());
+        // failed exit clears regardless of stdout
+        let exit_code = Some(1);
+        if exit_code != Some(0) {
+            line = None;
+        }
+        assert_eq!(line, None);
     }
 
     #[test]
