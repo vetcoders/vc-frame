@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
 * feat(chrome): Fixed Character Grid Model — compact-bar zones lock to fixed column budgets (brand 14, mode 8, entry chips 12+18); mode switches and entry labels no longer shift the tab zone by even one cell; unit tests lock the EAW-aware pad contract
-* feat(chrome): status-bar metric fields use fixed widths (`CPU {:3}`, `MEM {:4.1}/{:3}`, `DISK {:3}`, `LIVE {:2}`) so cockpit readings never jitter the right edge
+* feat(chrome): status-bar metric fields use fixed widths (`CPU {:4}`, `MEM {:5.1}/{:3}`, `DISK {:3}`, `LIVE {:2}`) covering multi-core >999% and used memory >=100G (operator hardware) without right-edge jitter
 * feat(chrome): operator layouts default `left_inset` to 6 columns (was 9) at standard monospace; large fonts can still raise it via layout config
 * feat(composer): Quick cmd floats a login shell over the *current* tab (no Agents detour); Composer chip, Super+e/Alt+e, and `vc-composer.sh` share one paste-stack-aware drafting contract (`~/.cache/vc-frame/paste-stack.json` seed + push)
 * feat(status-bar): mode-gated status contract — the diodes (`LIVE | CPU | MEM | DISK | HEALTH`) live in the resting mode only; action modes hand every column to the shortcut hints and keep just the swap-layout chip; on narrow bars the segment sheds blocks right-to-left (DISK → MEM → CPU → swap → HEALTH, pulse last) instead of vanishing whole, and a two-cell seam always separates hints from statuses

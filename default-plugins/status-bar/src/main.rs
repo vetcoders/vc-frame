@@ -728,11 +728,13 @@ fn parse_resource_sample(stdout: &[u8]) -> Option<String> {
     }
     const KIB_PER_GIB: f64 = 1024.0 * 1024.0;
     // Fixed-width fields so the right-edge segment never jitters when a
-    // reading rolls from 9 → 100 or 4.2G → 44.2G (Pensieve Fixed Character
-    // Grid Model). Widths: CPU 3, MEM used 4.1, total 3, DISK 3.
+    // reading rolls from 9 → 100, 8.0G → 264.3G, or multi-core CPU past
+    // 999% (Pensieve Fixed Character Grid Model + live operator hardware).
+    // Widths are max-and-min: CPU 4, MEM used 5.1, total 3, DISK 3.
+    // Clamp so a pathological sample cannot expand past the budget.
     Some(format!(
-        "CPU {:3.0}% | MEM {:4.1}/{:3.0}G | DISK {:3.0}G",
-        cpu.min(999.0),
+        "CPU {:4.0}% | MEM {:5.1}/{:3.0}G | DISK {:3.0}G",
+        cpu.min(9999.0),
         (used_kib / KIB_PER_GIB).min(999.9),
         (total_kib / KIB_PER_GIB).min(999.0),
         (disk_avail_kib / KIB_PER_GIB).min(999.0),
@@ -1003,23 +1005,51 @@ pub mod tests {
 
     #[test]
     fn resource_sample_formats_cpu_memory_and_disk() {
-        // 342% CPU, 8 GiB used of 64 GiB, 13 GiB free on / (KiB inputs).
-        // Fixed-width fields (CPU 3, MEM 4.1/3, DISK 3) — no jitter on roll.
-        let sample = parse_resource_sample(b"342 8388608 67108864 13631488");
+        // Fixed-width fields (CPU 4, MEM used 5.1, total 3, DISK 3).
+        // Mid-range laptop sample: 342% CPU, 8 GiB / 64 GiB, 13 GiB free.
+        let mid = parse_resource_sample(b"342 8388608 67108864 13631488");
         assert_eq!(
-            sample.as_deref(),
-            Some("CPU 342% | MEM  8.0/ 64G | DISK  13G")
+            mid.as_deref(),
+            Some("CPU  342% | MEM   8.0/ 64G | DISK  13G")
         );
-        // Single-digit CPU still occupies three columns.
+        // Single-digit path still occupies the full budget.
         let small = parse_resource_sample(b"9 1048576 2097152 1048576");
         assert_eq!(
             small.as_deref(),
-            Some("CPU   9% | MEM  1.0/  2G | DISK   1G")
+            Some("CPU    9% | MEM   1.0/  2G | DISK   1G")
+        );
+        // Operator hardware from Pensieve screenshots: multi-core CPU past
+        // 999% and used memory past 100G (264.3/512G, DISK 173G).
+        // 264.3 GiB = 264.3 * 1024 * 1024 KiB; 512 GiB total; 173 GiB disk.
+        let used_kib = (264.3_f64 * 1024.0 * 1024.0).round() as u64;
+        let total_kib = 512u64 * 1024 * 1024;
+        let disk_kib = 173u64 * 1024 * 1024;
+        let hardware = parse_resource_sample(
+            format!("1949 {} {} {}", used_kib, total_kib, disk_kib).as_bytes(),
         );
         assert_eq!(
-            sample.as_ref().unwrap().width(),
+            hardware.as_deref(),
+            Some("CPU 1949% | MEM 264.3/512G | DISK 173G")
+        );
+        // Another plan screenshot magnitude: 371.8 used of 512.
+        let used_kib_hi = (371.8_f64 * 1024.0 * 1024.0).round() as u64;
+        let heavy = parse_resource_sample(
+            format!("469 {} {} {}", used_kib_hi, total_kib, 348u64 * 1024 * 1024).as_bytes(),
+        );
+        assert_eq!(
+            heavy.as_deref(),
+            Some("CPU  469% | MEM 371.8/512G | DISK 348G")
+        );
+
+        let widths = [
+            mid.as_ref().unwrap().width(),
             small.as_ref().unwrap().width(),
-            "metric line width must be stable across magnitudes"
+            hardware.as_ref().unwrap().width(),
+            heavy.as_ref().unwrap().width(),
+        ];
+        assert!(
+            widths.windows(2).all(|w| w[0] == w[1]),
+            "metric line width must be stable across single-digit, mid, and >=100G used: {widths:?}"
         );
     }
 
@@ -1027,7 +1057,7 @@ pub mod tests {
     fn status_ladder_sheds_cockpit_fields_before_the_pulse() {
         let state = State {
             live_count: 3,
-            resource_line: Some("CPU 342% | MEM  8.0/ 64G | DISK  13G".to_owned()),
+            resource_line: Some("CPU  342% | MEM   8.0/ 64G | DISK  13G".to_owned()),
             ..Default::default()
         };
 
@@ -1035,17 +1065,17 @@ pub mod tests {
         let full = state.right_status_segment(None, 200);
         assert_eq!(
             full.len,
-            "LIVE  3 | CPU 342% | MEM  8.0/ 64G | DISK  13G | HEALTH ok".width()
+            "LIVE  3 | CPU  342% | MEM   8.0/ 64G | DISK  13G | HEALTH ok".width()
         );
         // Narrow: DISK is shed first...
-        let no_disk = state.right_status_segment(None, 50);
+        let no_disk = state.right_status_segment(None, 55);
         assert_eq!(
             no_disk.len,
-            "LIVE  3 | CPU 342% | MEM  8.0/ 64G | HEALTH ok".width()
+            "LIVE  3 | CPU  342% | MEM   8.0/ 64G | HEALTH ok".width()
         );
         // ...then MEM...
-        let no_mem = state.right_status_segment(None, 32);
-        assert_eq!(no_mem.len, "LIVE  3 | CPU 342% | HEALTH ok".width());
+        let no_mem = state.right_status_segment(None, 34);
+        assert_eq!(no_mem.len, "LIVE  3 | CPU  342% | HEALTH ok".width());
         // ...down to the bare pulse...
         let bare = state.right_status_segment(None, 8);
         assert_eq!(bare.len, "LIVE  3".width());
@@ -1059,7 +1089,7 @@ pub mod tests {
         // diagnosis: the sample exists, so HEALTH stays ok.
         let mut state = State {
             live_count: 0,
-            resource_line: Some("CPU  10% | MEM  1.0/  2G | DISK   1G".to_owned()),
+            resource_line: Some("CPU   10% | MEM   1.0/  2G | DISK   1G".to_owned()),
             ..Default::default()
         };
         let narrow = state.right_status_segment(None, "LIVE  0 | HEALTH ok".width());

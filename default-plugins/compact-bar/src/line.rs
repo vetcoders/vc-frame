@@ -427,6 +427,12 @@ impl RightSideElementsBuilder {
 
         elements.push(self.create_composer_chip());
         elements.push(self.create_quick_cmd_chip());
+        // Fixed entry zone: the two chips always sum to ENTRY_ZONE_COLS.
+        debug_assert_eq!(
+            elements[0].len + elements[1].len,
+            ENTRY_ZONE_COLS,
+            "composer+quick entry zone must be exactly {ENTRY_ZONE_COLS} cols"
+        );
 
         if let Some(ref tooltip_key) = config.toggle_tooltip_key {
             elements.push(self.create_tooltip_indicator(tooltip_key, config.tooltip_is_active));
