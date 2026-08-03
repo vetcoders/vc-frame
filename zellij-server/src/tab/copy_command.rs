@@ -1,7 +1,15 @@
 use std::io::prelude::*;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
+
+/// Cold clipboard helpers (notably hosted-Windows `powershell.exe`) can take
+/// several seconds just to start. One second was enough to kill the writer
+/// before it ever flushed, which made `CopyPaneScrollback` look like a missing
+/// file instead of a slow child. Ten seconds still bounds hang risk without
+/// losing large scrollbacks on slow runners.
+const COPY_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct CopyCommand {
     command: String,
@@ -23,16 +31,19 @@ impl CopyCommand {
             .stdin(Stdio::piped())
             .spawn()
             .with_context(|| format!("couldn't spawn {}", self.command))?;
-        process
-            .stdin
-            .take()
-            .context("could not get stdin")?
-            .write_all(value.as_bytes())
-            .with_context(|| format!("couldn't write to {} stdin", self.command))?;
+        // Close stdin after the write so the child sees EOF (powershell
+        // `ReadToEnd`, `cat > file`, …) and can finish promptly.
+        {
+            let mut stdin = process
+                .stdin
+                .take()
+                .context("could not get stdin")?;
+            stdin
+                .write_all(value.as_bytes())
+                .with_context(|| format!("couldn't write to {} stdin", self.command))?;
+        }
 
-        // reap process with a 1 second timeout
         std::thread::spawn(move || {
-            let timeout = std::time::Duration::from_secs(1);
             let start = std::time::Instant::now();
 
             loop {
@@ -41,12 +52,15 @@ impl CopyCommand {
                         return; // Process finished normally
                     },
                     Ok(None) => {
-                        if start.elapsed() > timeout {
+                        if start.elapsed() > COPY_COMMAND_TIMEOUT {
                             let _ = process.kill();
-                            log::error!("Copy operation times out after 1 second");
+                            log::error!(
+                                "Copy operation timed out after {} seconds",
+                                COPY_COMMAND_TIMEOUT.as_secs()
+                            );
                             return;
                         }
-                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        std::thread::sleep(Duration::from_millis(50));
                     },
                     Err(e) => {
                         log::error!("Clipboard failure: {}", e);
