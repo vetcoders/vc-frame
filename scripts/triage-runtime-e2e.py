@@ -3579,15 +3579,19 @@ def main() -> int:
         recorder.set("status", "running")
         mutation_started = True
 
-        create_session(binary, env, origin)
-        create_session(binary, env, peer)
+        # Create + mark each session before starting the next. Concurrent
+        # background attach of origin+peer has raced on hosted Ubuntu where
+        # origin disappeared from the session list before its canary tab was
+        # opened (only peer remained active).
         origin_canary = f"{unique}-origin-canary"
         peer_canary = f"{unique}-peer-canary"
         origin_marker = f"ORIGIN-{unique}"
         peer_marker = f"PEER-{unique}"
+        create_session(binary, env, origin)
         _origin_tab_id, origin_panes = create_marker_tab(
             binary, env, origin, origin_canary, origin_marker
         )
+        create_session(binary, env, peer)
         peer_canary_id, peer_panes = create_marker_tab(
             binary, env, peer, peer_canary, peer_marker
         )

@@ -11,10 +11,12 @@ Some(
                 tab_index: 0,
                 tab_name: None,
                 tiled_layout: TiledPaneLayout {
+                    tab_instance_id: None,
                     children_split_direction: Horizontal,
                     name: None,
                     children: [
                         TiledPaneLayout {
+                            tab_instance_id: None,
                             children_split_direction: Horizontal,
                             name: None,
                             children: [],
@@ -33,6 +35,7 @@ Some(
                             default_bg: None,
                         },
                         TiledPaneLayout {
+                            tab_instance_id: None,
                             children_split_direction: Horizontal,
                             name: None,
                             children: [],
@@ -94,18 +97,22 @@ Some(
                                 MaxPanes(
                                     4,
                                 ): TiledPaneLayout {
+                                    tab_instance_id: None,
                                     children_split_direction: Horizontal,
                                     name: None,
                                     children: [
                                         TiledPaneLayout {
+                                            tab_instance_id: None,
                                             children_split_direction: Horizontal,
                                             name: None,
                                             children: [
                                                 TiledPaneLayout {
+                                                    tab_instance_id: None,
                                                     children_split_direction: Vertical,
                                                     name: None,
                                                     children: [
                                                         TiledPaneLayout {
+                                                            tab_instance_id: None,
                                                             children_split_direction: Horizontal,
                                                             name: None,
                                                             children: [],
@@ -124,6 +131,7 @@ Some(
                                                             default_bg: None,
                                                         },
                                                         TiledPaneLayout {
+                                                            tab_instance_id: None,
                                                             children_split_direction: Horizontal,
                                                             name: None,
                                                             children: [],
@@ -174,6 +182,7 @@ Some(
                                             default_bg: None,
                                         },
                                         TiledPaneLayout {
+                                            tab_instance_id: None,
                                             children_split_direction: Horizontal,
                                             name: None,
                                             children: [],
@@ -230,18 +239,22 @@ Some(
                                 MaxPanes(
                                     7,
                                 ): TiledPaneLayout {
+                                    tab_instance_id: None,
                                     children_split_direction: Horizontal,
                                     name: None,
                                     children: [
                                         TiledPaneLayout {
+                                            tab_instance_id: None,
                                             children_split_direction: Horizontal,
                                             name: None,
                                             children: [
                                                 TiledPaneLayout {
+                                                    tab_instance_id: None,
                                                     children_split_direction: Vertical,
                                                     name: None,
                                                     children: [
                                                         TiledPaneLayout {
+                                                            tab_instance_id: None,
                                                             children_split_direction: Horizontal,
                                                             name: None,
                                                             children: [],
@@ -262,10 +275,12 @@ Some(
                                                             default_bg: None,
                                                         },
                                                         TiledPaneLayout {
+                                                            tab_instance_id: None,
                                                             children_split_direction: Horizontal,
                                                             name: None,
                                                             children: [
                                                                 TiledPaneLayout {
+                                                                    tab_instance_id: None,
                                                                     children_split_direction: Horizontal,
                                                                     name: None,
                                                                     children: [],
@@ -284,6 +299,7 @@ Some(
                                                                     default_bg: None,
                                                                 },
                                                                 TiledPaneLayout {
+                                                                    tab_instance_id: None,
                                                                     children_split_direction: Horizontal,
                                                                     name: None,
                                                                     children: [],
@@ -302,6 +318,7 @@ Some(
                                                                     default_bg: None,
                                                                 },
                                                                 TiledPaneLayout {
+                                                                    tab_instance_id: None,
                                                                     children_split_direction: Horizontal,
                                                                     name: None,
                                                                     children: [],
@@ -320,6 +337,7 @@ Some(
                                                                     default_bg: None,
                                                                 },
                                                                 TiledPaneLayout {
+                                                                    tab_instance_id: None,
                                                                     children_split_direction: Horizontal,
                                                                     name: None,
                                                                     children: [],
@@ -383,6 +401,7 @@ Some(
                                             default_bg: None,
                                         },
                                         TiledPaneLayout {
+                                            tab_instance_id: None,
                                             children_split_direction: Horizontal,
                                             name: None,
                                             children: [],
@@ -439,18 +458,22 @@ Some(
                                 MaxPanes(
                                     11,
                                 ): TiledPaneLayout {
+                                    tab_instance_id: None,
                                     children_split_direction: Horizontal,
                                     name: None,
                                     children: [
                                         TiledPaneLayout {
+                                            tab_instance_id: None,
                                             children_split_direction: Horizontal,
                                             name: None,
                                             children: [
                                                 TiledPaneLayout {
+                                                    tab_instance_id: None,
                                                     children_split_direction: Vertical,
                                                     name: None,
                                                     children: [
                                                         TiledPaneLayout {
+                                                            tab_instance_id: None,
                                                             children_split_direction: Horizontal,
                                                             name: None,
                                                             children: [],
@@ -471,10 +494,12 @@ Some(
                                                             default_bg: None,
                                                         },
                                                         TiledPaneLayout {
+                                                            tab_instance_id: None,
                                                             children_split_direction: Horizontal,
                                                             name: None,
                                                             children: [
                                                                 TiledPaneLayout {
+                                                                    tab_instance_id: None,
                                                                     children_split_direction: Horizontal,
                                                                     name: None,
                                                                     children: [],
@@ -493,6 +518,7 @@ Some(
                                                                     default_bg: None,
                                                                 },
                                                                 TiledPaneLayout {
+                                                                    tab_instance_id: None,
                                                                     children_split_direction: Horizontal,
                                                                     name: None,
                                                                     children: [],
@@ -511,6 +537,7 @@ Some(
                                                                     default_bg: None,
                                                                 },
                                                                 TiledPaneLayout {
+                                                                    tab_instance_id: None,
                                                                     children_split_direction: Horizontal,
                                                                     name: None,
                                                                     children: [],
@@ -529,6 +556,7 @@ Some(
                                                                     default_bg: None,
                                                                 },
                                                                 TiledPaneLayout {
+                                                                    tab_instance_id: None,
                                                                     children_split_direction: Horizontal,
                                                                     name: None,
                                                                     children: [],
@@ -562,10 +590,12 @@ Some(
                                                             default_bg: None,
                                                         },
                                                         TiledPaneLayout {
+                                                            tab_instance_id: None,
                                                             children_split_direction: Horizontal,
                                                             name: None,
                                                             children: [
                                                                 TiledPaneLayout {
+                                                                    tab_instance_id: None,
                                                                     children_split_direction: Horizontal,
                                                                     name: None,
                                                                     children: [],
@@ -584,6 +614,7 @@ Some(
                                                                     default_bg: None,
                                                                 },
                                                                 TiledPaneLayout {
+                                                                    tab_instance_id: None,
                                                                     children_split_direction: Horizontal,
                                                                     name: None,
                                                                     children: [],
@@ -602,6 +633,7 @@ Some(
                                                                     default_bg: None,
                                                                 },
                                                                 TiledPaneLayout {
+                                                                    tab_instance_id: None,
                                                                     children_split_direction: Horizontal,
                                                                     name: None,
                                                                     children: [],
@@ -620,6 +652,7 @@ Some(
                                                                     default_bg: None,
                                                                 },
                                                                 TiledPaneLayout {
+                                                                    tab_instance_id: None,
                                                                     children_split_direction: Horizontal,
                                                                     name: None,
                                                                     children: [],
@@ -683,6 +716,7 @@ Some(
                                             default_bg: None,
                                         },
                                         TiledPaneLayout {
+                                            tab_instance_id: None,
                                             children_split_direction: Horizontal,
                                             name: None,
                                             children: [],
@@ -746,14 +780,17 @@ Some(
                                 MaxPanes(
                                     3,
                                 ): TiledPaneLayout {
+                                    tab_instance_id: None,
                                     children_split_direction: Horizontal,
                                     name: None,
                                     children: [
                                         TiledPaneLayout {
+                                            tab_instance_id: None,
                                             children_split_direction: Horizontal,
                                             name: None,
                                             children: [
                                                 TiledPaneLayout {
+                                                    tab_instance_id: None,
                                                     children_split_direction: Horizontal,
                                                     name: None,
                                                     children: [],
@@ -772,6 +809,7 @@ Some(
                                                     default_bg: None,
                                                 },
                                                 TiledPaneLayout {
+                                                    tab_instance_id: None,
                                                     children_split_direction: Horizontal,
                                                     name: None,
                                                     children: [],
@@ -805,6 +843,7 @@ Some(
                                             default_bg: None,
                                         },
                                         TiledPaneLayout {
+                                            tab_instance_id: None,
                                             children_split_direction: Horizontal,
                                             name: None,
                                             children: [],
@@ -861,18 +900,22 @@ Some(
                                 MaxPanes(
                                     7,
                                 ): TiledPaneLayout {
+                                    tab_instance_id: None,
                                     children_split_direction: Horizontal,
                                     name: None,
                                     children: [
                                         TiledPaneLayout {
+                                            tab_instance_id: None,
                                             children_split_direction: Horizontal,
                                             name: None,
                                             children: [
                                                 TiledPaneLayout {
+                                                    tab_instance_id: None,
                                                     children_split_direction: Horizontal,
                                                     name: None,
                                                     children: [
                                                         TiledPaneLayout {
+                                                            tab_instance_id: None,
                                                             children_split_direction: Vertical,
                                                             name: None,
                                                             children: [],
@@ -893,10 +936,12 @@ Some(
                                                             default_bg: None,
                                                         },
                                                         TiledPaneLayout {
+                                                            tab_instance_id: None,
                                                             children_split_direction: Vertical,
                                                             name: None,
                                                             children: [
                                                                 TiledPaneLayout {
+                                                                    tab_instance_id: None,
                                                                     children_split_direction: Horizontal,
                                                                     name: None,
                                                                     children: [],
@@ -915,6 +960,7 @@ Some(
                                                                     default_bg: None,
                                                                 },
                                                                 TiledPaneLayout {
+                                                                    tab_instance_id: None,
                                                                     children_split_direction: Horizontal,
                                                                     name: None,
                                                                     children: [],
@@ -933,6 +979,7 @@ Some(
                                                                     default_bg: None,
                                                                 },
                                                                 TiledPaneLayout {
+                                                                    tab_instance_id: None,
                                                                     children_split_direction: Horizontal,
                                                                     name: None,
                                                                     children: [],
@@ -951,6 +998,7 @@ Some(
                                                                     default_bg: None,
                                                                 },
                                                                 TiledPaneLayout {
+                                                                    tab_instance_id: None,
                                                                     children_split_direction: Horizontal,
                                                                     name: None,
                                                                     children: [],
@@ -1014,6 +1062,7 @@ Some(
                                             default_bg: None,
                                         },
                                         TiledPaneLayout {
+                                            tab_instance_id: None,
                                             children_split_direction: Horizontal,
                                             name: None,
                                             children: [],
@@ -1070,18 +1119,22 @@ Some(
                                 MaxPanes(
                                     11,
                                 ): TiledPaneLayout {
+                                    tab_instance_id: None,
                                     children_split_direction: Horizontal,
                                     name: None,
                                     children: [
                                         TiledPaneLayout {
+                                            tab_instance_id: None,
                                             children_split_direction: Horizontal,
                                             name: None,
                                             children: [
                                                 TiledPaneLayout {
+                                                    tab_instance_id: None,
                                                     children_split_direction: Horizontal,
                                                     name: None,
                                                     children: [
                                                         TiledPaneLayout {
+                                                            tab_instance_id: None,
                                                             children_split_direction: Vertical,
                                                             name: None,
                                                             children: [],
@@ -1102,10 +1155,12 @@ Some(
                                                             default_bg: None,
                                                         },
                                                         TiledPaneLayout {
+                                                            tab_instance_id: None,
                                                             children_split_direction: Vertical,
                                                             name: None,
                                                             children: [
                                                                 TiledPaneLayout {
+                                                                    tab_instance_id: None,
                                                                     children_split_direction: Horizontal,
                                                                     name: None,
                                                                     children: [],
@@ -1124,6 +1179,7 @@ Some(
                                                                     default_bg: None,
                                                                 },
                                                                 TiledPaneLayout {
+                                                                    tab_instance_id: None,
                                                                     children_split_direction: Horizontal,
                                                                     name: None,
                                                                     children: [],
@@ -1142,6 +1198,7 @@ Some(
                                                                     default_bg: None,
                                                                 },
                                                                 TiledPaneLayout {
+                                                                    tab_instance_id: None,
                                                                     children_split_direction: Horizontal,
                                                                     name: None,
                                                                     children: [],
@@ -1160,6 +1217,7 @@ Some(
                                                                     default_bg: None,
                                                                 },
                                                                 TiledPaneLayout {
+                                                                    tab_instance_id: None,
                                                                     children_split_direction: Horizontal,
                                                                     name: None,
                                                                     children: [],
@@ -1193,10 +1251,12 @@ Some(
                                                             default_bg: None,
                                                         },
                                                         TiledPaneLayout {
+                                                            tab_instance_id: None,
                                                             children_split_direction: Vertical,
                                                             name: None,
                                                             children: [
                                                                 TiledPaneLayout {
+                                                                    tab_instance_id: None,
                                                                     children_split_direction: Horizontal,
                                                                     name: None,
                                                                     children: [],
@@ -1215,6 +1275,7 @@ Some(
                                                                     default_bg: None,
                                                                 },
                                                                 TiledPaneLayout {
+                                                                    tab_instance_id: None,
                                                                     children_split_direction: Horizontal,
                                                                     name: None,
                                                                     children: [],
@@ -1233,6 +1294,7 @@ Some(
                                                                     default_bg: None,
                                                                 },
                                                                 TiledPaneLayout {
+                                                                    tab_instance_id: None,
                                                                     children_split_direction: Horizontal,
                                                                     name: None,
                                                                     children: [],
@@ -1251,6 +1313,7 @@ Some(
                                                                     default_bg: None,
                                                                 },
                                                                 TiledPaneLayout {
+                                                                    tab_instance_id: None,
                                                                     children_split_direction: Horizontal,
                                                                     name: None,
                                                                     children: [],
@@ -1314,6 +1377,7 @@ Some(
                                             default_bg: None,
                                         },
                                         TiledPaneLayout {
+                                            tab_instance_id: None,
                                             children_split_direction: Horizontal,
                                             name: None,
                                             children: [],
@@ -1377,18 +1441,22 @@ Some(
                                 MinPanes(
                                     4,
                                 ): TiledPaneLayout {
+                                    tab_instance_id: None,
                                     children_split_direction: Horizontal,
                                     name: None,
                                     children: [
                                         TiledPaneLayout {
+                                            tab_instance_id: None,
                                             children_split_direction: Horizontal,
                                             name: None,
                                             children: [
                                                 TiledPaneLayout {
+                                                    tab_instance_id: None,
                                                     children_split_direction: Vertical,
                                                     name: None,
                                                     children: [
                                                         TiledPaneLayout {
+                                                            tab_instance_id: None,
                                                             children_split_direction: Horizontal,
                                                             name: None,
                                                             children: [],
@@ -1407,6 +1475,7 @@ Some(
                                                             default_bg: None,
                                                         },
                                                         TiledPaneLayout {
+                                                            tab_instance_id: None,
                                                             children_split_direction: Horizontal,
                                                             name: None,
                                                             children: [],
@@ -1457,6 +1526,7 @@ Some(
                                             default_bg: None,
                                         },
                                         TiledPaneLayout {
+                                            tab_instance_id: None,
                                             children_split_direction: Horizontal,
                                             name: None,
                                             children: [],

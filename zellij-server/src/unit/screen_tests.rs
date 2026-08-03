@@ -12721,7 +12721,7 @@ pub fn copy_pane_scrollback_action_pipes_focused_pane_full_scrollback_to_copy_co
     // creates the file long before it is complete) instead of a fixed sleep.
     // Keep the deadline above CopyCommand's internal reaper timeout so a slow
     // but successful child is still observed.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
     while std::time::Instant::now() < deadline {
         match std::fs::read_to_string(&copied_text_path) {
             Ok(copied) if copied.contains("copy-current-pane-line-9") => break,

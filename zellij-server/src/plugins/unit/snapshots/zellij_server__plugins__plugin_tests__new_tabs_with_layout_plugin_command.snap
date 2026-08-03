@@ -8,10 +8,12 @@ Some(
         None,
         Some(
             TiledPaneLayout {
+                tab_instance_id: None,
                 children_split_direction: Horizontal,
                 name: None,
                 children: [
                     TiledPaneLayout {
+                        tab_instance_id: None,
                         children_split_direction: Horizontal,
                         name: None,
                         children: [],
@@ -30,6 +32,7 @@ Some(
                         default_bg: None,
                     },
                     TiledPaneLayout {
+                        tab_instance_id: None,
                         children_split_direction: Horizontal,
                         name: None,
                         children: [],
@@ -76,6 +79,7 @@ Some(
         None,
         false,
         true,
+        Append,
         (
             1,
             false,
@@ -83,7 +87,9 @@ Some(
         Some(
             NotificationEnd {
                 channel: None,
-                resolution: None,
+                resolution: Some(
+                    Pending,
+                ),
                 exit_status: None,
                 unblock_condition: None,
                 affected_pane_id: None,
