@@ -112,8 +112,7 @@ fn account_for_races_in_snapshot(snapshot: String) -> String {
     // stay about product layout, not runner load. Segments can appear in any
     // order or subset (e.g. only MEM|DISK|HEALTH when LIVE is zero/absent).
     let live_replace = Regex::new(r"LIVE \d+\s*").unwrap();
-    let cockpit_seg_replace =
-        Regex::new(r"(?:\| )?(?:CPU|MEM|DISK|HDD|HEALTH) [^|\n]*").unwrap();
+    let cockpit_seg_replace = Regex::new(r"(?:\| )?(?:CPU|MEM|DISK|HDD|HEALTH) [^|\n]*").unwrap();
     let snapshot = base_replace.replace_all(&snapshot, "\n").to_string();
     let snapshot = base_replace_tmux_mode_1
         .replace_all(&snapshot, "\n")
