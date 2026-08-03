@@ -634,19 +634,19 @@ pub fn tab_separator(capabilities: PluginCapabilities) -> &'static str {
 /// an artificial state.
 pub fn mode_chip(mode: InputMode) -> (&'static str, &'static str) {
     match mode {
-        InputMode::Normal => ("▷", "N │"),
-        InputMode::Locked => ("⊝", "L │"),
-        InputMode::Pane => ("◫", "P │"),
-        InputMode::Tab => ("𝌁", "T │"),
-        InputMode::Resize => ("⤢", "R │"),
-        InputMode::Move => ("⟷", "M │"),
-        InputMode::Scroll => ("⇅", "S │"),
-        InputMode::Search => ("⌕", "F │"),
-        InputMode::EnterSearch => ("↵", "F │"),
-        InputMode::RenameTab => ("✎", "RNT │"),
-        InputMode::RenamePane => ("✎", "RNP │"),
-        InputMode::Session => ("𝌆", "S │"),
-        InputMode::Prompt => ("❯", "P │"),
-        InputMode::Tmux => ("ⓣ", "T │"),
+        InputMode::Normal => ("│ ▷", "N"),
+        InputMode::Locked => ("│ ⊝", "L"),
+        InputMode::Pane => ("│ ◫", "P"),
+        InputMode::Tab => ("│𝌁", "T"),
+        InputMode::Resize => ("│ ⤢", "R"),
+        InputMode::Move => ("│ ⟷", "M"),
+        InputMode::Scroll => ("│ ⇅", "S"),
+        InputMode::Search => ("│ ⌕", "F"),
+        InputMode::EnterSearch => ("│ ↵", "F"),
+        InputMode::RenameTab => ("│ ✎", "RT"),
+        InputMode::RenamePane => ("│ ✎", "RP"),
+        InputMode::Session => ("│𝌆", "S"),
+        InputMode::Prompt => ("│ ❯", "P"),
+        InputMode::Tmux => ("│ ⓣ", "T"),
     }
 }
