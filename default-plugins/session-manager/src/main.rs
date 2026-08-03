@@ -681,7 +681,56 @@ fn format_session_rail_entry(session: &SessionUiInfo, ordinal: usize) -> String 
     } else {
         "○"
     };
-    format!("{:02} {} {}", ordinal, status, session.name)
+    // Sanitize the name *before* pad/fit so control bytes and multi-space
+    // runs cannot change display width frame-to-frame (rail flicker).
+    format!(
+        "{:02} {} {}",
+        ordinal,
+        status,
+        sanitize_display_label(&session.name)
+    )
+}
+
+/// Strip control/line-break characters and collapse internal whitespace so a
+/// rail/help row paints at a stable grid width every tick.
+fn sanitize_display_label(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut prev_space = false;
+    for ch in input.chars() {
+        // Newlines/tabs/other whitespace → single space (never a hard break
+        // that would reflow the one-row rail cell). Other controls vanish.
+        let as_space = ch.is_whitespace()
+            || ch == '\n'
+            || ch == '\r'
+            || ch == '\t'
+            || ch == '\u{2028}'
+            || ch == '\u{2029}';
+        if as_space {
+            if !prev_space && !out.is_empty() {
+                out.push(' ');
+                prev_space = true;
+            }
+            continue;
+        }
+        if ch.is_control() {
+            continue;
+        }
+        prev_space = false;
+        out.push(ch);
+    }
+    // Trim trailing space from the collapse pass.
+    while out.ends_with(' ') {
+        out.pop();
+    }
+    out
+}
+
+/// Kill/delete contract for laptops (macOS): ⌥⌫ is primary. Forward-delete
+/// (Del) remains accepted for full keyboards but is never advertised in help
+/// — it is scarce on MacBooks and steals sequences under some hosts.
+fn is_kill_or_delete_key(key: &KeyWithModifier) -> bool {
+    (key.bare_key == BareKey::Backspace && key.has_only_modifiers(&[KeyModifier::Alt]))
+        || (key.bare_key == BareKey::Delete && key.has_no_modifiers())
 }
 
 /// Status buckets finished runs are transferred into.
@@ -858,13 +907,14 @@ fn format_bucket_rail_entry(
 
 fn format_process_tab_rail_entry(tab: &TabUiInfo) -> String {
     let activity = if tab.is_active { "◉" } else { "·" };
-    let mut text = format!("   {} {}", activity, tab.name);
-    if let Some(process_label) = tab.primary_process_label()
-        && process_label != tab.name
-        && !process_label.contains(&tab.name)
-    {
-        text.push_str(" · ");
-        text.push_str(process_label);
+    let tab_name = sanitize_display_label(&tab.name);
+    let mut text = format!("   {} {}", activity, tab_name);
+    if let Some(process_label) = tab.primary_process_label() {
+        let process_label = sanitize_display_label(process_label);
+        if process_label != tab_name && !process_label.contains(&tab_name) {
+            text.push_str(" · ");
+            text.push_str(&process_label);
+        }
     }
     let additional_processes = tab.live_process_count().saturating_sub(1);
     if additional_processes > 0 {
@@ -1245,7 +1295,7 @@ impl State {
             .iter()
             .find(|s| s.is_current_session)
         {
-            header_text.push_str(&format!(" · {}", current.name));
+            header_text.push_str(&format!(" · {}", sanitize_display_label(&current.name)));
         }
         let header = fit_rail_line(&header_text, cols);
         let header_width = header.width();
@@ -1873,7 +1923,7 @@ impl State {
                     self.renaming_session_name = Some(String::new());
                     should_render = true;
                 },
-                BareKey::Delete if key.has_no_modifiers() => {
+                _ if is_kill_or_delete_key(&key) => {
                     if let Some(selected_session_name) = self.sessions.get_selected_session_name() {
                         let was_searching = self.sessions.is_searching;
                         let prev_search_idx = self.sessions.selected_search_index;
@@ -1984,7 +2034,7 @@ impl State {
                 self.toggle_active_screen();
                 should_render = true;
             },
-            BareKey::Delete if key.has_no_modifiers() => {
+            _ if is_kill_or_delete_key(&key) => {
                 self.resurrectable_sessions.delete_selected_session();
                 should_render = true;
             },
@@ -2125,7 +2175,7 @@ impl State {
                 self.renaming_session_name = Some(String::new());
                 should_render = true;
             },
-            BareKey::Delete if key.has_no_modifiers() => {
+            _ if is_kill_or_delete_key(&key) => {
                 let selected = self
                     .single_screen_state
                     .get_selected_result()
@@ -3731,6 +3781,28 @@ mod rail_tests {
     fn rail_lines_are_clipped_and_padded_to_width() {
         assert_eq!(fit_rail_line("abcdef", 4), "abcd");
         assert_eq!(fit_rail_line("ab", 4), "ab  ");
+    }
+
+    #[test]
+    fn sanitize_display_label_strips_controls_and_collapses_whitespace() {
+        assert_eq!(sanitize_display_label("  hello\n\tworld  "), "hello world");
+        assert_eq!(sanitize_display_label("Main\u{0007}"), "Main");
+        // Stable width: control-laden and clean labels pad to the same grid.
+        let dirty = fit_rail_line(&sanitize_display_label("Main\n\r  "), 10);
+        let clean = fit_rail_line(&sanitize_display_label("Main"), 10);
+        assert_eq!(dirty.width(), clean.width());
+        assert_eq!(dirty.width(), 10);
+    }
+
+    #[test]
+    fn format_session_rail_entry_sanitizes_name_for_stable_columns() {
+        let mut session = session("alpha", true);
+        session.name = "alpha\nbeta".to_owned();
+        let text = format_session_rail_entry(&session, 1);
+        assert!(!text.contains('\n'));
+        assert!(text.contains("alpha beta") || text.contains("alphabeta") || text.contains("alpha"));
+        // After sanitize newline becomes space collapse → "alpha beta"
+        assert_eq!(sanitize_display_label("alpha\nbeta"), "alpha beta");
     }
 
     #[test]

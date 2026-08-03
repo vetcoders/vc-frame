@@ -5,6 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
+* fix(session-manager): kill/delete is ⌥⌫ (Alt+Backspace) on help and handlers — forward-delete Del is no longer advertised (scarce on Mac laptops, steals sequences); help uses macOS glyphs (⌃ ⌥ ⌫ ⏎)
+* fix(session-manager): rail/header labels sanitize control chars and collapse whitespace before fixed-width pad — stops row-width flicker from dirty session/tab titles
+* docs: CONFIG_OWNERSHIP.md — single owner per layer (vc-frame schema/runtime, vibecrafted package/install wire)
 * fix(chrome): floating PIN uses fisheye ○/◉ (not `[ ]`/`[+]`); Composer vim profile loads via single `-u` vimrc (fixes "Too many -c command arguments")
 * fix(composer): wrap OFF by default in the floating atelier (`set nowrap`, `textwidth=0`, sidescroll); F2 / `\w` toggles wrap; `VC_COMPOSER_WRAP=1` starts with wrap on — ends chrome bleeding into the draft buffer
 * feat(chrome): Uniform Mode Chip Separator Rule — every mode chip ends with `│` on a fixed 8-col budget (`▷ N │`, `⊝ L │`, `✎ RNT │`, …) so the bar aligns with the pane frame's `├`
