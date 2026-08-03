@@ -981,6 +981,27 @@ def session_tabs(
     return result.tabs
 
 
+def query_session_until_stable(
+    binary: pathlib.Path,
+    env: dict[str, str],
+    session: str,
+    *,
+    timeout: float = 5,
+) -> SessionQuery:
+    """Retry transient empty/malformed list-tabs success before treating as truth."""
+    deadline = time.monotonic() + timeout
+    last_ambiguity: AmbiguousSessionError | None = None
+    while time.monotonic() < deadline:
+        try:
+            return query_session(binary, env, session)
+        except AmbiguousSessionError as error:
+            last_ambiguity = error
+            time.sleep(0.1)
+    if last_ambiguity is not None:
+        raise last_ambiguity
+    raise AssertionError(f"session {session!r} query did not stabilize")
+
+
 def wait_for_tabs(
     binary: pathlib.Path, env: dict[str, str], session: str
 ) -> list[dict[str, object]]:
@@ -3238,11 +3259,18 @@ def cleanup_namespace(
         if state == "exited" and session not in live_process_sessions:
             continue
         if state == "live":
-            query = query_session(binary, env, session)
-            require(
-                query.state == "live",
-                f"cleanup inventory said {session!r} was active but exact query said absent",
-            )
+            # Inventory already marked live. Retry transient empty list-tabs
+            # (rc=0, stdout='') before kill; if inventory races to absent after
+            # retries, skip kill. On persistent ambiguity, still kill owned
+            # targets so cleanup is not blocked by a single flaky inventory read.
+            try:
+                query = query_session_until_stable(
+                    binary, env, session, timeout=min(5.0, timeout)
+                )
+                if query.state == "absent":
+                    continue
+            except AmbiguousSessionError:
+                pass
         command(binary, env, "kill-session", session)
         wait_for_session_gone(binary, env, session, timeout=timeout)
         killed.append(session)

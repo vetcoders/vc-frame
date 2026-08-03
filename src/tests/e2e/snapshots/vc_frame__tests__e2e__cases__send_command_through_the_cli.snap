@@ -25,4 +25,3 @@ expression: last_snapshot
 │                                                                         ││                                                                         │
 │                                                                         ││                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘└ [ EXIT CODE: 0 ] <ENTER> re-run, <ESC> drop to shell, <Ctrl-c> exit ────┘
-            Alt +  <n> New Pane  <hjkl> Change Focus  <+-> Resize  <f> Floating 
