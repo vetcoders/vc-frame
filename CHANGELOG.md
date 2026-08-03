@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
+* feat(status-bar): mode-gated status contract — the diodes (`LIVE | CPU | MEM | DISK | HEALTH`) live in the resting mode only; action modes hand every column to the shortcut hints and keep just the swap-layout chip; on narrow bars the segment sheds blocks right-to-left (DISK → MEM → CPU → swap → HEALTH, pulse last) instead of vanishing whole, and a two-cell seam always separates hints from statuses
+* feat(chrome): the Quick cmd click opens a fixed upper-center command strip (60%×30%) named `Quick cmd`, the Composer click a fixed centered atelier (70%×72%) — floating entry points land where the hands remember them instead of the session default
 * fix(status-bar): replace per-tab full-session `LIVE` fan-out with server-derived plugin/client updates; only each client's active status bar samples host resources, hidden bars stay idle, clipboard timers cannot fork samplers, and async-loader replay preserves exact lifecycle targets
 * feat(clinic): `asset-integrity` doctor section — the binary hashes its embedded plugins at runtime against its own SHA-256 receipt (`SHA256SUMS`), so a build that mixes plugin generations says so instead of "jakoś działa" (CRITICAL → `make install`)
 * feat(clinic): `host-terminal` doctor section — names the host terminal, and under Alacritty audits `option_as_alt` (absent/None = the Alt writer layer is dead on macOS, CRITICAL) plus Command/Super bindings the terminal intercepts before vc-frame (WARN, listed verbatim)

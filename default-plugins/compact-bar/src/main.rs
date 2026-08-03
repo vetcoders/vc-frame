@@ -515,14 +515,43 @@ impl State {
     }
 }
 
+/// The Quick cmd strip: shallow and wide, upper-center — a command palette
+/// with a real shell behind it, not a full work pane. Without coordinates
+/// the floating pane spawns at the session default and reads as a random
+/// window; the fixed strip is what makes it a "quick" command line.
+fn quick_cmd_coordinates() -> Option<FloatingPaneCoordinates> {
+    FloatingPaneCoordinates::new(
+        Some("20%".to_owned()),
+        Some("12%".to_owned()),
+        Some("60%".to_owned()),
+        Some("30%".to_owned()),
+        Some(false),
+        None,
+    )
+}
+
+/// The Composer atelier: one large, centered writing surface — the same
+/// footprint every time, so the writing layer always opens where the hands
+/// remember it.
+fn composer_coordinates() -> Option<FloatingPaneCoordinates> {
+    FloatingPaneCoordinates::new(
+        Some("15%".to_owned()),
+        Some("10%".to_owned()),
+        Some("70%".to_owned()),
+        Some("72%".to_owned()),
+        Some(false),
+        None,
+    )
+}
+
 /// The Dispatcher: a named floating login shell — the operator's dispatch
 /// console (vibecrafted CLI is the dispatch language, the pane is the desk).
 fn open_dispatcher() {
     let command = CommandToRun::new_with_args("sh", vec!["-c", DISPATCHER_COMMAND]);
     if let Some(PaneId::Terminal(terminal_pane_id)) =
-        open_command_pane_floating(command, None, BTreeMap::new())
+        open_command_pane_floating(command, quick_cmd_coordinates(), BTreeMap::new())
     {
-        rename_terminal_pane(terminal_pane_id, "Dispatcher");
+        rename_terminal_pane(terminal_pane_id, "Quick cmd");
     }
 }
 
@@ -530,7 +559,7 @@ fn open_dispatcher() {
 fn open_composer() {
     let command = CommandToRun::new_with_args("sh", vec!["-c", COMPOSER_COMMAND]);
     if let Some(PaneId::Terminal(terminal_pane_id)) =
-        open_command_pane_floating(command, None, BTreeMap::new())
+        open_command_pane_floating(command, composer_coordinates(), BTreeMap::new())
     {
         rename_terminal_pane(terminal_pane_id, "Composer");
     }

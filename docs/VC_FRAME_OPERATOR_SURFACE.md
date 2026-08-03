@@ -36,6 +36,12 @@ fisheye tab ribbons, the Quick cmd station chip, and the Command Composer chip
 (`Cmd+E`). Its `left_inset` option clears the macOS traffic lights in a
 decoration-free host window. The bottom `status-bar` owns pure status: the
 fleet `LIVE` count, host CPU/memory/disk cockpit, health, and layout state.
+The diodes live in the resting mode only (LOCK when the base mode is locked,
+NORMAL otherwise) — action modes hand every column to the shortcut hints and
+keep just the swap-layout chip as arrangement context. On a narrow bar the
+segment degrades block by block (DISK, then MEM, then CPU, then the swap
+chip, then HEALTH; the fleet pulse goes last) instead of vanishing whole,
+and a two-cell seam always separates hints from statuses.
 
 `LIVE` has a bounded background-cost contract. The server derives the count
 once from the session snapshot it already owns and sends a small scalar message

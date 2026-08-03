@@ -51,6 +51,12 @@ const RESOURCE_SAMPLE_COMMAND: &str = r#"cpu=$(ps -A -o %cpu= | awk '{s+=$1} END
 const TO_NORMAL: Action = Action::SwitchToMode {
     input_mode: InputMode::Normal,
 };
+/// Minimum breathing room between the hint line and the right status
+/// segment — hints may never touch the diodes.
+const STATUS_SEAM_CELLS: usize = 2;
+/// Columns the resting-mode hint ("Ctrl g LOCK") keeps for itself before
+/// the status segment may claim the rest of the bar.
+const RESTING_HINT_RESERVE: usize = 16;
 
 #[derive(Default)]
 struct State {
@@ -77,7 +83,7 @@ struct State {
 
 register_plugin!(State);
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct LinePart {
     part: String,
     len: usize,
@@ -392,11 +398,23 @@ impl ZellijPlugin for State {
                 PaletteColor::EightBit(color) => format!("\u{1b}[48;5;{}m\u{1b}[0K", color),
             };
             let active_tab = self.tabs.iter().find(|t| t.active);
-            // Right edge: host resource cockpit + swap-layout indicator —
-            // the status indicators the top bar gave up. The hint line gets
-            // the remaining columns.
-            let right = self.right_status_segment(active_tab);
-            let ui_cols = cols.saturating_sub(right.len);
+            // The bar keeps one contract: the resting mode (LOCK when the
+            // base mode is locked, NORMAL otherwise) shows the status
+            // diodes — LIVE, cockpit, HEALTH. Action modes hand every
+            // column to the shortcut hints; only the swap-layout chip
+            // stays, because it is arrangement context, not telemetry.
+            let resting_mode = if self.base_mode_is_locked {
+                InputMode::Locked
+            } else {
+                InputMode::Normal
+            };
+            let right = if self.mode_info.mode == resting_mode {
+                self.right_status_segment(active_tab, cols.saturating_sub(RESTING_HINT_RESERVE))
+            } else {
+                self.swap_chip_segment(active_tab, cols / 4)
+            };
+            let seam = if right.len > 0 { STATUS_SEAM_CELLS } else { 0 };
+            let ui_cols = cols.saturating_sub(right.len + seam);
             let line = one_line_ui(
                 &self.mode_info,
                 active_tab,
@@ -506,7 +524,44 @@ impl State {
     /// 2026-07-31 / close-out Fork IV): fleet LIVE, host cockpit, and a
     /// HEALTH chip. All glyphs are single-cell ASCII/emoji-safe tokens so we
     /// never re-introduce the ䷅ (U+4DC5, width 2) jumping-screen class.
-    fn right_status_segment(&self, active_tab: Option<&TabInfo>) -> LinePart {
+    ///
+    /// Degradation ladder: instead of dropping the whole segment when the
+    /// bar narrows, shed blocks right-to-left — DISK, then MEM, then CPU,
+    /// then the swap chip, then HEALTH; the fleet pulse goes last. The
+    /// returned segment always fits `max_len` (or is empty).
+    fn right_status_segment(&self, active_tab: Option<&TabInfo>, max_len: usize) -> LinePart {
+        let cockpit: Vec<&str> = self
+            .resource_line
+            .as_deref()
+            .map(|line| line.split(" | ").collect())
+            .unwrap_or_default();
+        let swap_chip = self.swap_layout_status(active_tab);
+
+        let mut ladder: Vec<(usize, bool, bool)> = (0..=cockpit.len())
+            .rev()
+            .map(|kept| (kept, true, true))
+            .collect();
+        ladder.push((0, false, true));
+        ladder.push((0, false, false));
+
+        for (fields_kept, with_swap, with_health) in ladder {
+            let chip = if with_swap { swap_chip.as_ref() } else { None };
+            let segment = self.compose_status_segment(&cockpit[..fields_kept], chip, with_health);
+            if segment.len <= max_len {
+                return segment;
+            }
+        }
+        LinePart::default()
+    }
+
+    /// One rung of the status ladder: LIVE + the kept cockpit fields +
+    /// optional HEALTH + optional swap-layout chip, in bar order.
+    fn compose_status_segment(
+        &self,
+        cockpit_fields: &[&str],
+        swap_chip: Option<&LinePart>,
+        with_health: bool,
+    ) -> LinePart {
         let mut segment = LinePart::default();
         let palette = self.mode_info.style.colors;
         let dim = style!(
@@ -522,35 +577,33 @@ impl State {
         // LIVE = fleet pulse (agent process tabs across sessions).
         let live_text = format!("LIVE {}", self.live_count);
         let live_part = if self.live_count > 0 {
-            hot.paint(live_text).to_string()
+            hot.paint(live_text.clone()).to_string()
         } else {
-            dim.paint(live_text).to_string()
+            dim.paint(live_text.clone()).to_string()
         };
         segment.append(&LinePart {
-            len: format!("LIVE {}", self.live_count).width(),
+            len: live_text.width(),
             part: live_part,
         });
 
-        // Resource cockpit already carries CPU | MEM | DISK from the sample.
-        if let Some(resource_line) = &self.resource_line {
-            let sep = " | ";
-            let text = format!("{}{}", sep, resource_line);
+        for field in cockpit_fields {
+            let text = format!(" | {}", field);
             segment.append(&LinePart {
                 len: text.width(),
                 part: dim.paint(text).to_string(),
             });
         }
 
-        // HEALTH: green `ok` when the sample is present and live_count is
-        // finite; `!` when we have no sample yet (honest unknown).
-        {
-            let sep = " | ";
+        // HEALTH: green `ok` when the sample is present; `?` when we have no
+        // sample yet (honest unknown). The verdict reads the sample itself,
+        // not the kept fields — a narrow bar never changes the diagnosis.
+        if with_health {
             let (label, emphasis) = if self.resource_line.is_some() {
                 ("HEALTH ok", true)
             } else {
                 ("HEALTH ?", false)
             };
-            let text = format!("{}{}", sep, label);
+            let text = format!(" | {}", label);
             let painted = if emphasis {
                 style!(
                     palette.text_unselected.emphasis_1,
@@ -567,16 +620,26 @@ impl State {
             });
         }
 
-        if let Some(swap_chip) = self.swap_layout_status(active_tab) {
+        if let Some(swap_chip) = swap_chip {
             let sep = LinePart {
                 len: 1,
                 part: dim.paint(" ").to_string(),
             };
             segment.append(&sep);
-            segment.append(&swap_chip);
+            segment.append(swap_chip);
         }
 
         segment
+    }
+
+    /// Action-mode right edge: the swap-layout chip alone. It survives
+    /// outside the resting mode because pane/tab modes are exactly when the
+    /// operator is arranging — but it yields once the bar gets tight.
+    fn swap_chip_segment(&self, active_tab: Option<&TabInfo>, max_len: usize) -> LinePart {
+        match self.swap_layout_status(active_tab) {
+            Some(chip) if chip.len <= max_len => chip,
+            _ => LinePart::default(),
+        }
     }
 
     fn swap_layout_status(&self, active_tab: Option<&TabInfo>) -> Option<LinePart> {
@@ -938,6 +1001,55 @@ pub mod tests {
         // 342% CPU, 8 GiB used of 64 GiB, 13 GiB free on / (KiB inputs).
         let sample = parse_resource_sample(b"342 8388608 67108864 13631488");
         assert_eq!(sample.as_deref(), Some("CPU 342% | MEM 8.0/64G | DISK 13G"));
+    }
+
+    #[test]
+    fn status_ladder_sheds_cockpit_fields_before_the_pulse() {
+        let state = State {
+            live_count: 3,
+            resource_line: Some("CPU 342% | MEM 8.0/64G | DISK 13G".to_owned()),
+            ..Default::default()
+        };
+
+        // Wide bar: the full segment fits.
+        let full = state.right_status_segment(None, 200);
+        assert_eq!(
+            full.len,
+            "LIVE 3 | CPU 342% | MEM 8.0/64G | DISK 13G | HEALTH ok".width()
+        );
+        // Narrow: DISK is shed first...
+        let no_disk = state.right_status_segment(None, 45);
+        assert_eq!(
+            no_disk.len,
+            "LIVE 3 | CPU 342% | MEM 8.0/64G | HEALTH ok".width()
+        );
+        // ...then MEM...
+        let no_mem = state.right_status_segment(None, 30);
+        assert_eq!(no_mem.len, "LIVE 3 | CPU 342% | HEALTH ok".width());
+        // ...down to the bare pulse...
+        let bare = state.right_status_segment(None, 8);
+        assert_eq!(bare.len, "LIVE 3".width());
+        // ...and an impossible budget yields empty, never an overflow.
+        assert_eq!(state.right_status_segment(None, 3).len, 0);
+    }
+
+    #[test]
+    fn status_ladder_health_verdict_survives_field_shedding() {
+        // A narrow bar hides cockpit numbers but must not change the
+        // diagnosis: the sample exists, so HEALTH stays ok.
+        let mut state = State {
+            live_count: 0,
+            resource_line: Some("CPU 10% | MEM 1.0/2G | DISK 1G".to_owned()),
+            ..Default::default()
+        };
+        let narrow = state.right_status_segment(None, "LIVE 0 | HEALTH ok".width());
+        assert_eq!(narrow.len, "LIVE 0 | HEALTH ok".width());
+        assert!(narrow.part.contains("HEALTH ok"));
+
+        // No sample at all: the verdict is an honest unknown.
+        state.resource_line = None;
+        let unknown = state.right_status_segment(None, 200);
+        assert!(unknown.part.contains("HEALTH ?"));
     }
 
     #[test]

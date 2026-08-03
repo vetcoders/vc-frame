@@ -292,6 +292,10 @@ fn short_mode_shortcut(
     }
 }
 
+/// One rendering density for a shortcut tile, from dense (`g LOCK`) down to
+/// letter-only.
+type ShortcutRenderer<'a> = Box<dyn Fn(&KeyShortcut, bool) -> LinePart + 'a>;
+
 fn key_indicators(
     max_len: usize,
     keys: &[KeyShortcut],
@@ -304,7 +308,7 @@ fn key_indicators(
     // blanking the whole bar or clipping the right edge (Fork I close-out).
     let (shared_modifiers, _) = superkey(palette, separator, mode_info);
 
-    let renderers: [Box<dyn Fn(&KeyShortcut, bool) -> LinePart>; 4] = [
+    let renderers: [ShortcutRenderer; 4] = [
         Box::new(|key, first| {
             dense_mode_shortcut(key, palette, separator, &shared_modifiers, first)
         }),
