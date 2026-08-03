@@ -63,12 +63,15 @@ pub fn pad_to_cols(text: &str, cols: usize) -> String {
 }
 
 /// Mode zone text — always exactly [`MODE_ZONE_COLS`] display columns.
+/// Uniform separator rule (spec 1.2): every mode ends with a vertical bar so
+/// the chip's right edge sits on the same column as the pane frame's `├`.
+/// Shape: ` {glyph} {code} ` padded to `MODE_ZONE_COLS - 1`, then `│`.
 pub fn format_mode_zone(mode: InputMode) -> String {
     let (glyph, code) = mode_chip(mode);
-    // Leading seam, glyph, code. Wide glyphs (𝌁/𝌆) sit flush so the budget
-    // still closes at MODE_ZONE_COLS for every mode — no horizontal shift.
-    let raw = format!(" {} {} ", glyph, code);
-    pad_to_cols(&raw, MODE_ZONE_COLS)
+    let body = format!(" {} {} ", glyph, code);
+    let mut zone = pad_to_cols(&body, MODE_ZONE_COLS.saturating_sub(1));
+    zone.push('│');
+    zone
 }
 
 /// Brand zone text — always exactly [`BRAND_ZONE_COLS`] display columns.
@@ -651,10 +654,10 @@ pub fn tab_separator(capabilities: PluginCapabilities) -> &'static str {
 }
 
 /// The operator-tuned mode chip set (glyph, short code) — one visual language
-/// for all fourteen input modes. Glyphs are plain text-presentation Unicode
-/// (no emoji VS16). EnterSearch shares F with Search on purpose: the extra ↵
-/// marks the typing phase. Wide EAW glyphs (𝌁/𝌆) stay; the zone budget in
-/// [`format_mode_zone`] absorbs them so the rest of the bar never shifts.
+/// for all fourteen input modes. The trailing `│` is applied by
+/// [`format_mode_zone`] (Uniform Mode Chip Separator Rule, spec 1.2).
+/// Rename codes are RNT/RNP; Prompt uses `⟩` so it never collides with the
+/// Quick cmd prompt glyph `❯_`.
 pub fn mode_chip(mode: InputMode) -> (&'static str, &'static str) {
     match mode {
         InputMode::Normal => ("▷", "N"),
@@ -666,10 +669,10 @@ pub fn mode_chip(mode: InputMode) -> (&'static str, &'static str) {
         InputMode::Scroll => ("⇅", "S"),
         InputMode::Search => ("⌕", "F"),
         InputMode::EnterSearch => ("↵", "F"),
-        InputMode::RenameTab => ("✎", "RT"),
-        InputMode::RenamePane => ("✎", "RP"),
+        InputMode::RenameTab => ("✎", "RNT"),
+        InputMode::RenamePane => ("✎", "RNP"),
         InputMode::Session => ("𝌆", "S"),
-        InputMode::Prompt => ("❯", "P"),
+        InputMode::Prompt => ("⟩", "P"),
         InputMode::Tmux => ("ⓣ", "T"),
     }
 }
@@ -710,6 +713,22 @@ mod tests {
         }
         // Stronger contract: every mode produces the same width (zero jitter).
         assert!(widths.windows(2).all(|w| w[0] == w[1]));
+    }
+
+    #[test]
+    fn mode_zone_ends_with_uniform_vertical_separator() {
+        for mode in ALL_MODES {
+            let zone = format_mode_zone(mode);
+            assert!(
+                zone.ends_with('│'),
+                "mode {:?} must end with │ (got {:?})",
+                mode,
+                zone
+            );
+        }
+        // Rename codes are three letters; still fit the fixed budget.
+        assert!(format_mode_zone(InputMode::RenameTab).contains("RNT"));
+        assert!(format_mode_zone(InputMode::RenamePane).contains("RNP"));
     }
 
     #[test]

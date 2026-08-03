@@ -5,10 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
+* feat(chrome): Uniform Mode Chip Separator Rule — every mode chip ends with `│` on a fixed 8-col budget (`▷ N │`, `⊝ L │`, `✎ RNT │`, …) so the bar aligns with the pane frame's `├`
+* feat(chrome): Quick cmd is a non-ephemeral mini console (`❯_ Quick cmd` + `vc-quick-cmd.sh` host@cwd banner + login shell); Composer header is `✍ Composer · ⧉ Paste stack`; Super+e is the sole Composer key (Alt+e free for Polish `ę`)
+* feat(composer): `vc-composer.sh` ships a vibecrafted vim profile (`number`, `laststatus=0`) and `Ctrl+p` paste-stack pick; `paste-stack.sh pick` uses fzf when available; Scroll mode `v` opens mouseless scrollback selection (`scrollback-select.sh`) that yanks to pbcopy + paste stack
 * feat(chrome): Fixed Character Grid Model — compact-bar zones lock to fixed column budgets (brand 14, mode 8, entry chips 12+18); mode switches and entry labels no longer shift the tab zone by even one cell; unit tests lock the EAW-aware pad contract
 * feat(chrome): status-bar metric fields use fixed widths (`CPU {:4}`, `MEM {:5.1}/{:3}`, `DISK {:3}`, `LIVE {:2}`) covering multi-core >999% and used memory >=100G (operator hardware) without right-edge jitter
 * feat(chrome): operator layouts default `left_inset` to 6 columns (was 9) at standard monospace; large fonts can still raise it via layout config
-* feat(composer): Quick cmd floats a login shell over the *current* tab (no Agents detour); Composer chip, Super+e/Alt+e, and `vc-composer.sh` share one paste-stack-aware drafting contract (`~/.cache/vc-frame/paste-stack.json` seed + push)
+* feat(composer): Quick cmd floats a login shell over the *current* tab (no Agents detour); Composer chip and Super+e share one paste-stack-aware drafting contract (`~/.cache/vc-frame/paste-stack.json` seed + push)
 * feat(status-bar): mode-gated status contract — the diodes (`LIVE | CPU | MEM | DISK | HEALTH`) live in the resting mode only; action modes hand every column to the shortcut hints and keep just the swap-layout chip; on narrow bars the segment sheds blocks right-to-left (DISK → MEM → CPU → swap → HEALTH, pulse last) instead of vanishing whole, and a two-cell seam always separates hints from statuses
 * feat(chrome): the Quick cmd click opens a fixed upper-center command strip (60%×30%) named `Quick cmd`, the Composer click a fixed centered atelier (70%×72%) — floating entry points land where the hands remember them instead of the session default
 * fix(status-bar): replace per-tab full-session `LIVE` fan-out with server-derived plugin/client updates; only each client's active status bar samples host resources, hidden bars stay idle, clipboard timers cannot fork samplers, and async-loader replay preserves exact lifecycle targets

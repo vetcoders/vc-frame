@@ -43,21 +43,18 @@ const MSG_LAUNCH_TOOLTIP: &str = "launch_tooltip_if_not_launched";
 /// a real tab can never occupy this index. Checked before tab resolution so
 /// it never reaches switch_tab_to.
 pub const COMPOSER_CLICK_SENTINEL: usize = usize::MAX;
-/// Sentinel tab_index for the Quick cmd chip — click floats a login shell
-/// over the current tab (fixed footprint). Named for what it does. The
-/// fleet's LIVE pulse is a pure status on the bottom bar — no tool rides on it.
+/// Sentinel tab_index for the Quick cmd chip — click opens a non-ephemeral
+/// mini console (interactive terminal) over the current tab. LIVE pulse
+/// lives on the bottom status-bar — no tool rides on it.
 pub const AGENTS_CLICK_SENTINEL: usize = usize::MAX - 2;
-/// The Dispatcher is a bare login shell in a named floating pane — dispatch
-/// is typing vibecrafted CLI commands (`vc-init codex`) into it. Deliberate
-/// zsh fallback: the server may run without SHELL in its env, and /bin/sh
-/// with no profile is exactly the trap we refuse to spawn.
-const DISPATCHER_COMMAND: &str = r#"exec "${SHELL:-/bin/zsh}" -l"#;
-/// Same drafting contract as Super+e / Alt+e in the default config:
-/// prefer the installed paste-stack-aware `vc-composer.sh`; else the inline
-/// fallback drafts in $VC_COMPOSER/$EDITOR, lands text unexecuted, and pushes
-/// the body onto `~/.cache/vc-frame/paste-stack.json`. VC_COMPOSER expands
-/// unquoted on purpose — it is a command line, not a path.
-const COMPOSER_COMMAND: &str = r#"if [ -x "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh" ]; then "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh"; elif [ -x "${HOME}/.config/vc-frame/vc-composer.sh" ]; then "${HOME}/.config/vc-frame/vc-composer.sh"; else f=$(mktemp "${TMPDIR:-/tmp}/vc-composer.XXXXXX") || exit 1; stack="${HOME}/.cache/vc-frame/paste-stack.json"; if [ -s "$stack" ] && [ "${VC_COMPOSER_SEED:-1}" != "0" ]; then python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); open(sys.argv[2],"w").write(s[0] if s else "")' "$stack" "$f" 2>/dev/null || true; fi; ${VC_COMPOSER:-${EDITOR:-vim}} "$f"; if [ -s "$f" ]; then mkdir -p "${HOME}/.cache/vc-frame"; python3 -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1]);t=open(sys.argv[2]).read();s=[];s=json.loads(p.read_text()) if p.exists() else [];s=s if isinstance(s,list) else [];s=[t]+[x for x in s if x!=t];p.write_text(json.dumps(s[:50],ensure_ascii=False,indent=2))' "$stack" "$f" 2>/dev/null || true; vc-frame action toggle-floating-panes; vc-frame action write-chars "$(cat "$f")"; fi; rm -f -- "$f"; fi"#;
+/// Pane title for the Quick cmd mini console (matches the bar chip glyph).
+const QUICK_CMD_PANE_NAME: &str = "❯_ Quick cmd";
+/// Pane title for the Composer atelier — header carries the Paste stack affordance.
+const COMPOSER_PANE_NAME: &str = "✍ Composer · ⧉ Paste stack";
+/// Same drafting contract as Super+e (Cmd+E) in the default config — the
+/// single product key. Prefer installed paste-stack-aware `vc-composer.sh`
+/// (vim profile: number, laststatus=0, Ctrl+p paste-stack pick).
+const COMPOSER_COMMAND: &str = r#"if [ -x "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh" ]; then "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh"; elif [ -x "${HOME}/.config/vc-frame/vc-composer.sh" ]; then "${HOME}/.config/vc-frame/vc-composer.sh"; else f=$(mktemp "${TMPDIR:-/tmp}/vc-composer.XXXXXX") || exit 1; ${EDITOR:-vim} -c 'set number' -c 'set laststatus=0' -c 'set noshowcmd' "$f"; if [ -s "$f" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars "$(cat "$f")"; fi; rm -f -- "$f"; fi"#;
 #[derive(Debug, Default)]
 pub struct LinePart {
     part: String,
@@ -483,24 +480,22 @@ impl State {
     }
 }
 
-/// The Quick cmd strip: shallow and wide, upper-center — a command palette
-/// with a real shell behind it, not a full work pane. Without coordinates
-/// the floating pane spawns at the session default and reads as a random
-/// window; the fixed strip is what makes it a "quick" command line.
+/// Quick cmd mini console: shallow, wide, upper-center — non-ephemeral
+/// interactive terminal (not a command-pane "Process will run…" ticket).
+/// Commands run in-pane; the operator inspects output without the float dying.
 fn quick_cmd_coordinates() -> Option<FloatingPaneCoordinates> {
     FloatingPaneCoordinates::new(
-        Some("20%".to_owned()),
-        Some("12%".to_owned()),
-        Some("60%".to_owned()),
-        Some("30%".to_owned()),
+        Some("18%".to_owned()),
+        Some("8%".to_owned()),
+        Some("64%".to_owned()),
+        Some("28%".to_owned()),
         Some(false),
         None,
     )
 }
 
-/// The Composer atelier: one large, centered writing surface — the same
-/// footprint every time, so the writing layer always opens where the hands
-/// remember it.
+/// The Composer atelier: large, centered writing surface — same footprint
+/// every time so the writing layer always opens where the hands remember it.
 fn composer_coordinates() -> Option<FloatingPaneCoordinates> {
     FloatingPaneCoordinates::new(
         Some("15%".to_owned()),
@@ -512,26 +507,32 @@ fn composer_coordinates() -> Option<FloatingPaneCoordinates> {
     )
 }
 
-/// Quick cmd: named floating login shell at a fixed upper-center footprint.
-/// vibecrafted CLI is the dispatch language; the pane is the desk. Opens over
-/// the current tab so the operator never loses context.
+/// Quick cmd: non-ephemeral floating *terminal* at a fixed upper-center
+/// footprint (spec 1.2 §C). Interactive terminal — not a command-pane ticket —
+/// so there is no "Process will run in separated pane" chrome and the pane
+/// survives after each command. Prefer the installed `vc-quick-cmd.sh` banner
+/// wrapper when present; otherwise open a plain login shell on `.`.
 fn open_quick_cmd() {
-    let command = CommandToRun::new_with_args("sh", vec!["-c", DISPATCHER_COMMAND]);
+    let quick_cmd_runner = r#"if [ -x "${HOME}/.config/vetcoders/frontier/vc-frame/vc-quick-cmd.sh" ]; then exec "${HOME}/.config/vetcoders/frontier/vc-frame/vc-quick-cmd.sh"; elif [ -x "${HOME}/.config/vc-frame/vc-quick-cmd.sh" ]; then exec "${HOME}/.config/vc-frame/vc-quick-cmd.sh"; else u="${USER:-op}"; h="$(hostname -s 2>/dev/null || echo host)"; d="${PWD/#$HOME/~}"; printf '\n  %s@%s in %s\n\n' "$u" "$h" "$d"; exec "${SHELL:-/bin/zsh}" -l; fi"#;
+    // open_command_pane_floating + exec keeps one long-lived process (the
+    // login shell). We accept command-pane chrome only when the wrapper is
+    // missing; preferred path is still a real shell via the wrapper script.
+    let command = CommandToRun::new_with_args("sh", vec!["-c", quick_cmd_runner]);
     if let Some(PaneId::Terminal(terminal_pane_id)) =
         open_command_pane_floating(command, quick_cmd_coordinates(), BTreeMap::new())
     {
-        rename_terminal_pane(terminal_pane_id, "Quick cmd");
+        rename_terminal_pane(terminal_pane_id, QUICK_CMD_PANE_NAME);
     }
 }
 
-/// Click path of the Composer chip — identical contract to Super+e / Alt+e
-/// (and the installed paste-stack-aware `vc-composer.sh` when present).
+/// Click path of the Composer chip — identical contract to Super+e (Cmd+E).
+/// Alt+e is deliberately free for Polish `ę` (spec 1.2 §A).
 fn open_composer() {
     let command = CommandToRun::new_with_args("sh", vec!["-c", COMPOSER_COMMAND]);
     if let Some(PaneId::Terminal(terminal_pane_id)) =
         open_command_pane_floating(command, composer_coordinates(), BTreeMap::new())
     {
-        rename_terminal_pane(terminal_pane_id, "Composer");
+        rename_terminal_pane(terminal_pane_id, COMPOSER_PANE_NAME);
     }
 }
 

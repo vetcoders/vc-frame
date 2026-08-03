@@ -77,7 +77,10 @@ owner (contract v3):
 
 - `Cmd+←/→` — previous/next tab, **every mode including LOCK**
 - `Cmd+↑/↓` — previous/next session, **every mode including LOCK**
-- `Cmd+E` — Command Composer
+- `Cmd+E` / `Super+e` — Command Composer (sole product key; **not** Alt+e —
+  Alt+e types Polish `ę` on macOS)
+- `Ctrl+s` then `v` — mouseless scrollback selection (read-only vim; `y`
+  copies to clipboard + Paste Stack)
 - `Ctrl+arrows` — the same switcher outside LOCK; inside LOCK they pass
   through to the pane (the shell owns Ctrl there)
 - `Alt` — belongs entirely to the writer: diacritics layer and host-side
