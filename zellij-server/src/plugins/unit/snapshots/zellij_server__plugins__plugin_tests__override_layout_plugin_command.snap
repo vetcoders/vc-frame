@@ -200,9 +200,7 @@ Some(
                                                             name: "compact-bar",
                                                             configuration: Some(
                                                                 PluginUserConfiguration(
-                                                                    {
-                                                                        "left_inset": "9",
-                                                                    },
+                                                                    {},
                                                                 ),
                                                             ),
                                                             initial_cwd: None,
@@ -421,9 +419,7 @@ Some(
                                                             name: "compact-bar",
                                                             configuration: Some(
                                                                 PluginUserConfiguration(
-                                                                    {
-                                                                        "left_inset": "9",
-                                                                    },
+                                                                    {},
                                                                 ),
                                                             ),
                                                             initial_cwd: None,
@@ -738,9 +734,7 @@ Some(
                                                             name: "compact-bar",
                                                             configuration: Some(
                                                                 PluginUserConfiguration(
-                                                                    {
-                                                                        "left_inset": "9",
-                                                                    },
+                                                                    {},
                                                                 ),
                                                             ),
                                                             initial_cwd: None,
@@ -867,9 +861,7 @@ Some(
                                                             name: "compact-bar",
                                                             configuration: Some(
                                                                 PluginUserConfiguration(
-                                                                    {
-                                                                        "left_inset": "9",
-                                                                    },
+                                                                    {},
                                                                 ),
                                                             ),
                                                             initial_cwd: None,
@@ -1088,9 +1080,7 @@ Some(
                                                             name: "compact-bar",
                                                             configuration: Some(
                                                                 PluginUserConfiguration(
-                                                                    {
-                                                                        "left_inset": "9",
-                                                                    },
+                                                                    {},
                                                                 ),
                                                             ),
                                                             initial_cwd: None,
@@ -1405,9 +1395,7 @@ Some(
                                                             name: "compact-bar",
                                                             configuration: Some(
                                                                 PluginUserConfiguration(
-                                                                    {
-                                                                        "left_inset": "9",
-                                                                    },
+                                                                    {},
                                                                 ),
                                                             ),
                                                             initial_cwd: None,
@@ -1556,9 +1544,7 @@ Some(
                                                             name: "compact-bar",
                                                             configuration: Some(
                                                                 PluginUserConfiguration(
-                                                                    {
-                                                                        "left_inset": "9",
-                                                                    },
+                                                                    {},
                                                                 ),
                                                             ),
                                                             initial_cwd: None,
