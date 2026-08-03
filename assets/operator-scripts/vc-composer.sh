@@ -44,6 +44,9 @@ if [[ "$seed" != "0" && -n "$PASTE_STACK" ]]; then
 fi
 
 # Vim profile (spec 1.2 §A): line numbers on, path statusline off, clean mode.
+# WRAP IS OFF by default — soft-wrap paints chrome into the buffer on a
+# narrow floating atelier (operator screenshot 2026-08-03). Toggle with F2
+# or `:set wrap!`. VC_COMPOSER_WRAP=1 starts with wrap on.
 # Ctrl+p → paste-stack pick → insert at cursor (requires paste-stack.sh pick).
 vim_paste_cmd=""
 if [[ -n "$PASTE_STACK" ]]; then
@@ -52,6 +55,11 @@ if [[ -n "$PASTE_STACK" ]]; then
 nnoremap <silent> <C-p> :let __vc_ps=tempname() \| execute 'silent !${PASTE_STACK} pick > ' . shellescape(__vc_ps) \| if filereadable(__vc_ps) && getfsize(__vc_ps) > 0 \| execute 'read' __vc_ps \| endif \| call delete(__vc_ps)<CR>
 EOF
 )
+fi
+
+wrap_cmd='set nowrap'
+if [[ "${VC_COMPOSER_WRAP:-0}" == "1" ]]; then
+  wrap_cmd='set wrap'
 fi
 
 if [[ -n "${VC_COMPOSER:-}" ]]; then
@@ -66,6 +74,13 @@ else
     -c 'set laststatus=0' \
     -c 'set noshowcmd' \
     -c 'set noruler' \
+    -c 'set textwidth=0' \
+    -c 'set nolinebreak' \
+    -c 'set sidescroll=1' \
+    -c 'set sidescrolloff=2' \
+    -c "$wrap_cmd" \
+    -c 'nnoremap <silent> <F2> :set wrap! wrap?<CR>' \
+    -c 'nnoremap <silent> <Leader>w :set wrap! wrap?<CR>' \
     ${vim_paste_cmd:+-c "$vim_paste_cmd"} \
     "$f"
 fi

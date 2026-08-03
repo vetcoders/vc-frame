@@ -54,7 +54,7 @@ const COMPOSER_PANE_NAME: &str = "✍ Composer · ⧉ Paste stack";
 /// Same drafting contract as Super+e (Cmd+E) in the default config — the
 /// single product key. Prefer installed paste-stack-aware `vc-composer.sh`
 /// (vim profile: number, laststatus=0, Ctrl+p paste-stack pick).
-const COMPOSER_COMMAND: &str = r#"if [ -x "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh" ]; then "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh"; elif [ -x "${HOME}/.config/vc-frame/vc-composer.sh" ]; then "${HOME}/.config/vc-frame/vc-composer.sh"; else f=$(mktemp "${TMPDIR:-/tmp}/vc-composer.XXXXXX") || exit 1; ${EDITOR:-vim} -c 'set number' -c 'set laststatus=0' -c 'set noshowcmd' "$f"; if [ -s "$f" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars "$(cat "$f")"; fi; rm -f -- "$f"; fi"#;
+const COMPOSER_COMMAND: &str = r#"if [ -x "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh" ]; then "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh"; elif [ -x "${HOME}/.config/vc-frame/vc-composer.sh" ]; then "${HOME}/.config/vc-frame/vc-composer.sh"; else f=$(mktemp "${TMPDIR:-/tmp}/vc-composer.XXXXXX") || exit 1; ${EDITOR:-vim} -c 'set number' -c 'set laststatus=0' -c 'set noshowcmd' -c 'set nowrap' -c 'set textwidth=0' -c 'set sidescroll=1' -c 'nnoremap <silent> <F2> :set wrap! wrap?<CR>' "$f"; if [ -s "$f" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars "$(cat "$f")"; fi; rm -f -- "$f"; fi"#;
 #[derive(Debug, Default)]
 pub struct LinePart {
     part: String,

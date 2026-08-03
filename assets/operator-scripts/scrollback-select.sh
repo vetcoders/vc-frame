@@ -61,6 +61,8 @@ fi
 "$editor_bin" -R \
   -c 'set number' \
   -c 'set laststatus=0' \
+  -c 'set nowrap' \
+  -c 'set sidescroll=1' \
   -c "let g:vc_yank_file='${yank_file//\'/\'\'}'" \
   -c 'vnoremap <silent> y "zy:call writefile(split(@z, "\n", 1), g:vc_yank_file)<CR>:echo "yanked — quit to push paste-stack"<CR>' \
   -- "$tmp" || true

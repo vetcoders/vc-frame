@@ -298,10 +298,11 @@ keybinds {
         // Command Composer (spec 1.2 §A): Super+e / Cmd+E is the single product
         // key. Alt+e is deliberately unbound so macOS Option types Polish `ę`.
         // Prefer installed paste-stack-aware vc-composer.sh (vim: number,
-        // laststatus=0, Ctrl+p paste-stack pick). On :wq the body lands in the
-        // underlying pane unexecuted and is pushed onto the Paste Stack.
+        // laststatus=0, nowrap default, F2 toggles wrap, Ctrl+p paste-stack).
+        // On :wq the body lands in the underlying pane unexecuted and is
+        // pushed onto the Paste Stack.
         bind "Super e" {
-            Run "sh" "-c" "if [ -x \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\"; elif [ -x \"${HOME}/.config/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vc-frame/vc-composer.sh\"; else f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${EDITOR:-vim} -c 'set number' -c 'set laststatus=0' \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"; fi" {
+            Run "sh" "-c" "if [ -x \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\"; elif [ -x \"${HOME}/.config/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vc-frame/vc-composer.sh\"; else f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${EDITOR:-vim} -c 'set number' -c 'set laststatus=0' -c 'set nowrap' -c 'set textwidth=0' -c 'set sidescroll=1' -c 'nnoremap <silent> <F2> :set wrap! wrap?<CR>' \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"; fi" {
                 floating true
                 close_on_exit true
                 name "✍ Composer · ⧉ Paste stack"

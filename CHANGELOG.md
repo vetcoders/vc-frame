@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
+* fix(composer): wrap OFF by default in the floating atelier (`set nowrap`, `textwidth=0`, sidescroll); F2 / `\w` toggles wrap; `VC_COMPOSER_WRAP=1` starts with wrap on — ends chrome bleeding into the draft buffer
 * feat(chrome): Uniform Mode Chip Separator Rule — every mode chip ends with `│` on a fixed 8-col budget (`▷ N │`, `⊝ L │`, `✎ RNT │`, …) so the bar aligns with the pane frame's `├`
 * feat(chrome): Quick cmd is a non-ephemeral mini console (`❯_ Quick cmd` + `vc-quick-cmd.sh` host@cwd banner + login shell); Composer header is `✍ Composer · ⧉ Paste stack`; Super+e is the sole Composer key (Alt+e free for Polish `ę`)
 * feat(composer): `vc-composer.sh` ships a vibecrafted vim profile (`number`, `laststatus=0`) and `Ctrl+p` paste-stack pick; `paste-stack.sh pick` uses fzf when available; Scroll mode `v` opens mouseless scrollback selection (`scrollback-select.sh`) that yanks to pbcopy + paste stack
