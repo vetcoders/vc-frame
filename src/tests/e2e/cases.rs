@@ -107,6 +107,13 @@ fn account_for_races_in_snapshot(snapshot: String) -> String {
     let base_replace_tmux_mode_1 = Regex::new(r"Alt \[\|SPACE\|Alt \]  BASE \s*\n").unwrap();
     let base_replace_tmux_mode_2 = Regex::new(r"Alt \[\|Alt \]\|SPACE  BASE \s*\n").unwrap();
     let eol_arrow_replace = Regex::new(r"\s*\n").unwrap();
+    // Right-edge fleet/host cockpit is non-deterministic across CI hosts
+    // (LIVE count, CPU%, MEM, DISK free, HEALTH). Strip it so chrome diffs
+    // stay about product layout, not runner load.
+    let right_status_replace = Regex::new(
+        r"LIVE \d+(?: \| CPU [^|\n]+)?(?: \| MEM [^|\n]+)?(?: \| DISK [^|\n]+)?(?: \| HDD [^|\n]+)?(?: \| HEALTH [^\n|]*)?",
+    )
+    .unwrap();
     let snapshot = base_replace.replace_all(&snapshot, "\n").to_string();
     let snapshot = base_replace_tmux_mode_1
         .replace_all(&snapshot, "\n")
@@ -114,6 +121,7 @@ fn account_for_races_in_snapshot(snapshot: String) -> String {
     let snapshot = base_replace_tmux_mode_2
         .replace_all(&snapshot, "\n")
         .to_string();
+    let snapshot = right_status_replace.replace_all(&snapshot, "").to_string();
 
     eol_arrow_replace.replace_all(&snapshot, "\n").to_string()
 }
