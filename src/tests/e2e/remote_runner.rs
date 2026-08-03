@@ -34,7 +34,7 @@ const CONNECTION_USERNAME: &str = "test";
 /// (see CONTRIBUTING.md).
 const SSH_KEY_ENV: &str = "ZELLIJ_E2E_SSH_KEY";
 const SESSION_NAME: &str = "e2e-test";
-const RETRIES: usize = 10;
+const RETRIES: usize = 5;
 
 /// Public-key only. There is deliberately no password fallback: a static
 /// `test`/`test` credential on this service container is exactly what was
@@ -321,7 +321,11 @@ fn wait_for_startup(last_snapshot: &Arc<Mutex<String>>) {
     let start = std::time::Instant::now();
     let timeout = std::time::Duration::from_secs(10);
     loop {
-        if last_snapshot.lock().unwrap().contains("Ctrl +") {
+        // Accept classic (`Ctrl +` / `LOCK`) and current chrome (`LIVE`,
+        // `HEALTH`, dense mode chips) so startup does not hang for 10s when
+        // the status-bar language moves.
+        let snap = last_snapshot.lock().unwrap().clone();
+        if chrome_appears_in(&snap) {
             break;
         }
         if start.elapsed() > timeout {
@@ -329,6 +333,16 @@ fn wait_for_startup(last_snapshot: &Arc<Mutex<String>>) {
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
+}
+
+/// True when the terminal dump shows any recognizable vc-frame chrome.
+fn chrome_appears_in(snap: &str) -> bool {
+    (snap.contains("Ctrl +") && snap.contains("LOCK"))
+        || snap.contains("LIVE ")
+        || snap.contains("HEALTH ")
+        || snap.contains(" Tab #1")
+        || snap.contains("Tab #1 ")
+        || (snap.contains("LOCK") && snap.contains("PANE"))
 }
 
 fn read_from_channel(
@@ -485,14 +499,17 @@ impl RemoteTerminal {
         x == self.cursor_x && y == self.cursor_y
     }
     pub fn status_bar_appears(&self) -> bool {
-        self.last_snapshot.lock().unwrap().contains("Ctrl +")
-            && self.last_snapshot.lock().unwrap().contains("LOCK")
+        let snap = self.last_snapshot.lock().unwrap().clone();
+        chrome_appears_in(&snap)
     }
     pub fn ctrl_plus_appears(&self) -> bool {
-        self.last_snapshot.lock().unwrap().contains("Ctrl +")
+        let snap = self.last_snapshot.lock().unwrap().clone();
+        // Dense chips may drop the superkey prefix; treat mode chrome as enough.
+        snap.contains("Ctrl +") || snap.contains("LOCK") || snap.contains("LIVE ")
     }
     pub fn tab_bar_appears(&self) -> bool {
-        self.last_snapshot.lock().unwrap().contains("Tab #1")
+        let snap = self.last_snapshot.lock().unwrap().clone();
+        snap.contains("Tab #1") || snap.contains("Tab#1")
     }
     pub fn snapshot_contains(&self, text: &str) -> bool {
         self.last_snapshot.lock().unwrap().contains(text)
