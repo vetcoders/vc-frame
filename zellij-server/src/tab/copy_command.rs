@@ -34,10 +34,7 @@ impl CopyCommand {
         // Close stdin after the write so the child sees EOF (powershell
         // `ReadToEnd`, `cat > file`, …) and can finish promptly.
         {
-            let mut stdin = process
-                .stdin
-                .take()
-                .context("could not get stdin")?;
+            let mut stdin = process.stdin.take().context("could not get stdin")?;
             stdin
                 .write_all(value.as_bytes())
                 .with_context(|| format!("couldn't write to {} stdin", self.command))?;

@@ -1384,6 +1384,39 @@ def write_error_category(stderr: str) -> str | None:
     return None
 
 
+def _strip_volatile_tab_titles(state: object) -> object:
+    """Drop pane/shell OSC tab titles from a runtime snapshot.
+
+    Bootstrap shells rename `Tab #1` → something like `shell` asynchronously.
+    Negative probes that only assert "this action did not mutate inventory"
+    must not fail on that cosmetic race — identity and focus still compare.
+    """
+    if not isinstance(state, dict):
+        return state
+    sessions = state.get("sessions")
+    if not isinstance(sessions, dict):
+        return state
+    scrubbed_sessions: dict[str, object] = {}
+    for session_name, session in sessions.items():
+        if not isinstance(session, dict):
+            scrubbed_sessions[session_name] = session
+            continue
+        tabs = session.get("tabs")
+        if not isinstance(tabs, list):
+            scrubbed_sessions[session_name] = session
+            continue
+        scrubbed_tabs = []
+        for tab in tabs:
+            if isinstance(tab, dict):
+                cleaned = dict(tab)
+                cleaned.pop("name", None)
+                scrubbed_tabs.append(cleaned)
+            else:
+                scrubbed_tabs.append(tab)
+        scrubbed_sessions[session_name] = {**session, "tabs": scrubbed_tabs}
+    return {**state, "sessions": scrubbed_sessions}
+
+
 def record_negative_probe(
     recorder: EvidenceRecorder,
     *,
@@ -1394,18 +1427,22 @@ def record_negative_probe(
     error_category: str,
     durable_failure_audit: dict[str, object] | None = None,
 ) -> None:
-    unchanged = before == after
     before_state = before.get("state")
     after_state = after.get("state")
     require(
         isinstance(before_state, dict) and isinstance(after_state, dict),
         f"{scenario} snapshots omitted runtime state",
     )
+    # Compare title-stripped views so shell OSC renames are not blamed on the
+    # probe under test (see wait_for_stable_tab_state call sites).
+    before_cmp = _strip_volatile_tab_titles(before_state)
+    after_cmp = _strip_volatile_tab_titles(after_state)
+    unchanged = before_cmp == after_cmp
     before_non_durable = {
-        key: value for key, value in before_state.items() if key != "control_plane"
+        key: value for key, value in before_cmp.items() if key != "control_plane"
     }
     after_non_durable = {
-        key: value for key, value in after_state.items() if key != "control_plane"
+        key: value for key, value in after_cmp.items() if key != "control_plane"
     }
     non_durable_unchanged = before_non_durable == after_non_durable
     state_contract_satisfied = (
