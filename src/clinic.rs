@@ -1338,28 +1338,74 @@ struct AlacrittyKeyShape {
 /// doctor needs two truths (is Option mapped to Alt, which bindings claim the
 /// Command/Super mod) and a text scan states them without a new dependency;
 /// anything it cannot prove it simply does not report.
+///
+/// Binding tables often span lines (`bindings = [\n { key = …, mods = … },\n]`),
+/// so Command/Super detection walks a comment-stripped, whitespace-collapsed
+/// blob rather than requiring key+mods on one line. `option_as_alt` still
+/// reads assignment lines, tolerating trailing comments and either quote style.
 fn alacritty_key_shape(raw: &str) -> AlacrittyKeyShape {
     let mut option_as_alt = false;
-    let mut super_bindings = Vec::new();
+    let mut code_chunks = Vec::new();
     for line in raw.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('#') {
+        let without_comment = match line.find('#') {
+            Some(idx) => &line[..idx],
+            None => line,
+        };
+        let trimmed = without_comment.trim();
+        if trimmed.is_empty() {
             continue;
         }
-        if trimmed.starts_with("option_as_alt") && !trimmed.ends_with("\"None\"") {
-            option_as_alt = true;
+        if let Some(value) = option_as_alt_value(trimmed) {
+            // "None" (any case/quote) = unmapped; any other value = mapped.
+            option_as_alt = !value.eq_ignore_ascii_case("none");
         }
-        let lower = trimmed.to_ascii_lowercase();
-        if lower.contains("mods")
-            && (lower.contains("command") || lower.contains("super"))
-            && lower.contains("key")
+        code_chunks.push(trimmed);
+    }
+    let collapsed = code_chunks.join(" ");
+    let lower = collapsed.to_ascii_lowercase();
+    let mut super_bindings = Vec::new();
+    // Walk each `{ … }` binding-ish span in the collapsed text.
+    let mut search_from = 0;
+    while let Some(rel_open) = lower[search_from..].find('{') {
+        let open = search_from + rel_open;
+        let Some(rel_close) = lower[open + 1..].find('}') else {
+            break;
+        };
+        let close = open + 1 + rel_close;
+        let span = &lower[open..=close];
+        if span.contains("key")
+            && span.contains("mods")
+            && (span.contains("command") || span.contains("super"))
         {
-            super_bindings.push(trimmed.to_owned());
+            // Report the original-casing span from `collapsed`.
+            super_bindings.push(collapsed[open..=close].trim().to_owned());
         }
+        search_from = close + 1;
     }
     AlacrittyKeyShape {
         option_as_alt,
         super_bindings,
+    }
+}
+
+/// Parse `option_as_alt = <value>` from a single non-comment line. Returns the
+/// bare value without quotes when the assignment is recognized.
+fn option_as_alt_value(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    let rest = trimmed
+        .strip_prefix("option_as_alt")?
+        .trim_start();
+    let rest = rest.strip_prefix('=')?.trim_start();
+    let value = rest
+        .trim_matches(|c: char| c == '"' || c == '\'' || c.is_whitespace())
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_matches(|c: char| c == '"' || c == '\'');
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_owned())
     }
 }
 
@@ -1381,6 +1427,14 @@ mod host_terminal_tests {
     }
 
     #[test]
+    fn option_as_alt_tolerates_inline_comments_and_single_quotes() {
+        assert!(alacritty_key_shape("option_as_alt = \"Both\" # macOS\n").option_as_alt);
+        assert!(alacritty_key_shape("option_as_alt = 'Both'\n").option_as_alt);
+        assert!(!alacritty_key_shape("option_as_alt = \"None\" # off\n").option_as_alt);
+        assert!(!alacritty_key_shape("option_as_alt = 'None'\n").option_as_alt);
+    }
+
+    #[test]
     fn a_commented_line_proves_nothing() {
         assert!(!alacritty_key_shape("# option_as_alt = \"Both\"\n").option_as_alt);
     }
@@ -1393,6 +1447,24 @@ mod host_terminal_tests {
         let shape = alacritty_key_shape(toml);
         assert_eq!(shape.super_bindings.len(), 1);
         assert!(shape.super_bindings[0].contains("Command"));
+    }
+
+    #[test]
+    fn multiline_command_bindings_are_still_detected() {
+        let toml = "[keyboard]\nbindings = [\n\
+                    {\n\
+                    key = \"N\",\n\
+                    mods = \"Command\",\n\
+                    action = \"CreateNewWindow\",\n\
+                    },\n\
+                    {\n\
+                    key = \"K\",\n\
+                    mods = \"Control\",\n\
+                    chars = \"x\",\n\
+                    },\n]\n";
+        let shape = alacritty_key_shape(toml);
+        assert_eq!(shape.super_bindings.len(), 1);
+        assert!(shape.super_bindings[0].to_ascii_lowercase().contains("command"));
     }
 }
 
