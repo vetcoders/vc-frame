@@ -1392,9 +1392,7 @@ fn alacritty_key_shape(raw: &str) -> AlacrittyKeyShape {
 /// bare value without quotes when the assignment is recognized.
 fn option_as_alt_value(line: &str) -> Option<String> {
     let trimmed = line.trim();
-    let rest = trimmed
-        .strip_prefix("option_as_alt")?
-        .trim_start();
+    let rest = trimmed.strip_prefix("option_as_alt")?.trim_start();
     let rest = rest.strip_prefix('=')?.trim_start();
     let value = rest
         .trim_matches(|c: char| c == '"' || c == '\'' || c.is_whitespace())
@@ -1464,7 +1462,11 @@ mod host_terminal_tests {
                     },\n]\n";
         let shape = alacritty_key_shape(toml);
         assert_eq!(shape.super_bindings.len(), 1);
-        assert!(shape.super_bindings[0].to_ascii_lowercase().contains("command"));
+        assert!(
+            shape.super_bindings[0]
+                .to_ascii_lowercase()
+                .contains("command")
+        );
     }
 }
 
