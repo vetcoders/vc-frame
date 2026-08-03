@@ -31,11 +31,17 @@ The `session-rail` plugin alias in `zellij-utils/assets/config/default.kdl`
 points at `zellij:session-manager` with `rail true`.
 
 The operator entrypoint layout (`vibecrafted`) replaces the top `tab-bar` with
-the redesigned `compact-bar`: brand chip, inverted mode chip, session anchor,
-fisheye tab ribbons, the Quick cmd station chip, and the Command Composer chip
-(`Cmd+E`). Its `left_inset` option clears the macOS traffic lights in a
-decoration-free host window. The bottom `status-bar` owns pure status: the
-fleet `LIVE` count, host CPU/memory/disk cockpit, health, and layout state.
+the redesigned `compact-bar`: brand chip, inverted mode chip, fisheye tab
+ribbons, the Quick cmd chip, and the Command Composer chip (`Cmd+E`). Zones
+follow the Fixed Character Grid Model — brand 14 cols, mode 8 cols, entry chips
+12+18 — so mode switches never shift the tab zone. `left_inset` (default **6**
+at standard monospace; raise to 9–12 for large fonts) clears the macOS traffic
+lights in a decoration-free host window. Quick cmd floats a login shell over
+the current tab; Composer drafts via `$VC_COMPOSER`/`$EDITOR`, seeds from and
+pushes to the Paste Stack (`~/.cache/vc-frame/paste-stack.json`), then
+`write-chars` into the pane beneath (Enter stays human). The bottom
+`status-bar` owns pure status: the fleet `LIVE` count, host CPU/memory/disk
+cockpit (fixed-width fields), health, and layout state.
 The diodes live in the resting mode only (LOCK when the base mode is locked,
 NORMAL otherwise) — action modes hand every column to the shortcut hints and
 keep just the swap-layout chip as arrangement context. On a narrow bar the

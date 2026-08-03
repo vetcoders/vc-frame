@@ -25,8 +25,9 @@ const CONFIG_BRAND_TEXT: &str = "brand_text";
 const CONFIG_BRAND_TEXT_SHORT: &str = "brand_text_short";
 /// Columns of blank bar before the brand chip — the 🚥 zone. In the native
 /// transparent window (Alacritty preset) the macOS traffic lights float over
-/// the first row; the inset shifts the whole bar clear of them. 9 columns
-/// ≈ 65–70px at a 13pt monospace.
+/// the first row; the inset shifts the whole bar clear of them. Default
+/// layouts use 6 columns at standard monospace (~13pt); large fonts may want
+/// 9–12 via layout config.
 const CONFIG_LEFT_INSET: &str = "left_inset";
 const MSG_TOGGLE_TOOLTIP: &str = "toggle_tooltip";
 // the status-bar shows up in the pane manifest as "vc-frame:status-bar" when
@@ -42,25 +43,21 @@ const MSG_LAUNCH_TOOLTIP: &str = "launch_tooltip_if_not_launched";
 /// a real tab can never occupy this index. Checked before tab resolution so
 /// it never reaches switch_tab_to.
 pub const COMPOSER_CLICK_SENTINEL: usize = usize::MAX;
-/// Sentinel tab_index for the ⌬ Quick cmd chip — click lands in the Agents
-/// station tab and floats the Dispatcher shell over it: a quick command
-/// line, named for what it does. (The fleet's LIVE pulse is a pure status
-/// on the bottom bar now — no tool rides on it.)
+/// Sentinel tab_index for the Quick cmd chip — click floats a login shell
+/// over the current tab (fixed footprint). Named for what it does. The
+/// fleet's LIVE pulse is a pure status on the bottom bar — no tool rides on it.
 pub const AGENTS_CLICK_SENTINEL: usize = usize::MAX - 2;
-/// The per-session station tab where dispatched agents stack up. One tab,
-/// many stacked panes: a collapsed title-bar is a list row, an expanded
-/// pane is the agent's full terminal.
-const AGENTS_TAB_NAME: &str = "Agents";
 /// The Dispatcher is a bare login shell in a named floating pane — dispatch
 /// is typing vibecrafted CLI commands (`vc-init codex`) into it. Deliberate
 /// zsh fallback: the server may run without SHELL in its env, and /bin/sh
 /// with no profile is exactly the trap we refuse to spawn.
 const DISPATCHER_COMMAND: &str = r#"exec "${SHELL:-/bin/zsh}" -l"#;
-/// Same drafting contract as the Alt+e keybind in the default config: draft
-/// in $VC_COMPOSER (or $EDITOR), land the text in the underlying pane
-/// unexecuted, clean up. VC_COMPOSER expands unquoted on purpose — it is a
-/// command line ("open -W -n -a Pensieve", "pensieve --wait"), not a path.
-const COMPOSER_COMMAND: &str = r#"if [ -x "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh" ]; then "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh"; else f=$(mktemp "${TMPDIR:-/tmp}/vc-composer.XXXXXX") || exit 1; ${VC_COMPOSER:-vim -c 'set number' -c 'set laststatus=0'} "$f"; if [ -s "$f" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars "$(cat "$f")"; fi; rm -f -- "$f"; fi"#;
+/// Same drafting contract as Super+e / Alt+e in the default config:
+/// prefer the installed paste-stack-aware `vc-composer.sh`; else the inline
+/// fallback drafts in $VC_COMPOSER/$EDITOR, lands text unexecuted, and pushes
+/// the body onto `~/.cache/vc-frame/paste-stack.json`. VC_COMPOSER expands
+/// unquoted on purpose — it is a command line, not a path.
+const COMPOSER_COMMAND: &str = r#"if [ -x "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh" ]; then "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh"; elif [ -x "${HOME}/.config/vc-frame/vc-composer.sh" ]; then "${HOME}/.config/vc-frame/vc-composer.sh"; else f=$(mktemp "${TMPDIR:-/tmp}/vc-composer.XXXXXX") || exit 1; stack="${HOME}/.cache/vc-frame/paste-stack.json"; if [ -s "$stack" ] && [ "${VC_COMPOSER_SEED:-1}" != "0" ]; then python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); open(sys.argv[2],"w").write(s[0] if s else "")' "$stack" "$f" 2>/dev/null || true; fi; ${VC_COMPOSER:-${EDITOR:-vim}} "$f"; if [ -s "$f" ]; then mkdir -p "${HOME}/.cache/vc-frame"; python3 -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1]);t=open(sys.argv[2]).read();s=[];s=json.loads(p.read_text()) if p.exists() else [];s=s if isinstance(s,list) else [];s=[t]+[x for x in s if x!=t];p.write_text(json.dumps(s[:50],ensure_ascii=False,indent=2))' "$stack" "$f" 2>/dev/null || true; vc-frame action toggle-floating-panes; vc-frame action write-chars "$(cat "$f")"; fi; rm -f -- "$f"; fi"#;
 #[derive(Debug, Default)]
 pub struct LinePart {
     part: String,
@@ -113,10 +110,6 @@ struct State {
     // Keybinding cache
     cached_keybinds: KeybindsVec,
 
-    // ⌬ Quick cmd chip: the Dispatcher spawn is deferred until a TabUpdate
-    // confirms the Agents tab is the active one. Firing it in the same
-    // click raced tab creation and floated the shell over the wrong tab.
-    pending_dispatcher_spawn: bool,
 }
 
 struct TabRenderData {
@@ -319,18 +312,6 @@ impl State {
             self.active_tab_idx = active_tab_idx;
             self.tabs = tabs;
 
-            // Deferred half of the ⌬ Agents click: the server has now told
-            // us which tab is active. Spawn the Dispatcher only when that
-            // tab is the Agents station — the float lands where it belongs.
-            if self.pending_dispatcher_spawn
-                && self
-                    .tabs
-                    .iter()
-                    .any(|tab| tab.active && tab.name == AGENTS_TAB_NAME)
-            {
-                self.pending_dispatcher_spawn = false;
-                open_dispatcher();
-            }
             should_render
         } else {
             false
@@ -475,27 +456,14 @@ impl State {
             return;
         }
         if self.sentinel_clicked(col, AGENTS_CLICK_SENTINEL) {
-            self.open_agents_station();
+            // Quick cmd floats over the *current* tab — no Agents detour, no
+            // deferred spawn race, no "Process will run…" over the wrong pane.
+            open_quick_cmd();
             return;
         }
         if let Some(tab_idx) = get_tab_to_focus(&self.tab_line, self.active_tab_idx, col) {
             switch_tab_to(tab_idx.try_into().unwrap());
         }
-    }
-
-    /// Click path of the ⌬ Agents chip: land in the Agents station tab
-    /// (creating it on first use) and float the Dispatcher shell over it —
-    /// "klikasz i masz gdzie pisać". The spawn is NOT fired here: tab
-    /// creation and pane creation travel separate server paths, so the
-    /// Dispatcher only opens once [`handle_tab_update`] confirms the Agents
-    /// tab is active. No more first-click float over the wrong tab.
-    fn open_agents_station(&mut self) {
-        if self.tabs.iter().any(|tab| tab.name == AGENTS_TAB_NAME) {
-            go_to_tab_name(AGENTS_TAB_NAME);
-        } else {
-            new_tab(Some(AGENTS_TAB_NAME), None);
-        }
-        self.pending_dispatcher_spawn = true;
     }
 
     fn sentinel_clicked(&self, col: usize, sentinel: usize) -> bool {
@@ -544,9 +512,10 @@ fn composer_coordinates() -> Option<FloatingPaneCoordinates> {
     )
 }
 
-/// The Dispatcher: a named floating login shell — the operator's dispatch
-/// console (vibecrafted CLI is the dispatch language, the pane is the desk).
-fn open_dispatcher() {
+/// Quick cmd: named floating login shell at a fixed upper-center footprint.
+/// vibecrafted CLI is the dispatch language; the pane is the desk. Opens over
+/// the current tab so the operator never loses context.
+fn open_quick_cmd() {
     let command = CommandToRun::new_with_args("sh", vec!["-c", DISPATCHER_COMMAND]);
     if let Some(PaneId::Terminal(terminal_pane_id)) =
         open_command_pane_floating(command, quick_cmd_coordinates(), BTreeMap::new())
@@ -555,7 +524,8 @@ fn open_dispatcher() {
     }
 }
 
-/// Click path of the Composer chip — identical contract to the Alt+e bind.
+/// Click path of the Composer chip — identical contract to Super+e / Alt+e
+/// (and the installed paste-stack-aware `vc-composer.sh` when present).
 fn open_composer() {
     let command = CommandToRun::new_with_args("sh", vec!["-c", COMPOSER_COMMAND]);
     if let Some(PaneId::Terminal(terminal_pane_id)) =

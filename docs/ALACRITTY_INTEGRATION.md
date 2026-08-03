@@ -85,7 +85,7 @@ so no color-font surprises.
   `startup_mode = "Maximized"` + `blur`/`opacity 0.9` + zero padding. The OS
   titlebar dissolves and the compact-bar becomes the de-facto window chrome —
   vc-frame reads as a native app. The traffic-light zone is handled bar-side,
-  not with padding: the operator layouts pass `left_inset "9"` to the
+  not with padding: the operator layouts pass `left_inset "6"` to the
   compact-bar, which starts the bar 9 blank columns in (≈ 65–70px at a 13pt
   monospace) so the brand chip clears the macOS window buttons. Padding would
   shift every row and both edges; the inset costs only the first row's

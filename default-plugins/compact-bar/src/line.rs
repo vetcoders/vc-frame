@@ -5,6 +5,19 @@ use crate::{ARROW_SEPARATOR, LinePart, TabRenderData};
 use zellij_tile::prelude::*;
 use zellij_tile_utils::style;
 
+/// Fixed character-column budgets for the compact-bar (Pensieve Fixed Character
+/// Grid Model). Every zone is either fixed-width or a single controlled flex
+/// (tabs + spacer). Mode switches and metric updates must never shift the bar
+/// by even one cell.
+pub const BRAND_ZONE_COLS: usize = 14;
+pub const MODE_ZONE_COLS: usize = 8;
+/// `✍ Composer` padded to 12 grid cells.
+pub const COMPOSER_CHIP_COLS: usize = 12;
+/// Leading seam + `❯_ Quick cmd` padded to 18 grid cells.
+pub const QUICK_CMD_CHIP_COLS: usize = 18;
+/// Right entry zone total: Composer + Quick cmd (no free-form growth).
+pub const ENTRY_ZONE_COLS: usize = COMPOSER_CHIP_COLS + QUICK_CMD_CHIP_COLS;
+
 pub fn tab_line(
     mode_info: &ModeInfo,
     tab_data: TabRenderData,
@@ -27,6 +40,59 @@ pub struct TabLineConfig {
 
 fn calculate_total_length(parts: &[LinePart]) -> usize {
     parts.iter().map(|p| p.len).sum()
+}
+
+/// Pad or hard-trim `text` so its display width equals `cols` exactly.
+/// Wide EAW glyphs count as 2; padding uses ASCII spaces (width 1).
+pub fn pad_to_cols(text: &str, cols: usize) -> String {
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in text.chars() {
+        let ch_w = ch.to_string().width().max(1);
+        if width + ch_w > cols {
+            break;
+        }
+        out.push(ch);
+        width += ch_w;
+    }
+    while width < cols {
+        out.push(' ');
+        width += 1;
+    }
+    out
+}
+
+/// Mode zone text — always exactly [`MODE_ZONE_COLS`] display columns.
+pub fn format_mode_zone(mode: InputMode) -> String {
+    let (glyph, code) = mode_chip(mode);
+    // Leading seam, glyph, code. Wide glyphs (𝌁/𝌆) sit flush so the budget
+    // still closes at MODE_ZONE_COLS for every mode — no horizontal shift.
+    let raw = format!(" {} {} ", glyph, code);
+    pad_to_cols(&raw, MODE_ZONE_COLS)
+}
+
+/// Brand zone text — always exactly [`BRAND_ZONE_COLS`] display columns.
+pub fn format_brand_zone(brand_text: Option<&str>, brand_text_short: Option<&str>) -> String {
+    let selected = select_brand_text(brand_text, brand_text_short);
+    pad_to_cols(&selected, BRAND_ZONE_COLS)
+}
+
+fn select_brand_text(brand_text: Option<&str>, brand_text_short: Option<&str>) -> String {
+    let default_brand = " 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. ".to_owned();
+    match (brand_text, brand_text_short) {
+        (Some(long_brand), Some(short_brand))
+            if long_brand.width() <= BRAND_ZONE_COLS
+                && long_brand.width() >= short_brand.width() =>
+        {
+            long_brand.to_owned()
+        },
+        (Some(_long_brand), Some(short_brand)) if short_brand.width() <= BRAND_ZONE_COLS => {
+            short_brand.to_owned()
+        },
+        (Some(long_brand), _) if long_brand.width() <= BRAND_ZONE_COLS => long_brand.to_owned(),
+        (Some(long_brand), _) => long_brand.to_owned(), // pad_to_cols will trim
+        _ => default_brand,
+    }
 }
 
 struct TabLinePopulator {
@@ -254,17 +320,12 @@ enum TabAction {
 
 struct TabLinePrefixBuilder {
     palette: Styling,
-    capabilities: PluginCapabilities,
     cols: usize,
 }
 
 impl TabLinePrefixBuilder {
-    fn new(palette: Styling, capabilities: PluginCapabilities, cols: usize) -> Self {
-        Self {
-            palette,
-            capabilities,
-            cols,
-        }
+    fn new(palette: Styling, cols: usize) -> Self {
+        Self { palette, cols }
     }
 
     fn build(
@@ -292,76 +353,25 @@ impl TabLinePrefixBuilder {
         brand_text: Option<&str>,
         brand_text_short: Option<&str>,
     ) -> LinePart {
-        let prefix_text = self.select_brand_text(brand_text, brand_text_short);
-        let is_branded = brand_text.is_some();
+        // Fixed BRAND_ZONE_COLS — brand text never moves the mode chip.
+        let prefix_text = format_brand_zone(brand_text, brand_text_short);
         // The brand sits bare on the bar ground (operator call 2026-07-30):
         // the inverted chip belongs to the MODE, not the wordmark.
         let colors = self.get_text_colors();
 
-        if !is_branded {
-            return LinePart {
-                part: style!(colors.text, colors.background)
-                    .bold()
-                    .paint(prefix_text.clone())
-                    .to_string(),
-                len: prefix_text.width(),
-                tab_index: None,
-            };
-        }
-
-        let separator = tab_separator(self.capabilities);
-        let prefix_len = prefix_text.width() + (separator.width() * 2);
-        let styled_part = if separator.is_empty() {
-            style!(colors.text, colors.background)
+        LinePart {
+            part: style!(colors.text, colors.background)
                 .bold()
                 .paint(prefix_text.clone())
-                .to_string()
-        } else {
-            let styled_parts = [
-                style!(self.palette.text_unselected.background, colors.background).paint(separator),
-                style!(colors.text, colors.background)
-                    .bold()
-                    .paint(prefix_text.clone()),
-                style!(colors.background, self.palette.text_unselected.background).paint(separator),
-            ];
-            AnsiStrings(&styled_parts).to_string()
-        };
-
-        LinePart {
-            part: styled_part,
-            len: prefix_len,
+                .to_string(),
+            len: BRAND_ZONE_COLS,
             tab_index: None,
         }
     }
 
-    fn select_brand_text(
-        &self,
-        brand_text: Option<&str>,
-        brand_text_short: Option<&str>,
-    ) -> String {
-        let default_brand = " 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. ".to_owned();
-        match (brand_text, brand_text_short) {
-            (Some(long_brand), Some(short_brand))
-                if long_brand.width() + 2 <= self.cols
-                    && long_brand.width() >= short_brand.width() =>
-            {
-                long_brand.to_owned()
-            },
-            (Some(_long_brand), Some(short_brand)) if short_brand.width() + 2 <= self.cols => {
-                short_brand.to_owned()
-            },
-            (Some(long_brand), _) if long_brand.width() + 2 <= self.cols => long_brand.to_owned(),
-            _ => default_brand,
-        }
-    }
-
-    /// Mode chip: one glyph + a three-letter code, the operator-tuned set
-    /// (2026-07-30). `▷ NRM` stays quiet, `⊝ LCK` inverts on the accent,
-    /// every armed mode inverts on the ribbon accent. Glyphs are plain
-    /// text-presentation Unicode — no emoji, no private-use — and lengths
-    /// are measured with `.width()` so the click map never drifts.
+    /// Mode chip: glyph + short code, always exactly [`MODE_ZONE_COLS`]
+    /// columns so mode switches never shift tabs or entry chips.
     fn create_mode_part(&self, mode: InputMode, used_len: usize) -> Option<LinePart> {
-        let (glyph, code) = mode_chip(mode);
         // The mode chip carries the bar's inversion (operator call
         // 2026-07-30): always inverse video, with the ground telling the
         // state apart — neutral base for Normal, the emphasis_1 accent for
@@ -380,8 +390,8 @@ impl TabLinePrefixBuilder {
                 self.palette.ribbon_selected.background
             ),
         };
-        let mode_text = format!(" {} {} ", glyph, code);
-        let mode_len = mode_text.width();
+        let mode_text = format_mode_zone(mode);
+        let mode_len = MODE_ZONE_COLS;
 
         if self.cols.saturating_sub(used_len) >= mode_len {
             Some(LinePart {
@@ -425,41 +435,47 @@ impl RightSideElementsBuilder {
         elements
     }
 
-    /// The Quick cmd chip — honest about what the click gives: a floating
-    /// dispatch shell to type into, not an agents dashboard (operator call
-    /// 2026-07-31: "to tak naprawdę Quick command line"). ⌬ (U+232C BENZENE
-    /// RING) is EAW-narrow, text-presentation only. The fleet's LIVE count
-    /// lives on the bottom status-bar now — the bar's right side is entry
-    /// points only, statuses belong below.
+    /// The Quick cmd chip — floating dispatch shell to type into, not an
+    /// agents dashboard (operator call 2026-07-31). Fixed
+    /// [`QUICK_CMD_CHIP_COLS`] so the entry zone never breathes. LIVE pulse
+    /// lives on the bottom status-bar.
     fn create_quick_cmd_chip(&self) -> LinePart {
-        let plain = " · ❯_ Quick cmd ";
+        let plain = pad_to_cols(" · ❯_ Quick cmd", QUICK_CMD_CHIP_COLS);
+        // Style the visible label; trailing pad spaces inherit the bar ground.
+        let label = "❯_ Quick cmd";
+        let seam = " · ";
+        let pad_tail = " ".repeat(plain.width().saturating_sub(seam.width() + label.width()));
         let styled_parts = [
             style!(
                 self.palette.text_unselected.emphasis_2,
                 self.palette.text_unselected.background
             )
-            .paint(" · "),
+            .paint(seam),
             style!(
                 self.palette.text_unselected.base,
                 self.palette.text_unselected.background
             )
             .bold()
-            .paint("❯_ Quick cmd "),
+            .paint(label),
+            style!(
+                self.palette.text_unselected.base,
+                self.palette.text_unselected.background
+            )
+            .paint(pad_tail),
         ];
 
         LinePart {
             part: AnsiStrings(&styled_parts).to_string(),
-            len: plain.width(),
+            len: QUICK_CMD_CHIP_COLS,
             tab_index: Some(crate::AGENTS_CLICK_SENTINEL),
         }
     }
 
     /// Always-visible Composer entry point, clickable via the sentinel
-    /// tab_index. ✍︎ (U+270D + VS15 so no font promotes it to emoji) says
-    /// "drafting" without burning columns on the keycap — onboarding and
-    /// the tooltip teach Alt+e.
+    /// tab_index. Fixed [`COMPOSER_CHIP_COLS`]. ✍ (text-presentation) says
+    /// "drafting" — onboarding and the tooltip teach Cmd+E / Alt+e.
     fn create_composer_chip(&self) -> LinePart {
-        let text = "✍︎ Composer";
+        let text = pad_to_cols("✍ Composer", COMPOSER_CHIP_COLS);
         let styled = style!(
             self.palette.text_unselected.base,
             self.palette.text_unselected.background
@@ -469,7 +485,7 @@ impl RightSideElementsBuilder {
 
         LinePart {
             part: styled.to_string(),
-            len: text.width(),
+            len: COMPOSER_CHIP_COLS,
             tab_index: Some(crate::COMPOSER_CLICK_SENTINEL),
         }
     }
@@ -518,7 +534,7 @@ impl TabLineBuilder {
         let (tabs_before_active, active_tab, tabs_after_active) =
             self.split_tabs(all_tabs, active_tab_index);
 
-        let prefix_builder = TabLinePrefixBuilder::new(self.palette, self.capabilities, self.cols);
+        let prefix_builder = TabLinePrefixBuilder::new(self.palette, self.cols);
         let mut prefix = prefix_builder.build(
             self.config.mode,
             self.config.brand_text.as_deref(),
@@ -628,25 +644,102 @@ pub fn tab_separator(capabilities: PluginCapabilities) -> &'static str {
     }
 }
 
-/// The operator-tuned mode chip set (glyph, three-letter code) — one visual
-/// language for all fourteen input modes. EnterSearch shares FND with Search
-/// on purpose: the extra ↵ marks the typing phase, a separate code would be
-/// an artificial state.
+/// The operator-tuned mode chip set (glyph, short code) — one visual language
+/// for all fourteen input modes. Glyphs are plain text-presentation Unicode
+/// (no emoji VS16). EnterSearch shares F with Search on purpose: the extra ↵
+/// marks the typing phase. Wide EAW glyphs (𝌁/𝌆) stay; the zone budget in
+/// [`format_mode_zone`] absorbs them so the rest of the bar never shifts.
 pub fn mode_chip(mode: InputMode) -> (&'static str, &'static str) {
     match mode {
-        InputMode::Normal => ("│ ▷", "N"),
-        InputMode::Locked => ("│ ⊝", "L"),
-        InputMode::Pane => ("│ ◫", "P"),
-        InputMode::Tab => ("│𝌁", "T"),
-        InputMode::Resize => ("│ ⤢", "R"),
-        InputMode::Move => ("│ ⟷", "M"),
-        InputMode::Scroll => ("│ ⇅", "S"),
-        InputMode::Search => ("│ ⌕", "F"),
-        InputMode::EnterSearch => ("│ ↵", "F"),
-        InputMode::RenameTab => ("│ ✎", "RT"),
-        InputMode::RenamePane => ("│ ✎", "RP"),
-        InputMode::Session => ("│𝌆", "S"),
-        InputMode::Prompt => ("│ ❯", "P"),
-        InputMode::Tmux => ("│ ⓣ", "T"),
+        InputMode::Normal => ("▷", "N"),
+        InputMode::Locked => ("⊝", "L"),
+        InputMode::Pane => ("◫", "P"),
+        InputMode::Tab => ("𝌁", "T"),
+        InputMode::Resize => ("⤢", "R"),
+        InputMode::Move => ("⟷", "M"),
+        InputMode::Scroll => ("⇅", "S"),
+        InputMode::Search => ("⌕", "F"),
+        InputMode::EnterSearch => ("↵", "F"),
+        InputMode::RenameTab => ("✎", "RT"),
+        InputMode::RenamePane => ("✎", "RP"),
+        InputMode::Session => ("𝌆", "S"),
+        InputMode::Prompt => ("❯", "P"),
+        InputMode::Tmux => ("ⓣ", "T"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL_MODES: [InputMode; 14] = [
+        InputMode::Normal,
+        InputMode::Locked,
+        InputMode::Pane,
+        InputMode::Tab,
+        InputMode::Resize,
+        InputMode::Move,
+        InputMode::Scroll,
+        InputMode::Search,
+        InputMode::EnterSearch,
+        InputMode::RenameTab,
+        InputMode::RenamePane,
+        InputMode::Session,
+        InputMode::Prompt,
+        InputMode::Tmux,
+    ];
+
+    #[test]
+    fn mode_zone_is_fixed_width_for_every_mode() {
+        let widths: Vec<usize> = ALL_MODES
+            .iter()
+            .map(|m| format_mode_zone(*m).width())
+            .collect();
+        for (mode, w) in ALL_MODES.iter().zip(widths.iter()) {
+            assert_eq!(
+                *w, MODE_ZONE_COLS,
+                "mode {:?} zone width {} != {}",
+                mode, w, MODE_ZONE_COLS
+            );
+        }
+        // Stronger contract: every mode produces the same width (zero jitter).
+        assert!(widths.windows(2).all(|w| w[0] == w[1]));
+    }
+
+    #[test]
+    fn brand_zone_is_fixed_width() {
+        assert_eq!(format_brand_zone(None, None).width(), BRAND_ZONE_COLS);
+        assert_eq!(
+            format_brand_zone(Some(" 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. "), None).width(),
+            BRAND_ZONE_COLS
+        );
+        assert_eq!(
+            format_brand_zone(Some("SHORT"), Some("S")).width(),
+            BRAND_ZONE_COLS
+        );
+        // Over-long brand is hard-trimmed, never expands the zone.
+        assert_eq!(
+            format_brand_zone(Some("XXXXXXXXXXXXXXXXXXXX"), None).width(),
+            BRAND_ZONE_COLS
+        );
+    }
+
+    #[test]
+    fn entry_chips_sum_to_fixed_entry_zone() {
+        assert_eq!(COMPOSER_CHIP_COLS + QUICK_CMD_CHIP_COLS, ENTRY_ZONE_COLS);
+        assert_eq!(pad_to_cols("✍ Composer", COMPOSER_CHIP_COLS).width(), COMPOSER_CHIP_COLS);
+        assert_eq!(
+            pad_to_cols(" · ❯_ Quick cmd", QUICK_CMD_CHIP_COLS).width(),
+            QUICK_CMD_CHIP_COLS
+        );
+    }
+
+    #[test]
+    fn pad_to_cols_handles_wide_eaw_glyphs() {
+        // 𝌆 is EAW wide (2). Budget of 4 must absorb it without overshoot.
+        let s = pad_to_cols("𝌆", 4);
+        assert_eq!(s.width(), 4);
+        let s2 = pad_to_cols("│𝌆", 3);
+        assert_eq!(s2.width(), 3);
     }
 }

@@ -575,7 +575,9 @@ impl State {
         .bold();
 
         // LIVE = fleet pulse (agent process tabs across sessions).
-        let live_text = format!("LIVE {}", self.live_count);
+        // Two-digit field so LIVE 9 → LIVE 12 never shifts the cockpit.
+        let live_shown = self.live_count.min(99);
+        let live_text = format!("LIVE {:2}", live_shown);
         let live_part = if self.live_count > 0 {
             hot.paint(live_text.clone()).to_string()
         } else {
@@ -725,12 +727,15 @@ fn parse_resource_sample(stdout: &[u8]) -> Option<String> {
         return None;
     }
     const KIB_PER_GIB: f64 = 1024.0 * 1024.0;
+    // Fixed-width fields so the right-edge segment never jitters when a
+    // reading rolls from 9 → 100 or 4.2G → 44.2G (Pensieve Fixed Character
+    // Grid Model). Widths: CPU 3, MEM used 4.1, total 3, DISK 3.
     Some(format!(
-        "CPU {:.0}% | MEM {:.1}/{:.0}G | DISK {:.0}G",
-        cpu,
-        used_kib / KIB_PER_GIB,
-        total_kib / KIB_PER_GIB,
-        disk_avail_kib / KIB_PER_GIB,
+        "CPU {:3.0}% | MEM {:4.1}/{:3.0}G | DISK {:3.0}G",
+        cpu.min(999.0),
+        (used_kib / KIB_PER_GIB).min(999.9),
+        (total_kib / KIB_PER_GIB).min(999.0),
+        (disk_avail_kib / KIB_PER_GIB).min(999.0),
     ))
 }
 
@@ -999,36 +1004,51 @@ pub mod tests {
     #[test]
     fn resource_sample_formats_cpu_memory_and_disk() {
         // 342% CPU, 8 GiB used of 64 GiB, 13 GiB free on / (KiB inputs).
+        // Fixed-width fields (CPU 3, MEM 4.1/3, DISK 3) — no jitter on roll.
         let sample = parse_resource_sample(b"342 8388608 67108864 13631488");
-        assert_eq!(sample.as_deref(), Some("CPU 342% | MEM 8.0/64G | DISK 13G"));
+        assert_eq!(
+            sample.as_deref(),
+            Some("CPU 342% | MEM  8.0/ 64G | DISK  13G")
+        );
+        // Single-digit CPU still occupies three columns.
+        let small = parse_resource_sample(b"9 1048576 2097152 1048576");
+        assert_eq!(
+            small.as_deref(),
+            Some("CPU   9% | MEM  1.0/  2G | DISK   1G")
+        );
+        assert_eq!(
+            sample.as_ref().unwrap().width(),
+            small.as_ref().unwrap().width(),
+            "metric line width must be stable across magnitudes"
+        );
     }
 
     #[test]
     fn status_ladder_sheds_cockpit_fields_before_the_pulse() {
         let state = State {
             live_count: 3,
-            resource_line: Some("CPU 342% | MEM 8.0/64G | DISK 13G".to_owned()),
+            resource_line: Some("CPU 342% | MEM  8.0/ 64G | DISK  13G".to_owned()),
             ..Default::default()
         };
 
-        // Wide bar: the full segment fits.
+        // Wide bar: the full segment fits. LIVE uses a 2-digit field.
         let full = state.right_status_segment(None, 200);
         assert_eq!(
             full.len,
-            "LIVE 3 | CPU 342% | MEM 8.0/64G | DISK 13G | HEALTH ok".width()
+            "LIVE  3 | CPU 342% | MEM  8.0/ 64G | DISK  13G | HEALTH ok".width()
         );
         // Narrow: DISK is shed first...
-        let no_disk = state.right_status_segment(None, 45);
+        let no_disk = state.right_status_segment(None, 50);
         assert_eq!(
             no_disk.len,
-            "LIVE 3 | CPU 342% | MEM 8.0/64G | HEALTH ok".width()
+            "LIVE  3 | CPU 342% | MEM  8.0/ 64G | HEALTH ok".width()
         );
         // ...then MEM...
-        let no_mem = state.right_status_segment(None, 30);
-        assert_eq!(no_mem.len, "LIVE 3 | CPU 342% | HEALTH ok".width());
+        let no_mem = state.right_status_segment(None, 32);
+        assert_eq!(no_mem.len, "LIVE  3 | CPU 342% | HEALTH ok".width());
         // ...down to the bare pulse...
         let bare = state.right_status_segment(None, 8);
-        assert_eq!(bare.len, "LIVE 3".width());
+        assert_eq!(bare.len, "LIVE  3".width());
         // ...and an impossible budget yields empty, never an overflow.
         assert_eq!(state.right_status_segment(None, 3).len, 0);
     }
@@ -1039,17 +1059,34 @@ pub mod tests {
         // diagnosis: the sample exists, so HEALTH stays ok.
         let mut state = State {
             live_count: 0,
-            resource_line: Some("CPU 10% | MEM 1.0/2G | DISK 1G".to_owned()),
+            resource_line: Some("CPU  10% | MEM  1.0/  2G | DISK   1G".to_owned()),
             ..Default::default()
         };
-        let narrow = state.right_status_segment(None, "LIVE 0 | HEALTH ok".width());
-        assert_eq!(narrow.len, "LIVE 0 | HEALTH ok".width());
+        let narrow = state.right_status_segment(None, "LIVE  0 | HEALTH ok".width());
+        assert_eq!(narrow.len, "LIVE  0 | HEALTH ok".width());
         assert!(narrow.part.contains("HEALTH ok"));
 
         // No sample at all: the verdict is an honest unknown.
         state.resource_line = None;
         let unknown = state.right_status_segment(None, 200);
         assert!(unknown.part.contains("HEALTH ?"));
+    }
+
+    #[test]
+    fn live_pulse_width_is_stable_across_counts() {
+        let low = State {
+            live_count: 3,
+            ..Default::default()
+        };
+        let high = State {
+            live_count: 12,
+            ..Default::default()
+        };
+        assert_eq!(
+            low.right_status_segment(None, 200).len,
+            high.right_status_segment(None, 200).len,
+            "LIVE field must not shift cockpit on count roll"
+        );
     }
 
     #[test]
