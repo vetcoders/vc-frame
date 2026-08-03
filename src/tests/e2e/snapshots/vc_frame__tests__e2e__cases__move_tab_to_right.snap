@@ -2,7 +2,7 @@
 source: src/tests/e2e/cases.rs
 expression: account_for_races_in_snapshot(last_snapshot)
 ---
- 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. (e2e-test)  Tab #1  Tab #3  Tab #2 
+ 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. (e2e-test)   ○ Tab #1    ○ Tab #3    ◉ Tab #2                                                             
 ┌ Pane #1 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │$ Tab #2 content█                                                                                                     │
 │                                                                                                                      │
@@ -25,4 +25,4 @@ expression: account_for_races_in_snapshot(last_snapshot)
 │                                                                                                                      │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
- Ctrl + <g> LOCK  <p> PANE  <t> TAB  <n> RESIZE  <h> MOVE  <s> SEARCH  <o> SESSION  <q> QUIT        ...
+                            Alt +  <n> New Pane  <f> Floating 
