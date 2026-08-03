@@ -2450,7 +2450,7 @@ pub fn send_blocking_command_through_the_cli() {
                 instruction: |remote_terminal: RemoteTerminal| -> bool {
                     let mut step_is_complete = false;
                     // The floating pane should appear with the running command
-                    if remote_terminal.snapshot_contains("PIN [ ]") {
+                    if remote_terminal.snapshot_contains("PIN ○") {
                         std::thread::sleep(std::time::Duration::from_millis(2000)); // wait for
                         // command to
                         // end
@@ -2467,7 +2467,7 @@ pub fn send_blocking_command_through_the_cli() {
                     // Wait until the floating pane is gone AND the shell prompt is back before
                     // asking for $?, otherwise we can race the blocking CLI process itself
                     // returning to the shell.
-                    if !remote_terminal.snapshot_contains("PIN [ ]")
+                    if !remote_terminal.snapshot_contains("PIN ○")
                         && remote_terminal.snapshot_contains("$ \u{2588}")
                         && remote_terminal.status_bar_appears()
                     {
@@ -2592,7 +2592,7 @@ pub fn pin_floating_panes() {
                 name: "Pin floating pane",
                 instruction: |mut remote_terminal: RemoteTerminal| -> bool {
                     let mut step_is_complete = false;
-                    if remote_terminal.snapshot_contains("PIN [ ]") {
+                    if remote_terminal.snapshot_contains("PIN ○") {
                         remote_terminal.send_key(&sgr_mouse_report(Position::new(8, 87), 0));
                         step_is_complete = true;
                     }
@@ -2603,7 +2603,7 @@ pub fn pin_floating_panes() {
                 name: "Focus underlying pane",
                 instruction: |mut remote_terminal: RemoteTerminal| -> bool {
                     let mut step_is_complete = false;
-                    if remote_terminal.snapshot_contains("PIN [+]") {
+                    if remote_terminal.snapshot_contains("PIN ◉") {
                         remote_terminal.send_key(&PANE_MODE);
                         std::thread::sleep(std::time::Duration::from_millis(100));
                         remote_terminal.send_key(&TOGGLE_FLOATING_PANES);

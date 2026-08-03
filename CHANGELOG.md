@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
+* fix(chrome): floating PIN uses fisheye ○/◉ (not `[ ]`/`[+]`); Composer vim profile loads via single `-u` vimrc (fixes "Too many -c command arguments")
 * fix(composer): wrap OFF by default in the floating atelier (`set nowrap`, `textwidth=0`, sidescroll); F2 / `\w` toggles wrap; `VC_COMPOSER_WRAP=1` starts with wrap on — ends chrome bleeding into the draft buffer
 * feat(chrome): Uniform Mode Chip Separator Rule — every mode chip ends with `│` on a fixed 8-col budget (`▷ N │`, `⊝ L │`, `✎ RNT │`, …) so the bar aligns with the pane frame's `├`
 * feat(chrome): Quick cmd is a non-ephemeral mini console (`❯_ Quick cmd` + `vc-quick-cmd.sh` host@cwd banner + login shell); Composer header is `✍ Composer · ⧉ Paste stack`; Super+e is the sole Composer key (Alt+e free for Polish `ę`)
