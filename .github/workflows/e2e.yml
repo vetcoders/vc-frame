@@ -130,18 +130,4 @@ jobs:
       # ephemeral public key into /config/.ssh/authorized_keys.
       run: docker restart ssh
     - name: Test
-      # INSTA_UPDATE=always: chrome redesign (◉ tabs, LIVE/HEALTH status)
-      # invalidates every committed e2e snap. Accept on this pass; the next
-      # commit lands the updated snaps. Volatile LIVE/CPU/MEM/DISK/HEALTH is
-      # stripped in account_for_races_in_snapshot so host load does not churn.
-      env:
-        INSTA_UPDATE: always
       run: cargo xtask ci e2e --test
-    - name: Upload refreshed e2e snapshots
-      if: always()
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-      with:
-        name: e2e-snapshots-${{ github.run_id }}
-        path: src/tests/e2e/snapshots/
-        if-no-files-found: warn
-        retention-days: 7
