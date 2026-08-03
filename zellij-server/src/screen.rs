@@ -2028,10 +2028,17 @@ const STARTUP_SENTINEL_TOKEN: u32 = 0;
 /// client always replies first; only the old-client and
 /// network-pathological cases ever see this fire.
 const SERVER_FORWARD_TIMEOUT_MS: u64 = 1000;
+// Production: cold hosted CI + first-load wasm plugin workers can stall the
+// plugin bus past 2s; triage-runtime-e2e then fails with "ACK timeout" on
+// ordinary terminal-only new-tab layouts. Tests keep the tight budget so
+// unit suites still fail fast on real hangs.
 #[cfg(not(test))]
-const LAYOUT_COMMIT_ACK_TIMEOUT: Duration = Duration::from_secs(2);
+const LAYOUT_COMMIT_ACK_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(test)]
 const LAYOUT_COMMIT_ACK_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(not(test))]
+const LAYOUT_COMMIT_ACK_ATTEMPTS: usize = 3;
+#[cfg(test)]
 const LAYOUT_COMMIT_ACK_ATTEMPTS: usize = 2;
 #[cfg(not(test))]
 const LAYOUT_CLEANUP_ACK_TIMEOUT: Duration = Duration::from_secs(2);
