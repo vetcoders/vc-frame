@@ -38,30 +38,26 @@ configuration.
 LAYOUTS
 =======
 
-Layouts are yaml files which vc-frame can load on startup when _--layout_ flag is
-provided.
-By default vc-frame will load a layout called `default.yaml`,
-but this can be changed by using the `default_layout: [LAYOUT_NAME]` configuration option.
+Layouts are **KDL** files which vc-frame can load on startup when the _--layout_
+flag is provided. YAML layout/config conversion (`convert-config`,
+`convert-layout`, `convert-theme`) has been removed — KDL is the only supported
+configuration format.
+
+By default vc-frame will load a layout called `default` (file `default.kdl`),
+but this can be changed with the `default_layout "name"` configuration option.
 
 
 For example a file like this:
 ```
----
-direction: Vertical
-parts:
-    - direction: Horizontal
-      split_size:
-        Percent: 50
-      parts:
-        - direction: Vertical
-          split_size:
-            Percent: 50
-        - direction: Vertical
-          split_size:
-            Percent: 50
-    - direction: Horizontal
-      split_size:
-        Percent: 50
+layout {
+    pane split_direction="vertical" {
+        pane
+        pane split_direction="horizontal" {
+            pane
+            pane
+        }
+    }
+}
 ```
 
 will tell vc-frame to create this layout:
@@ -76,21 +72,20 @@ will tell vc-frame to create this layout:
 CREATING LAYOUTS
 ----------------
 
-A layout file is a nested tree structure. Each node describes either a pane
-(leaf), or a space in which its parts (children) will be created.
+A layout file is a nested tree of `pane` nodes. Each node describes either a
+terminal pane (leaf), a split container, or a plugin pane.
 
-Each node has following fields:
-* __direction: <Horizontal / Vertical\>__ - node's children will be created by a
-  split in given direction.
-* **split_size:** - this indicates either a percentage of the node's parent's
-  space or a fixed size of columns/rows from its parent's space.
-    * __Percent: <1-100\>__
-    * __Fixed: <lines_number/columns_number\>__
-* __plugin: /path/to/plugin.wasm__ - optional path to a compiled vc-frame plugin.
-  If indicated loads a plugin into the created space. For more information see
-  PLUGINS section.
-* __default_fg: \<color\>__ - set the default foreground color for a pane (e.g. `"#00e000"`).
-* __default_bg: \<color\>__ - set the default background color for a pane (e.g. `"#001a3a"`).
+Common attributes:
+* __split_direction="horizontal|vertical"__ — how children are laid out.
+* __size=\<n\>__ — fixed size in rows/columns, or a share of the parent.
+* __plugin location="…"__ — load a compiled vc-frame plugin into the pane
+  (see PLUGINS). Built-in plugins use the `vc-frame:` / short-name form.
+* __command="…" / args "…"__ — run a command in the pane instead of a shell.
+* __borderless true|false__ — hide pane frames for chrome rails.
+
+Full layout syntax is documented upstream at
+https://zellij.dev/documentation/layouts.html (KDL) and in the in-repo layout
+fixtures under `zellij-utils/assets/layouts/`.
 
 KEYBINDINGS
 ===========
@@ -102,15 +97,16 @@ _keybinds_ section of configuration. For example, to introduce a keybinding that
 will create a new tab and go to tab 1 after pressing 'c' one can write:
 
 ```
-keybinds:
-    normal:
-        - action: [ NewTab, GoToTab: 1,]
-          key: [ Char: 'c',]
+keybinds {
+    normal {
+        bind "c" { NewTab; GoToTab 1; }
+    }
+}
 ```
 
-where "normal" stands for a mode name (see MODES section), "action" part
-specifies the actions to be executed by vc-frame (see ACTIONS section) and "key"
-is used to list  keys or key combinations bound to given actions (see KEYS). 
+where "normal" stands for a mode name (see MODES section), the bind body lists
+the actions to be executed by vc-frame (see ACTIONS section), and the bind key
+is the key or key combination. 
 
 The default keybinds can be unbound either for a specific mode, or for every mode.
 It supports either a list of `keybinds`, or a bool indicating that every keybind
