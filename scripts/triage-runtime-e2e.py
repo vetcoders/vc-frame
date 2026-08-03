@@ -1434,15 +1434,23 @@ def record_negative_probe(
         f"{scenario} snapshots omitted runtime state",
     )
     # Compare title-stripped views so shell OSC renames are not blamed on the
-    # probe under test (see wait_for_stable_tab_state call sites).
-    before_cmp = _strip_volatile_tab_titles(before_state)
-    after_cmp = _strip_volatile_tab_titles(after_state)
+    # probe under test (see wait_for_stable_tab_state call sites). Digests and
+    # other top-level snapshot fields still participate in the full equality
+    # path so unit contracts that flip only the digest keep failing closed.
+    before_cmp_state = _strip_volatile_tab_titles(before_state)
+    after_cmp_state = _strip_volatile_tab_titles(after_state)
+    before_cmp = {**before, "state": before_cmp_state}
+    after_cmp = {**after, "state": after_cmp_state}
     unchanged = before_cmp == after_cmp
     before_non_durable = {
-        key: value for key, value in before_cmp.items() if key != "control_plane"
+        key: value
+        for key, value in before_cmp_state.items()
+        if key != "control_plane"
     }
     after_non_durable = {
-        key: value for key, value in after_cmp.items() if key != "control_plane"
+        key: value
+        for key, value in after_cmp_state.items()
+        if key != "control_plane"
     }
     non_durable_unchanged = before_non_durable == after_non_durable
     state_contract_satisfied = (
