@@ -60,7 +60,7 @@ const DISPATCHER_COMMAND: &str = r#"exec "${SHELL:-/bin/zsh}" -l"#;
 /// in $VC_COMPOSER (or $EDITOR), land the text in the underlying pane
 /// unexecuted, clean up. VC_COMPOSER expands unquoted on purpose — it is a
 /// command line ("open -W -n -a Pensieve", "pensieve --wait"), not a path.
-const COMPOSER_COMMAND: &str = r#"f=$(mktemp "${TMPDIR:-/tmp}/vc-composer.XXXXXX") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} "$f"; if [ -s "$f" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars "$(cat "$f")"; fi; rm -f -- "$f""#;
+const COMPOSER_COMMAND: &str = r#"if [ -x "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh" ]; then "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh"; else f=$(mktemp "${TMPDIR:-/tmp}/vc-composer.XXXXXX") || exit 1; ${VC_COMPOSER:-vim -c 'set number' -c 'set laststatus=0'} "$f"; if [ -s "$f" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars "$(cat "$f")"; fi; rm -f -- "$f"; fi"#;
 #[derive(Debug, Default)]
 pub struct LinePart {
     part: String,

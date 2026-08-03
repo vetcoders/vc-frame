@@ -432,7 +432,7 @@ impl RightSideElementsBuilder {
     /// lives on the bottom status-bar now — the bar's right side is entry
     /// points only, statuses belong below.
     fn create_quick_cmd_chip(&self) -> LinePart {
-        let plain = " · ⌬ Quick cmd ";
+        let plain = " · ❯_ Quick cmd ";
         let styled_parts = [
             style!(
                 self.palette.text_unselected.emphasis_2,
@@ -444,7 +444,7 @@ impl RightSideElementsBuilder {
                 self.palette.text_unselected.background
             )
             .bold()
-            .paint("⌬ Quick cmd "),
+            .paint("❯_ Quick cmd "),
         ];
 
         LinePart {
@@ -634,19 +634,19 @@ pub fn tab_separator(capabilities: PluginCapabilities) -> &'static str {
 /// an artificial state.
 pub fn mode_chip(mode: InputMode) -> (&'static str, &'static str) {
     match mode {
-        InputMode::Normal => ("▷", "NRM"),
-        InputMode::Locked => ("⊝", "LCK"),
-        InputMode::Pane => ("◫", "PAN"),
-        InputMode::Tab => ("𝌁", "TAB"),
-        InputMode::Resize => ("⿺", "RES"),
-        InputMode::Move => ("⿻", "MOV"),
-        InputMode::Scroll => ("↕", "SCR"),
-        InputMode::Search => ("⌕", "FND"),
-        InputMode::EnterSearch => ("⌕↵", "FND"),
-        InputMode::RenameTab => ("✎", "RNT"),
-        InputMode::RenamePane => ("✎", "RNP"),
-        InputMode::Session => ("𝌆", "SES"),
-        InputMode::Prompt => ("⟩", "PMT"),
-        InputMode::Tmux => ("ⓣ", "TMX"),
+        InputMode::Normal => ("▷", "N │"),
+        InputMode::Locked => ("⊝", "L │"),
+        InputMode::Pane => ("◫", "P │"),
+        InputMode::Tab => ("𝌁", "T │"),
+        InputMode::Resize => ("⤢", "R │"),
+        InputMode::Move => ("⟷", "M │"),
+        InputMode::Scroll => ("⇅", "S │"),
+        InputMode::Search => ("⌕", "F │"),
+        InputMode::EnterSearch => ("↵", "F │"),
+        InputMode::RenameTab => ("✎", "RNT │"),
+        InputMode::RenamePane => ("✎", "RNP │"),
+        InputMode::Session => ("𝌆", "S │"),
+        InputMode::Prompt => ("❯", "P │"),
+        InputMode::Tmux => ("ⓣ", "T │"),
     }
 }
