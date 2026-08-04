@@ -752,7 +752,10 @@ mod tests {
     #[test]
     fn entry_chips_sum_to_fixed_entry_zone() {
         assert_eq!(COMPOSER_CHIP_COLS + QUICK_CMD_CHIP_COLS, ENTRY_ZONE_COLS);
-        assert_eq!(pad_to_cols("✍ Composer", COMPOSER_CHIP_COLS).width(), COMPOSER_CHIP_COLS);
+        assert_eq!(
+            pad_to_cols("✍ Composer", COMPOSER_CHIP_COLS).width(),
+            COMPOSER_CHIP_COLS
+        );
         assert_eq!(
             pad_to_cols(" · ❯_ Quick cmd", QUICK_CMD_CHIP_COLS).width(),
             QUICK_CMD_CHIP_COLS

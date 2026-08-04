@@ -106,7 +106,6 @@ struct State {
 
     // Keybinding cache
     cached_keybinds: KeybindsVec,
-
 }
 
 struct TabRenderData {
