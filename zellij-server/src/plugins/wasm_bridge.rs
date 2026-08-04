@@ -1,5 +1,6 @@
 use super::{
     LayoutPluginReceipt, LayoutPluginResolution, PinnedExecutor, PluginId, PluginInstruction,
+    PluginPaneId,
 };
 use crate::global_async_runtime::get_tokio_runtime;
 use crate::plugins::pipes::{
@@ -70,6 +71,13 @@ fn make_plugin_url_path_safe(url: String) -> String {
 #[cfg(not(windows))]
 fn make_plugin_url_path_safe(url: String) -> String {
     url
+}
+
+fn is_session_manager_singleton(run_plugin: &RunPlugin) -> bool {
+    matches!(
+        run_plugin.location.to_string().as_str(),
+        "session-manager" | "zellij:session-manager" | "vc-frame:session-manager"
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -631,10 +639,19 @@ impl LayoutPluginActivationGate {
 
 struct LayoutPluginReservation {
     plugins: Vec<ReservedLayoutPlugin>,
+    pane_bindings: Vec<PluginPaneId>,
+    session_manager_projector_pane_ids: Vec<PluginId>,
     state: LayoutPluginTransactionState,
     cancellation: CancellationToken,
     tracker: Arc<LayoutPluginActivationTracker>,
     activation_gate: Arc<LayoutPluginActivationGate>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SingletonAuthority {
+    runtime_plugin_id: PluginId,
+    projector_count: usize,
+    reserved_by: LayoutTransactionId,
 }
 
 struct LayoutPluginCleanupDebt {
@@ -687,6 +704,8 @@ pub struct WasmBridge {
     pub last_session_save_time: Arc<Mutex<Option<u64>>>, // milliseconds since UNIX epoch
     layout_plugin_reservations: HashMap<LayoutTransactionId, LayoutPluginReservation>,
     layout_plugin_owners: HashMap<PluginId, LayoutTransactionId>,
+    session_manager_authority: Option<SingletonAuthority>,
+    session_manager_projectors: HashMap<PluginId, PluginId>,
     layout_plugin_receipts:
         BTreeMap<(LayoutTransactionId, LayoutPluginResolutionKind), LayoutPluginReceipt>,
     layout_plugin_cleanup_debts: HashMap<LayoutTransactionId, LayoutPluginCleanupDebt>,
@@ -763,6 +782,8 @@ impl WasmBridge {
             last_session_save_time: Arc::new(Mutex::new(None)),
             layout_plugin_reservations: HashMap::new(),
             layout_plugin_owners: HashMap::new(),
+            session_manager_authority: None,
+            session_manager_projectors: HashMap::new(),
             layout_plugin_receipts: BTreeMap::new(),
             layout_plugin_cleanup_debts: HashMap::new(),
             layout_plugin_cleanup_receipts: BTreeMap::new(),
@@ -798,7 +819,10 @@ impl WasmBridge {
             ));
         }
 
-        let mut plugins = Vec::with_capacity(requests.len());
+        let request_count = requests.len();
+        let mut plugins = Vec::with_capacity(request_count);
+        let mut pane_bindings = Vec::with_capacity(request_count);
+        let mut session_manager_projector_pane_ids = Vec::new();
         for (offset, request) in requests.into_iter().enumerate() {
             let plugin_config =
                 PluginConfig::from_run_plugin(&request.run_plugin).ok_or_else(|| {
@@ -809,26 +833,53 @@ impl WasmBridge {
                 })?;
             let offset = u32::try_from(offset)
                 .map_err(|_| format!("too many layout plugins in transaction {transaction_id}"))?;
-            let plugin_id = self.next_plugin_id.checked_add(offset).ok_or_else(|| {
+            let pane_id = self.next_plugin_id.checked_add(offset).ok_or_else(|| {
                 format!("plugin id space exhausted for layout transaction {transaction_id}")
             })?;
-            plugins.push(ReservedLayoutPlugin {
-                plugin_id,
-                run_plugin: request.run_plugin,
-                plugin_config,
-                tab_index: request.tab_index,
-                size: request.size,
-                cwd: request.cwd,
-                skip_cache: request.skip_cache,
-                client_id: request.client_id,
-                cancellation: CancellationToken::new(),
-                activation_tracker: Arc::new(LayoutPluginActivationTracker::default()),
+            let is_session_manager = is_session_manager_singleton(&request.run_plugin);
+            let runtime_plugin_id = if is_session_manager {
+                let authority = self
+                    .session_manager_authority
+                    .get_or_insert(SingletonAuthority {
+                        runtime_plugin_id: pane_id,
+                        projector_count: 0,
+                        reserved_by: transaction_id,
+                    });
+                session_manager_projector_pane_ids.push(pane_id);
+                authority.runtime_plugin_id
+            } else {
+                pane_id
+            };
+            pane_bindings.push(if runtime_plugin_id == pane_id {
+                PluginPaneId::direct(pane_id)
+            } else {
+                PluginPaneId::projector(pane_id, runtime_plugin_id)
             });
+
+            let authority_is_new_in_this_transaction = !is_session_manager
+                || (runtime_plugin_id == pane_id
+                    && self
+                        .session_manager_authority
+                        .is_some_and(|authority| authority.reserved_by == transaction_id));
+            if authority_is_new_in_this_transaction {
+                plugins.push(ReservedLayoutPlugin {
+                    plugin_id: runtime_plugin_id,
+                    run_plugin: request.run_plugin,
+                    plugin_config,
+                    tab_index: request.tab_index,
+                    size: request.size,
+                    cwd: request.cwd,
+                    skip_cache: request.skip_cache,
+                    client_id: request.client_id,
+                    cancellation: CancellationToken::new(),
+                    activation_tracker: Arc::new(LayoutPluginActivationTracker::default()),
+                });
+            }
         }
 
         self.next_plugin_id =
             self.next_plugin_id
-                .checked_add(u32::try_from(plugins.len()).map_err(|_| {
+                .checked_add(u32::try_from(request_count).map_err(|_| {
                     format!("too many layout plugins in transaction {transaction_id}")
                 })?)
                 .ok_or_else(|| {
@@ -845,13 +896,35 @@ impl WasmBridge {
             transaction_id,
             LayoutPluginReservation {
                 plugins,
+                pane_bindings: pane_bindings.clone(),
+                session_manager_projector_pane_ids,
                 state: LayoutPluginTransactionState::Reserved,
                 cancellation: CancellationToken::new(),
                 tracker: Arc::new(LayoutPluginActivationTracker::default()),
                 activation_gate: Arc::new(LayoutPluginActivationGate::default()),
             },
         );
-        Ok(plugin_ids)
+        Ok(pane_bindings
+            .into_iter()
+            .map(|binding| binding.pane_id)
+            .collect())
+    }
+
+    pub fn layout_plugin_projector_bindings(
+        &self,
+        transaction_id: LayoutTransactionId,
+    ) -> Vec<PluginPaneId> {
+        self.layout_plugin_reservations
+            .get(&transaction_id)
+            .map(|reservation| {
+                reservation
+                    .pane_bindings
+                    .iter()
+                    .copied()
+                    .filter(|binding| binding.pane_id != binding.runtime_plugin_id)
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub fn resolve_layout_plugins(
@@ -919,9 +992,9 @@ impl WasmBridge {
             };
         };
         let mut reserved_plugin_ids = reservation
-            .plugins
+            .pane_bindings
             .iter()
-            .map(|plugin| plugin.plugin_id)
+            .map(|binding| binding.pane_id)
             .collect::<Vec<_>>();
         reserved_plugin_ids.sort_unstable();
         if reserved_plugin_ids != expected_plugin_ids {
@@ -993,11 +1066,13 @@ impl WasmBridge {
             .layout_plugin_reservations
             .get(&transaction_id)
             .map(|reservation| {
-                reservation
-                    .plugins
+                let mut pane_ids = reservation
+                    .pane_bindings
                     .iter()
-                    .map(|plugin| plugin.plugin_id)
-                    .collect()
+                    .map(|binding| binding.pane_id)
+                    .collect::<Vec<_>>();
+                pane_ids.sort_unstable();
+                pane_ids
             })
             .unwrap_or_default();
         self.resolve_layout_plugins(
@@ -1458,6 +1533,9 @@ impl WasmBridge {
             .get(&transaction_id)
             .ok_or_else(|| format!("unknown layout plugin transaction {transaction_id}"))?;
         let plugins = reservation.plugins.clone();
+        let pane_bindings = reservation.pane_bindings.clone();
+        let session_manager_projector_pane_ids =
+            reservation.session_manager_projector_pane_ids.clone();
         let cancellation = reservation.cancellation.clone();
         let tracker = reservation.tracker.clone();
         let activation_gate = reservation.activation_gate.clone();
@@ -1465,6 +1543,11 @@ impl WasmBridge {
             .iter()
             .map(|plugin| plugin.plugin_id)
             .collect::<Vec<_>>();
+        let mut receipt_plugin_ids = pane_bindings
+            .iter()
+            .map(|binding| binding.pane_id)
+            .collect::<Vec<_>>();
+        receipt_plugin_ids.sort_unstable();
 
         for plugin in &plugins {
             self.cached_events_for_pending_plugins
@@ -1510,19 +1593,40 @@ impl WasmBridge {
                     ));
                 }
                 return Ok(LayoutPluginReceipt::ActivationRolledBack {
-                    plugin_ids,
+                    plugin_ids: receipt_plugin_ids,
                     message,
                 });
             }
         }
 
         activation_gate.open();
+        if !session_manager_projector_pane_ids.is_empty() {
+            let authority_id = self
+                .session_manager_authority
+                .map(|authority| authority.runtime_plugin_id)
+                .ok_or_else(|| {
+                    format!(
+                        "layout plugin transaction {transaction_id} lost its session-manager authority"
+                    )
+                })?;
+            for pane_id in &session_manager_projector_pane_ids {
+                self.session_manager_projectors
+                    .insert(*pane_id, authority_id);
+            }
+            if let Some(authority) = self.session_manager_authority.as_mut() {
+                authority.projector_count = authority
+                    .projector_count
+                    .saturating_add(session_manager_projector_pane_ids.len());
+            }
+        }
         if plugin_ids.is_empty() {
             self.layout_plugin_reservations.remove(&transaction_id);
         } else if let Some(reservation) = self.layout_plugin_reservations.get_mut(&transaction_id) {
             reservation.state = LayoutPluginTransactionState::Activated;
         }
-        Ok(LayoutPluginReceipt::Activated { plugin_ids })
+        Ok(LayoutPluginReceipt::Activated {
+            plugin_ids: receipt_plugin_ids,
+        })
     }
 
     fn release_reserved_layout_plugins(
@@ -1530,17 +1634,24 @@ impl WasmBridge {
         transaction_id: LayoutTransactionId,
         reason: String,
     ) -> std::result::Result<LayoutPluginReceipt, String> {
-        let (plugin_ids, cancellation, tracker, activation_gate) = {
+        let (plugin_ids, receipt_plugin_ids, cancellation, tracker, activation_gate) = {
             let reservation = self
                 .layout_plugin_reservations
                 .get(&transaction_id)
                 .ok_or_else(|| format!("unknown layout plugin transaction {transaction_id}"))?;
+            let mut receipt_plugin_ids = reservation
+                .pane_bindings
+                .iter()
+                .map(|binding| binding.pane_id)
+                .collect::<Vec<_>>();
+            receipt_plugin_ids.sort_unstable();
             (
                 reservation
                     .plugins
                     .iter()
                     .map(|plugin| plugin.plugin_id)
                     .collect::<Vec<_>>(),
+                receipt_plugin_ids,
                 reservation.cancellation.clone(),
                 reservation.tracker.clone(),
                 reservation.activation_gate.clone(),
@@ -1555,11 +1666,18 @@ impl WasmBridge {
             ));
         }
         self.cleanup_owned_layout_plugin_ids(transaction_id, &plugin_ids)?;
+        if self.session_manager_authority.is_some_and(|authority| {
+            authority.reserved_by == transaction_id && authority.projector_count == 0
+        }) {
+            self.session_manager_authority = None;
+        }
         if plugin_ids.is_empty() {
             self.layout_plugin_reservations.remove(&transaction_id);
         }
         log::debug!("released suspended layout plugins for transaction {transaction_id}: {reason}");
-        Ok(LayoutPluginReceipt::Released { plugin_ids })
+        Ok(LayoutPluginReceipt::Released {
+            plugin_ids: receipt_plugin_ids,
+        })
     }
 
     fn compensate_layout_plugins(
@@ -1567,17 +1685,32 @@ impl WasmBridge {
         transaction_id: LayoutTransactionId,
         reason: String,
     ) -> std::result::Result<LayoutPluginReceipt, String> {
-        let (plugin_ids, cancellation, tracker, activation_gate) = {
+        let (
+            plugin_ids,
+            receipt_plugin_ids,
+            projector_pane_ids,
+            cancellation,
+            tracker,
+            activation_gate,
+        ) = {
             let reservation = self
                 .layout_plugin_reservations
                 .get(&transaction_id)
                 .ok_or_else(|| format!("unknown layout plugin transaction {transaction_id}"))?;
+            let mut receipt_plugin_ids = reservation
+                .pane_bindings
+                .iter()
+                .map(|binding| binding.pane_id)
+                .collect::<Vec<_>>();
+            receipt_plugin_ids.sort_unstable();
             (
                 reservation
                     .plugins
                     .iter()
                     .map(|plugin| plugin.plugin_id)
                     .collect::<Vec<_>>(),
+                receipt_plugin_ids,
+                reservation.session_manager_projector_pane_ids.clone(),
                 reservation.cancellation.clone(),
                 reservation.tracker.clone(),
                 reservation.activation_gate.clone(),
@@ -1591,9 +1724,25 @@ impl WasmBridge {
                 LAYOUT_PLUGIN_CLEANUP_TIMEOUT
             ));
         }
+        for pane_id in &projector_pane_ids {
+            self.session_manager_projectors.remove(pane_id);
+        }
+        if let Some(authority) = self.session_manager_authority.as_mut() {
+            authority.projector_count = authority
+                .projector_count
+                .saturating_sub(projector_pane_ids.len());
+        }
         self.cleanup_owned_layout_plugin_ids(transaction_id, &plugin_ids)?;
+        if self
+            .session_manager_authority
+            .is_some_and(|authority| authority.projector_count == 0)
+        {
+            self.session_manager_authority = None;
+        }
         log::debug!("compensated layout plugins for transaction {transaction_id}: {reason}");
-        Ok(LayoutPluginReceipt::Compensated { plugin_ids })
+        Ok(LayoutPluginReceipt::Compensated {
+            plugin_ids: receipt_plugin_ids,
+        })
     }
 
     pub fn handle_layout_plugin_activation_failure(
@@ -2035,6 +2184,27 @@ impl WasmBridge {
         Ok((plugin_id, client_id))
     }
     pub fn unload_plugin(&mut self, plugin_id: PluginId) -> Result<()> {
+        let plugin_id = if let Some(runtime_plugin_id) =
+            self.session_manager_projectors.remove(&plugin_id)
+        {
+            let remaining_projectors =
+                if let Some(authority) = self.session_manager_authority.as_mut() {
+                    authority.projector_count = authority.projector_count.saturating_sub(1);
+                    authority.projector_count
+                } else {
+                    0
+                };
+            if remaining_projectors > 0 {
+                log::debug!(
+                    "released session-manager projector; authority {runtime_plugin_id} retained for {remaining_projectors} projector(s)"
+                );
+                return Ok(());
+            }
+            self.session_manager_authority = None;
+            runtime_plugin_id
+        } else {
+            plugin_id
+        };
         info!("Bye from plugin {}", &plugin_id);
         let cleanup_transaction_id = self
             .layout_plugin_owners
@@ -4185,6 +4355,99 @@ mod layout_plugin_transaction_tests {
             skip_cache: false,
             client_id,
         }
+    }
+
+    fn session_manager_request(client_id: ClientId) -> LayoutPluginReservationRequest {
+        LayoutPluginReservationRequest {
+            run_plugin: RunPlugin::from_url("vc-frame:session-manager").unwrap(),
+            tab_index: Some(1),
+            size: Size::default(),
+            cwd: None,
+            skip_cache: false,
+            client_id,
+        }
+    }
+
+    #[test]
+    fn session_manager_layout_reserves_one_runtime_for_six_projectors() {
+        let mut bridge = test_bridge(1);
+        let transaction_id = 9910;
+        let pane_ids = bridge
+            .reserve_layout_plugins(
+                transaction_id,
+                (0..6)
+                    .map(|offset| session_manager_request(9100 + offset))
+                    .collect(),
+            )
+            .unwrap();
+
+        assert_eq!(pane_ids, vec![0, 1, 2, 3, 4, 5]);
+        let reservation = bridge
+            .layout_plugin_reservations
+            .get(&transaction_id)
+            .unwrap();
+        assert_eq!(reservation.plugins.len(), 1);
+        assert_eq!(reservation.plugins[0].plugin_id, 0);
+        assert_eq!(
+            reservation
+                .pane_bindings
+                .iter()
+                .map(|binding| binding.runtime_plugin_id)
+                .collect::<Vec<_>>(),
+            vec![0; 6]
+        );
+        assert_eq!(
+            bridge.layout_plugin_projector_bindings(transaction_id),
+            vec![
+                PluginPaneId::projector(1, 0),
+                PluginPaneId::projector(2, 0),
+                PluginPaneId::projector(3, 0),
+                PluginPaneId::projector(4, 0),
+                PluginPaneId::projector(5, 0),
+            ]
+        );
+
+        let receipt = bridge
+            .resolve_layout_plugins(
+                transaction_id,
+                LayoutPluginResolution::Release {
+                    reason: "test cleanup".to_owned(),
+                },
+                pane_ids.clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            receipt,
+            LayoutPluginReceipt::Released {
+                plugin_ids: pane_ids
+            }
+        );
+        assert!(bridge.session_manager_authority.is_none());
+    }
+
+    #[test]
+    fn closing_one_projector_keeps_singleton_authority_alive() {
+        let mut bridge = test_bridge(1);
+        bridge.session_manager_authority = Some(SingletonAuthority {
+            runtime_plugin_id: 7,
+            projector_count: 2,
+            reserved_by: 77,
+        });
+        bridge.session_manager_projectors.insert(7, 7);
+        bridge.session_manager_projectors.insert(8, 7);
+
+        bridge.unload_plugin(8).unwrap();
+
+        assert_eq!(
+            bridge.session_manager_authority,
+            Some(SingletonAuthority {
+                runtime_plugin_id: 7,
+                projector_count: 1,
+                reserved_by: 77,
+            })
+        );
+        assert_eq!(bridge.session_manager_projectors.get(&7), Some(&7));
+        assert!(!bridge.session_manager_projectors.contains_key(&8));
     }
 
     fn remote_request(client_id: ClientId) -> LayoutPluginReservationRequest {

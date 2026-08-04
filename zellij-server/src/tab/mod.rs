@@ -87,10 +87,11 @@ macro_rules! resize_pty {
                     .with_context(err_context);
             },
             PaneId::Plugin(ref pid) => {
-                let err_context = || format!("failed to resize plugin {pid}");
+                let runtime_plugin_id = $pane.plugin_runtime_id().unwrap_or(*pid);
+                let err_context = || format!("failed to resize plugin {runtime_plugin_id}");
                 $senders
                     .send_to_plugin(PluginInstruction::Resize(
-                        *pid,
+                        runtime_plugin_id,
                         $pane.get_content_columns(),
                         $pane.get_content_rows(),
                     ))
@@ -127,10 +128,11 @@ macro_rules! resize_pty {
                     .with_context(err_context)
             },
             PaneId::Plugin(ref pid) => {
-                let err_context = || format!("failed to resize plugin {pid}");
+                let runtime_plugin_id = $pane.plugin_runtime_id().unwrap_or(*pid);
+                let err_context = || format!("failed to resize plugin {runtime_plugin_id}");
                 $senders
                     .send_to_plugin(PluginInstruction::Resize(
-                        *pid,
+                        runtime_plugin_id,
                         $pane.get_content_columns(),
                         $pane.get_content_rows(),
                     ))
@@ -410,6 +412,13 @@ pub trait Pane {
     fn render_terminal_title(&mut self, _input_mode: InputMode) -> String;
     fn update_name(&mut self, name: &str);
     fn pid(&self) -> PaneId;
+    fn plugin_runtime_id(&self) -> Option<PluginId> {
+        match self.pid() {
+            PaneId::Plugin(plugin_id) => Some(plugin_id),
+            PaneId::Terminal(_) => None,
+        }
+    }
+    fn bind_plugin_runtime_id(&mut self, _runtime_plugin_id: PluginId) {}
     fn reduce_height(&mut self, percent: f64);
     fn increase_height(&mut self, percent: f64);
     fn reduce_width(&mut self, percent: f64);
@@ -3496,6 +3505,32 @@ impl Tab {
                 .values()
                 .any(|s_p| s_p.1.pid() == PaneId::Plugin(plugin_id))
     }
+    pub fn has_plugin_runtime(&self, plugin_id: PluginId) -> bool {
+        self.get_tiled_panes()
+            .chain(self.get_floating_panes())
+            .any(|(_, pane)| pane.plugin_runtime_id() == Some(plugin_id))
+            || self
+                .suppressed_panes
+                .values()
+                .any(|(_, pane)| pane.plugin_runtime_id() == Some(plugin_id))
+    }
+    pub fn bind_plugin_projectors(&mut self, bindings: &HashMap<PluginId, PluginId>) {
+        for (pane_id, runtime_plugin_id) in bindings {
+            let pane_id = PaneId::Plugin(*pane_id);
+            if let Some(pane) = self
+                .tiled_panes
+                .get_pane_mut(pane_id)
+                .or_else(|| self.floating_panes.get_pane_mut(pane_id))
+                .or_else(|| {
+                    self.suppressed_panes
+                        .get_mut(&pane_id)
+                        .map(|(_, pane)| pane)
+                })
+            {
+                pane.bind_plugin_runtime_id(*runtime_plugin_id);
+            }
+        }
+    }
     pub fn set_pane_color(
         &mut self,
         pane_id: PaneId,
@@ -3563,18 +3598,29 @@ impl Tab {
         client_id: ClientId,
         bytes: VteBytes,
     ) -> Result<()> {
-        if let Some(plugin_pane) = self
-            .tiled_panes
-            .get_pane_mut(PaneId::Plugin(pid))
-            .or_else(|| self.floating_panes.get_pane_mut(PaneId::Plugin(pid)))
-            .or_else(|| {
-                self.suppressed_panes
-                    .values_mut()
-                    .find(|s_p| s_p.1.pid() == PaneId::Plugin(pid))
-                    .map(|s_p| &mut s_p.1)
-            })
-        {
-            plugin_pane.handle_plugin_bytes(client_id, bytes);
+        // A singleton render is shared by projector panes across tabs. Only the
+        // tab currently owning this client may consume it; otherwise parked
+        // projectors would still parse every VTE frame even though they have no
+        // visible viewport.
+        if !self.connected_clients.borrow().contains(&client_id) {
+            return Ok(());
+        }
+        let pane_ids = self.get_static_and_floating_pane_ids();
+        for pane_id in pane_ids {
+            let pane = self
+                .tiled_panes
+                .get_pane_mut(pane_id)
+                .or_else(|| self.floating_panes.get_pane_mut(pane_id));
+            if let Some(pane) = pane
+                && pane.plugin_runtime_id() == Some(pid)
+            {
+                pane.handle_plugin_bytes(client_id, bytes.clone());
+            }
+        }
+        for (_, pane) in self.suppressed_panes.values_mut() {
+            if pane.plugin_runtime_id() == Some(pid) {
+                pane.handle_plugin_bytes(client_id, bytes.clone());
+            }
         }
         Ok(())
     }
@@ -3925,49 +3971,56 @@ impl Tab {
                     None => {},
                 }
             },
-            PaneId::Plugin(pid) => match active_pane.adjust_input_to_terminal(
-                key_with_modifier,
-                raw_input_bytes,
-                raw_input_bytes_are_kitty,
-                client_id,
-            ) {
-                Some(AdjustedInput::WriteKeyToPlugin(key_with_modifier)) => {
-                    self.senders
-                        .send_to_plugin(PluginInstruction::Update(vec![(
-                            Some(pid),
-                            client_id,
-                            Event::Key(key_with_modifier),
-                        )]))
-                        .with_context(err_context)?;
-                },
-                Some(AdjustedInput::WriteBytesToTerminal(adjusted_input)) => {
-                    let mut plugin_updates = vec![];
-                    for key in parse_keys(&adjusted_input) {
-                        plugin_updates.push((Some(pid), client_id, Event::Key(key)));
-                    }
-                    self.senders
-                        .send_to_plugin(PluginInstruction::Update(plugin_updates))
-                        .with_context(err_context)?;
-                },
-                Some(AdjustedInput::PermissionRequestResult(permissions, status)) => {
-                    if active_pane.query_should_be_suppressed() {
-                        active_pane.set_should_be_suppressed(false);
-                        self.suppress_pane(PaneId::Plugin(pid), client_id);
-                    }
-                    self.request_plugin_permissions(pid, None);
-                    self.senders
-                        .send_to_plugin(PluginInstruction::PermissionRequestResult(
-                            pid,
-                            client_id,
-                            permissions,
-                            status,
-                            None,
-                        ))
-                        .with_context(err_context)?;
-                    should_update_ui = true;
-                },
-                Some(_) => {},
-                None => {},
+            PaneId::Plugin(pid) => {
+                let runtime_plugin_id = active_pane.plugin_runtime_id().unwrap_or(pid);
+                match active_pane.adjust_input_to_terminal(
+                    key_with_modifier,
+                    raw_input_bytes,
+                    raw_input_bytes_are_kitty,
+                    client_id,
+                ) {
+                    Some(AdjustedInput::WriteKeyToPlugin(key_with_modifier)) => {
+                        self.senders
+                            .send_to_plugin(PluginInstruction::Update(vec![(
+                                Some(runtime_plugin_id),
+                                client_id,
+                                Event::Key(key_with_modifier),
+                            )]))
+                            .with_context(err_context)?;
+                    },
+                    Some(AdjustedInput::WriteBytesToTerminal(adjusted_input)) => {
+                        let mut plugin_updates = vec![];
+                        for key in parse_keys(&adjusted_input) {
+                            plugin_updates.push((
+                                Some(runtime_plugin_id),
+                                client_id,
+                                Event::Key(key),
+                            ));
+                        }
+                        self.senders
+                            .send_to_plugin(PluginInstruction::Update(plugin_updates))
+                            .with_context(err_context)?;
+                    },
+                    Some(AdjustedInput::PermissionRequestResult(permissions, status)) => {
+                        if active_pane.query_should_be_suppressed() {
+                            active_pane.set_should_be_suppressed(false);
+                            self.suppress_pane(PaneId::Plugin(pid), client_id);
+                        }
+                        self.request_plugin_permissions(pid, None);
+                        self.senders
+                            .send_to_plugin(PluginInstruction::PermissionRequestResult(
+                                runtime_plugin_id,
+                                client_id,
+                                permissions,
+                                status,
+                                None,
+                            ))
+                            .with_context(err_context)?;
+                        should_update_ui = true;
+                    },
+                    Some(_) => {},
+                    None => {},
+                }
             },
         }
         Ok(should_update_ui)
@@ -4822,13 +4875,19 @@ impl Tab {
             .collect()
     }
     pub fn get_plugin_ids(&self) -> Vec<PluginId> {
-        self.get_static_and_floating_pane_ids()
-            .into_iter()
-            .filter_map(|pane_id| match pane_id {
-                PaneId::Plugin(pid) => Some(pid),
-                _ => None,
-            })
-            .collect()
+        let mut plugin_ids = self
+            .get_tiled_panes()
+            .chain(self.get_floating_panes())
+            .filter_map(|(_, pane)| pane.plugin_runtime_id())
+            .chain(
+                self.suppressed_panes
+                    .values()
+                    .filter_map(|(_, pane)| pane.plugin_runtime_id()),
+            )
+            .collect::<Vec<_>>();
+        plugin_ids.sort_unstable();
+        plugin_ids.dedup();
+        plugin_ids
     }
     pub fn get_pane_info(&self, pane_id: PaneId) -> Option<PaneInfo> {
         let current_pane_group: HashMap<ClientId, Vec<PaneId>> =
@@ -5762,13 +5821,10 @@ impl Tab {
         Ok(())
     }
     pub fn visible(&mut self, visible: bool) -> Result<()> {
-        let pids_in_this_tab = self.tiled_panes.pane_ids().filter_map(|p| match p {
-            PaneId::Plugin(pid) => Some(pid),
-            _ => None,
-        });
+        let pids_in_this_tab = self.get_plugin_ids();
         let mut plugin_updates = vec![];
         for pid in pids_in_this_tab {
-            plugin_updates.push((Some(*pid), None, Event::Visible(visible)));
+            plugin_updates.push((Some(pid), None, Event::Visible(visible)));
         }
         self.senders
             .send_to_plugin(PluginInstruction::Update(plugin_updates))

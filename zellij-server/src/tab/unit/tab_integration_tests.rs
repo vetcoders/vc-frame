@@ -494,6 +494,78 @@ fn create_new_tab_with_swap_layouts(
     tab
 }
 
+#[test]
+fn session_manager_projector_forwards_input_and_stays_parked_when_hidden() {
+    let size = Size { cols: 80, rows: 20 };
+    let client_id = 1;
+    let base_layout = r#"
+        layout {
+            pane
+            pane size=3 borderless=true {
+                plugin location="vc-frame:session-manager"
+            }
+        }
+    "#;
+    let (base_layout, base_floating_layout) =
+        Layout::from_kdl(base_layout, Some("projector.kdl".into()), None, None)
+            .unwrap()
+            .template
+            .unwrap();
+    let session_manager =
+        RunPluginOrAlias::from_url("vc-frame:session-manager", &None, None, None).unwrap();
+    let mut plugin_ids = HashMap::new();
+    plugin_ids.insert(session_manager, vec![41]);
+    let mut tab = create_new_tab_with_swap_layouts(
+        size,
+        ModeInfo::default(),
+        (vec![], vec![]),
+        Some((
+            base_layout,
+            base_floating_layout,
+            vec![(1, None)],
+            vec![],
+            plugin_ids,
+        )),
+        true,
+        true,
+    );
+
+    tab.bind_plugin_projectors(&HashMap::from([(41, 7)]));
+    assert_eq!(tab.get_plugin_ids(), vec![7]);
+    assert!(tab.has_plugin_runtime(7));
+
+    let (plugin_tx, plugin_rx): ChannelWithContext<PluginInstruction> = channels::unbounded();
+    tab.senders
+        .replace_to_plugin(SenderWithContext::new(plugin_tx));
+    tab.focus_pane_with_id(PaneId::Plugin(41), false, false, client_id)
+        .unwrap();
+    tab.write_to_active_terminal(&None, b"x".to_vec(), false, client_id)
+        .unwrap();
+    let (instruction, _) = plugin_rx.recv().unwrap();
+    match instruction {
+        PluginInstruction::Update(updates) => {
+            assert_eq!(updates.len(), 1);
+            assert_eq!(updates[0].0, Some(7));
+            assert_eq!(updates[0].1, Some(client_id));
+        },
+        other => panic!("unexpected projector input instruction: {other:?}"),
+    }
+
+    tab.remove_client(client_id);
+    let projector = tab
+        .get_pane_with_id_mut(PaneId::Plugin(41))
+        .expect("projector pane");
+    projector.set_should_render(false);
+    tab.handle_plugin_bytes(7, client_id, b"hidden frame".to_vec())
+        .unwrap();
+    assert!(
+        !tab.get_pane_with_id(PaneId::Plugin(41))
+            .expect("projector pane")
+            .should_render(),
+        "a parked projector must not consume singleton render work"
+    );
+}
+
 fn create_new_tab_with_os_api(size: Size, default_mode: ModeInfo, os_api: &FakeInputOutput) -> Tab {
     set_session_name("test".into());
     let index = 0;

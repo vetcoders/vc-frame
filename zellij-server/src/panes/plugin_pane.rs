@@ -9,7 +9,7 @@ use crate::panes::{
     sixel::SixelImageStore,
     terminal_pane::{BRACKETED_PASTE_BEGIN, BRACKETED_PASTE_END},
 };
-use crate::plugins::PluginInstruction;
+use crate::plugins::{PluginId, PluginInstruction};
 use crate::pty::VteBytes;
 use crate::tab::{AdjustedInput, Pane};
 use crate::ui::{
@@ -75,6 +75,7 @@ macro_rules! get_or_create_grid {
 
 pub(crate) struct PluginPane {
     pub pid: u32,
+    runtime_plugin_id: u32,
     pub should_render: HashMap<ClientId, bool>,
     pub selectable: bool,
     pub geom: PaneGeom,
@@ -134,6 +135,7 @@ impl PluginPane {
         let initial_loading_message = loading_indication.to_string();
         let mut plugin = PluginPane {
             pid,
+            runtime_plugin_id: pid,
             should_render: HashMap::new(),
             selectable: true,
             geom: position_and_size,
@@ -331,7 +333,7 @@ impl Pane for PluginPane {
                         let _ = self
                             .send_plugin_instructions
                             .send(PluginInstruction::Update(vec![(
-                                Some(self.pid),
+                                Some(self.runtime_plugin_id),
                                 client_id,
                                 Event::PastedText(pasted_text),
                             )]));
@@ -525,6 +527,12 @@ impl Pane for PluginPane {
     }
     fn pid(&self) -> PaneId {
         PaneId::Plugin(self.pid)
+    }
+    fn plugin_runtime_id(&self) -> Option<PluginId> {
+        Some(self.runtime_plugin_id)
+    }
+    fn bind_plugin_runtime_id(&mut self, runtime_plugin_id: PluginId) {
+        self.runtime_plugin_id = runtime_plugin_id;
     }
     fn reduce_height(&mut self, percent: f64) {
         if let Some(p) = self.geom.rows.as_percent() {

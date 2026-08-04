@@ -197,7 +197,7 @@ use crate::{
     panes::sixel::SixelImageStore,
     plugins::{
         DumpSessionLayoutResponse, LayoutPluginReceipt, LayoutPluginResolution, PluginId,
-        PluginInstruction, PluginRenderAsset,
+        PluginInstruction, PluginPaneId, PluginRenderAsset,
     },
     pty::{
         ClientTabIndexOrPaneId, LayoutCommitAck, LayoutCommitOutcome, LayoutTransactionId,
@@ -1050,6 +1050,11 @@ pub enum ScreenInstruction {
     DesktopNotificationResponse(Vec<u8>, ClientId),
     PluginSubscribedToAnsiPaneContents(bool), // true = at least one plugin needs ANSI content
     UpdateBackgroundPluginSubscriptions(PluginId, ClientId, HashSet<EventType>),
+    RegisterPluginProjectors {
+        transaction_id: LayoutTransactionId,
+        bindings: Vec<PluginPaneId>,
+        ack: channels::Sender<std::result::Result<(), String>>,
+    },
     BroadcastModeUpdate(ModeInfo, Option<ClientId>), // ModeInfo, optional specific client_id (None = all clients)
     // Pane-targeting CLI variants
     ScrollUpWithPaneId(PaneId, Option<NotificationEnd>),
@@ -1396,6 +1401,7 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::UpdateBackgroundPluginSubscriptions(..) => {
                 ScreenContext::UpdateBackgroundPluginSubscriptions
             },
+            ScreenInstruction::RegisterPluginProjectors { .. } => ScreenContext::AddPlugin,
             ScreenInstruction::BroadcastModeUpdate(..) => ScreenContext::BroadcastModeUpdate,
             // Pane-targeting CLI variants
             ScreenInstruction::ScrollUpWithPaneId(..) => ScreenContext::ScrollUpWithPaneId,
@@ -1595,6 +1601,8 @@ pub(crate) struct Screen {
     /// handoff until PTY acknowledges the terminal commit decision.
     next_layout_transaction_id: LayoutTransactionId,
     active_layout_transactions: HashMap<LayoutTransactionId, ActiveLayoutTransaction>,
+    plugin_projector_bindings: HashMap<PluginId, PluginId>,
+    plugin_projector_transactions: HashMap<LayoutTransactionId, Vec<PluginId>>,
     /// Prepared Screen rollback owners whose external Plugin/PTY outcome is
     /// still unknown after bounded inline replay. Background reconciliation
     /// keeps retrying the exact worker decision while these owners remain
@@ -2619,6 +2627,8 @@ impl Screen {
             next_tab_id: 0,
             next_layout_transaction_id: 1,
             active_layout_transactions: HashMap::new(),
+            plugin_projector_bindings: HashMap::new(),
+            plugin_projector_transactions: HashMap::new(),
             indeterminate_layout_transactions: HashMap::new(),
             layout_reconciliation_results: Arc::new(Mutex::new(vec![])),
             layout_reconciliations_in_flight: HashSet::new(),
@@ -3579,6 +3589,7 @@ impl Screen {
         target_ids.dedup();
         resource_ids.sort_unstable();
         resource_ids.dedup();
+        let retain_projector_bindings = !matches!(&decision, ScreenLayoutDecision::Rejected(_));
         let receipt = ResolvedLayoutTransaction {
             kind: owner.kind,
             target_ids,
@@ -3594,6 +3605,7 @@ impl Screen {
             }
             return;
         }
+        self.resolve_plugin_projector_transaction(transaction_id, retain_projector_bindings);
         self.resolved_layout_transactions
             .insert(transaction_id, receipt);
         self.resolved_layout_transaction_order
@@ -3603,6 +3615,21 @@ impl Screen {
             {
                 self.resolved_layout_transactions
                     .remove(&expired_transaction_id);
+            }
+        }
+    }
+
+    fn resolve_plugin_projector_transaction(
+        &mut self,
+        transaction_id: LayoutTransactionId,
+        retain_bindings: bool,
+    ) {
+        let Some(pane_ids) = self.plugin_projector_transactions.remove(&transaction_id) else {
+            return;
+        };
+        if !retain_bindings {
+            for pane_id in pane_ids {
+                self.plugin_projector_bindings.remove(&pane_id);
             }
         }
     }
@@ -9607,14 +9634,13 @@ pub(crate) fn screen_thread_main(
                 for plugin_render_asset in plugin_render_assets.iter_mut() {
                     let plugin_id = plugin_render_asset.plugin_id;
                     let client_id = plugin_render_asset.client_id;
-                    let vte_bytes = plugin_render_asset.bytes.drain(..).collect();
+                    let vte_bytes: VteBytes = plugin_render_asset.bytes.drain(..).collect();
 
                     let all_tabs = screen.get_tabs_mut();
                     for tab in all_tabs.values_mut() {
-                        if tab.has_plugin(plugin_id) {
-                            tab.handle_plugin_bytes(plugin_id, client_id, vte_bytes)
+                        if tab.has_plugin_runtime(plugin_id) {
+                            tab.handle_plugin_bytes(plugin_id, client_id, vte_bytes.clone())
                                 .context("failed to process plugin bytes")?;
-                            break;
                         }
                     }
                     screen.render_blocker.remove_blocking_plugin(plugin_id);
@@ -11452,6 +11478,9 @@ pub(crate) fn screen_thread_main(
                         (client_id, is_web_client),
                         blocking_terminal.take(),
                     )?);
+                    if let Some(tab) = screen.tabs.get_mut(&tab_id) {
+                        tab.bind_plugin_projectors(&screen.plugin_projector_bindings);
+                    }
                     #[cfg(test)]
                     if take_reject_after_apply_prepare_for_test(transaction_id) {
                         bail!("injected rejection after Apply prepare");
@@ -12042,6 +12071,7 @@ pub(crate) fn screen_thread_main(
                     &mut pending_events_waiting_for_client,
                     &mut pending_events_waiting_for_tab,
                 );
+                screen.resolve_plugin_projector_transaction(transaction_id, false);
                 screen.active_layout_transactions.remove(&transaction_id);
                 log::warn!(
                     "layout transaction {} failed during Plugin/PTY preparation: {}",
@@ -13067,6 +13097,7 @@ pub(crate) fn screen_thread_main(
                         return Err(anyhow!(rejection.to_string()));
                     }
 
+                    let plugin_projector_bindings = screen.plugin_projector_bindings.clone();
                     // Process each tab result. A failure aborts the whole writer transaction.
                     for tab_result in tab_results {
                         let tab_index = tab_result.tab_index;
@@ -13098,6 +13129,7 @@ pub(crate) fn screen_thread_main(
                                 .with_context(|| {
                                     format!("failed to override layout for tab {tab_index}")
                                 })?;
+                            tab.bind_plugin_projectors(&plugin_projector_bindings);
                             transaction.defer_tab_name(new_tab_name);
                             prepared_override_layouts.push((tab_index, transaction));
                         } else {
@@ -13164,6 +13196,9 @@ pub(crate) fn screen_thread_main(
                                 .with_context(|| {
                                     format!("failed to override layout for new tab {tab_index}")
                                 })?;
+                            if let Some(tab) = screen.tabs.get_mut(&tab_index) {
+                                tab.bind_plugin_projectors(&plugin_projector_bindings);
+                            }
                             transaction.defer_tab_name(new_tab_name);
                             prepared_override_layouts.push((tab_index, transaction));
                         }
@@ -15193,6 +15228,9 @@ pub(crate) fn screen_thread_main(
                 screen.subscribe_to_pane_renders(client_id, pane_ids, scrollback, ansi);
             },
             ScreenInstruction::NotifyPaneClosedToSubscribers { pane_id } => {
+                if let zellij_utils::data::PaneId::Plugin(plugin_id) = pane_id {
+                    screen.plugin_projector_bindings.remove(&plugin_id);
+                }
                 screen.notify_pane_closed_to_subscribers(pane_id);
             },
             ScreenInstruction::PluginSubscribedToAnsiPaneContents(has_subscribers) => {
@@ -15212,6 +15250,33 @@ pub(crate) fn screen_thread_main(
                         .background_plugin_subscriptions
                         .insert((plugin_id, client_id), subscriptions);
                 }
+            },
+            ScreenInstruction::RegisterPluginProjectors {
+                transaction_id,
+                bindings,
+                ack,
+            } => {
+                let result = if screen
+                    .resolved_layout_transactions
+                    .contains_key(&transaction_id)
+                {
+                    Err(format!(
+                        "layout plugin transaction {transaction_id} was already resolved before projector registration"
+                    ))
+                } else {
+                    let mut pane_ids = Vec::with_capacity(bindings.len());
+                    for binding in bindings {
+                        pane_ids.push(binding.pane_id);
+                        screen
+                            .plugin_projector_bindings
+                            .insert(binding.pane_id, binding.runtime_plugin_id);
+                    }
+                    screen
+                        .plugin_projector_transactions
+                        .insert(transaction_id, pane_ids);
+                    Ok(())
+                };
+                let _ = ack.send(result);
             },
             ScreenInstruction::BroadcastModeUpdate(mode_info, target_client_id) => {
                 screen.broadcast_mode_update(mode_info, target_client_id)?;
