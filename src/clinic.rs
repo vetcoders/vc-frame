@@ -1892,27 +1892,13 @@ fn unique_backup_path(config_path: &Path, now: SystemTime) -> PathBuf {
 /// original so a `0600` config stays `0600`.
 fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let dir = path.parent().filter(|p| !p.as_os_str().is_empty());
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(DEFAULT_CONFIG_FILE_NAME);
-    let tmp = dir
-        .unwrap_or_else(|| Path::new("."))
-        .join(format!(".{file_name}.tmp-{}", std::process::id()));
-    let result = (|| {
-        let mut file = std::fs::File::create(&tmp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        if let Ok(meta) = std::fs::metadata(path) {
-            let _ = std::fs::set_permissions(&tmp, meta.permissions());
-        }
-        std::fs::rename(&tmp, path)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
+    let mut tmp = tempfile::NamedTempFile::new_in(dir.unwrap_or_else(|| Path::new(".")))?;
+    tmp.write_all(bytes)?;
+    tmp.as_file().sync_all()?;
+    if let Ok(meta) = std::fs::metadata(path) {
+        std::fs::set_permissions(tmp.path(), meta.permissions())?;
     }
-    result
+    tmp.persist(path).map(|_| ()).map_err(|error| error.error)
 }
 
 /// `YYYYMMDD-HHMMSS` in UTC, without pulling in a date library.
@@ -2384,6 +2370,28 @@ layout_dir "{}"
             .filter(|name| name.contains(".tmp-"))
             .collect();
         assert!(litter.is_empty(), "temp files left behind: {litter:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_does_not_follow_predictable_legacy_temp_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.kdl");
+        let victim = dir.path().join("victim");
+        let legacy_tmp = dir
+            .path()
+            .join(format!(".config.kdl.tmp-{}", std::process::id()));
+        std::fs::write(&config, "old").unwrap();
+        std::fs::write(&victim, "do not overwrite").unwrap();
+        std::os::unix::fs::symlink(&victim, &legacy_tmp).unwrap();
+
+        write_atomically(&config, b"new").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), "new");
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "do not overwrite"
+        );
     }
 
     #[test]
