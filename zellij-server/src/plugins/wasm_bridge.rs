@@ -1650,7 +1650,11 @@ impl WasmBridge {
                 .insert(*pane_id, (authority.runtime_plugin_id, *chrome_kind));
             authority.projector_count = authority.projector_count.saturating_add(1);
         }
-        if plugin_ids.is_empty() {
+        // A projector-only transaction owns no new WASM runtime, but it still
+        // owns live pane-to-runtime bindings and refcounts. Keep that metadata
+        // until PTY commit/rollback resolves the transaction so compensation
+        // can restore the exact pre-activation state.
+        if receipt_plugin_ids.is_empty() {
             self.layout_plugin_reservations.remove(&transaction_id);
         } else if let Some(reservation) = self.layout_plugin_reservations.get_mut(&transaction_id) {
             reservation.state = LayoutPluginTransactionState::Activated;
@@ -1760,6 +1764,7 @@ impl WasmBridge {
             }
         }
         self.cleanup_owned_layout_plugin_ids(transaction_id, &plugin_ids)?;
+        self.layout_plugin_reservations.remove(&transaction_id);
         self.session_chrome_authorities
             .retain(|_, authority| authority.projector_count > 0);
         log::debug!("compensated layout plugins for transaction {transaction_id}: {reason}");
@@ -5446,6 +5451,82 @@ mod layout_plugin_transaction_tests {
                 .unwrap(),
             compensated
         );
+    }
+
+    #[test]
+    fn projector_only_activation_retains_compensatable_metadata() {
+        let mut bridge = test_bridge(1);
+        bridge.session_chrome_authorities.insert(
+            SessionChromeKind::SessionManager,
+            SingletonAuthority {
+                runtime_plugin_id: 77,
+                projector_count: 1,
+                reserved_by: 1007,
+            },
+        );
+        bridge
+            .session_chrome_projectors
+            .insert(77, (77, SessionChromeKind::SessionManager));
+        let before_projectors = bridge.session_chrome_projectors.clone();
+        let before_authority = bridge
+            .session_chrome_authorities
+            .get(&SessionChromeKind::SessionManager)
+            .copied();
+
+        let pane_ids = bridge
+            .reserve_layout_plugins(1009, vec![session_manager_request(9400)])
+            .unwrap();
+        assert_eq!(pane_ids, vec![0]);
+        assert!(
+            bridge
+                .layout_plugin_reservations
+                .get(&1009)
+                .unwrap()
+                .plugins
+                .is_empty()
+        );
+
+        assert_eq!(
+            bridge
+                .resolve_layout_plugins(1009, LayoutPluginResolution::Activate, pane_ids.clone())
+                .unwrap(),
+            LayoutPluginReceipt::Activated {
+                plugin_ids: pane_ids.clone(),
+            }
+        );
+        assert!(bridge.layout_plugin_reservations.contains_key(&1009));
+        assert_eq!(
+            bridge
+                .session_chrome_authorities
+                .get(&SessionChromeKind::SessionManager)
+                .unwrap()
+                .projector_count,
+            2
+        );
+
+        assert_eq!(
+            bridge
+                .resolve_layout_plugins(
+                    1009,
+                    LayoutPluginResolution::Compensate {
+                        reason: "injected PTY rollback".to_owned(),
+                    },
+                    pane_ids.clone(),
+                )
+                .unwrap(),
+            LayoutPluginReceipt::Compensated {
+                plugin_ids: pane_ids,
+            }
+        );
+        assert_eq!(bridge.session_chrome_projectors, before_projectors);
+        assert_eq!(
+            bridge
+                .session_chrome_authorities
+                .get(&SessionChromeKind::SessionManager)
+                .copied(),
+            before_authority
+        );
+        assert!(!bridge.layout_plugin_reservations.contains_key(&1009));
     }
 
     #[test]

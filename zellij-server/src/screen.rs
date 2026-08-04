@@ -6310,16 +6310,36 @@ impl Screen {
                     .get(tab_id)
                     .into_iter()
                     .flat_map(|tab| {
-                        tab.get_plugin_ids().into_iter().filter(|plugin_id| {
-                            tab.get_pane_with_id(PaneId::Plugin(*plugin_id))
-                                .is_some_and(|pane| {
-                                    is_parkable_chrome_plugin_run(pane.invoked_with().as_ref())
-                                })
+                        let visible_panes = tab
+                            .get_tiled_panes()
+                            .chain(tab.get_floating_panes())
+                            .map(|(_, pane)| pane.as_ref());
+                        let suppressed_panes = tab
+                            .get_suppressed_panes()
+                            .map(|(_, (_, pane))| pane.as_ref());
+                        visible_panes.chain(suppressed_panes).filter_map(|pane| {
+                            is_parkable_chrome_plugin_run(pane.invoked_with().as_ref())
+                                .then(|| pane.plugin_runtime_id())
+                                .flatten()
                         })
                     })
                     .map(|plugin_id| (plugin_id, *client_id))
             })
             .collect()
+    }
+
+    fn request_plugin_runtime_permissions(
+        &mut self,
+        runtime_plugin_id: PluginId,
+        plugin_permission: PluginPermission,
+    ) -> bool {
+        self.tabs.values_mut().any(|tab| {
+            tab.request_plugin_runtime_permissions(
+                runtime_plugin_id,
+                Some(plugin_permission.clone()),
+            )
+            .is_some()
+        })
     }
 
     fn active_status_bar_plugin_targets(&self) -> BTreeSet<ChromePluginTarget> {
@@ -14301,15 +14321,8 @@ pub(crate) fn screen_thread_main(
                 }
             },
             ScreenInstruction::RequestPluginPermissions(plugin_id, plugin_permission) => {
-                let all_tabs = screen.get_tabs_mut();
-                let found = all_tabs.values_mut().any(|tab| {
-                    if tab.has_plugin(plugin_id) {
-                        tab.request_plugin_permissions(plugin_id, Some(plugin_permission.clone()));
-                        true
-                    } else {
-                        false
-                    }
-                });
+                let found =
+                    screen.request_plugin_runtime_permissions(plugin_id, plugin_permission.clone());
 
                 if !found {
                     log::error!("PluginId '{}' not found - caching request", plugin_id);

@@ -19,8 +19,8 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use zellij_utils::cli::CliAction;
 use zellij_utils::data::{
-    Event, EventType, ListPanesResponse, ListTabsResponse, PaneInfo, PaneManifest, Resize,
-    SessionInfo, Style, TabInfo, TabPlacement, WebSharing,
+    Event, EventType, ListPanesResponse, ListTabsResponse, PaneInfo, PaneManifest, PermissionType,
+    PluginPermission, Resize, SessionInfo, Style, TabInfo, TabPlacement, WebSharing,
 };
 use zellij_utils::errors::{ErrorContext, prelude::*};
 use zellij_utils::input::actions::Action;
@@ -349,6 +349,58 @@ fn status_bar_target_transition_hides_only_the_client_that_switched_tabs() {
                 "1".to_owned(),
             ),
         ]
+    );
+}
+
+#[test]
+fn projector_tab_keeps_shared_status_bar_runtime_active() {
+    let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
+    let (to_plugin, _plugin_receiver): ChannelWithContext<PluginInstruction> =
+        channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    new_tab_with_status_bar_and_worker(&mut screen, 0, 1, 42, 99);
+    new_tab_with_status_bar_and_worker(&mut screen, 1, 2, 43, 100);
+    screen
+        .get_tabs_mut()
+        .get_mut(&1)
+        .unwrap()
+        .bind_plugin_projectors(&HashMap::from([(43, 42)]));
+    screen.active_tab_ids = BTreeMap::from([(1, 1)]);
+
+    let (active, hidden) = screen.status_bar_plugin_target_transition();
+
+    assert_eq!(active, vec![(42, 1)]);
+    assert!(hidden.is_empty());
+}
+
+#[test]
+fn permission_request_uses_projector_after_authority_tab_closes() {
+    let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
+    let (to_plugin, _plugin_receiver): ChannelWithContext<PluginInstruction> =
+        channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    new_tab_with_status_bar_and_worker(&mut screen, 0, 1, 42, 99);
+    new_tab_with_status_bar_and_worker(&mut screen, 1, 2, 43, 100);
+    screen
+        .get_tabs_mut()
+        .get_mut(&1)
+        .unwrap()
+        .bind_plugin_projectors(&HashMap::from([(43, 42)]));
+    screen.get_tabs_mut().remove(&0);
+
+    assert!(screen.request_plugin_runtime_permissions(
+        42,
+        PluginPermission::new("status-bar".to_owned(), vec![PermissionType::RunCommands]),
+    ));
+    assert_eq!(
+        screen
+            .get_tabs()
+            .get(&1)
+            .unwrap()
+            .get_pane_with_id(PaneId::Plugin(43))
+            .unwrap()
+            .plugin_runtime_id(),
+        Some(42)
     );
 }
 

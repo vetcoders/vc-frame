@@ -6638,6 +6638,33 @@ impl Tab {
             self.focus_suppressed_pane_for_all_clients(PaneId::Plugin(pid));
         }
     }
+    /// Route a permission request emitted by a shared plugin runtime to the
+    /// pane that projects that runtime in this tab. Runtime identity and pane
+    /// identity are equal for ordinary plugins but deliberately differ for
+    /// session-canvas projectors.
+    pub fn request_plugin_runtime_permissions(
+        &mut self,
+        runtime_plugin_id: PluginId,
+        permissions: Option<PluginPermission>,
+    ) -> Option<PaneId> {
+        let pane_id = self
+            .get_tiled_panes()
+            .chain(self.get_floating_panes())
+            .find_map(|(pane_id, pane)| {
+                (pane.plugin_runtime_id() == Some(runtime_plugin_id)).then_some(*pane_id)
+            })
+            .or_else(|| {
+                self.get_suppressed_panes()
+                    .find_map(|(pane_id, (_, pane))| {
+                        (pane.plugin_runtime_id() == Some(runtime_plugin_id)).then_some(*pane_id)
+                    })
+            })?;
+        let PaneId::Plugin(local_plugin_pane_id) = pane_id else {
+            return None;
+        };
+        self.request_plugin_permissions(local_plugin_pane_id, permissions);
+        Some(pane_id)
+    }
     pub fn rerun_terminal_pane_with_id(
         &mut self,
         terminal_pane_id: u32,
