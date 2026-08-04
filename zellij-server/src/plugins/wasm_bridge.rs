@@ -4455,11 +4455,11 @@ mod layout_plugin_transaction_tests {
     }
 
     #[test]
-    fn session_canvas_reserves_three_runtimes_for_six_tab_views() {
+    fn session_canvas_reserves_three_runtimes_for_ten_tab_views() {
         let mut bridge = test_bridge(1);
         let transaction_id = 9911;
         let mut requests = vec![];
-        for client_id in 9200..9206 {
+        for client_id in 9200..9210 {
             for location in [
                 "vc-frame:compact-bar",
                 "vc-frame:session-manager",
@@ -4485,7 +4485,7 @@ mod layout_plugin_transaction_tests {
             .get(&transaction_id)
             .unwrap();
 
-        assert_eq!(pane_ids.len(), 18);
+        assert_eq!(pane_ids.len(), 30);
         assert_eq!(reservation.plugins.len(), 3);
         assert_eq!(
             reservation
