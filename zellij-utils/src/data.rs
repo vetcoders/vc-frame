@@ -2486,6 +2486,10 @@ pub struct PaneInfo {
 pub struct PaneListEntry {
     #[serde(flatten)]
     pub pane_info: PaneInfo,
+    /// The WASM runtime serving this plugin pane. Projector panes keep their
+    /// own pane `id` while sharing this runtime identity with their authority.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugin_runtime_id: Option<u32>,
     pub tab_id: usize,
     pub tab_position: usize,
     pub tab_name: String,

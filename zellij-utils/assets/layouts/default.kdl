@@ -1,20 +1,33 @@
 layout {
-    pane size=1 borderless=true {
-        plugin location="tab-bar" {
-            // 🚥 zone: clear the macOS traffic lights in the native window
-            left_inset "6"
-        }
-    }
-    pane split_direction="vertical" {
-        pane size=24 borderless=true {
-            plugin location="session-manager" {
-                rail true
-                pane_title "Sessions"
+    session_layer {
+        pane size=1 borderless=true {
+            plugin location="tab-bar" {
+                session_canvas true
+                session_canvas_kind "compact-bar"
+                // 🚥 zone: clear the macOS traffic lights in the native window
+                left_inset "6"
             }
         }
-        pane
+        pane split_direction="vertical" {
+            pane size=24 borderless=true {
+                plugin location="session-manager" {
+                    session_canvas true
+                    session_canvas_kind "session-manager"
+                    rail true
+                    pane_title "Sessions"
+                }
+            }
+            pane { children; }
+        }
+        pane size=1 borderless=true {
+            plugin location="status-bar" {
+                session_canvas true
+                session_canvas_kind "status-bar"
+            }
+        }
     }
-    pane size=1 borderless=true {
-        plugin location="status-bar"
+
+    default_tab_template {
+        pane { children; }
     }
 }

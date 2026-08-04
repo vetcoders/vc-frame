@@ -424,6 +424,10 @@ fn vibecrafted_layout_has_start_here_and_shell_tabs() {
             "session layer must own {chrome}"
         );
         assert!(
+            session_layer.contains(&format!("session_canvas_kind \"{chrome}\"")),
+            "session layer must preserve the stable singleton role for {chrome}"
+        );
+        assert!(
             !default_template.contains(chrome),
             "content-only default_tab_template must not own {chrome}"
         );
@@ -445,6 +449,47 @@ fn vibecrafted_layout_has_start_here_and_shell_tabs() {
                 "each materialized tab view must project {chrome} exactly once"
             );
         }
+    }
+}
+
+#[test]
+fn default_layout_new_tabs_use_the_session_canvas() {
+    let (layout, _config) =
+        Layout::from_default_assets(Path::new("default"), None, Config::default()).unwrap();
+    let (tiled, _) = layout.new_tab();
+    let runs = tiled.extract_run_instructions();
+
+    for (chrome, kind) in [
+        ("tab-bar", "compact-bar"),
+        ("session-manager", "session-manager"),
+        ("status-bar", "status-bar"),
+    ] {
+        let plugin = runs
+            .iter()
+            .find_map(|run| match run {
+                Some(Run::Plugin(plugin)) if plugin.location_string() == chrome => Some(plugin),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("default session canvas omitted {chrome}"));
+        let configuration = match plugin {
+            RunPluginOrAlias::RunPlugin(plugin) => Some(&plugin.configuration),
+            RunPluginOrAlias::Alias(alias) => alias.configuration.as_ref(),
+        }
+        .expect("session canvas plugin must carry role configuration");
+        assert_eq!(
+            configuration
+                .inner()
+                .get("session_canvas")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            configuration
+                .inner()
+                .get("session_canvas_kind")
+                .map(String::as_str),
+            Some(kind)
+        );
     }
 }
 

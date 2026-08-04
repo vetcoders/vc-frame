@@ -38,6 +38,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 #[cfg(test)]
 use std::sync::{OnceLock, mpsc};
+#[cfg(test)]
+use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
 use crate::route::NotificationEnd;
@@ -6241,9 +6243,24 @@ impl Screen {
             pane_info.is_selectable || show_all
         }
 
-        fn create_pane_list_entry(pane_info: PaneInfo, tab: &crate::tab::Tab) -> PaneListEntry {
+        fn create_pane_list_entry(
+            pane_info: PaneInfo,
+            tab: &crate::tab::Tab,
+            plugin_projector_bindings: &HashMap<PluginId, PluginId>,
+        ) -> PaneListEntry {
+            let plugin_runtime_id = pane_info.is_plugin.then(|| {
+                plugin_projector_bindings
+                    .get(&pane_info.id)
+                    .copied()
+                    .or_else(|| {
+                        tab.get_pane_with_id(PaneId::Plugin(pane_info.id))
+                            .and_then(|pane| pane.plugin_runtime_id())
+                    })
+                    .unwrap_or(pane_info.id)
+            });
             PaneListEntry {
                 pane_info,
+                plugin_runtime_id,
                 tab_id: tab.id,
                 tab_position: tab.position,
                 tab_name: tab.name.clone(),
@@ -6263,7 +6280,11 @@ impl Screen {
 
             for pane_info in pane_infos {
                 if should_include_pane(&pane_info, show_all) {
-                    pane_entries.push(create_pane_list_entry(pane_info, tab));
+                    pane_entries.push(create_pane_list_entry(
+                        pane_info,
+                        tab,
+                        &self.plugin_projector_bindings,
+                    ));
                 }
             }
         }
@@ -9255,16 +9276,20 @@ static VIEWER_CREATION_POST_INSTALL_TEST_HOOKS: OnceLock<
     Mutex<HashMap<String, ViewerCreationPostInstallTestHook>>,
 > = OnceLock::new();
 #[cfg(test)]
-static REJECT_AFTER_APPLY_PREPARE_TEST_TRANSACTIONS: OnceLock<Mutex<HashSet<LayoutTransactionId>>> =
-    OnceLock::new();
+static REJECT_AFTER_APPLY_PREPARE_TEST_TRANSACTIONS: OnceLock<
+    Mutex<HashSet<(ThreadId, LayoutTransactionId)>>,
+> = OnceLock::new();
 
 #[cfg(test)]
-pub(crate) fn reject_after_apply_prepare_for_test(transaction_id: LayoutTransactionId) {
+pub(crate) fn reject_after_apply_prepare_for_test(
+    screen_thread_id: ThreadId,
+    transaction_id: LayoutTransactionId,
+) {
     REJECT_AFTER_APPLY_PREPARE_TEST_TRANSACTIONS
         .get_or_init(|| Mutex::new(HashSet::new()))
         .lock()
         .unwrap()
-        .insert(transaction_id);
+        .insert((screen_thread_id, transaction_id));
 }
 
 #[cfg(test)]
@@ -9273,7 +9298,7 @@ fn take_reject_after_apply_prepare_for_test(transaction_id: LayoutTransactionId)
         .get_or_init(|| Mutex::new(HashSet::new()))
         .lock()
         .unwrap()
-        .remove(&transaction_id)
+        .remove(&(std::thread::current().id(), transaction_id))
 }
 
 #[cfg(test)]
@@ -15269,14 +15294,25 @@ pub(crate) fn screen_thread_main(
                 bindings,
                 ack,
             } => {
-                let result = if screen
+                let resolved_registration_is_exact_commit = screen
+                    .resolved_layout_transactions
+                    .get(&transaction_id)
+                    .is_some_and(|receipt| {
+                        matches!(
+                            receipt.decision,
+                            ScreenLayoutDecision::Committed
+                                | ScreenLayoutDecision::CommittedWithPostCommitError(_)
+                        ) && bindings.iter().all(|binding| {
+                            receipt
+                                .resource_ids
+                                .contains(&PaneId::Plugin(binding.pane_id))
+                        })
+                    });
+                let result = if !screen
                     .resolved_layout_transactions
                     .contains_key(&transaction_id)
+                    || resolved_registration_is_exact_commit
                 {
-                    Err(format!(
-                        "layout plugin transaction {transaction_id} was already resolved before projector registration"
-                    ))
-                } else {
                     let mut pane_ids = Vec::with_capacity(bindings.len());
                     for binding in bindings {
                         pane_ids.push(binding.pane_id);
@@ -15284,11 +15320,24 @@ pub(crate) fn screen_thread_main(
                             .plugin_projector_bindings
                             .insert(binding.pane_id, binding.runtime_plugin_id);
                     }
-                    screen
-                        .plugin_projector_transactions
-                        .insert(transaction_id, pane_ids);
+                    if !resolved_registration_is_exact_commit {
+                        screen
+                            .plugin_projector_transactions
+                            .insert(transaction_id, pane_ids);
+                    }
+                    let plugin_projector_bindings = &screen.plugin_projector_bindings;
+                    for tab in screen.tabs.values_mut() {
+                        tab.bind_plugin_projectors(plugin_projector_bindings);
+                    }
                     Ok(())
+                } else {
+                    Err(format!(
+                        "layout plugin transaction {transaction_id} was rejected or conflicted before projector registration"
+                    ))
                 };
+                if let Err(message) = &result {
+                    log::error!("{message}");
+                }
                 let _ = ack.send(result);
             },
             ScreenInstruction::BroadcastModeUpdate(mode_info, target_client_id) => {

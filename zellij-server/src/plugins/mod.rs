@@ -1860,7 +1860,13 @@ fn register_layout_plugin_projectors(
     if bindings.is_empty() {
         return Ok(());
     }
-    let (ack_tx, ack_rx) = channels::bounded(1);
+    // This instruction is queued before the Plugin -> PTY layout handoff, and
+    // both eventually reach Screen through the same ordered channel. Waiting
+    // synchronously for Screen here creates a bootstrap cycle: Screen can be
+    // waiting for Plugin activation while Plugin waits for this ACK. Preserve
+    // FIFO ordering and let Screen validate the transaction when it consumes
+    // the registration.
+    let (ack_tx, _ack_rx) = channels::bounded(1);
     bus.senders
         .send_to_screen(ScreenInstruction::RegisterPluginProjectors {
             transaction_id,
@@ -1871,14 +1877,7 @@ fn register_layout_plugin_projectors(
             format!(
                 "failed to register plugin projectors for layout transaction {transaction_id}: {error:#}"
             )
-        })?;
-    ack_rx
-        .recv_timeout(Duration::from_secs(2))
-        .map_err(|error| {
-            format!(
-                "screen did not acknowledge plugin projectors for layout transaction {transaction_id}: {error}"
-            )
-        })?
+        })
 }
 
 fn release_layout_plugin_reservation(

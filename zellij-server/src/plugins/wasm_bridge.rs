@@ -91,14 +91,17 @@ impl SessionChromeKind {
 }
 
 fn session_chrome_kind(run_plugin: &RunPlugin) -> Option<SessionChromeKind> {
-    if run_plugin
-        .configuration
-        .inner()
-        .get("session_canvas")
-        .map(String::as_str)
-        != Some("true")
-    {
+    let configuration = run_plugin.configuration.inner();
+    if configuration.get("session_canvas").map(String::as_str) != Some("true") {
         return None;
+    }
+    if let Some(kind) = configuration.get("session_canvas_kind").map(String::as_str) {
+        return match kind {
+            "compact-bar" => Some(SessionChromeKind::CompactBar),
+            "session-manager" => Some(SessionChromeKind::SessionManager),
+            "status-bar" => Some(SessionChromeKind::StatusBar),
+            _ => None,
+        };
     }
     match run_plugin.location.to_string().as_str() {
         "compact-bar" | "zellij:compact-bar" | "vc-frame:compact-bar" => {
@@ -4399,6 +4402,27 @@ mod layout_plugin_transaction_tests {
             cwd: None,
             skip_cache: false,
             client_id,
+        }
+    }
+
+    #[test]
+    fn explicit_session_canvas_kind_survives_resolved_plugin_locations() {
+        for (kind, expected) in [
+            ("compact-bar", SessionChromeKind::CompactBar),
+            ("session-manager", SessionChromeKind::SessionManager),
+            ("status-bar", SessionChromeKind::StatusBar),
+        ] {
+            let run_plugin = RunPlugin::from_url(&format!(
+                "file:{}/resolved-{kind}.wasm",
+                std::env::temp_dir().display()
+            ))
+            .unwrap()
+            .with_configuration(BTreeMap::from([
+                ("session_canvas".to_owned(), "true".to_owned()),
+                ("session_canvas_kind".to_owned(), kind.to_owned()),
+            ]));
+
+            assert_eq!(session_chrome_kind(&run_plugin), Some(expected));
         }
     }
 

@@ -106,6 +106,7 @@ fn git_rerun_paths(manifest_dir: &Path) -> BTreeSet<PathBuf> {
         paths.insert(git_marker);
     }
     insert_if_exists(&mut paths, git_dir.join("HEAD"));
+    insert_if_exists(&mut paths, git_dir.join("logs/HEAD"));
     insert_if_exists(&mut paths, git_dir.join("index"));
     insert_if_exists(&mut paths, git_dir.join("config.worktree"));
     insert_if_exists(&mut paths, common_dir.join("config"));
@@ -117,12 +118,14 @@ fn git_rerun_paths(manifest_dir: &Path) -> BTreeSet<PathBuf> {
         } else {
             &common_dir
         };
+        let ref_log = storage_dir.join("logs").join(&reference);
+        insert_if_exists(&mut paths, ref_log);
         let loose_ref = storage_dir.join(reference);
         if loose_ref.exists() {
             paths.insert(loose_ref);
         } else if let Some(parent) = nearest_existing_parent(&loose_ref, storage_dir) {
-            // Cargo cannot fingerprint a file that does not exist yet. Tracking
-            // its closest existing directory catches packed -> loose ref moves.
+            // The exact reflog above is the stable packed -> loose signal. Keep
+            // the closest existing directory as a compatibility fallback.
             paths.insert(parent);
         }
     }
@@ -352,7 +355,11 @@ mod tests {
             command
                 .current_dir(&self.crate_dir)
                 .args(["run", "--quiet"])
-                .env("CARGO_TERM_COLOR", "never");
+                .env("CARGO_TERM_COLOR", "never")
+                // The outer workspace may set one shared target directory.
+                // Nested fixture builds must not race on one package identity
+                // and reuse another temporary repository's build-script output.
+                .env("CARGO_TARGET_DIR", self.root.join("target"));
             for name in [
                 "VC_FRAME_GIT_SHA",
                 "VC_FRAME_GIT_DIRTY",
@@ -392,23 +399,23 @@ mod tests {
             new_head
         }
 
-        fn advance_head_until_ref_timestamp_changes(&self, loose_ref: &Path) -> String {
-            let before = fs::metadata(loose_ref)
+        fn advance_head_until_path_timestamp_changes(&self, watched_path: &Path) -> String {
+            let before = fs::metadata(watched_path)
                 .and_then(|metadata| metadata.modified())
-                .expect("read initial loose-ref timestamp");
+                .expect("read initial watched Git timestamp");
             let deadline = Instant::now() + Duration::from_secs(5);
 
             loop {
                 let new_head = self.advance_head_without_touching_sources();
-                let after = fs::metadata(loose_ref)
+                let after = fs::metadata(watched_path)
                     .and_then(|metadata| metadata.modified())
-                    .expect("read advanced loose-ref timestamp");
+                    .expect("read advanced watched Git timestamp");
                 if after != before {
                     return new_head;
                 }
                 assert!(
                     Instant::now() < deadline,
-                    "Git ref timestamp did not advance within the bounded retry window"
+                    "watched Git timestamp did not advance within the bounded retry window"
                 );
                 thread::sleep(Duration::from_millis(25));
             }
@@ -461,6 +468,7 @@ mod tests {
         );
         let reference = repo.symbolic_ref();
         let loose_ref = repo.root.join(".git").join(&reference);
+        let ref_log = repo.root.join(".git/logs").join(&reference);
         assert_eq!(
             loose_ref.exists(),
             !pack_refs,
@@ -471,15 +479,16 @@ mod tests {
         assert_eq!(repo.run_binary(), first_head);
         let before = repo.tracked_source_snapshot();
 
-        // Cargo fingerprints the watched Git path by filesystem metadata. For
-        // a loose ref, do not assume that a fixed sleep crosses the filesystem
-        // timestamp tick: advance until the exact watched ref proves it did.
-        // A packed ref becomes a new loose file, so its parent-directory entry
-        // changes on the first update and does not need the same retry.
+        // Cargo fingerprints watched Git paths by filesystem metadata. Do not
+        // assume a fixed sleep or a single update crosses the filesystem clock
+        // tick: advance until an exact watched file proves that it did. Packed
+        // refs use their existing reflog because the loose ref does not exist
+        // at the time of the first build-script run.
         let second_head = if pack_refs {
-            repo.advance_head_without_touching_sources()
+            assert!(ref_log.is_file(), "packed-ref fixture needs a ref log");
+            repo.advance_head_until_path_timestamp_changes(&ref_log)
         } else {
-            repo.advance_head_until_ref_timestamp_changes(&loose_ref)
+            repo.advance_head_until_path_timestamp_changes(&loose_ref)
         };
 
         assert_ne!(second_head, first_head);

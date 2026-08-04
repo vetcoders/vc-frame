@@ -365,12 +365,25 @@ fn projector_tab_keeps_shared_status_bar_runtime_active() {
         .get_mut(&1)
         .unwrap()
         .bind_plugin_projectors(&HashMap::from([(43, 42)]));
+    screen.plugin_projector_bindings.insert(43, 42);
     screen.active_tab_ids = BTreeMap::from([(1, 1)]);
 
     let (active, hidden) = screen.status_bar_plugin_target_transition();
 
     assert_eq!(active, vec![(42, 1)]);
     assert!(hidden.is_empty());
+
+    let pane_runtime_ids = screen
+        .collect_pane_list(true)
+        .unwrap()
+        .into_iter()
+        .filter(|entry| matches!(entry.pane_info.id, 42 | 43))
+        .map(|entry| (entry.pane_info.id, entry.plugin_runtime_id))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        pane_runtime_ids,
+        BTreeSet::from([(42, Some(42)), (43, Some(42))])
+    );
 }
 
 #[test]
@@ -1181,6 +1194,7 @@ struct MockScreen {
     advanced_mouse_actions: bool,
     last_opened_tab_index: Option<usize>,
     session_name: String,
+    screen_thread_id: Option<std::thread::ThreadId>,
 }
 
 impl MockScreen {
@@ -1209,9 +1223,13 @@ impl MockScreen {
         .should_silently_fail();
         let debug = false;
         let session_name = self.session_name.clone();
+        let (thread_id_tx, thread_id_rx) = std::sync::mpsc::sync_channel(1);
         let screen_thread = std::thread::Builder::new()
             .name("screen_thread".to_string())
             .spawn(move || {
+                thread_id_tx
+                    .send(std::thread::current().id())
+                    .expect("test must retain the screen thread-id receiver");
                 screen_thread_main(
                     screen_bus,
                     None,
@@ -1225,6 +1243,11 @@ impl MockScreen {
                 .expect("TEST")
             })
             .unwrap();
+        self.screen_thread_id = Some(
+            thread_id_rx
+                .recv()
+                .expect("screen thread must publish its test identity"),
+        );
         let pane_layout = initial_layout.unwrap_or_default();
         let pane_count = pane_layout.extract_run_instructions().len();
         let floating_pane_count = initial_floating_panes_layout.len();
@@ -1617,6 +1640,7 @@ impl MockScreen {
             config: Config::default(),
             advanced_mouse_actions: true,
             session_name: "zellij-test".to_owned(),
+            screen_thread_id: None,
         }
     }
     pub fn set_advanced_hover_effects(&mut self, advanced_mouse_actions: bool) {
@@ -8879,7 +8903,12 @@ pub fn break_pane_apply_rejection_preserves_live_pane_after_cleanup_ack() {
             );
         }
     };
-    reject_after_apply_prepare_for_test(transaction_id);
+    reject_after_apply_prepare_for_test(
+        mock_screen
+            .screen_thread_id
+            .expect("running MockScreen must publish its thread identity"),
+        transaction_id,
+    );
     let _ = mock_screen.to_screen.send(ScreenInstruction::ApplyLayout(
         tiled_layout,
         floating_layout,
@@ -8961,7 +8990,12 @@ pub fn late_apply_rejection_fails_blocking_completion_and_removes_pending_tab() 
     let terminal_id = 980;
     let (completion_tx, completion_rx) = oneshot::channel();
     let blocking_completion = NotificationEnd::new(completion_tx);
-    reject_after_apply_prepare_for_test(transaction_id);
+    reject_after_apply_prepare_for_test(
+        mock_screen
+            .screen_thread_id
+            .expect("running MockScreen must publish its thread identity"),
+        transaction_id,
+    );
     let _ = mock_screen.to_screen.send(ScreenInstruction::ApplyLayout(
         TiledPaneLayout::default(),
         vec![],
