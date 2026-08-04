@@ -704,6 +704,11 @@ type StringifiedLayout = (String, String, Option<(String, String)>);
 pub struct Layout {
     pub tabs: Vec<(Option<String>, TiledPaneLayout, Vec<FloatingPaneLayout>)>,
     pub focused_tab_index: Option<usize>,
+    /// Session-owned chrome wrapped around every tab content layout. Parsers
+    /// materialize this template into tabs and swap layouts while retaining the
+    /// source template here so Screen remains the runtime owner for new tabs.
+    #[serde(default)]
+    pub session_layer: Option<(TiledPaneLayout, Vec<FloatingPaneLayout>)>,
     pub template: Option<(TiledPaneLayout, Vec<FloatingPaneLayout>)>,
     pub swap_layouts: Vec<(TiledPaneLayout, Vec<FloatingPaneLayout>)>,
     pub swap_tiled_layouts: Vec<SwapTiledLayout>,
@@ -1263,6 +1268,28 @@ const BUILTIN_LAYOUT_NAMES: &[&str] = &[
 ];
 
 impl Layout {
+    fn mount_session_layer(
+        &self,
+        mut content: TiledPaneLayout,
+        mut floating_panes: Vec<FloatingPaneLayout>,
+    ) -> (TiledPaneLayout, Vec<FloatingPaneLayout>) {
+        let Some((session_layer, session_floating_panes)) = &self.session_layer else {
+            return (content, floating_panes);
+        };
+        let original_content = content.clone();
+        let tab_instance_id = content.tab_instance_id.take();
+        let hide_floating_panes = content.hide_floating_panes;
+        content.hide_floating_panes = false;
+        let mut canvas = session_layer.clone();
+        if !canvas.insert_children_layout(&mut content).unwrap_or(false) {
+            return (original_content, floating_panes);
+        }
+        canvas.tab_instance_id = tab_instance_id;
+        canvas.hide_floating_panes = hide_floating_panes;
+        floating_panes.extend(session_floating_panes.iter().cloned());
+        (canvas, floating_panes)
+    }
+
     pub fn list_available_layouts(
         layout_dir: Option<PathBuf>,
         default_layout_name: &Option<String>,
@@ -1748,7 +1775,8 @@ impl Layout {
     }
 
     pub fn new_tab(&self) -> (TiledPaneLayout, Vec<FloatingPaneLayout>) {
-        self.template.clone().unwrap_or_default()
+        let (tiled, floating) = self.template.clone().unwrap_or_default();
+        self.mount_session_layer(tiled, floating)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1761,7 +1789,14 @@ impl Layout {
 
     pub fn tabs(&self) -> Vec<(Option<String>, TiledPaneLayout, Vec<FloatingPaneLayout>)> {
         // String is the tab name
-        self.tabs.clone()
+        self.tabs
+            .iter()
+            .cloned()
+            .map(|(name, tiled, floating)| {
+                let (tiled, floating) = self.mount_session_layer(tiled, floating);
+                (name, tiled, floating)
+            })
+            .collect()
     }
 
     pub fn focused_tab_index(&self) -> Option<usize> {

@@ -73,11 +73,45 @@ fn make_plugin_url_path_safe(url: String) -> String {
     url
 }
 
-fn is_session_manager_singleton(run_plugin: &RunPlugin) -> bool {
-    matches!(
-        run_plugin.location.to_string().as_str(),
-        "session-manager" | "zellij:session-manager" | "vc-frame:session-manager"
-    )
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum SessionChromeKind {
+    CompactBar,
+    SessionManager,
+    StatusBar,
+}
+
+impl SessionChromeKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::CompactBar => "compact-bar",
+            Self::SessionManager => "session-manager",
+            Self::StatusBar => "status-bar",
+        }
+    }
+}
+
+fn session_chrome_kind(run_plugin: &RunPlugin) -> Option<SessionChromeKind> {
+    if run_plugin
+        .configuration
+        .inner()
+        .get("session_canvas")
+        .map(String::as_str)
+        != Some("true")
+    {
+        return None;
+    }
+    match run_plugin.location.to_string().as_str() {
+        "compact-bar" | "zellij:compact-bar" | "vc-frame:compact-bar" => {
+            Some(SessionChromeKind::CompactBar)
+        },
+        "session-manager" | "zellij:session-manager" | "vc-frame:session-manager" => {
+            Some(SessionChromeKind::SessionManager)
+        },
+        "status-bar" | "zellij:status-bar" | "vc-frame:status-bar" => {
+            Some(SessionChromeKind::StatusBar)
+        },
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -640,7 +674,7 @@ impl LayoutPluginActivationGate {
 struct LayoutPluginReservation {
     plugins: Vec<ReservedLayoutPlugin>,
     pane_bindings: Vec<PluginPaneId>,
-    session_manager_projector_pane_ids: Vec<PluginId>,
+    session_chrome_projector_pane_ids: Vec<(PluginId, SessionChromeKind)>,
     state: LayoutPluginTransactionState,
     cancellation: CancellationToken,
     tracker: Arc<LayoutPluginActivationTracker>,
@@ -704,8 +738,8 @@ pub struct WasmBridge {
     pub last_session_save_time: Arc<Mutex<Option<u64>>>, // milliseconds since UNIX epoch
     layout_plugin_reservations: HashMap<LayoutTransactionId, LayoutPluginReservation>,
     layout_plugin_owners: HashMap<PluginId, LayoutTransactionId>,
-    session_manager_authority: Option<SingletonAuthority>,
-    session_manager_projectors: HashMap<PluginId, PluginId>,
+    session_chrome_authorities: HashMap<SessionChromeKind, SingletonAuthority>,
+    session_chrome_projectors: HashMap<PluginId, (PluginId, SessionChromeKind)>,
     layout_plugin_receipts:
         BTreeMap<(LayoutTransactionId, LayoutPluginResolutionKind), LayoutPluginReceipt>,
     layout_plugin_cleanup_debts: HashMap<LayoutTransactionId, LayoutPluginCleanupDebt>,
@@ -782,8 +816,8 @@ impl WasmBridge {
             last_session_save_time: Arc::new(Mutex::new(None)),
             layout_plugin_reservations: HashMap::new(),
             layout_plugin_owners: HashMap::new(),
-            session_manager_authority: None,
-            session_manager_projectors: HashMap::new(),
+            session_chrome_authorities: HashMap::new(),
+            session_chrome_projectors: HashMap::new(),
             layout_plugin_receipts: BTreeMap::new(),
             layout_plugin_cleanup_debts: HashMap::new(),
             layout_plugin_cleanup_receipts: BTreeMap::new(),
@@ -822,7 +856,7 @@ impl WasmBridge {
         let request_count = requests.len();
         let mut plugins = Vec::with_capacity(request_count);
         let mut pane_bindings = Vec::with_capacity(request_count);
-        let mut session_manager_projector_pane_ids = Vec::new();
+        let mut session_chrome_projector_pane_ids = Vec::new();
         for (offset, request) in requests.into_iter().enumerate() {
             let plugin_config =
                 PluginConfig::from_run_plugin(&request.run_plugin).ok_or_else(|| {
@@ -836,16 +870,17 @@ impl WasmBridge {
             let pane_id = self.next_plugin_id.checked_add(offset).ok_or_else(|| {
                 format!("plugin id space exhausted for layout transaction {transaction_id}")
             })?;
-            let is_session_manager = is_session_manager_singleton(&request.run_plugin);
-            let runtime_plugin_id = if is_session_manager {
+            let chrome_kind = session_chrome_kind(&request.run_plugin);
+            let runtime_plugin_id = if let Some(chrome_kind) = chrome_kind {
                 let authority = self
-                    .session_manager_authority
-                    .get_or_insert(SingletonAuthority {
+                    .session_chrome_authorities
+                    .entry(chrome_kind)
+                    .or_insert(SingletonAuthority {
                         runtime_plugin_id: pane_id,
                         projector_count: 0,
                         reserved_by: transaction_id,
                     });
-                session_manager_projector_pane_ids.push(pane_id);
+                session_chrome_projector_pane_ids.push((pane_id, chrome_kind));
                 authority.runtime_plugin_id
             } else {
                 pane_id
@@ -856,10 +891,11 @@ impl WasmBridge {
                 PluginPaneId::projector(pane_id, runtime_plugin_id)
             });
 
-            let authority_is_new_in_this_transaction = !is_session_manager
+            let authority_is_new_in_this_transaction = chrome_kind.is_none()
                 || (runtime_plugin_id == pane_id
                     && self
-                        .session_manager_authority
+                        .session_chrome_authorities
+                        .get(&chrome_kind.expect("chrome kind exists for singleton authority"))
                         .is_some_and(|authority| authority.reserved_by == transaction_id));
             if authority_is_new_in_this_transaction {
                 plugins.push(ReservedLayoutPlugin {
@@ -897,7 +933,7 @@ impl WasmBridge {
             LayoutPluginReservation {
                 plugins,
                 pane_bindings: pane_bindings.clone(),
-                session_manager_projector_pane_ids,
+                session_chrome_projector_pane_ids,
                 state: LayoutPluginTransactionState::Reserved,
                 cancellation: CancellationToken::new(),
                 tracker: Arc::new(LayoutPluginActivationTracker::default()),
@@ -1534,8 +1570,8 @@ impl WasmBridge {
             .ok_or_else(|| format!("unknown layout plugin transaction {transaction_id}"))?;
         let plugins = reservation.plugins.clone();
         let pane_bindings = reservation.pane_bindings.clone();
-        let session_manager_projector_pane_ids =
-            reservation.session_manager_projector_pane_ids.clone();
+        let session_chrome_projector_pane_ids =
+            reservation.session_chrome_projector_pane_ids.clone();
         let cancellation = reservation.cancellation.clone();
         let tracker = reservation.tracker.clone();
         let activation_gate = reservation.activation_gate.clone();
@@ -1600,24 +1636,19 @@ impl WasmBridge {
         }
 
         activation_gate.open();
-        if !session_manager_projector_pane_ids.is_empty() {
-            let authority_id = self
-                .session_manager_authority
-                .map(|authority| authority.runtime_plugin_id)
+        for (pane_id, chrome_kind) in &session_chrome_projector_pane_ids {
+            let authority = self
+                .session_chrome_authorities
+                .get_mut(chrome_kind)
                 .ok_or_else(|| {
                     format!(
-                        "layout plugin transaction {transaction_id} lost its session-manager authority"
+                        "layout plugin transaction {transaction_id} lost its {} authority",
+                        chrome_kind.label()
                     )
                 })?;
-            for pane_id in &session_manager_projector_pane_ids {
-                self.session_manager_projectors
-                    .insert(*pane_id, authority_id);
-            }
-            if let Some(authority) = self.session_manager_authority.as_mut() {
-                authority.projector_count = authority
-                    .projector_count
-                    .saturating_add(session_manager_projector_pane_ids.len());
-            }
+            self.session_chrome_projectors
+                .insert(*pane_id, (authority.runtime_plugin_id, *chrome_kind));
+            authority.projector_count = authority.projector_count.saturating_add(1);
         }
         if plugin_ids.is_empty() {
             self.layout_plugin_reservations.remove(&transaction_id);
@@ -1666,11 +1697,9 @@ impl WasmBridge {
             ));
         }
         self.cleanup_owned_layout_plugin_ids(transaction_id, &plugin_ids)?;
-        if self.session_manager_authority.is_some_and(|authority| {
-            authority.reserved_by == transaction_id && authority.projector_count == 0
-        }) {
-            self.session_manager_authority = None;
-        }
+        self.session_chrome_authorities.retain(|_, authority| {
+            authority.reserved_by != transaction_id || authority.projector_count > 0
+        });
         if plugin_ids.is_empty() {
             self.layout_plugin_reservations.remove(&transaction_id);
         }
@@ -1710,7 +1739,7 @@ impl WasmBridge {
                     .map(|plugin| plugin.plugin_id)
                     .collect::<Vec<_>>(),
                 receipt_plugin_ids,
-                reservation.session_manager_projector_pane_ids.clone(),
+                reservation.session_chrome_projector_pane_ids.clone(),
                 reservation.cancellation.clone(),
                 reservation.tracker.clone(),
                 reservation.activation_gate.clone(),
@@ -1724,21 +1753,15 @@ impl WasmBridge {
                 LAYOUT_PLUGIN_CLEANUP_TIMEOUT
             ));
         }
-        for pane_id in &projector_pane_ids {
-            self.session_manager_projectors.remove(pane_id);
-        }
-        if let Some(authority) = self.session_manager_authority.as_mut() {
-            authority.projector_count = authority
-                .projector_count
-                .saturating_sub(projector_pane_ids.len());
+        for (pane_id, chrome_kind) in &projector_pane_ids {
+            self.session_chrome_projectors.remove(pane_id);
+            if let Some(authority) = self.session_chrome_authorities.get_mut(chrome_kind) {
+                authority.projector_count = authority.projector_count.saturating_sub(1);
+            }
         }
         self.cleanup_owned_layout_plugin_ids(transaction_id, &plugin_ids)?;
-        if self
-            .session_manager_authority
-            .is_some_and(|authority| authority.projector_count == 0)
-        {
-            self.session_manager_authority = None;
-        }
+        self.session_chrome_authorities
+            .retain(|_, authority| authority.projector_count > 0);
         log::debug!("compensated layout plugins for transaction {transaction_id}: {reason}");
         Ok(LayoutPluginReceipt::Compensated {
             plugin_ids: receipt_plugin_ids,
@@ -2184,11 +2207,11 @@ impl WasmBridge {
         Ok((plugin_id, client_id))
     }
     pub fn unload_plugin(&mut self, plugin_id: PluginId) -> Result<()> {
-        let plugin_id = if let Some(runtime_plugin_id) =
-            self.session_manager_projectors.remove(&plugin_id)
+        let plugin_id = if let Some((runtime_plugin_id, chrome_kind)) =
+            self.session_chrome_projectors.remove(&plugin_id)
         {
             let remaining_projectors =
-                if let Some(authority) = self.session_manager_authority.as_mut() {
+                if let Some(authority) = self.session_chrome_authorities.get_mut(&chrome_kind) {
                     authority.projector_count = authority.projector_count.saturating_sub(1);
                     authority.projector_count
                 } else {
@@ -2196,11 +2219,12 @@ impl WasmBridge {
                 };
             if remaining_projectors > 0 {
                 log::debug!(
-                    "released session-manager projector; authority {runtime_plugin_id} retained for {remaining_projectors} projector(s)"
+                    "released {} projector; authority {runtime_plugin_id} retained for {remaining_projectors} projector(s)",
+                    chrome_kind.label()
                 );
                 return Ok(());
             }
-            self.session_manager_authority = None;
+            self.session_chrome_authorities.remove(&chrome_kind);
             runtime_plugin_id
         } else {
             plugin_id
@@ -4359,7 +4383,12 @@ mod layout_plugin_transaction_tests {
 
     fn session_manager_request(client_id: ClientId) -> LayoutPluginReservationRequest {
         LayoutPluginReservationRequest {
-            run_plugin: RunPlugin::from_url("vc-frame:session-manager").unwrap(),
+            run_plugin: RunPlugin::from_url("vc-frame:session-manager")
+                .unwrap()
+                .with_configuration(BTreeMap::from([(
+                    "session_canvas".to_owned(),
+                    "true".to_owned(),
+                )])),
             tab_index: Some(1),
             size: Size::default(),
             cwd: None,
@@ -4422,32 +4451,121 @@ mod layout_plugin_transaction_tests {
                 plugin_ids: pane_ids
             }
         );
-        assert!(bridge.session_manager_authority.is_none());
+        assert!(bridge.session_chrome_authorities.is_empty());
+    }
+
+    #[test]
+    fn session_canvas_reserves_three_runtimes_for_six_tab_views() {
+        let mut bridge = test_bridge(1);
+        let transaction_id = 9911;
+        let mut requests = vec![];
+        for client_id in 9200..9206 {
+            for location in [
+                "vc-frame:compact-bar",
+                "vc-frame:session-manager",
+                "vc-frame:status-bar",
+            ] {
+                let mut request = session_manager_request(client_id);
+                request.run_plugin =
+                    RunPlugin::from_url(location)
+                        .unwrap()
+                        .with_configuration(BTreeMap::from([(
+                            "session_canvas".to_owned(),
+                            "true".to_owned(),
+                        )]));
+                requests.push(request);
+            }
+        }
+
+        let pane_ids = bridge
+            .reserve_layout_plugins(transaction_id, requests)
+            .unwrap();
+        let reservation = bridge
+            .layout_plugin_reservations
+            .get(&transaction_id)
+            .unwrap();
+
+        assert_eq!(pane_ids.len(), 18);
+        assert_eq!(reservation.plugins.len(), 3);
+        assert_eq!(
+            reservation
+                .plugins
+                .iter()
+                .map(|plugin| plugin.plugin_id)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(bridge.session_chrome_authorities.len(), 3);
+    }
+
+    #[test]
+    fn legacy_chrome_without_canvas_marker_keeps_independent_runtimes() {
+        let mut bridge = test_bridge(1);
+        let transaction_id = 9912;
+        let requests = (0..2usize)
+            .map(|offset| LayoutPluginReservationRequest {
+                run_plugin: RunPlugin::from_url("vc-frame:status-bar").unwrap(),
+                tab_index: Some(offset),
+                size: Size::default(),
+                cwd: None,
+                skip_cache: false,
+                client_id: 9300 + offset as ClientId,
+            })
+            .collect();
+
+        let pane_ids = bridge
+            .reserve_layout_plugins(transaction_id, requests)
+            .unwrap();
+        let reservation = bridge
+            .layout_plugin_reservations
+            .get(&transaction_id)
+            .unwrap();
+
+        assert_eq!(pane_ids, vec![0, 1]);
+        assert_eq!(reservation.plugins.len(), 2);
+        assert!(bridge.session_chrome_authorities.is_empty());
+        assert!(
+            bridge
+                .layout_plugin_projector_bindings(transaction_id)
+                .is_empty()
+        );
     }
 
     #[test]
     fn closing_one_projector_keeps_singleton_authority_alive() {
         let mut bridge = test_bridge(1);
-        bridge.session_manager_authority = Some(SingletonAuthority {
-            runtime_plugin_id: 7,
-            projector_count: 2,
-            reserved_by: 77,
-        });
-        bridge.session_manager_projectors.insert(7, 7);
-        bridge.session_manager_projectors.insert(8, 7);
+        bridge.session_chrome_authorities.insert(
+            SessionChromeKind::SessionManager,
+            SingletonAuthority {
+                runtime_plugin_id: 7,
+                projector_count: 2,
+                reserved_by: 77,
+            },
+        );
+        bridge
+            .session_chrome_projectors
+            .insert(7, (7, SessionChromeKind::SessionManager));
+        bridge
+            .session_chrome_projectors
+            .insert(8, (7, SessionChromeKind::SessionManager));
 
         bridge.unload_plugin(8).unwrap();
 
         assert_eq!(
-            bridge.session_manager_authority,
-            Some(SingletonAuthority {
+            bridge
+                .session_chrome_authorities
+                .get(&SessionChromeKind::SessionManager),
+            Some(&SingletonAuthority {
                 runtime_plugin_id: 7,
                 projector_count: 1,
                 reserved_by: 77,
             })
         );
-        assert_eq!(bridge.session_manager_projectors.get(&7), Some(&7));
-        assert!(!bridge.session_manager_projectors.contains_key(&8));
+        assert_eq!(
+            bridge.session_chrome_projectors.get(&7),
+            Some(&(7, SessionChromeKind::SessionManager))
+        );
+        assert!(!bridge.session_chrome_projectors.contains_key(&8));
     }
 
     fn remote_request(client_id: ClientId) -> LayoutPluginReservationRequest {

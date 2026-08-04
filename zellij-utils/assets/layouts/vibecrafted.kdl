@@ -4,13 +4,14 @@
 //   "Start here"  — first-run map (about mission-control): chrome, rail, keys
 //   "Shell"       — work shell with banner + zsh (not a silent suspended pane)
 //
-// Contract: every tab keeps the left Sessions rail (default_tab_template).
+// Contract: Screen owns one session canvas; tab templates contain content only.
 //
 // 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
 layout {
-    default_tab_template {
+    session_layer {
         pane size=1 borderless=true {
             plugin location="compact-bar" {
+                session_canvas true
                 brand_text " 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. "
                 // 🚥 zone: clear the macOS traffic lights in the native window
                 left_inset "6"
@@ -19,6 +20,7 @@ layout {
         pane split_direction="vertical" {
             pane size=24 borderless=true {
                 plugin location="session-manager" {
+                    session_canvas true
                     rail true
                     pane_title "Sessions"
                 }
@@ -26,8 +28,16 @@ layout {
             pane { children; }
         }
         pane size=1 borderless=true {
-            plugin location="status-bar"
+            plugin location="status-bar" {
+                session_canvas true
+            }
         }
+    }
+
+    // Content-only. The parser mounts this inside session_layer without
+    // copying chrome ownership into the tab contract.
+    default_tab_template {
+        pane { children; }
     }
 
     tab name="Start here" focus=true {

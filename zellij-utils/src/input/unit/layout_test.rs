@@ -3,16 +3,21 @@ use crate::input::config::Config;
 use insta::assert_snapshot;
 use std::path::{Path, PathBuf};
 
-fn strip_unassigned_tab_instance_ids(s: String) -> String {
+fn strip_unassigned_layout_metadata(s: String) -> String {
     s.lines()
-        .filter(|line| line.trim() != "tab_instance_id: None,")
+        .filter(|line| {
+            !matches!(
+                line.trim(),
+                "tab_instance_id: None," | "session_layer: None,"
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
 
 #[cfg(not(windows))]
 fn normalize_layout_debug(s: String) -> String {
-    strip_unassigned_tab_instance_ids(s)
+    strip_unassigned_layout_metadata(s)
 }
 
 #[cfg(windows)]
@@ -20,7 +25,7 @@ fn normalize_layout_debug(s: String) -> String {
     // On Windows, PathBuf's Debug output uses `\\` (escaped backslash).
     // Replace `\\\\` (two escaped backslashes in Debug repr) with `/`
     // so that snapshots match Unix-recorded baselines.
-    strip_unassigned_tab_instance_ids(s.replace("\\\\", "/"))
+    strip_unassigned_layout_metadata(s.replace("\\\\", "/"))
 }
 
 #[test]
@@ -402,14 +407,53 @@ fn vibecrafted_layout_has_start_here_and_shell_tabs() {
         raw_layout.contains("vibecrafted start"),
         "Shell banner must mention vibecrafted start"
     );
+    let session_layer_start = raw_layout
+        .find("session_layer {")
+        .expect("vibecrafted layout must declare a session layer");
+    let default_template_start = raw_layout
+        .find("default_tab_template {")
+        .expect("vibecrafted layout must declare a content template");
+    let explicit_tabs_start = raw_layout
+        .find("tab name=\"Start here\"")
+        .expect("vibecrafted layout must declare its first content tab");
+    let session_layer = &raw_layout[session_layer_start..default_template_start];
+    let default_template = &raw_layout[default_template_start..explicit_tabs_start];
+    for chrome in ["compact-bar", "session-manager", "status-bar"] {
+        assert!(
+            session_layer.contains(chrome),
+            "session layer must own {chrome}"
+        );
+        assert!(
+            !default_template.contains(chrome),
+            "content-only default_tab_template must not own {chrome}"
+        );
+    }
+
+    let (layout, _config) =
+        Layout::from_default_assets(Path::new("vibecrafted"), None, Config::default()).unwrap();
+    assert!(layout.session_layer.is_some());
+    for (_, tiled, _) in layout.tabs() {
+        let runs = tiled.extract_run_instructions();
+        for chrome in ["compact-bar", "session-manager", "status-bar"] {
+            assert_eq!(
+                runs.iter()
+                    .filter(|run| run.as_ref().is_some_and(|run| {
+                        matches!(run, Run::Plugin(plugin) if plugin.location_string() == chrome)
+                    }))
+                    .count(),
+                1,
+                "each materialized tab view must project {chrome} exactly once"
+            );
+        }
+    }
 }
 
 #[test]
 fn product_layouts_always_include_sessions_rail() {
     // Contract: left Sessions column is not optional on product surfaces.
     // Every built-in product layout must embed session-manager with rail true
-    // (default_tab_template or explicit pane). Legacy compact/classic/strider
-    // are deliberately off the product picker.
+    // (session_layer, a legacy default template, or an explicit pane). Legacy
+    // compact/classic/strider are deliberately off the product picker.
     for layout_name in [
         "default",
         "vibecrafted",
