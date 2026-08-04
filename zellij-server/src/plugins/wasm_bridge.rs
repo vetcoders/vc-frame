@@ -857,22 +857,37 @@ impl WasmBridge {
         }
 
         let request_count = requests.len();
+        let request_count_u32 = u32::try_from(request_count)
+            .map_err(|_| format!("too many layout plugins in transaction {transaction_id}"))?;
+        let next_plugin_id = self
+            .next_plugin_id
+            .checked_add(request_count_u32)
+            .ok_or_else(|| {
+                format!("plugin id space exhausted for layout transaction {transaction_id}")
+            })?;
+        // Validate the complete batch before publishing singleton authorities or
+        // consuming ids. Reservation is an atomic boundary: a malformed later
+        // request must not leave an authority pointing at a runtime that was
+        // never reserved.
+        let requests = requests
+            .into_iter()
+            .map(|request| {
+                let plugin_config =
+                    PluginConfig::from_run_plugin(&request.run_plugin).ok_or_else(|| {
+                        format!(
+                            "failed to resolve layout plugin {} for transaction {transaction_id}",
+                            request.run_plugin.location
+                        )
+                    })?;
+                Ok((request, plugin_config))
+            })
+            .collect::<std::result::Result<Vec<_>, String>>()?;
         let mut plugins = Vec::with_capacity(request_count);
         let mut pane_bindings = Vec::with_capacity(request_count);
         let mut session_chrome_projector_pane_ids = Vec::new();
-        for (offset, request) in requests.into_iter().enumerate() {
-            let plugin_config =
-                PluginConfig::from_run_plugin(&request.run_plugin).ok_or_else(|| {
-                    format!(
-                        "failed to resolve layout plugin {} for transaction {transaction_id}",
-                        request.run_plugin.location
-                    )
-                })?;
-            let offset = u32::try_from(offset)
-                .map_err(|_| format!("too many layout plugins in transaction {transaction_id}"))?;
-            let pane_id = self.next_plugin_id.checked_add(offset).ok_or_else(|| {
-                format!("plugin id space exhausted for layout transaction {transaction_id}")
-            })?;
+        for (pane_id, (request, plugin_config)) in
+            (self.next_plugin_id..next_plugin_id).zip(requests)
+        {
             let chrome_kind = session_chrome_kind(&request.run_plugin);
             let runtime_plugin_id = if let Some(chrome_kind) = chrome_kind {
                 let authority = self
@@ -916,14 +931,7 @@ impl WasmBridge {
             }
         }
 
-        self.next_plugin_id =
-            self.next_plugin_id
-                .checked_add(u32::try_from(request_count).map_err(|_| {
-                    format!("too many layout plugins in transaction {transaction_id}")
-                })?)
-                .ok_or_else(|| {
-                    format!("plugin id space exhausted for layout transaction {transaction_id}")
-                })?;
+        self.next_plugin_id = next_plugin_id;
         let plugin_ids = plugins
             .iter()
             .map(|plugin| plugin.plugin_id)
@@ -4525,6 +4533,44 @@ mod layout_plugin_transaction_tests {
             vec![0, 1, 2]
         );
         assert_eq!(bridge.session_chrome_authorities.len(), 3);
+    }
+
+    #[test]
+    fn failed_canvas_reservation_is_atomic_and_retryable() {
+        let mut bridge = test_bridge(1);
+        let transaction_id = 9913;
+        let mut unresolved_request = session_manager_request(9300);
+        unresolved_request.run_plugin = RunPlugin::from_url("zellij:not-a-plugin").unwrap();
+
+        let error = bridge
+            .reserve_layout_plugins(
+                transaction_id,
+                vec![session_manager_request(9299), unresolved_request],
+            )
+            .unwrap_err();
+
+        assert!(error.contains("failed to resolve layout plugin"));
+        assert_eq!(bridge.next_plugin_id, 0);
+        assert!(bridge.session_chrome_authorities.is_empty());
+        assert!(bridge.layout_plugin_owners.is_empty());
+        assert!(
+            !bridge
+                .layout_plugin_reservations
+                .contains_key(&transaction_id)
+        );
+
+        assert_eq!(
+            bridge
+                .reserve_layout_plugins(transaction_id, vec![session_manager_request(9301)])
+                .unwrap(),
+            vec![0]
+        );
+        let authority = bridge
+            .session_chrome_authorities
+            .get(&SessionChromeKind::SessionManager)
+            .unwrap();
+        assert_eq!(authority.runtime_plugin_id, 0);
+        assert_eq!(authority.reserved_by, transaction_id);
     }
 
     #[test]
