@@ -14422,8 +14422,12 @@ pub(crate) fn screen_thread_main(
                     screen.dump_layout_to_hd()?;
                 }
             },
-            ScreenInstruction::SaveSession(_client_id, completion_tx) => {
+            ScreenInstruction::SaveSession(_client_id, mut completion_tx) => {
                 let err_context = || "Failed to save session";
+
+                if let Some(completion) = completion_tx.as_mut() {
+                    completion.require_explicit_resolution();
+                }
 
                 screen.update_active_pane_ids();
                 let pane_manifest = screen.generate_and_report_pane_state()?;
@@ -14487,9 +14491,19 @@ pub(crate) fn screen_thread_main(
                         session_info,
                         session_layout_metadata,
                         generation,
-                        completion_tx,
+                        // SaveSession acknowledgement means the durable write was accepted.
+                        // Commit completion is an asynchronous receipt emitted by the PTY
+                        // worker; coupling the CLI's one-second budget to disk I/O created
+                        // the historical retry storm.
+                        completion_tx: None,
                     })
                     .with_context(err_context)?;
+                if let Some(completion) = completion_tx.as_mut() {
+                    completion.set_stdout_message(format!(
+                        "session save generation {generation} accepted"
+                    ));
+                    completion.mark_success();
+                }
             },
             ScreenInstruction::RenameSession(
                 name,

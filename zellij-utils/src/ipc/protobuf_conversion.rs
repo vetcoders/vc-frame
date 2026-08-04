@@ -2,10 +2,11 @@ use crate::{
     client_server_contract::client_server_contract::{
         ActionMsg, AttachClientMsg, AttachWatcherClientMsg, BackgroundColorMsg, CliPipeOutputMsg,
         ClientExitedMsg, ClientToServerMsg as ProtoClientToServerMsg, ColorRegistersMsg,
-        ConfigFileUpdatedMsg, ConnStatusMsg, ConnectedMsg, DesktopNotificationResponseMsg,
-        DetachSessionMsg, ExitMsg, ExitReason as ProtoExitReason, FailedToStartWebServerMsg,
-        FirstClientConnectedMsg, ForegroundColorMsg, ForwardQueryToHostMsg,
-        ForwardedReplyFromHostMsg, HostTerminalThemeChangedMsg,
+        ConfigFileUpdatedMsg, ConnStatusMsg, ConnectedMsg, DeclareCallerMsg,
+        DesktopNotificationResponseMsg, DetachSessionMsg, DoctorRoutesMsg, ExitMsg,
+        ExitReason as ProtoExitReason, FailedToStartWebServerMsg, FirstClientConnectedMsg,
+        ForegroundColorMsg, ForwardQueryToHostMsg, ForwardedReplyFromHostMsg,
+        HostTerminalThemeChangedMsg,
         HostTerminalThemeIndication as ProtoHostTerminalThemeIndication,
         InputMode as ProtoInputMode, KeyMsg, KillSessionMsg, LayoutMetadata as ProtoLayoutMetadata,
         LogErrorMsg, LogMsg, PaneMetadata as ProtoPaneMetadata, PaneRenderUpdateMsg,
@@ -91,6 +92,12 @@ impl From<ClientToServerMsg> for ProtoClientToServerMsg {
                 client_id: client_id.map(|id| id as u32),
                 is_cli_client,
             }),
+            ClientToServerMsg::DeclareCaller { caller } => {
+                client_to_server_msg::Message::DeclareCaller(DeclareCallerMsg { caller })
+            },
+            ClientToServerMsg::DoctorRoutes { json } => {
+                client_to_server_msg::Message::DoctorRoutes(DoctorRoutesMsg { json })
+            },
             ClientToServerMsg::Key {
                 key,
                 raw_bytes,
@@ -237,6 +244,14 @@ impl TryFrom<ProtoClientToServerMsg> for ClientToServerMsg {
                 client_id: action.client_id.map(|id| id as u16),
                 is_cli_client: action.is_cli_client,
             }),
+            Some(client_to_server_msg::Message::DeclareCaller(declaration)) => {
+                Ok(ClientToServerMsg::DeclareCaller {
+                    caller: declaration.caller,
+                })
+            },
+            Some(client_to_server_msg::Message::DoctorRoutes(request)) => {
+                Ok(ClientToServerMsg::DoctorRoutes { json: request.json })
+            },
             Some(client_to_server_msg::Message::Key(key)) => Ok(ClientToServerMsg::Key {
                 key: key.key.ok_or_else(|| anyhow!("Missing key"))?.try_into()?,
                 raw_bytes: key.raw_bytes.into_iter().map(|b| b as u8).collect(),

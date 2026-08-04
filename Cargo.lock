@@ -4007,6 +4007,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "sha2",
  "ssh2",
  "tempfile",
  "thiserror 1.0.61",

@@ -37,6 +37,11 @@ fn main() {
     if let Some(Command::Repair(repair_cli)) = &opts.command {
         std::process::exit(clinic::repair(&opts, repair_cli));
     }
+    if let Some(Command::Action(cli_action)) = &opts.command
+        && let zellij_utils::cli::CliAction::DoctorRoutes { json } = cli_action.as_ref()
+    {
+        std::process::exit(commands::doctor_routes(opts.session.clone(), *json));
+    }
 
     {
         let config = Config::try_from(&opts).ok();

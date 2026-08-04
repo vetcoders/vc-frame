@@ -462,6 +462,42 @@ pub(crate) fn send_action_to_session(
         },
     };
 }
+
+pub(crate) fn doctor_routes(requested_session_name: Option<String>, json: bool) -> i32 {
+    let session_name = match get_active_session() {
+        ActiveSession::None => {
+            eprintln!("There is no active session!");
+            return 1;
+        },
+        ActiveSession::One(session_name) => match requested_session_name {
+            Some(requested) if requested != session_name => {
+                eprintln!("Session '{requested}' not found; active session is '{session_name}'");
+                return 1;
+            },
+            _ => session_name,
+        },
+        ActiveSession::Many => {
+            let sessions = get_sessions()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>();
+            match requested_session_name.or_else(|| envs::get_session_name().ok()) {
+                Some(requested) if sessions.contains(&requested) => requested,
+                Some(requested) => {
+                    eprintln!("Session '{requested}' not found");
+                    return 1;
+                },
+                None => {
+                    eprintln!("Please specify --session; multiple sessions are active");
+                    return 1;
+                },
+            }
+        },
+    };
+    let os_input = get_os_input(zellij_client::os_input_output::get_cli_client_os_input);
+    zellij_client::cli_client::doctor_routes_client(Box::new(os_input), &session_name, json)
+}
 pub(crate) fn subscribe_to_session(
     subscribe_cli: zellij_utils::cli::SubscribeCli,
     requested_session_name: Option<String>,
@@ -911,14 +947,30 @@ pub(crate) fn start_client(opts: CliArgs) {
                 process::exit(0);
             }
 
-            let session_name = generate_unique_session_name_or_exit();
-            start_client_plan(session_name.clone());
+            let client = match get_active_session() {
+                ActiveSession::None => {
+                    let session_name =
+                        cwd_session_name().unwrap_or_else(generate_unique_session_name_or_exit);
+                    start_client_plan(session_name.clone());
+                    ClientInfo::New(session_name, layout_info, new_session_cwd)
+                },
+                ActiveSession::One(session_name) => {
+                    ClientInfo::Attach(session_name, config_options.clone())
+                },
+                ActiveSession::Many => {
+                    eprintln!(
+                        "Multiple vc-frame sessions are active. Choose one with `vc-frame attach <name>`:"
+                    );
+                    list_sessions(false, false, true);
+                    process::exit(1);
+                },
+            };
             reconnect_to_session = start_client_impl(
                 Box::new(os_input),
                 opts,
                 config,
                 config_options,
-                ClientInfo::New(session_name, layout_info, new_session_cwd),
+                client,
                 StartClientOptions {
                     tab_position_to_focus: None,
                     pane_id_to_focus: None,
@@ -931,6 +983,49 @@ pub(crate) fn start_client(opts: CliArgs) {
             break;
         }
     }
+}
+
+fn cwd_session_name() -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    let raw = cwd.file_name()?.to_string_lossy();
+    let base = cwd_session_name_base(&raw)?;
+    let resurrectable_names = get_resurrectable_sessions()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect::<std::collections::HashSet<_>>();
+    for suffix in 1..=1000 {
+        let candidate = if suffix == 1 {
+            base.clone()
+        } else {
+            format!("{base}-{suffix}")
+        };
+        if validate_session_name(&candidate).is_ok()
+            && !session_exists(&candidate).unwrap_or(true)
+            && !resurrectable_names.contains(&candidate)
+        {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn cwd_session_name_base(raw: &str) -> Option<String> {
+    let base = raw
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches(['-', '.'])
+        .to_string();
+    if validate_session_name(&base).is_err() {
+        return None;
+    }
+    Some(base)
 }
 
 fn generate_unique_session_name_or_exit() -> String {
@@ -1056,4 +1151,19 @@ pub fn get_config_options_from_cli_args(opts: &CliArgs) -> Result<Options, Strin
     Setup::from_cli_args(opts)
         .map(|(_, _, config_options, _, _)| config_options)
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod bare_start_tests {
+    use super::cwd_session_name_base;
+
+    #[test]
+    fn cwd_name_is_stable_and_socket_safe() {
+        assert_eq!(
+            cwd_session_name_base("Vet Clinic – Frontier"),
+            Some("Vet-Clinic---Frontier".to_string())
+        );
+        assert_eq!(cwd_session_name_base(".."), None);
+        assert_eq!(cwd_session_name_base(""), None);
+    }
 }

@@ -1903,6 +1903,12 @@ pub enum CliAction {
     DumpLayout,
     /// Save the current session state to disk immediately
     SaveSession,
+    /// Show server route/caller counts, latency percentiles and timeout receipts
+    DoctorRoutes {
+        /// Emit machine-readable JSON
+        #[clap(long, value_parser, default_value("false"), takes_value(false))]
+        json: bool,
+    },
     /// Open the pane scrollback in your default editor
     EditScrollback {
         /// Target a specific pane by ID (eg. terminal_1, plugin_2, or 3)

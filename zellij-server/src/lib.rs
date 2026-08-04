@@ -20,6 +20,7 @@ mod plugins;
 mod pty;
 mod pty_writer;
 mod route;
+mod route_telemetry;
 mod screen;
 mod session_layout_metadata;
 mod terminal_bytes;

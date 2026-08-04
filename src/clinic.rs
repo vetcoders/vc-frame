@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use kdl::{KdlDocument, KdlNode};
+use sha2::{Digest, Sha256};
 use zellij_utils::cli::{CliArgs, RepairCli};
 use zellij_utils::data::{BareKey, InputMode, KeyWithModifier};
 use zellij_utils::home::{find_default_config_dir, get_layout_dir};
@@ -704,7 +705,13 @@ fn diagnose_config_resolution(diagnosis: &mut Diagnosis, winner: Option<&Path>) 
         }
     }
     match winner {
-        Some(path) => lines.push(format!("WINNER → {}", path.display())),
+        Some(path) => {
+            lines.push(format!("WINNER → {}", path.display()));
+            match std::fs::read(path) {
+                Ok(bytes) => lines.push(format!("WINNER SHA256 → {:x}", Sha256::digest(bytes))),
+                Err(error) => lines.push(format!("WINNER SHA256 → unreadable ({error})")),
+            }
+        },
         None => lines.push("WINNER → (shipped assets only)".to_owned()),
     }
     diagnosis.ok_notes.push((
@@ -1566,12 +1573,25 @@ fn render_json(diagnosis: &Diagnosis, exit_code: i32) -> String {
             })
         })
         .collect();
+    let config_resolution = diagnosis
+        .ok_notes
+        .iter()
+        .find(|(_, note)| note.starts_with("config resolution"))
+        .map(|(_, note)| {
+            note.lines()
+                .skip(1)
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let document = serde_json::json!({
         "version": 1,
         // The verdict is about the on-disk config — what the NEXT session
         // loads. Live sessions keep the contract they started with.
         "scope": "next-session",
         "exit_code": exit_code,
+        "config_resolution": config_resolution,
         "findings": findings,
     });
     format!("{document:#}\n")
@@ -2112,6 +2132,42 @@ theme "vc-frame"
 
     fn effective(raw: &str) -> Config {
         Config::from_kdl(raw, Some(contract())).expect("fixture must parse")
+    }
+
+    #[test]
+    fn config_resolution_names_the_winner_then_hashes_its_exact_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let winner = temp.path().join("config.kdl");
+        std::fs::write(&winner, "theme \"vc-frame\"\n").unwrap();
+        let expected = format!("{:x}", Sha256::digest(b"theme \"vc-frame\"\n"));
+        let mut diagnosis = Diagnosis::default();
+
+        diagnose_config_resolution(&mut diagnosis, Some(&winner));
+
+        let output = diagnosis
+            .ok_notes
+            .iter()
+            .find(|(_, note)| note.starts_with("config resolution"))
+            .map(|(_, note)| note)
+            .unwrap();
+        let winner_index = output.find("WINNER →").unwrap();
+        let hash_index = output.find("WINNER SHA256 →").unwrap();
+        assert!(winner_index < hash_index, "{output}");
+        assert!(output.contains(&expected), "{output}");
+
+        let rendered = render_json(&diagnosis, diagnosis.exit_code());
+        let parsed: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        let resolution = parsed["config_resolution"].as_array().unwrap();
+        let winner_index = resolution
+            .iter()
+            .position(|line| line.as_str().unwrap().starts_with("WINNER →"))
+            .unwrap();
+        let hash_index = resolution
+            .iter()
+            .position(|line| line.as_str().unwrap().starts_with("WINNER SHA256 →"))
+            .unwrap();
+        assert!(winner_index < hash_index, "{resolution:?}");
+        assert!(resolution[hash_index].as_str().unwrap().contains(&expected));
     }
 
     // ------------------------------------------------------------ the diff --

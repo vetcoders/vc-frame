@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
+* feat(warden): caller-aware route telemetry, bounded action-client TTL, accepted-vs-committed SaveSession receipts, deterministic config hashes, bare-start attach/CWD naming, and explicit key/config/C2 contracts
 * fix(chrome): bottom bar mode tiles keep readable labels (LOCK/PANE not Lo/Pa); chrome key SSOT uses macOS glyphs ⌃⌥⌘⇧; session-manager help uses ⌥⌫ (not Del) + rail label sanitize against Main flicker
 * fix(host): inject Cmd→CSI Super translation into live Alacritty config so Cmd+arrows/Cmd+E work (key-contract v3)
 * fix(session-manager): kill/delete is ⌥⌫ (Alt+Backspace) on help and handlers — forward-delete Del is no longer advertised (scarce on Mac laptops, steals sequences); help uses macOS glyphs (⌃ ⌥ ⌫ ⏎)

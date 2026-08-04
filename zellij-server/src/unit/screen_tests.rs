@@ -835,6 +835,7 @@ fn send_cli_action_to_server(
     for action in actions {
         route_action(
             action,
+            "test",
             client_id,
             None,
             None,
@@ -12802,6 +12803,7 @@ pub fn copy_pane_scrollback_action_pipes_focused_pane_full_scrollback_to_copy_co
 
     route_action(
         Action::CopyPaneScrollback,
+        "test",
         client_id,
         None,
         None,

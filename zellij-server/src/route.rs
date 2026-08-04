@@ -13,7 +13,7 @@ use crate::{
     screen::{DumpScreenTargetIdentity, ScreenInstruction},
 };
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 use zellij_utils::{
     channels::SenderWithContext,
@@ -280,6 +280,7 @@ fn complete_action_immediately(sender: oneshot::Sender<ActionCompletionResult>) 
 #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
 pub(crate) fn route_action(
     action: Action,
+    caller: &str,
     client_id: ClientId,
     cli_client_id: Option<ClientId>,
     pane_id: Option<PaneId>,
@@ -288,6 +289,7 @@ pub(crate) fn route_action(
     mut seen_cli_pipes: Option<&mut HashSet<String>>,
     default_mode: InputMode,
 ) -> Result<(bool, Option<ActionCompletionResult>)> {
+    let route_started = Instant::now();
     let mut should_break = false;
     let err_context = || format!("failed to route action for client {client_id}");
     let action_name = action.to_string();
@@ -2255,6 +2257,17 @@ pub(crate) fn route_action(
         },
     }
     let result = wait_for_action_completion(completion_rx, &action_name, critical_completion);
+    let timed_out = result
+        .error_message
+        .as_deref()
+        .is_some_and(|message| message.contains("did not acknowledge completion within"));
+    crate::route_telemetry::record(
+        caller,
+        &action_name,
+        route_started.elapsed(),
+        timed_out,
+        result.error_message.is_none() && result.exit_status.is_none_or(|status| status == 0),
+    );
     Ok((should_break, Some(result)))
 }
 
@@ -2274,6 +2287,22 @@ macro_rules! send_to_screen_or_retry_queue {
     }};
 }
 
+fn normalize_route_caller(value: &str) -> String {
+    let normalized = value
+        .trim()
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | ':' | '/')
+        })
+        .take(64)
+        .collect::<String>();
+    if normalized.is_empty() {
+        "anonymous".to_string()
+    } else {
+        normalized
+    }
+}
+
 pub(crate) fn route_thread_main(
     session_data: Arc<RwLock<Option<SessionMetaData>>>,
     session_state: Arc<RwLock<SessionState>>,
@@ -2283,6 +2312,8 @@ pub(crate) fn route_thread_main(
     client_id: ClientId,
 ) -> Result<()> {
     let mut retry_queue = VecDeque::new();
+    let mut caller = "anonymous".to_string();
+    let connection_started = Instant::now();
     let err_context = || format!("failed to handle instruction for client {client_id}");
     let mut seen_cli_pipes = HashSet::new();
     'route_loop: loop {
@@ -2346,6 +2377,20 @@ pub(crate) fn route_thread_main(
                     }
 
                     match instruction {
+                        ClientToServerMsg::DeclareCaller { caller: declared } => {
+                            caller = normalize_route_caller(&declared);
+                        },
+                        ClientToServerMsg::DoctorRoutes { json: _ } => {
+                            os_input
+                                .send_to_client(
+                                    client_id,
+                                    ServerToClientMsg::Log {
+                                        lines: vec![crate::route_telemetry::snapshot_json()],
+                                    },
+                                )
+                                .with_context(err_context)?;
+                            should_break = true;
+                        },
                         ClientToServerMsg::Key {
                             key,
                             raw_bytes,
@@ -2394,6 +2439,7 @@ pub(crate) fn route_thread_main(
 
                                     match route_action(
                                         action,
+                                        "interactive",
                                         client_id,
                                         None,
                                         None,
@@ -2472,6 +2518,7 @@ pub(crate) fn route_thread_main(
                                 .then_some(cli_client_id);
                                 match route_action(
                                     action,
+                                    &caller,
                                     client_id,
                                     Some(cli_client_id),
                                     maybe_pane_id.map(PaneId::Terminal),
@@ -2798,6 +2845,15 @@ pub(crate) fn route_thread_main(
             ClientReceiveOutcome::Disconnected => {
                 // Clean EOF / broken pipe — end the route without the historical
                 // "unknown message" retry loop that eventually forced logout.
+                let age = connection_started.elapsed();
+                if age >= Duration::from_secs(60) {
+                    log::warn!(
+                        "warden.expired_client caller={} client_id={} age_seconds={} result=disconnected",
+                        caller,
+                        client_id,
+                        age.as_secs()
+                    );
+                }
                 log::info!("Client {client_id} disconnected");
                 break 'route_loop;
             },
@@ -3304,6 +3360,16 @@ fn cli_action_has_dedicated_response(action: &Action) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn route_caller_is_bounded_and_safe_for_receipts() {
+        assert_eq!(
+            normalize_route_caller("  settlement worker  "),
+            "settlementworker"
+        );
+        assert_eq!(normalize_route_caller("💥"), "anonymous");
+        assert_eq!(normalize_route_caller(&"a".repeat(100)).len(), 64);
+    }
 
     #[test]
     fn test_notification_end_sets_affected_tab_id() {
