@@ -288,7 +288,7 @@ mod tests {
     use std::ffi::OsStr;
     use std::process::{Command, Output};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     struct TempRepo {
         _temp_dir: tempfile::TempDir,
@@ -392,6 +392,28 @@ mod tests {
             new_head
         }
 
+        fn advance_head_until_ref_timestamp_changes(&self, loose_ref: &Path) -> String {
+            let before = fs::metadata(loose_ref)
+                .and_then(|metadata| metadata.modified())
+                .expect("read initial loose-ref timestamp");
+            let deadline = Instant::now() + Duration::from_secs(5);
+
+            loop {
+                let new_head = self.advance_head_without_touching_sources();
+                let after = fs::metadata(loose_ref)
+                    .and_then(|metadata| metadata.modified())
+                    .expect("read advanced loose-ref timestamp");
+                if after != before {
+                    return new_head;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "Git ref timestamp did not advance within the bounded retry window"
+                );
+                thread::sleep(Duration::from_millis(25));
+            }
+        }
+
         fn tracked_source_snapshot(&self) -> Vec<Vec<u8>> {
             [
                 self.crate_dir.join("Cargo.toml"),
@@ -449,10 +471,16 @@ mod tests {
         assert_eq!(repo.run_binary(), first_head);
         let before = repo.tracked_source_snapshot();
 
-        // Keep this test valid on filesystems whose mtimes have one-second
-        // resolution: only the Git ref may move after Cargo's first snapshot.
-        thread::sleep(Duration::from_millis(1_100));
-        let second_head = repo.advance_head_without_touching_sources();
+        // Cargo fingerprints the watched Git path by filesystem metadata. For
+        // a loose ref, do not assume that a fixed sleep crosses the filesystem
+        // timestamp tick: advance until the exact watched ref proves it did.
+        // A packed ref becomes a new loose file, so its parent-directory entry
+        // changes on the first update and does not need the same retry.
+        let second_head = if pack_refs {
+            repo.advance_head_without_touching_sources()
+        } else {
+            repo.advance_head_until_ref_timestamp_changes(&loose_ref)
+        };
 
         assert_ne!(second_head, first_head);
         assert_eq!(repo.tracked_source_snapshot(), before);
