@@ -112,13 +112,15 @@ impl KittyKeyboardParser {
             // final letter terminates `\x1b[A`- and `\x1b[1;2A`-style
             // sequences in place.
             let completed = match self.state {
-                KittyKeysParsingState::DoneParsingWithU => Some(KeyWithModifier::from_bytes_with_u(
-                    &self.number_bytes,
-                    &self.modifier_bytes,
-                )),
-                KittyKeysParsingState::DoneParsingWithTilde => Some(
-                    KeyWithModifier::from_bytes_with_tilde(&self.number_bytes, &self.modifier_bytes),
+                KittyKeysParsingState::DoneParsingWithU => Some(
+                    KeyWithModifier::from_bytes_with_u(&self.number_bytes, &self.modifier_bytes),
                 ),
+                KittyKeysParsingState::DoneParsingWithTilde => {
+                    Some(KeyWithModifier::from_bytes_with_tilde(
+                        &self.number_bytes,
+                        &self.modifier_bytes,
+                    ))
+                },
                 KittyKeysParsingState::ParsingNumber
                     if was_parsing_number && is_csi_final_letter(byte) =>
                 {
