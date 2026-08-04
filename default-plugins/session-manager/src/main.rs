@@ -40,6 +40,8 @@ enum ActiveScreen {
 
 const SETTLEMENT_COUNTS_PIPE: &str = "vc_settlement_counts";
 const SETTLEMENT_HISTORY_SCHEMA: &str = "vibecrafted.settlement-history.v1";
+const VC_CHROME_VISIBILITY_MESSAGE: &str = "vc.status-bar-visibility.v1";
+const VC_CHROME_HEARTBEAT_MESSAGE: &str = "vc.fleet-live-count.v1";
 // Guardian republishes at least every five seconds. Three missed refresh
 // windows turn exact counts into lower bounds instead of letting a dead
 // producer leave stale values looking authoritative forever.
@@ -230,16 +232,22 @@ impl ZellijPlugin for State {
             self.active_screen = ActiveScreen::AttachToSession;
         }
         self.single_screen_state.is_welcome_screen = self.is_welcome_screen;
-        self.is_visible = true;
-        subscribe(&[
+        // Rail instances are per-tab chrome and start parked. Screen wakes
+        // only the exact plugin/client target that is actually visible.
+        self.is_visible = !self.is_rail;
+        let mut subscriptions = vec![
             EventType::ModeUpdate,
-            EventType::SessionUpdate,
             EventType::Key,
             EventType::Mouse,
             EventType::RunCommandResult,
             EventType::Timer,
             EventType::Visible,
-        ]);
+            EventType::CustomMessage,
+        ];
+        if self.is_visible {
+            subscriptions.push(EventType::SessionUpdate);
+        }
+        subscribe(&subscriptions);
         let pane_title = if self.is_rail {
             configuration
                 .get("pane_title")
@@ -257,8 +265,10 @@ impl ZellijPlugin for State {
                 .unwrap_or_else(|| "Session Manager".to_owned())
         };
         rename_plugin_pane(get_plugin_ids().plugin_id, pane_title);
-        self.refresh_session_list();
-        if !self.is_welcome_screen {
+        if self.is_visible {
+            self.refresh_session_list();
+        }
+        if self.is_visible && !self.is_welcome_screen {
             self.arm_refresh_timer();
         }
     }
@@ -339,6 +349,9 @@ impl ZellijPlugin for State {
                 self.arm_refresh_timer();
             },
             Event::Visible(is_visible) => {
+                if self.is_rail {
+                    return false;
+                }
                 let was_visible = self.is_visible;
                 self.is_visible = is_visible;
                 if is_visible && !was_visible {
@@ -352,6 +365,41 @@ impl ZellijPlugin for State {
                     // server does not serialize the snapshot into their wasm
                     // memory every second.
                     unsubscribe(&[EventType::SessionUpdate]);
+                }
+            },
+            Event::CustomMessage(message, payload)
+                if self.is_rail && message == VC_CHROME_VISIBILITY_MESSAGE =>
+            {
+                match payload.as_str() {
+                    "true" => {
+                        let was_visible = self.is_visible;
+                        self.is_visible = true;
+                        if !was_visible {
+                            subscribe(&[EventType::SessionUpdate]);
+                            if self.refresh_session_list() {
+                                should_render = true;
+                            }
+                            self.arm_refresh_timer();
+                        }
+                    },
+                    "false" => {
+                        self.is_visible = false;
+                        unsubscribe(&[EventType::SessionUpdate]);
+                    },
+                    _ => {},
+                }
+            },
+            Event::CustomMessage(message, _payload)
+                if self.is_rail && message == VC_CHROME_HEARTBEAT_MESSAGE =>
+            {
+                let was_visible = self.is_visible;
+                self.is_visible = true;
+                if !was_visible {
+                    subscribe(&[EventType::SessionUpdate]);
+                    if self.refresh_session_list() {
+                        should_render = true;
+                    }
+                    self.arm_refresh_timer();
                 }
             },
             Event::ModeUpdate(mode_info) => {
@@ -3800,7 +3848,9 @@ mod rail_tests {
         session.name = "alpha\nbeta".to_owned();
         let text = format_session_rail_entry(&session, 1);
         assert!(!text.contains('\n'));
-        assert!(text.contains("alpha beta") || text.contains("alphabeta") || text.contains("alpha"));
+        assert!(
+            text.contains("alpha beta") || text.contains("alphabeta") || text.contains("alpha")
+        );
         // After sanitize newline becomes space collapse → "alpha beta"
         assert_eq!(sanitize_display_label("alpha\nbeta"), "alpha beta");
     }

@@ -37,6 +37,8 @@ const STATUS_BAR_PLUGIN_URLS: [&str; 3] =
 /// How long the clipboard notification ("Text copied...") stays on the bar
 /// before dismissing itself without requiring user input.
 const CLIPBOARD_HINT_TTL_SECONDS: f64 = 2.0;
+const VC_CHROME_VISIBILITY_MESSAGE: &str = "vc.status-bar-visibility.v1";
+const VC_CHROME_HEARTBEAT_MESSAGE: &str = "vc.fleet-live-count.v1";
 const MSG_TOGGLE_PERSISTED_TOOLTIP: &str = "toggle_persisted_tooltip";
 const MSG_LAUNCH_TOOLTIP: &str = "launch_tooltip_if_not_launched";
 /// Sentinel tab_index marking the clickable Composer chip on the tab line —
@@ -97,6 +99,7 @@ struct State {
     is_first_run: bool,
     own_tab_index: Option<usize>,
     own_client_id: u16,
+    is_visible: bool,
     // Last (mode, coordinates) actually sent to the server. Repositioning is
     // idempotent against this: a persistent tooltip receives ModeUpdate
     // broadcasts that its own coordinate/rename calls trigger, and resending
@@ -157,6 +160,25 @@ impl ZellijPlugin for State {
             Event::Timer(_) => self.handle_clipboard_hint_timeout(),
             Event::InputReceived => self.handle_input_received(),
             Event::PermissionRequestResult(_) => true,
+            Event::CustomMessage(message, payload) if message == VC_CHROME_VISIBILITY_MESSAGE => {
+                let was_visible = self.is_visible;
+                match payload.as_str() {
+                    "true" => self.is_visible = true,
+                    "false" => self.is_visible = false,
+                    _ => {},
+                }
+                self.is_visible && !was_visible
+            },
+            Event::CustomMessage(message, _) if message == VC_CHROME_HEARTBEAT_MESSAGE => {
+                let was_visible = self.is_visible;
+                self.is_visible = true;
+                !was_visible
+            },
+            Event::Visible(is_visible) => {
+                let was_visible = self.is_visible;
+                self.is_visible = is_visible;
+                is_visible && !was_visible
+            },
             _ => false,
         }
     }
@@ -229,6 +251,8 @@ impl State {
                 EventType::InitialKeybinds,
                 EventType::Timer,
                 EventType::PermissionRequestResult,
+                EventType::CustomMessage,
+                EventType::Visible,
             ]
         };
 

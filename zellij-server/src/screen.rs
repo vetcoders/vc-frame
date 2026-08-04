@@ -80,12 +80,21 @@ pub(crate) const VC_FLEET_LIVE_COUNT_MESSAGE: &str = "vc.fleet-live-count.v1";
 /// tab-global and is therefore insufficient when several clients view
 /// different tabs in one non-mirrored session.
 pub(crate) const VC_STATUS_BAR_VISIBILITY_MESSAGE: &str = "vc.status-bar-visibility.v1";
+type ChromePluginTarget = (PluginId, ClientId);
 // Plugin panes retain either the canonical built-in URL or their layout alias.
-// Keep the three runtime spellings as a fallback and also inspect an alias's
-// resolved RunPlugin so renamed aliases of the built-in status bar keep the
-// same lifecycle behavior.
-const STATUS_BAR_PLUGIN_URLS: [&str; 3] =
-    ["vc-frame:status-bar", "zellij:status-bar", "status-bar"];
+// Keep the three runtime spellings for each parkable chrome plugin and inspect
+// an alias's resolved RunPlugin so renamed built-ins keep the same lifecycle.
+const PARKABLE_CHROME_PLUGIN_URLS: [&str; 9] = [
+    "vc-frame:status-bar",
+    "zellij:status-bar",
+    "status-bar",
+    "vc-frame:compact-bar",
+    "zellij:compact-bar",
+    "compact-bar",
+    "vc-frame:session-manager",
+    "zellij:session-manager",
+    "session-manager",
+];
 
 /// Count live terminal-bearing tabs across working sessions. Triage bucket
 /// sessions are drawers, not fleet, and plugin-only/exited/held tabs do not
@@ -110,26 +119,26 @@ fn fleet_live_count(sessions: &[SessionInfo]) -> usize {
         .sum()
 }
 
-fn is_status_bar_plugin_run(run: Option<&Run>) -> bool {
+fn is_parkable_chrome_plugin_run(run: Option<&Run>) -> bool {
     let Some(Run::Plugin(run_plugin_or_alias)) = run else {
         return false;
     };
     match run_plugin_or_alias {
         RunPluginOrAlias::RunPlugin(run_plugin) => {
-            STATUS_BAR_PLUGIN_URLS.contains(&run_plugin.location.display().as_str())
+            PARKABLE_CHROME_PLUGIN_URLS.contains(&run_plugin.location.display().as_str())
         },
         RunPluginOrAlias::Alias(alias) => match &alias.run_plugin {
             Some(run_plugin) => {
-                STATUS_BAR_PLUGIN_URLS.contains(&run_plugin.location.display().as_str())
+                PARKABLE_CHROME_PLUGIN_URLS.contains(&run_plugin.location.display().as_str())
             },
-            None => STATUS_BAR_PLUGIN_URLS.contains(&alias.name.as_str()),
+            None => PARKABLE_CHROME_PLUGIN_URLS.contains(&alias.name.as_str()),
         },
     }
 }
 
-/// Build the ordinary broadcast session update plus a scalar update targeted
-/// only at this server's status-bar instances. A broadcast `CustomMessage`
-/// would wake every third-party plugin subscribed to that public event type.
+/// Build exact chrome lifecycle updates before the ordinary session broadcast.
+/// WasmBridge consumes these in order and parks hidden plugin/client targets
+/// before the heavyweight payload can cross into their WASM memories.
 fn session_update_events(
     live_sessions: Vec<SessionInfo>,
     resurrectable_sessions: Vec<(String, Duration)>,
@@ -138,25 +147,19 @@ fn session_update_events(
 ) -> Vec<(Option<PluginId>, Option<ClientId>, Event)> {
     let live_count = fleet_live_count(&live_sessions).to_string();
 
-    let mut updates = vec![(
-        None,
-        None,
-        Event::SessionUpdate(live_sessions, resurrectable_sessions),
-    )];
-    updates.extend(
-        hidden_status_bar_plugin_targets
-            .into_iter()
-            .map(|(plugin_id, client_id)| {
-                (
-                    Some(plugin_id),
-                    Some(client_id),
-                    Event::CustomMessage(
-                        VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
-                        "false".to_owned(),
-                    ),
-                )
-            }),
-    );
+    let mut updates = hidden_status_bar_plugin_targets
+        .into_iter()
+        .map(|(plugin_id, client_id)| {
+            (
+                Some(plugin_id),
+                Some(client_id),
+                Event::CustomMessage(
+                    VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
+                    "false".to_owned(),
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
     updates.extend(
         status_bar_plugin_targets
             .into_iter()
@@ -171,6 +174,11 @@ fn session_update_events(
                 )
             }),
     );
+    updates.push((
+        None,
+        None,
+        Event::SessionUpdate(live_sessions, resurrectable_sessions),
+    ));
     updates
 }
 
@@ -1620,10 +1628,6 @@ pub(crate) struct Screen {
     connected_clients: Rc<RefCell<HashMap<ClientId, bool>>>, // bool -> is_web_client
     /// The indices of this [`Screen`]'s active [`Tab`]s.
     active_tab_ids: BTreeMap<ClientId, usize>,
-    /// Last status-bar plugin/client pairs known to be active. This lets the
-    /// status-bar lifecycle emit exact per-client deactivation events without
-    /// changing the tab-global `Visible` contract used by other plugins.
-    active_status_bar_plugin_targets_cache: BTreeSet<(PluginId, ClientId)>,
     /// Per-regular-client viewport sizes, used to compute per-tab sizing.
     client_sizes: HashMap<ClientId, Size>,
     global_last_active_tab_id: usize,
@@ -2609,7 +2613,6 @@ impl Screen {
             style: client_attributes.style,
             connected_clients: Rc::new(RefCell::new(HashMap::new())),
             active_tab_ids: BTreeMap::new(),
-            active_status_bar_plugin_targets_cache: BTreeSet::new(),
             client_sizes: HashMap::new(),
             global_last_active_tab_id: 0,
             tabs: BTreeMap::new(),
@@ -6270,9 +6273,11 @@ impl Screen {
         }
     }
 
-    fn active_status_bar_plugin_targets(&self) -> BTreeSet<(PluginId, ClientId)> {
-        self.active_tab_ids
-            .iter()
+    fn chrome_plugin_targets_for_tabs<'a>(
+        &'a self,
+        tab_ids: impl Iterator<Item = (&'a ClientId, &'a usize)>,
+    ) -> BTreeSet<ChromePluginTarget> {
+        tab_ids
             .flat_map(|(client_id, tab_id)| {
                 self.tabs
                     .get(tab_id)
@@ -6281,7 +6286,7 @@ impl Screen {
                         tab.get_plugin_ids().into_iter().filter(|plugin_id| {
                             tab.get_pane_with_id(PaneId::Plugin(*plugin_id))
                                 .is_some_and(|pane| {
-                                    is_status_bar_plugin_run(pane.invoked_with().as_ref())
+                                    is_parkable_chrome_plugin_run(pane.invoked_with().as_ref())
                                 })
                         })
                     })
@@ -6290,16 +6295,27 @@ impl Screen {
             .collect()
     }
 
+    fn active_status_bar_plugin_targets(&self) -> BTreeSet<ChromePluginTarget> {
+        self.chrome_plugin_targets_for_tabs(self.active_tab_ids.iter())
+    }
+
+    fn all_status_bar_plugin_targets(&self) -> BTreeSet<ChromePluginTarget> {
+        self.chrome_plugin_targets_for_tabs(
+            self.active_tab_ids
+                .keys()
+                .flat_map(|client_id| self.tabs.keys().map(move |tab_id| (client_id, tab_id))),
+        )
+    }
+
     fn status_bar_plugin_target_transition(
         &mut self,
-    ) -> (Vec<(PluginId, ClientId)>, Vec<(PluginId, ClientId)>) {
+    ) -> (Vec<ChromePluginTarget>, Vec<ChromePluginTarget>) {
         let active_targets = self.active_status_bar_plugin_targets();
         let hidden_targets = self
-            .active_status_bar_plugin_targets_cache
+            .all_status_bar_plugin_targets()
             .difference(&active_targets)
             .copied()
             .collect();
-        self.active_status_bar_plugin_targets_cache = active_targets.clone();
         (active_targets.into_iter().collect(), hidden_targets)
     }
 

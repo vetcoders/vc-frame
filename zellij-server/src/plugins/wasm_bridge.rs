@@ -414,6 +414,9 @@ pub struct WasmBridge {
     plugin_executor: Arc<PinnedExecutor>,
     next_plugin_id: PluginId,
     plugin_ids_waiting_for_permission_request: HashSet<PluginId>,
+    // Exact plugin/client targets parked by Screen's chrome lifecycle. Heavy
+    // state payloads never cross into these WASM instances while hidden.
+    parked_chrome_plugin_clients: HashSet<(PluginId, ClientId)>,
     cached_events_for_pending_plugins: HashMap<PluginId, Vec<EventOrPipeMessage>>,
     cached_resizes_for_pending_plugins: HashMap<PluginId, (usize, usize)>, // (rows, columns)
     cached_worker_messages: HashMap<PluginId, Vec<(ClientId, String, String, String)>>, // Vec<clientid,
@@ -495,6 +498,7 @@ impl WasmBridge {
             next_plugin_id: 0,
             cached_events_for_pending_plugins: HashMap::new(),
             plugin_ids_waiting_for_permission_request: HashSet::new(),
+            parked_chrome_plugin_clients: HashSet::new(),
             cached_resizes_for_pending_plugins: HashMap::new(),
             cached_worker_messages: HashMap::new(),
             loading_plugins: HashSet::new(),
@@ -1111,6 +1115,8 @@ impl WasmBridge {
         self.cached_worker_messages.remove(&plugin_id);
         self.plugin_ids_waiting_for_permission_request
             .remove(&plugin_id);
+        self.parked_chrome_plugin_clients
+            .retain(|(parked_plugin_id, _)| parked_plugin_id != &plugin_id);
         self.loading_plugins
             .retain(|(loading_plugin_id, _)| loading_plugin_id != &plugin_id);
         self.cached_plugin_map.clear();
@@ -2141,6 +2147,7 @@ impl WasmBridge {
         let plugin_executor = self.plugin_executor.clone();
         for (pid, cid, event) in updates.iter() {
             let (pid, cid) = (*pid, *cid);
+            self.update_parked_chrome_target(pid, cid, event);
             let refreshable_status_bar_state =
                 Self::is_refreshable_status_bar_state(pid, cid, event);
             // FIXME: This is very janky... Maybe I should write my own macro for Event -> EventType?
@@ -2150,6 +2157,9 @@ impl WasmBridge {
             for ((plugin_id, client_id, running_plugin, _), subs) in
                 plugins_to_update.iter().zip(&plugin_subscription_snapshots)
             {
+                if self.is_parked_chrome_state_payload(*plugin_id, *client_id, event) {
+                    continue;
+                }
                 if (!self
                     .cached_events_for_pending_plugins
                     .contains_key(plugin_id)
@@ -2488,6 +2498,8 @@ impl WasmBridge {
         Ok(())
     }
     pub fn remove_client(&mut self, client_id: ClientId) {
+        self.parked_chrome_plugin_clients
+            .retain(|(_, parked_client_id)| parked_client_id != &client_id);
         self.connected_clients
             .lock()
             .unwrap()
@@ -2764,6 +2776,9 @@ impl WasmBridge {
                     .get_running_plugin_and_subscriptions(plugin_id, *client_id)
                 {
                     let subs = subscriptions.lock().unwrap().clone();
+                    let target_is_parked = self
+                        .parked_chrome_plugin_clients
+                        .contains(&(plugin_id, *client_id));
                     self.plugin_executor.execute_for_plugin(plugin_id, {
                         let running_plugin = running_plugin.clone();
                         let client_id = *client_id;
@@ -2775,6 +2790,14 @@ impl WasmBridge {
                                 match event_or_pipe_message {
                                     EventOrPipeMessage::Event(event) => {
                                         let event = *event;
+                                        if target_is_parked
+                                            && matches!(
+                                                event,
+                                                Event::SessionUpdate(..) | Event::PaneUpdate(..)
+                                            )
+                                        {
+                                            continue;
+                                        }
                                         match EventType::from_str(&event.to_string())
                                             .with_context(err_context)
                                         {
@@ -3209,6 +3232,50 @@ impl WasmBridge {
                 Event::CustomMessage(message, _)
                     if message == crate::screen::VC_FLEET_LIVE_COUNT_MESSAGE
                         || message == crate::screen::VC_STATUS_BAR_VISIBILITY_MESSAGE)
+    }
+    fn update_parked_chrome_target(
+        &mut self,
+        message_pid: Option<PluginId>,
+        message_cid: Option<ClientId>,
+        event: &Event,
+    ) {
+        let (Some(plugin_id), Some(client_id)) = (message_pid, message_cid) else {
+            return;
+        };
+        match event {
+            Event::CustomMessage(message, payload)
+                if message == crate::screen::VC_STATUS_BAR_VISIBILITY_MESSAGE =>
+            {
+                match payload.as_str() {
+                    "false" => {
+                        self.parked_chrome_plugin_clients
+                            .insert((plugin_id, client_id));
+                    },
+                    "true" => {
+                        self.parked_chrome_plugin_clients
+                            .remove(&(plugin_id, client_id));
+                    },
+                    _ => {},
+                }
+            },
+            Event::CustomMessage(message, _)
+                if message == crate::screen::VC_FLEET_LIVE_COUNT_MESSAGE =>
+            {
+                self.parked_chrome_plugin_clients
+                    .remove(&(plugin_id, client_id));
+            },
+            _ => {},
+        }
+    }
+    fn is_parked_chrome_state_payload(
+        &self,
+        plugin_id: PluginId,
+        client_id: ClientId,
+        event: &Event,
+    ) -> bool {
+        self.parked_chrome_plugin_clients
+            .contains(&(plugin_id, client_id))
+            && matches!(event, Event::SessionUpdate(..) | Event::PaneUpdate(..))
     }
     pub fn client_is_connected(&self, client_id: &ClientId) -> bool {
         self.connected_clients.lock().unwrap().contains(client_id)
@@ -3918,6 +3985,46 @@ mod layout_plugin_transaction_tests {
                 crate::screen::VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
                 "false".to_owned(),
             ),
+        ));
+    }
+
+    #[test]
+    fn exact_chrome_lifecycle_parks_heavy_state_payloads() {
+        let mut bridge = test_bridge(1);
+        let plugin_id = 77;
+        let client_id = 2;
+
+        bridge.update_parked_chrome_target(
+            Some(plugin_id),
+            Some(client_id),
+            &Event::CustomMessage(
+                crate::screen::VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
+                "false".to_owned(),
+            ),
+        );
+        assert!(bridge.is_parked_chrome_state_payload(
+            plugin_id,
+            client_id,
+            &Event::PaneUpdate(Default::default()),
+        ));
+        assert!(bridge.is_parked_chrome_state_payload(
+            plugin_id,
+            client_id,
+            &Event::SessionUpdate(vec![], vec![]),
+        ));
+
+        bridge.update_parked_chrome_target(
+            Some(plugin_id),
+            Some(client_id),
+            &Event::CustomMessage(
+                crate::screen::VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
+                "1".to_owned(),
+            ),
+        );
+        assert!(!bridge.is_parked_chrome_state_payload(
+            plugin_id,
+            client_id,
+            &Event::SessionUpdate(vec![], vec![]),
         ));
     }
 

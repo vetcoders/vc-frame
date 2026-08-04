@@ -2,7 +2,7 @@ use super::{
     ActiveLayoutTransaction, CopyOptions, DurableTabLayoutGeneration, LayoutPreparationCleanup,
     LayoutTabOwner, Screen, ScreenInstruction, ScreenLayoutTransactionKind, TabOverrideResult,
     VC_FLEET_LIVE_COUNT_MESSAGE, VC_STATUS_BAR_VISIBILITY_MESSAGE, fleet_live_count,
-    is_status_bar_plugin_run, register_viewer_creation_post_install_test_hook,
+    is_parkable_chrome_plugin_run, register_viewer_creation_post_install_test_hook,
     reject_after_apply_prepare_for_test, reserve_durable_tab_layout_recovery,
     reserve_new_durable_tab_layout_generation, screen_thread_main, session_update_events,
 };
@@ -148,24 +148,24 @@ fn fleet_live_count_message_targets_only_local_status_bars() {
 
     assert!(matches!(
         updates.first(),
-        Some((None, None, Event::SessionUpdate(_, _)))
-    ));
-    assert_eq!(updates.len(), 3);
-    assert!(matches!(
-        updates.get(1),
         Some((
             Some(41),
             Some(1),
             Event::CustomMessage(message, payload),
         )) if message == VC_STATUS_BAR_VISIBILITY_MESSAGE && payload == "false"
     ));
+    assert_eq!(updates.len(), 3);
     assert!(matches!(
-        updates.get(2),
+        updates.get(1),
         Some((
             Some(42),
             Some(1),
             Event::CustomMessage(message, payload),
         )) if message == VC_FLEET_LIVE_COUNT_MESSAGE && payload == "2"
+    ));
+    assert!(matches!(
+        updates.get(2),
+        Some((None, None, Event::SessionUpdate(_, _)))
     ));
     assert!(updates.iter().all(|(plugin_id, _, event)| {
         !matches!(event, Event::CustomMessage(_, _)) || plugin_id.is_some()
@@ -173,7 +173,7 @@ fn fleet_live_count_message_targets_only_local_status_bars() {
 }
 
 #[test]
-fn status_bar_plugin_run_accepts_builtin_urls_and_resolved_aliases_only() {
+fn parkable_chrome_plugin_run_accepts_builtin_urls_and_resolved_aliases_only() {
     let builtin =
         Run::Plugin(RunPluginOrAlias::from_url("vc-frame:status-bar", &None, None, None).unwrap());
     let legacy_builtin =
@@ -200,15 +200,21 @@ fn status_bar_plugin_run_accepts_builtin_urls_and_resolved_aliases_only() {
         Run::Plugin(RunPluginOrAlias::from_url("file:///worker.wasm", &None, None, None).unwrap());
     let compact_bar =
         Run::Plugin(RunPluginOrAlias::from_url("vc-frame:compact-bar", &None, None, None).unwrap());
+    let session_manager = Run::Plugin(
+        RunPluginOrAlias::from_url("vc-frame:session-manager", &None, None, None).unwrap(),
+    );
 
-    assert!(is_status_bar_plugin_run(Some(&builtin)));
-    assert!(is_status_bar_plugin_run(Some(&legacy_builtin)));
-    assert!(is_status_bar_plugin_run(Some(&default_alias)));
-    assert!(is_status_bar_plugin_run(Some(&renamed_alias)));
-    assert!(!is_status_bar_plugin_run(Some(&shadowed_default_alias)));
-    assert!(!is_status_bar_plugin_run(Some(&worker)));
-    assert!(!is_status_bar_plugin_run(Some(&compact_bar)));
-    assert!(!is_status_bar_plugin_run(None));
+    assert!(is_parkable_chrome_plugin_run(Some(&builtin)));
+    assert!(is_parkable_chrome_plugin_run(Some(&legacy_builtin)));
+    assert!(is_parkable_chrome_plugin_run(Some(&default_alias)));
+    assert!(is_parkable_chrome_plugin_run(Some(&renamed_alias)));
+    assert!(is_parkable_chrome_plugin_run(Some(&compact_bar)));
+    assert!(is_parkable_chrome_plugin_run(Some(&session_manager)));
+    assert!(!is_parkable_chrome_plugin_run(Some(
+        &shadowed_default_alias
+    )));
+    assert!(!is_parkable_chrome_plugin_run(Some(&worker)));
+    assert!(!is_parkable_chrome_plugin_run(None));
 }
 
 fn new_tab_with_status_bar_and_worker(
@@ -291,16 +297,14 @@ fn status_bar_target_transition_hides_only_the_client_that_switched_tabs() {
     new_tab_with_status_bar_and_worker(&mut screen, 0, 1, 42, 99);
     new_tab_with_status_bar_and_worker(&mut screen, 1, 2, 43, 100);
     screen.active_tab_ids = BTreeMap::from([(1, 0), (2, 0)]);
-    screen.active_status_bar_plugin_targets_cache.clear();
-
     let (initially_active, initially_hidden) = screen.status_bar_plugin_target_transition();
     assert_eq!(initially_active, vec![(42, 1), (42, 2)]);
-    assert!(initially_hidden.is_empty());
+    assert_eq!(initially_hidden, vec![(43, 1), (43, 2)]);
 
     screen.active_tab_ids.insert(1, 1);
     let (active_after_switch, hidden_after_switch) = screen.status_bar_plugin_target_transition();
     assert_eq!(active_after_switch, vec![(42, 2), (43, 1)]);
-    assert_eq!(hidden_after_switch, vec![(42, 1)]);
+    assert_eq!(hidden_after_switch, vec![(42, 1), (43, 2)]);
 
     let updates = session_update_events(
         vec![fleet_session("working", &[(false, false, false)])],
@@ -323,6 +327,12 @@ fn status_bar_target_transition_hides_only_the_client_that_switched_tabs() {
             (
                 Some(42),
                 Some(1),
+                VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
+                "false".to_owned(),
+            ),
+            (
+                Some(43),
+                Some(2),
                 VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
                 "false".to_owned(),
             ),
