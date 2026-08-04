@@ -61,29 +61,14 @@ impl KeyShortcut {
             Some(k) => k.strip_common_modifiers(common_modifiers),
             None => return String::from("?"),
         };
-        let shortened_modifiers = key
-            .key_modifiers
-            .iter()
-            .map(|m| match m {
-                KeyModifier::Ctrl => "^C",
-                KeyModifier::Alt => "^A",
-                KeyModifier::Super => "^Su",
-                KeyModifier::Shift => "^Sh",
-            })
-            .collect::<Vec<_>>()
-            .join("-");
-        if shortened_modifiers.is_empty() {
-            format!("{}", key)
-        } else {
-            format!("{} {}", shortened_modifiers, key.bare_key)
-        }
+        chrome_key_label(&key)
     }
     pub fn letter_shortcut(&self, common_modifiers: &[KeyModifier]) -> String {
         let key = match &self.key {
             Some(k) => k.strip_common_modifiers(common_modifiers),
             None => return String::from("?"),
         };
-        format!("{}", key)
+        chrome_key_label(&key)
     }
     pub fn get_key(&self) -> Option<KeyWithModifier> {
         self.key.clone()
@@ -97,19 +82,48 @@ impl KeyShortcut {
     pub fn is_selected(&self) -> bool {
         matches!(self.mode, KeyMode::Selected)
     }
+    /// Compressed mode labels for the one-line bar (Pensieve 3–6 col slots).
+    /// Never use 2-letter stubs like "Lo"/"Pa" — they read as broken chrome.
+    /// Keep parity with compact-bar mode chip codes (LCK/PANE/TAB/…).
     pub fn short_text(&self) -> String {
         match self.action {
-            KeyAction::Lock => String::from("Lo"),
-            KeyAction::Unlock => String::from("Un"),
-            KeyAction::Pane => String::from("Pa"),
-            KeyAction::Tab => String::from("Ta"),
-            KeyAction::Resize => String::from("Re"),
-            KeyAction::Search => String::from("Se"),
-            KeyAction::Quit => String::from("Qu"),
-            KeyAction::Session => String::from("Se"),
-            KeyAction::Move => String::from("Mo"),
-            KeyAction::Tmux => String::from("Tm"),
+            KeyAction::Lock => String::from("LOCK"),
+            KeyAction::Unlock => String::from("UNLCK"),
+            KeyAction::Pane => String::from("PANE"),
+            KeyAction::Tab => String::from("TAB"),
+            KeyAction::Resize => String::from("RSIZE"),
+            KeyAction::Search => String::from("FIND"),
+            KeyAction::Quit => String::from("QUIT"),
+            KeyAction::Session => String::from("SESS"),
+            KeyAction::Move => String::from("MOVE"),
+            KeyAction::Tmux => String::from("TMUX"),
         }
+    }
+}
+
+/// macOS product key glyphs — single source for chrome help surfaces.
+/// ⌃ Ctrl · ⌥ Alt · ⌘ Super/Cmd · ⇧ Shift
+pub fn modifier_glyph(m: KeyModifier) -> &'static str {
+    match m {
+        KeyModifier::Ctrl => "⌃",
+        KeyModifier::Alt => "⌥",
+        KeyModifier::Super => "⌘",
+        KeyModifier::Shift => "⇧",
+    }
+}
+
+/// Format a modifier set for the bar (`⌃` / `⌃⌥` / `⌘`).
+pub fn format_modifiers(modifiers: &[KeyModifier]) -> String {
+    modifiers.iter().map(|m| modifier_glyph(*m)).collect()
+}
+
+/// Format a key for chrome help: `⌃g`, `⌥⌫`, `⌘←` — no ASCII "Ctrl " prefix.
+pub fn chrome_key_label(key: &KeyWithModifier) -> String {
+    if key.key_modifiers.is_empty() {
+        format!("{}", key.bare_key)
+    } else {
+        let mods: Vec<KeyModifier> = key.key_modifiers.iter().copied().collect();
+        format!("{}{}", format_modifiers(&mods), key.bare_key)
     }
 }
 
@@ -594,25 +608,14 @@ pub fn superkey(
         return (common_modifiers, LinePart::default());
     }
 
+    // Product chrome: macOS glyphs (⌃ not "Ctrl") — same contract as
+    // session-manager help and the operator key-contract docs.
+    let mods = format_modifiers(&common_modifiers);
     let prefix_text = if mode_info.capabilities.arrow_fonts {
         // Add extra space in simplified ui
-        format!(
-            " {} + ",
-            common_modifiers
-                .iter()
-                .map(|m| m.to_string())
-                .collect::<Vec<_>>()
-                .join("-")
-        )
+        format!(" {} + ", mods)
     } else {
-        format!(
-            " {} +",
-            common_modifiers
-                .iter()
-                .map(|m| m.to_string())
-                .collect::<Vec<_>>()
-                .join("-")
-        )
+        format!(" {} +", mods)
     };
 
     let prefix = palette.superkey_prefix.paint(&prefix_text);
@@ -948,7 +951,7 @@ mod tests {
         let ret = long_mode_shortcut(&key, color, "+", &[], false);
         let ret = unstyle(ret);
 
-        assert_eq!(ret, "+ <Ctrl 0> SESSION +".to_string());
+        assert_eq!(ret, "+ <⌃0> SESSION +".to_string());
     }
 
     #[test]
@@ -1024,7 +1027,7 @@ mod tests {
         let ret = short_mode_shortcut(&key, color, "+", &[], false);
         let ret = unstyle(ret);
 
-        assert_eq!(ret, "+ Ctrl 0 +".to_string());
+        assert_eq!(ret, "+ ⌃0 +".to_string());
     }
 
     #[test]
@@ -1165,7 +1168,7 @@ mod tests {
         let ret = first_line(&mode_info, None, 500, ">");
         let ret = unstyle(ret);
 
-        assert_eq!(ret, " Ctrl + >>a PANE >>b RESIZE >>c MOVE >".to_string());
+        assert_eq!(ret, " ⌃ + >>a PANE >>b RESIZE >>c MOVE >".to_string());
     }
 
     #[test]
@@ -1186,7 +1189,7 @@ mod tests {
         let ret = first_line(&mode_info, None, 500, ">");
         let ret = unstyle(ret);
 
-        assert_eq!(ret, "Ctrl a PANE >>Ctrl b RESIZE >>c MOVE >".to_string());
+        assert_eq!(ret, "⌃a PANE >>⌃b RESIZE >>c MOVE >".to_string());
     }
 
     #[test]
@@ -1211,7 +1214,7 @@ mod tests {
 
         assert_eq!(
             ret,
-            "Ctrl a LOCK >>BACKSPACE PANE >>ENTER TAB >>TAB RESIZE >>← MOVE >".to_string()
+            "⌃a LOCK >>BACKSPACE PANE >>ENTER TAB >>TAB RESIZE >>← MOVE >".to_string()
         );
     }
 
@@ -1235,10 +1238,7 @@ mod tests {
         let ret = first_line(&mode_info, None, 50, ">");
         let ret = unstyle(ret);
 
-        assert_eq!(
-            ret,
-            " Ctrl + >>a LOCK >>b PANE >>c TAB >>e MOVE >".to_string()
-        );
+        assert_eq!(ret, " ⌃ + >>a LOCK >>b PANE >>c TAB >>e MOVE >".to_string());
     }
 
     #[test]
@@ -1259,6 +1259,9 @@ mod tests {
         let ret = first_line(&mode_info, None, 30, "");
         let ret = unstyle(ret);
 
-        assert_eq!(ret, " Ctrl + a PANE c MOVE ".to_string());
+        // Dense path keeps more tiles when labels stay compact (LOCK/PANE
+        // not "Lo"/"Pa"); RESIZE fits once the superkey prefix is a single
+        // glyph (⌃) instead of "Ctrl".
+        assert_eq!(ret, " ⌃ + a PANE b RESIZE c MOVE ".to_string());
     }
 }

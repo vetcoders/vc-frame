@@ -853,11 +853,8 @@ pub fn style_key_with_modifier(
     let common_modifiers = get_common_modifiers(keyvec.iter().collect());
 
     let no_common_modifier = common_modifiers.is_empty();
-    let modifier_str = common_modifiers
-        .iter()
-        .map(|m| m.to_string())
-        .collect::<Vec<_>>()
-        .join("-");
+    // macOS product glyphs (⌃ not "Ctrl") — chrome help SSOT.
+    let modifier_str = first_line::format_modifiers(&common_modifiers);
     let painted_modifier = if modifier_str.is_empty() {
         Style::new().paint("")
     } else if let Some(background) = background {
@@ -886,24 +883,27 @@ pub fn style_key_with_modifier(
         ret.push(Style::new().fg(text_color).paint(group_start_str));
     }
 
-    // Prints the keys
+    // Prints the keys — macOS glyphs for any remaining modifiers.
     let key = keyvec
         .iter()
         .map(|key| {
             if no_common_modifier {
-                format!("{}", key)
+                first_line::chrome_key_label(key)
             } else {
-                let key_modifier_for_key = key
+                let leftover: Vec<KeyModifier> = key
                     .key_modifiers
                     .iter()
                     .filter(|m| !common_modifiers.contains(m))
-                    .map(|m| m.to_string())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                if key_modifier_for_key.is_empty() {
+                    .copied()
+                    .collect();
+                if leftover.is_empty() {
                     format!("{}", key.bare_key)
                 } else {
-                    format!("{} {}", key_modifier_for_key, key.bare_key)
+                    format!(
+                        "{}{}",
+                        first_line::format_modifiers(&leftover),
+                        key.bare_key
+                    )
                 }
             }
         })
@@ -1504,7 +1504,7 @@ pub mod tests {
         let ret = style_key_with_modifier(&keyvec, &palette, None);
         let ret = unstyle(&AnsiStrings(&ret));
 
-        assert_eq!(ret, "Ctrl + <a|b|c|d>".to_string())
+        assert_eq!(ret, "⌃ + <a|b|c|d>".to_string())
     }
 
     #[test]
@@ -1520,7 +1520,7 @@ pub mod tests {
         let ret = style_key_with_modifier(&keyvec, &palette, None);
         let ret = unstyle(&AnsiStrings(&ret));
 
-        assert_eq!(ret, "Alt + <a|b|c|d>".to_string())
+        assert_eq!(ret, "⌥ + <a|b|c|d>".to_string())
     }
 
     #[test]
@@ -1536,7 +1536,7 @@ pub mod tests {
         let ret = style_key_with_modifier(&keyvec, &palette, None);
         let ret = unstyle(&AnsiStrings(&ret));
 
-        assert_eq!(ret, "Alt + <←↓↑→>".to_string())
+        assert_eq!(ret, "⌥ + <←↓↑→>".to_string())
     }
 
     #[test]
@@ -1551,7 +1551,7 @@ pub mod tests {
         let ret = style_key_with_modifier(&keyvec, &palette, None);
         let ret = unstyle(&AnsiStrings(&ret));
 
-        assert_eq!(ret, "<Alt a|Ctrl b|c>".to_string())
+        assert_eq!(ret, "<⌥a|⌃b|c>".to_string())
     }
 
     #[test]
@@ -1592,7 +1592,7 @@ pub mod tests {
         let ret = style_key_with_modifier(&keyvec, &palette, None);
         let ret = unstyle(&AnsiStrings(&ret));
 
-        assert_eq!(ret, "Ctrl + <ENTER|SPACE|TAB>".to_string())
+        assert_eq!(ret, "⌃ + <ENTER|SPACE|TAB>".to_string())
     }
 
     #[test]
@@ -1607,6 +1607,6 @@ pub mod tests {
         let ret = style_key_with_modifier(&keyvec, &palette, None);
         let ret = unstyle(&AnsiStrings(&ret));
 
-        assert_eq!(ret, "Alt + <ENTER|SPACE|TAB>".to_string())
+        assert_eq!(ret, "⌥ + <ENTER|SPACE|TAB>".to_string())
     }
 }
