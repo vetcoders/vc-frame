@@ -4,14 +4,14 @@ expression: snapshot
 ---
 00 (C): ┌ Pane #1 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 01 (C): │                                                                                                                       │
-02 (C): │ ┌ Pane #5 ───── SCROLL:  0/1 | PIN [ ] ┐                                                                              │
+02 (C): │ ┌ Pane #5 ─────── SCROLL:  0/1 | PIN ○ ┐                                                                              │
 03 (C): │ │EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE│                                                                              │
-04 (C): │ │E┌ Pane #6 ───── SCROLL:  0/1 | PIN [ ] ┐                                                                            │
+04 (C): │ │E┌ Pane #6 ─────── SCROLL:  0/1 | PIN ○ ┐                                                                            │
 05 (C): │ │E│EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE│                                                                            │
 06 (C): │ │E│EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE│                                                                            │
-07 (C): │ └─│EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE│─────────────────────── SCROLL:  0/1 | PIN [ ] ┐ ┐                          │
+07 (C): │ └─│EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE│───────────────────────── SCROLL:  0/1 | PIN ○ ┐ ┐                          │
 08 (C): │   │EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE│EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE│ │                          │
-09 (C): │   └──────────────────────────────────────┘───────────────────────── SCROLL:  0/1 | PIN [ ] ┐                          │
+09 (C): │   └──────────────────────────────────────┘─────────────────────────── SCROLL:  0/1 | PIN ○ ┐                          │
 10 (C): │                               │E│EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE│                          │
 11 (C): │                               │E│EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE│                          │
 12 (C): │                               │E│EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE│                          │

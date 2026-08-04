@@ -7,7 +7,7 @@ expression: "format!(\"{}\", snapshot)"
 02 (C): │                                                                                                                       │
 03 (C): │                                                                                                                       │
 04 (C): │                                                                                                                       │
-05 (C): │    ┌ Pane #2 ────────── PIN [+] ┐                         ┌ Pane #3 ────────── PIN [ ] ┐                              │
+05 (C): │    ┌ Pane #2 ──────────── PIN ◉ ┐                         ┌ Pane #3 ──────────── PIN ○ ┐                              │
 06 (C): │    │Pinned pane                 │                         │                            │                              │
 07 (C): │    │                            │                         │                            │                              │
 08 (C): │    │                            │                         │                            │                              │

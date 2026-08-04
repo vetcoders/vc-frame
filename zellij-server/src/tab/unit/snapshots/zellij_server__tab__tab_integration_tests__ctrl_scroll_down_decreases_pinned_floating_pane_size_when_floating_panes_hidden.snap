@@ -8,7 +8,7 @@ expression: "format!(\"{}\", snapshot_after)"
 03 (C): │                                                                                                                       │
 04 (C): │                                                                                                                       │
 05 (C): │                                                                                                                       │
-06 (C): │      ┌ Pane #2 ────── PIN [+] ┐                                                                                       │
+06 (C): │      ┌ Pane #2 ──────── PIN ◉ ┐                                                                                       │
 07 (C): │      │Floating pane           │                                                                                       │
 08 (C): │      │                        │                                                                                       │
 09 (C): │      │                        │                                                                                       │
