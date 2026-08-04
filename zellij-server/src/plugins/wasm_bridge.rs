@@ -90,30 +90,38 @@ impl SessionChromeKind {
     }
 }
 
-fn session_chrome_kind(run_plugin: &RunPlugin) -> Option<SessionChromeKind> {
+fn session_chrome_kind(
+    run_plugin: &RunPlugin,
+) -> std::result::Result<Option<SessionChromeKind>, String> {
     let configuration = run_plugin.configuration.inner();
     if configuration.get("session_canvas").map(String::as_str) != Some("true") {
-        return None;
+        return Ok(None);
     }
     if let Some(kind) = configuration.get("session_canvas_kind").map(String::as_str) {
         return match kind {
-            "compact-bar" => Some(SessionChromeKind::CompactBar),
-            "session-manager" => Some(SessionChromeKind::SessionManager),
-            "status-bar" => Some(SessionChromeKind::StatusBar),
-            _ => None,
+            "compact-bar" => Ok(Some(SessionChromeKind::CompactBar)),
+            "session-manager" => Ok(Some(SessionChromeKind::SessionManager)),
+            "status-bar" => Ok(Some(SessionChromeKind::StatusBar)),
+            _ => Err(format!(
+                "unknown session_canvas_kind `{kind}` for {}",
+                run_plugin.location
+            )),
         };
     }
     match run_plugin.location.to_string().as_str() {
         "compact-bar" | "zellij:compact-bar" | "vc-frame:compact-bar" => {
-            Some(SessionChromeKind::CompactBar)
+            Ok(Some(SessionChromeKind::CompactBar))
         },
         "session-manager" | "zellij:session-manager" | "vc-frame:session-manager" => {
-            Some(SessionChromeKind::SessionManager)
+            Ok(Some(SessionChromeKind::SessionManager))
         },
         "status-bar" | "zellij:status-bar" | "vc-frame:status-bar" => {
-            Some(SessionChromeKind::StatusBar)
+            Ok(Some(SessionChromeKind::StatusBar))
         },
-        _ => None,
+        _ => Err(format!(
+            "session_canvas=true requires session_canvas_kind for resolved plugin {}",
+            run_plugin.location
+        )),
     }
 }
 
@@ -879,16 +887,16 @@ impl WasmBridge {
                             request.run_plugin.location
                         )
                     })?;
-                Ok((request, plugin_config))
+                let chrome_kind = session_chrome_kind(&request.run_plugin)?;
+                Ok((request, plugin_config, chrome_kind))
             })
             .collect::<std::result::Result<Vec<_>, String>>()?;
         let mut plugins = Vec::with_capacity(request_count);
         let mut pane_bindings = Vec::with_capacity(request_count);
         let mut session_chrome_projector_pane_ids = Vec::new();
-        for (pane_id, (request, plugin_config)) in
+        for (pane_id, (request, plugin_config, chrome_kind)) in
             (self.next_plugin_id..next_plugin_id).zip(requests)
         {
-            let chrome_kind = session_chrome_kind(&request.run_plugin);
             let runtime_plugin_id = if let Some(chrome_kind) = chrome_kind {
                 let authority = self
                     .session_chrome_authorities
@@ -4430,8 +4438,77 @@ mod layout_plugin_transaction_tests {
                 ("session_canvas_kind".to_owned(), kind.to_owned()),
             ]));
 
-            assert_eq!(session_chrome_kind(&run_plugin), Some(expected));
+            assert_eq!(session_chrome_kind(&run_plugin), Ok(Some(expected)));
         }
+    }
+
+    #[test]
+    fn invalid_session_canvas_kind_rejects_the_entire_reservation() {
+        let mut bridge = test_bridge(1);
+        let transaction_id = 9914;
+        let mut invalid_request = session_manager_request(9300);
+        invalid_request.run_plugin = invalid_request
+            .run_plugin
+            .with_configuration(BTreeMap::from([
+                ("session_canvas".to_owned(), "true".to_owned()),
+                (
+                    "session_canvas_kind".to_owned(),
+                    "session-manger".to_owned(),
+                ),
+            ]));
+
+        let error = bridge
+            .reserve_layout_plugins(
+                transaction_id,
+                vec![session_manager_request(9299), invalid_request],
+            )
+            .unwrap_err();
+
+        assert!(error.contains("unknown session_canvas_kind `session-manger`"));
+        assert_eq!(bridge.next_plugin_id, 0);
+        assert!(bridge.session_chrome_authorities.is_empty());
+        assert!(bridge.layout_plugin_owners.is_empty());
+        assert!(
+            !bridge
+                .layout_plugin_reservations
+                .contains_key(&transaction_id)
+        );
+    }
+
+    #[test]
+    fn resolved_session_canvas_requires_an_explicit_kind() {
+        let mut bridge = test_bridge(1);
+        let transaction_id = 9915;
+        let resolved_request = LayoutPluginReservationRequest {
+            run_plugin: RunPlugin::from_url(&format!(
+                "file:{}/resolved-session-manager.wasm",
+                std::env::temp_dir().display()
+            ))
+            .unwrap()
+            .with_configuration(BTreeMap::from([(
+                "session_canvas".to_owned(),
+                "true".to_owned(),
+            )])),
+            tab_index: Some(1),
+            size: Size::default(),
+            cwd: None,
+            skip_cache: false,
+            client_id: 9301,
+        };
+
+        let error = bridge
+            .reserve_layout_plugins(transaction_id, vec![resolved_request])
+            .unwrap_err();
+
+        assert!(error.contains("session_canvas=true requires session_canvas_kind"));
+        assert_eq!(bridge.next_plugin_id, 0);
+        assert!(bridge.session_chrome_authorities.is_empty());
+        assert!(bridge.layout_plugin_owners.is_empty());
+        assert!(
+            !bridge
+                .layout_plugin_reservations
+                .contains_key(&transaction_id)
+        );
     }
 
     #[test]
