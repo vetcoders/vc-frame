@@ -15,15 +15,15 @@ use highway::{HighwayHash, PortableHash};
 use log::info;
 use notify_debouncer_full::{Debouncer, FileIdMap, notify::RecommendedWatcher};
 #[cfg(test)]
-use std::sync::{
-    Barrier,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::{Barrier, atomic::AtomicUsize};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
     str::FromStr,
-    sync::{Arc, Condvar, Mutex},
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tokio::sync::mpsc::Sender;
@@ -176,6 +176,247 @@ impl LoadingContext {
 }
 
 pub type PluginCache = Arc<Mutex<HashMap<PathBuf, Module>>>;
+
+const PLUGIN_EVENT_DIAGNOSTIC_SLOTS: usize = 256;
+const PLUGIN_EVENT_DIAGNOSTIC_WINDOW_MS: u64 = 1_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PluginEventDiagnosticKind {
+    SessionUpdate,
+    PaneUpdate,
+    PaneClosed,
+    TabUpdate,
+    Other,
+}
+
+impl PluginEventDiagnosticKind {
+    fn from_event(event: &Event) -> Self {
+        match event {
+            Event::SessionUpdate(..) => Self::SessionUpdate,
+            Event::PaneUpdate(..) => Self::PaneUpdate,
+            Event::PaneClosed(..) => Self::PaneClosed,
+            Event::TabUpdate(..) => Self::TabUpdate,
+            _ => Self::Other,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SessionUpdate => "SessionUpdate",
+            Self::PaneUpdate => "PaneUpdate",
+            Self::PaneClosed => "PaneClosed",
+            Self::TabUpdate => "TabUpdate",
+            Self::Other => "Other",
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Self::SessionUpdate => 0,
+            Self::PaneUpdate => 1,
+            Self::PaneClosed => 2,
+            Self::TabUpdate => 3,
+            Self::Other => 4,
+        }
+    }
+}
+
+#[derive(Default)]
+struct PluginEventDiagnosticSlot {
+    // Zero is the empty sentinel; stored identities are offset by one.
+    owner: AtomicU64,
+    window_started_ms: AtomicU64,
+    dispatched: [AtomicU64; 5],
+    rendered: [AtomicU64; 5],
+    empty_rendered: [AtomicU64; 5],
+}
+
+struct PluginEventDiagnostics {
+    slots: [PluginEventDiagnosticSlot; PLUGIN_EVENT_DIAGNOSTIC_SLOTS],
+}
+
+impl Default for PluginEventDiagnostics {
+    fn default() -> Self {
+        Self {
+            slots: std::array::from_fn(|_| PluginEventDiagnosticSlot::default()),
+        }
+    }
+}
+
+impl PluginEventDiagnostics {
+    fn owner(plugin_id: PluginId, client_id: ClientId) -> u64 {
+        (((plugin_id as u64) << 32) | client_id as u64).wrapping_add(1)
+    }
+
+    fn slot_index(owner: u64) -> usize {
+        (owner ^ (owner >> 32)) as usize % PLUGIN_EVENT_DIAGNOSTIC_SLOTS
+    }
+
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+
+    fn record(
+        &self,
+        plugin_id: PluginId,
+        client_id: ClientId,
+        event: &Event,
+        rendered: bool,
+        empty_rendered: bool,
+    ) {
+        if !log::log_enabled!(target: "vc_frame::plugin_event_rate", log::Level::Debug) {
+            return;
+        }
+        self.record_at(
+            plugin_id,
+            client_id,
+            PluginEventDiagnosticKind::from_event(event),
+            rendered,
+            empty_rendered,
+            Self::now_ms(),
+        );
+    }
+
+    fn record_at(
+        &self,
+        plugin_id: PluginId,
+        client_id: ClientId,
+        kind: PluginEventDiagnosticKind,
+        rendered: bool,
+        empty_rendered: bool,
+        now_ms: u64,
+    ) {
+        let owner = Self::owner(plugin_id, client_id);
+        let slot = &self.slots[Self::slot_index(owner)];
+        let observed_owner = slot.owner.load(Ordering::Relaxed);
+        if observed_owner == 0 {
+            match slot
+                .owner
+                .compare_exchange(0, owner, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => slot.window_started_ms.store(now_ms, Ordering::Relaxed),
+                Err(existing_owner) if existing_owner != owner => return,
+                Err(_) => {},
+            }
+        } else if observed_owner != owner {
+            // A fixed-size diagnostic table deliberately drops collisions instead
+            // of allocating or locking in the plugin event hot path.
+            return;
+        }
+
+        let index = kind.index();
+        slot.dispatched[index].fetch_add(1, Ordering::Relaxed);
+        if rendered {
+            slot.rendered[index].fetch_add(1, Ordering::Relaxed);
+        }
+        if empty_rendered {
+            slot.empty_rendered[index].fetch_add(1, Ordering::Relaxed);
+        }
+
+        let window_started_ms = slot.window_started_ms.load(Ordering::Relaxed);
+        let elapsed_ms = now_ms.saturating_sub(window_started_ms);
+        if elapsed_ms < PLUGIN_EVENT_DIAGNOSTIC_WINDOW_MS
+            || slot
+                .window_started_ms
+                .compare_exchange(
+                    window_started_ms,
+                    now_ms,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_err()
+        {
+            return;
+        }
+
+        for event_kind in [
+            PluginEventDiagnosticKind::SessionUpdate,
+            PluginEventDiagnosticKind::PaneUpdate,
+            PluginEventDiagnosticKind::PaneClosed,
+            PluginEventDiagnosticKind::TabUpdate,
+            PluginEventDiagnosticKind::Other,
+        ] {
+            let event_index = event_kind.index();
+            let dispatched = slot.dispatched[event_index].swap(0, Ordering::Relaxed);
+            let rendered = slot.rendered[event_index].swap(0, Ordering::Relaxed);
+            let empty_rendered = slot.empty_rendered[event_index].swap(0, Ordering::Relaxed);
+            if dispatched > 0 {
+                log::debug!(
+                    target: "vc_frame::plugin_event_rate",
+                    "plugin_id={plugin_id} client_id={client_id} event={} dispatched={} rendered={} empty_rendered={} window_ms={elapsed_ms}",
+                    event_kind.as_str(),
+                    dispatched,
+                    rendered,
+                    empty_rendered,
+                );
+            }
+        }
+    }
+
+    fn flush_plugin(&self, plugin_id: PluginId) {
+        if !log::log_enabled!(target: "vc_frame::plugin_event_rate", log::Level::Debug) {
+            return;
+        }
+        let now_ms = Self::now_ms();
+        for slot in &self.slots {
+            let encoded_owner = slot.owner.load(Ordering::Relaxed);
+            if encoded_owner == 0
+                || ((encoded_owner.wrapping_sub(1) >> 32) as PluginId) != plugin_id
+            {
+                continue;
+            }
+            let client_id = encoded_owner.wrapping_sub(1) as ClientId;
+            let elapsed_ms = now_ms.saturating_sub(slot.window_started_ms.load(Ordering::Relaxed));
+            for event_kind in [
+                PluginEventDiagnosticKind::SessionUpdate,
+                PluginEventDiagnosticKind::PaneUpdate,
+                PluginEventDiagnosticKind::PaneClosed,
+                PluginEventDiagnosticKind::TabUpdate,
+                PluginEventDiagnosticKind::Other,
+            ] {
+                let event_index = event_kind.index();
+                let dispatched = slot.dispatched[event_index].swap(0, Ordering::Relaxed);
+                let rendered = slot.rendered[event_index].swap(0, Ordering::Relaxed);
+                let empty_rendered = slot.empty_rendered[event_index].swap(0, Ordering::Relaxed);
+                if dispatched > 0 {
+                    log::debug!(
+                        target: "vc_frame::plugin_event_rate",
+                        "plugin_id={plugin_id} client_id={client_id} event={} dispatched={} rendered={} empty_rendered={} window_ms={elapsed_ms} final=true",
+                        event_kind.as_str(),
+                        dispatched,
+                        rendered,
+                        empty_rendered,
+                    );
+                }
+            }
+            slot.window_started_ms.store(0, Ordering::Relaxed);
+            slot.owner.store(0, Ordering::Relaxed);
+        }
+    }
+
+    #[cfg(test)]
+    fn counts(
+        &self,
+        plugin_id: PluginId,
+        client_id: ClientId,
+        kind: PluginEventDiagnosticKind,
+    ) -> (u64, u64, u64) {
+        let owner = Self::owner(plugin_id, client_id);
+        let slot = &self.slots[Self::slot_index(owner)];
+        if slot.owner.load(Ordering::Relaxed) != owner {
+            return (0, 0, 0);
+        }
+        let index = kind.index();
+        (
+            slot.dispatched[index].load(Ordering::Relaxed),
+            slot.rendered[index].load(Ordering::Relaxed),
+            slot.empty_rendered[index].load(Ordering::Relaxed),
+        )
+    }
+}
 
 const MAX_LAYOUT_PLUGIN_RECEIPT_TRANSACTIONS: usize = 512;
 const MAX_LAYOUT_PLUGIN_CLEANUP_RECEIPTS: usize = 512;
@@ -412,6 +653,7 @@ pub struct WasmBridge {
     plugin_dir: PathBuf,
     plugin_map: Arc<Mutex<PluginMap>>,
     plugin_executor: Arc<PinnedExecutor>,
+    event_diagnostics: Arc<PluginEventDiagnostics>,
     next_plugin_id: PluginId,
     plugin_ids_waiting_for_permission_request: HashSet<PluginId>,
     // Exact plugin/client targets parked by Screen's chrome lifecycle. Heavy
@@ -493,6 +735,7 @@ impl WasmBridge {
             plugin_dir,
             plugin_map,
             plugin_executor,
+            event_diagnostics: Arc::new(PluginEventDiagnostics::default()),
             path_to_default_shell,
             watcher,
             next_plugin_id: 0,
@@ -1802,6 +2045,7 @@ impl WasmBridge {
 
         match self.cleanup_layout_plugin(cleanup_transaction_id, plugin_id) {
             Ok(()) => {
+                self.event_diagnostics.flush_plugin(plugin_id);
                 self.plugin_unload_debts.remove(&plugin_id);
             },
             Err(error) => {
@@ -2145,6 +2389,7 @@ impl WasmBridge {
             .map(|(_, _, _, subscriptions)| subscriptions.lock().unwrap().clone())
             .collect();
         let plugin_executor = self.plugin_executor.clone();
+        let event_diagnostics = self.event_diagnostics.clone();
         for (pid, cid, event) in updates.iter() {
             let (pid, cid) = (*pid, *cid);
             self.update_parked_chrome_target(pid, cid, event);
@@ -2176,6 +2421,7 @@ impl WasmBridge {
                         let event = event.clone();
                         let _s = shutdown_sender.clone();
                         let plugin_subs = subs.clone();
+                        let event_diagnostics = event_diagnostics.clone();
                         move |senders, _plugin_map, _connected_clients, _plugin_cache, _engine| {
                             let _s = _s; // guard to allow the task to complete before cleanup/shutdown
                             let mut running_plugin = running_plugin.lock().unwrap();
@@ -2189,7 +2435,14 @@ impl WasmBridge {
                                 senders.clone(),
                                 &plugin_subs,
                             ) {
-                                Ok(()) => {
+                                Ok((rendered, empty_rendered)) => {
+                                    event_diagnostics.record(
+                                        plugin_id,
+                                        client_id,
+                                        &event,
+                                        rendered,
+                                        empty_rendered,
+                                    );
                                     let _ = senders.send_to_screen(ScreenInstruction::PluginBytes(
                                         plugin_render_assets,
                                     ));
@@ -2779,6 +3032,7 @@ impl WasmBridge {
                     let target_is_parked = self
                         .parked_chrome_plugin_clients
                         .contains(&(plugin_id, *client_id));
+                    let event_diagnostics = self.event_diagnostics.clone();
                     self.plugin_executor.execute_for_plugin(plugin_id, {
                         let running_plugin = running_plugin.clone();
                         let client_id = *client_id;
@@ -2817,7 +3071,14 @@ impl WasmBridge {
                                                     senders.clone(),
                                                     &subs,
                                                 ) {
-                                                    Ok(()) => {
+                                                    Ok((rendered, empty_rendered)) => {
+                                                        event_diagnostics.record(
+                                                            plugin_id,
+                                                            client_id,
+                                                            &event,
+                                                            rendered,
+                                                            empty_rendered,
+                                                        );
                                                         let _ = senders.send_to_screen(
                                                             ScreenInstruction::PluginBytes(
                                                                 plugin_render_assets,
@@ -3731,7 +3992,7 @@ fn check_event_permission(
     (PermissionStatus::Denied, Some(permission))
 }
 
-pub fn apply_event_to_plugin(
+fn apply_event_to_plugin(
     plugin_id: PluginId,
     client_id: ClientId,
     running_plugin: &mut RunningPlugin,
@@ -3739,12 +4000,14 @@ pub fn apply_event_to_plugin(
     plugin_render_assets: &mut Vec<PluginRenderAsset>,
     senders: ThreadSenders,
     plugin_subscriptions: &HashSet<EventType>,
-) -> Result<()> {
+) -> Result<(bool, bool)> {
     let instance = &running_plugin.instance;
     let rows = running_plugin.rows;
     let columns = running_plugin.columns;
 
     let err_context = || format!("Failed to apply event to plugin {plugin_id}");
+    let mut rendered_event = false;
+    let mut empty_rendered_event = false;
     match check_event_permission(running_plugin.store.data(), event) {
         (PermissionStatus::Granted, _) => {
             let mut event = event.clone();
@@ -3788,6 +4051,8 @@ pub fn apply_event_to_plugin(
                                     .map_err(|e| anyhow!(e))
                             })
                             .with_context(err_context)?;
+                        rendered_event = true;
+                        empty_rendered_event = rendered_bytes.is_empty();
                         let pipes_to_block_or_unblock =
                             pipes_to_block_or_unblock(running_plugin, None);
                         let plugin_render_asset = PluginRenderAsset::new(
@@ -3828,7 +4093,7 @@ pub fn apply_event_to_plugin(
             );
         },
     }
-    Ok(())
+    Ok((rendered_event, empty_rendered_event))
 }
 
 pub fn handle_plugin_crash(plugin_id: PluginId, message: String, senders: ThreadSenders) {
@@ -3934,6 +4199,83 @@ mod layout_plugin_transaction_tests {
             skip_cache: false,
             client_id,
         }
+    }
+
+    #[test]
+    fn event_diagnostics_count_dispatches_and_renders_without_dynamic_slots() {
+        let diagnostics = PluginEventDiagnostics::default();
+
+        for _ in 0..120 {
+            diagnostics.record_at(
+                7,
+                3,
+                PluginEventDiagnosticKind::PaneUpdate,
+                false,
+                false,
+                100,
+            );
+        }
+        for _ in 0..4 {
+            diagnostics.record_at(
+                7,
+                3,
+                PluginEventDiagnosticKind::SessionUpdate,
+                true,
+                false,
+                100,
+            );
+        }
+        diagnostics.record_at(
+            7,
+            3,
+            PluginEventDiagnosticKind::SessionUpdate,
+            true,
+            true,
+            100,
+        );
+
+        assert_eq!(
+            diagnostics.counts(7, 3, PluginEventDiagnosticKind::PaneUpdate),
+            (120, 0, 0)
+        );
+        assert_eq!(
+            diagnostics.counts(7, 3, PluginEventDiagnosticKind::SessionUpdate),
+            (5, 5, 1)
+        );
+    }
+
+    #[test]
+    fn event_diagnostics_drop_fixed_table_collisions_instead_of_reassigning() {
+        let diagnostics = PluginEventDiagnostics::default();
+        diagnostics.record_at(
+            1,
+            2,
+            PluginEventDiagnosticKind::PaneUpdate,
+            false,
+            false,
+            100,
+        );
+        diagnostics.record_at(
+            1 + PLUGIN_EVENT_DIAGNOSTIC_SLOTS as PluginId,
+            2,
+            PluginEventDiagnosticKind::PaneUpdate,
+            true,
+            false,
+            100,
+        );
+
+        assert_eq!(
+            diagnostics.counts(1, 2, PluginEventDiagnosticKind::PaneUpdate),
+            (1, 0, 0)
+        );
+        assert_eq!(
+            diagnostics.counts(
+                1 + PLUGIN_EVENT_DIAGNOSTIC_SLOTS as PluginId,
+                2,
+                PluginEventDiagnosticKind::PaneUpdate,
+            ),
+            (0, 0, 0)
+        );
     }
 
     #[test]
