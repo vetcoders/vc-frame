@@ -511,8 +511,14 @@ fn composer_coordinates() -> Option<FloatingPaneCoordinates> {
 /// so there is no "Process will run in separated pane" chrome and the pane
 /// survives after each command. Prefer the installed `vc-quick-cmd.sh` banner
 /// wrapper when present; otherwise open a plain login shell on `.`.
+///
+/// The fallback runner is **POSIX `sh` only** (no bashisms). Debian/Ubuntu
+/// `sh` is dash — `${PWD/#$HOME/~}` is a bash-only rewrite and aborts with
+/// `sh: 1: Bad substitution` / exit 2 (the EXIT CODE strip the operator saw).
 fn open_quick_cmd() {
-    let quick_cmd_runner = r#"if [ -x "${HOME}/.config/vetcoders/frontier/vc-frame/vc-quick-cmd.sh" ]; then exec "${HOME}/.config/vetcoders/frontier/vc-frame/vc-quick-cmd.sh"; elif [ -x "${HOME}/.config/vc-frame/vc-quick-cmd.sh" ]; then exec "${HOME}/.config/vc-frame/vc-quick-cmd.sh"; else u="${USER:-op}"; h="$(hostname -s 2>/dev/null || echo host)"; d="${PWD/#$HOME/~}"; printf '\n  %s@%s in %s\n\n' "$u" "$h" "$d"; exec "${SHELL:-/bin/zsh}" -l; fi"#;
+    // Keep this string dash-clean: ${var:-def} and ${var#prefix} are POSIX;
+    // ${var/pat/repl} and ${var/#pat/repl} are not.
+    let quick_cmd_runner = r#"if [ -x "${HOME}/.config/vetcoders/frontier/vc-frame/vc-quick-cmd.sh" ]; then exec "${HOME}/.config/vetcoders/frontier/vc-frame/vc-quick-cmd.sh"; elif [ -x "${HOME}/.config/vc-frame/vc-quick-cmd.sh" ]; then exec "${HOME}/.config/vc-frame/vc-quick-cmd.sh"; else u="${USER:-op}"; h="$(hostname -s 2>/dev/null || echo host)"; d="$PWD"; case "${HOME:-}" in "") ;; *) case "$d" in "$HOME"|"$HOME"/*) d="~${d#"$HOME"}" ;; esac ;; esac; printf '\n  %s@%s in %s\n\n' "$u" "$h" "$d"; exec "${SHELL:-/bin/zsh}" -l; fi"#;
     // open_command_pane_floating + exec keeps one long-lived process (the
     // login shell). We accept command-pane chrome only when the wrapper is
     // missing; preferred path is still a real shell via the wrapper script.
