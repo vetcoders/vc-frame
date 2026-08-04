@@ -57,6 +57,9 @@ const STATUS_SEAM_CELLS: usize = 2;
 /// Columns the resting-mode hint ("Ctrl g LOCK") keeps for itself before
 /// the status segment may claim the rest of the bar.
 const RESTING_HINT_RESERVE: usize = 16;
+/// Action modes hand every column to the shortcut hints; the swap-layout
+/// chip may claim at most 1/N of the row.
+const SWAP_CHIP_MAX_BAR_FRACTION: usize = 4;
 
 #[derive(Default)]
 struct State {
@@ -411,7 +414,7 @@ impl ZellijPlugin for State {
             let right = if self.mode_info.mode == resting_mode {
                 self.right_status_segment(active_tab, cols.saturating_sub(RESTING_HINT_RESERVE))
             } else {
-                self.swap_chip_segment(active_tab, cols / 4)
+                self.swap_chip_segment(active_tab, cols / SWAP_CHIP_MAX_BAR_FRACTION)
             };
             let seam = if right.len > 0 { STATUS_SEAM_CELLS } else { 0 };
             let ui_cols = cols.saturating_sub(right.len + seam);
