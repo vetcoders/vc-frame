@@ -99,7 +99,7 @@ pub(crate) fn stdin_loop(
             }
         });
     let mut needs_finalization = false;
-    loop {
+    'stdin: loop {
         match if needs_finalization {
             stdin_rx.recv_timeout(Duration::from_millis(50))
         } else {
@@ -168,13 +168,21 @@ pub(crate) fn stdin_loop(
                                 current_buffer =
                                     fallback_bytes[feed_result.consumed_up_to..].to_vec();
                                 for (key_with_modifier, seq_bytes) in feed_result.keys {
-                                    send_input_instructions
+                                    // Receiver gone = session switch/teardown;
+                                    // this thread's work is over, not a panic.
+                                    if send_input_instructions
                                         .send(InputInstruction::KeyWithModifierEvent(
                                             key_with_modifier,
                                             seq_bytes,
                                             true,
                                         ))
-                                        .unwrap();
+                                        .is_err()
+                                    {
+                                        log::debug!(
+                                            "input receiver gone; stopping stdin handler"
+                                        );
+                                        break 'stdin;
+                                    }
                                 }
                             }
                             match feed_result.rest {
@@ -207,12 +215,18 @@ pub(crate) fn stdin_loop(
                         // before the keyboard parser sees the bytes.
                         // Every termwiz event is a key/mouse/paste/etc.
                         for input_event in events.into_iter() {
-                            send_input_instructions
+                            // Receiver gone = session switch/teardown; this
+                            // thread's work is over, not a panic.
+                            if send_input_instructions
                                 .send(InputInstruction::KeyEvent(
                                     input_event,
                                     std::mem::take(&mut current_buffer),
                                 ))
-                                .unwrap();
+                                .is_err()
+                            {
+                                log::debug!("input receiver gone; stopping stdin handler");
+                                break 'stdin;
+                            }
                         }
 
                         needs_finalization = true;
