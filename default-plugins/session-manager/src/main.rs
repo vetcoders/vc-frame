@@ -742,7 +742,68 @@ fn rail_ordinal_key_to_index(character: char) -> Option<usize> {
     }
 }
 
-fn format_session_rail_entry(session: &SessionUiInfo, ordinal: usize) -> String {
+/// The rail reads its allocated width and picks one of three faces
+/// (audit topology 2026-08-05). Sharp thresholds, no hysteresis — the
+/// operator resizes the panel, the runtime never does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RailWidthMode {
+    /// Full render: `SESSIONS N · name` header, full names, counters.
+    /// The default operator layout allocates `size=24`, so Wide is the
+    /// byte-for-byte baseline.
+    Wide,
+    /// Header drops the current-session anchor, names truncate through
+    /// `fit_rail_line`, the ◉/○ indicators stay.
+    Normal,
+    /// Iconic strip: ordinal + state indicator only, ultra-short header,
+    /// no long text — built at row level, never by truncating prose into
+    /// mincemeat.
+    Dense,
+}
+
+/// Wide is today's baseline: the default operator layout gives the rail 24
+/// columns (see compact-bar/src/line.rs rail note).
+const RAIL_WIDE_MIN_COLS: usize = 24;
+/// Below this the header/name mix stops being readable and the rail switches
+/// to the iconic strip.
+const RAIL_NORMAL_MIN_COLS: usize = 14;
+
+impl RailWidthMode {
+    fn from_cols(cols: usize) -> Self {
+        if cols >= RAIL_WIDE_MIN_COLS {
+            RailWidthMode::Wide
+        } else if cols >= RAIL_NORMAL_MIN_COLS {
+            RailWidthMode::Normal
+        } else {
+            RailWidthMode::Dense
+        }
+    }
+}
+
+/// Header text per width mode. Wide anchors "you are here" with the current
+/// session name; Normal keeps the count only; Dense is an ultra-short badge.
+fn rail_header_text(
+    mode: RailWidthMode,
+    session_count: usize,
+    current_session_name: Option<&str>,
+) -> String {
+    match mode {
+        RailWidthMode::Wide => {
+            let mut text = format!("SESSIONS {}", session_count);
+            if let Some(name) = current_session_name {
+                text.push_str(&format!(" · {}", sanitize_display_label(name)));
+            }
+            text
+        },
+        RailWidthMode::Normal => format!("SESSIONS {}", session_count),
+        RailWidthMode::Dense => format!("S{}", session_count),
+    }
+}
+
+fn format_session_rail_entry(
+    session: &SessionUiInfo,
+    ordinal: usize,
+    mode: RailWidthMode,
+) -> String {
     // The fisheye is the one "you are here" glyph across the whole chrome —
     // the same ◉/○ pair the tab chips carry.
     let status = if session.is_current_session {
@@ -750,6 +811,11 @@ fn format_session_rail_entry(session: &SessionUiInfo, ordinal: usize) -> String 
     } else {
         "○"
     };
+    if mode == RailWidthMode::Dense {
+        // Iconic row: ordinal keeps the 1..9/0 hotkey affordance visible,
+        // the fisheye carries the state — no name to shred.
+        return format!("{:02} {}", ordinal, status);
+    }
     // Sanitize the name *before* pad/fit so control bytes and multi-space
     // runs cannot change display width frame-to-frame (rail flicker).
     format!(
@@ -958,8 +1024,13 @@ fn format_bucket_summary_entry(segments: &[String]) -> String {
     format!(" {}", segments.join(" · "))
 }
 
-fn format_process_tab_rail_entry(tab: &TabUiInfo) -> String {
+fn format_process_tab_rail_entry(tab: &TabUiInfo, mode: RailWidthMode) -> String {
     let activity = if tab.is_active { "◉" } else { "·" };
+    if mode == RailWidthMode::Dense {
+        // Iconic strip: the indented activity dot alone carries the state —
+        // truncating "name · command +N" into mincemeat is not an option.
+        return format!("   {}", activity);
+    }
     let tab_name = sanitize_display_label(&tab.name);
     let mut text = format!("   {} {}", activity, tab_name);
     if let Some(process_label) = tab.primary_process_label() {
@@ -1053,13 +1124,14 @@ fn session_rail_rows_with_truth(
     sessions: &[SessionUiInfo],
     settlement_history: Option<&SettlementHistory>,
     settlement_feed_degraded: bool,
+    mode: RailWidthMode,
 ) -> Vec<SessionRailRow> {
     let mut rows = vec![];
     for (ordinal, session_index) in working_session_indices(sessions).into_iter().enumerate() {
         let session = &sessions[session_index];
         rows.push(SessionRailRow {
             kind: SessionRailRowKind::Session(session_index),
-            text: format_session_rail_entry(session, ordinal + 1),
+            text: format_session_rail_entry(session, ordinal + 1, mode),
         });
         rows.extend(
             session
@@ -1071,7 +1143,7 @@ fn session_rail_rows_with_truth(
                         session_index,
                         tab_position: tab.position,
                     },
-                    text: format_process_tab_rail_entry(tab),
+                    text: format_process_tab_rail_entry(tab, mode),
                 }),
         );
     }
@@ -1085,7 +1157,7 @@ fn session_rail_rows_with_truth(
 
 #[cfg(test)]
 fn session_rail_rows(sessions: &[SessionUiInfo]) -> Vec<SessionRailRow> {
-    session_rail_rows_with_truth(sessions, None, false)
+    session_rail_rows_with_truth(sessions, None, false, RailWidthMode::Wide)
 }
 
 /// The pinned tail of the rail. Always all three buckets, whether or not their
@@ -1306,11 +1378,13 @@ impl State {
             return;
         }
         self.ensure_rail_selection();
+        let mode = RailWidthMode::from_cols(cols);
 
         let all_rows = session_rail_rows_with_truth(
             &self.sessions.session_ui_infos,
             self.settlement_history.as_ref(),
             self.settlement_feed_degraded,
+            mode,
         );
         // The buckets are pinned to the bottom of the rail, so only the leading
         // working-session rows take part in scrolling.
@@ -1322,26 +1396,35 @@ impl State {
         // top bar carries brand │ mode │ tabs only, so "where am I" lives
         // here, right above the session list.
         let session_count = working_session_indices(&self.sessions.session_ui_infos).len();
-        let mut header_text = format!("SESSIONS {}", session_count);
-        let anchor_start = header_text.width() + 3; // " · " before the name
-        if let Some(current) = self
+        let current_session_name = self
             .sessions
             .session_ui_infos
             .iter()
             .find(|s| s.is_current_session)
-        {
-            header_text.push_str(&format!(" · {}", sanitize_display_label(&current.name)));
-        }
+            .map(|s| s.name.as_str());
+        // Anchor offset only exists in Wide — the other modes drop the name.
+        let anchor_start = format!("SESSIONS {}", session_count).width() + 3; // " · "
+        let header_text = rail_header_text(mode, session_count, current_session_name);
         let header = fit_rail_line(&header_text, cols);
         let header_width = header.width();
+        let header_chars = header.chars().count();
         let mut header = Text::new(header);
-        if cols >= 8 {
-            header = header.color_range(1, 0..8);
-        }
-        if header_width > anchor_start {
-            // The anchor takes the same accent as SESSIONS — one hue for
-            // "you are here", per the THEMES_GUIDE doctrine.
-            header = header.color_range(1, anchor_start..);
+        match mode {
+            RailWidthMode::Wide | RailWidthMode::Normal => {
+                if cols >= 8 {
+                    header = header.color_range(1, 0..8);
+                }
+                if mode == RailWidthMode::Wide && header_width > anchor_start {
+                    // The anchor takes the same accent as SESSIONS — one hue
+                    // for "you are here", per the THEMES_GUIDE doctrine.
+                    header = header.color_range(1, anchor_start..);
+                }
+            },
+            RailWidthMode::Dense => {
+                // The whole badge is the accent; the range never exceeds the
+                // fitted text (trailing pad spaces carry no visible ink).
+                header = header.color_range(1, 0..header_chars);
+            },
         }
         print_text_with_coordinates(header, 0, 0, None, None);
 
@@ -1385,9 +1468,14 @@ impl State {
                         // Ordinal digits are chrome, not content — dim them.
                         text = text.color_range(2, 0..2);
                         if is_current {
-                            // "You are here" carries the accent on the NAME,
-                            // the same ink as the header — one glance finds it.
-                            if fitted_chars > 5 {
+                            if mode == RailWidthMode::Dense {
+                                // No name in the iconic strip — the accent
+                                // lands on the fisheye itself.
+                                text = text.color_range(1, 3..4);
+                            } else if fitted_chars > 5 {
+                                // "You are here" carries the accent on the
+                                // NAME, the same ink as the header — one
+                                // glance finds it.
                                 text = text.color_range(1, 5..fitted_chars);
                             }
                         } else {
@@ -1419,10 +1507,11 @@ impl State {
                         if let Some(separator) = char_offset_of(&fitted, " · ", 4) {
                             text = text.color_range(2, separator..fitted_chars);
                         }
-                        if in_current_session && is_active_tab_row {
+                        if in_current_session && is_active_tab_row && mode != RailWidthMode::Dense {
                             // Strongest level of the three: on the highlight
                             // bed, the tab you are actually in carries the
-                            // accent on its whole name.
+                            // accent on its whole name. (Dense has no name —
+                            // the dot already took the accent above.)
                             let name_end =
                                 char_offset_of(&fitted, " · ", 4).unwrap_or(fitted_chars);
                             text = text.color_range(1, 3..name_end);
@@ -2833,6 +2922,70 @@ mod rail_tests {
         // zero-dimension guard and legally renders at cols 6-10.
     }
 
+    #[test]
+    fn rail_width_mode_thresholds_are_sharp() {
+        assert_eq!(RailWidthMode::from_cols(24), RailWidthMode::Wide);
+        assert_eq!(RailWidthMode::from_cols(23), RailWidthMode::Normal);
+        assert_eq!(RailWidthMode::from_cols(14), RailWidthMode::Normal);
+        assert_eq!(RailWidthMode::from_cols(13), RailWidthMode::Dense);
+        assert_eq!(RailWidthMode::from_cols(6), RailWidthMode::Dense);
+        assert_eq!(RailWidthMode::from_cols(80), RailWidthMode::Wide);
+    }
+
+    #[test]
+    fn rail_header_speaks_three_faces() {
+        // Wide anchors the current session name.
+        assert_eq!(
+            rail_header_text(RailWidthMode::Wide, 3, Some("alpha")),
+            "SESSIONS 3 · alpha"
+        );
+        // Normal keeps the count, drops the anchor.
+        assert_eq!(
+            rail_header_text(RailWidthMode::Normal, 3, Some("alpha")),
+            "SESSIONS 3"
+        );
+        // Dense is an ultra-short badge.
+        assert_eq!(rail_header_text(RailWidthMode::Dense, 3, Some("alpha")), "S3");
+        // No current session: Wide degrades to the count alone.
+        assert_eq!(rail_header_text(RailWidthMode::Wide, 2, None), "SESSIONS 2");
+    }
+
+    #[test]
+    fn dense_rows_are_iconic_and_fit_narrow_columns() {
+        let entry = format_session_rail_entry(&session("very-long-session-name", true), 1, RailWidthMode::Dense);
+        assert_eq!(entry, "01 ◉");
+        let entry = format_session_rail_entry(&session("other", false), 7, RailWidthMode::Dense);
+        assert_eq!(entry, "07 ○");
+        // Every dense row fits the narrowest legal rail without shredding.
+        for cols in [4, 6, 8, 13] {
+            assert!(fit_rail_line(&entry, cols).width() <= cols);
+        }
+    }
+
+    #[test]
+    fn dense_and_wide_build_the_same_row_inventory() {
+        // Same sessions, same number and kinds of rows in both faces — the
+        // click-map is built per row in render, so kind parity here proves
+        // every dense row stays clickable.
+        let mut alpha = session("alpha", true);
+        alpha.tabs = vec![TabUiInfo::for_rail_test("build", true, "cargo", 1)];
+        let sessions = [alpha, session("beta", false)];
+        let wide = session_rail_rows_with_truth(&sessions, None, false, RailWidthMode::Wide);
+        let dense = session_rail_rows_with_truth(&sessions, None, false, RailWidthMode::Dense);
+        assert_eq!(wide.len(), dense.len());
+        for (wide_row, dense_row) in wide.iter().zip(dense.iter()) {
+            assert_eq!(wide_row.kind, dense_row.kind);
+        }
+    }
+
+    #[test]
+    fn normal_rows_keep_names_and_indicators() {
+        let entry = format_session_rail_entry(&session("alpha", true), 1, RailWidthMode::Normal);
+        assert_eq!(entry, "01 ◉ alpha");
+        let entry = format_session_rail_entry(&session("beta", false), 2, RailWidthMode::Normal);
+        assert_eq!(entry, "02 ○ beta");
+    }
+
     fn session(name: &str, is_current_session: bool) -> SessionUiInfo {
         SessionUiInfo {
             name: name.to_owned(),
@@ -3043,11 +3196,11 @@ mod rail_tests {
     #[test]
     fn rail_entries_include_ordinal_status_and_name() {
         assert_eq!(
-            format_session_rail_entry(&session("alpha", true), 1),
+            format_session_rail_entry(&session("alpha", true), 1, RailWidthMode::Wide),
             "01 ◉ alpha"
         );
         assert_eq!(
-            format_session_rail_entry(&session("beta", false), 12),
+            format_session_rail_entry(&session("beta", false), 12, RailWidthMode::Wide),
             "12 ○ beta"
         );
     }
@@ -3204,7 +3357,10 @@ mod rail_tests {
     fn rail_does_not_repeat_process_label_when_tab_already_names_the_agent() {
         let tab = TabUiInfo::for_rail_test("claude", true, "claude", 1);
 
-        assert_eq!(format_process_tab_rail_entry(&tab), "   ◉ claude");
+        assert_eq!(
+            format_process_tab_rail_entry(&tab, RailWidthMode::Wide),
+            "   ◉ claude"
+        );
     }
 
     fn bucket_session(name: &str, tabs: usize) -> SessionUiInfo {
@@ -3306,7 +3462,12 @@ mod rail_tests {
         let snapshot =
             SettlementHistory::parse(&settlement_payload(681, (97, 176, 408), (12, 7, 3)))
                 .expect("valid settlement history");
-        let rows = session_rail_rows_with_truth(&[session("alpha", true)], Some(&snapshot), false);
+        let rows = session_rail_rows_with_truth(
+            &[session("alpha", true)],
+            Some(&snapshot),
+            false,
+            RailWidthMode::Wide,
+        );
         let buckets: Vec<&str> = rows
             .iter()
             .filter(|row| row.is_bucket())
@@ -3327,7 +3488,7 @@ mod rail_tests {
             None,
         );
         let snapshot = SettlementHistory::parse(&payload).expect("valid partial history");
-        let rows = session_rail_rows_with_truth(&[], Some(&snapshot), false);
+        let rows = session_rail_rows_with_truth(&[], Some(&snapshot), false, RailWidthMode::Wide);
         let buckets: Vec<&str> = rows
             .iter()
             .filter(|row| row.is_bucket())
@@ -3457,6 +3618,7 @@ mod rail_tests {
             &[],
             state.settlement_history.as_ref(),
             state.settlement_feed_degraded,
+            RailWidthMode::Wide,
         );
         assert_eq!(
             degraded_rows
@@ -3499,6 +3661,7 @@ mod rail_tests {
             &[],
             state.settlement_history.as_ref(),
             state.settlement_feed_degraded,
+            RailWidthMode::Wide,
         );
         assert_eq!(
             degraded_rows
@@ -3607,6 +3770,7 @@ mod rail_tests {
             &[session("alpha", true), bucket_session("Needs attention", 1)],
             Some(&snapshot),
             false,
+            RailWidthMode::Wide,
         );
         let summary = rows
             .iter()
@@ -3812,7 +3976,7 @@ mod rail_tests {
     fn format_session_rail_entry_sanitizes_name_for_stable_columns() {
         let mut session = session("alpha", true);
         session.name = "alpha\nbeta".to_owned();
-        let text = format_session_rail_entry(&session, 1);
+        let text = format_session_rail_entry(&session, 1, RailWidthMode::Wide);
         assert!(!text.contains('\n'));
         assert!(
             text.contains("alpha beta") || text.contains("alphabeta") || text.contains("alpha")
