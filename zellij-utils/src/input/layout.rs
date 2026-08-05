@@ -1473,10 +1473,25 @@ impl Layout {
                     Layout::stringified_from_dir(layout_path, layout_dir.as_ref())
                 }
             },
-            None => Layout::stringified_from_dir(
-                &std::path::PathBuf::from("default"),
-                layout_dir.as_ref(),
-            ),
+            None => {
+                // Nothing configured anywhere. A user file layouts/default.kdl
+                // still wins (docs contract); only without one does the implicit
+                // fallback land on the guided "vibecrafted" operator entrypoint
+                // instead of the bare "default" chrome. Mirrors
+                // LayoutInfo::from_config — keep the two in step.
+                let implicit = std::path::PathBuf::from("default");
+                let has_user_default = layout_dir
+                    .as_ref()
+                    .map(|dir| dir.join(&implicit).with_extension("kdl").exists())
+                    .unwrap_or(false);
+                if has_user_default {
+                    Layout::stringified_from_dir(&implicit, layout_dir.as_ref())
+                } else {
+                    Layout::stringified_from_default_assets(&std::path::PathBuf::from(
+                        "vibecrafted",
+                    ))
+                }
+            },
         }
     }
     #[cfg(not(target_family = "wasm"))]

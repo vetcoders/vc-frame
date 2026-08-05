@@ -458,10 +458,13 @@ load_plugins {
 // theme "default"
 
 // The name of the default layout to load on startup
-// Default: "default"
 // (Requires restart)
 //
-// default_layout "compact"
+// Unset, this resolves to "vibecrafted" — the operator entrypoint with the
+// "Start here" guide tab and the Shell banner. A file named default.kdl in
+// your layout directory still wins. Set "default" for bare rail chrome.
+//
+// default_layout "vibecrafted"
 
 // Choose the mode that zellij uses when starting up.
 // Default: normal
