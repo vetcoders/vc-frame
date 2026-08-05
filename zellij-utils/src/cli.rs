@@ -1369,6 +1369,13 @@ pub enum Sessions {
         /// Name of target session
         #[clap(value_parser)]
         target_session: Option<String>,
+        /// Automatic yes to prompts (kill-session prompts for nothing; accepted
+        /// for muscle-memory parity with `ka` / `da`)
+        #[clap(short, long, value_parser)]
+        yes: bool,
+        /// Treat an already-dead session as success and clean up its stale socket
+        #[clap(short, long, value_parser, takes_value(false), default_value("false"))]
+        force: bool,
     },
 
     /// Delete a specific session

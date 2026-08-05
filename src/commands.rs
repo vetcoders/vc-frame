@@ -66,7 +66,9 @@ pub(crate) fn kill_all_sessions(yes: bool) {
                 }
             }
             for session in &sessions {
-                kill_session_impl(&session.0);
+                // The sweep must not abort because one session died between
+                // the inventory probe and its shutdown call — idempotent kill.
+                kill_session_impl(&session.0, true);
             }
             process::exit(0);
         },
@@ -122,7 +124,7 @@ pub(crate) fn delete_all_sessions(yes: bool, force: bool) {
     process::exit(0);
 }
 
-pub(crate) fn kill_session(target_session: &Option<String>) {
+pub(crate) fn kill_session(target_session: &Option<String>, force: bool) {
     match target_session {
         Some(target_session) => {
             if let Err(e) = validate_session_name(target_session) {
@@ -131,7 +133,7 @@ pub(crate) fn kill_session(target_session: &Option<String>) {
             }
             // A live server can miss the short inventory probe while busy.
             // Let the exact socket transport decide whether shutdown can land.
-            kill_session_impl(target_session);
+            kill_session_impl(target_session, force);
             process::exit(0);
         },
         None => {
