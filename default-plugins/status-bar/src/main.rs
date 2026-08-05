@@ -57,6 +57,9 @@ const STATUS_SEAM_CELLS: usize = 2;
 /// Columns the resting-mode hint ("Ctrl g LOCK") keeps for itself before
 /// the status segment may claim the rest of the bar.
 const RESTING_HINT_RESERVE: usize = 16;
+/// Unlocked modes hand the width to the shortcut cheat-sheet; the
+/// swap-layout chip may claim at most 1/N of the row.
+const SWAP_CHIP_MAX_BAR_FRACTION: usize = 4;
 
 #[derive(Default)]
 struct State {
@@ -409,9 +412,11 @@ impl ZellijPlugin for State {
             let right = if self.mode_info.mode == InputMode::Locked {
                 self.right_status_segment(active_tab, cols.saturating_sub(RESTING_HINT_RESERVE))
             } else {
-                // Unlocked modes: the whole width belongs to the shortcut
-                // cheat-sheet — no telemetry, no arrangement chip.
-                LinePart::default()
+                // Unlocked modes: the width belongs to the full shortcut
+                // cheat-sheet — no telemetry. Only the swap-layout chip
+                // ("BASE") keeps the right edge: manipulation modes are
+                // exactly when the operator is arranging.
+                self.swap_chip_segment(active_tab, cols / SWAP_CHIP_MAX_BAR_FRACTION)
             };
             let seam = if right.len > 0 { STATUS_SEAM_CELLS } else { 0 };
             let ui_cols = cols.saturating_sub(right.len + seam);
@@ -632,6 +637,16 @@ impl State {
         }
 
         segment
+    }
+
+    /// Unlocked-mode right edge: the swap-layout chip alone. Manipulation
+    /// modes are exactly when the operator is arranging — but the chip
+    /// yields once the bar gets tight.
+    fn swap_chip_segment(&self, active_tab: Option<&TabInfo>, max_len: usize) -> LinePart {
+        match self.swap_layout_status(active_tab) {
+            Some(chip) if chip.len <= max_len => chip,
+            _ => LinePart::default(),
+        }
     }
 
     fn swap_layout_status(&self, active_tab: Option<&TabInfo>) -> Option<LinePart> {
