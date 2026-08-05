@@ -25,8 +25,8 @@ pub const DATUM_PARTITION: &str = "⎮";
 pub const DATUM_PARTITION_COLS: usize = 1;
 /// Columns between datum and the mode chip.
 pub const MODE_LEAD_GAP_COLS: usize = 1;
-/// Mode chip body — always exactly 8 display columns (no trailing frame bar).
-pub const MODE_ZONE_COLS: usize = 8;
+/// Mode chip body — always exactly 5 display columns (fully inverted chip).
+pub const MODE_ZONE_COLS: usize = 5;
 /// Fixed prefix after brand: gap + datum + lead + mode.
 pub const AFTER_BRAND_FIXED_COLS: usize =
     BRAND_DATUM_GAP_COLS + DATUM_PARTITION_COLS + MODE_LEAD_GAP_COLS + MODE_ZONE_COLS;
@@ -145,7 +145,12 @@ pub fn truncate_display_width(text: &str, max_cols: usize) -> String {
 /// frame bar (the datum `⎮` is the partition, not a chip separator).
 pub fn format_mode_zone(mode: InputMode) -> String {
     let (glyph, code) = mode_chip(mode);
-    let body = format!("{} {}", glyph, code);
+    let glyph_width = glyph.width();
+    let body = if glyph_width == 2 {
+        format!("│{} {}", glyph, code)
+    } else {
+        format!("│ {} {}", glyph, code)
+    };
     pad_to_cols(&body, MODE_ZONE_COLS)
 }
 
@@ -777,7 +782,7 @@ pub fn tab_separator(capabilities: PluginCapabilities) -> &'static str {
 pub fn mode_chip(mode: InputMode) -> (&'static str, &'static str) {
     match mode {
         InputMode::Normal => ("▷", "N"),
-        InputMode::Locked => ("⊝", "L"),
+        InputMode::Locked => ("⚿", "L"),
         InputMode::Pane => ("◫", "P"),
         InputMode::Tab => ("𝌁", "T"),
         InputMode::Resize => ("⤢", "R"),
@@ -785,8 +790,8 @@ pub fn mode_chip(mode: InputMode) -> (&'static str, &'static str) {
         InputMode::Scroll => ("⇅", "S"),
         InputMode::Search => ("⌕", "F"),
         InputMode::EnterSearch => ("↵", "F"),
-        InputMode::RenameTab => ("✎", "RNT"),
-        InputMode::RenamePane => ("✎", "RNP"),
+        InputMode::RenameTab => ("✎", "t"),
+        InputMode::RenamePane => ("✎", "p"),
         InputMode::Session => ("𝌆", "S"),
         InputMode::Prompt => ("⟩", "P"),
         InputMode::Tmux => ("ⓣ", "T"),
@@ -832,20 +837,20 @@ mod tests {
     }
 
     #[test]
-    fn mode_zone_has_no_trailing_frame_bar() {
-        // Datum `⎮` is a separate partition part; mode body must not re-draw │.
+    fn mode_zone_has_leading_vertical_separator() {
+        // Mode chip starts with │ to anchor flush against the rail continuum.
         for mode in ALL_MODES {
             let zone = format_mode_zone(mode);
             assert!(
-                !zone.contains('│') && !zone.contains('⎮'),
-                "mode {:?} must not embed partition glyphs (got {:?})",
+                zone.starts_with('│'),
+                "mode {:?} must start with │ (got {:?})",
                 mode,
                 zone
             );
         }
-        // Rename codes are three letters; still fit the fixed budget.
-        assert!(format_mode_zone(InputMode::RenameTab).contains("RNT"));
-        assert!(format_mode_zone(InputMode::RenamePane).contains("RNP"));
+        // Single-letter rename codes fit the exact 5-col budget.
+        assert!(format_mode_zone(InputMode::RenameTab).contains("t"));
+        assert!(format_mode_zone(InputMode::RenamePane).contains("p"));
     }
 
     #[test]
@@ -893,8 +898,8 @@ mod tests {
 
     #[test]
     fn after_brand_fixed_cols_match_column_guard() {
-        // gap(4) + datum(1) + lead(1) + mode(8) = 14
-        assert_eq!(AFTER_BRAND_FIXED_COLS, 14);
+        // gap(4) + datum(1) + lead(1) + mode(5) = 11
+        assert_eq!(AFTER_BRAND_FIXED_COLS, 11);
         assert_eq!(DATUM_PARTITION.width(), DATUM_PARTITION_COLS);
     }
 
