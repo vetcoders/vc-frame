@@ -928,7 +928,10 @@ mod tests {
         // Spec: Protected Toolbar Fixed 36 cols.
         assert_eq!(ENTRY_ZONE_COLS, 36);
         assert_eq!(BRAND_ZONE_COLS, 14);
-        assert_eq!(MODE_ZONE_COLS, 8);
+        // 5 since the mode chip was tightened from the original 8-col budget
+        // (f5b8dff65); this freeze-test guards against accidental drift, so
+        // it must track deliberate budget changes.
+        assert_eq!(MODE_ZONE_COLS, 5);
         assert_eq!(BRAND_DATUM_GAP_COLS, 4);
         assert_eq!(MODE_LEAD_GAP_COLS, 1);
     }
