@@ -56,7 +56,13 @@ const COMPOSER_PANE_NAME: &str = "✍ Composer · ⧉ Paste stack";
 /// Same drafting contract as Super+e (Cmd+E) in the default config — the
 /// single product key. Prefer installed paste-stack-aware `vc-composer.sh`
 /// (vim profile: number, laststatus=0, Ctrl+p paste-stack pick).
-const COMPOSER_COMMAND: &str = r#"if [ -x "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh" ]; then "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh"; elif [ -x "${HOME}/.config/vc-frame/vc-composer.sh" ]; then "${HOME}/.config/vc-frame/vc-composer.sh"; else f=$(mktemp "${TMPDIR:-/tmp}/vc-composer.XXXXXX") || exit 1; ${EDITOR:-vim} -N -c 'set number laststatus=0 nowrap textwidth=0' "$f"; if [ -s "$f" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars "$(cat "$f")"; fi; rm -f -- "$f"; fi"#;
+/// The fallback speaks the same caret language as the installed script
+/// (caret-semantics.md, one contract, two roads) via a mktemp mini-vimrc:
+/// insert=beam 6 / replace=blink-underline 3 / normal=underline 4 through
+/// termcaps, DECSCUSR 0 handed back after the editor exits. Named
+/// degradation: visual/cmdline/operator-pending states live only in the
+/// installed script — the one-liner budget stops at the three termcaps.
+const COMPOSER_COMMAND: &str = r#"if [ -x "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh" ]; then "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh"; elif [ -x "${HOME}/.config/vc-frame/vc-composer.sh" ]; then "${HOME}/.config/vc-frame/vc-composer.sh"; else f=$(mktemp "${TMPDIR:-/tmp}/vc-composer.XXXXXX") || exit 1; rc=$(mktemp "${TMPDIR:-/tmp}/vc-composer-vimrc.XXXXXX") || exit 1; printf '%s\n' 'set number laststatus=0 nowrap textwidth=0' > "$rc"; if [ "${VC_COMPOSER_CARET:-1}" != "0" ]; then printf '%s\n' 'let &t_SI = "\e[6 q"' 'let &t_SR = "\e[3 q"' 'let &t_EI = "\e[4 q"' >> "$rc"; fi; ${EDITOR:-vim} -N -u "$rc" "$f"; if [ "${VC_COMPOSER_CARET:-1}" != "0" ]; then printf '\033[0 q'; fi; if [ -s "$f" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars "$(cat "$f")"; fi; rm -f -- "$f" "$rc"; fi"#;
 #[derive(Debug, Default)]
 pub struct LinePart {
     part: String,
