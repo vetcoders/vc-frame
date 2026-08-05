@@ -1,8 +1,13 @@
 use crate::LinePart;
+use crate::line::truncate_display_width;
 use ansi_term::{AnsiString, AnsiStrings};
 use unicode_width::UnicodeWidthStr;
 use zellij_tile::prelude::*;
 use zellij_tile_utils::style;
+
+/// Soft max for a single tab label before the chip wastes Z2 budget.
+/// Overflow across many tabs is still handled by the `+N` compact badge.
+const TAB_LABEL_MAX_COLS: usize = 16;
 
 /// Fisheye tab markers: the focused tab carries ◉ (fisheye, alive center),
 /// every inactive tab carries ○. The marker carries state together with the
@@ -103,6 +108,8 @@ pub fn tab_style(
     palette: Styling,
     _capabilities: PluginCapabilities,
 ) -> LinePart {
+    // Grapheme-safe soft truncate so long tab titles never explode Z2 width.
+    tabname = truncate_display_width(&tabname, TAB_LABEL_MAX_COLS);
     if tab.is_fullscreen_active {
         tabname.push_str(" (FULLSCREEN)");
     } else if tab.is_sync_panes_active {

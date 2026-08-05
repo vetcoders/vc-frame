@@ -1,22 +1,41 @@
 use ansi_term::AnsiStrings;
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::{ARROW_SEPARATOR, LinePart, TabRenderData};
 use zellij_tile::prelude::*;
 use zellij_tile_utils::style;
 
-/// Fixed character-column budgets for the compact-bar (Pensieve Fixed Character
-/// Grid Model). Every zone is either fixed-width or a single controlled flex
-/// (tabs + spacer). Mode switches and metric updates must never shift the bar
-/// by even one cell.
+/// Fixed character-column budgets for the compact-bar — Vibecrafted Column
+/// Guard Contract (`v0.47.2-contract`). Every zone is either fixed-width or a
+/// single controlled flex (tabs + spacer). Mode switches, tab open/close, and
+/// metric updates must never shift Z0/Z1/Z3 by even one cell.
+///
+/// Grid (Row 0 chrome), anchored to the Sessions-rail partition datum `⎮`:
+/// ```text
+///   [left_inset][Z0 brand 14][gap 4][⎮][gap 1][Z1 mode 8][Z2 tabs flex][Z3 toolbar 36]
+/// ```
+/// With the default operator layout (`left_inset=6`, rail `size=24`):
+/// brand ends at col 20, 4-col gap, datum at col 24 (= rail width), mode at 26.
 pub const BRAND_ZONE_COLS: usize = 14;
+/// Columns between brand right edge and the datum partition line.
+pub const BRAND_DATUM_GAP_COLS: usize = 4;
+/// Canonical partition glyph between Sessions rail and workspace (1 col).
+pub const DATUM_PARTITION: &str = "⎮";
+pub const DATUM_PARTITION_COLS: usize = 1;
+/// Columns between datum and the mode chip.
+pub const MODE_LEAD_GAP_COLS: usize = 1;
+/// Mode chip body — always exactly 8 display columns (no trailing frame bar).
 pub const MODE_ZONE_COLS: usize = 8;
-/// `✍ Composer` padded to 12 grid cells.
-pub const COMPOSER_CHIP_COLS: usize = 12;
-/// Leading seam + `❯_ Quick cmd` padded to 18 grid cells.
-pub const QUICK_CMD_CHIP_COLS: usize = 18;
-/// Right entry zone total: Composer + Quick cmd (no free-form growth).
-pub const ENTRY_ZONE_COLS: usize = COMPOSER_CHIP_COLS + QUICK_CMD_CHIP_COLS;
+/// Fixed prefix after brand: gap + datum + lead + mode.
+pub const AFTER_BRAND_FIXED_COLS: usize =
+    BRAND_DATUM_GAP_COLS + DATUM_PARTITION_COLS + MODE_LEAD_GAP_COLS + MODE_ZONE_COLS;
+/// `✍ Composer` padded to 14 grid cells (Z3 left half).
+pub const COMPOSER_CHIP_COLS: usize = 14;
+/// Leading seam + `❯_ Quick cmd` padded to 22 grid cells (Z3 right half).
+pub const QUICK_CMD_CHIP_COLS: usize = 22;
+/// Protected right toolbar total — immutable position; tabs never push it out.
+pub const ENTRY_ZONE_COLS: usize = COMPOSER_CHIP_COLS + QUICK_CMD_CHIP_COLS; // 36
 
 pub fn tab_line(
     mode_info: &ModeInfo,
@@ -42,18 +61,29 @@ fn calculate_total_length(parts: &[LinePart]) -> usize {
     parts.iter().map(|p| p.len).sum()
 }
 
+/// Display width of a string as the sum of grapheme cluster widths (wcwidth).
+pub fn display_width(text: &str) -> usize {
+    text.graphemes(true).map(grapheme_width).sum()
+}
+
+fn grapheme_width(g: &str) -> usize {
+    // unicode-width: most symbols 0/1/2. Zero-width joiners contribute 0.
+    UnicodeWidthStr::width(g)
+}
+
 /// Pad or hard-trim `text` so its display width equals `cols` exactly.
-/// Wide EAW glyphs count as 2; padding uses ASCII spaces (width 1).
+/// Slices on grapheme-cluster boundaries; wide EAW glyphs count as 2;
+/// padding uses ASCII spaces (width 1).
 pub fn pad_to_cols(text: &str, cols: usize) -> String {
     let mut out = String::new();
     let mut width = 0usize;
-    for ch in text.chars() {
-        let ch_w = ch.to_string().width().max(1);
-        if width + ch_w > cols {
+    for g in text.graphemes(true) {
+        let g_w = grapheme_width(g);
+        if width + g_w > cols {
             break;
         }
-        out.push(ch);
-        width += ch_w;
+        out.push_str(g);
+        width += g_w;
     }
     while width < cols {
         out.push(' ');
@@ -62,26 +92,73 @@ pub fn pad_to_cols(text: &str, cols: usize) -> String {
     out
 }
 
-/// Mode zone text — always exactly [`MODE_ZONE_COLS`] display columns.
-/// Uniform separator rule (spec 1.2): every mode ends with a vertical bar so
-/// the chip's right edge sits on the same column as the pane frame's `├`.
-/// Shape: ` {glyph} {code} ` padded to `MODE_ZONE_COLS - 1`, then `│`.
-pub fn format_mode_zone(mode: InputMode) -> String {
-    let (glyph, code) = mode_chip(mode);
-    let body = format!(" {} {} ", glyph, code);
-    let mut zone = pad_to_cols(&body, MODE_ZONE_COLS.saturating_sub(1));
-    zone.push('│');
-    zone
+/// Right-align `text` into exactly `cols` display columns (left-pad spaces).
+/// Truncates on grapheme boundaries when over-budget.
+pub fn right_align_to_cols(text: &str, cols: usize) -> String {
+    let trimmed = text.trim_end();
+    let mut kept = String::new();
+    let mut width = 0usize;
+    for g in trimmed.graphemes(true) {
+        let g_w = grapheme_width(g);
+        if width + g_w > cols {
+            break;
+        }
+        kept.push_str(g);
+        width += g_w;
+    }
+    let pad = cols.saturating_sub(width);
+    format!("{}{}", " ".repeat(pad), kept)
 }
 
-/// Brand zone text — always exactly [`BRAND_ZONE_COLS`] display columns.
+/// Truncate `text` to at most `max_cols` display columns on grapheme
+/// boundaries. When truncation is required, the last column is the ellipsis
+/// `…` (1 display col) — never mid-grapheme or mid-UTF-8.
+pub fn truncate_display_width(text: &str, max_cols: usize) -> String {
+    if max_cols == 0 {
+        return String::new();
+    }
+    let full_w: usize = text.graphemes(true).map(grapheme_width).sum();
+    if full_w <= max_cols {
+        return text.to_owned();
+    }
+    let mut current_width = 0usize;
+    let mut result = String::new();
+    for grapheme in text.graphemes(true) {
+        let g_width = grapheme_width(grapheme);
+        // Reserve 1 col for the ellipsis when this grapheme would not fit.
+        if current_width + g_width + 1 > max_cols {
+            result.push('…');
+            break;
+        }
+        result.push_str(grapheme);
+        current_width += g_width;
+    }
+    if result.is_empty() && max_cols > 0 {
+        result.push('…');
+    }
+    result
+}
+
+/// Mode zone text — always exactly [`MODE_ZONE_COLS`] display columns.
+/// Column Guard: mode starts one col right of the datum (lead gap is a
+/// separate LinePart). Body is glyph + short code, space-padded — no trailing
+/// frame bar (the datum `⎮` is the partition, not a chip separator).
+pub fn format_mode_zone(mode: InputMode) -> String {
+    let (glyph, code) = mode_chip(mode);
+    let body = format!("{} {}", glyph, code);
+    pad_to_cols(&body, MODE_ZONE_COLS)
+}
+
+/// Brand zone text — always exactly [`BRAND_ZONE_COLS`] display columns,
+/// right-aligned so its right edge sits flush against the 4-col datum gap.
 pub fn format_brand_zone(brand_text: Option<&str>, brand_text_short: Option<&str>) -> String {
     let selected = select_brand_text(brand_text, brand_text_short);
-    pad_to_cols(&selected, BRAND_ZONE_COLS)
+    right_align_to_cols(&selected, BRAND_ZONE_COLS)
 }
 
 fn select_brand_text(brand_text: Option<&str>, brand_text_short: Option<&str>) -> String {
-    let default_brand = " 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. ".to_owned();
+    // Bare wordmark (12 cols under unicode-width); right_align pads to 14.
+    let default_brand = "𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍.".to_owned();
     match (brand_text, brand_text_short) {
         (Some(long_brand), Some(short_brand))
             if long_brand.width() <= BRAND_ZONE_COLS
@@ -93,7 +170,7 @@ fn select_brand_text(brand_text: Option<&str>, brand_text_short: Option<&str>) -
             short_brand.to_owned()
         },
         (Some(long_brand), _) if long_brand.width() <= BRAND_ZONE_COLS => long_brand.to_owned(),
-        (Some(long_brand), _) => long_brand.to_owned(), // pad_to_cols will trim
+        (Some(long_brand), _) => long_brand.to_owned(), // right_align/truncate will fit
         _ => default_brand,
     }
 }
@@ -243,8 +320,8 @@ impl TabLinePopulator {
         if tab_count == 0 {
             return LinePart::default();
         }
-
-        let more_text = self.format_count_text(tab_count, "← +{}", " ← +many ");
+        // Compact contract: `+N` badge (no arrows that eat Z2 width).
+        let more_text = self.format_count_text(tab_count, "+{}", "+many");
         self.create_styled_indicator(more_text, tab_index)
     }
 
@@ -252,14 +329,15 @@ impl TabLinePopulator {
         if tab_count == 0 {
             return LinePart::default();
         }
-
-        let more_text = self.format_count_text(tab_count, "+{} →", " +many → ");
+        // Compact contract (`○ name+N`): overflow count as a tight `+N` badge.
+        // Never `+N →` — arrows pushed Z3 off-screen in the legacy layout.
+        let more_text = self.format_count_text(tab_count, "+{}", "+many");
         self.create_styled_indicator(more_text, tab_index)
     }
 
     fn format_count_text(&self, count: usize, format_str: &str, fallback: &str) -> String {
         if count < 10000 {
-            format!(" {} ", format_str.replace("{}", &count.to_string()))
+            format!("{}", format_str.replace("{}", &count.to_string()))
         } else {
             fallback.to_string()
         }
@@ -337,18 +415,52 @@ impl TabLinePrefixBuilder {
         brand_text: Option<&str>,
         brand_text_short: Option<&str>,
     ) -> Vec<LinePart> {
+        // Column Guard order: Z0 brand · 4-col gap · datum `⎮` · 1-col lead · Z1 mode · Z2 tabs.
+        // The session anchor lives in the rail header (`SESSIONS N · name`), not here.
         let mut parts = vec![self.create_brand_part(brand_text, brand_text_short)];
-        let used_len = parts.first().map_or(0, |p| p.len);
-
-        // Operator's zone order: brand │ mode │ tabs — the mode chip sits
-        // directly after the brand so it never leaves the eye's home
-        // position. The session anchor lives in the rail header
-        // (`SESSIONS N · name`), not on this bar (operator call 2026-07-30).
+        parts.push(self.create_gap_part(BRAND_DATUM_GAP_COLS));
+        parts.push(self.create_datum_part());
+        parts.push(self.create_gap_part(MODE_LEAD_GAP_COLS));
+        let used_len = calculate_total_length(&parts);
         if let Some(mode_part) = self.create_mode_part(mode, used_len) {
             parts.push(mode_part);
         }
-
+        // Brand is always present as parts[0]; fixed suffix is gap+datum+lead[+mode].
+        let brand_len = parts.first().map_or(0, |p| p.len);
+        let after_brand = calculate_total_length(&parts).saturating_sub(brand_len);
+        debug_assert!(
+            after_brand == AFTER_BRAND_FIXED_COLS
+                || after_brand == AFTER_BRAND_FIXED_COLS.saturating_sub(MODE_ZONE_COLS),
+            "after-brand fixed width drifted: {after_brand} (want {AFTER_BRAND_FIXED_COLS} or gap-only)"
+        );
         parts
+    }
+
+    fn create_gap_part(&self, cols: usize) -> LinePart {
+        if cols == 0 {
+            return LinePart::default();
+        }
+        let colors = self.get_text_colors();
+        LinePart {
+            part: style!(colors.text, colors.background)
+                .paint(" ".repeat(cols))
+                .to_string(),
+            len: cols,
+            tab_index: None,
+        }
+    }
+
+    fn create_datum_part(&self) -> LinePart {
+        let colors = self.get_text_colors();
+        // Partition mark — aligns with the Sessions-rail / workspace split.
+        // Painted in base ink so the datum is visible against the bar ground.
+        LinePart {
+            part: style!(colors.text, colors.background)
+                .paint(DATUM_PARTITION)
+                .to_string(),
+            len: DATUM_PARTITION_COLS,
+            tab_index: None,
+        }
     }
 
     fn create_brand_part(
@@ -425,22 +537,14 @@ impl RightSideElementsBuilder {
         Self { palette }
     }
 
-    fn build(&self, config: &TabLineConfig) -> Vec<LinePart> {
-        let mut elements = Vec::new();
-
-        elements.push(self.create_composer_chip());
-        elements.push(self.create_quick_cmd_chip());
-        // Fixed entry zone: the two chips always sum to ENTRY_ZONE_COLS.
+    /// Protected Z3 only — Composer + Quick cmd. Never includes optional chrome.
+    fn build_protected_zone(&self) -> Vec<LinePart> {
+        let elements = vec![self.create_composer_chip(), self.create_quick_cmd_chip()];
         debug_assert_eq!(
             elements[0].len + elements[1].len,
             ENTRY_ZONE_COLS,
             "composer+quick entry zone must be exactly {ENTRY_ZONE_COLS} cols"
         );
-
-        if let Some(ref tooltip_key) = config.toggle_tooltip_key {
-            elements.push(self.create_tooltip_indicator(tooltip_key, config.tooltip_is_active));
-        }
-
         elements
     }
 
@@ -453,7 +557,9 @@ impl RightSideElementsBuilder {
         // Style the visible label; trailing pad spaces inherit the bar ground.
         let label = "❯_ Quick cmd";
         let seam = " · ";
-        let pad_tail = " ".repeat(plain.width().saturating_sub(seam.width() + label.width()));
+        let pad_tail = " ".repeat(
+            display_width(&plain).saturating_sub(display_width(seam) + display_width(label)),
+        );
         let styled_parts = [
             style!(
                 self.palette.text_unselected.emphasis_2,
@@ -553,6 +659,9 @@ impl TabLineBuilder {
         // macOS traffic lights in the native transparent window. A LinePart
         // with tab_index None keeps the click map honest — both the tab and
         // sentinel resolvers walk cumulative lens.
+        //
+        // With rail size=24 and left_inset=6: brand (14) ends at col 20, the
+        // 4-col gap + datum land on the Sessions/workspace partition (col 24).
         let left_inset = self.config.left_inset.min(self.cols / 2);
         if left_inset > 0 {
             let colors = self.palette.text_unselected;
@@ -569,16 +678,22 @@ impl TabLineBuilder {
         }
         let prefix_len = calculate_total_length(&prefix);
 
-        if prefix_len + active_tab.len > self.cols {
+        // Protected Right Action Zone (Z3): always reserve ENTRY_ZONE_COLS so
+        // Composer + Quick cmd never shift or fall off when tabs overflow.
+        let reserved_right = ENTRY_ZONE_COLS.min(self.cols.saturating_sub(prefix_len));
+        let tabs_budget = self
+            .cols
+            .saturating_sub(prefix_len)
+            .saturating_sub(reserved_right);
+
+        if active_tab.len > tabs_budget {
+            // Even the active tab alone is too wide — still pin Z3.
+            self.add_right_side_elements(&mut prefix);
             return prefix;
         }
 
         let mut tabs_to_render = vec![active_tab];
-        let populator = TabLinePopulator::new(
-            self.cols.saturating_sub(prefix_len),
-            self.palette,
-            self.capabilities,
-        );
+        let populator = TabLinePopulator::new(tabs_budget, self.palette, self.capabilities);
 
         let mut tabs_before = tabs_before_active;
         let mut tabs_after = tabs_after_active;
@@ -608,25 +723,29 @@ impl TabLineBuilder {
     }
 
     fn add_right_side_elements(&self, prefix: &mut Vec<LinePart>) {
+        // Right Guard: Z3 (Composer + Quick cmd) is always placed. Optional
+        // tooltip may follow only when free columns remain after Z3.
+        let right_builder = RightSideElementsBuilder::new(self.palette);
+        let mut right_elements = right_builder.build_protected_zone();
+        let z3_len = calculate_total_length(&right_elements);
+        debug_assert_eq!(z3_len, ENTRY_ZONE_COLS);
+
         let current_len = calculate_total_length(prefix);
+        let remaining_space = self.cols.saturating_sub(current_len).saturating_sub(z3_len);
+        if remaining_space > 0 {
+            prefix.push(self.create_spacer(remaining_space));
+        }
+        prefix.append(&mut right_elements);
 
-        if current_len < self.cols {
-            let right_builder = RightSideElementsBuilder::new(self.palette);
-            let mut right_elements = right_builder.build(&self.config);
-
-            let right_len = calculate_total_length(&right_elements);
-
-            if current_len + right_len <= self.cols {
-                let remaining_space = self
-                    .cols
-                    .saturating_sub(current_len)
-                    .saturating_sub(right_len);
-
-                if remaining_space > 0 {
-                    prefix.push(self.create_spacer(remaining_space));
-                }
-
-                prefix.append(&mut right_elements);
+        // Tooltip is optional chrome — never steals columns from Z3.
+        if let Some(ref tooltip_key) = self.config.toggle_tooltip_key {
+            let tip = right_builder.create_tooltip_indicator(
+                tooltip_key,
+                self.config.tooltip_is_active,
+            );
+            let after_z3 = calculate_total_length(prefix);
+            if after_z3 + tip.len <= self.cols {
+                prefix.push(tip);
             }
         }
     }
@@ -654,8 +773,7 @@ pub fn tab_separator(capabilities: PluginCapabilities) -> &'static str {
 }
 
 /// The operator-tuned mode chip set (glyph, short code) — one visual language
-/// for all fourteen input modes. The trailing `│` is applied by
-/// [`format_mode_zone`] (Uniform Mode Chip Separator Rule, spec 1.2).
+/// for all fourteen input modes. Width is enforced by [`format_mode_zone`].
 /// Rename codes are RNT/RNP; Prompt uses `⟩` so it never collides with the
 /// Quick cmd prompt glyph `❯_`.
 pub fn mode_chip(mode: InputMode) -> (&'static str, &'static str) {
@@ -702,7 +820,7 @@ mod tests {
     fn mode_zone_is_fixed_width_for_every_mode() {
         let widths: Vec<usize> = ALL_MODES
             .iter()
-            .map(|m| format_mode_zone(*m).width())
+            .map(|m| display_width(&format_mode_zone(*m)))
             .collect();
         for (mode, w) in ALL_MODES.iter().zip(widths.iter()) {
             assert_eq!(
@@ -716,12 +834,13 @@ mod tests {
     }
 
     #[test]
-    fn mode_zone_ends_with_uniform_vertical_separator() {
+    fn mode_zone_has_no_trailing_frame_bar() {
+        // Datum `⎮` is a separate partition part; mode body must not re-draw │.
         for mode in ALL_MODES {
             let zone = format_mode_zone(mode);
             assert!(
-                zone.ends_with('│'),
-                "mode {:?} must end with │ (got {:?})",
+                !zone.contains('│') && !zone.contains('⎮'),
+                "mode {:?} must not embed partition glyphs (got {:?})",
                 mode,
                 zone
             );
@@ -732,42 +851,75 @@ mod tests {
     }
 
     #[test]
-    fn brand_zone_is_fixed_width() {
-        assert_eq!(format_brand_zone(None, None).width(), BRAND_ZONE_COLS);
+    fn brand_zone_is_fixed_width_and_right_aligned() {
+        assert_eq!(display_width(&format_brand_zone(None, None)), BRAND_ZONE_COLS);
         assert_eq!(
-            format_brand_zone(Some(" 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. "), None).width(),
+            display_width(&format_brand_zone(Some("𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍."), None)),
             BRAND_ZONE_COLS
         );
         assert_eq!(
-            format_brand_zone(Some("SHORT"), Some("S")).width(),
+            display_width(&format_brand_zone(Some("SHORT"), Some("S"))),
             BRAND_ZONE_COLS
         );
         // Over-long brand is hard-trimmed, never expands the zone.
         assert_eq!(
-            format_brand_zone(Some("XXXXXXXXXXXXXXXXXXXX"), None).width(),
+            display_width(&format_brand_zone(Some("XXXXXXXXXXXXXXXXXXXX"), None)),
             BRAND_ZONE_COLS
+        );
+        // Right-aligned: short brand ends at the zone edge (leading spaces).
+        let short = format_brand_zone(Some("VC"), None);
+        assert!(short.ends_with("VC"), "got {:?}", short);
+        assert!(short.starts_with(' '), "short brand must left-pad: {:?}", short);
+    }
+
+    #[test]
+    fn entry_chips_sum_to_protected_z3_36() {
+        assert_eq!(ENTRY_ZONE_COLS, 36);
+        assert_eq!(COMPOSER_CHIP_COLS + QUICK_CMD_CHIP_COLS, ENTRY_ZONE_COLS);
+        assert_eq!(
+            display_width(&pad_to_cols("✍ Composer", COMPOSER_CHIP_COLS)),
+            COMPOSER_CHIP_COLS
+        );
+        assert_eq!(
+            display_width(&pad_to_cols(" · ❯_ Quick cmd", QUICK_CMD_CHIP_COLS)),
+            QUICK_CMD_CHIP_COLS
         );
     }
 
     #[test]
-    fn entry_chips_sum_to_fixed_entry_zone() {
-        assert_eq!(COMPOSER_CHIP_COLS + QUICK_CMD_CHIP_COLS, ENTRY_ZONE_COLS);
-        assert_eq!(
-            pad_to_cols("✍ Composer", COMPOSER_CHIP_COLS).width(),
-            COMPOSER_CHIP_COLS
-        );
-        assert_eq!(
-            pad_to_cols(" · ❯_ Quick cmd", QUICK_CMD_CHIP_COLS).width(),
-            QUICK_CMD_CHIP_COLS
-        );
+    fn after_brand_fixed_cols_match_column_guard() {
+        // gap(4) + datum(1) + lead(1) + mode(8) = 14
+        assert_eq!(AFTER_BRAND_FIXED_COLS, 14);
+        assert_eq!(DATUM_PARTITION.width(), DATUM_PARTITION_COLS);
     }
 
     #[test]
     fn pad_to_cols_handles_wide_eaw_glyphs() {
         // 𝌆 is EAW wide (2). Budget of 4 must absorb it without overshoot.
         let s = pad_to_cols("𝌆", 4);
-        assert_eq!(s.width(), 4);
+        assert_eq!(display_width(&s), 4);
         let s2 = pad_to_cols("│𝌆", 3);
-        assert_eq!(s2.width(), 3);
+        assert_eq!(display_width(&s2), 3);
+    }
+
+    #[test]
+    fn truncate_display_width_uses_ellipsis_on_grapheme_boundary() {
+        let t = truncate_display_width("HelloWorld", 6);
+        assert_eq!(display_width(&t), 6);
+        assert!(t.ends_with('…'), "got {:?}", t);
+        // Already fits — no ellipsis.
+        assert_eq!(truncate_display_width("Hi", 5), "Hi");
+        // Empty budget.
+        assert_eq!(truncate_display_width("Hi", 0), "");
+    }
+
+    #[test]
+    fn reserved_z3_constant_matches_toolbar_budget() {
+        // Spec: Protected Toolbar Fixed 36 cols.
+        assert_eq!(ENTRY_ZONE_COLS, 36);
+        assert_eq!(BRAND_ZONE_COLS, 14);
+        assert_eq!(MODE_ZONE_COLS, 8);
+        assert_eq!(BRAND_DATUM_GAP_COLS, 4);
+        assert_eq!(MODE_LEAD_GAP_COLS, 1);
     }
 }
