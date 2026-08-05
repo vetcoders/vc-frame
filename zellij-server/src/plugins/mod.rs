@@ -1750,6 +1750,7 @@ fn populate_session_layout_metadata(
     }
 
     let plugin_ids = session_layout_metadata.all_plugin_ids();
+    let plugin_ids_missing_run = session_layout_metadata.plugin_ids_missing_run();
     let mut plugin_ids_to_cmds: HashMap<u32, RunPlugin> = HashMap::new();
     for plugin_id in plugin_ids {
         let plugin_cmd = wasm_bridge.run_plugin_of_plugin_id(plugin_id);
@@ -1757,7 +1758,15 @@ fn populate_session_layout_metadata(
             Some(plugin_cmd) => {
                 plugin_ids_to_cmds.insert(plugin_id, plugin_cmd.clone());
             },
-            None => log::error!("Plugin with id: {plugin_id} not found"),
+            // Parked / not-yet-activated chrome has no bridge entry by design;
+            // its pane metadata still carries `invoked_with`, so nothing is
+            // lost. Only a pane with no run identity at all is a real problem.
+            None if plugin_ids_missing_run.contains(&plugin_id) => {
+                log::error!("Plugin with id: {plugin_id} not found and its pane has no run identity")
+            },
+            None => log::debug!(
+                "Plugin with id: {plugin_id} not loaded (parked chrome); keeping the pane's own run identity"
+            ),
         }
     }
     session_layout_metadata.update_plugin_cmds(plugin_ids_to_cmds);

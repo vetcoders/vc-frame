@@ -645,6 +645,10 @@ fn serialize_multiple_tabs(
     tabs: Vec<(String, TabLayoutManifest)>,
     pane_contents: &mut BTreeMap<String, String>,
 ) -> Result<Vec<KdlNode>, &'static str> {
+    // Best-effort: a tab whose pane geometry is transiently indecomposable
+    // (mid-resize, chrome swap) must not block persisting every other tab —
+    // an all-or-nothing failure here means the session never reaches disk.
+    let had_tabs = !tabs.is_empty();
     let mut serialized_tabs: Vec<KdlNode> = vec![];
     for (tab_name, tab_layout_manifest) in tabs {
         let tiled_panes = tab_layout_manifest.tiled_panes;
@@ -662,8 +666,15 @@ fn serialize_multiple_tabs(
         if let Some(serialized) = serialized {
             serialized_tabs.push(serialized);
         } else {
-            return Err("Failed to serialize session state");
+            log::warn!(
+                "Failed to serialize tab '{}' (pane geometry did not decompose into splits); \
+                 skipping it in this session snapshot",
+                tab_name
+            );
         }
+    }
+    if had_tabs && serialized_tabs.is_empty() {
+        return Err("Failed to serialize session state");
     }
     Ok(serialized_tabs)
 }
