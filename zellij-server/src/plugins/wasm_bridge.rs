@@ -2565,11 +2565,19 @@ impl WasmBridge {
                                             client_id,
                                             rendered_bytes.as_bytes().to_vec(),
                                         );
-                                        senders
-                                            .send_to_screen(ScreenInstruction::PluginBytes(vec![
+                                        // Screen may already be gone during session teardown;
+                                        // a lost resize render is not worth panicking the
+                                        // plugin worker thread.
+                                        if let Err(e) = senders.send_to_screen(
+                                            ScreenInstruction::PluginBytes(vec![
                                                 plugin_render_asset,
-                                            ]))
-                                            .unwrap();
+                                            ]),
+                                        ) {
+                                            log::warn!(
+                                                "failed to send PluginBytes to screen: {}",
+                                                e
+                                            );
+                                        }
                                     },
                                     Err(e) => log::error!("{}", e),
                                 }
