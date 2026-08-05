@@ -39,7 +39,9 @@ at standard monospace; raise to 9–12 for large fonts) clears the macOS traffic
 lights in a decoration-free host window. Quick cmd floats a login shell over
 the current tab; Composer drafts via `$VC_COMPOSER`/`$EDITOR`, seeds from and
 pushes to the Paste Stack (`~/.cache/vc-frame/paste-stack.json`), then
-`write-chars` into the pane beneath (Enter stays human). The bottom
+`write-chars` into the pane beneath (Enter stays human). Inside the Composer,
+`?` (normal mode) toggles a built-in cheat sheet — `q`/`Esc` closes it;
+backward-search is deliberately traded away, `/` still searches. The bottom
 `status-bar` owns pure status: the fleet `LIVE` count, host CPU/memory/disk
 cockpit (fixed-width fields), health, and layout state.
 The diodes live in the resting mode only (LOCK when the base mode is locked,

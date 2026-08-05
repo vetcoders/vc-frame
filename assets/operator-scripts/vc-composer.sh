@@ -5,9 +5,11 @@
 # for Polish `ę` on macOS):
 #   1. Draft in vim with: number, laststatus=0, nowrap (clean -- INSERT --)
 #   2. Ctrl+p opens the Paste Stack picker and inserts at cursor
-#   3. On non-empty :wq/ZZ: push body to Paste Stack, hide floating panes,
+#   3. `?` in normal mode toggles the built-in cheat sheet (q/Esc closes) —
+#      backward-search is deliberately traded away; `/` still searches
+#   4. On non-empty :wq/ZZ: push body to Paste Stack, hide floating panes,
 #      write-chars into the underlying pane (unexecuted — Enter is human)
-#   4. Clean up the temp draft
+#   5. Clean up the temp draft
 #
 # IMPORTANT: all settings go through ONE -u vimrc file. Classic vim hard-caps
 # the number of -c / +cmd arguments (~10) and dies with:
@@ -77,6 +79,46 @@ set sidescroll=1
 set sidescrolloff=2
 nnoremap <silent> <F2> :set wrap! wrap?<CR>
 nnoremap <silent> <Leader>w :set wrap! wrap?<CR>
+
+" ? = built-in cheat sheet. The Composer is a scratch drafting pad, not a
+" vim session — a novice's "how do I even leave" beats backward-search.
+nnoremap <silent> ? :call VcComposerHelp()<CR>
+function! VcComposerHelp() abort
+  let l:existing = bufnr('VC_COMPOSER_HELP')
+  if l:existing != -1 && bufwinnr(l:existing) != -1
+    execute bufwinnr(l:existing) . 'wincmd w'
+    close
+    return
+  endif
+  let l:lines = [
+        \ '  Composer — cheat sheet                              (q closes)  ',
+        \ '',
+        \ '  WRITE       i   start typing (INSERT)      Esc  stop typing',
+        \ '  SEND        :wq  or  ZZ   → text lands in your shell UNEXECUTED',
+        \ '                             review it, then press Enter yourself',
+        \ '  CANCEL      :q!            quit without sending anything',
+        \ '  PASTE       Ctrl+p         insert from the Paste Stack',
+        \ '  WRAP        F2             toggle line wrap',
+        \ '  UNDO/REDO   u  /  Ctrl+r',
+        \ '  LINES       dd delete · yy copy · p paste below',
+        \ '  MOVE        arrows work everywhere · gg top · G bottom',
+        \ '',
+        \ '  Empty draft on :wq = cancel. Nothing runs without your Enter.',
+        \ ]
+  botright new
+  silent file VC_COMPOSER_HELP
+  setlocal buftype=nofile bufhidden=wipe nobuflisted noswapfile
+  setlocal nonumber norelativenumber winfixheight
+  call setline(1, l:lines)
+  execute 'resize' (len(l:lines) + 1)
+  setlocal nomodifiable
+  nnoremap <silent> <buffer> q :close<CR>
+  nnoremap <silent> <buffer> ? :close<CR>
+  nnoremap <silent> <buffer> <Esc> :close<CR>
+endfunction
+
+" One-line orientation hint in the free cmdline (laststatus=0 keeps it clear).
+autocmd VimEnter * echo 'Composer: i = type · :wq = send · ? = help'
 VIMRC_HEAD
   printf '%s\n' "$wrap_line"
   if [[ -n "$PASTE_STACK" ]]; then
