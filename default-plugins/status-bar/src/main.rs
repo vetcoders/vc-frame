@@ -57,9 +57,6 @@ const STATUS_SEAM_CELLS: usize = 2;
 /// Columns the resting-mode hint ("Ctrl g LOCK") keeps for itself before
 /// the status segment may claim the rest of the bar.
 const RESTING_HINT_RESERVE: usize = 16;
-/// Action modes hand every column to the shortcut hints; the swap-layout
-/// chip may claim at most 1/N of the row.
-const SWAP_CHIP_MAX_BAR_FRACTION: usize = 4;
 
 #[derive(Default)]
 struct State {
@@ -401,20 +398,20 @@ impl ZellijPlugin for State {
                 PaletteColor::EightBit(color) => format!("\u{1b}[48;5;{}m\u{1b}[0K", color),
             };
             let active_tab = self.tabs.iter().find(|t| t.active);
-            // The bar keeps one contract: the resting mode (LOCK when the
-            // base mode is locked, NORMAL otherwise) shows the status
-            // diodes — LIVE, cockpit, HEALTH. Action modes hand every
-            // column to the shortcut hints; only the swap-layout chip
-            // stays, because it is arrangement context, not telemetry.
-            let resting_mode = if self.base_mode_is_locked {
-                InputMode::Locked
-            } else {
-                InputMode::Normal
-            };
-            let right = if self.mode_info.mode == resting_mode {
+            // The bar keeps one contract: LOCK is the presentation mode —
+            // the whole bar belongs to the status diodes (LIVE, cockpit,
+            // HEALTH) regardless of which base mode the config declares.
+            // Every unlocked mode hands the width to the shortcut
+            // cheat-sheet; only the swap-layout chip stays, because it is
+            // arrangement context, not telemetry. (Operator regression
+            // 2026-08-05: gating on a derived "resting mode" hid the
+            // cockpit in LOCK whenever the base mode was Normal.)
+            let right = if self.mode_info.mode == InputMode::Locked {
                 self.right_status_segment(active_tab, cols.saturating_sub(RESTING_HINT_RESERVE))
             } else {
-                self.swap_chip_segment(active_tab, cols / SWAP_CHIP_MAX_BAR_FRACTION)
+                // Unlocked modes: the whole width belongs to the shortcut
+                // cheat-sheet — no telemetry, no arrangement chip.
+                LinePart::default()
             };
             let seam = if right.len > 0 { STATUS_SEAM_CELLS } else { 0 };
             let ui_cols = cols.saturating_sub(right.len + seam);
@@ -635,16 +632,6 @@ impl State {
         }
 
         segment
-    }
-
-    /// Action-mode right edge: the swap-layout chip alone. It survives
-    /// outside the resting mode because pane/tab modes are exactly when the
-    /// operator is arranging — but it yields once the bar gets tight.
-    fn swap_chip_segment(&self, active_tab: Option<&TabInfo>, max_len: usize) -> LinePart {
-        match self.swap_layout_status(active_tab) {
-            Some(chip) if chip.len <= max_len => chip,
-            _ => LinePart::default(),
-        }
     }
 
     fn swap_layout_status(&self, active_tab: Option<&TabInfo>) -> Option<LinePart> {
