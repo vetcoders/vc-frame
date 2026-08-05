@@ -939,10 +939,12 @@ fn format_bucket_rail_entry(
     // Primary number is *open now* (latest_by_run), never the append-only
     // historical mountain that painted ≥118 / ≥435 / ≥2247 forever.
     // Degraded / incomplete feed keeps the number but marks it `~`.
+    // No feed at all renders NO number: "count albo cały albo wcale" — a "?"
+    // placeholder is a lying digit in operator eyes and reads as broken chrome.
     let count = match live_count {
         Some(n) if truth_is_exact => format!("{n:>3}"),
         Some(n) => format!("~{n}"),
-        None => "  ?".to_owned(),
+        None => "   ".to_owned(),
     };
     format!(
         " {} {} {} · {}",
@@ -3186,10 +3188,11 @@ mod rail_tests {
                 "   ◉ impl-260718-120000-01000 · claude",
                 "   · audit-260718-130000-02000 · codex +1",
                 "02 ○ beta",
-                // the buckets are always pinned to the tail of the rail
-                " f ○   ? · final",
-                " x ○   ? · fail",
-                " n ○   ? · needs",
+                // the buckets are always pinned to the tail of the rail;
+                // no settlement feed yet = no number at all (never a "?")
+                " f ○     · final",
+                " x ○     · fail",
+                " n ○     · needs",
             ]
         );
         assert_eq!(rows.iter().filter(|row| row.is_live_process()).count(), 2);
@@ -3644,7 +3647,7 @@ mod rail_tests {
             })
             .expect("finalized bucket");
 
-        assert_eq!(finalized.text, " f ○   ? · final");
+        assert_eq!(finalized.text, " f ○     · final");
         assert!(
             !finalized.text.contains(" f ○   2 "),
             "viewer inventory must never masquerade as settlement truth"
@@ -3687,9 +3690,9 @@ mod rail_tests {
             vec![
                 "01 ◉ alpha",
                 "02 ○ beta",
-                " f ○   ? · final",
-                " x ○   ? · fail",
-                " n ○   ? · needs",
+                " f ○     · final",
+                " x ○     · fail",
+                " n ○     · needs",
             ]
         );
     }
@@ -3718,7 +3721,7 @@ mod rail_tests {
             .collect();
         assert_eq!(
             buckets,
-            vec![" f ○   ? · final", " x ○   ? · fail", " n ○   ? · needs",]
+            vec![" f ○     · final", " x ○     · fail", " n ○     · needs",]
         );
     }
 
@@ -3728,9 +3731,9 @@ mod rail_tests {
         let buckets: Vec<&SessionRailRow> = rows.iter().filter(|row| row.is_bucket()).collect();
 
         assert_eq!(buckets.len(), 3);
-        assert_eq!(buckets[0].text, " f ○   ? · final");
-        assert_eq!(buckets[1].text, " x ○   ? · fail");
-        assert_eq!(buckets[2].text, " n ○   ? · needs");
+        assert_eq!(buckets[0].text, " f ○     · final");
+        assert_eq!(buckets[1].text, " x ○     · fail");
+        assert_eq!(buckets[2].text, " n ○     · needs");
         assert!(matches!(
             buckets[0].kind,
             SessionRailRowKind::Bucket {
