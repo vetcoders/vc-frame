@@ -61,6 +61,16 @@ const RESTING_HINT_RESERVE: usize = 16;
 /// swap-layout chip may claim at most 1/N of the row.
 const SWAP_CHIP_MAX_BAR_FRACTION: usize = 4;
 
+// Floor for a renderable frame: anything below is a transient startup event,
+// not a legal surface. Kept far below the comfortable chrome minimum
+// (tools/repro_chrome.py MIN_COLUMNS) so legal small panes always render.
+const MIN_RENDER_ROWS: usize = 1;
+const MIN_RENDER_COLS: usize = 4;
+
+fn dimensions_are_transient(rows: usize, cols: usize) -> bool {
+    rows < MIN_RENDER_ROWS || cols < MIN_RENDER_COLS
+}
+
 #[derive(Default)]
 struct State {
     tabs: Vec<TabInfo>,
@@ -386,6 +396,12 @@ impl ZellijPlugin for State {
     }
 
     fn render(&mut self, rows: usize, cols: usize) {
+        // Transient initial resize events arrive with rows/cols at or near
+        // zero before the real layout lands; painting those frames is what
+        // makes the chrome visibly jump at session start.
+        if dimensions_are_transient(rows, cols) {
+            return;
+        }
         let supports_arrow_fonts = !self.mode_info.capabilities.arrow_fonts;
         let separator = if supports_arrow_fonts {
             ARROW_SEPARATOR
@@ -1613,5 +1629,18 @@ pub mod tests {
         let ret = unstyle(&AnsiStrings(&ret));
 
         assert_eq!(ret, "⌥ + <ENTER|SPACE|TAB>".to_string())
+    }
+
+    #[test]
+    fn transient_dimensions_are_guarded() {
+        assert!(dimensions_are_transient(0, 80));
+        assert!(dimensions_are_transient(1, 0));
+        assert!(dimensions_are_transient(1, 3));
+    }
+
+    #[test]
+    fn legal_dimensions_are_not_transient() {
+        assert!(!dimensions_are_transient(1, 4));
+        assert!(!dimensions_are_transient(2, 24));
     }
 }

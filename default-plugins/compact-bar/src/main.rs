@@ -200,12 +200,29 @@ impl ZellijPlugin for State {
     }
 
     fn render(&mut self, rows: usize, cols: usize) {
+        // Transient initial resize events arrive with rows/cols at or near
+        // zero before the real layout lands; painting those frames is what
+        // makes the chrome visibly jump at session start.
+        if dimensions_are_transient(rows, cols) {
+            return;
+        }
         if self.is_tooltip {
             self.render_tooltip(rows, cols);
         } else {
             self.render_tab_line(cols);
         }
     }
+}
+
+// Floor for a renderable frame: anything below is a transient startup event,
+// not a legal surface. Kept far below the comfortable chrome minimum
+// (tools/repro_chrome.py MIN_COLUMNS) so legal small panes — the tooltip
+// floating pane included — always render.
+const MIN_RENDER_ROWS: usize = 1;
+const MIN_RENDER_COLS: usize = 4;
+
+fn dimensions_are_transient(rows: usize, cols: usize) -> bool {
+    rows < MIN_RENDER_ROWS || cols < MIN_RENDER_COLS
 }
 
 impl State {
@@ -783,4 +800,30 @@ fn bind_toggle_key_config(toggle_key: &str, client_id: u16) -> String {
     "#,
         toggle_key, toggle_key, client_id
     )
+}
+
+#[cfg(test)]
+mod transient_dimension_guard_tests {
+    use super::*;
+
+    #[test]
+    fn zero_dimensions_are_transient() {
+        assert!(dimensions_are_transient(0, 80));
+        assert!(dimensions_are_transient(1, 0));
+        assert!(dimensions_are_transient(0, 0));
+    }
+
+    #[test]
+    fn sub_minimum_columns_are_transient() {
+        assert!(dimensions_are_transient(1, 3));
+    }
+
+    #[test]
+    fn legal_small_surfaces_still_render() {
+        // The tooltip lives in a small floating pane; the guard must not
+        // eat it.
+        assert!(!dimensions_are_transient(1, 4));
+        assert!(!dimensions_are_transient(1, 8));
+        assert!(!dimensions_are_transient(10, 40));
+    }
 }

@@ -47,6 +47,19 @@ const VC_CHROME_HEARTBEAT_MESSAGE: &str = "vc.fleet-live-count.v1";
 // producer leave stale values looking authoritative forever.
 const SETTLEMENT_FEED_STALE_AFTER_TICKS: u8 = 15;
 
+// Floor for a renderable main-menu frame: anything below is a transient
+// startup event, not a legal surface. The menu needs at least a banner row
+// plus a content row; kept far below the comfortable chrome minimum
+// (tools/repro_chrome.py MIN_COLUMNS) so legal small panes still render.
+// The rail path has its own zero-dimension guard and legally lives at
+// cols 6-10 — these thresholds must never apply to it.
+const MIN_MENU_RENDER_ROWS: usize = 2;
+const MIN_MENU_RENDER_COLS: usize = 4;
+
+fn menu_dimensions_are_transient(rows: usize, cols: usize) -> bool {
+    rows < MIN_MENU_RENDER_ROWS || cols < MIN_MENU_RENDER_COLS
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SettlementPipeOutcome {
     acknowledged: bool,
@@ -471,6 +484,14 @@ impl ZellijPlugin for State {
             if let Some(error) = self.error.as_ref() {
                 render_error(error, rows, cols, 0, 0);
             }
+            return;
+        }
+
+        // Transient initial resize events arrive with rows/cols at or near
+        // zero before the real layout lands; painting the main menu on those
+        // frames is what makes the view visibly jump at startup. The rail
+        // branch above keeps its own long-standing zero-dimension guard.
+        if menu_dimensions_are_transient(rows, cols) {
             return;
         }
 
@@ -2795,6 +2816,22 @@ impl State {
 mod rail_tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn transient_menu_dimensions_are_guarded() {
+        assert!(menu_dimensions_are_transient(0, 80));
+        assert!(menu_dimensions_are_transient(1, 80));
+        assert!(menu_dimensions_are_transient(2, 3));
+        assert!(menu_dimensions_are_transient(0, 0));
+    }
+
+    #[test]
+    fn legal_menu_dimensions_are_not_transient() {
+        assert!(!menu_dimensions_are_transient(2, 4));
+        assert!(!menu_dimensions_are_transient(24, 80));
+        // The rail path never consults this predicate: it keeps its own
+        // zero-dimension guard and legally renders at cols 6-10.
+    }
 
     fn session(name: &str, is_current_session: bool) -> SessionUiInfo {
         SessionUiInfo {
