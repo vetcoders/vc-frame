@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
+* feat(composer): semantic caret — the cursor shape names the mode in the drafting vimrc (insert=beam `│`, normal=underline `_` brand, visual=blinking block, replace/cmdline=blinking underline, operator-pending=block); nvim via `guicursor`, classic vim via `t_SI/t_SR/t_EI` + guarded `ModeChanged`/`CmdlineEnter` fallback; DECSCUSR 0 handed back to the host on exit; `VC_COMPOSER_CARET=0` opts out; brand-gold caret color (OSC 12 `#c99a3b`) prepared behind `VC_COMPOSER_CARET_COLOR` (default OFF pending the pass-through verdict)
 * feat(warden): caller-aware route telemetry, bounded action-client TTL, accepted-vs-committed SaveSession receipts, deterministic config hashes, bare-start attach/CWD naming, and explicit key/config/C2 contracts
 * fix(chrome): bottom bar mode tiles keep readable labels (LOCK/PANE not Lo/Pa); chrome key SSOT uses macOS glyphs ⌃⌥⌘⇧; session-manager help uses ⌥⌫ (not Del) + rail label sanitize against Main flicker
 * fix(host): inject Cmd→CSI Super translation into live Alacritty config so Cmd+arrows/Cmd+E work (key-contract v3)

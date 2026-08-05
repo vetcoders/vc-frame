@@ -53,6 +53,16 @@ if [[ "${VC_COMPOSER_WRAP:-0}" == "1" ]]; then
   wrap_line='set wrap'
 fi
 
+# Semantic caret (design: caret-semantics.md) — the cursor shape names the
+# mode: insert=beam, normal=underline (brand), visual=blinking block,
+# replace/cmdline=blinking underline, operator-pending=block.
+# VC_COMPOSER_CARET=0 is the operator escape hatch: the generated vimrc then
+# carries today's clean profile with no caret sequences at all.
+caret="${VC_COMPOSER_CARET:-1}"
+# Brand-gold caret color (OSC 12/112). Default OFF until the W2-B
+# pass-through verdict; flip with VC_COMPOSER_CARET_COLOR=1.
+caret_color="${VC_COMPOSER_CARET_COLOR:-0}"
+
 # Single sourced profile — never stack a dozen -c flags (vim 9.x hard limit).
 {
   cat <<'VIMRC_HEAD'
@@ -75,6 +85,55 @@ VIMRC_HEAD
     cat <<EOF
 nnoremap <silent> <C-p> :let __vc_ps=tempname() \\| execute 'silent !${local_ps} pick > ' . shellescape(__vc_ps) \\| if filereadable(__vc_ps) && getfsize(__vc_ps) > 0 \\| execute 'read' __vc_ps \\| endif \\| call delete(__vc_ps)<CR>
 EOF
+  fi
+  if [[ "$caret" != "0" ]]; then
+    cat <<'VIMRC_CARET'
+" Semantic caret (caret-semantics.md): normal=underline _ (brand), insert=beam,
+" visual=blinking block (hollow-block approximation), replace/cmdline=blinking
+" underline, operator-pending=block. On exit the host cursor MUST return to its
+" default — a composer that leaves the panel with a permanent beam is a
+" regression worse than no feature.
+if has('nvim')
+  " nvim translates guicursor into DECSCUSR for the host terminal.
+  set guicursor=n-sm:hor20,i-ci-si:ver25,v-ve:block-blinkwait175-blinkon400-blinkoff250,o:block,r-cr:hor20-blinkwait175-blinkon400-blinkoff250,c:hor20-blinkwait175-blinkon400-blinkoff250
+  autocmd VimLeave * call chansend(v:stderr, "\x1b[0 q")
+else
+  " Classic vim: termcaps carry insert (DECSCUSR 6), replace (3), normal (4).
+  let &t_SI = "\e[6 q"
+  let &t_SR = "\e[3 q"
+  let &t_EI = "\e[4 q"
+  if exists('*echoraw')
+    " Paint the brand caret immediately, not on the first mode roundtrip.
+    autocmd VimEnter * call echoraw(&t_EI)
+    " Visual and operator-pending have no termcap; ModeChanged (vim >=
+    " 8.2.3770) is the only road. Without it: three states instead of five,
+    " still one coherent language (accepted degradation).
+    if has('autocmd') && exists('##ModeChanged')
+      autocmd ModeChanged *:[vV\x16]* call echoraw("\e[1 q")
+      autocmd ModeChanged *:no* call echoraw("\e[2 q")
+      autocmd ModeChanged [vV\x16no]*:n call echoraw(&t_EI)
+    endif
+    if exists('##CmdlineEnter')
+      autocmd CmdlineEnter * call echoraw("\e[3 q")
+      autocmd CmdlineLeave * call echoraw(&t_EI)
+    endif
+  endif
+  " Hand the host its default cursor back (DECSCUSR 0) on the way out.
+  autocmd VimLeave * silent !printf '\033[0 q'
+endif
+VIMRC_CARET
+    if [[ "$caret_color" == "1" ]]; then
+      cat <<'VIMRC_CARET_COLOR'
+" Brand-gold caret while composing (OSC 12); OSC 112 resets on leave.
+if has('nvim')
+  autocmd VimEnter * call chansend(v:stderr, "\x1b]12;#c99a3b\x07")
+  autocmd VimLeave * call chansend(v:stderr, "\x1b]112\x07")
+elseif exists('*echoraw')
+  autocmd VimEnter * call echoraw("\x1b]12;#c99a3b\x07")
+  autocmd VimLeave * call echoraw("\x1b]112\x07")
+endif
+VIMRC_CARET_COLOR
+    fi
   fi
 } >"$vimrc"
 
