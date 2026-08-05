@@ -337,7 +337,7 @@ impl TabLinePopulator {
 
     fn format_count_text(&self, count: usize, format_str: &str, fallback: &str) -> String {
         if count < 10000 {
-            format!("{}", format_str.replace("{}", &count.to_string()))
+            format_str.replace("{}", &count.to_string())
         } else {
             fallback.to_string()
         }
@@ -739,10 +739,8 @@ impl TabLineBuilder {
 
         // Tooltip is optional chrome — never steals columns from Z3.
         if let Some(ref tooltip_key) = self.config.toggle_tooltip_key {
-            let tip = right_builder.create_tooltip_indicator(
-                tooltip_key,
-                self.config.tooltip_is_active,
-            );
+            let tip =
+                right_builder.create_tooltip_indicator(tooltip_key, self.config.tooltip_is_active);
             let after_z3 = calculate_total_length(prefix);
             if after_z3 + tip.len <= self.cols {
                 prefix.push(tip);
@@ -852,7 +850,10 @@ mod tests {
 
     #[test]
     fn brand_zone_is_fixed_width_and_right_aligned() {
-        assert_eq!(display_width(&format_brand_zone(None, None)), BRAND_ZONE_COLS);
+        assert_eq!(
+            display_width(&format_brand_zone(None, None)),
+            BRAND_ZONE_COLS
+        );
         assert_eq!(
             display_width(&format_brand_zone(Some("𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍."), None)),
             BRAND_ZONE_COLS
@@ -869,7 +870,11 @@ mod tests {
         // Right-aligned: short brand ends at the zone edge (leading spaces).
         let short = format_brand_zone(Some("VC"), None);
         assert!(short.ends_with("VC"), "got {:?}", short);
-        assert!(short.starts_with(' '), "short brand must left-pad: {:?}", short);
+        assert!(
+            short.starts_with(' '),
+            "short brand must left-pad: {:?}",
+            short
+        );
     }
 
     #[test]
