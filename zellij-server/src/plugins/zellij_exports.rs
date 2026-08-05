@@ -4882,7 +4882,7 @@ fn load_new_plugin(
     load_in_background: bool,
     skip_plugin_cache: bool,
 ) {
-    let url = if &url == "zellij:OWN_URL" {
+    let url = if matches!(url.as_str(), "zellij:OWN_URL" | "vc-frame:OWN_URL") {
         env.plugin.location.display()
     } else {
         url

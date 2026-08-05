@@ -7,9 +7,9 @@ use anyhow::{Context, Result};
 /// Cold clipboard helpers (notably hosted-Windows `powershell.exe`) can take
 /// several seconds just to start. One second was enough to kill the writer
 /// before it ever flushed, which made `CopyPaneScrollback` look like a missing
-/// file instead of a slow child. Ten seconds still bounds hang risk without
-/// losing large scrollbacks on slow runners.
-const COPY_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+/// file instead of a slow child. Twenty seconds still bounds hang risk without
+/// losing large scrollbacks on cold hosted runners.
+const COPY_COMMAND_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub struct CopyCommand {
     command: String,

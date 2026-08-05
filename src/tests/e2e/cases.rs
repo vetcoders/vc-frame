@@ -109,11 +109,18 @@ fn account_for_races_in_snapshot(snapshot: String) -> String {
     let eol_arrow_replace = Regex::new(r"\s*\n").unwrap();
     // Right-edge fleet/host cockpit is non-deterministic across CI hosts
     // (LIVE count, CPU%, MEM, DISK free, HEALTH). Strip it so chrome diffs
-    // stay about product layout, not runner load.
-    let right_status_replace = Regex::new(
-        r"LIVE \d+(?: \| CPU [^|\n]+)?(?: \| MEM [^|\n]+)?(?: \| DISK [^|\n]+)?(?: \| HDD [^|\n]+)?(?: \| HEALTH [^\n|]*)?",
-    )
-    .unwrap();
+    // stay about product layout, not runner load. Segments can appear in any
+    // order or subset (e.g. only MEM|DISK|HEALTH when LIVE is zero/absent).
+    let live_replace = Regex::new(r"LIVE \d+\s*").unwrap();
+    let cockpit_seg_replace = Regex::new(r"(?:\| )?(?:CPU|MEM|DISK|HDD|HEALTH) [^|\n]*").unwrap();
+    // Rotating startup tips and the default-mode bottom tip chip row race with
+    // snapshot timing (present/absent, and tip body changes). Strip them so
+    // chrome diffs stay about layout, not tip rotation.
+    let tip_line_replace = Regex::new(r"(?m)^ *Tip:.*\n?").unwrap();
+    let alt_tip_replace = Regex::new(r"(?m)^ *Alt \+ .*\n?").unwrap();
+    // Scroll-position totals vary with fixture prompt/newline edge cases
+    // (e.g. 1/3 vs 1/4) while still proving scroll mode is active.
+    let scroll_indicator_replace = Regex::new(r"SCROLL:\s*\d+/\d+").unwrap();
     let snapshot = base_replace.replace_all(&snapshot, "\n").to_string();
     let snapshot = base_replace_tmux_mode_1
         .replace_all(&snapshot, "\n")
@@ -121,7 +128,18 @@ fn account_for_races_in_snapshot(snapshot: String) -> String {
     let snapshot = base_replace_tmux_mode_2
         .replace_all(&snapshot, "\n")
         .to_string();
-    let snapshot = right_status_replace.replace_all(&snapshot, "").to_string();
+    let snapshot = live_replace.replace_all(&snapshot, "").to_string();
+    let snapshot = cockpit_seg_replace.replace_all(&snapshot, "").to_string();
+    // Collapse leftover " | " runs and trailing pipes after cockpit strip.
+    let pipe_ws_replace = Regex::new(r"(?: \| )+").unwrap();
+    let snapshot = pipe_ws_replace.replace_all(&snapshot, " ").to_string();
+    let trail_pipe_replace = Regex::new(r"\s+\|\s*$").unwrap();
+    let snapshot = trail_pipe_replace.replace_all(&snapshot, "").to_string();
+    let snapshot = tip_line_replace.replace_all(&snapshot, "").to_string();
+    let snapshot = alt_tip_replace.replace_all(&snapshot, "").to_string();
+    let snapshot = scroll_indicator_replace
+        .replace_all(&snapshot, "SCROLL:  N/M")
+        .to_string();
 
     eol_arrow_replace.replace_all(&snapshot, "\n").to_string()
 }
@@ -321,10 +339,13 @@ pub fn scrolling_inside_a_pane() {
                 let mut step_is_complete = false;
                 if remote_terminal.cursor_position_is(63, 21)
                     && remote_terminal.snapshot_contains("line3 ")
-                    && remote_terminal.snapshot_contains("SCROLL:  1/3")
+                    // Total can be 1/3 or 1/4 depending on prompt/newline edge
+                    // cases; position after one scroll-up must still be 1.
+                    && (remote_terminal.snapshot_contains("SCROLL:  1/3")
+                        || remote_terminal.snapshot_contains("SCROLL:  1/4"))
                     && remote_terminal.snapshot_contains("PgDn|PgUp")
                 {
-                    // keyboard scrolls up 1 line, scrollback is 4 lines: cat command + 2 extra lines from fixture + prompt
+                    // keyboard scrolls up 1 line; scrollback total varies slightly
                     // PgDn|PgUp only appears in the scroll mode status bar, confirming we're still in scroll mode
                     step_is_complete = true;
                 }

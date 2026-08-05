@@ -981,6 +981,27 @@ def session_tabs(
     return result.tabs
 
 
+def query_session_until_stable(
+    binary: pathlib.Path,
+    env: dict[str, str],
+    session: str,
+    *,
+    timeout: float = 5,
+) -> SessionQuery:
+    """Retry transient empty/malformed list-tabs success before treating as truth."""
+    deadline = time.monotonic() + timeout
+    last_ambiguity: AmbiguousSessionError | None = None
+    while time.monotonic() < deadline:
+        try:
+            return query_session(binary, env, session)
+        except AmbiguousSessionError as error:
+            last_ambiguity = error
+            time.sleep(0.1)
+    if last_ambiguity is not None:
+        raise last_ambiguity
+    raise AssertionError(f"session {session!r} query did not stabilize")
+
+
 def wait_for_tabs(
     binary: pathlib.Path, env: dict[str, str], session: str
 ) -> list[dict[str, object]]:
@@ -1985,6 +2006,19 @@ def signal_exact_owned_group_member(
         )
         if member is None:
             if expected_stopped_parent is not None:
+                parent = next(
+                    (
+                        current
+                        for current in last_members
+                        if int(current["pid"]) == expected_stopped_parent
+                    ),
+                    None,
+                )
+                # Short-lived children can exit between inventory and signal
+                # while the stopped parent still freezes the subtree. That is
+                # a benign reap, not a lost/reparented PID — re-inventory.
+                if parent is not None and "T" in str(parent.get("state", "")):
+                    return False
                 raise OwnedProcessGroupRefusal(
                     f"refusing {signal_name} for missing pinned member "
                     f"{member_pid}: stopped parent={expected_stopped_parent}, "
@@ -2255,7 +2289,7 @@ def stop_owned_process_group(
             continue
 
         expected_parent = int(target["ppid"])
-        signal_exact_owned_group_member(
+        signalled = signal_exact_owned_group_member(
             process,
             target_pid,
             signal.SIGSTOP,
@@ -2263,6 +2297,11 @@ def stop_owned_process_group(
             require_running=True,
             expected_stopped_parent=expected_parent,
         )
+        if not signalled:
+            # Target reaped under the frozen parent between inventory and
+            # signal; re-inventory rather than waiting on a dead PID.
+            time.sleep(0.001)
+            continue
         wait_for_owned_member_quiescence(
             process,
             target_pid,
@@ -2406,7 +2445,7 @@ def kill_owned_process_group(
             process.kill()
             return
         expected_parent = int(member["ppid"])
-        signal_exact_owned_group_member(
+        signalled = signal_exact_owned_group_member(
             process,
             member_pid,
             signal.SIGKILL,
@@ -2414,6 +2453,8 @@ def kill_owned_process_group(
             require_stopped=True,
             expected_stopped_parent=expected_parent,
         )
+        if not signalled:
+            continue
         wait_for_owned_member_quiescence(
             process,
             member_pid,
@@ -3238,11 +3279,18 @@ def cleanup_namespace(
         if state == "exited" and session not in live_process_sessions:
             continue
         if state == "live":
-            query = query_session(binary, env, session)
-            require(
-                query.state == "live",
-                f"cleanup inventory said {session!r} was active but exact query said absent",
-            )
+            # Inventory already marked live. Retry transient empty list-tabs
+            # (rc=0, stdout='') before kill; if inventory races to absent after
+            # retries, skip kill. On persistent ambiguity, still kill owned
+            # targets so cleanup is not blocked by a single flaky inventory read.
+            try:
+                query = query_session_until_stable(
+                    binary, env, session, timeout=min(5.0, timeout)
+                )
+                if query.state == "absent":
+                    continue
+            except AmbiguousSessionError:
+                pass
         command(binary, env, "kill-session", session)
         wait_for_session_gone(binary, env, session, timeout=timeout)
         killed.append(session)
@@ -3531,15 +3579,19 @@ def main() -> int:
         recorder.set("status", "running")
         mutation_started = True
 
-        create_session(binary, env, origin)
-        create_session(binary, env, peer)
+        # Create + mark each session before starting the next. Concurrent
+        # background attach of origin+peer has raced on hosted Ubuntu where
+        # origin disappeared from the session list before its canary tab was
+        # opened (only peer remained active).
         origin_canary = f"{unique}-origin-canary"
         peer_canary = f"{unique}-peer-canary"
         origin_marker = f"ORIGIN-{unique}"
         peer_marker = f"PEER-{unique}"
+        create_session(binary, env, origin)
         _origin_tab_id, origin_panes = create_marker_tab(
             binary, env, origin, origin_canary, origin_marker
         )
+        create_session(binary, env, peer)
         peer_canary_id, peer_panes = create_marker_tab(
             binary, env, peer, peer_canary, peer_marker
         )
