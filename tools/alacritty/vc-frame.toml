@@ -45,12 +45,30 @@ dynamic_padding = true
 # normal = { family = "JetBrainsMono Nerd Font" }
 size = 13.0
 
+[scrolling]
+# Enough history for long make/help dumps at the host prompt.
+history = 50000
+multiplier = 3
+
 [mouse]
 hide_when_typing = true
+# Split wheel by terminal buffer (debugged 2026-08-06):
+#   ~Alt (primary / normal shell) → Alacritty scrollback
+#    Alt (TUI without mouse protocol: Atuin, less, vim, …) → Up/Down keys
+# Shift always forces terminal scrollback (bypasses app mouse reporting).
+#
+# Do NOT keep the interactive shell permanently on the alternate buffer
+# (no smcup wrapper for the whole session) — that kills host scrollback and
+# makes the wheel look like arrow keys. TUIs enter/leave Alt themselves.
+# See tools/alacritty/launch-primary-shell.zsh and docs/ALACRITTY_INTEGRATION.md.
 bindings = [
-  # While vc-frame mouse reporting is active, Shift suppresses reporting so
-  # the wheel can drive Alacritty's own scrollback instead.
-  { mouse = "WheelUp", mods = "Shift", action = "ScrollLineUp" },
+  { mouse = "WheelUp",   mode = "~Alt", action = "ScrollLineUp" },
+  { mouse = "WheelDown", mode = "~Alt", action = "ScrollLineDown" },
+
+  { mouse = "WheelUp",   mode = "Alt",  chars = "\u001bOA" },
+  { mouse = "WheelDown", mode = "Alt",  chars = "\u001bOB" },
+
+  { mouse = "WheelUp",   mods = "Shift", action = "ScrollLineUp" },
   { mouse = "WheelDown", mods = "Shift", action = "ScrollLineDown" },
 ]
 
