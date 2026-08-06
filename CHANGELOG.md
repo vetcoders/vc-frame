@@ -3,8 +3,10 @@
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
-
 ## [Unreleased]
+
+## [0.47.3] - 2026-08-06
+
 * feat(rail): the session rail reads its allocated width and picks one of three faces — Wide (`cols >= 24`, today's full render), Normal (`14 <= cols < 24`, header drops the current-session anchor, names truncate, ◉/○ stay) and Dense (`cols < 14`, iconic strip: ordinal + state dot rows, `S N` badge header, no shredded prose); sharp thresholds, row variants built at row level, click-map stays full in every face
 * feat(composer): caret parity for the inline fallback — the chip's `COMPOSER_COMMAND` speaks the same caret language as the installed script via a mktemp mini-vimrc (insert=beam/replace=blink-underline/normal=underline + DECSCUSR 0 handed back on exit, `VC_COMPOSER_CARET=0` respected); named degradation: visual/cmdline states live only in the installed script. OSC 12/112 verdict: swallowed in `grid.rs` (`b"12"`/`b"112"` unimplemented arms) — caret color stays OFF, forwarding is a separate operator-mandated cut
 * fix(chrome): transient dimension guard at the render entry of compact-bar, status-bar and the session-manager main menu — startup `rows`/`cols` ≈ 0 frames no longer paint partial layouts (the visible chrome jump at session start); thresholds far below legal small surfaces (tooltip, rail)
