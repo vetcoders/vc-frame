@@ -178,9 +178,7 @@ pub(crate) fn stdin_loop(
                                         ))
                                         .is_err()
                                     {
-                                        log::debug!(
-                                            "input receiver gone; stopping stdin handler"
-                                        );
+                                        log::debug!("input receiver gone; stopping stdin handler");
                                         break 'stdin;
                                     }
                                 }

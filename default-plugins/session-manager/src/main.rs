@@ -2945,14 +2945,21 @@ mod rail_tests {
             "SESSIONS 3"
         );
         // Dense is an ultra-short badge.
-        assert_eq!(rail_header_text(RailWidthMode::Dense, 3, Some("alpha")), "S3");
+        assert_eq!(
+            rail_header_text(RailWidthMode::Dense, 3, Some("alpha")),
+            "S3"
+        );
         // No current session: Wide degrades to the count alone.
         assert_eq!(rail_header_text(RailWidthMode::Wide, 2, None), "SESSIONS 2");
     }
 
     #[test]
     fn dense_rows_are_iconic_and_fit_narrow_columns() {
-        let entry = format_session_rail_entry(&session("very-long-session-name", true), 1, RailWidthMode::Dense);
+        let entry = format_session_rail_entry(
+            &session("very-long-session-name", true),
+            1,
+            RailWidthMode::Dense,
+        );
         assert_eq!(entry, "01 ◉");
         let entry = format_session_rail_entry(&session("other", false), 7, RailWidthMode::Dense);
         assert_eq!(entry, "07 ○");

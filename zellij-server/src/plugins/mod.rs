@@ -1762,7 +1762,9 @@ fn populate_session_layout_metadata(
             // its pane metadata still carries `invoked_with`, so nothing is
             // lost. Only a pane with no run identity at all is a real problem.
             None if plugin_ids_missing_run.contains(&plugin_id) => {
-                log::error!("Plugin with id: {plugin_id} not found and its pane has no run identity")
+                log::error!(
+                    "Plugin with id: {plugin_id} not found and its pane has no run identity"
+                )
             },
             None => log::debug!(
                 "Plugin with id: {plugin_id} not loaded (parked chrome); keeping the pane's own run identity"
