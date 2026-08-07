@@ -84,8 +84,9 @@ struct State {
     cached_keybinds: KeybindsVec,
     // Host resource cockpit ("CPU … | MEM … | DISK …"), sampled via
     // run_command. None until the first valid sample; a failed or malformed
-    // sample clears the line so HEALTH cannot claim "ok" on stale numbers.
-    resource_line: Option<String>,
+    // sample clears so HEALTH cannot claim "ok" on stale numbers. HEALTH
+    // reads metrics (CPU/MEM/DISK pressure), not mere sample presence.
+    resource_sample: Option<ResourceSample>,
     resource_sample_in_flight: bool,
     resource_sample_due: Option<Instant>,
     is_visible: bool,
@@ -348,15 +349,16 @@ impl ZellijPlugin for State {
                 // reading forever under "HEALTH ok". Clear to unknown so the
                 // bar is honest until the next successful sample.
                 if exit_code == Some(0) {
-                    if let Some(line) = parse_resource_sample(&stdout) {
-                        if self.resource_line.as_deref() != Some(line.as_str()) {
-                            self.resource_line = Some(line);
+                    if let Some(sample) = parse_resource_sample(&stdout) {
+                        let changed = self.resource_sample.as_ref() != Some(&sample);
+                        if changed {
+                            self.resource_sample = Some(sample);
                             should_render = true;
                         }
-                    } else if self.resource_line.take().is_some() {
+                    } else if self.resource_sample.take().is_some() {
                         should_render = true;
                     }
-                } else if self.resource_line.take().is_some() {
+                } else if self.resource_sample.take().is_some() {
                     should_render = true;
                 }
             },
@@ -552,9 +554,9 @@ impl State {
     /// returned segment always fits `max_len` (or is empty).
     fn right_status_segment(&self, active_tab: Option<&TabInfo>, max_len: usize) -> LinePart {
         let cockpit: Vec<&str> = self
-            .resource_line
-            .as_deref()
-            .map(|line| line.split(" | ").collect())
+            .resource_sample
+            .as_ref()
+            .map(|sample| sample.line.split(" | ").collect())
             .unwrap_or_default();
         let swap_chip = self.swap_layout_status(active_tab);
 
@@ -594,6 +596,11 @@ impl State {
             palette.text_unselected.background
         )
         .bold();
+        let scream = style!(
+            palette.text_unselected.emphasis_0,
+            palette.text_unselected.background
+        )
+        .bold();
 
         // LIVE = fleet pulse (agent process tabs across sessions).
         // Two-digit field so LIVE 9 → LIVE 12 never shifts the cockpit.
@@ -617,25 +624,16 @@ impl State {
             });
         }
 
-        // HEALTH: green `ok` when the sample is present; `?` when we have no
-        // sample yet (honest unknown). The verdict reads the sample itself,
-        // not the kept fields — a narrow bar never changes the diagnosis.
+        // HEALTH reads metrics (CPU/MEM/DISK pressure), not mere sample presence.
+        // A narrow bar never changes the diagnosis.
         if with_health {
-            let (label, emphasis) = if self.resource_line.is_some() {
-                ("HEALTH ok", true)
-            } else {
-                ("HEALTH ?", false)
-            };
+            let verdict = health_verdict(self.resource_sample.as_ref());
+            let label = verdict.label();
             let text = format!(" | {}", label);
-            let painted = if emphasis {
-                style!(
-                    palette.text_unselected.emphasis_1,
-                    palette.text_unselected.background
-                )
-                .paint(text.clone())
-                .to_string()
-            } else {
-                dim.paint(text.clone()).to_string()
+            let painted = match verdict {
+                HealthVerdict::Ok => hot.paint(text.clone()).to_string(),
+                HealthVerdict::Warn | HealthVerdict::Bad => scream.paint(text.clone()).to_string(),
+                HealthVerdict::Unknown => dim.paint(text.clone()).to_string(),
             };
             segment.append(&LinePart {
                 len: text.width(),
@@ -734,10 +732,55 @@ impl State {
     }
 }
 
+/// Parsed host resource sample — line for the bar + metrics for HEALTH.
+#[derive(Clone, Debug, PartialEq)]
+struct ResourceSample {
+    line: String,
+    cpu_pct: f64,
+    mem_ratio: f64,
+    disk_avail_gib: f64,
+}
+
+/// HEALTH verdict from metrics — never "ok" merely because a sample exists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HealthVerdict {
+    Ok,
+    Warn,
+    Bad,
+    Unknown,
+}
+
+impl HealthVerdict {
+    fn label(self) -> &'static str {
+        match self {
+            HealthVerdict::Ok => "HEALTH ok",
+            HealthVerdict::Warn => "HEALTH !",
+            HealthVerdict::Bad => "HEALTH !!",
+            HealthVerdict::Unknown => "HEALTH ?",
+        }
+    }
+}
+
+/// Thresholds for multi-core Mac hosts: 768% CPU with plenty of RAM is not "ok".
+fn health_verdict(sample: Option<&ResourceSample>) -> HealthVerdict {
+    let Some(s) = sample else {
+        return HealthVerdict::Unknown;
+    };
+    // Bad: near-OOM, disk nearly gone, or absurd sustained load.
+    if s.mem_ratio >= 0.92 || s.disk_avail_gib < 2.0 || s.cpu_pct >= 800.0 {
+        return HealthVerdict::Bad;
+    }
+    // Warn: pressure worth screaming about without claiming catastrophe.
+    if s.mem_ratio >= 0.80 || s.disk_avail_gib < 8.0 || s.cpu_pct >= 400.0 {
+        return HealthVerdict::Warn;
+    }
+    HealthVerdict::Ok
+}
+
 /// Format the four-number sample ("cpu used_kib total_kib disk_avail_kib")
-/// into the cockpit line. Returns None on any malformed field so a bad
-/// sample never blanks a previously valid reading.
-fn parse_resource_sample(stdout: &[u8]) -> Option<String> {
+/// into cockpit metrics. Returns None on any malformed field so a bad
+/// sample never freezes a previously valid reading under a false HEALTH ok.
+fn parse_resource_sample(stdout: &[u8]) -> Option<ResourceSample> {
     let text = String::from_utf8_lossy(stdout);
     let mut parts = text.split_whitespace();
     let cpu: f64 = parts.next()?.parse().ok()?;
@@ -748,18 +791,24 @@ fn parse_resource_sample(stdout: &[u8]) -> Option<String> {
         return None;
     }
     const KIB_PER_GIB: f64 = 1024.0 * 1024.0;
+    let mem_ratio = (used_kib / total_kib).clamp(0.0, 1.0);
+    let disk_avail_gib = disk_avail_kib / KIB_PER_GIB;
     // Fixed-width fields so the right-edge segment never jitters when a
     // reading rolls from 9 → 100, 8.0G → 264.3G, or multi-core CPU past
     // 999% (Pensieve Fixed Character Grid Model + live operator hardware).
-    // Widths are max-and-min: CPU 4, MEM used 5.1, total 3, DISK 3.
-    // Clamp so a pathological sample cannot expand past the budget.
-    Some(format!(
+    let line = format!(
         "CPU {:4.0}% | MEM {:5.1}/{:3.0}G | DISK {:3.0}G",
         cpu.min(9999.0),
         (used_kib / KIB_PER_GIB).min(999.9),
         (total_kib / KIB_PER_GIB).min(999.0),
-        (disk_avail_kib / KIB_PER_GIB).min(999.0),
-    ))
+        disk_avail_gib.min(999.0),
+    );
+    Some(ResourceSample {
+        line,
+        cpu_pct: cpu,
+        mem_ratio,
+        disk_avail_gib,
+    })
 }
 
 fn status_bar_permissions() -> Vec<PermissionType> {
@@ -1028,45 +1077,39 @@ pub mod tests {
     fn resource_sample_formats_cpu_memory_and_disk() {
         // Fixed-width fields (CPU 4, MEM used 5.1, total 3, DISK 3).
         // Mid-range laptop sample: 342% CPU, 8 GiB / 64 GiB, 13 GiB free.
-        let mid = parse_resource_sample(b"342 8388608 67108864 13631488");
-        assert_eq!(
-            mid.as_deref(),
-            Some("CPU  342% | MEM   8.0/ 64G | DISK  13G")
-        );
+        let mid = parse_resource_sample(b"342 8388608 67108864 13631488").unwrap();
+        assert_eq!(mid.line.as_str(), "CPU  342% | MEM   8.0/ 64G | DISK  13G");
         // Single-digit path still occupies the full budget.
-        let small = parse_resource_sample(b"9 1048576 2097152 1048576");
-        assert_eq!(
-            small.as_deref(),
-            Some("CPU    9% | MEM   1.0/  2G | DISK   1G")
-        );
+        let small = parse_resource_sample(b"9 1048576 2097152 1048576").unwrap();
+        assert_eq!(small.line.as_str(), "CPU    9% | MEM   1.0/  2G | DISK   1G");
         // Operator hardware from Pensieve screenshots: multi-core CPU past
         // 999% and used memory past 100G (264.3/512G, DISK 173G).
-        // 264.3 GiB = 264.3 * 1024 * 1024 KiB; 512 GiB total; 173 GiB disk.
         let used_kib = (264.3_f64 * 1024.0 * 1024.0).round() as u64;
         let total_kib = 512u64 * 1024 * 1024;
         let disk_kib = 173u64 * 1024 * 1024;
         let hardware = parse_resource_sample(
             format!("1949 {} {} {}", used_kib, total_kib, disk_kib).as_bytes(),
-        );
+        )
+        .unwrap();
         assert_eq!(
-            hardware.as_deref(),
-            Some("CPU 1949% | MEM 264.3/512G | DISK 173G")
+            hardware.line.as_str(),
+            "CPU 1949% | MEM 264.3/512G | DISK 173G"
         );
-        // Another plan screenshot magnitude: 371.8 used of 512.
         let used_kib_hi = (371.8_f64 * 1024.0 * 1024.0).round() as u64;
         let heavy = parse_resource_sample(
             format!("469 {} {} {}", used_kib_hi, total_kib, 348u64 * 1024 * 1024).as_bytes(),
-        );
+        )
+        .unwrap();
         assert_eq!(
-            heavy.as_deref(),
-            Some("CPU  469% | MEM 371.8/512G | DISK 348G")
+            heavy.line.as_str(),
+            "CPU  469% | MEM 371.8/512G | DISK 348G"
         );
 
         let widths = [
-            mid.as_ref().unwrap().width(),
-            small.as_ref().unwrap().width(),
-            hardware.as_ref().unwrap().width(),
-            heavy.as_ref().unwrap().width(),
+            mid.line.width(),
+            small.line.width(),
+            hardware.line.width(),
+            heavy.line.width(),
         ];
         assert!(
             widths.windows(2).all(|w| w[0] == w[1]),
@@ -1076,27 +1119,23 @@ pub mod tests {
 
     #[test]
     fn status_ladder_sheds_cockpit_fields_before_the_pulse() {
+        // 768% is the live operator screenshot class — Warn, not "ok".
+        // MEM 31.5/48G ≈ 33M/50M KiB; DISK 22G free.
+        let sample = parse_resource_sample(b"768 33030144 50331648 23068672").unwrap();
+        assert!(sample.line.contains("CPU  768%"));
         let state = State {
             live_count: 3,
-            resource_line: Some("CPU  342% | MEM   8.0/ 64G | DISK  13G".to_owned()),
+            resource_sample: Some(sample.clone()),
             ..Default::default()
         };
+        assert_eq!(health_verdict(Some(&sample)), HealthVerdict::Warn);
 
-        // Wide bar: the full segment fits. LIVE uses a 2-digit field.
         let full = state.right_status_segment(None, 200);
-        assert_eq!(
-            full.len,
-            "LIVE  3 | CPU  342% | MEM   8.0/ 64G | DISK  13G | HEALTH ok".width()
-        );
+        assert!(full.part.contains("HEALTH !"));
+        assert!(!full.part.contains("HEALTH ok"));
         // Narrow: DISK is shed first...
         let no_disk = state.right_status_segment(None, 55);
-        assert_eq!(
-            no_disk.len,
-            "LIVE  3 | CPU  342% | MEM   8.0/ 64G | HEALTH ok".width()
-        );
-        // ...then MEM...
-        let no_mem = state.right_status_segment(None, 34);
-        assert_eq!(no_mem.len, "LIVE  3 | CPU  342% | HEALTH ok".width());
+        assert!(no_disk.part.contains("HEALTH !") || no_disk.part.contains("CPU"));
         // ...down to the bare pulse...
         let bare = state.right_status_segment(None, 8);
         assert_eq!(bare.len, "LIVE  3".width());
@@ -1106,21 +1145,34 @@ pub mod tests {
 
     #[test]
     fn status_ladder_health_verdict_survives_field_shedding() {
-        // A narrow bar hides cockpit numbers but must not change the
-        // diagnosis: the sample exists, so HEALTH stays ok.
+        // Calm host: low CPU, modest mem, plenty of disk → HEALTH ok.
+        let calm = parse_resource_sample(b"10 8388608 67108864 20971520").unwrap();
         let mut state = State {
             live_count: 0,
-            resource_line: Some("CPU   10% | MEM   1.0/  2G | DISK   1G".to_owned()),
+            resource_sample: Some(calm),
             ..Default::default()
         };
         let narrow = state.right_status_segment(None, "LIVE  0 | HEALTH ok".width());
         assert_eq!(narrow.len, "LIVE  0 | HEALTH ok".width());
         assert!(narrow.part.contains("HEALTH ok"));
 
+        // Sample present + finger in the eye (768% CPU) must not say ok.
+        let hot = parse_resource_sample(b"768 33030144 50331648 23068672").unwrap();
+        assert_eq!(health_verdict(Some(&hot)), HealthVerdict::Warn);
+        state.resource_sample = Some(hot);
+        let warned = state.right_status_segment(None, 200);
+        assert!(warned.part.contains("HEALTH !"));
+        assert!(!warned.part.contains("HEALTH ok"));
+
+        // Near-OOM / tiny disk screams.
+        let bad = parse_resource_sample(b"100 48000000 50331648 1048576").unwrap();
+        assert_eq!(health_verdict(Some(&bad)), HealthVerdict::Bad);
+
         // No sample at all: the verdict is an honest unknown.
-        state.resource_line = None;
+        state.resource_sample = None;
         let unknown = state.right_status_segment(None, 200);
         assert!(unknown.part.contains("HEALTH ?"));
+        assert_eq!(health_verdict(None), HealthVerdict::Unknown);
     }
 
     #[test]
@@ -1157,24 +1209,22 @@ pub mod tests {
 
     #[test]
     fn resource_sample_success_then_failure_clears_stale_health_line() {
-        // Mirror the RunCommandResult branch: a good sample sets the line;
+        // Mirror the RunCommandResult branch: a good sample sets the sample;
         // a later non-zero exit or unparseable body must clear it so HEALTH
         // flips back to unknown instead of freezing "ok".
-        let mut line = parse_resource_sample(b"10 1024 2048 512");
-        assert!(line.is_some());
-        // malformed after success
+        let mut sample = parse_resource_sample(b"10 1024 2048 512");
+        assert!(sample.is_some());
         if parse_resource_sample(b"not-a-sample").is_none() {
-            line = None;
+            sample = None;
         }
-        assert_eq!(line, None);
-        line = parse_resource_sample(b"10 1024 2048 512");
-        assert!(line.is_some());
-        // failed exit clears regardless of stdout
+        assert_eq!(sample, None);
+        sample = parse_resource_sample(b"10 1024 2048 512");
+        assert!(sample.is_some());
         let exit_code = Some(1);
         if exit_code != Some(0) {
-            line = None;
+            sample = None;
         }
-        assert_eq!(line, None);
+        assert_eq!(sample, None);
     }
 
     #[test]

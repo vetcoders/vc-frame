@@ -1113,6 +1113,87 @@ fn working_session_indices(sessions: &[SessionUiInfo]) -> Vec<usize> {
         .collect()
 }
 
+/// Pure policy for f/x/n open — unit-tested without WASM I/O.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BucketOpenAction {
+    Stay,
+    SwitchExisting,
+    /// Floating control-plane / reports read — never create a god session.
+    ReadSurface,
+}
+
+fn bucket_open_action(drawer_session_exists: bool, is_current: bool) -> BucketOpenAction {
+    if drawer_session_exists && is_current {
+        BucketOpenAction::Stay
+    } else if drawer_session_exists {
+        BucketOpenAction::SwitchExisting
+    } else {
+        BucketOpenAction::ReadSurface
+    }
+}
+
+fn settlement_read_coordinates() -> Option<FloatingPaneCoordinates> {
+    FloatingPaneCoordinates::new(
+        Some("12%".to_owned()),
+        Some("12%".to_owned()),
+        Some("76%".to_owned()),
+        Some("70%".to_owned()),
+        Some(false),
+        None,
+    )
+}
+
+/// Floating diagnostic: control plane + loctree reports. No new Zellij session.
+fn open_settlement_read_surface(bucket: BucketKind) {
+    let letter = match bucket {
+        BucketKind::Finalized => "f",
+        BucketKind::Failed => "x",
+        BucketKind::NeedsAttention => "n",
+    };
+    // POSIX sh only (dash-clean). Prints settlement truth then waits.
+    let script = format!(
+        r#"b="{letter}"
+printf '\n  VIBECRAFTED · settlement %s (read-only)\n' "$b"
+printf '  No god-session created. Counts come from the control plane feed.\n\n'
+shown=0
+for base in \
+  "http://127.0.0.1:3024" \
+  "http://127.0.0.1:3025" \
+  "http://100.82.232.70:3025"
+do
+  if command -v curl >/dev/null 2>&1 \
+    && curl -sf --max-time 2 "$base/api/control/state" 2>/dev/null \
+    | head -c 6000
+  then
+    printf '\n  [eye] %s\n' "$base"
+    shown=1
+    break
+  fi
+done
+if [ "$shown" -eq 0 ]; then
+  printf '  control plane not reachable on 3024/3025 — try: vibecrafted server status\n'
+fi
+printf '\n  loctree-suite reports (if present):\n'
+for d in \
+  "${{HOME}}/vc-workspace/vetcoders/loctree-suite/reports" \
+  "${{HOME}}/.vibecrafted/artifacts"
+do
+  if [ -d "$d" ]; then
+    ls -1t "$d" 2>/dev/null | head -12 | sed 's/^/    /'
+    shown=1
+  fi
+done
+if [ "$shown" -eq 0 ]; then
+  printf '    (none found)\n'
+fi
+printf '\n  [enter to close]\n'
+read -r _ || true
+"#
+    );
+    let command = CommandToRun::new_with_args("sh", vec!["-c", &script]);
+    let _ = open_command_pane_floating(command, settlement_read_coordinates(), BTreeMap::new());
+}
+
 /// Resolve an ordinal keypress against the *working* sessions, so the buckets
 /// sitting at the bottom of the rail do not shift what `3` means.
 fn rail_ordinal_target(sessions: &[SessionUiInfo], character: char) -> Option<usize> {
@@ -1583,8 +1664,8 @@ impl State {
             if self.rail_hover_row == Some(row) {
                 text = text.selected();
             }
-            // Empty drawers stay clickable: mouse + f/x/n open the folder
-            // (create session with fleet layout when missing).
+            // Empty drawers stay clickable: mouse + f/x/n open the control-plane
+            // read surface (never mint Finalized/Failed/Needs god-sessions).
             self.rail_click_map
                 .insert(row, rail_row_click_target(&bucket_row.kind));
             print_text_with_coordinates(text, 0, row, None, None);
@@ -1724,34 +1805,30 @@ impl State {
             _ => false,
         }
     }
-    /// Open a triage drawer session (Finalized / Failed / Needs attention).
+    /// Open settlement truth for f/x/n — control-plane read surface.
     ///
-    /// OS-folder contract: every path does something useful.
-    /// - already here → quiet no-op
-    /// - exists elsewhere → switch
-    /// - missing (count 0) → create with fleet `vibecrafted` layout and attach
+    /// Primary path must **not** mint "Finalized runs" / "Failed runs" /
+    /// "Needs attention" god-sessions. Counts already come from the settlement
+    /// feed; click opens a floating diagnostic that reads the control plane
+    /// (and loctree-suite reports when present). If an operator already created
+    /// a drawer session manually, switch into it — never create one here.
     fn jump_to_bucket(&mut self, bucket: BucketKind) {
         let name = bucket.session_name();
-        let exists = self
+        let existing = self
             .sessions
             .session_ui_infos
             .iter()
             .find(|session| session.name == name);
-        match exists {
-            Some(session) if session.is_current_session => {
-                // Already inside this drawer — no error spam.
-            },
-            Some(_) => {
+        let exists = existing.is_some();
+        let is_current = existing.is_some_and(|s| s.is_current_session);
+        match bucket_open_action(exists, is_current) {
+            BucketOpenAction::Stay => {},
+            BucketOpenAction::SwitchExisting => {
                 switch_session_with_focus(name, None, None);
                 self.reset_selected_index();
             },
-            None => {
-                // Empty drawer: open the folder with the standard session canvas.
-                switch_session_with_layout(
-                    Some(name),
-                    LayoutInfo::BuiltIn("vibecrafted".to_owned()),
-                    None,
-                );
+            BucketOpenAction::ReadSurface => {
+                open_settlement_read_surface(bucket);
                 self.reset_selected_index();
             },
         }
@@ -4107,8 +4184,8 @@ mod rail_tests {
             }),
             RailClickTarget::Bucket(BucketKind::Failed)
         );
-        // Empty drawer: still a bucket target so mouse + f/x/n open the folder
-        // (create-with-layout when missing — not a silent dead zone).
+        // Empty drawer: still a bucket target so mouse + f/x/n open the
+        // control-plane read surface (not a silent dead zone; never mint god sessions).
         assert_eq!(
             rail_row_click_target(&SessionRailRowKind::Bucket {
                 bucket: BucketKind::NeedsAttention,
@@ -4116,6 +4193,15 @@ mod rail_tests {
             }),
             RailClickTarget::Bucket(BucketKind::NeedsAttention)
         );
+        assert_eq!(
+            bucket_open_action(false, false),
+            BucketOpenAction::ReadSurface
+        );
+        assert_eq!(
+            bucket_open_action(true, false),
+            BucketOpenAction::SwitchExisting
+        );
+        assert_eq!(bucket_open_action(true, true), BucketOpenAction::Stay);
     }
 
     #[test]
