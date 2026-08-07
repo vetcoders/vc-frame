@@ -2568,11 +2568,11 @@ impl WasmBridge {
                                         // Screen may already be gone during session teardown;
                                         // a lost resize render is not worth panicking the
                                         // plugin worker thread.
-                                        if let Err(e) = senders.send_to_screen(
-                                            ScreenInstruction::PluginBytes(vec![
-                                                plugin_render_asset,
-                                            ]),
-                                        ) {
+                                        if let Err(e) =
+                                            senders.send_to_screen(ScreenInstruction::PluginBytes(
+                                                vec![plugin_render_asset],
+                                            ))
+                                        {
                                             log::warn!(
                                                 "failed to send PluginBytes to screen: {}",
                                                 e

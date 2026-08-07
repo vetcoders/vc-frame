@@ -37,7 +37,7 @@ use std::rc::Rc;
 
 use interprocess::local_socket::Stream as LocalSocketStream;
 use zellij_utils::{
-    data::{FloatingPaneCoordinates, InputMode, ModeInfo, NewPanePlacement, Palette, Style},
+    data::{Event, FloatingPaneCoordinates, InputMode, ModeInfo, NewPanePlacement, Palette, Style},
     input::command::{RunCommand, TerminalAction},
     ipc::{ClientToServerMsg, ServerToClientMsg},
 };
@@ -394,15 +394,38 @@ fn create_new_tab_with_swap_layouts(
     draw_pane_frames: bool,
     stacked_resize: bool,
 ) -> Tab {
+    let (mock_plugin_sender, _mock_plugin_receiver): ChannelWithContext<PluginInstruction> =
+        channels::unbounded();
+    create_new_tab_with_swap_layouts_and_plugin_sender(
+        size,
+        default_mode,
+        swap_layouts,
+        base_layout_and_ids,
+        draw_pane_frames,
+        stacked_resize,
+        SenderWithContext::new(mock_plugin_sender),
+    )
+}
+
+// Plugin panes clone the to_plugin sender at construction time, so a test that
+// wants to observe pane-internal sends (e.g. mouse events) must inject its own
+// channel before the layout is applied.
+fn create_new_tab_with_swap_layouts_and_plugin_sender(
+    size: Size,
+    default_mode: ModeInfo,
+    swap_layouts: (Vec<SwapTiledLayout>, Vec<SwapFloatingLayout>),
+    base_layout_and_ids: Option<BaseLayoutAndIds>,
+    draw_pane_frames: bool,
+    stacked_resize: bool,
+    plugin_sender: SenderWithContext<PluginInstruction>,
+) -> Tab {
     set_session_name("test".into());
     let index = 0;
     let position = 0;
     let name = String::new();
     let os_api = Box::new(FakeInputOutput::default());
     let mut senders = ThreadSenders::default().silently_fail_on_send();
-    let (mock_plugin_sender, _mock_plugin_receiver): ChannelWithContext<PluginInstruction> =
-        channels::unbounded();
-    senders.replace_to_plugin(SenderWithContext::new(mock_plugin_sender));
+    senders.replace_to_plugin(plugin_sender);
     let max_panes = None;
     let mode_info = default_mode;
     let style = Style::default();
@@ -563,6 +586,84 @@ fn session_manager_projector_forwards_input_and_stays_parked_when_hidden() {
             .expect("projector pane")
             .should_render(),
         "a parked projector must not consume singleton render work"
+    );
+}
+
+#[test]
+fn session_manager_projector_routes_mouse_events_to_runtime_plugin() {
+    let size = Size { cols: 80, rows: 20 };
+    let client_id = 1;
+    let base_layout = r#"
+        layout {
+            pane
+            pane size=3 borderless=true {
+                plugin location="vc-frame:session-manager"
+            }
+        }
+    "#;
+    let (base_layout, base_floating_layout) =
+        Layout::from_kdl(base_layout, Some("projector.kdl".into()), None, None)
+            .unwrap()
+            .template
+            .unwrap();
+    let session_manager =
+        RunPluginOrAlias::from_url("vc-frame:session-manager", &None, None, None).unwrap();
+    let mut plugin_ids = HashMap::new();
+    plugin_ids.insert(session_manager, vec![41]);
+    let (plugin_tx, plugin_rx): ChannelWithContext<PluginInstruction> = channels::unbounded();
+    let mut tab = create_new_tab_with_swap_layouts_and_plugin_sender(
+        size,
+        ModeInfo::default(),
+        (vec![], vec![]),
+        Some((
+            base_layout,
+            base_floating_layout,
+            vec![(1, None)],
+            vec![],
+            plugin_ids,
+        )),
+        true,
+        true,
+        SenderWithContext::new(plugin_tx),
+    );
+
+    tab.bind_plugin_projectors(&HashMap::from([(41, 7)]));
+    assert!(
+        tab.has_plugin_runtime(7),
+        "projector pane 41 must be bound to runtime plugin 7"
+    );
+
+    tab.focus_pane_with_id(PaneId::Plugin(41), false, false, client_id)
+        .unwrap();
+    while plugin_rx.try_recv().is_ok() {} // drain layout/focus noise
+
+    let inside_projector = Position::new(18, 5);
+    tab.handle_mouse_event(&MouseEvent::new_left_press_event(inside_projector), client_id)
+        .unwrap();
+    tab.handle_mouse_event(
+        &MouseEvent::new_left_release_event(inside_projector),
+        client_id,
+    )
+    .unwrap();
+
+    let mut mouse_targets = vec![];
+    while let Ok((instruction, _)) = plugin_rx.try_recv() {
+        if let PluginInstruction::Update(updates) = instruction {
+            for (plugin_id, update_client_id, event) in updates {
+                if let Event::Mouse(_) = event {
+                    assert_eq!(update_client_id, Some(client_id));
+                    mouse_targets.push(plugin_id);
+                }
+            }
+        }
+    }
+    assert!(
+        !mouse_targets.is_empty(),
+        "a click inside the projector pane must reach the plugin runtime"
+    );
+    assert!(
+        mouse_targets.iter().all(|target| *target == Some(7)),
+        "projector mouse events must route to runtime_plugin_id 7 (never local pane id 41), got {mouse_targets:?}"
     );
 }
 

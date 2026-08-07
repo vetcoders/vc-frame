@@ -21,9 +21,14 @@ product bug and a flicker class.
    assets, `vc-frame doctor` / `repair`).
 3. **vibecrafted** owns *how the product is installed and which preset is
    live* (`vibecrafted install` / doctor `vc-frame:truth`).
-4. Operator scripts for Composer / paste-stack / quick-cmd ship from
-   **vc-frame** `assets/operator-scripts/` and are installed next to the
-   preset by vibecrafted install (or copied to frontier on release).
+4. Operator scripts for Composer / paste-stack / quick-cmd / deck ship from
+   **vc-frame** `assets/operator-scripts/`, are mirrored into vibecrafted
+   `config/vc-frame/` for packaging, and are **wired by install** to both
+   `~/.config/vc-frame/` and `~/.config/vetcoders/frontier/vc-frame/`
+   (frontier is what `VC_FRAME_CONFIG_DIR` pins). Hand-copying scripts is a
+   product bug — if frontier still shows an old STALE-FILE, the installer is
+   broken, not the operator.
+
 
 ## Historical note
 

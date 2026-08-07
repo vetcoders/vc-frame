@@ -591,7 +591,7 @@ impl Pane for PluginPane {
     fn scroll_up(&mut self, count: usize, client_id: ClientId) {
         self.send_plugin_instructions
             .send(PluginInstruction::Update(vec![(
-                Some(self.pid),
+                Some(self.runtime_plugin_id),
                 Some(client_id),
                 Event::Mouse(Mouse::ScrollUp(count)),
             )]))
@@ -600,7 +600,7 @@ impl Pane for PluginPane {
     fn scroll_down(&mut self, count: usize, client_id: ClientId) {
         self.send_plugin_instructions
             .send(PluginInstruction::Update(vec![(
-                Some(self.pid),
+                Some(self.runtime_plugin_id),
                 Some(client_id),
                 Event::Mouse(Mouse::ScrollDown(count)),
             )]))
@@ -621,7 +621,7 @@ impl Pane for PluginPane {
         } else {
             self.send_plugin_instructions
                 .send(PluginInstruction::Update(vec![(
-                    Some(self.pid),
+                    Some(self.runtime_plugin_id),
                     Some(client_id),
                     Event::Mouse(Mouse::LeftClick(start.line.0, start.column.0)),
                 )]))
@@ -637,7 +637,7 @@ impl Pane for PluginPane {
         } else {
             self.send_plugin_instructions
                 .send(PluginInstruction::Update(vec![(
-                    Some(self.pid),
+                    Some(self.runtime_plugin_id),
                     Some(client_id),
                     Event::Mouse(Mouse::Hold(position.line.0, position.column.0)),
                 )]))
@@ -652,7 +652,7 @@ impl Pane for PluginPane {
         } else {
             self.send_plugin_instructions
                 .send(PluginInstruction::Update(vec![(
-                    Some(self.pid),
+                    Some(self.runtime_plugin_id),
                     Some(client_id),
                     Event::Mouse(Mouse::Release(end.line(), end.column())),
                 )]))
@@ -732,7 +732,7 @@ impl Pane for PluginPane {
     fn handle_right_click(&mut self, to: &Position, client_id: ClientId) {
         self.send_plugin_instructions
             .send(PluginInstruction::Update(vec![(
-                Some(self.pid),
+                Some(self.runtime_plugin_id),
                 Some(client_id),
                 Event::Mouse(Mouse::RightClick(to.line.0, to.column.0)),
             )]))
@@ -889,7 +889,7 @@ impl Pane for PluginPane {
                 let _ = self
                     .send_plugin_instructions
                     .send(PluginInstruction::Update(vec![(
-                        Some(self.pid),
+                        Some(self.runtime_plugin_id),
                         Some(client_id),
                         Event::Mouse(Mouse::Hover(event.position.line(), event.position.column())),
                     )]));

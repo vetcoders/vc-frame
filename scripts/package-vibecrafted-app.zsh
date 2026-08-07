@@ -41,8 +41,16 @@ cp "$VCFRAME_BIN"   "$BUILD/Contents/MacOS/vc-frame"
 
 # ── baked identity: alacritty fallback config (fresh machine = full brand).
 # Live user config (~/.config/alacritty/alacritty.toml) still wins at launch.
-cat > "$BUILD/Contents/Resources/alacritty.toml" <<'EOF'
-# 𝓥𝓲𝓫𝓮𝓬𝓻𝓪𝓯𝓽𝓮𝓭. — baked bundle identity (fallback when no user config)
+# Prefer the shipped host preset (wheel ~Alt/Alt split, option_as_alt, Cmd layer).
+PRESET="$REPO/tools/alacritty/vc-frame.toml"
+LAUNCHER="$REPO/tools/alacritty/launch-primary-shell.zsh"
+if [[ -f "$PRESET" ]]; then
+  cp "$PRESET" "$BUILD/Contents/Resources/alacritty.toml"
+  print "host cfg : $PRESET"
+else
+  print "warn: missing $PRESET — baking minimal fallback"
+  cat > "$BUILD/Contents/Resources/alacritty.toml" <<'EOF'
+# 𝓥𝓲𝓫𝓮𝓬𝓻𝓪𝓯𝓽𝓮𝓭. — minimal fallback (preset missing at package time)
 
 [window]
 title = "𝓥𝓲𝓫𝓮𝓬𝓻𝓪𝓯𝓽𝓮𝓭."
@@ -58,10 +66,21 @@ size = 13.0
 [font.normal]
 family = "Monaco"
 
+[scrolling]
+history = 50000
+multiplier = 3
+
 [mouse]
 hide_when_typing = true
+bindings = [
+  { mouse = "WheelUp",   mode = "~Alt", action = "ScrollLineUp" },
+  { mouse = "WheelDown", mode = "~Alt", action = "ScrollLineDown" },
+  { mouse = "WheelUp",   mode = "Alt",  chars = "\u001bOA" },
+  { mouse = "WheelDown", mode = "Alt",  chars = "\u001bOB" },
+  { mouse = "WheelUp",   mods = "Shift", action = "ScrollLineUp" },
+  { mouse = "WheelDown", mods = "Shift", action = "ScrollLineDown" },
+]
 
-# Vetcoders copper palette
 [colors.primary]
 background = "#1a1a2e"
 foreground = "#e0def4"
@@ -90,6 +109,11 @@ magenta = "#c4a7e7"
 cyan    = "#9ccfd8"
 white   = "#e0def4"
 EOF
+fi
+if [[ -f "$LAUNCHER" ]]; then
+  cp "$LAUNCHER" "$BUILD/Contents/Resources/launch-primary-shell.zsh"
+  chmod +x "$BUILD/Contents/Resources/launch-primary-shell.zsh"
+fi
 
 # ── launcher: no guessing. Surface and runtime ship in the bundle;
 # every launch lands in THE console session (attach --create).
