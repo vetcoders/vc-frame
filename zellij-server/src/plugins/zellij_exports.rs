@@ -120,6 +120,7 @@ macro_rules! apply_action {
     ($action:ident, $error_message:ident, $env: ident) => {
         match route_action(
             $action,
+            "plugin",
             $env.client_id,
             None,
             Some(PaneId::Plugin($env.plugin_id)),
@@ -1444,6 +1445,7 @@ fn run_action(env: &PluginEnv, mut action: Action, context: BTreeMap<String, Str
         // Execute the action and capture the result
         let pane_id = match route_action(
             action,
+            "plugin",
             client_id,
             None,
             Some(PaneId::Plugin(plugin_id)),
@@ -4594,6 +4596,7 @@ fn try_edit_layout(
     // Route the action - this is fallible
     route_action(
         action,
+        "plugin",
         env.client_id,
         None,
         Some(PaneId::Plugin(env.plugin_id)),

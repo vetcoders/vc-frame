@@ -3,8 +3,31 @@
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
-
 ## [Unreleased]
+
+## [0.47.3] - 2026-08-06
+
+* feat(rail): the session rail reads its allocated width and picks one of three faces — Wide (`cols >= 24`, today's full render), Normal (`14 <= cols < 24`, header drops the current-session anchor, names truncate, ◉/○ stay) and Dense (`cols < 14`, iconic strip: ordinal + state dot rows, `S N` badge header, no shredded prose); sharp thresholds, row variants built at row level, click-map stays full in every face
+* feat(composer): caret parity for the inline fallback — the chip's `COMPOSER_COMMAND` speaks the same caret language as the installed script via a mktemp mini-vimrc (insert=beam/replace=blink-underline/normal=underline + DECSCUSR 0 handed back on exit, `VC_COMPOSER_CARET=0` respected); named degradation: visual/cmdline states live only in the installed script. OSC 12/112 verdict: swallowed in `grid.rs` (`b"12"`/`b"112"` unimplemented arms) — caret color stays OFF, forwarding is a separate operator-mandated cut
+* fix(chrome): transient dimension guard at the render entry of compact-bar, status-bar and the session-manager main menu — startup `rows`/`cols` ≈ 0 frames no longer paint partial layouts (the visible chrome jump at session start); thresholds far below legal small surfaces (tooltip, rail)
+* feat(composer): semantic caret — the cursor shape names the mode in the drafting vimrc (insert=beam `│`, normal=underline `_` brand, visual=blinking block, replace/cmdline=blinking underline, operator-pending=block); nvim via `guicursor`, classic vim via `t_SI/t_SR/t_EI` + guarded `ModeChanged`/`CmdlineEnter` fallback; DECSCUSR 0 handed back to the host on exit; `VC_COMPOSER_CARET=0` opts out; brand-gold caret color (OSC 12 `#c99a3b`) prepared behind `VC_COMPOSER_CARET_COLOR` (default OFF pending the pass-through verdict)
+* feat(warden): caller-aware route telemetry, bounded action-client TTL, accepted-vs-committed SaveSession receipts, deterministic config hashes, bare-start attach/CWD naming, and explicit key/config/C2 contracts
+* fix(chrome): bottom bar mode tiles keep readable labels (LOCK/PANE not Lo/Pa); chrome key SSOT uses macOS glyphs ⌃⌥⌘⇧; session-manager help uses ⌥⌫ (not Del) + rail label sanitize against Main flicker
+* fix(host): inject Cmd→CSI Super translation into live Alacritty config so Cmd+arrows/Cmd+E work (key-contract v3)
+* fix(session-manager): kill/delete is ⌥⌫ (Alt+Backspace) on help and handlers — forward-delete Del is no longer advertised (scarce on Mac laptops, steals sequences); help uses macOS glyphs (⌃ ⌥ ⌫ ⏎)
+* fix(session-manager): rail/header labels sanitize control chars and collapse whitespace before fixed-width pad — stops row-width flicker from dirty session/tab titles
+* docs: CONFIG_OWNERSHIP.md — single owner per layer (vc-frame schema/runtime, vibecrafted package/install wire)
+* fix(chrome): floating PIN uses fisheye ○/◉ (not `[ ]`/`[+]`); Composer vim profile loads via single `-u` vimrc (fixes "Too many -c command arguments")
+* fix(composer): wrap OFF by default in the floating atelier (`set nowrap`, `textwidth=0`, sidescroll); F2 / `\w` toggles wrap; `VC_COMPOSER_WRAP=1` starts with wrap on — ends chrome bleeding into the draft buffer
+* feat(chrome): Uniform Mode Chip Separator Rule — every mode chip ends with `│` on a fixed 8-col budget (`▷ N │`, `⊝ L │`, `✎ RNT │`, …) so the bar aligns with the pane frame's `├`
+* feat(chrome): Quick cmd is a non-ephemeral mini console (`❯_ Quick cmd` + `vc-quick-cmd.sh` host@cwd banner + login shell); Composer header is `✍ Composer · ⧉ Paste stack`; Super+e is the sole Composer key (Alt+e free for Polish `ę`)
+* feat(composer): `vc-composer.sh` ships a vibecrafted vim profile (`number`, `laststatus=0`) and `Ctrl+p` paste-stack pick; `paste-stack.sh pick` uses fzf when available; Scroll mode `v` opens mouseless scrollback selection (`scrollback-select.sh`) that yanks to pbcopy + paste stack
+* feat(chrome): Fixed Character Grid Model — compact-bar zones lock to fixed column budgets (brand 14, mode 8, entry chips 12+18); mode switches and entry labels no longer shift the tab zone by even one cell; unit tests lock the EAW-aware pad contract
+* feat(chrome): status-bar metric fields use fixed widths (`CPU {:4}`, `MEM {:5.1}/{:3}`, `DISK {:3}`, `LIVE {:2}`) covering multi-core >999% and used memory >=100G (operator hardware) without right-edge jitter
+* feat(chrome): operator layouts default `left_inset` to 6 columns (was 9) at standard monospace; large fonts can still raise it via layout config
+* feat(composer): Quick cmd floats a login shell over the *current* tab (no Agents detour); Composer chip and Super+e share one paste-stack-aware drafting contract (`~/.cache/vc-frame/paste-stack.json` seed + push)
+* feat(status-bar): mode-gated status contract — the diodes (`LIVE | CPU | MEM | DISK | HEALTH`) live in the resting mode only; action modes hand every column to the shortcut hints and keep just the swap-layout chip; on narrow bars the segment sheds blocks right-to-left (DISK → MEM → CPU → swap → HEALTH, pulse last) instead of vanishing whole, and a two-cell seam always separates hints from statuses
+* feat(chrome): the Quick cmd click opens a fixed upper-center command strip (60%×30%) named `Quick cmd`, the Composer click a fixed centered atelier (70%×72%) — floating entry points land where the hands remember them instead of the session default
 * fix(status-bar): replace per-tab full-session `LIVE` fan-out with server-derived plugin/client updates; only each client's active status bar samples host resources, hidden bars stay idle, clipboard timers cannot fork samplers, and async-loader replay preserves exact lifecycle targets
 * feat(clinic): `asset-integrity` doctor section — the binary hashes its embedded plugins at runtime against its own SHA-256 receipt (`SHA256SUMS`), so a build that mixes plugin generations says so instead of "jakoś działa" (CRITICAL → `make install`)
 * feat(clinic): `host-terminal` doctor section — names the host terminal, and under Alacritty audits `option_as_alt` (absent/None = the Alt writer layer is dead on macOS, CRITICAL) plus Command/Super bindings the terminal intercepts before vc-frame (WARN, listed verbatim)

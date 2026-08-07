@@ -1369,6 +1369,13 @@ pub enum Sessions {
         /// Name of target session
         #[clap(value_parser)]
         target_session: Option<String>,
+        /// Automatic yes to prompts (kill-session prompts for nothing; accepted
+        /// for muscle-memory parity with `ka` / `da`)
+        #[clap(short, long, value_parser)]
+        yes: bool,
+        /// Treat an already-dead session as success and clean up its stale socket
+        #[clap(short, long, value_parser, takes_value(false), default_value("false"))]
+        force: bool,
     },
 
     /// Delete a specific session
@@ -1903,6 +1910,12 @@ pub enum CliAction {
     DumpLayout,
     /// Save the current session state to disk immediately
     SaveSession,
+    /// Show server route/caller counts, latency percentiles and timeout receipts
+    DoctorRoutes {
+        /// Emit machine-readable JSON
+        #[clap(long, value_parser, default_value("false"), takes_value(false))]
+        json: bool,
+    },
     /// Open the pane scrollback in your default editor
     EditScrollback {
         /// Target a specific pane by ID (eg. terminal_1, plugin_2, or 3)

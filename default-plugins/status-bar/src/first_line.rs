@@ -61,29 +61,14 @@ impl KeyShortcut {
             Some(k) => k.strip_common_modifiers(common_modifiers),
             None => return String::from("?"),
         };
-        let shortened_modifiers = key
-            .key_modifiers
-            .iter()
-            .map(|m| match m {
-                KeyModifier::Ctrl => "^C",
-                KeyModifier::Alt => "^A",
-                KeyModifier::Super => "^Su",
-                KeyModifier::Shift => "^Sh",
-            })
-            .collect::<Vec<_>>()
-            .join("-");
-        if shortened_modifiers.is_empty() {
-            format!("{}", key)
-        } else {
-            format!("{} {}", shortened_modifiers, key.bare_key)
-        }
+        chrome_key_label(&key)
     }
     pub fn letter_shortcut(&self, common_modifiers: &[KeyModifier]) -> String {
         let key = match &self.key {
             Some(k) => k.strip_common_modifiers(common_modifiers),
             None => return String::from("?"),
         };
-        format!("{}", key)
+        chrome_key_label(&key)
     }
     pub fn get_key(&self) -> Option<KeyWithModifier> {
         self.key.clone()
@@ -97,19 +82,48 @@ impl KeyShortcut {
     pub fn is_selected(&self) -> bool {
         matches!(self.mode, KeyMode::Selected)
     }
+    /// Compressed mode labels for the one-line bar (Pensieve 3–6 col slots).
+    /// Never use 2-letter stubs like "Lo"/"Pa" — they read as broken chrome.
+    /// Keep parity with compact-bar mode chip codes (LCK/PANE/TAB/…).
     pub fn short_text(&self) -> String {
         match self.action {
-            KeyAction::Lock => String::from("Lo"),
-            KeyAction::Unlock => String::from("Un"),
-            KeyAction::Pane => String::from("Pa"),
-            KeyAction::Tab => String::from("Ta"),
-            KeyAction::Resize => String::from("Re"),
-            KeyAction::Search => String::from("Se"),
-            KeyAction::Quit => String::from("Qu"),
-            KeyAction::Session => String::from("Se"),
-            KeyAction::Move => String::from("Mo"),
-            KeyAction::Tmux => String::from("Tm"),
+            KeyAction::Lock => String::from("LOCK"),
+            KeyAction::Unlock => String::from("UNLCK"),
+            KeyAction::Pane => String::from("PANE"),
+            KeyAction::Tab => String::from("TAB"),
+            KeyAction::Resize => String::from("RSIZE"),
+            KeyAction::Search => String::from("FIND"),
+            KeyAction::Quit => String::from("QUIT"),
+            KeyAction::Session => String::from("SESS"),
+            KeyAction::Move => String::from("MOVE"),
+            KeyAction::Tmux => String::from("TMUX"),
         }
+    }
+}
+
+/// macOS product key glyphs — single source for chrome help surfaces.
+/// ⌃ Ctrl · ⌥ Alt · ⌘ Super/Cmd · ⇧ Shift
+pub fn modifier_glyph(m: KeyModifier) -> &'static str {
+    match m {
+        KeyModifier::Ctrl => "⌃",
+        KeyModifier::Alt => "⌥",
+        KeyModifier::Super => "⌘",
+        KeyModifier::Shift => "⇧",
+    }
+}
+
+/// Format a modifier set for the bar (`⌃` / `⌃⌥` / `⌘`).
+pub fn format_modifiers(modifiers: &[KeyModifier]) -> String {
+    modifiers.iter().map(|m| modifier_glyph(*m)).collect()
+}
+
+/// Format a key for chrome help: `⌃g`, `⌥⌫`, `⌘←` — no ASCII "Ctrl " prefix.
+pub fn chrome_key_label(key: &KeyWithModifier) -> String {
+    if key.key_modifiers.is_empty() {
+        format!("{}", key.bare_key)
+    } else {
+        let mods: Vec<KeyModifier> = key.key_modifiers.iter().copied().collect();
+        format!("{}{}", format_modifiers(&mods), key.bare_key)
     }
 }
 
@@ -292,6 +306,57 @@ fn short_mode_shortcut(
     }
 }
 
+/// One rendering density for a shortcut tile, from dense (`g LOCK`) down to
+/// letter-only (` g `). The bar walks [`TILE_DENSITY_LADDER`] top-down and,
+/// inside each rung, sheds tiles by [`tile_importance`] — degradation is a
+/// denser layout or fewer tiles, never a label clipped mid-word.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum TileDensity {
+    /// `g LOCK` — key letter + full mode name, no angle brackets (preferred).
+    Dense,
+    /// ` <g> LOCK ` — classic bracketed keybinding + full mode name.
+    Long,
+    /// Shortened modifiers + bare key (`^C g`).
+    ShortenedModifier,
+    /// ` g ` — the bare key alone, the last readable form.
+    LetterOnly,
+}
+
+/// The degradation ladder in the order the bar tries it.
+pub const TILE_DENSITY_LADDER: [TileDensity; 4] = [
+    TileDensity::Dense,
+    TileDensity::Long,
+    TileDensity::ShortenedModifier,
+    TileDensity::LetterOnly,
+];
+
+/// Named width bands of the bottom bar. These are contract pins held by the
+/// tests below, not runtime switches: rung selection stays fit-driven
+/// (glyph-aware), because a hard cols cutoff could overflow the row on long
+/// labels or waste it on short ones. At `WIDE` the full default tile set
+/// fits its densest rung; at `NORMAL` the bar has begun shedding tiles by
+/// [`tile_importance`] but still renders whole words only.
+#[cfg(test)]
+pub const STATUS_BAR_WIDE_MIN_COLS: usize = 100;
+#[cfg(test)]
+pub const STATUS_BAR_NORMAL_MIN_COLS: usize = 70;
+
+/// Shedding order when a rung still overflows: least → most important.
+/// Quit is the first tile off the bar; Lock/Unlock survives to the very end.
+fn tile_importance(action: KeyAction) -> u8 {
+    match action {
+        KeyAction::Quit => 0,
+        KeyAction::Resize => 1,
+        KeyAction::Tmux => 2,
+        KeyAction::Search => 3,
+        KeyAction::Move => 4,
+        KeyAction::Session => 5,
+        KeyAction::Tab => 6,
+        KeyAction::Pane => 7,
+        KeyAction::Lock | KeyAction::Unlock => 8,
+    }
+}
+
 fn key_indicators(
     max_len: usize,
     keys: &[KeyShortcut],
@@ -299,48 +364,34 @@ fn key_indicators(
     separator: &str,
     mode_info: &ModeInfo,
 ) -> LinePart {
-    // Dense chips first (`g LOCK`), then classic long / short-mod / letter-only.
-    // On overflow: drop least-important tiles (Quit → … → Lock) instead of
-    // blanking the whole bar or clipping the right edge (Fork I close-out).
+    // Walk the named ladder; on overflow drop least-important tiles
+    // (Quit → … → Lock) instead of blanking the whole bar or clipping the
+    // right edge (Fork I close-out).
     let (shared_modifiers, _) = superkey(palette, separator, mode_info);
-
-    let renderers: [Box<dyn Fn(&KeyShortcut, bool) -> LinePart>; 4] = [
-        Box::new(|key, first| {
+    let render_tile = |density: TileDensity, key: &KeyShortcut, first: bool| match density {
+        TileDensity::Dense => {
             dense_mode_shortcut(key, palette, separator, &shared_modifiers, first)
-        }),
-        Box::new(|key, first| {
-            long_mode_shortcut(key, palette, separator, &shared_modifiers, first)
-        }),
-        Box::new(|key, first| {
+        },
+        TileDensity::Long => long_mode_shortcut(key, palette, separator, &shared_modifiers, first),
+        TileDensity::ShortenedModifier => {
             shortened_modifier_shortcut(key, palette, separator, &shared_modifiers, first)
-        }),
-        Box::new(|key, first| {
+        },
+        TileDensity::LetterOnly => {
             short_mode_shortcut(key, palette, separator, &shared_modifiers, first)
-        }),
-    ];
-
-    // Least → most important for dropping.
-    let importance = |action: KeyAction| -> u8 {
-        match action {
-            KeyAction::Quit => 0,
-            KeyAction::Resize => 1,
-            KeyAction::Tmux => 2,
-            KeyAction::Search => 3,
-            KeyAction::Move => 4,
-            KeyAction::Session => 5,
-            KeyAction::Tab => 6,
-            KeyAction::Pane => 7,
-            KeyAction::Lock | KeyAction::Unlock => 8,
-        }
+        },
     };
 
-    for renderer in &renderers {
+    // When even a lone tile overflows a rung, remember the smallest such
+    // rendering and keep walking down the ladder — the ladder must reach
+    // letter-only before the bar is allowed to overflow at all.
+    let mut best_effort = LinePart::default();
+    for density in TILE_DENSITY_LADDER {
         let mut active: Vec<usize> = (0..keys.len()).collect();
         loop {
             let (_, mut line_part) = superkey(palette, separator, mode_info);
             for &idx in &active {
                 let line_empty = line_part.len == 0;
-                let tile = renderer(&keys[idx], line_empty);
+                let tile = render_tile(density, &keys[idx], line_empty);
                 if tile.len == 0 {
                     continue;
                 }
@@ -354,22 +405,25 @@ fn key_indicators(
             let drop_at = active
                 .iter()
                 .copied()
-                .min_by_key(|&i| importance(keys[i].action));
+                .min_by_key(|&i| tile_importance(keys[i].action));
             match drop_at {
                 Some(i) if active.len() > 1 => {
                     active.retain(|&x| x != i);
                 },
                 _ => {
-                    // Nothing left to drop — return best effort if non-empty.
-                    if line_part.len > 0 {
-                        return line_part;
+                    // Lone tile still overflows this rung — fall through to
+                    // the next, smaller form.
+                    if line_part.len > 0
+                        && (best_effort.len == 0 || line_part.len < best_effort.len)
+                    {
+                        best_effort = line_part;
                     }
                     break;
                 },
             }
         }
     }
-    LinePart::default()
+    best_effort
 }
 
 /// Dense chip: `g LOCK` — letter + full mode name, no angle brackets.
@@ -590,25 +644,14 @@ pub fn superkey(
         return (common_modifiers, LinePart::default());
     }
 
+    // Product chrome: macOS glyphs (⌃ not "Ctrl") — same contract as
+    // session-manager help and the operator key-contract docs.
+    let mods = format_modifiers(&common_modifiers);
     let prefix_text = if mode_info.capabilities.arrow_fonts {
         // Add extra space in simplified ui
-        format!(
-            " {} + ",
-            common_modifiers
-                .iter()
-                .map(|m| m.to_string())
-                .collect::<Vec<_>>()
-                .join("-")
-        )
+        format!(" {} + ", mods)
     } else {
-        format!(
-            " {} +",
-            common_modifiers
-                .iter()
-                .map(|m| m.to_string())
-                .collect::<Vec<_>>()
-                .join("-")
-        )
+        format!(" {} +", mods)
     };
 
     let prefix = palette.superkey_prefix.paint(&prefix_text);
@@ -944,7 +987,7 @@ mod tests {
         let ret = long_mode_shortcut(&key, color, "+", &[], false);
         let ret = unstyle(ret);
 
-        assert_eq!(ret, "+ <Ctrl 0> SESSION +".to_string());
+        assert_eq!(ret, "+ <⌃0> SESSION +".to_string());
     }
 
     #[test]
@@ -1020,7 +1063,7 @@ mod tests {
         let ret = short_mode_shortcut(&key, color, "+", &[], false);
         let ret = unstyle(ret);
 
-        assert_eq!(ret, "+ Ctrl 0 +".to_string());
+        assert_eq!(ret, "+ ⌃0 +".to_string());
     }
 
     #[test]
@@ -1161,7 +1204,7 @@ mod tests {
         let ret = first_line(&mode_info, None, 500, ">");
         let ret = unstyle(ret);
 
-        assert_eq!(ret, " Ctrl + >>a PANE >>b RESIZE >>c MOVE >".to_string());
+        assert_eq!(ret, " ⌃ + >>a PANE >>b RESIZE >>c MOVE >".to_string());
     }
 
     #[test]
@@ -1182,7 +1225,7 @@ mod tests {
         let ret = first_line(&mode_info, None, 500, ">");
         let ret = unstyle(ret);
 
-        assert_eq!(ret, "Ctrl a PANE >>Ctrl b RESIZE >>c MOVE >".to_string());
+        assert_eq!(ret, "⌃a PANE >>⌃b RESIZE >>c MOVE >".to_string());
     }
 
     #[test]
@@ -1207,7 +1250,7 @@ mod tests {
 
         assert_eq!(
             ret,
-            "Ctrl a LOCK >>BACKSPACE PANE >>ENTER TAB >>TAB RESIZE >>← MOVE >".to_string()
+            "⌃a LOCK >>BACKSPACE PANE >>ENTER TAB >>TAB RESIZE >>← MOVE >".to_string()
         );
     }
 
@@ -1231,10 +1274,7 @@ mod tests {
         let ret = first_line(&mode_info, None, 50, ">");
         let ret = unstyle(ret);
 
-        assert_eq!(
-            ret,
-            " Ctrl + >>a LOCK >>b PANE >>c TAB >>e MOVE >".to_string()
-        );
+        assert_eq!(ret, " ⌃ + >>a LOCK >>b PANE >>c TAB >>e MOVE >".to_string());
     }
 
     #[test]
@@ -1255,6 +1295,100 @@ mod tests {
         let ret = first_line(&mode_info, None, 30, "");
         let ret = unstyle(ret);
 
-        assert_eq!(ret, " Ctrl + a PANE c MOVE ".to_string());
+        // Dense path keeps more tiles when labels stay compact (LOCK/PANE
+        // not "Lo"/"Pa"); RESIZE fits once the superkey prefix is a single
+        // glyph (⌃) instead of "Ctrl".
+        assert_eq!(ret, " ⌃ + a PANE b RESIZE c MOVE ".to_string());
+    }
+
+    // ─── Width-band contract pins (operator umowa 2026-08-04) ───────────
+    // Named bands instead of an implied `if len <= max_len` loop: the
+    // constants live next to TILE_DENSITY_LADDER, these tests hold them to
+    // the ladder's real output.
+
+    fn resting_tile_set() -> Vec<KeyShortcut> {
+        let key = |c: char| Some(KeyWithModifier::new(BareKey::Char(c)));
+        vec![
+            KeyShortcut::new(KeyMode::Selected, KeyAction::Lock, key('g')),
+            KeyShortcut::new(KeyMode::Unselected, KeyAction::Pane, key('p')),
+            KeyShortcut::new(KeyMode::Unselected, KeyAction::Tab, key('t')),
+            KeyShortcut::new(KeyMode::Unselected, KeyAction::Resize, key('n')),
+            KeyShortcut::new(KeyMode::Unselected, KeyAction::Move, key('h')),
+            KeyShortcut::new(KeyMode::Unselected, KeyAction::Search, key('s')),
+            KeyShortcut::new(KeyMode::Unselected, KeyAction::Session, key('o')),
+            KeyShortcut::new(KeyMode::Unselected, KeyAction::Quit, key('q')),
+        ]
+    }
+
+    fn render_tiles(max_len: usize) -> (LinePart, String) {
+        let keys = resting_tile_set();
+        let ret = key_indicators(
+            max_len,
+            &keys,
+            colored_elements(),
+            "+",
+            &ModeInfo::default(),
+        );
+        let text = unstyle(ret.clone());
+        (ret, text)
+    }
+
+    #[test]
+    fn wide_band_fits_the_full_tile_set_at_the_densest_rung() {
+        let (ret, text) = render_tiles(STATUS_BAR_WIDE_MIN_COLS);
+        assert!(ret.len <= STATUS_BAR_WIDE_MIN_COLS);
+        for label in [
+            "LOCK", "PANE", "TAB", "RESIZE", "MOVE", "SEARCH", "SESSION", "QUIT",
+        ] {
+            assert!(text.contains(label), "missing tile {label:?} in {text:?}");
+        }
+    }
+
+    #[test]
+    fn normal_band_sheds_quit_first_and_keeps_whole_words() {
+        let (ret, text) = render_tiles(STATUS_BAR_NORMAL_MIN_COLS);
+        assert!(ret.len <= STATUS_BAR_NORMAL_MIN_COLS);
+        // Quit is the least important tile — first off the bar…
+        assert!(!text.contains("QUIT"), "QUIT should shed first: {text:?}");
+        // …while the remaining tiles stay full words (dense rung, no "Lo").
+        for label in ["LOCK", "PANE", "TAB", "SESSION"] {
+            assert!(text.contains(label), "missing tile {label:?} in {text:?}");
+        }
+    }
+
+    #[test]
+    fn dense_band_reaches_letter_only_instead_of_clipping() {
+        // Narrower than a lone dense tile ("g LOCK +" = 8): the ladder must
+        // fall through to a letter form, not return an overflowing label.
+        let (ret, text) = render_tiles(6);
+        assert!(ret.len <= 6, "bar overflowed: {} > 6 ({text:?})", ret.len);
+        assert!(
+            !text.contains("LOCK"),
+            "label should have degraded: {text:?}"
+        );
+        assert!(text.contains('g'), "lock key must survive: {text:?}");
+    }
+
+    #[test]
+    fn ladder_never_overflows_above_the_letter_floor() {
+        for width in 6..=120 {
+            let (ret, text) = render_tiles(width);
+            assert!(
+                ret.len <= width,
+                "overflow at width {width}: len {} ({text:?})",
+                ret.len
+            );
+        }
+    }
+
+    #[test]
+    fn below_the_letter_floor_best_effort_is_the_smallest_form() {
+        // Nothing fits in 1 column; the best effort must be the smallest
+        // rendering the ladder reached (letter-only Lock), never a dense
+        // label the terminal would clip mid-word.
+        let (ret, text) = render_tiles(1);
+        assert!(ret.len > 0, "resting bar may not go fully blank");
+        assert!(!text.contains("LOCK"), "dense overflow leaked: {text:?}");
+        assert!(text.contains('g'), "lock key must survive: {text:?}");
     }
 }

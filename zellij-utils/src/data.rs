@@ -2296,6 +2296,10 @@ impl LayoutInfo {
         // resolution below will correctly handle this.
         // The docs promise this behavior, so we have to abide:
         // <https://zellij.dev/documentation/layouts.html#layout-default-directory>
+        // Only when NOTHING is configured and no user default.kdl exists does the
+        // implicit fallback land on the guided "vibecrafted" operator entrypoint
+        // instead of the bare "default" chrome (see the builtin fallback below).
+        let is_implicit_default = maybe_layout_path.is_none();
         let layout_path = maybe_layout_path
             .clone()
             .unwrap_or(PathBuf::from("default"));
@@ -2330,8 +2334,15 @@ impl LayoutInfo {
                     ));
                 }
             }
-            // Assume a builtin layout by default
-            Some(LayoutInfo::BuiltIn(layout_path.display().to_string()))
+            // Assume a builtin layout by default. An implicit (unconfigured)
+            // default resolves to the guided operator entrypoint; an explicit
+            // `default_layout "default"` keeps the bare chrome. A user's own
+            // layouts/default.kdl (checked above) still wins.
+            if is_implicit_default {
+                Some(LayoutInfo::BuiltIn("vibecrafted".to_owned()))
+            } else {
+                Some(LayoutInfo::BuiltIn(layout_path.display().to_string()))
+            }
         }
     }
 }
@@ -2486,6 +2497,10 @@ pub struct PaneInfo {
 pub struct PaneListEntry {
     #[serde(flatten)]
     pub pane_info: PaneInfo,
+    /// The WASM runtime serving this plugin pane. Projector panes keep their
+    /// own pane `id` while sharing this runtime identity with their authority.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugin_runtime_id: Option<u32>,
     pub tab_id: usize,
     pub tab_position: usize,
     pub tab_name: String,

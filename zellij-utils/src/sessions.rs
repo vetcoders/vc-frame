@@ -378,7 +378,7 @@ pub fn get_active_session() -> ActiveSession {
     }
 }
 
-pub fn kill_session(name: &str) {
+pub fn kill_session(name: &str, force: bool) {
     if let Err(error) = validate_session_name(name) {
         eprintln!("{error}");
         process::exit(1);
@@ -399,14 +399,31 @@ pub fn kill_session(name: &str) {
     match shutdown_result {
         Ok(Ok(())) => {},
         Ok(Err(error)) => {
-            eprintln!("Failed to kill session {name}: {error}");
-            process::exit(1);
+            // Dead transport: the server is already gone and only its socket
+            // remains. With --force the kill is idempotent — report success
+            // and clean the stale socket so the name stops resolving.
+            let already_dead = matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            );
+            if force && already_dead {
+                let _ = std::fs::remove_file(path);
+                eprintln!("Session {name} was already dead — cleaned up its stale socket.");
+            } else {
+                eprintln!("Failed to kill session {name}: {error}");
+                process::exit(1);
+            }
         },
         Err(_) => {
             eprintln!(
                 "Session {name} did not acknowledge shutdown within {:.1}s",
                 KILL_SESSION_ACK_TIMEOUT.as_secs_f64()
             );
+            if force {
+                eprintln!(
+                    "--force cannot reach an unresponsive server; find it with: ps aux | grep 'vc-frame --server' | grep '{name}'"
+                );
+            }
             process::exit(1);
         },
     }

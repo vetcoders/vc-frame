@@ -48,15 +48,13 @@ configuration\.
 
 .SH "LAYOUTS"
 .PP
-Layouts are \f[B]KDL\fP files which vc\-frame can load on startup when the
-\fI\-\-layout\fP flag is provided\.
-YAML layout/config conversion (\f[CR]convert\-config\fP, \f[CR]convert\-layout\fP,
-\f[CR]convert\-theme\fP) has been removed — KDL is the only supported
+Layouts are \fBKDL\fP files which vc\-frame can load on startup when the \fI\-\-layout\fP
+flag is provided\. YAML layout/config conversion (`\f[CR]convert\-config\fP`,
+`\f[CR]convert\-layout\fP`, `\f[CR]convert\-theme\fP`) has been removed \-\- KDL is the only supported
 configuration format\.
 .PP
-By default vc\-frame will load a layout called \f[CR]default\fP (file
-\f[CR]default\.kdl\fP), but this can be changed with the
-\f[CR]default_layout "name"\fP configuration option\.
+By default vc\-frame will load a layout called `\f[CR]default\fP` (file `\f[CR]default\.kdl\fP`),
+but this can be changed with the `\f[CR]default_layout "name"\fP` configuration option\.
 .PP
 For example a file like this:
 .RS
@@ -75,37 +73,47 @@ layout {
 .RE
 .PP
 will tell vc\-frame to create this layout:
-.IP
+.RS
+.PP
 .nf
-┌─────┬─────┐
-│     │     │
-├─────┤     │
-│     │     │
-└─────┴─────┘
++\-\-\-\-\-+\-\-\-\-\-+|     |     |+\-\-\-\-\-+     ||     |     |+\-\-\-\-\-+\-\-\-\-\-+
 .fi
+.RE
+
 .SS "CREATING LAYOUTS"
 .PP
-A layout file is a nested tree of \f[CR]pane\fP nodes\.
-Each node describes either a terminal pane (leaf), a split container, or a
-plugin pane\.
+A layout file is a nested tree of `\f[CR]pane\fP` nodes\. Each node describes either a
+terminal pane (leaf), a split container, or a plugin pane\.
 .PP
 Common attributes:
-.IP \(bu 2
-\fBsplit_direction="horizontal|vertical"\fP — how children are laid out\.
-.IP \(bu 2
-\fBsize=<n>\fP — fixed size in rows/columns, or a share of the parent\.
-.IP \(bu 2
-\fBplugin location="…"\fP — load a compiled vc\-frame plugin into the pane
-(see PLUGINS)\. Built\-in plugins use the \f[CR]vc\-frame:\fP / short\-name form\.
-.IP \(bu 2
-\fBcommand="…" / args "…"\fP — run a command in the pane instead of a shell\.
-.IP \(bu 2
-\fBborderless true|false\fP — hide pane frames for chrome rails\.
+.RS
+.Bl
+.IP \(bu 4
+\fBsplit_direction="horizontal|vertical"\fP \-\- how children are laid out\.
+.El
+.Bl
+.IP \(bu 4
+\fBsize=<n>\fP \-\- fixed size in rows/columns, or a share of the parent\.
+.El
+.Bl
+.IP \(bu 4
+\fBplugin location="\.\.\."\fP \-\- load a compiled vc\-frame plugin into the pane
+(see PLUGINS)\. Built\-in plugins use the `\f[CR]vc\-frame:\fP` / short\-name form\.
+.El
+.Bl
+.IP \(bu 4
+\fBcommand="\.\.\." / args "\.\.\."\fP \-\- run a command in the pane instead of a shell\.
+.El
+.Bl
+.IP \(bu 4
+\fBborderless true|false\fP \-\- hide pane frames for chrome rails\.
+.El
+.RE
 .PP
 Full layout syntax is documented upstream at
 https://zellij\.dev/documentation/layouts\.html (KDL) and in the in\-repo layout
-fixtures under \f[CR]zellij\-utils/assets/layouts/\fP\.
-.PP
+fixtures under `\f[CR]zellij\-utils/assets/layouts/\fP`\.
+
 .SH "KEYBINDINGS"
 .PP
 vc\-frame comes with a default set of keybindings which aims to fit as many users
@@ -124,9 +132,9 @@ keybinds {
 .fi
 .RE
 .PP
-where "normal" stands for a mode name (see MODES section), "action" part
-specifies the actions to be executed by vc\-frame (see ACTIONS section) and "key"
-is used to list  keys or key combinations bound to given actions (see KEYS)\.
+where "normal" stands for a mode name (see MODES section), the bind body lists
+the actions to be executed by vc\-frame (see ACTIONS section), and the bind key
+is the key or key combination\.
 .PP
 The default keybinds can be unbound either for a specific mode, or for every mode\.
 It supports either a list of `\f[CR]keybinds\fP`, or a bool indicating that every keybind

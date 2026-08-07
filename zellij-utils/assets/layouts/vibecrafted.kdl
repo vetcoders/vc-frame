@@ -4,21 +4,25 @@
 //   "Start here"  — first-run map (about mission-control): chrome, rail, keys
 //   "Shell"       — work shell with banner + zsh (not a silent suspended pane)
 //
-// Contract: every tab keeps the left Sessions rail (default_tab_template).
+// Contract: Screen owns one session canvas; tab templates contain content only.
 //
 // 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
 layout {
-    default_tab_template {
+    session_layer {
         pane size=1 borderless=true {
             plugin location="compact-bar" {
+                session_canvas true
+                session_canvas_kind "compact-bar"
                 brand_text " 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. "
                 // 🚥 zone: clear the macOS traffic lights in the native window
-                left_inset "9"
+                left_inset "6"
             }
         }
         pane split_direction="vertical" {
             pane size=24 borderless=true {
                 plugin location="session-manager" {
+                    session_canvas true
+                    session_canvas_kind "session-manager"
                     rail true
                     pane_title "Sessions"
                 }
@@ -26,8 +30,17 @@ layout {
             pane { children; }
         }
         pane size=1 borderless=true {
-            plugin location="status-bar"
+            plugin location="status-bar" {
+                session_canvas true
+                session_canvas_kind "status-bar"
+            }
         }
+    }
+
+    // Content-only. The parser mounts this inside session_layer without
+    // copying chrome ownership into the tab contract.
+    default_tab_template {
+        pane { children; }
     }
 
     tab name="Start here" focus=true {
@@ -42,7 +55,7 @@ layout {
     tab name="Shell" hide_floating_panes=true {
         // Banner then interactive zsh — wakes immediately (no suspended Enter void).
         pane command="bash" name="Shell" {
-            args "-lc" "printf '\\n'; printf '  ┌────────────────────────────────────────────────────────────┐\\n'; printf '  │  VIBECRAFTED  ·  SHELL TAB                                 │\\n'; printf '  ├────────────────────────────────────────────────────────────┤\\n'; printf '  │  This is your work shell (not the Guide).                  │\\n'; printf '  │                                                            │\\n'; printf '  │  First commands:                                           │\\n'; printf '  │    vibecrafted start     open / attach operator flow       │\\n'; printf '  │    vibecrafted help      list CLI surfaces                 │\\n'; printf '  │                                                            │\\n'; printf '  │  Chrome (always on screen):                                │\\n'; printf '  │    LEFT  SESSIONS rail — your session block is lit         │\\n'; printf '  │    TOP   ◉ marks your tab · ⊝ LCK / ▷ NRM mode chip        │\\n'; printf '  │    Cmd+←→ tabs · Cmd+↑↓ sessions — works even in LCK       │\\n'; printf '  │    Ctrl+arrows mirror outside LCK · Alt = writing layer    │\\n';printf '  │    Alt+e  Command Composer — draft in $VC_COMPOSER/$EDITOR │\\n'; printf '  │    Ctrl+t then 1  back to the Guide map                    │\\n'; printf '  └────────────────────────────────────────────────────────────┘\\n'; printf '\\n'; exec zsh -l"
+            args "-lc" "printf '\\n'; printf '  ┌────────────────────────────────────────────────────────────┐\\n'; printf '  │  VIBECRAFTED  ·  SHELL TAB                                 │\\n'; printf '  ├────────────────────────────────────────────────────────────┤\\n'; printf '  │  This is your work shell (not the Guide).                  │\\n'; printf '  │                                                            │\\n'; printf '  │  First commands:                                           │\\n'; printf '  │    vibecrafted start     open / attach operator flow       │\\n'; printf '  │    vibecrafted help      list CLI surfaces                 │\\n'; printf '  │                                                            │\\n'; printf '  │  Chrome (always on screen):                                │\\n'; printf '  │    LEFT  SESSIONS rail — your session block is lit         │\\n'; printf '  │    TOP   ◉ marks your tab · ⊝ LCK / ▷ NRM mode chip        │\\n'; printf '  │    Cmd+←→ tabs · Cmd+↑↓ sessions — works even in LCK       │\\n'; printf '  │    Ctrl+arrows mirror outside LCK · Alt = writing layer    │\\n';printf '  │    Cmd+E  Command Composer — draft · ? shows help          │\\n'; printf '  │    Ctrl+t then 1  back to the Guide map                    │\\n'; printf '  └────────────────────────────────────────────────────────────┘\\n'; printf '\\n'; exec zsh -l"
         }
     }
 

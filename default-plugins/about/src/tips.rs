@@ -8,7 +8,7 @@ use crate::pages::{
     VC_FRAME_REPOSITORY_URL,
 };
 
-pub const MAX_TIP_INDEX: usize = 11;
+pub const MAX_TIP_INDEX: usize = 12;
 
 impl Page {
     pub fn new_tip_screen(
@@ -40,6 +40,8 @@ impl Page {
             Page::tip_11(link_executable)
         } else if tip_index == 11 {
             Page::tip_12(link_executable, base_mode)
+        } else if tip_index == 12 {
+            Page::tip_13(link_executable)
         } else {
             Page::tip_1(link_executable)
         }
@@ -679,6 +681,44 @@ impl Page {
                         link_executable.clone(),
                     )),
             ])])
+            .with_paragraph(vec![ComponentLine::new(vec![
+                ActiveComponent::new(TextOrCustomRender::Text(support_the_developer_text())),
+                ActiveComponent::new(TextOrCustomRender::Text(sponsors_link_text_unselected()))
+                    .with_hover(TextOrCustomRender::CustomRender(
+                        Box::new(sponsors_link_text_selected),
+                        Box::new(sponsors_link_text_selected_len),
+                    ))
+                    .with_left_click_action(ClickAction::new_open_link(
+                        VC_FRAME_REPOSITORY_URL.to_owned(),
+                        link_executable.clone(),
+                    )),
+            ])])
+            .with_help(Box::new(|hovering_over_link, _menu_item_is_selected| {
+                tips_help_text(hovering_over_link)
+            }))
+    }
+    pub fn tip_13(link_executable: Rc<RefCell<String>>) -> Page {
+        Page::new()
+            .main_screen()
+            .with_title(Text::new("vc-frame Tip #13").color_range(0, ..))
+            .with_paragraph(vec![
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        "Cmd+E opens the Command Composer — draft long commands in a real editor.",
+                    )
+                    .color_range(3, ..=4),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("Inside it, press ? for a built-in cheat sheet (q closes it).")
+                        .color_range(3, 17..=17),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        ":wq sends the text to your shell UNEXECUTED — you press Enter yourself.",
+                    )
+                    .color_range(2, ..=2),
+                ))]),
+            ])
             .with_paragraph(vec![ComponentLine::new(vec![
                 ActiveComponent::new(TextOrCustomRender::Text(support_the_developer_text())),
                 ActiveComponent::new(TextOrCustomRender::Text(sponsors_link_text_unselected()))

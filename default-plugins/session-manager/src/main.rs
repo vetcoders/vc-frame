@@ -40,10 +40,25 @@ enum ActiveScreen {
 
 const SETTLEMENT_COUNTS_PIPE: &str = "vc_settlement_counts";
 const SETTLEMENT_HISTORY_SCHEMA: &str = "vibecrafted.settlement-history.v1";
+const VC_CHROME_VISIBILITY_MESSAGE: &str = "vc.status-bar-visibility.v1";
+const VC_CHROME_HEARTBEAT_MESSAGE: &str = "vc.fleet-live-count.v1";
 // Guardian republishes at least every five seconds. Three missed refresh
 // windows turn exact counts into lower bounds instead of letting a dead
 // producer leave stale values looking authoritative forever.
 const SETTLEMENT_FEED_STALE_AFTER_TICKS: u8 = 15;
+
+// Floor for a renderable main-menu frame: anything below is a transient
+// startup event, not a legal surface. The menu needs at least a banner row
+// plus a content row; kept far below the comfortable chrome minimum
+// (tools/repro_chrome.py MIN_COLUMNS) so legal small panes still render.
+// The rail path has its own zero-dimension guard and legally lives at
+// cols 6-10 — these thresholds must never apply to it.
+const MIN_MENU_RENDER_ROWS: usize = 2;
+const MIN_MENU_RENDER_COLS: usize = 4;
+
+fn menu_dimensions_are_transient(rows: usize, cols: usize) -> bool {
+    rows < MIN_MENU_RENDER_ROWS || cols < MIN_MENU_RENDER_COLS
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SettlementPipeOutcome {
@@ -230,16 +245,22 @@ impl ZellijPlugin for State {
             self.active_screen = ActiveScreen::AttachToSession;
         }
         self.single_screen_state.is_welcome_screen = self.is_welcome_screen;
-        self.is_visible = true;
-        subscribe(&[
+        // Rail instances are per-tab chrome and start parked. Screen wakes
+        // only the exact plugin/client target that is actually visible.
+        self.is_visible = !self.is_rail;
+        let mut subscriptions = vec![
             EventType::ModeUpdate,
-            EventType::SessionUpdate,
             EventType::Key,
             EventType::Mouse,
             EventType::RunCommandResult,
             EventType::Timer,
             EventType::Visible,
-        ]);
+            EventType::CustomMessage,
+        ];
+        if self.is_visible {
+            subscriptions.push(EventType::SessionUpdate);
+        }
+        subscribe(&subscriptions);
         let pane_title = if self.is_rail {
             configuration
                 .get("pane_title")
@@ -257,8 +278,10 @@ impl ZellijPlugin for State {
                 .unwrap_or_else(|| "Session Manager".to_owned())
         };
         rename_plugin_pane(get_plugin_ids().plugin_id, pane_title);
-        self.refresh_session_list();
-        if !self.is_welcome_screen {
+        if self.is_visible {
+            self.refresh_session_list();
+        }
+        if self.is_visible && !self.is_welcome_screen {
             self.arm_refresh_timer();
         }
     }
@@ -339,6 +362,9 @@ impl ZellijPlugin for State {
                 self.arm_refresh_timer();
             },
             Event::Visible(is_visible) => {
+                if self.is_rail {
+                    return false;
+                }
                 let was_visible = self.is_visible;
                 self.is_visible = is_visible;
                 if is_visible && !was_visible {
@@ -352,6 +378,41 @@ impl ZellijPlugin for State {
                     // server does not serialize the snapshot into their wasm
                     // memory every second.
                     unsubscribe(&[EventType::SessionUpdate]);
+                }
+            },
+            Event::CustomMessage(message, payload)
+                if self.is_rail && message == VC_CHROME_VISIBILITY_MESSAGE =>
+            {
+                match payload.as_str() {
+                    "true" => {
+                        let was_visible = self.is_visible;
+                        self.is_visible = true;
+                        if !was_visible {
+                            subscribe(&[EventType::SessionUpdate]);
+                            if self.refresh_session_list() {
+                                should_render = true;
+                            }
+                            self.arm_refresh_timer();
+                        }
+                    },
+                    "false" => {
+                        self.is_visible = false;
+                        unsubscribe(&[EventType::SessionUpdate]);
+                    },
+                    _ => {},
+                }
+            },
+            Event::CustomMessage(message, _payload)
+                if self.is_rail && message == VC_CHROME_HEARTBEAT_MESSAGE =>
+            {
+                let was_visible = self.is_visible;
+                self.is_visible = true;
+                if !was_visible {
+                    subscribe(&[EventType::SessionUpdate]);
+                    if self.refresh_session_list() {
+                        should_render = true;
+                    }
+                    self.arm_refresh_timer();
                 }
             },
             Event::ModeUpdate(mode_info) => {
@@ -423,6 +484,14 @@ impl ZellijPlugin for State {
             if let Some(error) = self.error.as_ref() {
                 render_error(error, rows, cols, 0, 0);
             }
+            return;
+        }
+
+        // Transient initial resize events arrive with rows/cols at or near
+        // zero before the real layout lands; painting the main menu on those
+        // frames is what makes the view visibly jump at startup. The rail
+        // branch above keeps its own long-standing zero-dimension guard.
+        if menu_dimensions_are_transient(rows, cols) {
             return;
         }
 
@@ -673,7 +742,68 @@ fn rail_ordinal_key_to_index(character: char) -> Option<usize> {
     }
 }
 
-fn format_session_rail_entry(session: &SessionUiInfo, ordinal: usize) -> String {
+/// The rail reads its allocated width and picks one of three faces
+/// (audit topology 2026-08-05). Sharp thresholds, no hysteresis — the
+/// operator resizes the panel, the runtime never does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RailWidthMode {
+    /// Full render: `SESSIONS N · name` header, full names, counters.
+    /// The default operator layout allocates `size=24`, so Wide is the
+    /// byte-for-byte baseline.
+    Wide,
+    /// Header drops the current-session anchor, names truncate through
+    /// `fit_rail_line`, the ◉/○ indicators stay.
+    Normal,
+    /// Iconic strip: ordinal + state indicator only, ultra-short header,
+    /// no long text — built at row level, never by truncating prose into
+    /// mincemeat.
+    Dense,
+}
+
+/// Wide is today's baseline: the default operator layout gives the rail 24
+/// columns (see compact-bar/src/line.rs rail note).
+const RAIL_WIDE_MIN_COLS: usize = 24;
+/// Below this the header/name mix stops being readable and the rail switches
+/// to the iconic strip.
+const RAIL_NORMAL_MIN_COLS: usize = 14;
+
+impl RailWidthMode {
+    fn from_cols(cols: usize) -> Self {
+        if cols >= RAIL_WIDE_MIN_COLS {
+            RailWidthMode::Wide
+        } else if cols >= RAIL_NORMAL_MIN_COLS {
+            RailWidthMode::Normal
+        } else {
+            RailWidthMode::Dense
+        }
+    }
+}
+
+/// Header text per width mode. Wide anchors "you are here" with the current
+/// session name; Normal keeps the count only; Dense is an ultra-short badge.
+fn rail_header_text(
+    mode: RailWidthMode,
+    session_count: usize,
+    current_session_name: Option<&str>,
+) -> String {
+    match mode {
+        RailWidthMode::Wide => {
+            let mut text = format!("SESSIONS {}", session_count);
+            if let Some(name) = current_session_name {
+                text.push_str(&format!(" · {}", sanitize_display_label(name)));
+            }
+            text
+        },
+        RailWidthMode::Normal => format!("SESSIONS {}", session_count),
+        RailWidthMode::Dense => format!("S{}", session_count),
+    }
+}
+
+fn format_session_rail_entry(
+    session: &SessionUiInfo,
+    ordinal: usize,
+    mode: RailWidthMode,
+) -> String {
     // The fisheye is the one "you are here" glyph across the whole chrome —
     // the same ◉/○ pair the tab chips carry.
     let status = if session.is_current_session {
@@ -681,7 +811,61 @@ fn format_session_rail_entry(session: &SessionUiInfo, ordinal: usize) -> String 
     } else {
         "○"
     };
-    format!("{:02} {} {}", ordinal, status, session.name)
+    if mode == RailWidthMode::Dense {
+        // Iconic row: ordinal keeps the 1..9/0 hotkey affordance visible,
+        // the fisheye carries the state — no name to shred.
+        return format!("{:02} {}", ordinal, status);
+    }
+    // Sanitize the name *before* pad/fit so control bytes and multi-space
+    // runs cannot change display width frame-to-frame (rail flicker).
+    format!(
+        "{:02} {} {}",
+        ordinal,
+        status,
+        sanitize_display_label(&session.name)
+    )
+}
+
+/// Strip control/line-break characters and collapse internal whitespace so a
+/// rail/help row paints at a stable grid width every tick.
+fn sanitize_display_label(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut prev_space = false;
+    for ch in input.chars() {
+        // Newlines/tabs/other whitespace → single space (never a hard break
+        // that would reflow the one-row rail cell). Other controls vanish.
+        let as_space = ch.is_whitespace()
+            || ch == '\n'
+            || ch == '\r'
+            || ch == '\t'
+            || ch == '\u{2028}'
+            || ch == '\u{2029}';
+        if as_space {
+            if !prev_space && !out.is_empty() {
+                out.push(' ');
+                prev_space = true;
+            }
+            continue;
+        }
+        if ch.is_control() {
+            continue;
+        }
+        prev_space = false;
+        out.push(ch);
+    }
+    // Trim trailing space from the collapse pass.
+    while out.ends_with(' ') {
+        out.pop();
+    }
+    out
+}
+
+/// Kill/delete contract for laptops (macOS): ⌥⌫ is primary. Forward-delete
+/// (Del) remains accepted for full keyboards but is never advertised in help
+/// — it is scarce on MacBooks and steals sequences under some hosts.
+fn is_kill_or_delete_key(key: &KeyWithModifier) -> bool {
+    (key.bare_key == BareKey::Backspace && key.has_only_modifiers(&[KeyModifier::Alt]))
+        || (key.bare_key == BareKey::Delete && key.has_no_modifiers())
 }
 
 /// Status buckets finished runs are transferred into.
@@ -706,11 +890,6 @@ const RAIL_BUCKETS: [BucketKind; 3] = [
     BucketKind::NeedsAttention,
 ];
 
-/// Chrome tabs of the default layout (`vibecrafted.kdl`): present in every
-/// session created without an explicit layout, including bucket sessions. Kept
-/// in lockstep with the layout by `chrome_tab_names_match_the_default_layout`.
-const CHROME_TAB_NAMES: [&str; 2] = ["Start here", "Shell"];
-
 /// Char offset of `needle` in `haystack`, searching from char offset `from`.
 /// Text::color_range speaks char offsets, while `str::find` returns bytes —
 /// this bridges the two for rows containing multi-byte glyphs (`◉`, `·`).
@@ -733,12 +912,12 @@ impl BucketKind {
             BucketKind::NeedsAttention => "Needs attention",
         }
     }
-    /// Dense rail label — the operator-facing short form (close-out Fork IV).
-    fn short_rail_label(&self) -> &'static str {
+    /// Squared-letter glyph of the dense f/x/n status line (Fork IV).
+    fn glyph(&self) -> &'static str {
         match self {
-            BucketKind::Finalized => "final",
-            BucketKind::Failed => "fail",
-            BucketKind::NeedsAttention => "needs",
+            BucketKind::Finalized => "🅵",
+            BucketKind::Failed => "🆇",
+            BucketKind::NeedsAttention => "🅽",
         }
     }
     /// Hotkey, deliberately outside the '0'-'9' range the session ordinals use.
@@ -825,46 +1004,41 @@ impl SessionRailRow {
     }
 }
 
-/// Same rhythm as working-session rows (` 1 * name`): hotkey slot + status +
-/// immutable historical count + label. Viewer tabs are deliberately demoted
-/// to the explicit `tN` suffix: they are useful diagnostics, never f/x/n truth.
-fn format_bucket_rail_entry(
-    bucket: BucketKind,
-    // Open-now count from settlement latest_by_run (not all-time history).
-    live_count: Option<u64>,
-    // True when the settlement feed is complete and not degraded.
-    truth_is_exact: bool,
-    is_current_session: bool,
-) -> String {
-    let status = if is_current_session { "◉" } else { "○" };
-    // Keep the accent glyph at CHAR index 3 (` f ○ …` / ` f ◉ …`) so the
-    // rail colour pass can share the session column without measuring.
-    // Primary number is *open now* (latest_by_run), never the append-only
-    // historical mountain that painted ≥118 / ≥435 / ≥2247 forever.
-    // Degraded / incomplete feed keeps the number but marks it `~`.
-    let count = match live_count {
-        Some(n) if truth_is_exact => format!("{n:>3}"),
+/// One count cell of the dense f/x/n line (Fork IV). Open-now truth only:
+/// exact number, `~n` when the feed is degraded/incomplete, `999+` past the
+/// display cap, and `…` when there is no feed at all — never a placeholder
+/// digit and never a clipped one.
+fn format_bucket_count(live_count: Option<u64>, truth_is_exact: bool) -> String {
+    const DISPLAY_CAP: u64 = 999;
+    match live_count {
+        Some(n) if n > DISPLAY_CAP => format!("{DISPLAY_CAP}+"),
+        Some(n) if truth_is_exact => n.to_string(),
         Some(n) => format!("~{n}"),
-        None => "  ?".to_owned(),
-    };
-    format!(
-        " {} {} {} · {}",
-        bucket.hotkey(),
-        status,
-        count,
-        bucket.short_rail_label(),
-    )
+        None => "…".to_owned(),
+    }
 }
 
-fn format_process_tab_rail_entry(tab: &TabUiInfo) -> String {
+/// Fork IV: the three drawer rows collapse into ONE dense status line —
+/// ` 🅵118 · 🆇435 · 🅽999+` — instead of a three-row `f/x/n` block.
+fn format_bucket_summary_entry(segments: &[String]) -> String {
+    format!(" {}", segments.join(" · "))
+}
+
+fn format_process_tab_rail_entry(tab: &TabUiInfo, mode: RailWidthMode) -> String {
     let activity = if tab.is_active { "◉" } else { "·" };
-    let mut text = format!("   {} {}", activity, tab.name);
-    if let Some(process_label) = tab.primary_process_label()
-        && process_label != tab.name
-        && !process_label.contains(&tab.name)
-    {
-        text.push_str(" · ");
-        text.push_str(process_label);
+    if mode == RailWidthMode::Dense {
+        // Iconic strip: the indented activity dot alone carries the state —
+        // truncating "name · command +N" into mincemeat is not an option.
+        return format!("   {}", activity);
+    }
+    let tab_name = sanitize_display_label(&tab.name);
+    let mut text = format!("   {} {}", activity, tab_name);
+    if let Some(process_label) = tab.primary_process_label() {
+        let process_label = sanitize_display_label(process_label);
+        if process_label != tab_name && !process_label.contains(&tab_name) {
+            text.push_str(" · ");
+            text.push_str(&process_label);
+        }
     }
     let additional_processes = tab.live_process_count().saturating_sub(1);
     if additional_processes > 0 {
@@ -939,6 +1113,87 @@ fn working_session_indices(sessions: &[SessionUiInfo]) -> Vec<usize> {
         .collect()
 }
 
+/// Pure policy for f/x/n open — unit-tested without WASM I/O.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BucketOpenAction {
+    Stay,
+    SwitchExisting,
+    /// Floating control-plane / reports read — never create a god session.
+    ReadSurface,
+}
+
+fn bucket_open_action(drawer_session_exists: bool, is_current: bool) -> BucketOpenAction {
+    if drawer_session_exists && is_current {
+        BucketOpenAction::Stay
+    } else if drawer_session_exists {
+        BucketOpenAction::SwitchExisting
+    } else {
+        BucketOpenAction::ReadSurface
+    }
+}
+
+fn settlement_read_coordinates() -> Option<FloatingPaneCoordinates> {
+    FloatingPaneCoordinates::new(
+        Some("12%".to_owned()),
+        Some("12%".to_owned()),
+        Some("76%".to_owned()),
+        Some("70%".to_owned()),
+        Some(false),
+        None,
+    )
+}
+
+/// Floating diagnostic: control plane + loctree reports. No new Zellij session.
+fn open_settlement_read_surface(bucket: BucketKind) {
+    let letter = match bucket {
+        BucketKind::Finalized => "f",
+        BucketKind::Failed => "x",
+        BucketKind::NeedsAttention => "n",
+    };
+    // POSIX sh only (dash-clean). Prints settlement truth then waits.
+    let script = format!(
+        r#"b="{letter}"
+printf '\n  VIBECRAFTED · settlement %s (read-only)\n' "$b"
+printf '  No god-session created. Counts come from the control plane feed.\n\n'
+shown=0
+for base in \
+  "http://127.0.0.1:3024" \
+  "http://127.0.0.1:3025" \
+  "http://100.82.232.70:3025"
+do
+  if command -v curl >/dev/null 2>&1 \
+    && curl -sf --max-time 2 "$base/api/control/state" 2>/dev/null \
+    | head -c 6000
+  then
+    printf '\n  [eye] %s\n' "$base"
+    shown=1
+    break
+  fi
+done
+if [ "$shown" -eq 0 ]; then
+  printf '  control plane not reachable on 3024/3025 — try: vibecrafted server status\n'
+fi
+printf '\n  loctree-suite reports (if present):\n'
+for d in \
+  "${{HOME}}/vc-workspace/vetcoders/loctree-suite/reports" \
+  "${{HOME}}/.vibecrafted/artifacts"
+do
+  if [ -d "$d" ]; then
+    ls -1t "$d" 2>/dev/null | head -12 | sed 's/^/    /'
+    shown=1
+  fi
+done
+if [ "$shown" -eq 0 ]; then
+  printf '    (none found)\n'
+fi
+printf '\n  [enter to close]\n'
+read -r _ || true
+"#
+    );
+    let command = CommandToRun::new_with_args("sh", vec!["-c", &script]);
+    let _ = open_command_pane_floating(command, settlement_read_coordinates(), BTreeMap::new());
+}
+
 /// Resolve an ordinal keypress against the *working* sessions, so the buckets
 /// sitting at the bottom of the rail do not shift what `3` means.
 fn rail_ordinal_target(sessions: &[SessionUiInfo], character: char) -> Option<usize> {
@@ -950,13 +1205,14 @@ fn session_rail_rows_with_truth(
     sessions: &[SessionUiInfo],
     settlement_history: Option<&SettlementHistory>,
     settlement_feed_degraded: bool,
+    mode: RailWidthMode,
 ) -> Vec<SessionRailRow> {
     let mut rows = vec![];
     for (ordinal, session_index) in working_session_indices(sessions).into_iter().enumerate() {
         let session = &sessions[session_index];
         rows.push(SessionRailRow {
             kind: SessionRailRowKind::Session(session_index),
-            text: format_session_rail_entry(session, ordinal + 1),
+            text: format_session_rail_entry(session, ordinal + 1, mode),
         });
         rows.extend(
             session
@@ -968,7 +1224,7 @@ fn session_rail_rows_with_truth(
                         session_index,
                         tab_position: tab.position,
                     },
-                    text: format_process_tab_rail_entry(tab),
+                    text: format_process_tab_rail_entry(tab, mode),
                 }),
         );
     }
@@ -982,7 +1238,7 @@ fn session_rail_rows_with_truth(
 
 #[cfg(test)]
 fn session_rail_rows(sessions: &[SessionUiInfo]) -> Vec<SessionRailRow> {
-    session_rail_rows_with_truth(sessions, None, false)
+    session_rail_rows_with_truth(sessions, None, false, RailWidthMode::Wide)
 }
 
 /// The pinned tail of the rail. Always all three buckets, whether or not their
@@ -993,48 +1249,36 @@ fn bucket_rail_rows(
     settlement_history: Option<&SettlementHistory>,
     settlement_feed_degraded: bool,
 ) -> Vec<SessionRailRow> {
-    RAIL_BUCKETS
+    // Fork IV: one dense status line for all three buckets, pinned to the
+    // rail tail. Open-now counts (latest_by_run), never the append-only
+    // historical mountain that painted ≥118 / ≥435 / ≥2247 forever.
+    let truth_is_exact =
+        !settlement_feed_degraded && settlement_history.is_some_and(SettlementHistory::is_complete);
+    let segments: Vec<String> = RAIL_BUCKETS
         .into_iter()
         .map(|bucket| {
-            let session_index = sessions
-                .iter()
-                .position(|session| session.name == bucket.session_name());
-            let session = session_index.map(|index| &sessions[index]);
-            // The bucket session remains the navigation target. Its non-chrome
-            // tab inventory is shown only as secondary `tN` telemetry: tabs can
-            // disappear, be finalized elsewhere, or represent stale viewers.
-            let viewer_tabs = session
-                .map(|session| {
-                    session
-                        .tabs
-                        .iter()
-                        .filter(|tab| !CHROME_TAB_NAMES.contains(&tab.name.as_str()))
-                        .count()
-                })
-                .unwrap_or(0);
-            // Open-now counts (latest_by_run), not all-time historical_transitions.
             let live_count =
                 settlement_history.map(|snapshot| snapshot.latest_by_run.historical_count(bucket));
-            let truth_is_exact = !settlement_feed_degraded
-                && settlement_history.is_some_and(SettlementHistory::is_complete);
-            let is_current_session = session.is_some_and(|session| session.is_current_session);
-            // viewer_tabs stays as secondary diagnostic in the session itself;
-            // it no longer crowds the dense f/x/n line.
-            let _ = viewer_tabs;
-            SessionRailRow {
-                kind: SessionRailRowKind::Bucket {
-                    bucket,
-                    session_index,
-                },
-                text: format_bucket_rail_entry(
-                    bucket,
-                    live_count,
-                    truth_is_exact,
-                    is_current_session,
-                ),
-            }
+            format!(
+                "{}{}",
+                bucket.glyph(),
+                format_bucket_count(live_count, truth_is_exact)
+            )
         })
-        .collect()
+        .collect();
+    // Click target: the actionable drawer. The full per-bucket dashboard
+    // (vc-server stats) is Fork IV's follow-up; f/x/n hotkeys keep opening
+    // their own drawers regardless of this row.
+    let needs_index = sessions
+        .iter()
+        .position(|session| session.name == BucketKind::NeedsAttention.session_name());
+    vec![SessionRailRow {
+        kind: SessionRailRowKind::Bucket {
+            bucket: BucketKind::NeedsAttention,
+            session_index: needs_index,
+        },
+        text: format_bucket_summary_entry(&segments),
+    }]
 }
 
 fn rail_range_to_render(
@@ -1073,32 +1317,26 @@ fn fit_rail_line(text: &str, width: usize) -> String {
     fitted
 }
 
-/// Bucket rows lose label letters first. An open-now count is either rendered
-/// in full or omitted entirely: clipping `18446744073709551615` into a smaller
-/// exact-looking number would corrupt the operator truth.
+/// The dense f/x/n line sheds whole ` · `-separated segments from the right.
+/// An open-now count is either rendered in full or omitted entirely: clipping
+/// `999+` into an exact-looking `99` would corrupt the operator truth.
 fn fit_bucket_rail_line(text: &str, width: usize) -> String {
     if text.width() <= width {
         return fit_rail_line(text, width);
     }
-    let Some(head_end) = text.find(" · ") else {
+    if !text.contains(" · ") {
+        // Not a segmented summary — plain clip is the only honest option.
         return fit_rail_line(text, width);
-    };
-    let head = &text[..head_end];
-    let head_width = head.width();
-    if head_width > width {
-        // Overflowing count: keep hotkey + ring, drop the digits.
-        let bucket_without_count: String = head.chars().take(4).collect();
-        return fit_rail_line(&format!("{bucket_without_count} …"), width);
     }
-    let label = &text[head_end..];
-    let label_width = width.saturating_sub(head_width);
-    let mut fitted = head.to_owned();
-    fitted.push_str(&truncate_to_width(label, label_width));
-    let fitted_width = fitted.width();
-    if fitted_width < width {
-        fitted.push_str(&" ".repeat(width - fitted_width));
+    let mut segments: Vec<&str> = text.split(" · ").collect();
+    while segments.len() > 1 {
+        segments.pop();
+        let candidate = format!("{} …", segments.join(" · "));
+        if candidate.width() <= width {
+            return fit_rail_line(&candidate, width);
+        }
     }
-    fitted
+    fit_rail_line("…", width)
 }
 
 fn truncate_to_width(text: &str, width: usize) -> String {
@@ -1221,11 +1459,13 @@ impl State {
             return;
         }
         self.ensure_rail_selection();
+        let mode = RailWidthMode::from_cols(cols);
 
         let all_rows = session_rail_rows_with_truth(
             &self.sessions.session_ui_infos,
             self.settlement_history.as_ref(),
             self.settlement_feed_degraded,
+            mode,
         );
         // The buckets are pinned to the bottom of the rail, so only the leading
         // working-session rows take part in scrolling.
@@ -1237,26 +1477,35 @@ impl State {
         // top bar carries brand │ mode │ tabs only, so "where am I" lives
         // here, right above the session list.
         let session_count = working_session_indices(&self.sessions.session_ui_infos).len();
-        let mut header_text = format!("SESSIONS {}", session_count);
-        let anchor_start = header_text.width() + 3; // " · " before the name
-        if let Some(current) = self
+        let current_session_name = self
             .sessions
             .session_ui_infos
             .iter()
             .find(|s| s.is_current_session)
-        {
-            header_text.push_str(&format!(" · {}", current.name));
-        }
+            .map(|s| s.name.as_str());
+        // Anchor offset only exists in Wide — the other modes drop the name.
+        let anchor_start = format!("SESSIONS {}", session_count).width() + 3; // " · "
+        let header_text = rail_header_text(mode, session_count, current_session_name);
         let header = fit_rail_line(&header_text, cols);
         let header_width = header.width();
+        let header_chars = header.chars().count();
         let mut header = Text::new(header);
-        if cols >= 8 {
-            header = header.color_range(1, 0..8);
-        }
-        if header_width > anchor_start {
-            // The anchor takes the same accent as SESSIONS — one hue for
-            // "you are here", per the THEMES_GUIDE doctrine.
-            header = header.color_range(1, anchor_start..);
+        match mode {
+            RailWidthMode::Wide | RailWidthMode::Normal => {
+                if cols >= 8 {
+                    header = header.color_range(1, 0..8);
+                }
+                if mode == RailWidthMode::Wide && header_width > anchor_start {
+                    // The anchor takes the same accent as SESSIONS — one hue
+                    // for "you are here", per the THEMES_GUIDE doctrine.
+                    header = header.color_range(1, anchor_start..);
+                }
+            },
+            RailWidthMode::Dense => {
+                // The whole badge is the accent; the range never exceeds the
+                // fitted text (trailing pad spaces carry no visible ink).
+                header = header.color_range(1, 0..header_chars);
+            },
         }
         print_text_with_coordinates(header, 0, 0, None, None);
 
@@ -1300,9 +1549,14 @@ impl State {
                         // Ordinal digits are chrome, not content — dim them.
                         text = text.color_range(2, 0..2);
                         if is_current {
-                            // "You are here" carries the accent on the NAME,
-                            // the same ink as the header — one glance finds it.
-                            if fitted_chars > 5 {
+                            if mode == RailWidthMode::Dense {
+                                // No name in the iconic strip — the accent
+                                // lands on the fisheye itself.
+                                text = text.color_range(1, 3..4);
+                            } else if fitted_chars > 5 {
+                                // "You are here" carries the accent on the
+                                // NAME, the same ink as the header — one
+                                // glance finds it.
                                 text = text.color_range(1, 5..fitted_chars);
                             }
                         } else {
@@ -1334,10 +1588,11 @@ impl State {
                         if let Some(separator) = char_offset_of(&fitted, " · ", 4) {
                             text = text.color_range(2, separator..fitted_chars);
                         }
-                        if in_current_session && is_active_tab_row {
+                        if in_current_session && is_active_tab_row && mode != RailWidthMode::Dense {
                             // Strongest level of the three: on the highlight
                             // bed, the tab you are actually in carries the
-                            // accent on its whole name.
+                            // accent on its whole name. (Dense has no name —
+                            // the dot already took the accent above.)
                             let name_end =
                                 char_offset_of(&fitted, " · ", 4).unwrap_or(fitted_chars);
                             text = text.color_range(1, 3..name_end);
@@ -1389,11 +1644,14 @@ impl State {
         }
 
         for bucket_row in &bucket_rows[bucket_rows.len() - pinned_rows..] {
-            let mut text = Text::new(fit_bucket_rail_line(&bucket_row.text, cols));
-            // Same accent column as session status (`◉`/`○` at index 3 in
-            // `"01 ◉ name"` / `" f ○ Finalized…"`) — color_range(1, 3..4).
-            if cols >= 4 {
-                text = text.color_range(1, 3..4);
+            let fitted = fit_bucket_rail_line(&bucket_row.text, cols);
+            let mut text = Text::new(&fitted);
+            // Accent the 🅵/🆇/🅽 glyphs so the dense line keeps the same
+            // colour language the drawer rows had.
+            for (offset, character) in fitted.chars().enumerate() {
+                if matches!(character, '🅵' | '🆇' | '🅽') {
+                    text = text.color_range(1, offset..offset + 1);
+                }
             }
             if let SessionRailRowKind::Bucket {
                 session_index: Some(session_index),
@@ -1406,8 +1664,8 @@ impl State {
             if self.rail_hover_row == Some(row) {
                 text = text.selected();
             }
-            // Empty drawers stay clickable: mouse + f/x/n open the folder
-            // (create session with fleet layout when missing).
+            // Empty drawers stay clickable: mouse + f/x/n open the control-plane
+            // read surface (never mint Finalized/Failed/Needs god-sessions).
             self.rail_click_map
                 .insert(row, rail_row_click_target(&bucket_row.kind));
             print_text_with_coordinates(text, 0, row, None, None);
@@ -1547,34 +1805,30 @@ impl State {
             _ => false,
         }
     }
-    /// Open a triage drawer session (Finalized / Failed / Needs attention).
+    /// Open settlement truth for f/x/n — control-plane read surface.
     ///
-    /// OS-folder contract: every path does something useful.
-    /// - already here → quiet no-op
-    /// - exists elsewhere → switch
-    /// - missing (count 0) → create with fleet `vibecrafted` layout and attach
+    /// Primary path must **not** mint "Finalized runs" / "Failed runs" /
+    /// "Needs attention" god-sessions. Counts already come from the settlement
+    /// feed; click opens a floating diagnostic that reads the control plane
+    /// (and loctree-suite reports when present). If an operator already created
+    /// a drawer session manually, switch into it — never create one here.
     fn jump_to_bucket(&mut self, bucket: BucketKind) {
         let name = bucket.session_name();
-        let exists = self
+        let existing = self
             .sessions
             .session_ui_infos
             .iter()
             .find(|session| session.name == name);
-        match exists {
-            Some(session) if session.is_current_session => {
-                // Already inside this drawer — no error spam.
-            },
-            Some(_) => {
+        let exists = existing.is_some();
+        let is_current = existing.is_some_and(|s| s.is_current_session);
+        match bucket_open_action(exists, is_current) {
+            BucketOpenAction::Stay => {},
+            BucketOpenAction::SwitchExisting => {
                 switch_session_with_focus(name, None, None);
                 self.reset_selected_index();
             },
-            None => {
-                // Empty drawer: open the folder with the standard session canvas.
-                switch_session_with_layout(
-                    Some(name),
-                    LayoutInfo::BuiltIn("vibecrafted".to_owned()),
-                    None,
-                );
+            BucketOpenAction::ReadSurface => {
+                open_settlement_read_surface(bucket);
                 self.reset_selected_index();
             },
         }
@@ -1873,7 +2127,7 @@ impl State {
                     self.renaming_session_name = Some(String::new());
                     should_render = true;
                 },
-                BareKey::Delete if key.has_no_modifiers() => {
+                _ if is_kill_or_delete_key(&key) => {
                     if let Some(selected_session_name) = self.sessions.get_selected_session_name() {
                         let was_searching = self.sessions.is_searching;
                         let prev_search_idx = self.sessions.selected_search_index;
@@ -1984,7 +2238,7 @@ impl State {
                 self.toggle_active_screen();
                 should_render = true;
             },
-            BareKey::Delete if key.has_no_modifiers() => {
+            _ if is_kill_or_delete_key(&key) => {
                 self.resurrectable_sessions.delete_selected_session();
                 should_render = true;
             },
@@ -2125,7 +2379,7 @@ impl State {
                 self.renaming_session_name = Some(String::new());
                 should_render = true;
             },
-            BareKey::Delete if key.has_no_modifiers() => {
+            _ if is_kill_or_delete_key(&key) => {
                 let selected = self
                     .single_screen_state
                     .get_selected_result()
@@ -2729,6 +2983,93 @@ mod rail_tests {
     use super::*;
     use std::time::Duration;
 
+    #[test]
+    fn transient_menu_dimensions_are_guarded() {
+        assert!(menu_dimensions_are_transient(0, 80));
+        assert!(menu_dimensions_are_transient(1, 80));
+        assert!(menu_dimensions_are_transient(2, 3));
+        assert!(menu_dimensions_are_transient(0, 0));
+    }
+
+    #[test]
+    fn legal_menu_dimensions_are_not_transient() {
+        assert!(!menu_dimensions_are_transient(2, 4));
+        assert!(!menu_dimensions_are_transient(24, 80));
+        // The rail path never consults this predicate: it keeps its own
+        // zero-dimension guard and legally renders at cols 6-10.
+    }
+
+    #[test]
+    fn rail_width_mode_thresholds_are_sharp() {
+        assert_eq!(RailWidthMode::from_cols(24), RailWidthMode::Wide);
+        assert_eq!(RailWidthMode::from_cols(23), RailWidthMode::Normal);
+        assert_eq!(RailWidthMode::from_cols(14), RailWidthMode::Normal);
+        assert_eq!(RailWidthMode::from_cols(13), RailWidthMode::Dense);
+        assert_eq!(RailWidthMode::from_cols(6), RailWidthMode::Dense);
+        assert_eq!(RailWidthMode::from_cols(80), RailWidthMode::Wide);
+    }
+
+    #[test]
+    fn rail_header_speaks_three_faces() {
+        // Wide anchors the current session name.
+        assert_eq!(
+            rail_header_text(RailWidthMode::Wide, 3, Some("alpha")),
+            "SESSIONS 3 · alpha"
+        );
+        // Normal keeps the count, drops the anchor.
+        assert_eq!(
+            rail_header_text(RailWidthMode::Normal, 3, Some("alpha")),
+            "SESSIONS 3"
+        );
+        // Dense is an ultra-short badge.
+        assert_eq!(
+            rail_header_text(RailWidthMode::Dense, 3, Some("alpha")),
+            "S3"
+        );
+        // No current session: Wide degrades to the count alone.
+        assert_eq!(rail_header_text(RailWidthMode::Wide, 2, None), "SESSIONS 2");
+    }
+
+    #[test]
+    fn dense_rows_are_iconic_and_fit_narrow_columns() {
+        let entry = format_session_rail_entry(
+            &session("very-long-session-name", true),
+            1,
+            RailWidthMode::Dense,
+        );
+        assert_eq!(entry, "01 ◉");
+        let entry = format_session_rail_entry(&session("other", false), 7, RailWidthMode::Dense);
+        assert_eq!(entry, "07 ○");
+        // Every dense row fits the narrowest legal rail without shredding.
+        for cols in [4, 6, 8, 13] {
+            assert!(fit_rail_line(&entry, cols).width() <= cols);
+        }
+    }
+
+    #[test]
+    fn dense_and_wide_build_the_same_row_inventory() {
+        // Same sessions, same number and kinds of rows in both faces — the
+        // click-map is built per row in render, so kind parity here proves
+        // every dense row stays clickable.
+        let mut alpha = session("alpha", true);
+        alpha.tabs = vec![TabUiInfo::for_rail_test("build", true, "cargo", 1)];
+        let sessions = [alpha, session("beta", false)];
+        let wide = session_rail_rows_with_truth(&sessions, None, false, RailWidthMode::Wide);
+        let dense = session_rail_rows_with_truth(&sessions, None, false, RailWidthMode::Dense);
+        assert_eq!(wide.len(), dense.len());
+        for (wide_row, dense_row) in wide.iter().zip(dense.iter()) {
+            assert_eq!(wide_row.kind, dense_row.kind);
+        }
+    }
+
+    #[test]
+    fn normal_rows_keep_names_and_indicators() {
+        let entry = format_session_rail_entry(&session("alpha", true), 1, RailWidthMode::Normal);
+        assert_eq!(entry, "01 ◉ alpha");
+        let entry = format_session_rail_entry(&session("beta", false), 2, RailWidthMode::Normal);
+        assert_eq!(entry, "02 ○ beta");
+    }
+
     fn session(name: &str, is_current_session: bool) -> SessionUiInfo {
         SessionUiInfo {
             name: name.to_owned(),
@@ -2939,11 +3280,11 @@ mod rail_tests {
     #[test]
     fn rail_entries_include_ordinal_status_and_name() {
         assert_eq!(
-            format_session_rail_entry(&session("alpha", true), 1),
+            format_session_rail_entry(&session("alpha", true), 1, RailWidthMode::Wide),
             "01 ◉ alpha"
         );
         assert_eq!(
-            format_session_rail_entry(&session("beta", false), 12),
+            format_session_rail_entry(&session("beta", false), 12, RailWidthMode::Wide),
             "12 ○ beta"
         );
     }
@@ -3088,10 +3429,9 @@ mod rail_tests {
                 "   ◉ impl-260718-120000-01000 · claude",
                 "   · audit-260718-130000-02000 · codex +1",
                 "02 ○ beta",
-                // the buckets are always pinned to the tail of the rail
-                " f ○   ? · final",
-                " x ○   ? · fail",
-                " n ○   ? · needs",
+                // the buckets are always pinned to the tail of the rail;
+                // no settlement feed yet = no number at all (never a "?")
+                " 🅵… · 🆇… · 🅽…",
             ]
         );
         assert_eq!(rows.iter().filter(|row| row.is_live_process()).count(), 2);
@@ -3101,7 +3441,10 @@ mod rail_tests {
     fn rail_does_not_repeat_process_label_when_tab_already_names_the_agent() {
         let tab = TabUiInfo::for_rail_test("claude", true, "claude", 1);
 
-        assert_eq!(format_process_tab_rail_entry(&tab), "   ◉ claude");
+        assert_eq!(
+            format_process_tab_rail_entry(&tab, RailWidthMode::Wide),
+            "   ◉ claude"
+        );
     }
 
     fn bucket_session(name: &str, tabs: usize) -> SessionUiInfo {
@@ -3203,17 +3546,19 @@ mod rail_tests {
         let snapshot =
             SettlementHistory::parse(&settlement_payload(681, (97, 176, 408), (12, 7, 3)))
                 .expect("valid settlement history");
-        let rows = session_rail_rows_with_truth(&[session("alpha", true)], Some(&snapshot), false);
+        let rows = session_rail_rows_with_truth(
+            &[session("alpha", true)],
+            Some(&snapshot),
+            false,
+            RailWidthMode::Wide,
+        );
         let buckets: Vec<&str> = rows
             .iter()
             .filter(|row| row.is_bucket())
             .map(|row| row.text.as_str())
             .collect();
 
-        assert_eq!(
-            buckets,
-            vec![" f ○  12 · final", " x ○   7 · fail", " n ○   3 · needs",]
-        );
+        assert_eq!(buckets, vec![" 🅵12 · 🆇7 · 🅽3",]);
     }
 
     #[test]
@@ -3227,17 +3572,14 @@ mod rail_tests {
             None,
         );
         let snapshot = SettlementHistory::parse(&payload).expect("valid partial history");
-        let rows = session_rail_rows_with_truth(&[], Some(&snapshot), false);
+        let rows = session_rail_rows_with_truth(&[], Some(&snapshot), false, RailWidthMode::Wide);
         let buckets: Vec<&str> = rows
             .iter()
             .filter(|row| row.is_bucket())
             .map(|row| row.text.as_str())
             .collect();
 
-        assert_eq!(
-            buckets,
-            vec![" f ○ ~12 · final", " x ○ ~7 · fail", " n ○ ~3 · needs",]
-        );
+        assert_eq!(buckets, vec![" 🅵~12 · 🆇~7 · 🅽~3",]);
         assert!(
             SettlementHistory::parse(&settlement_payload_for(
                 "00000000-0000-4000-8000-000000000001",
@@ -3360,6 +3702,7 @@ mod rail_tests {
             &[],
             state.settlement_history.as_ref(),
             state.settlement_feed_degraded,
+            RailWidthMode::Wide,
         );
         assert_eq!(
             degraded_rows
@@ -3367,7 +3710,7 @@ mod rail_tests {
                 .filter(|row| row.is_bucket())
                 .map(|row| row.text.as_str())
                 .collect::<Vec<_>>(),
-            vec![" f ○ ~2 · final", " x ○ ~1 · fail", " n ○ ~1 · needs",]
+            vec![" 🅵~2 · 🆇~1 · 🅽~1",]
         );
 
         // An exact canonical replay is both an integrity confirmation and a
@@ -3402,6 +3745,7 @@ mod rail_tests {
             &[],
             state.settlement_history.as_ref(),
             state.settlement_feed_degraded,
+            RailWidthMode::Wide,
         );
         assert_eq!(
             degraded_rows
@@ -3409,7 +3753,7 @@ mod rail_tests {
                 .filter(|row| row.is_bucket())
                 .map(|row| row.text.as_str())
                 .collect::<Vec<_>>(),
-            vec![" f ○ ~2 · final", " x ○ ~1 · fail", " n ○ ~1 · needs",]
+            vec![" 🅵~2 · 🆇~1 · 🅽~1",]
         );
         assert!(state.pipe(settlement_pipe(accepted.clone())));
         assert!(!state.settlement_feed_degraded);
@@ -3510,45 +3854,30 @@ mod rail_tests {
             &[session("alpha", true), bucket_session("Needs attention", 1)],
             Some(&snapshot),
             false,
+            RailWidthMode::Wide,
         );
-        let needs_attention = rows
+        let summary = rows
             .iter()
-            .find(|row| {
-                matches!(
-                    row.kind,
-                    SessionRailRowKind::Bucket {
-                        bucket: BucketKind::NeedsAttention,
-                        ..
-                    }
-                )
-            })
-            .expect("needs-attention bucket");
+            .find(|row| row.is_bucket())
+            .expect("bucket summary row");
 
         assert_eq!(
-            needs_attention.text, " n ○   0 · needs",
-            "historical n=408 is primary; finalized latest and one viewer tab are not"
+            summary.text, " 🅵1 · 🆇0 · 🅽0",
+            "open-now latest_by_run is primary; historical n=408 and viewer tabs are not"
         );
     }
 
     #[test]
     fn viewer_inventory_is_secondary_while_truth_is_unavailable() {
         let rows = session_rail_rows(&[bucket_session("Finalized runs", 2)]);
-        let finalized = rows
+        let summary = rows
             .iter()
-            .find(|row| {
-                matches!(
-                    row.kind,
-                    SessionRailRowKind::Bucket {
-                        bucket: BucketKind::Finalized,
-                        ..
-                    }
-                )
-            })
-            .expect("finalized bucket");
+            .find(|row| row.is_bucket())
+            .expect("bucket summary row");
 
-        assert_eq!(finalized.text, " f ○   ? · final");
+        assert_eq!(summary.text, " 🅵… · 🆇… · 🅽…");
         assert!(
-            !finalized.text.contains(" f ○   2 "),
+            !summary.text.contains("🅵2"),
             "viewer inventory must never masquerade as settlement truth"
         );
     }
@@ -3564,10 +3893,10 @@ mod rail_tests {
     }
 
     #[test]
-    fn bucket_short_rail_labels_match_the_dense_contract() {
-        assert_eq!(BucketKind::Finalized.short_rail_label(), "final");
-        assert_eq!(BucketKind::Failed.short_rail_label(), "fail");
-        assert_eq!(BucketKind::NeedsAttention.short_rail_label(), "needs");
+    fn bucket_glyphs_match_the_dense_contract() {
+        assert_eq!(BucketKind::Finalized.glyph(), "🅵");
+        assert_eq!(BucketKind::Failed.glyph(), "🆇");
+        assert_eq!(BucketKind::NeedsAttention.glyph(), "🅽");
     }
 
     #[test]
@@ -3581,19 +3910,9 @@ mod rail_tests {
         ]);
         let text: Vec<&str> = rows.iter().map(|row| row.text.as_str()).collect();
 
-        // Drawer order is fixed by RAIL_BUCKETS, not by session creation order.
-        // Without canonical truth the primary count is unavailable; mutable
-        // viewer inventory survives only in the explicit tN suffix.
-        assert_eq!(
-            text,
-            vec![
-                "01 ◉ alpha",
-                "02 ○ beta",
-                " f ○   ? · final",
-                " x ○   ? · fail",
-                " n ○   ? · needs",
-            ]
-        );
+        // Segment order is fixed by RAIL_BUCKETS, not by session creation
+        // order. Without canonical truth every count collapses to `…`.
+        assert_eq!(text, vec!["01 ◉ alpha", "02 ○ beta", " 🅵… · 🆇… · 🅽…",]);
     }
 
     #[test]
@@ -3618,21 +3937,17 @@ mod rail_tests {
             .filter(|row| row.is_bucket())
             .map(|row| row.text.as_str())
             .collect();
-        assert_eq!(
-            buckets,
-            vec![" f ○   ? · final", " x ○   ? · fail", " n ○   ? · needs",]
-        );
+        assert_eq!(buckets, vec![" 🅵… · 🆇… · 🅽…",]);
     }
 
     #[test]
-    fn bucket_rows_show_even_before_their_sessions_exist() {
+    fn bucket_summary_shows_even_before_its_sessions_exist() {
         let rows = session_rail_rows(&[session("alpha", true)]);
         let buckets: Vec<&SessionRailRow> = rows.iter().filter(|row| row.is_bucket()).collect();
 
-        assert_eq!(buckets.len(), 3);
-        assert_eq!(buckets[0].text, " f ○   ? · final");
-        assert_eq!(buckets[1].text, " x ○   ? · fail");
-        assert_eq!(buckets[2].text, " n ○   ? · needs");
+        // Fork IV: ONE dense line, still pinned before any drawer exists.
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].text, " 🅵… · 🆇… · 🅽…");
         assert!(matches!(
             buckets[0].kind,
             SessionRailRowKind::Bucket {
@@ -3643,16 +3958,13 @@ mod rail_tests {
     }
 
     #[test]
-    fn bucket_rows_carry_the_session_index_so_clicks_reuse_the_existing_plumbing() {
+    fn bucket_summary_carries_the_session_index_so_clicks_reuse_the_existing_plumbing() {
         let rows =
             session_rail_rows(&[session("alpha", true), bucket_session("Needs attention", 2)]);
-        let needs_attention = rows
-            .iter()
-            .find(|row| row.is_bucket() && row.text.contains("needs"))
-            .unwrap();
+        let summary = rows.iter().find(|row| row.is_bucket()).unwrap();
 
         assert_eq!(
-            needs_attention.kind,
+            summary.kind,
             SessionRailRowKind::Bucket {
                 bucket: BucketKind::NeedsAttention,
                 session_index: Some(1),
@@ -3702,7 +4014,7 @@ mod rail_tests {
     fn a_bucket_session_is_never_listed_twice() {
         let rows = session_rail_rows(&[bucket_session("Finalized runs", 2)]);
 
-        assert_eq!(rows.iter().filter(|row| row.is_bucket()).count(), 3);
+        assert_eq!(rows.iter().filter(|row| row.is_bucket()).count(), 1);
         assert!(
             !rows
                 .iter()
@@ -3734,31 +4046,55 @@ mod rail_tests {
     }
 
     #[test]
+    fn sanitize_display_label_strips_controls_and_collapses_whitespace() {
+        assert_eq!(sanitize_display_label("  hello\n\tworld  "), "hello world");
+        assert_eq!(sanitize_display_label("Main\u{0007}"), "Main");
+        // Stable width: control-laden and clean labels pad to the same grid.
+        let dirty = fit_rail_line(&sanitize_display_label("Main\n\r  "), 10);
+        let clean = fit_rail_line(&sanitize_display_label("Main"), 10);
+        assert_eq!(dirty.width(), clean.width());
+        assert_eq!(dirty.width(), 10);
+    }
+
+    #[test]
+    fn format_session_rail_entry_sanitizes_name_for_stable_columns() {
+        let mut session = session("alpha", true);
+        session.name = "alpha\nbeta".to_owned();
+        let text = format_session_rail_entry(&session, 1, RailWidthMode::Wide);
+        assert!(!text.contains('\n'));
+        assert!(
+            text.contains("alpha beta") || text.contains("alphabeta") || text.contains("alpha")
+        );
+        // After sanitize newline becomes space collapse → "alpha beta"
+        assert_eq!(sanitize_display_label("alpha\nbeta"), "alpha beta");
+    }
+
+    #[test]
     fn bucket_rail_lines_truncate_label_and_omit_overflowing_counts() {
         // Wide enough: untouched, padded like any rail line.
         assert_eq!(
             fit_bucket_rail_line(" n ○ 408 · needs", 34),
             " n ○ 408 · needs                  "
         );
-        // Narrow: the label loses letters; the open-now count stays intact.
+        // Narrow: whole trailing segments drop, the loss is marked with `…`.
         assert_eq!(
-            fit_bucket_rail_line(" n ○ 408 · needs", 14),
-            " n ○ 408 · nee"
+            fit_bucket_rail_line(" 🅵97 · 🆇176 · 🅽408", 14).trim_end(),
+            " 🅵97 · 🆇176 …"
         );
-        // Shorter drawers at a generous width pad instead of truncating.
+        // Generous width pads instead of truncating.
         assert_eq!(
-            fit_bucket_rail_line(" x ○ 176 · fail", 24),
-            " x ○ 176 · fail         "
+            fit_bucket_rail_line(" 🅵97 · 🆇176 …", 16),
+            " 🅵97 · 🆇176 …   "
         );
-        // Degenerate width: head only.
-        assert_eq!(fit_bucket_rail_line(" n ○ 408 · needs", 4), " n ○");
-        let huge = fit_bucket_rail_line(" f ○ 18446744073709551615 · final", 24);
-        assert_eq!(huge.trim_end(), " f ○ …");
+        // Degenerate width: bare ellipsis, never a clipped digit.
+        assert_eq!(fit_bucket_rail_line(" 🅵97 · 🆇176 · 🅽408", 3), "…  ");
+        // A summary that cannot keep even one segment collapses entirely.
+        let huge = fit_bucket_rail_line(" 🅵18446744073709551615 · 🆇… · 🅽…", 8);
         assert!(
             !huge.chars().any(|character| character.is_ascii_digit()),
             "an overflowing count must be omitted, never clipped into a smaller exact number"
         );
-        // Non-bucket text is untouched by the head/label rule.
+        // Non-bucket text without separators falls back to plain clipping.
         assert_eq!(fit_bucket_rail_line("01 ◉ alpha", 6), "01 ◉ a");
     }
 
@@ -3848,8 +4184,8 @@ mod rail_tests {
             }),
             RailClickTarget::Bucket(BucketKind::Failed)
         );
-        // Empty drawer: still a bucket target so mouse + f/x/n open the folder
-        // (create-with-layout when missing — not a silent dead zone).
+        // Empty drawer: still a bucket target so mouse + f/x/n open the
+        // control-plane read surface (not a silent dead zone; never mint god sessions).
         assert_eq!(
             rail_row_click_target(&SessionRailRowKind::Bucket {
                 bucket: BucketKind::NeedsAttention,
@@ -3857,6 +4193,15 @@ mod rail_tests {
             }),
             RailClickTarget::Bucket(BucketKind::NeedsAttention)
         );
+        assert_eq!(
+            bucket_open_action(false, false),
+            BucketOpenAction::ReadSurface
+        );
+        assert_eq!(
+            bucket_open_action(true, false),
+            BucketOpenAction::SwitchExisting
+        );
+        assert_eq!(bucket_open_action(true, true), BucketOpenAction::Stay);
     }
 
     #[test]
@@ -3918,19 +4263,14 @@ mod rail_tests {
         for (offset, row) in rows.iter().enumerate() {
             click_map.insert(offset + 1, rail_row_click_target(&row.kind));
         }
-        // alpha + three empty drawers
+        // alpha + one dense summary line; clicking it opens the actionable
+        // drawer (the vc-server stats dashboard is Fork IV's follow-up).
         assert_eq!(
             click_map.get(&2),
-            Some(&RailClickTarget::Bucket(BucketKind::Finalized))
-        );
-        assert_eq!(
-            click_map.get(&3),
-            Some(&RailClickTarget::Bucket(BucketKind::Failed))
-        );
-        assert_eq!(
-            click_map.get(&4),
             Some(&RailClickTarget::Bucket(BucketKind::NeedsAttention))
         );
+        assert_eq!(click_map.get(&3), None);
+        assert_eq!(click_map.get(&4), None);
     }
 
     #[test]
@@ -3953,12 +4293,12 @@ mod rail_tests {
         for (offset, row) in rows.iter().enumerate() {
             click_map.insert(offset + 1, rail_row_click_target(&row.kind));
         }
-        // Data rows (1 = session, 2..=4 = drawers) highlight.
+        // Data rows (1 = session, 2 = f/x/n summary) highlight.
         assert_eq!(rail_hover_target(1, &click_map), Some(1));
         assert_eq!(
             rail_hover_target(2, &click_map),
             Some(2),
-            "empty Finalized drawer stays hoverable"
+            "the f/x/n summary stays hoverable before any drawer exists"
         );
         // Header, blank gap, out-of-bounds, negative leave → clear.
         assert_eq!(rail_hover_target(0, &click_map), None);
@@ -3967,27 +4307,35 @@ mod rail_tests {
     }
 
     #[test]
-    fn bucket_and_session_status_share_accent_column_index_3() {
-        // Session: "01 ◉ alpha" — status fisheye at display column 3.
-        // Bucket:  " f ○  12 · final" — status ring at column 3.
-        // The markers are multi-byte, so the accent column is a CHAR index —
-        // the same unit color_range(1, 3..4) speaks.
-        let session_text = session_rail_rows(&[session("alpha", true)])
-            .into_iter()
-            .find(|r| matches!(r.kind, SessionRailRowKind::Session(_)))
-            .unwrap()
-            .text;
-        let bucket_text = format_bucket_rail_entry(BucketKind::Finalized, Some(12), true, false);
-        assert_eq!(
-            session_text.chars().nth(3),
-            Some('◉'),
-            "session status column"
-        );
-        assert_eq!(
-            bucket_text.chars().nth(3),
-            Some('○'),
-            "bucket status column (same index as session)"
-        );
+    fn bucket_counts_are_exact_capped_tilde_or_ellipsis_never_clipped() {
+        // Fork IV count cell: exact / `~n` degraded / `999+` capped / `…`
+        // when there is no feed — never a "?" and never a clipped digit.
+        assert_eq!(format_bucket_count(Some(12), true), "12");
+        assert_eq!(format_bucket_count(Some(12), false), "~12");
+        assert_eq!(format_bucket_count(Some(2247), true), "999+");
+        assert_eq!(format_bucket_count(Some(2247), false), "999+");
+        assert_eq!(format_bucket_count(None, true), "…");
+        assert_eq!(format_bucket_count(None, false), "…");
+    }
+
+    #[test]
+    fn bucket_summary_sheds_whole_segments_never_digits() {
+        let line = " 🅵118 · 🆇435 · 🅽999+";
+        // Plenty of room: unchanged (padded to width).
+        assert_eq!(fit_bucket_rail_line(line, 40).trim_end(), line);
+        // Too narrow for the tail: whole segments drop, `…` marks the loss.
+        let narrow = fit_bucket_rail_line(line, 16);
+        assert!(narrow.contains("🅵118"), "head survives: {narrow:?}");
+        assert!(!narrow.contains("🅽"), "tail segment dropped: {narrow:?}");
+        assert!(narrow.contains('…'), "loss is marked: {narrow:?}");
+        // No width clips a count mid-number.
+        for width in 1..=24 {
+            let fitted = fit_bucket_rail_line(line, width);
+            assert!(
+                !fitted.contains("99 ") && !fitted.trim_end().ends_with("99"),
+                "clipped digit at width {width}: {fitted:?}"
+            );
+        }
     }
 
     #[test]

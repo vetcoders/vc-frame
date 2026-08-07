@@ -53,6 +53,32 @@ use zellij_utils::{
 
 pub type PluginId = u32;
 
+/// Explicitly separates a pane's layout identity from the WASM runtime that
+/// supplies its surface. Ordinary plugin panes use the same id for both. A
+/// session-manager projector owns a distinct `pane_id` and forwards render,
+/// input, and resize work to `runtime_plugin_id`.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct PluginPaneId {
+    pub pane_id: PluginId,
+    pub runtime_plugin_id: PluginId,
+}
+
+impl PluginPaneId {
+    pub fn direct(plugin_id: PluginId) -> Self {
+        Self {
+            pane_id: plugin_id,
+            runtime_plugin_id: plugin_id,
+        }
+    }
+
+    pub fn projector(pane_id: PluginId, runtime_plugin_id: PluginId) -> Self {
+        Self {
+            pane_id,
+            runtime_plugin_id,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LayoutPluginResolution {
     Activate,
@@ -715,6 +741,29 @@ pub(crate) fn plugin_thread_main(
                         continue;
                     },
                 };
+                if let Err(message) =
+                    register_layout_plugin_projectors(&wasm_bridge, &bus, transaction_id)
+                {
+                    let cleanup = match wasm_bridge
+                        .release_layout_plugins_by_transaction(transaction_id, message.clone())
+                    {
+                        Ok(_) => LayoutPreparationCleanup::Resolved,
+                        Err(_) => LayoutPreparationCleanup::ReleasePluginReservation {
+                            plugin_ids: reserved_plugin_ids.clone(),
+                            pty_cleanup_succeeded: true,
+                        },
+                    };
+                    reject_layout_preparation(
+                        &bus,
+                        transaction_id,
+                        Some(tab_id),
+                        completion_tx,
+                        layout_generation,
+                        message,
+                        cleanup,
+                    );
+                    continue;
+                }
                 let mut plugin_ids: HashMap<RunPluginOrAlias, Vec<PluginId>> = HashMap::new();
                 for ((run_plugin_or_alias, _), plugin_id) in
                     planned_plugins.into_iter().zip(reserved_plugin_ids)
@@ -926,6 +975,31 @@ pub(crate) fn plugin_thread_main(
                         continue;
                     },
                 };
+                if let Err(message) =
+                    register_layout_plugin_projectors(&wasm_bridge, &bus, transaction_id)
+                {
+                    let cleanup = match wasm_bridge
+                        .release_layout_plugins_by_transaction(transaction_id, message.clone())
+                    {
+                        Ok(_) => LayoutPreparationCleanup::Resolved,
+                        Err(_) => LayoutPreparationCleanup::ReleasePluginReservation {
+                            plugin_ids: reserved_plugin_ids.clone(),
+                            pty_cleanup_succeeded: true,
+                        },
+                    };
+                    reject_layout_preparation(
+                        &bus,
+                        transaction_id,
+                        layout_generation
+                            .as_ref()
+                            .map(|generation| generation.tab_id),
+                        completion_tx,
+                        layout_generation,
+                        message,
+                        cleanup,
+                    );
+                    continue;
+                }
                 let mut reserved_plugin_ids = reserved_plugin_ids.into_iter();
                 let mut tab_layouts_with_plugin_ids = Vec::new();
                 for (tab_layout_info, plugin_keys) in tab_layouts_with_plugin_keys {
@@ -1676,6 +1750,7 @@ fn populate_session_layout_metadata(
     }
 
     let plugin_ids = session_layout_metadata.all_plugin_ids();
+    let plugin_ids_missing_run = session_layout_metadata.plugin_ids_missing_run();
     let mut plugin_ids_to_cmds: HashMap<u32, RunPlugin> = HashMap::new();
     for plugin_id in plugin_ids {
         let plugin_cmd = wasm_bridge.run_plugin_of_plugin_id(plugin_id);
@@ -1683,7 +1758,17 @@ fn populate_session_layout_metadata(
             Some(plugin_cmd) => {
                 plugin_ids_to_cmds.insert(plugin_id, plugin_cmd.clone());
             },
-            None => log::error!("Plugin with id: {plugin_id} not found"),
+            // Parked / not-yet-activated chrome has no bridge entry by design;
+            // its pane metadata still carries `invoked_with`, so nothing is
+            // lost. Only a pane with no run identity at all is a real problem.
+            None if plugin_ids_missing_run.contains(&plugin_id) => {
+                log::error!(
+                    "Plugin with id: {plugin_id} not found and its pane has no run identity"
+                )
+            },
+            None => log::debug!(
+                "Plugin with id: {plugin_id} not loaded (parked chrome); keeping the pane's own run identity"
+            ),
         }
     }
     session_layout_metadata.update_plugin_cmds(plugin_ids_to_cmds);
@@ -1775,6 +1860,35 @@ fn mark_layout_completion_failed(completion: Option<&mut NotificationEnd>, messa
     if let Some(completion) = completion {
         completion.mark_failure(message);
     }
+}
+
+fn register_layout_plugin_projectors(
+    wasm_bridge: &WasmBridge,
+    bus: &Bus<PluginInstruction>,
+    transaction_id: LayoutTransactionId,
+) -> std::result::Result<(), String> {
+    let bindings = wasm_bridge.layout_plugin_projector_bindings(transaction_id);
+    if bindings.is_empty() {
+        return Ok(());
+    }
+    // This instruction is queued before the Plugin -> PTY layout handoff, and
+    // both eventually reach Screen through the same ordered channel. Waiting
+    // synchronously for Screen here creates a bootstrap cycle: Screen can be
+    // waiting for Plugin activation while Plugin waits for this ACK. Preserve
+    // FIFO ordering and let Screen validate the transaction when it consumes
+    // the registration.
+    let (ack_tx, _ack_rx) = channels::bounded(1);
+    bus.senders
+        .send_to_screen(ScreenInstruction::RegisterPluginProjectors {
+            transaction_id,
+            bindings,
+            ack: ack_tx,
+        })
+        .map_err(|error| {
+            format!(
+                "failed to register plugin projectors for layout transaction {transaction_id}: {error:#}"
+            )
+        })
 }
 
 fn release_layout_plugin_reservation(

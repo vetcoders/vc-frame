@@ -2,7 +2,7 @@ use super::{
     ActiveLayoutTransaction, CopyOptions, DurableTabLayoutGeneration, LayoutPreparationCleanup,
     LayoutTabOwner, Screen, ScreenInstruction, ScreenLayoutTransactionKind, TabOverrideResult,
     VC_FLEET_LIVE_COUNT_MESSAGE, VC_STATUS_BAR_VISIBILITY_MESSAGE, fleet_live_count,
-    is_status_bar_plugin_run, register_viewer_creation_post_install_test_hook,
+    is_parkable_chrome_plugin_run, register_viewer_creation_post_install_test_hook,
     reject_after_apply_prepare_for_test, reserve_durable_tab_layout_recovery,
     reserve_new_durable_tab_layout_generation, screen_thread_main, session_update_events,
 };
@@ -19,8 +19,8 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use zellij_utils::cli::CliAction;
 use zellij_utils::data::{
-    Event, EventType, ListPanesResponse, ListTabsResponse, PaneInfo, PaneManifest, Resize,
-    SessionInfo, Style, TabInfo, TabPlacement, WebSharing,
+    Event, EventType, ListPanesResponse, ListTabsResponse, PaneInfo, PaneManifest, PermissionType,
+    PluginPermission, Resize, SessionInfo, Style, TabInfo, TabPlacement, WebSharing,
 };
 use zellij_utils::errors::{ErrorContext, prelude::*};
 use zellij_utils::input::actions::Action;
@@ -148,24 +148,24 @@ fn fleet_live_count_message_targets_only_local_status_bars() {
 
     assert!(matches!(
         updates.first(),
-        Some((None, None, Event::SessionUpdate(_, _)))
-    ));
-    assert_eq!(updates.len(), 3);
-    assert!(matches!(
-        updates.get(1),
         Some((
             Some(41),
             Some(1),
             Event::CustomMessage(message, payload),
         )) if message == VC_STATUS_BAR_VISIBILITY_MESSAGE && payload == "false"
     ));
+    assert_eq!(updates.len(), 3);
     assert!(matches!(
-        updates.get(2),
+        updates.get(1),
         Some((
             Some(42),
             Some(1),
             Event::CustomMessage(message, payload),
         )) if message == VC_FLEET_LIVE_COUNT_MESSAGE && payload == "2"
+    ));
+    assert!(matches!(
+        updates.get(2),
+        Some((None, None, Event::SessionUpdate(_, _)))
     ));
     assert!(updates.iter().all(|(plugin_id, _, event)| {
         !matches!(event, Event::CustomMessage(_, _)) || plugin_id.is_some()
@@ -173,7 +173,7 @@ fn fleet_live_count_message_targets_only_local_status_bars() {
 }
 
 #[test]
-fn status_bar_plugin_run_accepts_builtin_urls_and_resolved_aliases_only() {
+fn parkable_chrome_plugin_run_accepts_builtin_urls_and_resolved_aliases_only() {
     let builtin =
         Run::Plugin(RunPluginOrAlias::from_url("vc-frame:status-bar", &None, None, None).unwrap());
     let legacy_builtin =
@@ -200,15 +200,21 @@ fn status_bar_plugin_run_accepts_builtin_urls_and_resolved_aliases_only() {
         Run::Plugin(RunPluginOrAlias::from_url("file:///worker.wasm", &None, None, None).unwrap());
     let compact_bar =
         Run::Plugin(RunPluginOrAlias::from_url("vc-frame:compact-bar", &None, None, None).unwrap());
+    let session_manager = Run::Plugin(
+        RunPluginOrAlias::from_url("vc-frame:session-manager", &None, None, None).unwrap(),
+    );
 
-    assert!(is_status_bar_plugin_run(Some(&builtin)));
-    assert!(is_status_bar_plugin_run(Some(&legacy_builtin)));
-    assert!(is_status_bar_plugin_run(Some(&default_alias)));
-    assert!(is_status_bar_plugin_run(Some(&renamed_alias)));
-    assert!(!is_status_bar_plugin_run(Some(&shadowed_default_alias)));
-    assert!(!is_status_bar_plugin_run(Some(&worker)));
-    assert!(!is_status_bar_plugin_run(Some(&compact_bar)));
-    assert!(!is_status_bar_plugin_run(None));
+    assert!(is_parkable_chrome_plugin_run(Some(&builtin)));
+    assert!(is_parkable_chrome_plugin_run(Some(&legacy_builtin)));
+    assert!(is_parkable_chrome_plugin_run(Some(&default_alias)));
+    assert!(is_parkable_chrome_plugin_run(Some(&renamed_alias)));
+    assert!(is_parkable_chrome_plugin_run(Some(&compact_bar)));
+    assert!(is_parkable_chrome_plugin_run(Some(&session_manager)));
+    assert!(!is_parkable_chrome_plugin_run(Some(
+        &shadowed_default_alias
+    )));
+    assert!(!is_parkable_chrome_plugin_run(Some(&worker)));
+    assert!(!is_parkable_chrome_plugin_run(None));
 }
 
 fn new_tab_with_status_bar_and_worker(
@@ -291,16 +297,14 @@ fn status_bar_target_transition_hides_only_the_client_that_switched_tabs() {
     new_tab_with_status_bar_and_worker(&mut screen, 0, 1, 42, 99);
     new_tab_with_status_bar_and_worker(&mut screen, 1, 2, 43, 100);
     screen.active_tab_ids = BTreeMap::from([(1, 0), (2, 0)]);
-    screen.active_status_bar_plugin_targets_cache.clear();
-
     let (initially_active, initially_hidden) = screen.status_bar_plugin_target_transition();
     assert_eq!(initially_active, vec![(42, 1), (42, 2)]);
-    assert!(initially_hidden.is_empty());
+    assert_eq!(initially_hidden, vec![(43, 1), (43, 2)]);
 
     screen.active_tab_ids.insert(1, 1);
     let (active_after_switch, hidden_after_switch) = screen.status_bar_plugin_target_transition();
     assert_eq!(active_after_switch, vec![(42, 2), (43, 1)]);
-    assert_eq!(hidden_after_switch, vec![(42, 1)]);
+    assert_eq!(hidden_after_switch, vec![(42, 1), (43, 2)]);
 
     let updates = session_update_events(
         vec![fleet_session("working", &[(false, false, false)])],
@@ -327,6 +331,12 @@ fn status_bar_target_transition_hides_only_the_client_that_switched_tabs() {
                 "false".to_owned(),
             ),
             (
+                Some(43),
+                Some(2),
+                VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
+                "false".to_owned(),
+            ),
+            (
                 Some(42),
                 Some(2),
                 VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
@@ -339,6 +349,71 @@ fn status_bar_target_transition_hides_only_the_client_that_switched_tabs() {
                 "1".to_owned(),
             ),
         ]
+    );
+}
+
+#[test]
+fn projector_tab_keeps_shared_status_bar_runtime_active() {
+    let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
+    let (to_plugin, _plugin_receiver): ChannelWithContext<PluginInstruction> =
+        channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    new_tab_with_status_bar_and_worker(&mut screen, 0, 1, 42, 99);
+    new_tab_with_status_bar_and_worker(&mut screen, 1, 2, 43, 100);
+    screen
+        .get_tabs_mut()
+        .get_mut(&1)
+        .unwrap()
+        .bind_plugin_projectors(&HashMap::from([(43, 42)]));
+    screen.plugin_projector_bindings.insert(43, 42);
+    screen.active_tab_ids = BTreeMap::from([(1, 1)]);
+
+    let (active, hidden) = screen.status_bar_plugin_target_transition();
+
+    assert_eq!(active, vec![(42, 1)]);
+    assert!(hidden.is_empty());
+
+    let pane_runtime_ids = screen
+        .collect_pane_list(true)
+        .unwrap()
+        .into_iter()
+        .filter(|entry| matches!(entry.pane_info.id, 42 | 43))
+        .map(|entry| (entry.pane_info.id, entry.plugin_runtime_id))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        pane_runtime_ids,
+        BTreeSet::from([(42, Some(42)), (43, Some(42))])
+    );
+}
+
+#[test]
+fn permission_request_uses_projector_after_authority_tab_closes() {
+    let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
+    let (to_plugin, _plugin_receiver): ChannelWithContext<PluginInstruction> =
+        channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    new_tab_with_status_bar_and_worker(&mut screen, 0, 1, 42, 99);
+    new_tab_with_status_bar_and_worker(&mut screen, 1, 2, 43, 100);
+    screen
+        .get_tabs_mut()
+        .get_mut(&1)
+        .unwrap()
+        .bind_plugin_projectors(&HashMap::from([(43, 42)]));
+    screen.get_tabs_mut().remove(&0);
+
+    assert!(screen.request_plugin_runtime_permissions(
+        42,
+        PluginPermission::new("status-bar".to_owned(), vec![PermissionType::RunCommands]),
+    ));
+    assert_eq!(
+        screen
+            .get_tabs()
+            .get(&1)
+            .unwrap()
+            .get_pane_with_id(PaneId::Plugin(43))
+            .unwrap()
+            .plugin_runtime_id(),
+        Some(42)
     );
 }
 
@@ -760,6 +835,7 @@ fn send_cli_action_to_server(
     for action in actions {
         route_action(
             action,
+            "test",
             client_id,
             None,
             None,
@@ -1119,6 +1195,7 @@ struct MockScreen {
     advanced_mouse_actions: bool,
     last_opened_tab_index: Option<usize>,
     session_name: String,
+    screen_thread_id: Option<std::thread::ThreadId>,
 }
 
 impl MockScreen {
@@ -1147,9 +1224,13 @@ impl MockScreen {
         .should_silently_fail();
         let debug = false;
         let session_name = self.session_name.clone();
+        let (thread_id_tx, thread_id_rx) = std::sync::mpsc::sync_channel(1);
         let screen_thread = std::thread::Builder::new()
             .name("screen_thread".to_string())
             .spawn(move || {
+                thread_id_tx
+                    .send(std::thread::current().id())
+                    .expect("test must retain the screen thread-id receiver");
                 screen_thread_main(
                     screen_bus,
                     None,
@@ -1163,6 +1244,11 @@ impl MockScreen {
                 .expect("TEST")
             })
             .unwrap();
+        self.screen_thread_id = Some(
+            thread_id_rx
+                .recv()
+                .expect("screen thread must publish its test identity"),
+        );
         let pane_layout = initial_layout.unwrap_or_default();
         let pane_count = pane_layout.extract_run_instructions().len();
         let floating_pane_count = initial_floating_panes_layout.len();
@@ -1555,6 +1641,7 @@ impl MockScreen {
             config: Config::default(),
             advanced_mouse_actions: true,
             session_name: "zellij-test".to_owned(),
+            screen_thread_id: None,
         }
     }
     pub fn set_advanced_hover_effects(&mut self, advanced_mouse_actions: bool) {
@@ -8817,7 +8904,12 @@ pub fn break_pane_apply_rejection_preserves_live_pane_after_cleanup_ack() {
             );
         }
     };
-    reject_after_apply_prepare_for_test(transaction_id);
+    reject_after_apply_prepare_for_test(
+        mock_screen
+            .screen_thread_id
+            .expect("running MockScreen must publish its thread identity"),
+        transaction_id,
+    );
     let _ = mock_screen.to_screen.send(ScreenInstruction::ApplyLayout(
         tiled_layout,
         floating_layout,
@@ -8899,7 +8991,12 @@ pub fn late_apply_rejection_fails_blocking_completion_and_removes_pending_tab() 
     let terminal_id = 980;
     let (completion_tx, completion_rx) = oneshot::channel();
     let blocking_completion = NotificationEnd::new(completion_tx);
-    reject_after_apply_prepare_for_test(transaction_id);
+    reject_after_apply_prepare_for_test(
+        mock_screen
+            .screen_thread_id
+            .expect("running MockScreen must publish its thread identity"),
+        transaction_id,
+    );
     let _ = mock_screen.to_screen.send(ScreenInstruction::ApplyLayout(
         TiledPaneLayout::default(),
         vec![],
@@ -12706,6 +12803,7 @@ pub fn copy_pane_scrollback_action_pipes_focused_pane_full_scrollback_to_copy_co
 
     route_action(
         Action::CopyPaneScrollback,
+        "test",
         client_id,
         None,
         None,

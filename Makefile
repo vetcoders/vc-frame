@@ -14,7 +14,7 @@
 #   - protobuf compiler (protoc)
 
 .PHONY: all build plugins plugins-assets plugins-parity plugins-parity-double \
-        plugins-parity-self-test binary install run test test-server test-utils \
+        plugins-parity-self-test chrome-contract binary install run test test-server test-utils \
         test-client test-no-web check clippy precheck semgrep fmt clean doctor \
         doctor-quiet doctor-install-quiet help release-guard \
         release-guard-self-test package install-test release-contract-test \
@@ -118,6 +118,10 @@ plugins-parity-double: doctor-quiet
 plugins-parity-self-test:
 	@./scripts/plugins-parity.zsh self-test
 
+## Fixed-cell chrome lock: every shipped chrome glyph must be EAW=N.
+chrome-contract:
+	@PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tools/repro_chrome.py --columns 40 --json
+
 ## Build only the host binary (assumes plugins are already built)
 binary: doctor-quiet
 	$(CARGO) xtask build --no-plugins
@@ -192,7 +196,7 @@ fmt-check:
 
 ## Full pre-push gate: format → plugin build → clippy → typecheck
 ## This is what CI runs. If this passes locally, CI will pass.
-precheck:
+precheck: chrome-contract
 	@echo "╔══════════════════════════════════════╗"
 	@echo "║  vc-frame precheck                   ║"
 	@echo "╚══════════════════════════════════════╝"

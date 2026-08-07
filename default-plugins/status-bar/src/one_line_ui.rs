@@ -8,7 +8,9 @@ use zellij_tile::prelude::actions::Action;
 use zellij_tile::prelude::*;
 use zellij_tile_utils::palette_match;
 
-use crate::first_line::{KeyAction, KeyMode, KeyShortcut, to_char};
+use crate::first_line::{
+    KeyAction, KeyMode, KeyShortcut, chrome_key_label, format_modifiers, to_char,
+};
 use crate::second_line::{system_clipboard_error, text_copied_hint};
 use crate::{ColoredElements, LinePart};
 use crate::{MORE_MSG, TO_NORMAL, action_key, action_key_group, color_elements};
@@ -627,6 +629,8 @@ fn full_modes_shortcut_list(default_keys: &Vec<KeyShortcut>, help: &ModeInfo) ->
 }
 
 fn shortened_modes_shortcut_list(default_keys: &Vec<KeyShortcut>, help: &ModeInfo) -> LinePart {
+    // Medium labels (LOCK/PANE/TAB — same as short_text now). Never 2-letter
+    // "Lo"/"Pa" stubs; those read as broken chrome (operator 2026-08-04).
     let mut shortened_shortcut_list = LinePart::default();
     for key in default_keys {
         let is_selected = key.is_selected();
@@ -687,25 +691,12 @@ fn render_common_modifiers(
     line_part_to_render: &mut LinePart,
     separator: &str,
 ) {
+    let mods = format_modifiers(common_modifiers);
     let prefix_text = if mode_info.capabilities.arrow_fonts {
         // Add extra space in simplified ui
-        format!(
-            " {} + ",
-            common_modifiers
-                .iter()
-                .map(|m| m.to_string())
-                .collect::<Vec<_>>()
-                .join("-")
-        )
+        format!(" {} + ", mods)
     } else {
-        format!(
-            " {} +",
-            common_modifiers
-                .iter()
-                .map(|m| m.to_string())
-                .collect::<Vec<_>>()
-                .join("-")
-        )
+        format!(" {} +", mods)
     };
 
     let suffix_separator = palette.superkey_suffix_separator.paint(separator);
@@ -932,14 +923,7 @@ fn secondary_keybinds(help: &ModeInfo, tab_info: Option<&TabInfo>, max_len: usiz
         ));
     } else {
         let modifier_str = text_as_line_part_with_emphasis(
-            format!(
-                "{} + ",
-                common_modifiers
-                    .iter()
-                    .map(|m| m.to_string())
-                    .collect::<Vec<_>>()
-                    .join("-")
-            ),
+            format!("{} + ", format_modifiers(&common_modifiers)),
             0,
         );
         secondary_info.append(&modifier_str);
@@ -1024,14 +1008,7 @@ fn secondary_keybinds(help: &ModeInfo, tab_info: Option<&TabInfo>, max_len: usiz
             ));
         } else {
             let modifier_str = text_as_line_part_with_emphasis(
-                format!(
-                    "{} + ",
-                    common_modifiers
-                        .iter()
-                        .map(|m| m.to_string())
-                        .collect::<Vec<_>>()
-                        .join("-")
-                ),
+                format!("{} + ", format_modifiers(&common_modifiers)),
                 0,
             );
             short_line.append(&modifier_str);
@@ -1646,20 +1623,16 @@ fn style_key_with_modifier(keyvec: &[KeyWithModifier], color_index: Option<usize
     let common_modifiers = get_common_modifiers(keyvec.iter().collect());
 
     let no_common_modifier = common_modifiers.is_empty();
-    let modifier_str = common_modifiers
-        .iter()
-        .map(|m| m.to_string())
-        .collect::<Vec<_>>()
-        .join("-");
+    let modifier_str = format_modifiers(&common_modifiers);
 
-    // Prints the keys
+    // Prints the keys — macOS glyphs (⌃g not "Ctrl g")
     let key = keyvec
         .iter()
         .map(|key| {
             if no_common_modifier || keyvec.len() == 1 {
-                format!("{}", key)
+                chrome_key_label(key)
             } else {
-                format!("{}", key.strip_common_modifiers(&common_modifiers))
+                chrome_key_label(&key.strip_common_modifiers(&common_modifiers))
             }
         })
         .collect::<Vec<String>>();

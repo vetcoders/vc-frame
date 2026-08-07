@@ -37,6 +37,11 @@ fn main() {
     if let Some(Command::Repair(repair_cli)) = &opts.command {
         std::process::exit(clinic::repair(&opts, repair_cli));
     }
+    if let Some(Command::Action(cli_action)) = &opts.command
+        && let zellij_utils::cli::CliAction::DoctorRoutes { json } = cli_action.as_ref()
+    {
+        std::process::exit(commands::doctor_routes(opts.session.clone(), *json));
+    }
 
     {
         let config = Config::try_from(&opts).ok();
@@ -298,10 +303,13 @@ fn main() {
         commands::watch_session(session_name.clone(), opts);
     } else if let Some(Command::Sessions(Sessions::KillAllSessions { yes })) = opts.command {
         commands::kill_all_sessions(yes);
-    } else if let Some(Command::Sessions(Sessions::KillSession { ref target_session })) =
-        opts.command
+    } else if let Some(Command::Sessions(Sessions::KillSession {
+        ref target_session,
+        yes: _,
+        force,
+    })) = opts.command
     {
-        commands::kill_session(target_session);
+        commands::kill_session(target_session, force);
     } else if let Some(Command::Sessions(Sessions::DeleteAllSessions { yes, force })) = opts.command
     {
         commands::delete_all_sessions(yes, force);
