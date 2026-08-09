@@ -1585,34 +1585,34 @@ impl Tab {
         let connected_clients = Rc::new(RefCell::new(connected_clients));
         let mode_info = Rc::new(RefCell::new(HashMap::new()));
 
-        let tiled_panes = TiledPanes::new(
-            display_area.clone(),
-            viewport.clone(),
-            connected_clients.clone(),
-            connected_clients_in_app.clone(),
-            mode_info.clone(),
-            character_cell_size.clone(),
-            stacked_resize.clone(),
+        let tiled_panes = TiledPanes::new(crate::panes::tiled_panes::TiledPanesOptions {
+            display_area: display_area.clone(),
+            viewport: viewport.clone(),
+            connected_clients: connected_clients.clone(),
+            connected_clients_in_app: connected_clients_in_app.clone(),
+            mode_info: mode_info.clone(),
+            character_cell_size: character_cell_size.clone(),
+            stacked_resize: stacked_resize.clone(),
             session_is_mirrored,
             draw_pane_frames,
-            default_mode_info.clone(),
+            default_mode_info: default_mode_info.clone(),
             style,
-            os_api.clone(),
-            senders.clone(),
-        );
-        let floating_panes = FloatingPanes::new(
-            display_area.clone(),
-            viewport.clone(),
-            connected_clients.clone(),
-            connected_clients_in_app.clone(),
-            mode_info.clone(),
-            character_cell_size.clone(),
+            os_api: os_api.clone(),
+            senders: senders.clone(),
+        });
+        let floating_panes = FloatingPanes::new(crate::panes::floating_panes::FloatingPanesOptions {
+            display_area: display_area.clone(),
+            viewport: viewport.clone(),
+            connected_clients: connected_clients.clone(),
+            connected_clients_in_app: connected_clients_in_app.clone(),
+            mode_info: mode_info.clone(),
+            character_cell_size: character_cell_size.clone(),
             session_is_mirrored,
-            default_mode_info.clone(),
+            default_mode_info: default_mode_info.clone(),
             style,
-            os_api.clone(),
-            senders.clone(),
-        );
+            os_input: os_api.clone(),
+            senders: senders.clone(),
+        });
 
         let clipboard_provider = match copy_options.command {
             Some(command) => ClipboardProvider::Command(CopyCommand::new(command)),

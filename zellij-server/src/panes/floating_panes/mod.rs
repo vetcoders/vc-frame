@@ -75,22 +75,36 @@ pub(crate) struct FloatingPanesLayoutSnapshot {
     layout_resizes_enabled: bool,
 }
 
+pub struct FloatingPanesOptions {
+    pub display_area: Rc<RefCell<Size>>,
+    pub viewport: Rc<RefCell<Viewport>>,
+    pub connected_clients: Rc<RefCell<HashSet<ClientId>>>,
+    pub connected_clients_in_app: Rc<RefCell<HashMap<ClientId, bool>>>,
+    pub mode_info: Rc<RefCell<HashMap<ClientId, ModeInfo>>>,
+    pub character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
+    pub session_is_mirrored: bool,
+    pub default_mode_info: ModeInfo,
+    pub style: Style,
+    pub os_input: Box<dyn ServerOsApi>,
+    pub senders: ThreadSenders,
+}
+
 #[allow(clippy::borrowed_box)]
-#[allow(clippy::too_many_arguments)]
 impl FloatingPanes {
-    pub fn new(
-        display_area: Rc<RefCell<Size>>,
-        viewport: Rc<RefCell<Viewport>>,
-        connected_clients: Rc<RefCell<HashSet<ClientId>>>,
-        connected_clients_in_app: Rc<RefCell<HashMap<ClientId, bool>>>, // bool -> is_web_client
-        mode_info: Rc<RefCell<HashMap<ClientId, ModeInfo>>>,
-        character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
-        session_is_mirrored: bool,
-        default_mode_info: ModeInfo,
-        style: Style,
-        os_input: Box<dyn ServerOsApi>,
-        senders: ThreadSenders,
-    ) -> Self {
+    pub fn new(opts: FloatingPanesOptions) -> Self {
+        let FloatingPanesOptions {
+            display_area,
+            viewport,
+            connected_clients,
+            connected_clients_in_app,
+            mode_info,
+            character_cell_size,
+            session_is_mirrored,
+            default_mode_info,
+            style,
+            os_input,
+            senders,
+        } = opts;
         FloatingPanes {
             panes: BTreeMap::new(),
             display_area,
