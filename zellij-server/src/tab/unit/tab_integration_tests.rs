@@ -89,13 +89,20 @@ impl Tab {
         default_mode_info: ModeInfo,
         draw_pane_frames: bool,
         auto_layout: bool,
-        connected_clients_in_app: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<ClientId, bool>>>,
+        connected_clients_in_app: std::rc::Rc<
+            std::cell::RefCell<std::collections::HashMap<ClientId, bool>>,
+        >,
         session_is_mirrored: bool,
         client_id: Option<ClientId>,
         copy_options: CopyOptions,
         terminal_emulator_colors: std::rc::Rc<std::cell::RefCell<Palette>>,
-        terminal_emulator_color_codes: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<usize, String>>>,
-        swap_layouts: (Vec<zellij_utils::input::layout::SwapTiledLayout>, Vec<zellij_utils::input::layout::SwapFloatingLayout>),
+        terminal_emulator_color_codes: std::rc::Rc<
+            std::cell::RefCell<std::collections::HashMap<usize, String>>,
+        >,
+        swap_layouts: (
+            Vec<zellij_utils::input::layout::SwapTiledLayout>,
+            Vec<zellij_utils::input::layout::SwapFloatingLayout>,
+        ),
         default_shell: PathBuf,
         debug: bool,
         arrow_fonts: bool,
@@ -106,7 +113,9 @@ impl Tab {
         web_clients_allowed: bool,
         web_sharing: WebSharing,
         current_pane_group: std::rc::Rc<std::cell::RefCell<PaneGroups>>,
-        currently_marking_pane_group: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<ClientId, bool>>>,
+        currently_marking_pane_group: std::rc::Rc<
+            std::cell::RefCell<std::collections::HashMap<ClientId, bool>>,
+        >,
         advanced_mouse_actions: bool,
         mouse_hover_effects: bool,
         focus_follows_mouse: bool,
@@ -795,8 +804,11 @@ fn session_manager_projector_routes_mouse_events_to_runtime_plugin() {
     while plugin_rx.try_recv().is_ok() {} // drain layout/focus noise
 
     let inside_projector = Position::new(18, 5);
-    tab.handle_mouse_event(&MouseEvent::new_left_press_event(inside_projector), client_id)
-        .unwrap();
+    tab.handle_mouse_event(
+        &MouseEvent::new_left_press_event(inside_projector),
+        client_id,
+    )
+    .unwrap();
     tab.handle_mouse_event(
         &MouseEvent::new_left_release_event(inside_projector),
         client_id,

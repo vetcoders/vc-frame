@@ -1601,19 +1601,20 @@ impl Tab {
             os_api: os_api.clone(),
             senders: senders.clone(),
         });
-        let floating_panes = FloatingPanes::new(crate::panes::floating_panes::FloatingPanesOptions {
-            display_area: display_area.clone(),
-            viewport: viewport.clone(),
-            connected_clients: connected_clients.clone(),
-            connected_clients_in_app: connected_clients_in_app.clone(),
-            mode_info: mode_info.clone(),
-            character_cell_size: character_cell_size.clone(),
-            session_is_mirrored,
-            default_mode_info: default_mode_info.clone(),
-            style,
-            os_input: os_api.clone(),
-            senders: senders.clone(),
-        });
+        let floating_panes =
+            FloatingPanes::new(crate::panes::floating_panes::FloatingPanesOptions {
+                display_area: display_area.clone(),
+                viewport: viewport.clone(),
+                connected_clients: connected_clients.clone(),
+                connected_clients_in_app: connected_clients_in_app.clone(),
+                mode_info: mode_info.clone(),
+                character_cell_size: character_cell_size.clone(),
+                session_is_mirrored,
+                default_mode_info: default_mode_info.clone(),
+                style,
+                os_input: os_api.clone(),
+                senders: senders.clone(),
+            });
 
         let clipboard_provider = match copy_options.command {
             Some(command) => ClipboardProvider::Command(CopyCommand::new(command)),
@@ -1763,30 +1764,32 @@ impl Tab {
         self.begin_layout_transaction();
         self.swap_layouts
             .set_base_layout((layout.clone(), floating_panes_layout.clone()));
-        let mut layout_applier = LayoutApplier::new(crate::tab::layout_applier::LayoutApplierOptions {
-            viewport: &self.viewport,
-            senders: &self.senders,
-            sixel_image_store: &self.sixel_image_store,
-            link_handler: &self.link_handler,
-            terminal_emulator_colors: &self.terminal_emulator_colors,
-            terminal_emulator_color_codes: &self.terminal_emulator_color_codes,
-            character_cell_size: &self.character_cell_size,
-            connected_clients: &self.connected_clients_in_app,
-            style: &self.style,
-            display_area: &self.display_area,
-            tiled_panes: &mut self.tiled_panes,
-            floating_panes: &mut self.floating_panes,
-            draw_pane_frames: self.draw_pane_frames,
-            focus_pane_id: &mut self.focus_pane_id,
-            _os_api: &*self.os_api,
-            debug: self.debug,
-            arrow_fonts: self.arrow_fonts,
-            styled_underlines: self.styled_underlines,
-            osc8_hyperlinks: self.osc8_hyperlinks,
-            explicitly_disable_kitty_keyboard_protocol: self.explicitly_disable_kitty_keyboard_protocol,
-            blocking_terminal,
-        })
-        .defer_side_effects();
+        let mut layout_applier =
+            LayoutApplier::new(crate::tab::layout_applier::LayoutApplierOptions {
+                viewport: &self.viewport,
+                senders: &self.senders,
+                sixel_image_store: &self.sixel_image_store,
+                link_handler: &self.link_handler,
+                terminal_emulator_colors: &self.terminal_emulator_colors,
+                terminal_emulator_color_codes: &self.terminal_emulator_color_codes,
+                character_cell_size: &self.character_cell_size,
+                connected_clients: &self.connected_clients_in_app,
+                style: &self.style,
+                display_area: &self.display_area,
+                tiled_panes: &mut self.tiled_panes,
+                floating_panes: &mut self.floating_panes,
+                draw_pane_frames: self.draw_pane_frames,
+                focus_pane_id: &mut self.focus_pane_id,
+                _os_api: &*self.os_api,
+                debug: self.debug,
+                arrow_fonts: self.arrow_fonts,
+                styled_underlines: self.styled_underlines,
+                osc8_hyperlinks: self.osc8_hyperlinks,
+                explicitly_disable_kitty_keyboard_protocol: self
+                    .explicitly_disable_kitty_keyboard_protocol,
+                blocking_terminal,
+            })
+            .defer_side_effects();
         let application_result = layout_applier.apply_layout(
             layout,
             floating_panes_layout,
@@ -1852,30 +1855,32 @@ impl Tab {
             .set_swap_floating_layouts(new_swap_floating_layouts);
         self.swap_layouts
             .set_base_layout((layout.clone(), floating_panes_layout.clone()));
-        let mut layout_applier = LayoutApplier::new(crate::tab::layout_applier::LayoutApplierOptions {
-            viewport: &self.viewport,
-            senders: &self.senders,
-            sixel_image_store: &self.sixel_image_store,
-            link_handler: &self.link_handler,
-            terminal_emulator_colors: &self.terminal_emulator_colors,
-            terminal_emulator_color_codes: &self.terminal_emulator_color_codes,
-            character_cell_size: &self.character_cell_size,
-            connected_clients: &self.connected_clients_in_app,
-            style: &self.style,
-            display_area: &self.display_area,
-            tiled_panes: &mut self.tiled_panes,
-            floating_panes: &mut self.floating_panes,
-            draw_pane_frames: self.draw_pane_frames,
-            focus_pane_id: &mut self.focus_pane_id,
-            _os_api: &*self.os_api,
-            debug: self.debug,
-            arrow_fonts: self.arrow_fonts,
-            styled_underlines: self.styled_underlines,
-            osc8_hyperlinks: self.osc8_hyperlinks,
-            explicitly_disable_kitty_keyboard_protocol: self.explicitly_disable_kitty_keyboard_protocol,
-            blocking_terminal,
-        })
-        .defer_side_effects();
+        let mut layout_applier =
+            LayoutApplier::new(crate::tab::layout_applier::LayoutApplierOptions {
+                viewport: &self.viewport,
+                senders: &self.senders,
+                sixel_image_store: &self.sixel_image_store,
+                link_handler: &self.link_handler,
+                terminal_emulator_colors: &self.terminal_emulator_colors,
+                terminal_emulator_color_codes: &self.terminal_emulator_color_codes,
+                character_cell_size: &self.character_cell_size,
+                connected_clients: &self.connected_clients_in_app,
+                style: &self.style,
+                display_area: &self.display_area,
+                tiled_panes: &mut self.tiled_panes,
+                floating_panes: &mut self.floating_panes,
+                draw_pane_frames: self.draw_pane_frames,
+                focus_pane_id: &mut self.focus_pane_id,
+                _os_api: &*self.os_api,
+                debug: self.debug,
+                arrow_fonts: self.arrow_fonts,
+                styled_underlines: self.styled_underlines,
+                osc8_hyperlinks: self.osc8_hyperlinks,
+                explicitly_disable_kitty_keyboard_protocol: self
+                    .explicitly_disable_kitty_keyboard_protocol,
+                blocking_terminal,
+            })
+            .defer_side_effects();
         let application_result = layout_applier.override_layout(
             crate::tab::layout_applier::LayoutApplierOverrideOptions {
                 tiled_panes_layout: layout,
@@ -1956,7 +1961,8 @@ impl Tab {
                 arrow_fonts: self.arrow_fonts,
                 styled_underlines: self.styled_underlines,
                 osc8_hyperlinks: self.osc8_hyperlinks,
-                explicitly_disable_kitty_keyboard_protocol: self.explicitly_disable_kitty_keyboard_protocol,
+                explicitly_disable_kitty_keyboard_protocol: self
+                    .explicitly_disable_kitty_keyboard_protocol,
                 blocking_terminal: None,
             })
             .apply_floating_panes_layout_to_existing_panes(&layout_candidate)
@@ -1978,30 +1984,32 @@ impl Tab {
             .swap_layouts
             .swap_tiled_panes(&self.tiled_panes, search_backwards)
         {
-            let application_res = LayoutApplier::new(crate::tab::layout_applier::LayoutApplierOptions {
-                viewport: &self.viewport,
-                senders: &self.senders,
-                sixel_image_store: &self.sixel_image_store,
-                link_handler: &self.link_handler,
-                terminal_emulator_colors: &self.terminal_emulator_colors,
-                terminal_emulator_color_codes: &self.terminal_emulator_color_codes,
-                character_cell_size: &self.character_cell_size,
-                connected_clients: &self.connected_clients_in_app,
-                style: &self.style,
-                display_area: &self.display_area,
-                tiled_panes: &mut self.tiled_panes,
-                floating_panes: &mut self.floating_panes,
-                draw_pane_frames: self.draw_pane_frames,
-                focus_pane_id: &mut self.focus_pane_id,
-                _os_api: &*self.os_api,
-                debug: self.debug,
-                arrow_fonts: self.arrow_fonts,
-                styled_underlines: self.styled_underlines,
-                osc8_hyperlinks: self.osc8_hyperlinks,
-                explicitly_disable_kitty_keyboard_protocol: self.explicitly_disable_kitty_keyboard_protocol,
-                blocking_terminal: None,
-            })
-            .apply_tiled_panes_layout_to_existing_panes(&layout_candidate);
+            let application_res =
+                LayoutApplier::new(crate::tab::layout_applier::LayoutApplierOptions {
+                    viewport: &self.viewport,
+                    senders: &self.senders,
+                    sixel_image_store: &self.sixel_image_store,
+                    link_handler: &self.link_handler,
+                    terminal_emulator_colors: &self.terminal_emulator_colors,
+                    terminal_emulator_color_codes: &self.terminal_emulator_color_codes,
+                    character_cell_size: &self.character_cell_size,
+                    connected_clients: &self.connected_clients_in_app,
+                    style: &self.style,
+                    display_area: &self.display_area,
+                    tiled_panes: &mut self.tiled_panes,
+                    floating_panes: &mut self.floating_panes,
+                    draw_pane_frames: self.draw_pane_frames,
+                    focus_pane_id: &mut self.focus_pane_id,
+                    _os_api: &*self.os_api,
+                    debug: self.debug,
+                    arrow_fonts: self.arrow_fonts,
+                    styled_underlines: self.styled_underlines,
+                    osc8_hyperlinks: self.osc8_hyperlinks,
+                    explicitly_disable_kitty_keyboard_protocol: self
+                        .explicitly_disable_kitty_keyboard_protocol,
+                    blocking_terminal: None,
+                })
+                .apply_tiled_panes_layout_to_existing_panes(&layout_candidate);
             if application_res.is_err() {
                 self.swap_layouts.set_is_tiled_damaged();
                 application_res.non_fatal();
@@ -2401,16 +2409,18 @@ impl Tab {
         } = opts;
         let invoked_with = self.normalize_invoked_with_for_default_shell(invoked_with);
         match new_pane_placement {
-            NewPanePlacement::NoPreference { borderless } => self.new_no_preference_pane(NewNoPreferencePaneOptions {
-                pid,
-                initial_pane_title,
-                invoked_with,
-                start_suppressed,
-                should_focus_pane,
-                client_id,
-                blocking_notification,
-                borderless,
-            }),
+            NewPanePlacement::NoPreference { borderless } => {
+                self.new_no_preference_pane(NewNoPreferencePaneOptions {
+                    pid,
+                    initial_pane_title,
+                    invoked_with,
+                    start_suppressed,
+                    should_focus_pane,
+                    client_id,
+                    blocking_notification,
+                    borderless,
+                })
+            },
             NewPanePlacement::Tiled {
                 direction: None,
                 borderless,
@@ -2449,15 +2459,17 @@ impl Tab {
                 }
                 Ok(())
             },
-            NewPanePlacement::Floating(floating_pane_coordinates) => self.new_floating_pane(NewFloatingPaneOptions {
-                pid,
-                initial_pane_title,
-                invoked_with,
-                start_suppressed,
-                should_focus_pane,
-                floating_pane_coordinates,
-                blocking_notification,
-            }),
+            NewPanePlacement::Floating(floating_pane_coordinates) => {
+                self.new_floating_pane(NewFloatingPaneOptions {
+                    pid,
+                    initial_pane_title,
+                    invoked_with,
+                    start_suppressed,
+                    should_focus_pane,
+                    floating_pane_coordinates,
+                    blocking_notification,
+                })
+            },
             NewPanePlacement::InPlace {
                 pane_id_to_replace,
                 close_replaced_pane,
@@ -2587,32 +2599,36 @@ impl Tab {
         let mut new_pane = match pid {
             PaneId::Terminal(term_pid) => {
                 let next_terminal_position = self.get_next_terminal_position();
-                Box::new(TerminalPane::new(crate::panes::terminal_pane::TerminalPaneOptions {
-                    pid: term_pid,
-                    position_and_size: PaneGeom::default(), // this will be filled out later
-                    style: self.style,
-                    pane_index: next_terminal_position,
-                    pane_name: initial_pane_title.clone().unwrap_or_default(),
-                    link_handler: self.link_handler.clone(),
-                    character_cell_size: self.character_cell_size.clone(),
-                    sixel_image_store: self.sixel_image_store.clone(),
-                    terminal_emulator_colors: self.terminal_emulator_colors.clone(),
-                    terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
-                    initial_pane_title,
-                    invoked_with,
-                    debug: self.debug,
-                    arrow_fonts: self.arrow_fonts,
-                    styled_underlines: self.styled_underlines,
-                    osc8_hyperlinks: self.osc8_hyperlinks,
-                    explicitly_disable_keyboard_protocol: self.explicitly_disable_kitty_keyboard_protocol,
-                    notification_end: blocking_notification,
-                })) as Box<dyn Pane>
+                Box::new(TerminalPane::new(
+                    crate::panes::terminal_pane::TerminalPaneOptions {
+                        pid: term_pid,
+                        position_and_size: PaneGeom::default(), // this will be filled out later
+                        style: self.style,
+                        pane_index: next_terminal_position,
+                        pane_name: initial_pane_title.clone().unwrap_or_default(),
+                        link_handler: self.link_handler.clone(),
+                        character_cell_size: self.character_cell_size.clone(),
+                        sixel_image_store: self.sixel_image_store.clone(),
+                        terminal_emulator_colors: self.terminal_emulator_colors.clone(),
+                        terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
+                        initial_pane_title,
+                        invoked_with,
+                        debug: self.debug,
+                        arrow_fonts: self.arrow_fonts,
+                        styled_underlines: self.styled_underlines,
+                        osc8_hyperlinks: self.osc8_hyperlinks,
+                        explicitly_disable_keyboard_protocol: self
+                            .explicitly_disable_kitty_keyboard_protocol,
+                        notification_end: blocking_notification,
+                    },
+                )) as Box<dyn Pane>
             },
             PaneId::Plugin(plugin_pid) => {
                 Box::new(PluginPane::new(crate::panes::PluginPaneOptions {
                     pid: plugin_pid,
                     position_and_size: PaneGeom::default(), // this will be filled out later
-                    send_plugin_instructions: self.senders
+                    send_plugin_instructions: self
+                        .senders
                         .to_plugin
                         .as_ref()
                         .with_context(err_context)?
@@ -2624,7 +2640,8 @@ impl Tab {
                     terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
                     link_handler: self.link_handler.clone(),
                     character_cell_size: self.character_cell_size.clone(),
-                    currently_connected_clients: self.connected_clients_in_app
+                    currently_connected_clients: self
+                        .connected_clients_in_app
                         .borrow()
                         .keys()
                         .copied()
@@ -2698,32 +2715,36 @@ impl Tab {
         let mut new_pane = match pid {
             PaneId::Terminal(term_pid) => {
                 let next_terminal_position = self.get_next_terminal_position();
-                Box::new(TerminalPane::new(crate::panes::terminal_pane::TerminalPaneOptions {
-                    pid: term_pid,
-                    position_and_size: PaneGeom::default(), // this will be filled out later
-                    style: self.style,
-                    pane_index: next_terminal_position,
-                    pane_name: initial_pane_title.clone().unwrap_or_default(),
-                    link_handler: self.link_handler.clone(),
-                    character_cell_size: self.character_cell_size.clone(),
-                    sixel_image_store: self.sixel_image_store.clone(),
-                    terminal_emulator_colors: self.terminal_emulator_colors.clone(),
-                    terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
-                    initial_pane_title,
-                    invoked_with,
-                    debug: self.debug,
-                    arrow_fonts: self.arrow_fonts,
-                    styled_underlines: self.styled_underlines,
-                    osc8_hyperlinks: self.osc8_hyperlinks,
-                    explicitly_disable_keyboard_protocol: self.explicitly_disable_kitty_keyboard_protocol,
-                    notification_end: blocking_notification,
-                })) as Box<dyn Pane>
+                Box::new(TerminalPane::new(
+                    crate::panes::terminal_pane::TerminalPaneOptions {
+                        pid: term_pid,
+                        position_and_size: PaneGeom::default(), // this will be filled out later
+                        style: self.style,
+                        pane_index: next_terminal_position,
+                        pane_name: initial_pane_title.clone().unwrap_or_default(),
+                        link_handler: self.link_handler.clone(),
+                        character_cell_size: self.character_cell_size.clone(),
+                        sixel_image_store: self.sixel_image_store.clone(),
+                        terminal_emulator_colors: self.terminal_emulator_colors.clone(),
+                        terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
+                        initial_pane_title,
+                        invoked_with,
+                        debug: self.debug,
+                        arrow_fonts: self.arrow_fonts,
+                        styled_underlines: self.styled_underlines,
+                        osc8_hyperlinks: self.osc8_hyperlinks,
+                        explicitly_disable_keyboard_protocol: self
+                            .explicitly_disable_kitty_keyboard_protocol,
+                        notification_end: blocking_notification,
+                    },
+                )) as Box<dyn Pane>
             },
             PaneId::Plugin(plugin_pid) => {
                 Box::new(PluginPane::new(crate::panes::PluginPaneOptions {
                     pid: plugin_pid,
                     position_and_size: PaneGeom::default(), // this will be filled out later
-                    send_plugin_instructions: self.senders
+                    send_plugin_instructions: self
+                        .senders
                         .to_plugin
                         .as_ref()
                         .with_context(err_context)?
@@ -2735,7 +2756,8 @@ impl Tab {
                     terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
                     link_handler: self.link_handler.clone(),
                     character_cell_size: self.character_cell_size.clone(),
-                    currently_connected_clients: self.connected_clients_in_app
+                    currently_connected_clients: self
+                        .connected_clients_in_app
                         .borrow()
                         .keys()
                         .copied()

@@ -1532,7 +1532,10 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                         let pane_id_to_replace_converted = pane_id_to_replace.map(|p| p.into());
                         let configuration = Some(message.plugin_config);
                         let args = Some(message.message_args);
-                        let should_focus = message.new_plugin_args.as_ref().and_then(|n| n.should_focus);
+                        let should_focus = message
+                            .new_plugin_args
+                            .as_ref()
+                            .and_then(|n| n.should_focus);
                         pipe_to_specific_plugins(PipeToSpecificPluginsParams {
                             pipe_source: PipeSource::Plugin(source_plugin_id),
                             plugin_url: &plugin_url,

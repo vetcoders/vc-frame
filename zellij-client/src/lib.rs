@@ -660,8 +660,8 @@ pub fn start_remote_client(
 
     let runtime = crate::async_runtime(opts.async_worker_tasks);
 
-    let connections = remote_attach::attach_to_remote_session(
-        remote_attach::AttachRemoteSessionOptions {
+    let connections =
+        remote_attach::attach_to_remote_session(remote_attach::AttachRemoteSessionOptions {
             runtime: runtime.clone(),
             _os_input: opts.os_input.clone(),
             remote_session_url: opts.remote_session_url,
@@ -670,8 +670,7 @@ pub fn start_remote_client(
             forget: opts.forget,
             ca_cert: opts.ca_cert.as_deref(),
             insecure: opts.insecure,
-        },
-    )?;
+        })?;
 
     let reconnect_to_session = None;
     opts.os_input.unset_raw_mode().unwrap();

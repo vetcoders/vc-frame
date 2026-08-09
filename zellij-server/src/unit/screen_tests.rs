@@ -1,11 +1,11 @@
 use super::{
     ActiveLayoutTransaction, ApplyLayoutParams, CopyOptions, DurableTabLayoutGeneration,
-    LayoutPreparationCleanup,
-    LayoutTabOwner, Screen, ScreenInstruction, ScreenLayoutTransactionKind, ScreenOptions, TabOverrideResult,
+    LayoutPreparationCleanup, LayoutTabOwner, Screen, ScreenInstruction,
+    ScreenLayoutTransactionKind, ScreenOptions, ScreenThreadParams, TabOverrideResult,
     VC_FLEET_LIVE_COUNT_MESSAGE, VC_STATUS_BAR_VISIBILITY_MESSAGE, fleet_live_count,
     is_parkable_chrome_plugin_run, register_viewer_creation_post_install_test_hook,
     reject_after_apply_prepare_for_test, reserve_durable_tab_layout_recovery,
-    reserve_new_durable_tab_layout_generation, ScreenThreadParams, screen_thread_main, session_update_events,
+    reserve_new_durable_tab_layout_generation, screen_thread_main, session_update_events,
 };
 use crate::panes::PaneId;
 use crate::{

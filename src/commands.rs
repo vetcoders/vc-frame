@@ -769,8 +769,8 @@ pub(crate) fn start_client(opts: CliArgs) {
                 }
 
                 #[cfg(feature = "web_server_capability")]
-                if let Err(e) = zellij_client::start_remote_client(
-                    zellij_client::StartRemoteClientOptions {
+                if let Err(e) =
+                    zellij_client::start_remote_client(zellij_client::StartRemoteClientOptions {
                         os_input: Box::new(os_input.clone()),
                         remote_session_url,
                         token,
@@ -779,8 +779,8 @@ pub(crate) fn start_client(opts: CliArgs) {
                         ca_cert,
                         insecure,
                         async_worker_tasks: config_options.client_async_worker_tasks,
-                    },
-                ) {
+                    })
+                {
                     eprintln!("{}", e);
                     std::process::exit(2);
                 }

@@ -720,7 +720,8 @@ impl<'a> LayoutApplier<'a> {
         let mut new_plugin = PluginPane::new(crate::panes::PluginPaneOptions {
             pid,
             position_and_size: *position_and_size,
-            send_plugin_instructions: self.senders
+            send_plugin_instructions: self
+                .senders
                 .to_plugin
                 .as_ref()
                 .with_context(err_context)?
@@ -768,7 +769,8 @@ impl<'a> LayoutApplier<'a> {
         let mut new_pane = PluginPane::new(crate::panes::PluginPaneOptions {
             pid,
             position_and_size,
-            send_plugin_instructions: self.senders
+            send_plugin_instructions: self
+                .senders
                 .to_plugin
                 .as_ref()
                 .with_context(err_context)?

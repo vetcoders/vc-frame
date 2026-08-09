@@ -1049,9 +1049,9 @@ impl TiledPanes {
     pub fn focused_pane_id(&self, client_id: ClientId) -> Option<PaneId> {
         self.active_panes.get(&client_id).copied()
     }
-   // &Box return/arg shape is a ~50-callsite internal contract; flattening to
-   // &dyn Pane is its own follow-up cut (sweep 2026-08-09).
-   #[allow(clippy::borrowed_box)]
+    // &Box return/arg shape is a ~50-callsite internal contract; flattening to
+    // &dyn Pane is its own follow-up cut (sweep 2026-08-09).
+    #[allow(clippy::borrowed_box)]
     pub fn get_pane(&self, pane_id: PaneId) -> Option<&Box<dyn Pane>> {
         self.panes.get(&pane_id)
     }

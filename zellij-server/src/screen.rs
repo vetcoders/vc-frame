@@ -5774,7 +5774,8 @@ impl Screen {
             arrow_fonts: self.arrow_fonts,
             styled_underlines: self.styled_underlines,
             osc8_hyperlinks: self.osc8_hyperlinks,
-            explicitly_disable_kitty_keyboard_protocol: self.explicitly_disable_kitty_keyboard_protocol,
+            explicitly_disable_kitty_keyboard_protocol: self
+                .explicitly_disable_kitty_keyboard_protocol,
             default_editor: self.default_editor.clone(),
             web_clients_allowed: self.web_clients_allowed,
             web_sharing: self.web_sharing,

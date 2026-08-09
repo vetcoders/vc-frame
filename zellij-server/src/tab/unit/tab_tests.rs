@@ -59,13 +59,20 @@ impl Tab {
         default_mode_info: ModeInfo,
         draw_pane_frames: bool,
         auto_layout: bool,
-        connected_clients_in_app: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<ClientId, bool>>>,
+        connected_clients_in_app: std::rc::Rc<
+            std::cell::RefCell<std::collections::HashMap<ClientId, bool>>,
+        >,
         session_is_mirrored: bool,
         client_id: Option<ClientId>,
         copy_options: CopyOptions,
         terminal_emulator_colors: std::rc::Rc<std::cell::RefCell<Palette>>,
-        terminal_emulator_color_codes: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<usize, String>>>,
-        swap_layouts: (Vec<zellij_utils::input::layout::SwapTiledLayout>, Vec<zellij_utils::input::layout::SwapFloatingLayout>),
+        terminal_emulator_color_codes: std::rc::Rc<
+            std::cell::RefCell<std::collections::HashMap<usize, String>>,
+        >,
+        swap_layouts: (
+            Vec<zellij_utils::input::layout::SwapTiledLayout>,
+            Vec<zellij_utils::input::layout::SwapFloatingLayout>,
+        ),
         default_shell: PathBuf,
         debug: bool,
         arrow_fonts: bool,
@@ -76,7 +83,9 @@ impl Tab {
         web_clients_allowed: bool,
         web_sharing: WebSharing,
         current_pane_group: std::rc::Rc<std::cell::RefCell<PaneGroups>>,
-        currently_marking_pane_group: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<ClientId, bool>>>,
+        currently_marking_pane_group: std::rc::Rc<
+            std::cell::RefCell<std::collections::HashMap<ClientId, bool>>,
+        >,
         advanced_mouse_actions: bool,
         mouse_hover_effects: bool,
         focus_follows_mouse: bool,
@@ -15801,7 +15810,7 @@ fn floating_pane_z_index_is_tracked() {
         floating_pane_coordinates: None,
         blocking_notification: None,
     })
-        .unwrap();
+    .unwrap();
 
     // Create second floating pane
     tab.new_floating_pane(NewFloatingPaneOptions {
@@ -15813,7 +15822,7 @@ fn floating_pane_z_index_is_tracked() {
         floating_pane_coordinates: None,
         blocking_notification: None,
     })
-        .unwrap();
+    .unwrap();
 
     // Verify z-indices exist and are different
     let z_index_pane2 = tab.floating_panes.get_pane_z_index(PaneId::Terminal(2));
@@ -15853,7 +15862,7 @@ fn pinned_floating_pane_has_higher_z_index() {
         floating_pane_coordinates: None,
         blocking_notification: None,
     })
-        .unwrap();
+    .unwrap();
 
     // Create second floating pane and pin it
     tab.new_floating_pane(NewFloatingPaneOptions {
@@ -15865,7 +15874,7 @@ fn pinned_floating_pane_has_higher_z_index() {
         floating_pane_coordinates: None,
         blocking_notification: None,
     })
-        .unwrap();
+    .unwrap();
     tab.set_floating_pane_pinned(PaneId::Terminal(3), true);
 
     // Get z-indices
@@ -15906,7 +15915,7 @@ fn pinned_pane_z_index_higher_than_regular_floating_panes() {
         floating_pane_coordinates: None,
         blocking_notification: None,
     })
-        .unwrap();
+    .unwrap();
 
     // Create second floating pane
     tab.new_floating_pane(NewFloatingPaneOptions {
@@ -15918,7 +15927,7 @@ fn pinned_pane_z_index_higher_than_regular_floating_panes() {
         floating_pane_coordinates: None,
         blocking_notification: None,
     })
-        .unwrap();
+    .unwrap();
 
     // Pin the second pane so it's on top
     tab.set_floating_pane_pinned(PaneId::Terminal(3), true);
@@ -15971,7 +15980,7 @@ fn active_pane_z_index_retrieved_for_cursor_visibility() {
         floating_pane_coordinates: None,
         blocking_notification: None,
     })
-        .unwrap();
+    .unwrap();
 
     // Active pane should now have a z-index
     let active_pane_id_floating = tab.get_active_pane_id(client_id).unwrap();
@@ -16002,7 +16011,7 @@ fn get_pane_z_index_returns_none_for_nonexistent_pane() {
         floating_pane_coordinates: None,
         blocking_notification: None,
     })
-        .unwrap();
+    .unwrap();
     tab.new_floating_pane(NewFloatingPaneOptions {
         pid: PaneId::Terminal(3),
         initial_pane_title: None,
@@ -16012,7 +16021,7 @@ fn get_pane_z_index_returns_none_for_nonexistent_pane() {
         floating_pane_coordinates: None,
         blocking_notification: None,
     })
-        .unwrap();
+    .unwrap();
 
     // Query for a pane that doesn't exist
     let z_index_nonexistent = tab.floating_panes.get_pane_z_index(PaneId::Terminal(999));

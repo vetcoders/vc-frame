@@ -278,18 +278,18 @@ impl FloatingPanes {
             p.hold(exit_status, is_first_run, run_command)
         }
     }
-   // &Box return/arg shape is a ~50-callsite internal contract; flattening to
-   // &dyn Pane is its own follow-up cut (sweep 2026-08-09).
-   #[allow(clippy::borrowed_box)]
+    // &Box return/arg shape is a ~50-callsite internal contract; flattening to
+    // &dyn Pane is its own follow-up cut (sweep 2026-08-09).
+    #[allow(clippy::borrowed_box)]
     pub fn get(&self, pane_id: &PaneId) -> Option<&Box<dyn Pane>> {
         self.panes.get(pane_id)
     }
     pub fn get_mut(&mut self, pane_id: &PaneId) -> Option<&mut Box<dyn Pane>> {
         self.panes.get_mut(pane_id)
     }
-   // &Box return/arg shape is a ~50-callsite internal contract; flattening to
-   // &dyn Pane is its own follow-up cut (sweep 2026-08-09).
-   #[allow(clippy::borrowed_box)]
+    // &Box return/arg shape is a ~50-callsite internal contract; flattening to
+    // &dyn Pane is its own follow-up cut (sweep 2026-08-09).
+    #[allow(clippy::borrowed_box)]
     pub fn get_active_pane(&self, client_id: ClientId) -> Option<&Box<dyn Pane>> {
         self.active_panes
             .get(&client_id)
@@ -1061,9 +1061,9 @@ impl FloatingPanes {
         self.active_panes.remove(&client_id, &mut self.panes);
         self.set_force_render();
     }
-   // &Box return/arg shape is a ~50-callsite internal contract; flattening to
-   // &dyn Pane is its own follow-up cut (sweep 2026-08-09).
-   #[allow(clippy::borrowed_box)]
+    // &Box return/arg shape is a ~50-callsite internal contract; flattening to
+    // &dyn Pane is its own follow-up cut (sweep 2026-08-09).
+    #[allow(clippy::borrowed_box)]
     pub fn get_pane(&self, pane_id: PaneId) -> Option<&Box<dyn Pane>> {
         self.panes.get(&pane_id)
     }

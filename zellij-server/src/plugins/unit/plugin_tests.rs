@@ -1,4 +1,4 @@
-use super::{plugin_thread_main as plugin_thread_main_impl, PluginThreadParams};
+use super::{PluginThreadParams, plugin_thread_main as plugin_thread_main_impl};
 
 fn plugin_thread_main(
     bus: Bus<PluginInstruction>,
@@ -40,8 +40,7 @@ fn plugin_thread_main(
 use crate::route::NotificationEnd;
 use crate::screen::{LayoutPreparationCleanup, ScreenInstruction};
 use crate::{
-    ClientId,
-    ServerInstruction,
+    ClientId, ServerInstruction,
     channels::SenderWithContext,
     thread_bus::{Bus, ThreadSenders},
 };

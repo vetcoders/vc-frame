@@ -1081,7 +1081,10 @@ pub mod tests {
         assert_eq!(mid.line.as_str(), "CPU  342% | MEM   8.0/ 64G | DISK  13G");
         // Single-digit path still occupies the full budget.
         let small = parse_resource_sample(b"9 1048576 2097152 1048576").unwrap();
-        assert_eq!(small.line.as_str(), "CPU    9% | MEM   1.0/  2G | DISK   1G");
+        assert_eq!(
+            small.line.as_str(),
+            "CPU    9% | MEM   1.0/  2G | DISK   1G"
+        );
         // Operator hardware from Pensieve screenshots: multi-core CPU past
         // 999% and used memory past 100G (264.3/512G, DISK 173G).
         let used_kib = (264.3_f64 * 1024.0 * 1024.0).round() as u64;

@@ -5,9 +5,7 @@ use crate::global_async_runtime::get_tokio_runtime;
 use crate::plugins::plugin_map::PluginEnv;
 use crate::plugins::wasm_bridge::handle_plugin_crash;
 use crate::pty::{ClientTabIndexOrPaneId, PtyInstruction};
-use crate::route::{
-    NotificationEnd, route_action, RouteActionParams, wait_for_action_completion,
-};
+use crate::route::{NotificationEnd, RouteActionParams, route_action, wait_for_action_completion};
 use log::warn;
 use serde::Serialize;
 use std::{
