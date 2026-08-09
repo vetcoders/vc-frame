@@ -15750,11 +15750,27 @@ fn floating_pane_z_index_is_tracked() {
     let _client_id = 1;
 
     // Create first floating pane (should_float = true means it will be a floating pane)
-    tab.new_floating_pane(PaneId::Terminal(2), None, None, false, true, None, None)
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: PaneId::Terminal(2),
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: None,
+        blocking_notification: None,
+    })
         .unwrap();
 
     // Create second floating pane
-    tab.new_floating_pane(PaneId::Terminal(3), None, None, false, true, None, None)
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: PaneId::Terminal(3),
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: None,
+        blocking_notification: None,
+    })
         .unwrap();
 
     // Verify z-indices exist and are different
@@ -15786,11 +15802,27 @@ fn pinned_floating_pane_has_higher_z_index() {
     let _client_id = 1;
 
     // Create first floating pane (will be unpinned)
-    tab.new_floating_pane(PaneId::Terminal(2), None, None, false, true, None, None)
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: PaneId::Terminal(2),
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: None,
+        blocking_notification: None,
+    })
         .unwrap();
 
     // Create second floating pane and pin it
-    tab.new_floating_pane(PaneId::Terminal(3), None, None, false, true, None, None)
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: PaneId::Terminal(3),
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: None,
+        blocking_notification: None,
+    })
         .unwrap();
     tab.set_floating_pane_pinned(PaneId::Terminal(3), true);
 
@@ -15823,11 +15855,27 @@ fn pinned_pane_z_index_higher_than_regular_floating_panes() {
     let _client_id = 1;
 
     // Create first floating pane
-    tab.new_floating_pane(PaneId::Terminal(2), None, None, false, true, None, None)
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: PaneId::Terminal(2),
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: None,
+        blocking_notification: None,
+    })
         .unwrap();
 
     // Create second floating pane
-    tab.new_floating_pane(PaneId::Terminal(3), None, None, false, true, None, None)
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: PaneId::Terminal(3),
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: None,
+        blocking_notification: None,
+    })
         .unwrap();
 
     // Pin the second pane so it's on top
@@ -15872,7 +15920,15 @@ fn active_pane_z_index_retrieved_for_cursor_visibility() {
     );
 
     // Create a floating pane
-    tab.new_floating_pane(PaneId::Terminal(2), None, None, false, true, None, None)
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: PaneId::Terminal(2),
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: None,
+        blocking_notification: None,
+    })
         .unwrap();
 
     // Active pane should now have a z-index
@@ -15895,9 +15951,25 @@ fn get_pane_z_index_returns_none_for_nonexistent_pane() {
     let _client_id = 1;
 
     // Create two floating panes
-    tab.new_floating_pane(PaneId::Terminal(2), None, None, false, true, None, None)
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: PaneId::Terminal(2),
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: None,
+        blocking_notification: None,
+    })
         .unwrap();
-    tab.new_floating_pane(PaneId::Terminal(3), None, None, false, true, None, None)
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: PaneId::Terminal(3),
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: None,
+        blocking_notification: None,
+    })
         .unwrap();
 
     // Query for a pane that doesn't exist

@@ -1,4 +1,4 @@
-use super::{Output, Tab as TabImpl, TabOptions};
+use super::{NewFloatingPaneOptions, NewInPlacePaneOptions, Output, Tab as TabImpl, TabOptions};
 
 struct Tab;
 impl Tab {
@@ -10323,15 +10323,15 @@ fn borderless_floating_pane() {
         borderless: Some(true),
     };
 
-    tab.new_floating_pane(
-        new_pane_id,
-        None,
-        None,
-        false,
-        true,
-        Some(coordinates),
-        None,
-    )
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: new_pane_id,
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: Some(coordinates),
+        blocking_notification: None,
+    })
     .unwrap();
 
     tab.handle_pty_bytes(
@@ -10370,15 +10370,15 @@ fn borderless_pane_content_fills_edges() {
         borderless: Some(true),
     };
 
-    tab.new_floating_pane(
-        new_pane_id,
-        None,
-        None,
-        false,
-        true,
-        Some(coordinates),
-        None,
-    )
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: new_pane_id,
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: Some(coordinates),
+        blocking_notification: None,
+    })
     .unwrap();
 
     // Fill with X's to verify content reaches edges
@@ -10418,15 +10418,15 @@ fn borderless_pinned_floating_pane() {
         borderless: Some(true),
     };
 
-    tab.new_floating_pane(
-        borderless_pane_id,
-        None,
-        None,
-        false,
-        true,
-        Some(coordinates),
-        None,
-    )
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: borderless_pane_id,
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: Some(coordinates),
+        blocking_notification: None,
+    })
     .unwrap();
 
     // Toggle floating panes off to test pinned behavior
@@ -10470,15 +10470,15 @@ fn cursor_hidden_when_floating_pane_is_under_pinned_pane() {
         borderless: Some(false),
     };
 
-    tab.new_floating_pane(
-        PaneId::Terminal(2),
-        None,
-        None,
-        false,
-        true,
-        Some(bottom_pane_coordinates),
-        None,
-    )
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: PaneId::Terminal(2),
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: Some(bottom_pane_coordinates),
+        blocking_notification: None,
+    })
     .unwrap();
 
     // Create overlapping pinned pane on top
@@ -10491,15 +10491,15 @@ fn cursor_hidden_when_floating_pane_is_under_pinned_pane() {
         borderless: Some(false),
     };
 
-    tab.new_floating_pane(
-        PaneId::Terminal(3),
-        None,
-        None,
-        false,
-        true,
-        Some(top_pane_coordinates),
-        None,
-    )
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: PaneId::Terminal(3),
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: Some(top_pane_coordinates),
+        blocking_notification: None,
+    })
     .unwrap();
 
     // Add some text to both panes so we can see them
@@ -10550,15 +10550,15 @@ fn cursor_visible_when_pinned_pane_is_focused() {
         borderless: Some(false),
     };
 
-    tab.new_floating_pane(
-        PaneId::Terminal(2),
-        None,
-        None,
-        false,
-        true,
-        Some(bottom_pane_coordinates),
-        None,
-    )
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: PaneId::Terminal(2),
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: Some(bottom_pane_coordinates),
+        blocking_notification: None,
+    })
     .unwrap();
 
     // Create overlapping pinned pane on top
@@ -10571,15 +10571,15 @@ fn cursor_visible_when_pinned_pane_is_focused() {
         borderless: Some(false),
     };
 
-    tab.new_floating_pane(
-        PaneId::Terminal(3),
-        None,
-        None,
-        false,
-        true,
-        Some(top_pane_coordinates),
-        None,
-    )
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: PaneId::Terminal(3),
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: Some(top_pane_coordinates),
+        blocking_notification: None,
+    })
     .unwrap();
 
     // Add some text to both panes
@@ -12691,16 +12691,16 @@ fn in_place_pane_with_close_replaced_pane_false_restores_original() {
         .unwrap();
 
     // Open pane 3 in-place of pane 2 without closing the replaced pane (suppress it)
-    tab.new_in_place_pane(
-        PaneId::Terminal(3),
-        None,
-        None,
-        Some(PaneId::Terminal(2)),
-        false, // close_replaced_pane
-        Some(client_id),
-        None,
-        None,
-    )
+    tab.new_in_place_pane(NewInPlacePaneOptions {
+        pid: PaneId::Terminal(3),
+        initial_pane_title: None,
+        invoked_with: None,
+        pane_id_to_replace: Some(PaneId::Terminal(2)),
+        close_replaced_pane: false,
+        client_id: Some(client_id),
+        blocking_notification: None,
+        borderless: None,
+    })
     .unwrap();
     tab.handle_pty_bytes(3, Vec::from("\n\n\nI am the in-place pane".as_bytes()))
         .unwrap();
@@ -12753,16 +12753,16 @@ fn in_place_pane_with_close_replaced_pane_true_closes_original() {
         .unwrap();
 
     // Open pane 3 in-place of pane 2, closing the replaced pane permanently
-    tab.new_in_place_pane(
-        PaneId::Terminal(3),
-        None,
-        None,
-        Some(PaneId::Terminal(2)),
-        true, // close_replaced_pane
-        Some(client_id),
-        None,
-        None,
-    )
+    tab.new_in_place_pane(NewInPlacePaneOptions {
+        pid: PaneId::Terminal(3),
+        initial_pane_title: None,
+        invoked_with: None,
+        pane_id_to_replace: Some(PaneId::Terminal(2)),
+        close_replaced_pane: true,
+        client_id: Some(client_id),
+        blocking_notification: None,
+        borderless: None,
+    })
     .unwrap();
     tab.handle_pty_bytes(3, Vec::from("\n\n\nI am the in-place pane".as_bytes()))
         .unwrap();

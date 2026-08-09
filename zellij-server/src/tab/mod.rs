@@ -2373,7 +2373,7 @@ impl Tab {
     ) -> Result<()> {
         let invoked_with = self.normalize_invoked_with_for_default_shell(invoked_with);
         match new_pane_placement {
-            NewPanePlacement::NoPreference { borderless } => self.new_no_preference_pane(
+            NewPanePlacement::NoPreference { borderless } => self.new_no_preference_pane(NewNoPreferencePaneOptions {
                 pid,
                 initial_pane_title,
                 invoked_with,
@@ -2382,11 +2382,11 @@ impl Tab {
                 client_id,
                 blocking_notification,
                 borderless,
-            ),
+            }),
             NewPanePlacement::Tiled {
                 direction: None,
                 borderless,
-            } => self.new_tiled_pane(
+            } => self.new_tiled_pane(NewTiledPaneOptions {
                 pid,
                 initial_pane_title,
                 invoked_with,
@@ -2395,7 +2395,7 @@ impl Tab {
                 client_id,
                 blocking_notification,
                 borderless,
-            ),
+            }),
             NewPanePlacement::Tiled {
                 direction: Some(direction),
                 borderless,
@@ -2421,7 +2421,7 @@ impl Tab {
                 }
                 Ok(())
             },
-            NewPanePlacement::Floating(floating_pane_coordinates) => self.new_floating_pane(
+            NewPanePlacement::Floating(floating_pane_coordinates) => self.new_floating_pane(NewFloatingPaneOptions {
                 pid,
                 initial_pane_title,
                 invoked_with,
@@ -2429,49 +2429,103 @@ impl Tab {
                 should_focus_pane,
                 floating_pane_coordinates,
                 blocking_notification,
-            ),
+            }),
             NewPanePlacement::InPlace {
                 pane_id_to_replace,
                 close_replaced_pane,
                 borderless,
-            } => self.new_in_place_pane(
+            } => self.new_in_place_pane(NewInPlacePaneOptions {
                 pid,
                 initial_pane_title,
                 invoked_with,
-                pane_id_to_replace.map(|id| id.into()),
+                pane_id_to_replace: pane_id_to_replace.map(|id| id.into()),
                 close_replaced_pane,
                 client_id,
                 blocking_notification,
                 borderless,
-            ),
+            }),
             NewPanePlacement::Stacked {
                 pane_id_to_stack_under,
                 borderless,
-            } => self.new_stacked_pane(
+            } => self.new_stacked_pane(NewStackedPaneOptions {
                 pid,
                 initial_pane_title,
                 invoked_with,
                 start_suppressed,
                 should_focus_pane,
-                pane_id_to_stack_under.map(|id| id.into()),
+                pane_id_to_stack_under: pane_id_to_stack_under.map(|id| id.into()),
                 client_id,
                 blocking_notification,
                 borderless,
-            ),
+            }),
         }
     }
-    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
-    pub fn new_no_preference_pane(
-        &mut self,
-        pid: PaneId,
-        initial_pane_title: Option<String>,
-        invoked_with: Option<Run>,
-        start_suppressed: bool,
-        should_focus_pane: bool,
-        client_id: Option<ClientId>,
-        blocking_notification: Option<NotificationEnd>,
-        borderless: Option<bool>,
-    ) -> Result<()> {
+pub struct NewNoPreferencePaneOptions {
+    pub pid: PaneId,
+    pub initial_pane_title: Option<String>,
+    pub invoked_with: Option<Run>,
+    pub start_suppressed: bool,
+    pub should_focus_pane: bool,
+    pub client_id: Option<ClientId>,
+    pub blocking_notification: Option<NotificationEnd>,
+    pub borderless: Option<bool>,
+}
+
+pub struct NewTiledPaneOptions {
+    pub pid: PaneId,
+    pub initial_pane_title: Option<String>,
+    pub invoked_with: Option<Run>,
+    pub start_suppressed: bool,
+    pub should_focus_pane: bool,
+    pub client_id: Option<ClientId>,
+    pub blocking_notification: Option<NotificationEnd>,
+    pub borderless: Option<bool>,
+}
+
+pub struct NewFloatingPaneOptions {
+    pub pid: PaneId,
+    pub initial_pane_title: Option<String>,
+    pub invoked_with: Option<Run>,
+    pub start_suppressed: bool,
+    pub should_focus_pane: bool,
+    pub floating_pane_coordinates: Option<FloatingPaneCoordinates>,
+    pub blocking_notification: Option<NotificationEnd>,
+}
+
+pub struct NewInPlacePaneOptions {
+    pub pid: PaneId,
+    pub initial_pane_title: Option<String>,
+    pub invoked_with: Option<Run>,
+    pub pane_id_to_replace: Option<PaneId>,
+    pub close_replaced_pane: bool,
+    pub client_id: Option<ClientId>,
+    pub blocking_notification: Option<NotificationEnd>,
+    pub borderless: Option<bool>,
+}
+
+pub struct NewStackedPaneOptions {
+    pub pid: PaneId,
+    pub initial_pane_title: Option<String>,
+    pub invoked_with: Option<Run>,
+    pub start_suppressed: bool,
+    pub should_focus_pane: bool,
+    pub pane_id_to_stack_under: Option<PaneId>,
+    pub client_id: Option<ClientId>,
+    pub blocking_notification: Option<NotificationEnd>,
+    pub borderless: Option<bool>,
+}
+
+    pub fn new_no_preference_pane(&mut self, opts: NewNoPreferencePaneOptions) -> Result<()> {
+        let NewNoPreferencePaneOptions {
+            pid,
+            initial_pane_title,
+            invoked_with,
+            start_suppressed,
+            should_focus_pane,
+            client_id,
+            blocking_notification,
+            borderless,
+        } = opts;
         let err_context = || format!("failed to create new pane with id {pid:?}");
         self.close_down_to_max_terminals()
             .with_context(err_context)?;
@@ -2569,18 +2623,17 @@ impl Tab {
             self.add_tiled_pane(new_pane, pid, false, client_id)
         }
     }
-    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
-    pub fn new_tiled_pane(
-        &mut self,
-        pid: PaneId,
-        initial_pane_title: Option<String>,
-        invoked_with: Option<Run>,
-        start_suppressed: bool,
-        should_focus_pane: bool,
-        client_id: Option<ClientId>,
-        blocking_notification: Option<NotificationEnd>,
-        borderless: Option<bool>,
-    ) -> Result<()> {
+    pub fn new_tiled_pane(&mut self, opts: NewTiledPaneOptions) -> Result<()> {
+        let NewTiledPaneOptions {
+            pid,
+            initial_pane_title,
+            invoked_with,
+            start_suppressed,
+            should_focus_pane,
+            client_id,
+            blocking_notification,
+            borderless,
+        } = opts;
         let err_context = || format!("failed to create new pane with id {pid:?}");
         if should_focus_pane {
             self.hide_floating_panes();
@@ -2590,54 +2643,54 @@ impl Tab {
         let mut new_pane = match pid {
             PaneId::Terminal(term_pid) => {
                 let next_terminal_position = self.get_next_terminal_position();
-                Box::new(TerminalPane::new(
-                    term_pid,
-                    PaneGeom::default(), // this will be filled out later
-                    self.style,
-                    next_terminal_position,
-                    initial_pane_title.clone().unwrap_or_default(),
-                    self.link_handler.clone(),
-                    self.character_cell_size.clone(),
-                    self.sixel_image_store.clone(),
-                    self.terminal_emulator_colors.clone(),
-                    self.terminal_emulator_color_codes.clone(),
+                Box::new(TerminalPane::new(crate::panes::terminal_pane::TerminalPaneOptions {
+                    pid: term_pid,
+                    position_and_size: PaneGeom::default(), // this will be filled out later
+                    style: self.style,
+                    pane_index: next_terminal_position,
+                    pane_name: initial_pane_title.clone().unwrap_or_default(),
+                    link_handler: self.link_handler.clone(),
+                    character_cell_size: self.character_cell_size.clone(),
+                    sixel_image_store: self.sixel_image_store.clone(),
+                    terminal_emulator_colors: self.terminal_emulator_colors.clone(),
+                    terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
                     initial_pane_title,
                     invoked_with,
-                    self.debug,
-                    self.arrow_fonts,
-                    self.styled_underlines,
-                    self.osc8_hyperlinks,
-                    self.explicitly_disable_kitty_keyboard_protocol,
-                    blocking_notification,
-                )) as Box<dyn Pane>
+                    debug: self.debug,
+                    arrow_fonts: self.arrow_fonts,
+                    styled_underlines: self.styled_underlines,
+                    osc8_hyperlinks: self.osc8_hyperlinks,
+                    explicitly_disable_keyboard_protocol: self.explicitly_disable_kitty_keyboard_protocol,
+                    notification_end: blocking_notification,
+                })) as Box<dyn Pane>
             },
             PaneId::Plugin(plugin_pid) => {
-                Box::new(PluginPane::new(
-                    plugin_pid,
-                    PaneGeom::default(), // this will be filled out later
-                    self.senders
+                Box::new(PluginPane::new(crate::panes::plugin_pane::PluginPaneOptions {
+                    pid: plugin_pid,
+                    position_and_size: PaneGeom::default(), // this will be filled out later
+                    send_plugin_instructions: self.senders
                         .to_plugin
                         .as_ref()
                         .with_context(err_context)?
                         .clone(),
-                    initial_pane_title.unwrap_or("".to_owned()),
-                    String::new(),
-                    self.sixel_image_store.clone(),
-                    self.terminal_emulator_colors.clone(),
-                    self.terminal_emulator_color_codes.clone(),
-                    self.link_handler.clone(),
-                    self.character_cell_size.clone(),
-                    self.connected_clients_in_app
+                    title: initial_pane_title.unwrap_or("".to_owned()),
+                    pane_name: String::new(),
+                    sixel_image_store: self.sixel_image_store.clone(),
+                    terminal_emulator_colors: self.terminal_emulator_colors.clone(),
+                    terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
+                    link_handler: self.link_handler.clone(),
+                    character_cell_size: self.character_cell_size.clone(),
+                    currently_connected_clients: self.connected_clients_in_app
                         .borrow()
                         .keys()
                         .copied()
                         .collect(),
-                    self.style,
+                    style: self.style,
                     invoked_with,
-                    self.debug,
-                    self.arrow_fonts,
-                    self.styled_underlines,
-                )) as Box<dyn Pane>
+                    debug: self.debug,
+                    arrow_fonts: self.arrow_fonts,
+                    styled_underlines: self.styled_underlines,
+                })) as Box<dyn Pane>
             },
         };
 
@@ -2673,17 +2726,16 @@ impl Tab {
             self.add_tiled_pane(new_pane, pid, false, client_id)
         }
     }
-    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
-    pub fn new_floating_pane(
-        &mut self,
-        pid: PaneId,
-        initial_pane_title: Option<String>,
-        invoked_with: Option<Run>,
-        start_suppressed: bool,
-        should_focus_pane: bool,
-        floating_pane_coordinates: Option<FloatingPaneCoordinates>,
-        blocking_notification: Option<NotificationEnd>,
-    ) -> Result<()> {
+    pub fn new_floating_pane(&mut self, opts: NewFloatingPaneOptions) -> Result<()> {
+        let NewFloatingPaneOptions {
+            pid,
+            initial_pane_title,
+            invoked_with,
+            start_suppressed,
+            should_focus_pane,
+            floating_pane_coordinates,
+            blocking_notification,
+        } = opts;
         let err_context = || format!("failed to create new pane with id {pid:?}");
         if should_focus_pane {
             self.show_floating_panes();
@@ -2772,18 +2824,17 @@ impl Tab {
             self.add_floating_pane(new_pane, pid, floating_pane_coordinates, should_focus_pane)
         }
     }
-    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
-    pub fn new_in_place_pane(
-        &mut self,
-        pid: PaneId,
-        initial_pane_title: Option<String>,
-        invoked_with: Option<Run>,
-        pane_id_to_replace: Option<PaneId>,
-        close_replaced_pane: bool,
-        client_id: Option<ClientId>,
-        blocking_notification: Option<NotificationEnd>,
-        borderless: Option<bool>,
-    ) -> Result<()> {
+    pub fn new_in_place_pane(&mut self, opts: NewInPlacePaneOptions) -> Result<()> {
+        let NewInPlacePaneOptions {
+            pid,
+            initial_pane_title,
+            invoked_with,
+            pane_id_to_replace,
+            close_replaced_pane,
+            client_id,
+            blocking_notification,
+            borderless,
+        } = opts;
         match (pane_id_to_replace, client_id) {
             (Some(pane_id_to_replace), _) => {
                 self.suppress_pane_and_replace_with_pid(
@@ -2819,19 +2870,18 @@ impl Tab {
         }
         Ok(())
     }
-    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
-    pub fn new_stacked_pane(
-        &mut self,
-        pid: PaneId,
-        initial_pane_title: Option<String>,
-        invoked_with: Option<Run>,
-        start_suppressed: bool,
-        should_focus_pane: bool,
-        pane_id_to_stack_under: Option<PaneId>,
-        client_id: Option<ClientId>,
-        blocking_notification: Option<NotificationEnd>,
-        borderless: Option<bool>,
-    ) -> Result<()> {
+    pub fn new_stacked_pane(&mut self, opts: NewStackedPaneOptions) -> Result<()> {
+        let NewStackedPaneOptions {
+            pid,
+            initial_pane_title,
+            invoked_with,
+            start_suppressed,
+            should_focus_pane,
+            pane_id_to_stack_under,
+            client_id,
+            blocking_notification,
+            borderless,
+        } = opts;
         let err_context = || format!("failed to create new pane with id {pid:?}");
         if should_focus_pane {
             self.hide_floating_panes();

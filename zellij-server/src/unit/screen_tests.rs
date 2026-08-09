@@ -10500,16 +10500,16 @@ pub fn gc_safe_close_accepts_all_runtime_viewer_plugin_locations() {
             screen
                 .get_tab_by_id_mut(1)
                 .unwrap()
-                .new_tiled_pane(
-                    PaneId::Plugin(90),
-                    Some(plugin.location_string()),
-                    Some(Run::Plugin(plugin)),
-                    false,
-                    false,
-                    None,
-                    None,
-                    Some(false),
-                )
+                .new_tiled_pane(crate::tab::NewTiledPaneOptions {
+                    pid: PaneId::Plugin(90),
+                    initial_pane_title: Some(plugin.location_string()),
+                    invoked_with: Some(Run::Plugin(plugin)),
+                    start_suppressed: false,
+                    should_focus_pane: false,
+                    client_id: None,
+                    blocking_notification: None,
+                    borderless: Some(false),
+                })
                 .expect("viewer plugin pane should use the runtime creation path");
             screen.get_tab_by_id_mut(1).unwrap().name = "viewer".to_owned();
             screen.get_tab_by_id_mut(1).unwrap().hold_pane(
@@ -10619,16 +10619,16 @@ pub fn gc_safe_close_refuses_an_unexpected_plugin_surface() {
     screen
         .get_tab_by_id_mut(1)
         .unwrap()
-        .new_tiled_pane(
-            PaneId::Plugin(90),
-            Some(plugin.location_string()),
-            Some(Run::Plugin(plugin)),
-            false,
-            false,
-            None,
-            None,
-            Some(false),
-        )
+        .new_tiled_pane(crate::tab::NewTiledPaneOptions {
+            pid: PaneId::Plugin(90),
+            initial_pane_title: Some(plugin.location_string()),
+            invoked_with: Some(Run::Plugin(plugin)),
+            start_suppressed: false,
+            should_focus_pane: false,
+            client_id: None,
+            blocking_notification: None,
+            borderless: Some(false),
+        })
         .expect("fixture plugin pane should use the runtime creation path");
     screen.get_tab_by_id_mut(1).unwrap().name = "viewer".to_owned();
     screen.get_tab_by_id_mut(1).unwrap().hold_pane(
