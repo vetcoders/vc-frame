@@ -5,7 +5,9 @@ use crate::global_async_runtime::get_tokio_runtime;
 use crate::plugins::plugin_map::PluginEnv;
 use crate::plugins::wasm_bridge::handle_plugin_crash;
 use crate::pty::{ClientTabIndexOrPaneId, PtyInstruction};
-use crate::route::{NotificationEnd, route_action, wait_for_action_completion};
+use crate::route::{
+    NotificationEnd, route_action, RouteActionParams, wait_for_action_completion,
+};
 use log::warn;
 use serde::Serialize;
 use std::{
@@ -118,17 +120,17 @@ use zellij_utils::plugin_api::plugin_command::{
 
 macro_rules! apply_action {
     ($action:ident, $error_message:ident, $env: ident) => {
-        match route_action(
-            $action,
-            "plugin",
-            $env.client_id,
-            None,
-            Some(PaneId::Plugin($env.plugin_id)),
-            $env.senders.clone(),
-            $env.default_shell.clone(),
-            None,
-            $env.default_mode.clone(),
-        ) {
+        match route_action(RouteActionParams {
+            action: $action,
+            caller: "plugin",
+            client_id: $env.client_id,
+            cli_client_id: None,
+            pane_id: Some(PaneId::Plugin($env.plugin_id)),
+            senders: $env.senders.clone(),
+            default_shell: $env.default_shell.clone(),
+            seen_cli_pipes: None,
+            default_mode: $env.default_mode.clone(),
+        }) {
             Ok((_, result)) => result,
             Err(e) => {
                 log::error!("{}: {:?}", $error_message(), e);
@@ -1443,17 +1445,17 @@ fn run_action(env: &PluginEnv, mut action: Action, context: BTreeMap<String, Str
     // Spawn a new thread to execute the action
     thread::spawn(move || {
         // Execute the action and capture the result
-        let pane_id = match route_action(
+        let pane_id = match route_action(RouteActionParams {
             action,
-            "plugin",
+            caller: "plugin",
             client_id,
-            None,
-            Some(PaneId::Plugin(plugin_id)),
-            senders.clone(),
+            cli_client_id: None,
+            pane_id: Some(PaneId::Plugin(plugin_id)),
+            senders: senders.clone(),
             default_shell,
-            None,
+            seen_cli_pipes: None,
             default_mode,
-        ) {
+        }) {
             Ok((_should_break, result)) => {
                 // Extract pane_id from ActionCompletionResult
                 result.and_then(|r| r.affected_pane_id)
@@ -4594,17 +4596,17 @@ fn try_edit_layout(
     };
 
     // Route the action - this is fallible
-    route_action(
+    route_action(RouteActionParams {
         action,
-        "plugin",
-        env.client_id,
-        None,
-        Some(PaneId::Plugin(env.plugin_id)),
-        env.senders.clone(),
-        env.default_shell.clone(),
-        None,
-        env.default_mode,
-    )
+        caller: "plugin",
+        client_id: env.client_id,
+        cli_client_id: None,
+        pane_id: Some(PaneId::Plugin(env.plugin_id)),
+        senders: env.senders.clone(),
+        default_shell: env.default_shell.clone(),
+        seen_cli_pipes: None,
+        default_mode: env.default_mode.clone(),
+    })
     .map(|_| ())
     .map_err(|e| format!("Failed to route edit action: {:?}", e))
 }

@@ -2796,14 +2796,16 @@ impl WasmBridge {
                             let stdin_pipe = plugin_env.stdin_pipe.clone();
                             let stdout_pipe = plugin_env.stdout_pipe.clone();
                             let wasi_ctx = PluginLoader::create_wasi_ctx(
-                                &new_host_dir,
-                                &plugin_env.plugin_own_data_dir,
-                                &plugin_env.plugin_own_cache_dir,
-                                &ZELLIJ_TMP_DIR,
-                                &plugin_env.plugin.location.to_string(),
-                                plugin_env.plugin_id,
-                                stdin_pipe.clone(),
-                                stdout_pipe.clone(),
+                                crate::plugins::plugin_loader::WasiCtxParams {
+                                    host_dir: &new_host_dir,
+                                    data_dir: &plugin_env.plugin_own_data_dir,
+                                    cache_dir: &plugin_env.plugin_own_cache_dir,
+                                    tmp_dir: &ZELLIJ_TMP_DIR,
+                                    plugin_url: &plugin_env.plugin.location.to_string(),
+                                    plugin_id: plugin_env.plugin_id,
+                                    stdin_pipe: stdin_pipe.clone(),
+                                    stdout_pipe: stdout_pipe.clone(),
+                                },
                             );
                             match wasi_ctx {
                                 Ok(wasi_ctx) => {
