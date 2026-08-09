@@ -237,8 +237,11 @@ impl PaneFrame {
         &self,
         max_length: usize,
     ) -> Option<(Vec<TerminalCharacter>, usize)> {
-        let is_checked = if self.is_pinned { '+' } else { ' ' };
-        let full_indication = format!(" PIN [{}] ", is_checked);
+        // Fisheye contract (same language as tab/session chips): ○ unpinned,
+        // ◉ pinned. Brackets `[ ]` / `[+]` are gone — they read as form UI,
+        // not as state (operator call 2026-08-03).
+        let pin_glyph = if self.is_pinned { '◉' } else { '○' };
+        let full_indication = format!(" PIN {} ", pin_glyph);
         let full_indication_len = full_indication.chars().count();
         if full_indication_len <= max_length {
             Some((

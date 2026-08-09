@@ -1,6 +1,5 @@
 ---
 source: zellij-utils/src/kdl/mod.rs
-assertion_line: 7319
 expression: fake_config_stringified
 ---
 keybinds clear-defaults=true {
@@ -116,6 +115,14 @@ keybinds clear-defaults=true {
     scroll {
         bind "e" { EditScrollback; SwitchToMode "normal"; }
         bind "s" { SwitchToMode "entersearch"; SearchInput 0; }
+        bind "v" {
+            Run "sh" "-c" "if [ -x \"${HOME}/.config/vetcoders/frontier/vc-frame/scrollback-select.sh\" ]; then \"${HOME}/.config/vetcoders/frontier/vc-frame/scrollback-select.sh\"; elif [ -x \"${HOME}/.config/vc-frame/scrollback-select.sh\" ]; then \"${HOME}/.config/vc-frame/scrollback-select.sh\"; else vc-frame action dump-screen --full --path /tmp/vc-sb.txt; ${EDITOR:-vim} -R -c 'set number' -c 'set laststatus=0' /tmp/vc-sb.txt; fi" {
+                floating true
+                close_on_exit true
+                name "Scrollback · visual"
+            }
+            SwitchToMode "normal"
+        }
     }
     search {
         bind "c" { SearchToggleOption "CaseSensitivity"; }
@@ -236,18 +243,11 @@ keybinds clear-defaults=true {
         bind "Alt =" { Resize "Increase"; }
         bind "Alt [" { PreviousSwapLayout; }
         bind "Alt ]" { NextSwapLayout; }
-        bind "Alt e" {
-            Run "sh" "-c" "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"" {
-                floating true
-                close_on_exit true
-                name "Composer"
-            }
-        }
         bind "Super e" {
-            Run "sh" "-c" "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"" {
+            Run "sh" "-c" "if [ -x \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\"; elif [ -x \"${HOME}/.config/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vc-frame/vc-composer.sh\"; else f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${EDITOR:-vim} -c 'set number' -c 'set laststatus=0' -c 'set nowrap' -c 'set textwidth=0' -c 'set sidescroll=1' -c 'nnoremap <silent> <F2> :set wrap! wrap?<CR>' \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"; fi" {
                 floating true
                 close_on_exit true
-                name "Composer"
+                name "✍ Composer · ⧉ Paste stack"
             }
         }
         bind "Alt f" { ToggleFloatingPanes; }

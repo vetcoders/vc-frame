@@ -1,18 +1,23 @@
 # Semgrep adjudication evidence
 
-Receiver baseline: Semgrep 1.164.0, explicit registry pack `p/rust`, 60 resolved
-rules, 57 rules executed over 376 targets, 326 blocking findings and zero scan
-errors at `f41af931`. The exact raw JSON hash is pinned in `baseline.json`;
+Receiver baseline: Semgrep 1.172.0, explicit registry pack `p/rust`, 60 resolved
+rules, 57 rules executed over 358 targets, 326 blocking findings and zero scan
+errors at `6ba1ab7b`. The exact raw JSON hash is pinned in `baseline.json`;
 `findings.jsonl` is the checked-in machine-verifiable verdict surface.
 The gate also hashes Semgrep's normalized resolved rule representation, so a
 registry rule-body change fails even when rule IDs stay the same. Scanner
 version, all 60 resolved IDs and result fingerprints are independently pinned.
 `make semgrep` is the canonical executable gate for this contract.
 
-No confirmed product defect was found. The broad audit rules found explicit
-review boundaries, test helpers, or false source-to-sink paths. No fake product
-fix was invented. Validator negative tests prove missing rows, empty owners,
-new fingerprints and broad ignores fail.
+The 2026-08-04 re-adjudication found one real product defect: the clinic's
+atomic config writer used a predictable process-ID temporary path and
+`File::create`, which could follow a pre-positioned symlink. The writer now
+uses an exclusively created random `NamedTempFile` in the destination
+directory before fsync and atomic persist. The fixed scan returns the same 326
+reviewed fingerprints as the prior inventory; the remaining broad audit hits
+are explicit review boundaries, test helpers, or false source-to-sink paths.
+Validator negative tests prove missing rows, empty owners, new fingerprints
+and broad ignores fail.
 
 ## Plugin API FFI
 

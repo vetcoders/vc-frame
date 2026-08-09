@@ -21,6 +21,8 @@ use crate::consts::{ZELLIJ_TMP_DIR, ZELLIJ_TMP_LOG_DIR, ZELLIJ_TMP_LOG_FILE};
 use crate::shared::set_permissions;
 
 const LOG_MAX_BYTES: u64 = 1024 * 1024 * 16; // 16 MiB per log
+const PLUGIN_EVENT_DIAGNOSTICS_ENV: &str = "VC_FRAME_PLUGIN_EVENT_DIAGNOSTICS";
+const PLUGIN_EVENT_DIAGNOSTICS_TARGET: &str = "vc_frame::plugin_event_rate";
 
 pub fn configure_logger() {
     atomic_create_dir(&ZELLIJ_TMP_DIR).unwrap();
@@ -69,7 +71,7 @@ pub fn configure_logger() {
     // Set the default logging level to "info" and log it to zellij.log file
     // Decrease verbosity for `wasmtime_wasi` module because it has a lot of useless info logs
     // For `zellij_server::logging_pipe`, we use custom format as we use logging macros to forward stderr output from plugins
-    let config = Config::builder()
+    let mut config_builder = Config::builder()
         .appender(Appender::builder().build("logFile", Box::new(log_file)))
         .appender(Appender::builder().build("logPlugin", Box::new(log_plugin)))
         // reduce the verbosity of isahc, otherwise it logs on every failed web request
@@ -88,7 +90,16 @@ pub fn configure_logger() {
                 .appender("logPlugin")
                 .additive(false)
                 .build("zellij_server::logging_pipe", LevelFilter::Trace),
-        )
+        );
+    if std::env::var_os(PLUGIN_EVENT_DIAGNOSTICS_ENV).is_some() {
+        config_builder = config_builder.logger(
+            Logger::builder()
+                .appender("logFile")
+                .additive(false)
+                .build(PLUGIN_EVENT_DIAGNOSTICS_TARGET, LevelFilter::Debug),
+        );
+    }
+    let config = config_builder
         .build(Root::builder().appender("logFile").build(LevelFilter::Info))
         .unwrap();
 

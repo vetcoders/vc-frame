@@ -564,6 +564,7 @@ version = "0.1.0"
 dependencies = [
  "colored",
  "nu-ansi-term",
+ "unicode-segmentation",
  "unicode-width 0.1.10",
  "zellij-tile",
  "zellij-tile-utils",
@@ -986,11 +987,10 @@ dependencies = [
 
 [[package]]
 name = "event-listener"
-version = "5.4.1"
+version = "5.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e13b66accf52311f30a0db42147dadea9850cb48cd070028831ae5f5d4b856ab"
+checksum = "5a23add41df1562121a9393cb065eab5146a1242410f23a644851e90cfd669d2"
 dependencies = [
- "concurrent-queue",
  "parking",
  "pin-project-lite",
 ]
@@ -3989,7 +3989,7 @@ dependencies = [
 
 [[package]]
 name = "vc-frame"
-version = "0.47.2"
+version = "0.47.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -4008,6 +4008,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "sha2",
  "ssh2",
  "tempfile",
  "thiserror 1.0.61",
@@ -4827,7 +4828,7 @@ dependencies = [
 
 [[package]]
 name = "zellij-client"
-version = "0.47.2"
+version = "0.47.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4873,7 +4874,7 @@ dependencies = [
 
 [[package]]
 name = "zellij-server"
-version = "0.47.2"
+version = "0.47.3"
 dependencies = [
  "anyhow",
  "arrayvec 0.7.6",
@@ -4924,7 +4925,7 @@ dependencies = [
 
 [[package]]
 name = "zellij-tile"
-version = "0.47.2"
+version = "0.47.3"
 dependencies = [
  "clap",
  "prost",
@@ -4937,14 +4938,14 @@ dependencies = [
 
 [[package]]
 name = "zellij-tile-utils"
-version = "0.47.2"
+version = "0.47.3"
 dependencies = [
  "nu-ansi-term",
 ]
 
 [[package]]
 name = "zellij-utils"
-version = "0.47.2"
+version = "0.47.3"
 dependencies = [
  "anyhow",
  "backtrace",

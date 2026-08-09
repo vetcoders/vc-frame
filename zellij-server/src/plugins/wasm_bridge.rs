@@ -1,5 +1,6 @@
 use super::{
     LayoutPluginReceipt, LayoutPluginResolution, PinnedExecutor, PluginId, PluginInstruction,
+    PluginPaneId,
 };
 use crate::global_async_runtime::get_tokio_runtime;
 use crate::plugins::pipes::{
@@ -15,15 +16,15 @@ use highway::{HighwayHash, PortableHash};
 use log::info;
 use notify_debouncer_full::{Debouncer, FileIdMap, notify::RecommendedWatcher};
 #[cfg(test)]
-use std::sync::{
-    Barrier,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::{Barrier, atomic::AtomicUsize};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
     str::FromStr,
-    sync::{Arc, Condvar, Mutex},
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tokio::sync::mpsc::Sender;
@@ -70,6 +71,58 @@ fn make_plugin_url_path_safe(url: String) -> String {
 #[cfg(not(windows))]
 fn make_plugin_url_path_safe(url: String) -> String {
     url
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum SessionChromeKind {
+    CompactBar,
+    SessionManager,
+    StatusBar,
+}
+
+impl SessionChromeKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::CompactBar => "compact-bar",
+            Self::SessionManager => "session-manager",
+            Self::StatusBar => "status-bar",
+        }
+    }
+}
+
+fn session_chrome_kind(
+    run_plugin: &RunPlugin,
+) -> std::result::Result<Option<SessionChromeKind>, String> {
+    let configuration = run_plugin.configuration.inner();
+    if configuration.get("session_canvas").map(String::as_str) != Some("true") {
+        return Ok(None);
+    }
+    if let Some(kind) = configuration.get("session_canvas_kind").map(String::as_str) {
+        return match kind {
+            "compact-bar" => Ok(Some(SessionChromeKind::CompactBar)),
+            "session-manager" => Ok(Some(SessionChromeKind::SessionManager)),
+            "status-bar" => Ok(Some(SessionChromeKind::StatusBar)),
+            _ => Err(format!(
+                "unknown session_canvas_kind `{kind}` for {}",
+                run_plugin.location
+            )),
+        };
+    }
+    match run_plugin.location.to_string().as_str() {
+        "compact-bar" | "zellij:compact-bar" | "vc-frame:compact-bar" => {
+            Ok(Some(SessionChromeKind::CompactBar))
+        },
+        "session-manager" | "zellij:session-manager" | "vc-frame:session-manager" => {
+            Ok(Some(SessionChromeKind::SessionManager))
+        },
+        "status-bar" | "zellij:status-bar" | "vc-frame:status-bar" => {
+            Ok(Some(SessionChromeKind::StatusBar))
+        },
+        _ => Err(format!(
+            "session_canvas=true requires session_canvas_kind for resolved plugin {}",
+            run_plugin.location
+        )),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -176,6 +229,247 @@ impl LoadingContext {
 }
 
 pub type PluginCache = Arc<Mutex<HashMap<PathBuf, Module>>>;
+
+const PLUGIN_EVENT_DIAGNOSTIC_SLOTS: usize = 256;
+const PLUGIN_EVENT_DIAGNOSTIC_WINDOW_MS: u64 = 1_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PluginEventDiagnosticKind {
+    SessionUpdate,
+    PaneUpdate,
+    PaneClosed,
+    TabUpdate,
+    Other,
+}
+
+impl PluginEventDiagnosticKind {
+    fn from_event(event: &Event) -> Self {
+        match event {
+            Event::SessionUpdate(..) => Self::SessionUpdate,
+            Event::PaneUpdate(..) => Self::PaneUpdate,
+            Event::PaneClosed(..) => Self::PaneClosed,
+            Event::TabUpdate(..) => Self::TabUpdate,
+            _ => Self::Other,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SessionUpdate => "SessionUpdate",
+            Self::PaneUpdate => "PaneUpdate",
+            Self::PaneClosed => "PaneClosed",
+            Self::TabUpdate => "TabUpdate",
+            Self::Other => "Other",
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Self::SessionUpdate => 0,
+            Self::PaneUpdate => 1,
+            Self::PaneClosed => 2,
+            Self::TabUpdate => 3,
+            Self::Other => 4,
+        }
+    }
+}
+
+#[derive(Default)]
+struct PluginEventDiagnosticSlot {
+    // Zero is the empty sentinel; stored identities are offset by one.
+    owner: AtomicU64,
+    window_started_ms: AtomicU64,
+    dispatched: [AtomicU64; 5],
+    rendered: [AtomicU64; 5],
+    empty_rendered: [AtomicU64; 5],
+}
+
+struct PluginEventDiagnostics {
+    slots: [PluginEventDiagnosticSlot; PLUGIN_EVENT_DIAGNOSTIC_SLOTS],
+}
+
+impl Default for PluginEventDiagnostics {
+    fn default() -> Self {
+        Self {
+            slots: std::array::from_fn(|_| PluginEventDiagnosticSlot::default()),
+        }
+    }
+}
+
+impl PluginEventDiagnostics {
+    fn owner(plugin_id: PluginId, client_id: ClientId) -> u64 {
+        (((plugin_id as u64) << 32) | client_id as u64).wrapping_add(1)
+    }
+
+    fn slot_index(owner: u64) -> usize {
+        (owner ^ (owner >> 32)) as usize % PLUGIN_EVENT_DIAGNOSTIC_SLOTS
+    }
+
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+
+    fn record(
+        &self,
+        plugin_id: PluginId,
+        client_id: ClientId,
+        event: &Event,
+        rendered: bool,
+        empty_rendered: bool,
+    ) {
+        if !log::log_enabled!(target: "vc_frame::plugin_event_rate", log::Level::Debug) {
+            return;
+        }
+        self.record_at(
+            plugin_id,
+            client_id,
+            PluginEventDiagnosticKind::from_event(event),
+            rendered,
+            empty_rendered,
+            Self::now_ms(),
+        );
+    }
+
+    fn record_at(
+        &self,
+        plugin_id: PluginId,
+        client_id: ClientId,
+        kind: PluginEventDiagnosticKind,
+        rendered: bool,
+        empty_rendered: bool,
+        now_ms: u64,
+    ) {
+        let owner = Self::owner(plugin_id, client_id);
+        let slot = &self.slots[Self::slot_index(owner)];
+        let observed_owner = slot.owner.load(Ordering::Relaxed);
+        if observed_owner == 0 {
+            match slot
+                .owner
+                .compare_exchange(0, owner, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => slot.window_started_ms.store(now_ms, Ordering::Relaxed),
+                Err(existing_owner) if existing_owner != owner => return,
+                Err(_) => {},
+            }
+        } else if observed_owner != owner {
+            // A fixed-size diagnostic table deliberately drops collisions instead
+            // of allocating or locking in the plugin event hot path.
+            return;
+        }
+
+        let index = kind.index();
+        slot.dispatched[index].fetch_add(1, Ordering::Relaxed);
+        if rendered {
+            slot.rendered[index].fetch_add(1, Ordering::Relaxed);
+        }
+        if empty_rendered {
+            slot.empty_rendered[index].fetch_add(1, Ordering::Relaxed);
+        }
+
+        let window_started_ms = slot.window_started_ms.load(Ordering::Relaxed);
+        let elapsed_ms = now_ms.saturating_sub(window_started_ms);
+        if elapsed_ms < PLUGIN_EVENT_DIAGNOSTIC_WINDOW_MS
+            || slot
+                .window_started_ms
+                .compare_exchange(
+                    window_started_ms,
+                    now_ms,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_err()
+        {
+            return;
+        }
+
+        for event_kind in [
+            PluginEventDiagnosticKind::SessionUpdate,
+            PluginEventDiagnosticKind::PaneUpdate,
+            PluginEventDiagnosticKind::PaneClosed,
+            PluginEventDiagnosticKind::TabUpdate,
+            PluginEventDiagnosticKind::Other,
+        ] {
+            let event_index = event_kind.index();
+            let dispatched = slot.dispatched[event_index].swap(0, Ordering::Relaxed);
+            let rendered = slot.rendered[event_index].swap(0, Ordering::Relaxed);
+            let empty_rendered = slot.empty_rendered[event_index].swap(0, Ordering::Relaxed);
+            if dispatched > 0 {
+                log::debug!(
+                    target: "vc_frame::plugin_event_rate",
+                    "plugin_id={plugin_id} client_id={client_id} event={} dispatched={} rendered={} empty_rendered={} window_ms={elapsed_ms}",
+                    event_kind.as_str(),
+                    dispatched,
+                    rendered,
+                    empty_rendered,
+                );
+            }
+        }
+    }
+
+    fn flush_plugin(&self, plugin_id: PluginId) {
+        if !log::log_enabled!(target: "vc_frame::plugin_event_rate", log::Level::Debug) {
+            return;
+        }
+        let now_ms = Self::now_ms();
+        for slot in &self.slots {
+            let encoded_owner = slot.owner.load(Ordering::Relaxed);
+            if encoded_owner == 0
+                || ((encoded_owner.wrapping_sub(1) >> 32) as PluginId) != plugin_id
+            {
+                continue;
+            }
+            let client_id = encoded_owner.wrapping_sub(1) as ClientId;
+            let elapsed_ms = now_ms.saturating_sub(slot.window_started_ms.load(Ordering::Relaxed));
+            for event_kind in [
+                PluginEventDiagnosticKind::SessionUpdate,
+                PluginEventDiagnosticKind::PaneUpdate,
+                PluginEventDiagnosticKind::PaneClosed,
+                PluginEventDiagnosticKind::TabUpdate,
+                PluginEventDiagnosticKind::Other,
+            ] {
+                let event_index = event_kind.index();
+                let dispatched = slot.dispatched[event_index].swap(0, Ordering::Relaxed);
+                let rendered = slot.rendered[event_index].swap(0, Ordering::Relaxed);
+                let empty_rendered = slot.empty_rendered[event_index].swap(0, Ordering::Relaxed);
+                if dispatched > 0 {
+                    log::debug!(
+                        target: "vc_frame::plugin_event_rate",
+                        "plugin_id={plugin_id} client_id={client_id} event={} dispatched={} rendered={} empty_rendered={} window_ms={elapsed_ms} final=true",
+                        event_kind.as_str(),
+                        dispatched,
+                        rendered,
+                        empty_rendered,
+                    );
+                }
+            }
+            slot.window_started_ms.store(0, Ordering::Relaxed);
+            slot.owner.store(0, Ordering::Relaxed);
+        }
+    }
+
+    #[cfg(test)]
+    fn counts(
+        &self,
+        plugin_id: PluginId,
+        client_id: ClientId,
+        kind: PluginEventDiagnosticKind,
+    ) -> (u64, u64, u64) {
+        let owner = Self::owner(plugin_id, client_id);
+        let slot = &self.slots[Self::slot_index(owner)];
+        if slot.owner.load(Ordering::Relaxed) != owner {
+            return (0, 0, 0);
+        }
+        let index = kind.index();
+        (
+            slot.dispatched[index].load(Ordering::Relaxed),
+            slot.rendered[index].load(Ordering::Relaxed),
+            slot.empty_rendered[index].load(Ordering::Relaxed),
+        )
+    }
+}
 
 const MAX_LAYOUT_PLUGIN_RECEIPT_TRANSACTIONS: usize = 512;
 const MAX_LAYOUT_PLUGIN_CLEANUP_RECEIPTS: usize = 512;
@@ -390,10 +684,19 @@ impl LayoutPluginActivationGate {
 
 struct LayoutPluginReservation {
     plugins: Vec<ReservedLayoutPlugin>,
+    pane_bindings: Vec<PluginPaneId>,
+    session_chrome_projector_pane_ids: Vec<(PluginId, SessionChromeKind)>,
     state: LayoutPluginTransactionState,
     cancellation: CancellationToken,
     tracker: Arc<LayoutPluginActivationTracker>,
     activation_gate: Arc<LayoutPluginActivationGate>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SingletonAuthority {
+    runtime_plugin_id: PluginId,
+    projector_count: usize,
+    reserved_by: LayoutTransactionId,
 }
 
 struct LayoutPluginCleanupDebt {
@@ -412,8 +715,12 @@ pub struct WasmBridge {
     plugin_dir: PathBuf,
     plugin_map: Arc<Mutex<PluginMap>>,
     plugin_executor: Arc<PinnedExecutor>,
+    event_diagnostics: Arc<PluginEventDiagnostics>,
     next_plugin_id: PluginId,
     plugin_ids_waiting_for_permission_request: HashSet<PluginId>,
+    // Exact plugin/client targets parked by Screen's chrome lifecycle. Heavy
+    // state payloads never cross into these WASM instances while hidden.
+    parked_chrome_plugin_clients: HashSet<(PluginId, ClientId)>,
     cached_events_for_pending_plugins: HashMap<PluginId, Vec<EventOrPipeMessage>>,
     cached_resizes_for_pending_plugins: HashMap<PluginId, (usize, usize)>, // (rows, columns)
     cached_worker_messages: HashMap<PluginId, Vec<(ClientId, String, String, String)>>, // Vec<clientid,
@@ -442,6 +749,8 @@ pub struct WasmBridge {
     pub last_session_save_time: Arc<Mutex<Option<u64>>>, // milliseconds since UNIX epoch
     layout_plugin_reservations: HashMap<LayoutTransactionId, LayoutPluginReservation>,
     layout_plugin_owners: HashMap<PluginId, LayoutTransactionId>,
+    session_chrome_authorities: HashMap<SessionChromeKind, SingletonAuthority>,
+    session_chrome_projectors: HashMap<PluginId, (PluginId, SessionChromeKind)>,
     layout_plugin_receipts:
         BTreeMap<(LayoutTransactionId, LayoutPluginResolutionKind), LayoutPluginReceipt>,
     layout_plugin_cleanup_debts: HashMap<LayoutTransactionId, LayoutPluginCleanupDebt>,
@@ -490,11 +799,13 @@ impl WasmBridge {
             plugin_dir,
             plugin_map,
             plugin_executor,
+            event_diagnostics: Arc::new(PluginEventDiagnostics::default()),
             path_to_default_shell,
             watcher,
             next_plugin_id: 0,
             cached_events_for_pending_plugins: HashMap::new(),
             plugin_ids_waiting_for_permission_request: HashSet::new(),
+            parked_chrome_plugin_clients: HashSet::new(),
             cached_resizes_for_pending_plugins: HashMap::new(),
             cached_worker_messages: HashMap::new(),
             loading_plugins: HashSet::new(),
@@ -516,6 +827,8 @@ impl WasmBridge {
             last_session_save_time: Arc::new(Mutex::new(None)),
             layout_plugin_reservations: HashMap::new(),
             layout_plugin_owners: HashMap::new(),
+            session_chrome_authorities: HashMap::new(),
+            session_chrome_projectors: HashMap::new(),
             layout_plugin_receipts: BTreeMap::new(),
             layout_plugin_cleanup_debts: HashMap::new(),
             layout_plugin_cleanup_receipts: BTreeMap::new(),
@@ -551,42 +864,82 @@ impl WasmBridge {
             ));
         }
 
-        let mut plugins = Vec::with_capacity(requests.len());
-        for (offset, request) in requests.into_iter().enumerate() {
-            let plugin_config =
-                PluginConfig::from_run_plugin(&request.run_plugin).ok_or_else(|| {
-                    format!(
-                        "failed to resolve layout plugin {} for transaction {transaction_id}",
-                        request.run_plugin.location
-                    )
-                })?;
-            let offset = u32::try_from(offset)
-                .map_err(|_| format!("too many layout plugins in transaction {transaction_id}"))?;
-            let plugin_id = self.next_plugin_id.checked_add(offset).ok_or_else(|| {
+        let request_count = requests.len();
+        let request_count_u32 = u32::try_from(request_count)
+            .map_err(|_| format!("too many layout plugins in transaction {transaction_id}"))?;
+        let next_plugin_id = self
+            .next_plugin_id
+            .checked_add(request_count_u32)
+            .ok_or_else(|| {
                 format!("plugin id space exhausted for layout transaction {transaction_id}")
             })?;
-            plugins.push(ReservedLayoutPlugin {
-                plugin_id,
-                run_plugin: request.run_plugin,
-                plugin_config,
-                tab_index: request.tab_index,
-                size: request.size,
-                cwd: request.cwd,
-                skip_cache: request.skip_cache,
-                client_id: request.client_id,
-                cancellation: CancellationToken::new(),
-                activation_tracker: Arc::new(LayoutPluginActivationTracker::default()),
+        // Validate the complete batch before publishing singleton authorities or
+        // consuming ids. Reservation is an atomic boundary: a malformed later
+        // request must not leave an authority pointing at a runtime that was
+        // never reserved.
+        let requests = requests
+            .into_iter()
+            .map(|request| {
+                let plugin_config =
+                    PluginConfig::from_run_plugin(&request.run_plugin).ok_or_else(|| {
+                        format!(
+                            "failed to resolve layout plugin {} for transaction {transaction_id}",
+                            request.run_plugin.location
+                        )
+                    })?;
+                let chrome_kind = session_chrome_kind(&request.run_plugin)?;
+                Ok((request, plugin_config, chrome_kind))
+            })
+            .collect::<std::result::Result<Vec<_>, String>>()?;
+        let mut plugins = Vec::with_capacity(request_count);
+        let mut pane_bindings = Vec::with_capacity(request_count);
+        let mut session_chrome_projector_pane_ids = Vec::new();
+        for (pane_id, (request, plugin_config, chrome_kind)) in
+            (self.next_plugin_id..next_plugin_id).zip(requests)
+        {
+            let runtime_plugin_id = if let Some(chrome_kind) = chrome_kind {
+                let authority = self
+                    .session_chrome_authorities
+                    .entry(chrome_kind)
+                    .or_insert(SingletonAuthority {
+                        runtime_plugin_id: pane_id,
+                        projector_count: 0,
+                        reserved_by: transaction_id,
+                    });
+                session_chrome_projector_pane_ids.push((pane_id, chrome_kind));
+                authority.runtime_plugin_id
+            } else {
+                pane_id
+            };
+            pane_bindings.push(if runtime_plugin_id == pane_id {
+                PluginPaneId::direct(pane_id)
+            } else {
+                PluginPaneId::projector(pane_id, runtime_plugin_id)
             });
+
+            let authority_is_new_in_this_transaction = chrome_kind.is_none()
+                || (runtime_plugin_id == pane_id
+                    && self
+                        .session_chrome_authorities
+                        .get(&chrome_kind.expect("chrome kind exists for singleton authority"))
+                        .is_some_and(|authority| authority.reserved_by == transaction_id));
+            if authority_is_new_in_this_transaction {
+                plugins.push(ReservedLayoutPlugin {
+                    plugin_id: runtime_plugin_id,
+                    run_plugin: request.run_plugin,
+                    plugin_config,
+                    tab_index: request.tab_index,
+                    size: request.size,
+                    cwd: request.cwd,
+                    skip_cache: request.skip_cache,
+                    client_id: request.client_id,
+                    cancellation: CancellationToken::new(),
+                    activation_tracker: Arc::new(LayoutPluginActivationTracker::default()),
+                });
+            }
         }
 
-        self.next_plugin_id =
-            self.next_plugin_id
-                .checked_add(u32::try_from(plugins.len()).map_err(|_| {
-                    format!("too many layout plugins in transaction {transaction_id}")
-                })?)
-                .ok_or_else(|| {
-                    format!("plugin id space exhausted for layout transaction {transaction_id}")
-                })?;
+        self.next_plugin_id = next_plugin_id;
         let plugin_ids = plugins
             .iter()
             .map(|plugin| plugin.plugin_id)
@@ -598,13 +951,35 @@ impl WasmBridge {
             transaction_id,
             LayoutPluginReservation {
                 plugins,
+                pane_bindings: pane_bindings.clone(),
+                session_chrome_projector_pane_ids,
                 state: LayoutPluginTransactionState::Reserved,
                 cancellation: CancellationToken::new(),
                 tracker: Arc::new(LayoutPluginActivationTracker::default()),
                 activation_gate: Arc::new(LayoutPluginActivationGate::default()),
             },
         );
-        Ok(plugin_ids)
+        Ok(pane_bindings
+            .into_iter()
+            .map(|binding| binding.pane_id)
+            .collect())
+    }
+
+    pub fn layout_plugin_projector_bindings(
+        &self,
+        transaction_id: LayoutTransactionId,
+    ) -> Vec<PluginPaneId> {
+        self.layout_plugin_reservations
+            .get(&transaction_id)
+            .map(|reservation| {
+                reservation
+                    .pane_bindings
+                    .iter()
+                    .copied()
+                    .filter(|binding| binding.pane_id != binding.runtime_plugin_id)
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub fn resolve_layout_plugins(
@@ -672,9 +1047,9 @@ impl WasmBridge {
             };
         };
         let mut reserved_plugin_ids = reservation
-            .plugins
+            .pane_bindings
             .iter()
-            .map(|plugin| plugin.plugin_id)
+            .map(|binding| binding.pane_id)
             .collect::<Vec<_>>();
         reserved_plugin_ids.sort_unstable();
         if reserved_plugin_ids != expected_plugin_ids {
@@ -746,11 +1121,13 @@ impl WasmBridge {
             .layout_plugin_reservations
             .get(&transaction_id)
             .map(|reservation| {
-                reservation
-                    .plugins
+                let mut pane_ids = reservation
+                    .pane_bindings
                     .iter()
-                    .map(|plugin| plugin.plugin_id)
-                    .collect()
+                    .map(|binding| binding.pane_id)
+                    .collect::<Vec<_>>();
+                pane_ids.sort_unstable();
+                pane_ids
             })
             .unwrap_or_default();
         self.resolve_layout_plugins(
@@ -1111,6 +1488,8 @@ impl WasmBridge {
         self.cached_worker_messages.remove(&plugin_id);
         self.plugin_ids_waiting_for_permission_request
             .remove(&plugin_id);
+        self.parked_chrome_plugin_clients
+            .retain(|(parked_plugin_id, _)| parked_plugin_id != &plugin_id);
         self.loading_plugins
             .retain(|(loading_plugin_id, _)| loading_plugin_id != &plugin_id);
         self.cached_plugin_map.clear();
@@ -1209,6 +1588,9 @@ impl WasmBridge {
             .get(&transaction_id)
             .ok_or_else(|| format!("unknown layout plugin transaction {transaction_id}"))?;
         let plugins = reservation.plugins.clone();
+        let pane_bindings = reservation.pane_bindings.clone();
+        let session_chrome_projector_pane_ids =
+            reservation.session_chrome_projector_pane_ids.clone();
         let cancellation = reservation.cancellation.clone();
         let tracker = reservation.tracker.clone();
         let activation_gate = reservation.activation_gate.clone();
@@ -1216,6 +1598,11 @@ impl WasmBridge {
             .iter()
             .map(|plugin| plugin.plugin_id)
             .collect::<Vec<_>>();
+        let mut receipt_plugin_ids = pane_bindings
+            .iter()
+            .map(|binding| binding.pane_id)
+            .collect::<Vec<_>>();
+        receipt_plugin_ids.sort_unstable();
 
         for plugin in &plugins {
             self.cached_events_for_pending_plugins
@@ -1261,19 +1648,39 @@ impl WasmBridge {
                     ));
                 }
                 return Ok(LayoutPluginReceipt::ActivationRolledBack {
-                    plugin_ids,
+                    plugin_ids: receipt_plugin_ids,
                     message,
                 });
             }
         }
 
         activation_gate.open();
-        if plugin_ids.is_empty() {
+        for (pane_id, chrome_kind) in &session_chrome_projector_pane_ids {
+            let authority = self
+                .session_chrome_authorities
+                .get_mut(chrome_kind)
+                .ok_or_else(|| {
+                    format!(
+                        "layout plugin transaction {transaction_id} lost its {} authority",
+                        chrome_kind.label()
+                    )
+                })?;
+            self.session_chrome_projectors
+                .insert(*pane_id, (authority.runtime_plugin_id, *chrome_kind));
+            authority.projector_count = authority.projector_count.saturating_add(1);
+        }
+        // A projector-only transaction owns no new WASM runtime, but it still
+        // owns live pane-to-runtime bindings and refcounts. Keep that metadata
+        // until PTY commit/rollback resolves the transaction so compensation
+        // can restore the exact pre-activation state.
+        if receipt_plugin_ids.is_empty() {
             self.layout_plugin_reservations.remove(&transaction_id);
         } else if let Some(reservation) = self.layout_plugin_reservations.get_mut(&transaction_id) {
             reservation.state = LayoutPluginTransactionState::Activated;
         }
-        Ok(LayoutPluginReceipt::Activated { plugin_ids })
+        Ok(LayoutPluginReceipt::Activated {
+            plugin_ids: receipt_plugin_ids,
+        })
     }
 
     fn release_reserved_layout_plugins(
@@ -1281,17 +1688,24 @@ impl WasmBridge {
         transaction_id: LayoutTransactionId,
         reason: String,
     ) -> std::result::Result<LayoutPluginReceipt, String> {
-        let (plugin_ids, cancellation, tracker, activation_gate) = {
+        let (plugin_ids, receipt_plugin_ids, cancellation, tracker, activation_gate) = {
             let reservation = self
                 .layout_plugin_reservations
                 .get(&transaction_id)
                 .ok_or_else(|| format!("unknown layout plugin transaction {transaction_id}"))?;
+            let mut receipt_plugin_ids = reservation
+                .pane_bindings
+                .iter()
+                .map(|binding| binding.pane_id)
+                .collect::<Vec<_>>();
+            receipt_plugin_ids.sort_unstable();
             (
                 reservation
                     .plugins
                     .iter()
                     .map(|plugin| plugin.plugin_id)
                     .collect::<Vec<_>>(),
+                receipt_plugin_ids,
                 reservation.cancellation.clone(),
                 reservation.tracker.clone(),
                 reservation.activation_gate.clone(),
@@ -1306,11 +1720,16 @@ impl WasmBridge {
             ));
         }
         self.cleanup_owned_layout_plugin_ids(transaction_id, &plugin_ids)?;
+        self.session_chrome_authorities.retain(|_, authority| {
+            authority.reserved_by != transaction_id || authority.projector_count > 0
+        });
         if plugin_ids.is_empty() {
             self.layout_plugin_reservations.remove(&transaction_id);
         }
         log::debug!("released suspended layout plugins for transaction {transaction_id}: {reason}");
-        Ok(LayoutPluginReceipt::Released { plugin_ids })
+        Ok(LayoutPluginReceipt::Released {
+            plugin_ids: receipt_plugin_ids,
+        })
     }
 
     fn compensate_layout_plugins(
@@ -1318,17 +1737,32 @@ impl WasmBridge {
         transaction_id: LayoutTransactionId,
         reason: String,
     ) -> std::result::Result<LayoutPluginReceipt, String> {
-        let (plugin_ids, cancellation, tracker, activation_gate) = {
+        let (
+            plugin_ids,
+            receipt_plugin_ids,
+            projector_pane_ids,
+            cancellation,
+            tracker,
+            activation_gate,
+        ) = {
             let reservation = self
                 .layout_plugin_reservations
                 .get(&transaction_id)
                 .ok_or_else(|| format!("unknown layout plugin transaction {transaction_id}"))?;
+            let mut receipt_plugin_ids = reservation
+                .pane_bindings
+                .iter()
+                .map(|binding| binding.pane_id)
+                .collect::<Vec<_>>();
+            receipt_plugin_ids.sort_unstable();
             (
                 reservation
                     .plugins
                     .iter()
                     .map(|plugin| plugin.plugin_id)
                     .collect::<Vec<_>>(),
+                receipt_plugin_ids,
+                reservation.session_chrome_projector_pane_ids.clone(),
                 reservation.cancellation.clone(),
                 reservation.tracker.clone(),
                 reservation.activation_gate.clone(),
@@ -1342,9 +1776,20 @@ impl WasmBridge {
                 LAYOUT_PLUGIN_CLEANUP_TIMEOUT
             ));
         }
+        for (pane_id, chrome_kind) in &projector_pane_ids {
+            self.session_chrome_projectors.remove(pane_id);
+            if let Some(authority) = self.session_chrome_authorities.get_mut(chrome_kind) {
+                authority.projector_count = authority.projector_count.saturating_sub(1);
+            }
+        }
         self.cleanup_owned_layout_plugin_ids(transaction_id, &plugin_ids)?;
+        self.layout_plugin_reservations.remove(&transaction_id);
+        self.session_chrome_authorities
+            .retain(|_, authority| authority.projector_count > 0);
         log::debug!("compensated layout plugins for transaction {transaction_id}: {reason}");
-        Ok(LayoutPluginReceipt::Compensated { plugin_ids })
+        Ok(LayoutPluginReceipt::Compensated {
+            plugin_ids: receipt_plugin_ids,
+        })
     }
 
     pub fn handle_layout_plugin_activation_failure(
@@ -1786,6 +2231,28 @@ impl WasmBridge {
         Ok((plugin_id, client_id))
     }
     pub fn unload_plugin(&mut self, plugin_id: PluginId) -> Result<()> {
+        let plugin_id = if let Some((runtime_plugin_id, chrome_kind)) =
+            self.session_chrome_projectors.remove(&plugin_id)
+        {
+            let remaining_projectors =
+                if let Some(authority) = self.session_chrome_authorities.get_mut(&chrome_kind) {
+                    authority.projector_count = authority.projector_count.saturating_sub(1);
+                    authority.projector_count
+                } else {
+                    0
+                };
+            if remaining_projectors > 0 {
+                log::debug!(
+                    "released {} projector; authority {runtime_plugin_id} retained for {remaining_projectors} projector(s)",
+                    chrome_kind.label()
+                );
+                return Ok(());
+            }
+            self.session_chrome_authorities.remove(&chrome_kind);
+            runtime_plugin_id
+        } else {
+            plugin_id
+        };
         info!("Bye from plugin {}", &plugin_id);
         let cleanup_transaction_id = self
             .layout_plugin_owners
@@ -1796,6 +2263,7 @@ impl WasmBridge {
 
         match self.cleanup_layout_plugin(cleanup_transaction_id, plugin_id) {
             Ok(()) => {
+                self.event_diagnostics.flush_plugin(plugin_id);
                 self.plugin_unload_debts.remove(&plugin_id);
             },
             Err(error) => {
@@ -2097,11 +2565,19 @@ impl WasmBridge {
                                             client_id,
                                             rendered_bytes.as_bytes().to_vec(),
                                         );
-                                        senders
-                                            .send_to_screen(ScreenInstruction::PluginBytes(vec![
-                                                plugin_render_asset,
-                                            ]))
-                                            .unwrap();
+                                        // Screen may already be gone during session teardown;
+                                        // a lost resize render is not worth panicking the
+                                        // plugin worker thread.
+                                        if let Err(e) =
+                                            senders.send_to_screen(ScreenInstruction::PluginBytes(
+                                                vec![plugin_render_asset],
+                                            ))
+                                        {
+                                            log::warn!(
+                                                "failed to send PluginBytes to screen: {}",
+                                                e
+                                            );
+                                        }
                                     },
                                     Err(e) => log::error!("{}", e),
                                 }
@@ -2139,8 +2615,10 @@ impl WasmBridge {
             .map(|(_, _, _, subscriptions)| subscriptions.lock().unwrap().clone())
             .collect();
         let plugin_executor = self.plugin_executor.clone();
+        let event_diagnostics = self.event_diagnostics.clone();
         for (pid, cid, event) in updates.iter() {
             let (pid, cid) = (*pid, *cid);
+            self.update_parked_chrome_target(pid, cid, event);
             let refreshable_status_bar_state =
                 Self::is_refreshable_status_bar_state(pid, cid, event);
             // FIXME: This is very janky... Maybe I should write my own macro for Event -> EventType?
@@ -2150,6 +2628,9 @@ impl WasmBridge {
             for ((plugin_id, client_id, running_plugin, _), subs) in
                 plugins_to_update.iter().zip(&plugin_subscription_snapshots)
             {
+                if self.is_parked_chrome_state_payload(*plugin_id, *client_id, event) {
+                    continue;
+                }
                 if (!self
                     .cached_events_for_pending_plugins
                     .contains_key(plugin_id)
@@ -2166,6 +2647,7 @@ impl WasmBridge {
                         let event = event.clone();
                         let _s = shutdown_sender.clone();
                         let plugin_subs = subs.clone();
+                        let event_diagnostics = event_diagnostics.clone();
                         move |senders, _plugin_map, _connected_clients, _plugin_cache, _engine| {
                             let _s = _s; // guard to allow the task to complete before cleanup/shutdown
                             let mut running_plugin = running_plugin.lock().unwrap();
@@ -2179,7 +2661,14 @@ impl WasmBridge {
                                 senders.clone(),
                                 &plugin_subs,
                             ) {
-                                Ok(()) => {
+                                Ok((rendered, empty_rendered)) => {
+                                    event_diagnostics.record(
+                                        plugin_id,
+                                        client_id,
+                                        &event,
+                                        rendered,
+                                        empty_rendered,
+                                    );
                                     let _ = senders.send_to_screen(ScreenInstruction::PluginBytes(
                                         plugin_render_assets,
                                     ));
@@ -2488,6 +2977,8 @@ impl WasmBridge {
         Ok(())
     }
     pub fn remove_client(&mut self, client_id: ClientId) {
+        self.parked_chrome_plugin_clients
+            .retain(|(_, parked_client_id)| parked_client_id != &client_id);
         self.connected_clients
             .lock()
             .unwrap()
@@ -2764,6 +3255,10 @@ impl WasmBridge {
                     .get_running_plugin_and_subscriptions(plugin_id, *client_id)
                 {
                     let subs = subscriptions.lock().unwrap().clone();
+                    let target_is_parked = self
+                        .parked_chrome_plugin_clients
+                        .contains(&(plugin_id, *client_id));
+                    let event_diagnostics = self.event_diagnostics.clone();
                     self.plugin_executor.execute_for_plugin(plugin_id, {
                         let running_plugin = running_plugin.clone();
                         let client_id = *client_id;
@@ -2775,6 +3270,14 @@ impl WasmBridge {
                                 match event_or_pipe_message {
                                     EventOrPipeMessage::Event(event) => {
                                         let event = *event;
+                                        if target_is_parked
+                                            && matches!(
+                                                event,
+                                                Event::SessionUpdate(..) | Event::PaneUpdate(..)
+                                            )
+                                        {
+                                            continue;
+                                        }
                                         match EventType::from_str(&event.to_string())
                                             .with_context(err_context)
                                         {
@@ -2794,7 +3297,14 @@ impl WasmBridge {
                                                     senders.clone(),
                                                     &subs,
                                                 ) {
-                                                    Ok(()) => {
+                                                    Ok((rendered, empty_rendered)) => {
+                                                        event_diagnostics.record(
+                                                            plugin_id,
+                                                            client_id,
+                                                            &event,
+                                                            rendered,
+                                                            empty_rendered,
+                                                        );
                                                         let _ = senders.send_to_screen(
                                                             ScreenInstruction::PluginBytes(
                                                                 plugin_render_assets,
@@ -3209,6 +3719,50 @@ impl WasmBridge {
                 Event::CustomMessage(message, _)
                     if message == crate::screen::VC_FLEET_LIVE_COUNT_MESSAGE
                         || message == crate::screen::VC_STATUS_BAR_VISIBILITY_MESSAGE)
+    }
+    fn update_parked_chrome_target(
+        &mut self,
+        message_pid: Option<PluginId>,
+        message_cid: Option<ClientId>,
+        event: &Event,
+    ) {
+        let (Some(plugin_id), Some(client_id)) = (message_pid, message_cid) else {
+            return;
+        };
+        match event {
+            Event::CustomMessage(message, payload)
+                if message == crate::screen::VC_STATUS_BAR_VISIBILITY_MESSAGE =>
+            {
+                match payload.as_str() {
+                    "false" => {
+                        self.parked_chrome_plugin_clients
+                            .insert((plugin_id, client_id));
+                    },
+                    "true" => {
+                        self.parked_chrome_plugin_clients
+                            .remove(&(plugin_id, client_id));
+                    },
+                    _ => {},
+                }
+            },
+            Event::CustomMessage(message, _)
+                if message == crate::screen::VC_FLEET_LIVE_COUNT_MESSAGE =>
+            {
+                self.parked_chrome_plugin_clients
+                    .remove(&(plugin_id, client_id));
+            },
+            _ => {},
+        }
+    }
+    fn is_parked_chrome_state_payload(
+        &self,
+        plugin_id: PluginId,
+        client_id: ClientId,
+        event: &Event,
+    ) -> bool {
+        self.parked_chrome_plugin_clients
+            .contains(&(plugin_id, client_id))
+            && matches!(event, Event::SessionUpdate(..) | Event::PaneUpdate(..))
     }
     pub fn client_is_connected(&self, client_id: &ClientId) -> bool {
         self.connected_clients.lock().unwrap().contains(client_id)
@@ -3664,7 +4218,7 @@ fn check_event_permission(
     (PermissionStatus::Denied, Some(permission))
 }
 
-pub fn apply_event_to_plugin(
+fn apply_event_to_plugin(
     plugin_id: PluginId,
     client_id: ClientId,
     running_plugin: &mut RunningPlugin,
@@ -3672,12 +4226,14 @@ pub fn apply_event_to_plugin(
     plugin_render_assets: &mut Vec<PluginRenderAsset>,
     senders: ThreadSenders,
     plugin_subscriptions: &HashSet<EventType>,
-) -> Result<()> {
+) -> Result<(bool, bool)> {
     let instance = &running_plugin.instance;
     let rows = running_plugin.rows;
     let columns = running_plugin.columns;
 
     let err_context = || format!("Failed to apply event to plugin {plugin_id}");
+    let mut rendered_event = false;
+    let mut empty_rendered_event = false;
     match check_event_permission(running_plugin.store.data(), event) {
         (PermissionStatus::Granted, _) => {
             let mut event = event.clone();
@@ -3721,6 +4277,8 @@ pub fn apply_event_to_plugin(
                                     .map_err(|e| anyhow!(e))
                             })
                             .with_context(err_context)?;
+                        rendered_event = true;
+                        empty_rendered_event = rendered_bytes.is_empty();
                         let pipes_to_block_or_unblock =
                             pipes_to_block_or_unblock(running_plugin, None);
                         let plugin_render_asset = PluginRenderAsset::new(
@@ -3761,7 +4319,7 @@ pub fn apply_event_to_plugin(
             );
         },
     }
-    Ok(())
+    Ok((rendered_event, empty_rendered_event))
 }
 
 pub fn handle_plugin_crash(plugin_id: PluginId, message: String, senders: ThreadSenders) {
@@ -3855,6 +4413,321 @@ mod layout_plugin_transaction_tests {
         }
     }
 
+    fn session_manager_request(client_id: ClientId) -> LayoutPluginReservationRequest {
+        LayoutPluginReservationRequest {
+            run_plugin: RunPlugin::from_url("vc-frame:session-manager")
+                .unwrap()
+                .with_configuration(BTreeMap::from([(
+                    "session_canvas".to_owned(),
+                    "true".to_owned(),
+                )])),
+            tab_index: Some(1),
+            size: Size::default(),
+            cwd: None,
+            skip_cache: false,
+            client_id,
+        }
+    }
+
+    #[test]
+    fn explicit_session_canvas_kind_survives_resolved_plugin_locations() {
+        for (kind, expected) in [
+            ("compact-bar", SessionChromeKind::CompactBar),
+            ("session-manager", SessionChromeKind::SessionManager),
+            ("status-bar", SessionChromeKind::StatusBar),
+        ] {
+            let run_plugin = RunPlugin::from_url(&format!(
+                "file:{}/resolved-{kind}.wasm",
+                std::env::temp_dir().display()
+            ))
+            .unwrap()
+            .with_configuration(BTreeMap::from([
+                ("session_canvas".to_owned(), "true".to_owned()),
+                ("session_canvas_kind".to_owned(), kind.to_owned()),
+            ]));
+
+            assert_eq!(session_chrome_kind(&run_plugin), Ok(Some(expected)));
+        }
+    }
+
+    #[test]
+    fn invalid_session_canvas_kind_rejects_the_entire_reservation() {
+        let mut bridge = test_bridge(1);
+        let transaction_id = 9914;
+        let mut invalid_request = session_manager_request(9300);
+        invalid_request.run_plugin = invalid_request
+            .run_plugin
+            .with_configuration(BTreeMap::from([
+                ("session_canvas".to_owned(), "true".to_owned()),
+                (
+                    "session_canvas_kind".to_owned(),
+                    "session-manger".to_owned(),
+                ),
+            ]));
+
+        let error = bridge
+            .reserve_layout_plugins(
+                transaction_id,
+                vec![session_manager_request(9299), invalid_request],
+            )
+            .unwrap_err();
+
+        assert!(error.contains("unknown session_canvas_kind `session-manger`"));
+        assert_eq!(bridge.next_plugin_id, 0);
+        assert!(bridge.session_chrome_authorities.is_empty());
+        assert!(bridge.layout_plugin_owners.is_empty());
+        assert!(
+            !bridge
+                .layout_plugin_reservations
+                .contains_key(&transaction_id)
+        );
+    }
+
+    #[test]
+    fn resolved_session_canvas_requires_an_explicit_kind() {
+        let mut bridge = test_bridge(1);
+        let transaction_id = 9915;
+        let resolved_request = LayoutPluginReservationRequest {
+            run_plugin: RunPlugin::from_url(&format!(
+                "file:{}/resolved-session-manager.wasm",
+                std::env::temp_dir().display()
+            ))
+            .unwrap()
+            .with_configuration(BTreeMap::from([(
+                "session_canvas".to_owned(),
+                "true".to_owned(),
+            )])),
+            tab_index: Some(1),
+            size: Size::default(),
+            cwd: None,
+            skip_cache: false,
+            client_id: 9301,
+        };
+
+        let error = bridge
+            .reserve_layout_plugins(transaction_id, vec![resolved_request])
+            .unwrap_err();
+
+        assert!(error.contains("session_canvas=true requires session_canvas_kind"));
+        assert_eq!(bridge.next_plugin_id, 0);
+        assert!(bridge.session_chrome_authorities.is_empty());
+        assert!(bridge.layout_plugin_owners.is_empty());
+        assert!(
+            !bridge
+                .layout_plugin_reservations
+                .contains_key(&transaction_id)
+        );
+    }
+
+    #[test]
+    fn session_manager_layout_reserves_one_runtime_for_six_projectors() {
+        let mut bridge = test_bridge(1);
+        let transaction_id = 9910;
+        let pane_ids = bridge
+            .reserve_layout_plugins(
+                transaction_id,
+                (0..6)
+                    .map(|offset| session_manager_request(9100 + offset))
+                    .collect(),
+            )
+            .unwrap();
+
+        assert_eq!(pane_ids, vec![0, 1, 2, 3, 4, 5]);
+        let reservation = bridge
+            .layout_plugin_reservations
+            .get(&transaction_id)
+            .unwrap();
+        assert_eq!(reservation.plugins.len(), 1);
+        assert_eq!(reservation.plugins[0].plugin_id, 0);
+        assert_eq!(
+            reservation
+                .pane_bindings
+                .iter()
+                .map(|binding| binding.runtime_plugin_id)
+                .collect::<Vec<_>>(),
+            vec![0; 6]
+        );
+        assert_eq!(
+            bridge.layout_plugin_projector_bindings(transaction_id),
+            vec![
+                PluginPaneId::projector(1, 0),
+                PluginPaneId::projector(2, 0),
+                PluginPaneId::projector(3, 0),
+                PluginPaneId::projector(4, 0),
+                PluginPaneId::projector(5, 0),
+            ]
+        );
+
+        let receipt = bridge
+            .resolve_layout_plugins(
+                transaction_id,
+                LayoutPluginResolution::Release {
+                    reason: "test cleanup".to_owned(),
+                },
+                pane_ids.clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            receipt,
+            LayoutPluginReceipt::Released {
+                plugin_ids: pane_ids
+            }
+        );
+        assert!(bridge.session_chrome_authorities.is_empty());
+    }
+
+    #[test]
+    fn session_canvas_reserves_three_runtimes_for_ten_tab_views() {
+        let mut bridge = test_bridge(1);
+        let transaction_id = 9911;
+        let mut requests = vec![];
+        for client_id in 9200..9210 {
+            for location in [
+                "vc-frame:compact-bar",
+                "vc-frame:session-manager",
+                "vc-frame:status-bar",
+            ] {
+                let mut request = session_manager_request(client_id);
+                request.run_plugin =
+                    RunPlugin::from_url(location)
+                        .unwrap()
+                        .with_configuration(BTreeMap::from([(
+                            "session_canvas".to_owned(),
+                            "true".to_owned(),
+                        )]));
+                requests.push(request);
+            }
+        }
+
+        let pane_ids = bridge
+            .reserve_layout_plugins(transaction_id, requests)
+            .unwrap();
+        let reservation = bridge
+            .layout_plugin_reservations
+            .get(&transaction_id)
+            .unwrap();
+
+        assert_eq!(pane_ids.len(), 30);
+        assert_eq!(reservation.plugins.len(), 3);
+        assert_eq!(
+            reservation
+                .plugins
+                .iter()
+                .map(|plugin| plugin.plugin_id)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(bridge.session_chrome_authorities.len(), 3);
+    }
+
+    #[test]
+    fn failed_canvas_reservation_is_atomic_and_retryable() {
+        let mut bridge = test_bridge(1);
+        let transaction_id = 9913;
+        let mut unresolved_request = session_manager_request(9300);
+        unresolved_request.run_plugin = RunPlugin::from_url("zellij:not-a-plugin").unwrap();
+
+        let error = bridge
+            .reserve_layout_plugins(
+                transaction_id,
+                vec![session_manager_request(9299), unresolved_request],
+            )
+            .unwrap_err();
+
+        assert!(error.contains("failed to resolve layout plugin"));
+        assert_eq!(bridge.next_plugin_id, 0);
+        assert!(bridge.session_chrome_authorities.is_empty());
+        assert!(bridge.layout_plugin_owners.is_empty());
+        assert!(
+            !bridge
+                .layout_plugin_reservations
+                .contains_key(&transaction_id)
+        );
+
+        assert_eq!(
+            bridge
+                .reserve_layout_plugins(transaction_id, vec![session_manager_request(9301)])
+                .unwrap(),
+            vec![0]
+        );
+        let authority = bridge
+            .session_chrome_authorities
+            .get(&SessionChromeKind::SessionManager)
+            .unwrap();
+        assert_eq!(authority.runtime_plugin_id, 0);
+        assert_eq!(authority.reserved_by, transaction_id);
+    }
+
+    #[test]
+    fn legacy_chrome_without_canvas_marker_keeps_independent_runtimes() {
+        let mut bridge = test_bridge(1);
+        let transaction_id = 9912;
+        let requests = (0..2usize)
+            .map(|offset| LayoutPluginReservationRequest {
+                run_plugin: RunPlugin::from_url("vc-frame:status-bar").unwrap(),
+                tab_index: Some(offset),
+                size: Size::default(),
+                cwd: None,
+                skip_cache: false,
+                client_id: 9300 + offset as ClientId,
+            })
+            .collect();
+
+        let pane_ids = bridge
+            .reserve_layout_plugins(transaction_id, requests)
+            .unwrap();
+        let reservation = bridge
+            .layout_plugin_reservations
+            .get(&transaction_id)
+            .unwrap();
+
+        assert_eq!(pane_ids, vec![0, 1]);
+        assert_eq!(reservation.plugins.len(), 2);
+        assert!(bridge.session_chrome_authorities.is_empty());
+        assert!(
+            bridge
+                .layout_plugin_projector_bindings(transaction_id)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn closing_one_projector_keeps_singleton_authority_alive() {
+        let mut bridge = test_bridge(1);
+        bridge.session_chrome_authorities.insert(
+            SessionChromeKind::SessionManager,
+            SingletonAuthority {
+                runtime_plugin_id: 7,
+                projector_count: 2,
+                reserved_by: 77,
+            },
+        );
+        bridge
+            .session_chrome_projectors
+            .insert(7, (7, SessionChromeKind::SessionManager));
+        bridge
+            .session_chrome_projectors
+            .insert(8, (7, SessionChromeKind::SessionManager));
+
+        bridge.unload_plugin(8).unwrap();
+
+        assert_eq!(
+            bridge
+                .session_chrome_authorities
+                .get(&SessionChromeKind::SessionManager),
+            Some(&SingletonAuthority {
+                runtime_plugin_id: 7,
+                projector_count: 1,
+                reserved_by: 77,
+            })
+        );
+        assert_eq!(
+            bridge.session_chrome_projectors.get(&7),
+            Some(&(7, SessionChromeKind::SessionManager))
+        );
+        assert!(!bridge.session_chrome_projectors.contains_key(&8));
+    }
+
     fn remote_request(client_id: ClientId) -> LayoutPluginReservationRequest {
         LayoutPluginReservationRequest {
             run_plugin: RunPlugin::from_url(
@@ -3867,6 +4740,83 @@ mod layout_plugin_transaction_tests {
             skip_cache: false,
             client_id,
         }
+    }
+
+    #[test]
+    fn event_diagnostics_count_dispatches_and_renders_without_dynamic_slots() {
+        let diagnostics = PluginEventDiagnostics::default();
+
+        for _ in 0..120 {
+            diagnostics.record_at(
+                7,
+                3,
+                PluginEventDiagnosticKind::PaneUpdate,
+                false,
+                false,
+                100,
+            );
+        }
+        for _ in 0..4 {
+            diagnostics.record_at(
+                7,
+                3,
+                PluginEventDiagnosticKind::SessionUpdate,
+                true,
+                false,
+                100,
+            );
+        }
+        diagnostics.record_at(
+            7,
+            3,
+            PluginEventDiagnosticKind::SessionUpdate,
+            true,
+            true,
+            100,
+        );
+
+        assert_eq!(
+            diagnostics.counts(7, 3, PluginEventDiagnosticKind::PaneUpdate),
+            (120, 0, 0)
+        );
+        assert_eq!(
+            diagnostics.counts(7, 3, PluginEventDiagnosticKind::SessionUpdate),
+            (5, 5, 1)
+        );
+    }
+
+    #[test]
+    fn event_diagnostics_drop_fixed_table_collisions_instead_of_reassigning() {
+        let diagnostics = PluginEventDiagnostics::default();
+        diagnostics.record_at(
+            1,
+            2,
+            PluginEventDiagnosticKind::PaneUpdate,
+            false,
+            false,
+            100,
+        );
+        diagnostics.record_at(
+            1 + PLUGIN_EVENT_DIAGNOSTIC_SLOTS as PluginId,
+            2,
+            PluginEventDiagnosticKind::PaneUpdate,
+            true,
+            false,
+            100,
+        );
+
+        assert_eq!(
+            diagnostics.counts(1, 2, PluginEventDiagnosticKind::PaneUpdate),
+            (1, 0, 0)
+        );
+        assert_eq!(
+            diagnostics.counts(
+                1 + PLUGIN_EVENT_DIAGNOSTIC_SLOTS as PluginId,
+                2,
+                PluginEventDiagnosticKind::PaneUpdate,
+            ),
+            (0, 0, 0)
+        );
     }
 
     #[test]
@@ -3918,6 +4868,46 @@ mod layout_plugin_transaction_tests {
                 crate::screen::VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
                 "false".to_owned(),
             ),
+        ));
+    }
+
+    #[test]
+    fn exact_chrome_lifecycle_parks_heavy_state_payloads() {
+        let mut bridge = test_bridge(1);
+        let plugin_id = 77;
+        let client_id = 2;
+
+        bridge.update_parked_chrome_target(
+            Some(plugin_id),
+            Some(client_id),
+            &Event::CustomMessage(
+                crate::screen::VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
+                "false".to_owned(),
+            ),
+        );
+        assert!(bridge.is_parked_chrome_state_payload(
+            plugin_id,
+            client_id,
+            &Event::PaneUpdate(Default::default()),
+        ));
+        assert!(bridge.is_parked_chrome_state_payload(
+            plugin_id,
+            client_id,
+            &Event::SessionUpdate(vec![], vec![]),
+        ));
+
+        bridge.update_parked_chrome_target(
+            Some(plugin_id),
+            Some(client_id),
+            &Event::CustomMessage(
+                crate::screen::VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
+                "1".to_owned(),
+            ),
+        );
+        assert!(!bridge.is_parked_chrome_state_payload(
+            plugin_id,
+            client_id,
+            &Event::SessionUpdate(vec![], vec![]),
         ));
     }
 
@@ -4616,6 +5606,82 @@ mod layout_plugin_transaction_tests {
                 .unwrap(),
             compensated
         );
+    }
+
+    #[test]
+    fn projector_only_activation_retains_compensatable_metadata() {
+        let mut bridge = test_bridge(1);
+        bridge.session_chrome_authorities.insert(
+            SessionChromeKind::SessionManager,
+            SingletonAuthority {
+                runtime_plugin_id: 77,
+                projector_count: 1,
+                reserved_by: 1007,
+            },
+        );
+        bridge
+            .session_chrome_projectors
+            .insert(77, (77, SessionChromeKind::SessionManager));
+        let before_projectors = bridge.session_chrome_projectors.clone();
+        let before_authority = bridge
+            .session_chrome_authorities
+            .get(&SessionChromeKind::SessionManager)
+            .copied();
+
+        let pane_ids = bridge
+            .reserve_layout_plugins(1009, vec![session_manager_request(9400)])
+            .unwrap();
+        assert_eq!(pane_ids, vec![0]);
+        assert!(
+            bridge
+                .layout_plugin_reservations
+                .get(&1009)
+                .unwrap()
+                .plugins
+                .is_empty()
+        );
+
+        assert_eq!(
+            bridge
+                .resolve_layout_plugins(1009, LayoutPluginResolution::Activate, pane_ids.clone())
+                .unwrap(),
+            LayoutPluginReceipt::Activated {
+                plugin_ids: pane_ids.clone(),
+            }
+        );
+        assert!(bridge.layout_plugin_reservations.contains_key(&1009));
+        assert_eq!(
+            bridge
+                .session_chrome_authorities
+                .get(&SessionChromeKind::SessionManager)
+                .unwrap()
+                .projector_count,
+            2
+        );
+
+        assert_eq!(
+            bridge
+                .resolve_layout_plugins(
+                    1009,
+                    LayoutPluginResolution::Compensate {
+                        reason: "injected PTY rollback".to_owned(),
+                    },
+                    pane_ids.clone(),
+                )
+                .unwrap(),
+            LayoutPluginReceipt::Compensated {
+                plugin_ids: pane_ids,
+            }
+        );
+        assert_eq!(bridge.session_chrome_projectors, before_projectors);
+        assert_eq!(
+            bridge
+                .session_chrome_authorities
+                .get(&SessionChromeKind::SessionManager)
+                .copied(),
+            before_authority
+        );
+        assert!(!bridge.layout_plugin_reservations.contains_key(&1009));
     }
 
     #[test]

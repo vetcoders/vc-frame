@@ -1,6 +1,5 @@
 ---
 source: zellij-utils/src/setup.rs
-assertion_line: 893
 expression: "format!(\"{:#?}\", config)"
 ---
 Config {
@@ -290,38 +289,6 @@ Config {
                     'e',
                 ),
                 key_modifiers: {
-                    Alt,
-                },
-            }: [
-                NewFloatingPane {
-                    command: Some(
-                        RunCommandAction {
-                            command: "sh",
-                            args: [
-                                "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
-                            ],
-                            cwd: None,
-                            direction: None,
-                            hold_on_close: false,
-                            hold_on_start: false,
-                            originating_plugin: None,
-                            use_terminal_title: false,
-                        },
-                    ),
-                    pane_name: Some(
-                        "Composer",
-                    ),
-                    coordinates: None,
-                    near_current_pane: false,
-                    tab_id: None,
-                },
-            ],
-            KeyWithModifier {
-                bare_key: Char(
-                    'e',
-                ),
-                key_modifiers: {
                     Super,
                 },
             }: [
@@ -331,7 +298,7 @@ Config {
                             command: "sh",
                             args: [
                                 "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                                "if [ -x \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\"; elif [ -x \"${HOME}/.config/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vc-frame/vc-composer.sh\"; else f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${EDITOR:-vim} -c 'set number' -c 'set laststatus=0' -c 'set nowrap' -c 'set textwidth=0' -c 'set sidescroll=1' -c 'nnoremap <silent> <F2> :set wrap! wrap?<CR>' \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"; fi",
                             ],
                             cwd: None,
                             direction: None,
@@ -342,7 +309,7 @@ Config {
                         },
                     ),
                     pane_name: Some(
-                        "Composer",
+                        "✍ Composer · ⧉ Paste stack",
                     ),
                     coordinates: None,
                     near_current_pane: false,
@@ -1123,38 +1090,6 @@ Config {
                     'e',
                 ),
                 key_modifiers: {
-                    Alt,
-                },
-            }: [
-                NewFloatingPane {
-                    command: Some(
-                        RunCommandAction {
-                            command: "sh",
-                            args: [
-                                "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
-                            ],
-                            cwd: None,
-                            direction: None,
-                            hold_on_close: false,
-                            hold_on_start: false,
-                            originating_plugin: None,
-                            use_terminal_title: false,
-                        },
-                    ),
-                    pane_name: Some(
-                        "Composer",
-                    ),
-                    coordinates: None,
-                    near_current_pane: false,
-                    tab_id: None,
-                },
-            ],
-            KeyWithModifier {
-                bare_key: Char(
-                    'e',
-                ),
-                key_modifiers: {
                     Super,
                 },
             }: [
@@ -1164,7 +1099,7 @@ Config {
                             command: "sh",
                             args: [
                                 "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                                "if [ -x \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\"; elif [ -x \"${HOME}/.config/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vc-frame/vc-composer.sh\"; else f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${EDITOR:-vim} -c 'set number' -c 'set laststatus=0' -c 'set nowrap' -c 'set textwidth=0' -c 'set sidescroll=1' -c 'nnoremap <silent> <F2> :set wrap! wrap?<CR>' \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"; fi",
                             ],
                             cwd: None,
                             direction: None,
@@ -1175,7 +1110,7 @@ Config {
                         },
                     ),
                     pane_name: Some(
-                        "Composer",
+                        "✍ Composer · ⧉ Paste stack",
                     ),
                     coordinates: None,
                     near_current_pane: false,
@@ -1822,38 +1757,6 @@ Config {
                     'e',
                 ),
                 key_modifiers: {
-                    Alt,
-                },
-            }: [
-                NewFloatingPane {
-                    command: Some(
-                        RunCommandAction {
-                            command: "sh",
-                            args: [
-                                "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
-                            ],
-                            cwd: None,
-                            direction: None,
-                            hold_on_close: false,
-                            hold_on_start: false,
-                            originating_plugin: None,
-                            use_terminal_title: false,
-                        },
-                    ),
-                    pane_name: Some(
-                        "Composer",
-                    ),
-                    coordinates: None,
-                    near_current_pane: false,
-                    tab_id: None,
-                },
-            ],
-            KeyWithModifier {
-                bare_key: Char(
-                    'e',
-                ),
-                key_modifiers: {
                     Super,
                 },
             }: [
@@ -1863,7 +1766,7 @@ Config {
                             command: "sh",
                             args: [
                                 "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                                "if [ -x \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\"; elif [ -x \"${HOME}/.config/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vc-frame/vc-composer.sh\"; else f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${EDITOR:-vim} -c 'set number' -c 'set laststatus=0' -c 'set nowrap' -c 'set textwidth=0' -c 'set sidescroll=1' -c 'nnoremap <silent> <F2> :set wrap! wrap?<CR>' \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"; fi",
                             ],
                             cwd: None,
                             direction: None,
@@ -1874,7 +1777,7 @@ Config {
                         },
                     ),
                     pane_name: Some(
-                        "Composer",
+                        "✍ Composer · ⧉ Paste stack",
                     ),
                     coordinates: None,
                     near_current_pane: false,
@@ -2761,38 +2664,6 @@ Config {
                     'e',
                 ),
                 key_modifiers: {
-                    Alt,
-                },
-            }: [
-                NewFloatingPane {
-                    command: Some(
-                        RunCommandAction {
-                            command: "sh",
-                            args: [
-                                "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
-                            ],
-                            cwd: None,
-                            direction: None,
-                            hold_on_close: false,
-                            hold_on_start: false,
-                            originating_plugin: None,
-                            use_terminal_title: false,
-                        },
-                    ),
-                    pane_name: Some(
-                        "Composer",
-                    ),
-                    coordinates: None,
-                    near_current_pane: false,
-                    tab_id: None,
-                },
-            ],
-            KeyWithModifier {
-                bare_key: Char(
-                    'e',
-                ),
-                key_modifiers: {
                     Super,
                 },
             }: [
@@ -2802,7 +2673,7 @@ Config {
                             command: "sh",
                             args: [
                                 "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                                "if [ -x \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\"; elif [ -x \"${HOME}/.config/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vc-frame/vc-composer.sh\"; else f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${EDITOR:-vim} -c 'set number' -c 'set laststatus=0' -c 'set nowrap' -c 'set textwidth=0' -c 'set sidescroll=1' -c 'nnoremap <silent> <F2> :set wrap! wrap?<CR>' \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"; fi",
                             ],
                             cwd: None,
                             direction: None,
@@ -2813,7 +2684,7 @@ Config {
                         },
                     ),
                     pane_name: Some(
-                        "Composer",
+                        "✍ Composer · ⧉ Paste stack",
                     ),
                     coordinates: None,
                     near_current_pane: false,
@@ -3540,38 +3411,6 @@ Config {
                     'e',
                 ),
                 key_modifiers: {
-                    Alt,
-                },
-            }: [
-                NewFloatingPane {
-                    command: Some(
-                        RunCommandAction {
-                            command: "sh",
-                            args: [
-                                "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
-                            ],
-                            cwd: None,
-                            direction: None,
-                            hold_on_close: false,
-                            hold_on_start: false,
-                            originating_plugin: None,
-                            use_terminal_title: false,
-                        },
-                    ),
-                    pane_name: Some(
-                        "Composer",
-                    ),
-                    coordinates: None,
-                    near_current_pane: false,
-                    tab_id: None,
-                },
-            ],
-            KeyWithModifier {
-                bare_key: Char(
-                    'e',
-                ),
-                key_modifiers: {
                     Super,
                 },
             }: [
@@ -3581,7 +3420,7 @@ Config {
                             command: "sh",
                             args: [
                                 "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                                "if [ -x \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\"; elif [ -x \"${HOME}/.config/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vc-frame/vc-composer.sh\"; else f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${EDITOR:-vim} -c 'set number' -c 'set laststatus=0' -c 'set nowrap' -c 'set textwidth=0' -c 'set sidescroll=1' -c 'nnoremap <silent> <F2> :set wrap! wrap?<CR>' \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"; fi",
                             ],
                             cwd: None,
                             direction: None,
@@ -3592,7 +3431,7 @@ Config {
                         },
                     ),
                     pane_name: Some(
-                        "Composer",
+                        "✍ Composer · ⧉ Paste stack",
                     ),
                     coordinates: None,
                     near_current_pane: false,
@@ -3874,6 +3713,39 @@ Config {
                 key_modifiers: {},
             }: [
                 HalfPageScrollUp,
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'v',
+                ),
+                key_modifiers: {},
+            }: [
+                NewFloatingPane {
+                    command: Some(
+                        RunCommandAction {
+                            command: "sh",
+                            args: [
+                                "-c",
+                                "if [ -x \"${HOME}/.config/vetcoders/frontier/vc-frame/scrollback-select.sh\" ]; then \"${HOME}/.config/vetcoders/frontier/vc-frame/scrollback-select.sh\"; elif [ -x \"${HOME}/.config/vc-frame/scrollback-select.sh\" ]; then \"${HOME}/.config/vc-frame/scrollback-select.sh\"; else vc-frame action dump-screen --full --path /tmp/vc-sb.txt; ${EDITOR:-vim} -R -c 'set number' -c 'set laststatus=0' /tmp/vc-sb.txt; fi",
+                            ],
+                            cwd: None,
+                            direction: None,
+                            hold_on_close: false,
+                            hold_on_start: false,
+                            originating_plugin: None,
+                            use_terminal_title: false,
+                        },
+                    ),
+                    pane_name: Some(
+                        "Scrollback · visual",
+                    ),
+                    coordinates: None,
+                    near_current_pane: false,
+                    tab_id: None,
+                },
+                SwitchToMode {
+                    input_mode: Normal,
+                },
             ],
             KeyWithModifier {
                 bare_key: Esc,
@@ -4189,38 +4061,6 @@ Config {
                     'e',
                 ),
                 key_modifiers: {
-                    Alt,
-                },
-            }: [
-                NewFloatingPane {
-                    command: Some(
-                        RunCommandAction {
-                            command: "sh",
-                            args: [
-                                "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
-                            ],
-                            cwd: None,
-                            direction: None,
-                            hold_on_close: false,
-                            hold_on_start: false,
-                            originating_plugin: None,
-                            use_terminal_title: false,
-                        },
-                    ),
-                    pane_name: Some(
-                        "Composer",
-                    ),
-                    coordinates: None,
-                    near_current_pane: false,
-                    tab_id: None,
-                },
-            ],
-            KeyWithModifier {
-                bare_key: Char(
-                    'e',
-                ),
-                key_modifiers: {
                     Super,
                 },
             }: [
@@ -4230,7 +4070,7 @@ Config {
                             command: "sh",
                             args: [
                                 "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                                "if [ -x \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\"; elif [ -x \"${HOME}/.config/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vc-frame/vc-composer.sh\"; else f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${EDITOR:-vim} -c 'set number' -c 'set laststatus=0' -c 'set nowrap' -c 'set textwidth=0' -c 'set sidescroll=1' -c 'nnoremap <silent> <F2> :set wrap! wrap?<CR>' \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"; fi",
                             ],
                             cwd: None,
                             direction: None,
@@ -4241,7 +4081,7 @@ Config {
                         },
                     ),
                     pane_name: Some(
-                        "Composer",
+                        "✍ Composer · ⧉ Paste stack",
                     ),
                     coordinates: None,
                     near_current_pane: false,
@@ -4826,38 +4666,6 @@ Config {
                     'e',
                 ),
                 key_modifiers: {
-                    Alt,
-                },
-            }: [
-                NewFloatingPane {
-                    command: Some(
-                        RunCommandAction {
-                            command: "sh",
-                            args: [
-                                "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
-                            ],
-                            cwd: None,
-                            direction: None,
-                            hold_on_close: false,
-                            hold_on_start: false,
-                            originating_plugin: None,
-                            use_terminal_title: false,
-                        },
-                    ),
-                    pane_name: Some(
-                        "Composer",
-                    ),
-                    coordinates: None,
-                    near_current_pane: false,
-                    tab_id: None,
-                },
-            ],
-            KeyWithModifier {
-                bare_key: Char(
-                    'e',
-                ),
-                key_modifiers: {
                     Super,
                 },
             }: [
@@ -4867,7 +4675,7 @@ Config {
                             command: "sh",
                             args: [
                                 "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                                "if [ -x \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\"; elif [ -x \"${HOME}/.config/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vc-frame/vc-composer.sh\"; else f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${EDITOR:-vim} -c 'set number' -c 'set laststatus=0' -c 'set nowrap' -c 'set textwidth=0' -c 'set sidescroll=1' -c 'nnoremap <silent> <F2> :set wrap! wrap?<CR>' \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"; fi",
                             ],
                             cwd: None,
                             direction: None,
@@ -4878,7 +4686,7 @@ Config {
                         },
                     ),
                     pane_name: Some(
-                        "Composer",
+                        "✍ Composer · ⧉ Paste stack",
                     ),
                     coordinates: None,
                     near_current_pane: false,
@@ -5500,38 +5308,6 @@ Config {
                     'e',
                 ),
                 key_modifiers: {
-                    Alt,
-                },
-            }: [
-                NewFloatingPane {
-                    command: Some(
-                        RunCommandAction {
-                            command: "sh",
-                            args: [
-                                "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
-                            ],
-                            cwd: None,
-                            direction: None,
-                            hold_on_close: false,
-                            hold_on_start: false,
-                            originating_plugin: None,
-                            use_terminal_title: false,
-                        },
-                    ),
-                    pane_name: Some(
-                        "Composer",
-                    ),
-                    coordinates: None,
-                    near_current_pane: false,
-                    tab_id: None,
-                },
-            ],
-            KeyWithModifier {
-                bare_key: Char(
-                    'e',
-                ),
-                key_modifiers: {
                     Super,
                 },
             }: [
@@ -5541,7 +5317,7 @@ Config {
                             command: "sh",
                             args: [
                                 "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                                "if [ -x \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\"; elif [ -x \"${HOME}/.config/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vc-frame/vc-composer.sh\"; else f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${EDITOR:-vim} -c 'set number' -c 'set laststatus=0' -c 'set nowrap' -c 'set textwidth=0' -c 'set sidescroll=1' -c 'nnoremap <silent> <F2> :set wrap! wrap?<CR>' \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"; fi",
                             ],
                             cwd: None,
                             direction: None,
@@ -5552,7 +5328,7 @@ Config {
                         },
                     ),
                     pane_name: Some(
-                        "Composer",
+                        "✍ Composer · ⧉ Paste stack",
                     ),
                     coordinates: None,
                     near_current_pane: false,
@@ -6085,38 +5861,6 @@ Config {
                     'e',
                 ),
                 key_modifiers: {
-                    Alt,
-                },
-            }: [
-                NewFloatingPane {
-                    command: Some(
-                        RunCommandAction {
-                            command: "sh",
-                            args: [
-                                "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
-                            ],
-                            cwd: None,
-                            direction: None,
-                            hold_on_close: false,
-                            hold_on_start: false,
-                            originating_plugin: None,
-                            use_terminal_title: false,
-                        },
-                    ),
-                    pane_name: Some(
-                        "Composer",
-                    ),
-                    coordinates: None,
-                    near_current_pane: false,
-                    tab_id: None,
-                },
-            ],
-            KeyWithModifier {
-                bare_key: Char(
-                    'e',
-                ),
-                key_modifiers: {
                     Super,
                 },
             }: [
@@ -6126,7 +5870,7 @@ Config {
                             command: "sh",
                             args: [
                                 "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                                "if [ -x \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\"; elif [ -x \"${HOME}/.config/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vc-frame/vc-composer.sh\"; else f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${EDITOR:-vim} -c 'set number' -c 'set laststatus=0' -c 'set nowrap' -c 'set textwidth=0' -c 'set sidescroll=1' -c 'nnoremap <silent> <F2> :set wrap! wrap?<CR>' \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"; fi",
                             ],
                             cwd: None,
                             direction: None,
@@ -6137,7 +5881,7 @@ Config {
                         },
                     ),
                     pane_name: Some(
-                        "Composer",
+                        "✍ Composer · ⧉ Paste stack",
                     ),
                     coordinates: None,
                     near_current_pane: false,
@@ -6728,38 +6472,6 @@ Config {
                     'e',
                 ),
                 key_modifiers: {
-                    Alt,
-                },
-            }: [
-                NewFloatingPane {
-                    command: Some(
-                        RunCommandAction {
-                            command: "sh",
-                            args: [
-                                "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
-                            ],
-                            cwd: None,
-                            direction: None,
-                            hold_on_close: false,
-                            hold_on_start: false,
-                            originating_plugin: None,
-                            use_terminal_title: false,
-                        },
-                    ),
-                    pane_name: Some(
-                        "Composer",
-                    ),
-                    coordinates: None,
-                    near_current_pane: false,
-                    tab_id: None,
-                },
-            ],
-            KeyWithModifier {
-                bare_key: Char(
-                    'e',
-                ),
-                key_modifiers: {
                     Super,
                 },
             }: [
@@ -6769,7 +6481,7 @@ Config {
                             command: "sh",
                             args: [
                                 "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                                "if [ -x \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\"; elif [ -x \"${HOME}/.config/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vc-frame/vc-composer.sh\"; else f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${EDITOR:-vim} -c 'set number' -c 'set laststatus=0' -c 'set nowrap' -c 'set textwidth=0' -c 'set sidescroll=1' -c 'nnoremap <silent> <F2> :set wrap! wrap?<CR>' \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"; fi",
                             ],
                             cwd: None,
                             direction: None,
@@ -6780,7 +6492,7 @@ Config {
                         },
                     ),
                     pane_name: Some(
-                        "Composer",
+                        "✍ Composer · ⧉ Paste stack",
                     ),
                     coordinates: None,
                     near_current_pane: false,
@@ -7524,38 +7236,6 @@ Config {
                     'e',
                 ),
                 key_modifiers: {
-                    Alt,
-                },
-            }: [
-                NewFloatingPane {
-                    command: Some(
-                        RunCommandAction {
-                            command: "sh",
-                            args: [
-                                "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
-                            ],
-                            cwd: None,
-                            direction: None,
-                            hold_on_close: false,
-                            hold_on_start: false,
-                            originating_plugin: None,
-                            use_terminal_title: false,
-                        },
-                    ),
-                    pane_name: Some(
-                        "Composer",
-                    ),
-                    coordinates: None,
-                    near_current_pane: false,
-                    tab_id: None,
-                },
-            ],
-            KeyWithModifier {
-                bare_key: Char(
-                    'e',
-                ),
-                key_modifiers: {
                     Super,
                 },
             }: [
@@ -7565,7 +7245,7 @@ Config {
                             command: "sh",
                             args: [
                                 "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                                "if [ -x \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\"; elif [ -x \"${HOME}/.config/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vc-frame/vc-composer.sh\"; else f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${EDITOR:-vim} -c 'set number' -c 'set laststatus=0' -c 'set nowrap' -c 'set textwidth=0' -c 'set sidescroll=1' -c 'nnoremap <silent> <F2> :set wrap! wrap?<CR>' \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"; fi",
                             ],
                             cwd: None,
                             direction: None,
@@ -7576,7 +7256,7 @@ Config {
                         },
                     ),
                     pane_name: Some(
-                        "Composer",
+                        "✍ Composer · ⧉ Paste stack",
                     ),
                     coordinates: None,
                     near_current_pane: false,
@@ -8170,38 +7850,6 @@ Config {
                     'e',
                 ),
                 key_modifiers: {
-                    Alt,
-                },
-            }: [
-                NewFloatingPane {
-                    command: Some(
-                        RunCommandAction {
-                            command: "sh",
-                            args: [
-                                "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
-                            ],
-                            cwd: None,
-                            direction: None,
-                            hold_on_close: false,
-                            hold_on_start: false,
-                            originating_plugin: None,
-                            use_terminal_title: false,
-                        },
-                    ),
-                    pane_name: Some(
-                        "Composer",
-                    ),
-                    coordinates: None,
-                    near_current_pane: false,
-                    tab_id: None,
-                },
-            ],
-            KeyWithModifier {
-                bare_key: Char(
-                    'e',
-                ),
-                key_modifiers: {
                     Super,
                 },
             }: [
@@ -8211,7 +7859,7 @@ Config {
                             command: "sh",
                             args: [
                                 "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                                "if [ -x \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\"; elif [ -x \"${HOME}/.config/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vc-frame/vc-composer.sh\"; else f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${EDITOR:-vim} -c 'set number' -c 'set laststatus=0' -c 'set nowrap' -c 'set textwidth=0' -c 'set sidescroll=1' -c 'nnoremap <silent> <F2> :set wrap! wrap?<CR>' \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"; fi",
                             ],
                             cwd: None,
                             direction: None,
@@ -8222,7 +7870,7 @@ Config {
                         },
                     ),
                     pane_name: Some(
-                        "Composer",
+                        "✍ Composer · ⧉ Paste stack",
                     ),
                     coordinates: None,
                     near_current_pane: false,
@@ -8885,38 +8533,6 @@ Config {
                     'e',
                 ),
                 key_modifiers: {
-                    Alt,
-                },
-            }: [
-                NewFloatingPane {
-                    command: Some(
-                        RunCommandAction {
-                            command: "sh",
-                            args: [
-                                "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
-                            ],
-                            cwd: None,
-                            direction: None,
-                            hold_on_close: false,
-                            hold_on_start: false,
-                            originating_plugin: None,
-                            use_terminal_title: false,
-                        },
-                    ),
-                    pane_name: Some(
-                        "Composer",
-                    ),
-                    coordinates: None,
-                    near_current_pane: false,
-                    tab_id: None,
-                },
-            ],
-            KeyWithModifier {
-                bare_key: Char(
-                    'e',
-                ),
-                key_modifiers: {
                     Super,
                 },
             }: [
@@ -8926,7 +8542,7 @@ Config {
                             command: "sh",
                             args: [
                                 "-c",
-                                "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"",
+                                "if [ -x \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\"; elif [ -x \"${HOME}/.config/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vc-frame/vc-composer.sh\"; else f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${EDITOR:-vim} -c 'set number' -c 'set laststatus=0' -c 'set nowrap' -c 'set textwidth=0' -c 'set sidescroll=1' -c 'nnoremap <silent> <F2> :set wrap! wrap?<CR>' \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"; fi",
                             ],
                             cwd: None,
                             direction: None,
@@ -8937,7 +8553,7 @@ Config {
                         },
                     ),
                     pane_name: Some(
-                        "Composer",
+                        "✍ Composer · ⧉ Paste stack",
                     ),
                     coordinates: None,
                     near_current_pane: false,

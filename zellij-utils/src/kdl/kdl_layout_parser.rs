@@ -38,6 +38,7 @@ pub struct KdlLayoutParser<'a> {
     raw_layout: &'a str,
     tab_templates: HashMap<String, (TiledPaneLayout, Vec<FloatingPaneLayout>, KdlNode)>,
     pane_templates: HashMap<String, (PaneOrFloatingPane, KdlNode)>,
+    session_layer: Option<(TiledPaneLayout, Vec<FloatingPaneLayout>, KdlNode)>,
     default_tab_template: Option<(TiledPaneLayout, Vec<FloatingPaneLayout>, KdlNode)>,
     new_tab_template: Option<(TiledPaneLayout, Vec<FloatingPaneLayout>)>,
     file_name: Option<PathBuf>,
@@ -61,6 +62,7 @@ impl<'a> KdlLayoutParser<'a> {
             raw_layout,
             tab_templates: HashMap::new(),
             pane_templates: HashMap::new(),
+            session_layer: None,
             default_tab_template: None,
             new_tab_template: None,
             global_cwd,
@@ -74,6 +76,7 @@ impl<'a> KdlLayoutParser<'a> {
             || word == "layout"
             || word == "pane_template"
             || word == "tab_template"
+            || word == "session_layer"
             || word == "default_tab_template"
             || word == "new_tab_template"
             || word == "command"
@@ -1703,6 +1706,26 @@ impl<'a> KdlLayoutParser<'a> {
             Some((tab_template, tab_template_floating_panes, kdl_node.clone()));
         Ok(())
     }
+    fn populate_session_layer(&mut self, kdl_node: &KdlNode) -> Result<(), ConfigError> {
+        let (session_layer, floating_panes) = self.parse_tab_template_node(kdl_node)?;
+        if session_layer.children_block_count() != 1 {
+            return Err(ConfigError::new_layout_kdl_error(
+                "The `session_layer` must contain exactly one bare `children` insertion point"
+                    .to_string(),
+                kdl_node.span().offset(),
+                kdl_node.span().len(),
+            ));
+        }
+        if !floating_panes.is_empty() {
+            return Err(ConfigError::new_layout_kdl_error(
+                "The `session_layer` cannot contain floating panes".to_string(),
+                kdl_node.span().offset(),
+                kdl_node.span().len(),
+            ));
+        }
+        self.session_layer = Some((session_layer, floating_panes, kdl_node.clone()));
+        Ok(())
+    }
     fn populate_new_tab_template(&mut self, kdl_node: &KdlNode) -> Result<(), ConfigError> {
         let (_is_focused, _tab_name, tab_template, tab_template_floating_panes) =
             self.parse_tab_node(kdl_node)?;
@@ -1909,7 +1932,9 @@ impl<'a> KdlLayoutParser<'a> {
     fn populate_tab_templates(&mut self, layout_children: &[KdlNode]) -> Result<(), ConfigError> {
         for child in layout_children.iter() {
             let child_name = kdl_name!(child);
-            if child_name == "tab_template" {
+            if child_name == "session_layer" {
+                self.populate_session_layer(child)?;
+            } else if child_name == "tab_template" {
                 self.populate_one_tab_template(child)?;
             } else if child_name == "default_tab_template" {
                 self.populate_default_tab_template(child)?;
@@ -1918,6 +1943,40 @@ impl<'a> KdlLayoutParser<'a> {
             }
         }
         Ok(())
+    }
+    fn wrap_in_session_layer(
+        &self,
+        mut content: TiledPaneLayout,
+    ) -> Result<TiledPaneLayout, ConfigError> {
+        let Some((session_layer, _, kdl_node)) = &self.session_layer else {
+            return Ok(content);
+        };
+        let tab_instance_id = content.tab_instance_id.take();
+        let hide_floating_panes = content.hide_floating_panes;
+        content.hide_floating_panes = false;
+        let mut canvas = session_layer.clone();
+        if !canvas.insert_children_layout(&mut content)? {
+            return Err(ConfigError::new_layout_kdl_error(
+                "The `session_layer` lost its `children` insertion point".to_string(),
+                kdl_node.span().offset(),
+                kdl_node.span().len(),
+            ));
+        }
+        canvas.tab_instance_id = tab_instance_id;
+        canvas.hide_floating_panes = hide_floating_panes;
+        Ok(canvas)
+    }
+
+    fn finalize_layout(&self, mut layout: Layout) -> Result<Layout, ConfigError> {
+        if let Some((session_layer, floating_panes, _)) = &self.session_layer {
+            layout.session_layer = Some((session_layer.clone(), floating_panes.clone()));
+        }
+        for (variants, _) in &mut layout.swap_tiled_layouts {
+            for tiled in variants.values_mut() {
+                *tiled = self.wrap_in_session_layer(std::mem::take(tiled))?;
+            }
+        }
+        Ok(layout)
     }
     fn populate_swap_tiled_layouts(
         &mut self,
@@ -2167,7 +2226,7 @@ impl<'a> KdlLayoutParser<'a> {
             Some((default_tab_tiled_panes_template, vec![]))
         };
 
-        Ok(Layout {
+        self.finalize_layout(Layout {
             tabs,
             template,
             focused_tab_index,
@@ -2231,7 +2290,7 @@ impl<'a> KdlLayoutParser<'a> {
         // durable identity so callers cannot observe a freshly generated ID.
         template.0.tab_instance_id = tab_instance_id;
         // create a layout with one tab that has these child panes
-        Ok(Layout {
+        self.finalize_layout(Layout {
             tabs,
             template: Some(template),
             swap_tiled_layouts,
@@ -2296,7 +2355,7 @@ impl<'a> KdlLayoutParser<'a> {
         } else {
             vec![]
         };
-        Ok(Layout {
+        self.finalize_layout(Layout {
             tabs,
             template,
             swap_tiled_layouts,

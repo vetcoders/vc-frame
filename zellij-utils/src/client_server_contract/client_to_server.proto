@@ -25,6 +25,8 @@ message ClientToServerMsg {
     DesktopNotificationResponseMsg desktop_notification_response = 18;
     ForwardedReplyFromHostMsg forwarded_reply_from_host = 19;
     HostTerminalThemeChangedMsg host_terminal_theme_changed = 20;
+    DeclareCallerMsg declare_caller = 21;
+    DoctorRoutesMsg doctor_routes = 22;
   }
 }
 
@@ -74,6 +76,14 @@ message ActionMsg {
   optional uint32 terminal_id = 2;
   optional uint32 client_id = 3;
   bool is_cli_client = 4;
+}
+
+message DeclareCallerMsg {
+  string caller = 1;
+}
+
+message DoctorRoutesMsg {
+  bool json = 1;
 }
 
 message KeyMsg {

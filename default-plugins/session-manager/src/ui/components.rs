@@ -978,21 +978,23 @@ pub fn render_controls_line(
             }
         },
         ActiveScreen::AttachToSession => {
-            let rename = colors.shortcuts("<Ctrl r>");
+            // macOS product key labels: ⌃ ⌥ ⌘ ⌫ ⏎ — never bare <Del> (laptop
+            // keyboards have no forward-delete; Del also steals sequences).
+            let rename = colors.shortcuts("⌃r");
             let rename_text = colors.bold("Rename");
-            let disconnect = colors.shortcuts("<Ctrl x>");
+            let disconnect = colors.shortcuts("⌃x");
             let disconnect_text = colors.bold("Disconnect others");
-            let kill = colors.shortcuts("<Del>");
+            let kill = colors.shortcuts("⌥⌫");
             let kill_text = colors.bold("Kill");
-            let kill_all = colors.shortcuts("<Ctrl d>");
+            let kill_all = colors.shortcuts("⌃d");
             let kill_all_text = colors.bold("Kill all");
 
-            if max_cols > 90 {
+            if max_cols > 78 {
                 print!(
                     "\u{1b}[m\u{1b}[{y};{x}HHelp: {rename} - {rename_text}, {disconnect} - {disconnect_text}, {kill} - {kill_text}, {kill_all} - {kill_all_text}"
                 );
                 true
-            } else if max_cols >= 28 {
+            } else if max_cols >= 20 {
                 print!("\u{1b}[m\u{1b}[{y};{x}H{rename}/{disconnect}/{kill}/{kill_all}");
                 false
             } else {
@@ -1000,21 +1002,21 @@ pub fn render_controls_line(
             }
         },
         ActiveScreen::ResurrectSession => {
-            let arrows = colors.shortcuts("<↓↑>");
+            let arrows = colors.shortcuts("↓↑");
             let navigate = colors.bold("Navigate");
-            let enter = colors.shortcuts("<ENTER>");
+            let enter = colors.shortcuts("⏎");
             let select = colors.bold("Resurrect");
-            let del = colors.shortcuts("<DEL>");
+            let del = colors.shortcuts("⌥⌫");
             let del_text = colors.bold("Delete");
-            let del_all = colors.shortcuts("<Ctrl d>");
+            let del_all = colors.shortcuts("⌃d");
             let del_all_text = colors.bold("Delete all");
 
-            if max_cols > 83 {
+            if max_cols > 72 {
                 print!(
                     "\u{1b}[m\u{1b}[{y};{x}HHelp: {arrows} - {navigate}, {enter} - {select}, {del} - {del_text}, {del_all} - {del_all_text}"
                 );
                 true
-            } else if max_cols >= 28 {
+            } else if max_cols >= 16 {
                 print!("\u{1b}[m\u{1b}[{y};{x}H{arrows}/{enter}/{del}/{del_all}");
                 false
             } else {
@@ -1022,28 +1024,26 @@ pub fn render_controls_line(
             }
         },
         ActiveScreen::SingleScreen => {
-            let rename = colors.shortcuts("<Ctrl r>");
+            let rename = colors.shortcuts("⌃r");
             let rename_text = colors.bold("Rename");
-            let disconnect = colors.shortcuts("<Ctrl x>");
+            let disconnect = colors.shortcuts("⌃x");
             let disconnect_full_text = colors.bold("Disconnect others");
             let disconnect_short_text = colors.bold("Disconnect");
-            let kill = colors.shortcuts("<Del>");
+            let kill = colors.shortcuts("⌥⌫");
             let kill_text = colors.bold("Kill/Delete");
 
-            // Full: "Help: <Ctrl r> - Rename, <Ctrl x> - Disconnect others, <Del> - Kill/Delete" = 76 chars
-            if max_cols > 76 {
+            // Full help with macOS symbols (no <Del> — laptop contract).
+            if max_cols > 70 {
                 print!(
                     "\u{1b}[m\u{1b}[{y};{x}HHelp: {rename} - {rename_text}, {disconnect} - {disconnect_full_text}, {kill} - {kill_text}"
                 );
                 true
-            // Medium: "Help: <Ctrl r> - Rename, <Ctrl x> - Disconnect, <Del> - Kill/Delete" = 69 chars
-            } else if max_cols > 69 {
+            } else if max_cols > 58 {
                 print!(
                     "\u{1b}[m\u{1b}[{y};{x}HHelp: {rename} - {rename_text}, {disconnect} - {disconnect_short_text}, {kill} - {kill_text}"
                 );
                 true
-            // Compact: "<Ctrl r>/<Ctrl x>/<Del>" = 23 chars
-            } else if max_cols >= 23 {
+            } else if max_cols >= 12 {
                 print!("\u{1b}[m\u{1b}[{y};{x}H{rename}/{disconnect}/{kill}");
                 false
             } else {
@@ -1088,8 +1088,8 @@ pub fn render_unsaved_changes_line(
     y: usize,
     last_saved_timestamp: Option<u64>,
 ) {
-    // Declare all text components
-    let shortcut_text = "<Ctrl a>";
+    // Declare all text components — macOS key glyphs (⌃ not <Ctrl …>).
+    let shortcut_text = "⌃a";
     let full_action_text = "Save current session for resurrection";
     let medium_action_text = "Save session";
     let short_action_text = "Save";

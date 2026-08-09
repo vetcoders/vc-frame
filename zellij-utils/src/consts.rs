@@ -25,7 +25,20 @@ pub const SYSTEM_DEFAULT_DATA_DIR_PREFIX: &str = system_default_data_dir();
 
 pub static ZELLIJ_DEFAULT_THEMES: Dir = include_dir!("$CARGO_MANIFEST_DIR/assets/themes");
 
-pub const CLIENT_SERVER_CONTRACT_VERSION: usize = 1;
+/// Client↔server wire-contract generation. Sockets live in a
+/// `contract_version_{N}` namespace, so binaries from different generations
+/// never talk to each other — a new client simply cannot reach an old
+/// server's socket.
+///
+/// RULE: any change to the client↔server protobuf surface
+/// (`assets/prost_ipc/client_server_contract.rs` — new/removed/renamed
+/// message variants or fields) MUST bump this number. An old server decodes
+/// an unknown oneof variant as `None` ("Empty ClientToServerMsg") and, on
+/// pre-2026-08 binaries, logs a WARN+ERROR pair per message without
+/// disconnecting — the 2026-08-05 log storm (~2/s, rotation ate forensics)
+/// was exactly this: `DeclareCaller` shipped without a bump. The pin test
+/// in `client_server_contract/mod.rs` enforces this rule.
+pub const CLIENT_SERVER_CONTRACT_VERSION: usize = 2;
 
 const VC_FRAME_PROJECT_QUALIFIER: &str = "io";
 const VC_FRAME_PROJECT_ORGANIZATION: &str = "vetcoders";

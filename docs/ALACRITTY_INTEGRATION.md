@@ -74,6 +74,36 @@ complete monospace works; a Nerd Font is a safe superset. Emoji-presentation
 glyphs are deliberately absent from the chrome (see `docs/THEMES_GUIDE.md`),
 so no color-font surprises.
 
+### 5. Split mouse wheel by alternate buffer (do not smcup the shell)
+
+Two failure modes share one root cause: a host shell that lives forever on
+the alternate buffer (`tput smcup` / `\e[?1049h` at session start).
+
+| Buffer | Wheel must do |
+|---|---|
+| **primary** (`mode = "~Alt"`) | Alacritty scrollback (`ScrollLineUp` / `ScrollLineDown`) |
+| **alternate** (`mode = "Alt"`) | Up/Down keys for TUIs without mouse protocol (`\u001bOA` / `\u001bOB`) |
+| **any + Shift** | force host scrollback (bypass app mouse reporting) |
+
+The shipped preset encodes that split under `[mouse]`. Consequences:
+
+- Keep the login shell on the **primary** buffer. TUIs (Atuin, less, vim,
+  vc-frame) enter/leave Alt themselves.
+- If you need a plain-shell entrypoint, use
+  `tools/alacritty/launch-primary-shell.zsh` (install as
+  `~/.config/alacritty/launch-primary-shell.zsh`). It explicitly leaves Alt
+  on start. Do **not** reintroduce a permanent-smcup wrapper.
+- Keyboard Up can stay bound to Atuin; the wheel on the primary buffer no
+  longer collides with that binding.
+
+Symptom → cause → fix:
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Wheel opens Atuin / walks shell history at the prompt | primary buffer missing; wheel sent as arrows | import preset mouse bindings; drop permanent smcup |
+| Cannot browse past output after `make help` | shell stuck in Alt | `launch-primary-shell.zsh` or plain `/bin/zsh -l` |
+| Wheel dead inside a TUI | Alt-mode arrow bindings missing | import preset `mode = "Alt"` wheel chars |
+
 ## Recommended, not required
 
 - **`shell = { program = "vc-frame", args = ["attach", "--create", "main"] }`**
@@ -85,7 +115,7 @@ so no color-font surprises.
   `startup_mode = "Maximized"` + `blur`/`opacity 0.9` + zero padding. The OS
   titlebar dissolves and the compact-bar becomes the de-facto window chrome —
   vc-frame reads as a native app. The traffic-light zone is handled bar-side,
-  not with padding: the operator layouts pass `left_inset "9"` to the
+  not with padding: the operator layouts pass `left_inset "6"` to the
   compact-bar, which starts the bar 9 blank columns in (≈ 65–70px at a 13pt
   monospace) so the brand chip clears the macOS window buttons. Padding would
   shift every row and both edges; the inset costs only the first row's
@@ -119,6 +149,8 @@ chrome ground can never drift apart.
 | Chrome glyphs show as boxes | font lacks Misc Symbols coverage | pick a fuller monospace / Nerd Font |
 | Thin colored border around the chrome | host padding + opaque mismatched background | keep the preset's `blur`/`opacity`, or match theme ground / zero the padding |
 | Chrome keys from the guide do nothing / `Ctrl+q` kills the whole session | frozen `clear-defaults` keybinds in the user config shadow the shipped contract | `vc-frame doctor`, then `vc-frame repair key-bindings` (see [DOCTOR.md](DOCTOR.md)) |
+| Wheel opens history/Atuin instead of scrolling output | host shell on alternate buffer, or wheel not split by `~Alt`/`Alt` | import preset `[mouse]` + `[scrolling]`; use `launch-primary-shell.zsh` if you need a plain shell |
+| Shift+wheel does nothing while a pane owns the mouse | missing Shift→ScrollLine bindings | import the preset mouse block |
 
 ---
 

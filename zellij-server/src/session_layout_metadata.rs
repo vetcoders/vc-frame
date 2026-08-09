@@ -1,6 +1,6 @@
 use crate::ClientId;
 use crate::panes::PaneId;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use zellij_utils::common_path::common_path_all;
@@ -248,6 +248,22 @@ impl SessionLayoutMetadata {
             for pane_layout_metadata in &tab.floating_panes {
                 if let PaneId::Plugin(id) = pane_layout_metadata.id {
                     plugin_ids.push(id);
+                }
+            }
+        }
+        plugin_ids
+    }
+    /// Plugin panes whose metadata carries no `run` identity at all. Only these
+    /// lose information when the WASM bridge cannot resolve their command —
+    /// parked or not-yet-activated chrome keeps the pane's own `invoked_with`.
+    pub fn plugin_ids_missing_run(&self) -> HashSet<u32> {
+        let mut plugin_ids = HashSet::new();
+        for tab in &self.tabs {
+            for pane_layout_metadata in tab.tiled_panes.iter().chain(tab.floating_panes.iter()) {
+                if let PaneId::Plugin(id) = pane_layout_metadata.id
+                    && pane_layout_metadata.run.is_none()
+                {
+                    plugin_ids.insert(id);
                 }
             }
         }

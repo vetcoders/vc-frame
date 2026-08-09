@@ -38,6 +38,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 #[cfg(test)]
 use std::sync::{OnceLock, mpsc};
+#[cfg(test)]
+use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
 use crate::route::NotificationEnd;
@@ -80,12 +82,21 @@ pub(crate) const VC_FLEET_LIVE_COUNT_MESSAGE: &str = "vc.fleet-live-count.v1";
 /// tab-global and is therefore insufficient when several clients view
 /// different tabs in one non-mirrored session.
 pub(crate) const VC_STATUS_BAR_VISIBILITY_MESSAGE: &str = "vc.status-bar-visibility.v1";
+type ChromePluginTarget = (PluginId, ClientId);
 // Plugin panes retain either the canonical built-in URL or their layout alias.
-// Keep the three runtime spellings as a fallback and also inspect an alias's
-// resolved RunPlugin so renamed aliases of the built-in status bar keep the
-// same lifecycle behavior.
-const STATUS_BAR_PLUGIN_URLS: [&str; 3] =
-    ["vc-frame:status-bar", "zellij:status-bar", "status-bar"];
+// Keep the three runtime spellings for each parkable chrome plugin and inspect
+// an alias's resolved RunPlugin so renamed built-ins keep the same lifecycle.
+const PARKABLE_CHROME_PLUGIN_URLS: [&str; 9] = [
+    "vc-frame:status-bar",
+    "zellij:status-bar",
+    "status-bar",
+    "vc-frame:compact-bar",
+    "zellij:compact-bar",
+    "compact-bar",
+    "vc-frame:session-manager",
+    "zellij:session-manager",
+    "session-manager",
+];
 
 /// Count live terminal-bearing tabs across working sessions. Triage bucket
 /// sessions are drawers, not fleet, and plugin-only/exited/held tabs do not
@@ -110,26 +121,26 @@ fn fleet_live_count(sessions: &[SessionInfo]) -> usize {
         .sum()
 }
 
-fn is_status_bar_plugin_run(run: Option<&Run>) -> bool {
+fn is_parkable_chrome_plugin_run(run: Option<&Run>) -> bool {
     let Some(Run::Plugin(run_plugin_or_alias)) = run else {
         return false;
     };
     match run_plugin_or_alias {
         RunPluginOrAlias::RunPlugin(run_plugin) => {
-            STATUS_BAR_PLUGIN_URLS.contains(&run_plugin.location.display().as_str())
+            PARKABLE_CHROME_PLUGIN_URLS.contains(&run_plugin.location.display().as_str())
         },
         RunPluginOrAlias::Alias(alias) => match &alias.run_plugin {
             Some(run_plugin) => {
-                STATUS_BAR_PLUGIN_URLS.contains(&run_plugin.location.display().as_str())
+                PARKABLE_CHROME_PLUGIN_URLS.contains(&run_plugin.location.display().as_str())
             },
-            None => STATUS_BAR_PLUGIN_URLS.contains(&alias.name.as_str()),
+            None => PARKABLE_CHROME_PLUGIN_URLS.contains(&alias.name.as_str()),
         },
     }
 }
 
-/// Build the ordinary broadcast session update plus a scalar update targeted
-/// only at this server's status-bar instances. A broadcast `CustomMessage`
-/// would wake every third-party plugin subscribed to that public event type.
+/// Build exact chrome lifecycle updates before the ordinary session broadcast.
+/// WasmBridge consumes these in order and parks hidden plugin/client targets
+/// before the heavyweight payload can cross into their WASM memories.
 fn session_update_events(
     live_sessions: Vec<SessionInfo>,
     resurrectable_sessions: Vec<(String, Duration)>,
@@ -138,25 +149,19 @@ fn session_update_events(
 ) -> Vec<(Option<PluginId>, Option<ClientId>, Event)> {
     let live_count = fleet_live_count(&live_sessions).to_string();
 
-    let mut updates = vec![(
-        None,
-        None,
-        Event::SessionUpdate(live_sessions, resurrectable_sessions),
-    )];
-    updates.extend(
-        hidden_status_bar_plugin_targets
-            .into_iter()
-            .map(|(plugin_id, client_id)| {
-                (
-                    Some(plugin_id),
-                    Some(client_id),
-                    Event::CustomMessage(
-                        VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
-                        "false".to_owned(),
-                    ),
-                )
-            }),
-    );
+    let mut updates = hidden_status_bar_plugin_targets
+        .into_iter()
+        .map(|(plugin_id, client_id)| {
+            (
+                Some(plugin_id),
+                Some(client_id),
+                Event::CustomMessage(
+                    VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
+                    "false".to_owned(),
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
     updates.extend(
         status_bar_plugin_targets
             .into_iter()
@@ -171,6 +176,11 @@ fn session_update_events(
                 )
             }),
     );
+    updates.push((
+        None,
+        None,
+        Event::SessionUpdate(live_sessions, resurrectable_sessions),
+    ));
     updates
 }
 
@@ -189,7 +199,7 @@ use crate::{
     panes::sixel::SixelImageStore,
     plugins::{
         DumpSessionLayoutResponse, LayoutPluginReceipt, LayoutPluginResolution, PluginId,
-        PluginInstruction, PluginRenderAsset,
+        PluginInstruction, PluginPaneId, PluginRenderAsset,
     },
     pty::{
         ClientTabIndexOrPaneId, LayoutCommitAck, LayoutCommitOutcome, LayoutTransactionId,
@@ -1042,6 +1052,11 @@ pub enum ScreenInstruction {
     DesktopNotificationResponse(Vec<u8>, ClientId),
     PluginSubscribedToAnsiPaneContents(bool), // true = at least one plugin needs ANSI content
     UpdateBackgroundPluginSubscriptions(PluginId, ClientId, HashSet<EventType>),
+    RegisterPluginProjectors {
+        transaction_id: LayoutTransactionId,
+        bindings: Vec<PluginPaneId>,
+        ack: channels::Sender<std::result::Result<(), String>>,
+    },
     BroadcastModeUpdate(ModeInfo, Option<ClientId>), // ModeInfo, optional specific client_id (None = all clients)
     // Pane-targeting CLI variants
     ScrollUpWithPaneId(PaneId, Option<NotificationEnd>),
@@ -1388,6 +1403,7 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::UpdateBackgroundPluginSubscriptions(..) => {
                 ScreenContext::UpdateBackgroundPluginSubscriptions
             },
+            ScreenInstruction::RegisterPluginProjectors { .. } => ScreenContext::AddPlugin,
             ScreenInstruction::BroadcastModeUpdate(..) => ScreenContext::BroadcastModeUpdate,
             // Pane-targeting CLI variants
             ScreenInstruction::ScrollUpWithPaneId(..) => ScreenContext::ScrollUpWithPaneId,
@@ -1587,6 +1603,8 @@ pub(crate) struct Screen {
     /// handoff until PTY acknowledges the terminal commit decision.
     next_layout_transaction_id: LayoutTransactionId,
     active_layout_transactions: HashMap<LayoutTransactionId, ActiveLayoutTransaction>,
+    plugin_projector_bindings: HashMap<PluginId, PluginId>,
+    plugin_projector_transactions: HashMap<LayoutTransactionId, Vec<PluginId>>,
     /// Prepared Screen rollback owners whose external Plugin/PTY outcome is
     /// still unknown after bounded inline replay. Background reconciliation
     /// keeps retrying the exact worker decision while these owners remain
@@ -1620,10 +1638,6 @@ pub(crate) struct Screen {
     connected_clients: Rc<RefCell<HashMap<ClientId, bool>>>, // bool -> is_web_client
     /// The indices of this [`Screen`]'s active [`Tab`]s.
     active_tab_ids: BTreeMap<ClientId, usize>,
-    /// Last status-bar plugin/client pairs known to be active. This lets the
-    /// status-bar lifecycle emit exact per-client deactivation events without
-    /// changing the tab-global `Visible` contract used by other plugins.
-    active_status_bar_plugin_targets_cache: BTreeSet<(PluginId, ClientId)>,
     /// Per-regular-client viewport sizes, used to compute per-tab sizing.
     client_sizes: HashMap<ClientId, Size>,
     global_last_active_tab_id: usize,
@@ -2609,13 +2623,14 @@ impl Screen {
             style: client_attributes.style,
             connected_clients: Rc::new(RefCell::new(HashMap::new())),
             active_tab_ids: BTreeMap::new(),
-            active_status_bar_plugin_targets_cache: BTreeSet::new(),
             client_sizes: HashMap::new(),
             global_last_active_tab_id: 0,
             tabs: BTreeMap::new(),
             next_tab_id: 0,
             next_layout_transaction_id: 1,
             active_layout_transactions: HashMap::new(),
+            plugin_projector_bindings: HashMap::new(),
+            plugin_projector_transactions: HashMap::new(),
             indeterminate_layout_transactions: HashMap::new(),
             layout_reconciliation_results: Arc::new(Mutex::new(vec![])),
             layout_reconciliations_in_flight: HashSet::new(),
@@ -3576,6 +3591,7 @@ impl Screen {
         target_ids.dedup();
         resource_ids.sort_unstable();
         resource_ids.dedup();
+        let retain_projector_bindings = !matches!(&decision, ScreenLayoutDecision::Rejected(_));
         let receipt = ResolvedLayoutTransaction {
             kind: owner.kind,
             target_ids,
@@ -3591,6 +3607,7 @@ impl Screen {
             }
             return;
         }
+        self.resolve_plugin_projector_transaction(transaction_id, retain_projector_bindings);
         self.resolved_layout_transactions
             .insert(transaction_id, receipt);
         self.resolved_layout_transaction_order
@@ -3600,6 +3617,21 @@ impl Screen {
             {
                 self.resolved_layout_transactions
                     .remove(&expired_transaction_id);
+            }
+        }
+    }
+
+    fn resolve_plugin_projector_transaction(
+        &mut self,
+        transaction_id: LayoutTransactionId,
+        retain_bindings: bool,
+    ) {
+        let Some(pane_ids) = self.plugin_projector_transactions.remove(&transaction_id) else {
+            return;
+        };
+        if !retain_bindings {
+            for pane_id in pane_ids {
+                self.plugin_projector_bindings.remove(&pane_id);
             }
         }
     }
@@ -6211,9 +6243,24 @@ impl Screen {
             pane_info.is_selectable || show_all
         }
 
-        fn create_pane_list_entry(pane_info: PaneInfo, tab: &crate::tab::Tab) -> PaneListEntry {
+        fn create_pane_list_entry(
+            pane_info: PaneInfo,
+            tab: &crate::tab::Tab,
+            plugin_projector_bindings: &HashMap<PluginId, PluginId>,
+        ) -> PaneListEntry {
+            let plugin_runtime_id = pane_info.is_plugin.then(|| {
+                plugin_projector_bindings
+                    .get(&pane_info.id)
+                    .copied()
+                    .or_else(|| {
+                        tab.get_pane_with_id(PaneId::Plugin(pane_info.id))
+                            .and_then(|pane| pane.plugin_runtime_id())
+                    })
+                    .unwrap_or(pane_info.id)
+            });
             PaneListEntry {
                 pane_info,
+                plugin_runtime_id,
                 tab_id: tab.id,
                 tab_position: tab.position,
                 tab_name: tab.name.clone(),
@@ -6233,7 +6280,11 @@ impl Screen {
 
             for pane_info in pane_infos {
                 if should_include_pane(&pane_info, show_all) {
-                    pane_entries.push(create_pane_list_entry(pane_info, tab));
+                    pane_entries.push(create_pane_list_entry(
+                        pane_info,
+                        tab,
+                        &self.plugin_projector_bindings,
+                    ));
                 }
             }
         }
@@ -6270,19 +6321,27 @@ impl Screen {
         }
     }
 
-    fn active_status_bar_plugin_targets(&self) -> BTreeSet<(PluginId, ClientId)> {
-        self.active_tab_ids
-            .iter()
+    fn chrome_plugin_targets_for_tabs<'a>(
+        &'a self,
+        tab_ids: impl Iterator<Item = (&'a ClientId, &'a usize)>,
+    ) -> BTreeSet<ChromePluginTarget> {
+        tab_ids
             .flat_map(|(client_id, tab_id)| {
                 self.tabs
                     .get(tab_id)
                     .into_iter()
                     .flat_map(|tab| {
-                        tab.get_plugin_ids().into_iter().filter(|plugin_id| {
-                            tab.get_pane_with_id(PaneId::Plugin(*plugin_id))
-                                .is_some_and(|pane| {
-                                    is_status_bar_plugin_run(pane.invoked_with().as_ref())
-                                })
+                        let visible_panes = tab
+                            .get_tiled_panes()
+                            .chain(tab.get_floating_panes())
+                            .map(|(_, pane)| pane.as_ref());
+                        let suppressed_panes = tab
+                            .get_suppressed_panes()
+                            .map(|(_, (_, pane))| pane.as_ref());
+                        visible_panes.chain(suppressed_panes).filter_map(|pane| {
+                            is_parkable_chrome_plugin_run(pane.invoked_with().as_ref())
+                                .then(|| pane.plugin_runtime_id())
+                                .flatten()
                         })
                     })
                     .map(|plugin_id| (plugin_id, *client_id))
@@ -6290,16 +6349,41 @@ impl Screen {
             .collect()
     }
 
+    fn request_plugin_runtime_permissions(
+        &mut self,
+        runtime_plugin_id: PluginId,
+        plugin_permission: PluginPermission,
+    ) -> bool {
+        self.tabs.values_mut().any(|tab| {
+            tab.request_plugin_runtime_permissions(
+                runtime_plugin_id,
+                Some(plugin_permission.clone()),
+            )
+            .is_some()
+        })
+    }
+
+    fn active_status_bar_plugin_targets(&self) -> BTreeSet<ChromePluginTarget> {
+        self.chrome_plugin_targets_for_tabs(self.active_tab_ids.iter())
+    }
+
+    fn all_status_bar_plugin_targets(&self) -> BTreeSet<ChromePluginTarget> {
+        self.chrome_plugin_targets_for_tabs(
+            self.active_tab_ids
+                .keys()
+                .flat_map(|client_id| self.tabs.keys().map(move |tab_id| (client_id, tab_id))),
+        )
+    }
+
     fn status_bar_plugin_target_transition(
         &mut self,
-    ) -> (Vec<(PluginId, ClientId)>, Vec<(PluginId, ClientId)>) {
+    ) -> (Vec<ChromePluginTarget>, Vec<ChromePluginTarget>) {
         let active_targets = self.active_status_bar_plugin_targets();
         let hidden_targets = self
-            .active_status_bar_plugin_targets_cache
+            .all_status_bar_plugin_targets()
             .difference(&active_targets)
             .copied()
             .collect();
-        self.active_status_bar_plugin_targets_cache = active_targets.clone();
         (active_targets.into_iter().collect(), hidden_targets)
     }
 
@@ -9192,16 +9276,20 @@ static VIEWER_CREATION_POST_INSTALL_TEST_HOOKS: OnceLock<
     Mutex<HashMap<String, ViewerCreationPostInstallTestHook>>,
 > = OnceLock::new();
 #[cfg(test)]
-static REJECT_AFTER_APPLY_PREPARE_TEST_TRANSACTIONS: OnceLock<Mutex<HashSet<LayoutTransactionId>>> =
-    OnceLock::new();
+static REJECT_AFTER_APPLY_PREPARE_TEST_TRANSACTIONS: OnceLock<
+    Mutex<HashSet<(ThreadId, LayoutTransactionId)>>,
+> = OnceLock::new();
 
 #[cfg(test)]
-pub(crate) fn reject_after_apply_prepare_for_test(transaction_id: LayoutTransactionId) {
+pub(crate) fn reject_after_apply_prepare_for_test(
+    screen_thread_id: ThreadId,
+    transaction_id: LayoutTransactionId,
+) {
     REJECT_AFTER_APPLY_PREPARE_TEST_TRANSACTIONS
         .get_or_init(|| Mutex::new(HashSet::new()))
         .lock()
         .unwrap()
-        .insert(transaction_id);
+        .insert((screen_thread_id, transaction_id));
 }
 
 #[cfg(test)]
@@ -9210,7 +9298,7 @@ fn take_reject_after_apply_prepare_for_test(transaction_id: LayoutTransactionId)
         .get_or_init(|| Mutex::new(HashSet::new()))
         .lock()
         .unwrap()
-        .remove(&transaction_id)
+        .remove(&(std::thread::current().id(), transaction_id))
 }
 
 #[cfg(test)]
@@ -9591,14 +9679,13 @@ pub(crate) fn screen_thread_main(
                 for plugin_render_asset in plugin_render_assets.iter_mut() {
                     let plugin_id = plugin_render_asset.plugin_id;
                     let client_id = plugin_render_asset.client_id;
-                    let vte_bytes = plugin_render_asset.bytes.drain(..).collect();
+                    let vte_bytes: VteBytes = plugin_render_asset.bytes.drain(..).collect();
 
                     let all_tabs = screen.get_tabs_mut();
                     for tab in all_tabs.values_mut() {
-                        if tab.has_plugin(plugin_id) {
-                            tab.handle_plugin_bytes(plugin_id, client_id, vte_bytes)
+                        if tab.has_plugin_runtime(plugin_id) {
+                            tab.handle_plugin_bytes(plugin_id, client_id, vte_bytes.clone())
                                 .context("failed to process plugin bytes")?;
-                            break;
                         }
                     }
                     screen.render_blocker.remove_blocking_plugin(plugin_id);
@@ -11436,6 +11523,9 @@ pub(crate) fn screen_thread_main(
                         (client_id, is_web_client),
                         blocking_terminal.take(),
                     )?);
+                    if let Some(tab) = screen.tabs.get_mut(&tab_id) {
+                        tab.bind_plugin_projectors(&screen.plugin_projector_bindings);
+                    }
                     #[cfg(test)]
                     if take_reject_after_apply_prepare_for_test(transaction_id) {
                         bail!("injected rejection after Apply prepare");
@@ -12026,6 +12116,7 @@ pub(crate) fn screen_thread_main(
                     &mut pending_events_waiting_for_client,
                     &mut pending_events_waiting_for_tab,
                 );
+                screen.resolve_plugin_projector_transaction(transaction_id, false);
                 screen.active_layout_transactions.remove(&transaction_id);
                 log::warn!(
                     "layout transaction {} failed during Plugin/PTY preparation: {}",
@@ -13051,6 +13142,7 @@ pub(crate) fn screen_thread_main(
                         return Err(anyhow!(rejection.to_string()));
                     }
 
+                    let plugin_projector_bindings = screen.plugin_projector_bindings.clone();
                     // Process each tab result. A failure aborts the whole writer transaction.
                     for tab_result in tab_results {
                         let tab_index = tab_result.tab_index;
@@ -13082,6 +13174,7 @@ pub(crate) fn screen_thread_main(
                                 .with_context(|| {
                                     format!("failed to override layout for tab {tab_index}")
                                 })?;
+                            tab.bind_plugin_projectors(&plugin_projector_bindings);
                             transaction.defer_tab_name(new_tab_name);
                             prepared_override_layouts.push((tab_index, transaction));
                         } else {
@@ -13148,6 +13241,9 @@ pub(crate) fn screen_thread_main(
                                 .with_context(|| {
                                     format!("failed to override layout for new tab {tab_index}")
                                 })?;
+                            if let Some(tab) = screen.tabs.get_mut(&tab_index) {
+                                tab.bind_plugin_projectors(&plugin_projector_bindings);
+                            }
                             transaction.defer_tab_name(new_tab_name);
                             prepared_override_layouts.push((tab_index, transaction));
                         }
@@ -14250,15 +14346,8 @@ pub(crate) fn screen_thread_main(
                 }
             },
             ScreenInstruction::RequestPluginPermissions(plugin_id, plugin_permission) => {
-                let all_tabs = screen.get_tabs_mut();
-                let found = all_tabs.values_mut().any(|tab| {
-                    if tab.has_plugin(plugin_id) {
-                        tab.request_plugin_permissions(plugin_id, Some(plugin_permission.clone()));
-                        true
-                    } else {
-                        false
-                    }
-                });
+                let found =
+                    screen.request_plugin_runtime_permissions(plugin_id, plugin_permission.clone());
 
                 if !found {
                     log::error!("PluginId '{}' not found - caching request", plugin_id);
@@ -14333,8 +14422,12 @@ pub(crate) fn screen_thread_main(
                     screen.dump_layout_to_hd()?;
                 }
             },
-            ScreenInstruction::SaveSession(_client_id, completion_tx) => {
+            ScreenInstruction::SaveSession(_client_id, mut completion_tx) => {
                 let err_context = || "Failed to save session";
+
+                if let Some(completion) = completion_tx.as_mut() {
+                    completion.require_explicit_resolution();
+                }
 
                 screen.update_active_pane_ids();
                 let pane_manifest = screen.generate_and_report_pane_state()?;
@@ -14398,9 +14491,19 @@ pub(crate) fn screen_thread_main(
                         session_info,
                         session_layout_metadata,
                         generation,
-                        completion_tx,
+                        // SaveSession acknowledgement means the durable write was accepted.
+                        // Commit completion is an asynchronous receipt emitted by the PTY
+                        // worker; coupling the CLI's one-second budget to disk I/O created
+                        // the historical retry storm.
+                        completion_tx: None,
                     })
                     .with_context(err_context)?;
+                if let Some(completion) = completion_tx.as_mut() {
+                    completion.set_stdout_message(format!(
+                        "session save generation {generation} accepted"
+                    ));
+                    completion.mark_success();
+                }
             },
             ScreenInstruction::RenameSession(
                 name,
@@ -15177,6 +15280,9 @@ pub(crate) fn screen_thread_main(
                 screen.subscribe_to_pane_renders(client_id, pane_ids, scrollback, ansi);
             },
             ScreenInstruction::NotifyPaneClosedToSubscribers { pane_id } => {
+                if let zellij_utils::data::PaneId::Plugin(plugin_id) = pane_id {
+                    screen.plugin_projector_bindings.remove(&plugin_id);
+                }
                 screen.notify_pane_closed_to_subscribers(pane_id);
             },
             ScreenInstruction::PluginSubscribedToAnsiPaneContents(has_subscribers) => {
@@ -15196,6 +15302,57 @@ pub(crate) fn screen_thread_main(
                         .background_plugin_subscriptions
                         .insert((plugin_id, client_id), subscriptions);
                 }
+            },
+            ScreenInstruction::RegisterPluginProjectors {
+                transaction_id,
+                bindings,
+                ack,
+            } => {
+                let resolved_registration_is_exact_commit = screen
+                    .resolved_layout_transactions
+                    .get(&transaction_id)
+                    .is_some_and(|receipt| {
+                        matches!(
+                            receipt.decision,
+                            ScreenLayoutDecision::Committed
+                                | ScreenLayoutDecision::CommittedWithPostCommitError(_)
+                        ) && bindings.iter().all(|binding| {
+                            receipt
+                                .resource_ids
+                                .contains(&PaneId::Plugin(binding.pane_id))
+                        })
+                    });
+                let result = if !screen
+                    .resolved_layout_transactions
+                    .contains_key(&transaction_id)
+                    || resolved_registration_is_exact_commit
+                {
+                    let mut pane_ids = Vec::with_capacity(bindings.len());
+                    for binding in bindings {
+                        pane_ids.push(binding.pane_id);
+                        screen
+                            .plugin_projector_bindings
+                            .insert(binding.pane_id, binding.runtime_plugin_id);
+                    }
+                    if !resolved_registration_is_exact_commit {
+                        screen
+                            .plugin_projector_transactions
+                            .insert(transaction_id, pane_ids);
+                    }
+                    let plugin_projector_bindings = &screen.plugin_projector_bindings;
+                    for tab in screen.tabs.values_mut() {
+                        tab.bind_plugin_projectors(plugin_projector_bindings);
+                    }
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "layout plugin transaction {transaction_id} was rejected or conflicted before projector registration"
+                    ))
+                };
+                if let Err(message) = &result {
+                    log::error!("{message}");
+                }
+                let _ = ack.send(result);
             },
             ScreenInstruction::BroadcastModeUpdate(mode_info, target_client_id) => {
                 screen.broadcast_mode_update(mode_info, target_client_id)?;

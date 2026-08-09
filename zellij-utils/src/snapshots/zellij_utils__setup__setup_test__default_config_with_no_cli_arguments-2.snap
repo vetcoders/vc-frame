@@ -1,9 +1,10 @@
 ---
 source: zellij-utils/src/setup.rs
+assertion_line: 780
 expression: "format!(\"{:#?}\", layout_info)"
 ---
 Some(
     BuiltIn(
-        "default",
+        "vibecrafted",
     ),
 )

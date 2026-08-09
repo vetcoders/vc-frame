@@ -2957,7 +2957,7 @@ impl WebSharing {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ClientToServerMsg {
-    #[prost(oneof="client_to_server_msg::Message", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20")]
+    #[prost(oneof="client_to_server_msg::Message", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22")]
     pub message: ::core::option::Option<client_to_server_msg::Message>,
 }
 /// Nested message and enum types in `ClientToServerMsg`.
@@ -3005,6 +3005,10 @@ pub mod client_to_server_msg {
         ForwardedReplyFromHost(super::ForwardedReplyFromHostMsg),
         #[prost(message, tag="20")]
         HostTerminalThemeChanged(super::HostTerminalThemeChangedMsg),
+        #[prost(message, tag="21")]
+        DeclareCaller(super::DeclareCallerMsg),
+        #[prost(message, tag="22")]
+        DoctorRoutes(super::DoctorRoutesMsg),
     }
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -3082,6 +3086,18 @@ pub struct ActionMsg {
     pub client_id: ::core::option::Option<u32>,
     #[prost(bool, tag="4")]
     pub is_cli_client: bool,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DeclareCallerMsg {
+    #[prost(string, tag="1")]
+    pub caller: ::prost::alloc::string::String,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DoctorRoutesMsg {
+    #[prost(bool, tag="1")]
+    pub json: bool,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

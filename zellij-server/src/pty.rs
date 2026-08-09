@@ -1198,24 +1198,34 @@ fn pty_thread_main_loop(pty: &mut Pty, layout: Box<Layout>) -> Result<()> {
                             kdl_and_files.clone(),
                         ) {
                             Err(error) => {
-                                log::error!("Failed to save session to durable storage: {}", error);
+                                log::error!(
+                                    "warden.save_commit_failed session={} generation={} error={}",
+                                    session_name,
+                                    generation,
+                                    error
+                                );
                                 if let Some(completion_tx) = completion_tx.as_mut() {
                                     completion_tx.set_exit_status(1);
                                     completion_tx.set_error_message(error);
                                 }
                             },
                             Ok(false) => {
-                                let error = format!(
-                                    "session save generation {} for '{}' was superseded before commit; retry the save",
-                                    generation, session_name
+                                let receipt = format!(
+                                    "warden.coalesced_save session={} generation={} result=superseded_by_newer_generation",
+                                    session_name, generation
                                 );
-                                log::error!("{}", error);
+                                log::info!("{}", receipt);
                                 if let Some(completion_tx) = completion_tx.as_mut() {
-                                    completion_tx.set_exit_status(1);
-                                    completion_tx.set_error_message(error);
+                                    completion_tx.set_stdout_message(receipt);
+                                    completion_tx.mark_success();
                                 }
                             },
                             Ok(true) => {
+                                log::info!(
+                                    "warden.save_committed session={} generation={} result=durable",
+                                    session_name,
+                                    generation
+                                );
                                 // Update session save time for plugin query only after
                                 // all resurrection files reached durable storage.
                                 let timestamp_millis = std::time::SystemTime::now()

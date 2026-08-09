@@ -134,6 +134,12 @@ pub enum ClientToServerMsg {
         client_id: Option<ClientId>,
         is_cli_client: bool,
     },
+    DeclareCaller {
+        caller: String,
+    },
+    DoctorRoutes {
+        json: bool,
+    },
     Key {
         key: KeyWithModifier,
         raw_bytes: Vec<u8>,

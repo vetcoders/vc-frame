@@ -4,6 +4,11 @@ use std::collections::{BTreeMap, HashSet};
 use std::io::{self, BufRead, Write};
 use std::process;
 use std::str::FromStr;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::Duration;
 use std::{fs, path::PathBuf};
 
 use crate::os_input_output::ClientOsApi;
@@ -22,6 +27,7 @@ pub fn start_cli_client(
     session_name: &str,
     actions: Vec<Action>,
 ) {
+    let deadline = ActionDeadline::arm(&*os_input);
     let zellij_ipc_pipe: PathBuf = {
         let mut sock_dir = zellij_utils::consts::ZELLIJ_SOCK_DIR.clone();
         fs::create_dir_all(&sock_dir).unwrap();
@@ -31,6 +37,11 @@ pub fn start_cli_client(
     };
     crate::check_ipc_pipe_length(&zellij_ipc_pipe);
     os_input.connect_to_server(&zellij_ipc_pipe);
+    let caller = os_input
+        .env_variable("VC_FRAME_CALLER")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "anonymous".to_string());
+    os_input.send_to_server(ClientToServerMsg::DeclareCaller { caller });
     let pane_id = os_input
         .env_variable(VC_FRAME_PANE_ID_ENV_KEY)
         .or_else(|| os_input.env_variable(PANE_ID_ENV_KEY))
@@ -77,6 +88,76 @@ pub fn start_cli_client(
         }
     }
     os_input.send_to_server(ClientToServerMsg::ClientExited);
+    deadline.complete();
+}
+
+struct ActionDeadline {
+    completed: Arc<AtomicBool>,
+}
+
+impl ActionDeadline {
+    fn arm(os_input: &dyn ClientOsApi) -> Self {
+        let seconds = os_input
+            .env_variable("VC_FRAME_ACTION_TTL_SECONDS")
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(60)
+            .clamp(1, 3600);
+        let completed = Arc::new(AtomicBool::new(false));
+        let watchdog = completed.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(seconds));
+            if !watchdog.load(Ordering::Acquire) {
+                eprintln!(
+                    "warden.expired_client caller={} ttl_seconds={} result=client_self_retired",
+                    std::env::var("VC_FRAME_CALLER").unwrap_or_else(|_| "anonymous".to_string()),
+                    seconds
+                );
+                process::exit(124);
+            }
+        });
+        Self { completed }
+    }
+
+    fn complete(&self) {
+        self.completed.store(true, Ordering::Release);
+    }
+}
+
+pub fn doctor_routes_client(os_input: Box<dyn ClientOsApi>, session_name: &str, json: bool) -> i32 {
+    let deadline = ActionDeadline::arm(&*os_input);
+    let mut socket = zellij_utils::consts::ZELLIJ_SOCK_DIR.clone();
+    socket.push(session_name);
+    os_input.connect_to_server(&socket);
+    let caller = os_input
+        .env_variable("VC_FRAME_CALLER")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "operator".to_string());
+    os_input.send_to_server(ClientToServerMsg::DeclareCaller { caller });
+    os_input.send_to_server(ClientToServerMsg::DoctorRoutes { json });
+    let exit_code = loop {
+        match os_input.recv_from_server().map(|(message, _)| message) {
+            Some(ServerToClientMsg::Log { lines }) => {
+                for line in lines {
+                    println!("{line}");
+                }
+                break 0;
+            },
+            Some(ServerToClientMsg::LogError { lines }) => {
+                for line in lines {
+                    eprintln!("{line}");
+                }
+                break 1;
+            },
+            Some(ServerToClientMsg::Connected | ServerToClientMsg::UnblockInputThread) => {},
+            None => {
+                eprintln!("route telemetry request ended without a receipt");
+                break 1;
+            },
+            Some(_) => {},
+        }
+    };
+    deadline.complete();
+    exit_code
 }
 
 struct PipeClientParams {

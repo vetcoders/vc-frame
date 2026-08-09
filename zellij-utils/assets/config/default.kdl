@@ -90,6 +90,16 @@ keybinds {
     scroll {
         bind "Ctrl s" { SwitchToMode "Normal"; }
         bind "e" { EditScrollback; SwitchToMode "Normal"; }
+        // Spec 1.2 §B — mouseless visual selection: dump scrollback into
+        // read-only vim; `y` copies to pbcopy AND pushes the Paste Stack.
+        bind "v" {
+            Run "sh" "-c" "if [ -x \"${HOME}/.config/vetcoders/frontier/vc-frame/scrollback-select.sh\" ]; then \"${HOME}/.config/vetcoders/frontier/vc-frame/scrollback-select.sh\"; elif [ -x \"${HOME}/.config/vc-frame/scrollback-select.sh\" ]; then \"${HOME}/.config/vc-frame/scrollback-select.sh\"; else vc-frame action dump-screen --full --path /tmp/vc-sb.txt; ${EDITOR:-vim} -R -c 'set number' -c 'set laststatus=0' /tmp/vc-sb.txt; fi" {
+                floating true
+                close_on_exit true
+                name "Scrollback · visual"
+            };
+            SwitchToMode "Normal";
+        }
         bind "s" { SwitchToMode "EnterSearch"; SearchInput 0; }
         bind "Ctrl c" { ScrollToBottom; SwitchToMode "Normal"; }
         bind "j" "Down" { ScrollDown; }
@@ -285,19 +295,17 @@ keybinds {
         bind "Alt ]" { NextSwapLayout; }
         bind "Alt p" { TogglePaneInGroup; }
         bind "Alt Shift p" { ToggleGroupMarking; }
-        // Command Composer: draft a command in $VC_COMPOSER (or $EDITOR)
-        // inside a floating ticket; on save+quit the text lands in the
-        // underlying pane's input, unexecuted — pressing Enter stays a human
-        // decision. VC_COMPOSER expands unquoted on purpose: it is a command
-        // line ("open -W -n -a Pensieve", "pensieve --wait"), not a path.
-        // Two doors, one Composer: Super+e (Cmd+E) is the macOS product key
-        // — it never collides with a diacritics layer; Alt+e stays for hosts
-        // without a Super channel (Linux, plain terminals).
-        bind "Super e" "Alt e" {
-            Run "sh" "-c" "f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"" {
+        // Command Composer (spec 1.2 §A): Super+e / Cmd+E is the single product
+        // key. Alt+e is deliberately unbound so macOS Option types Polish `ę`.
+        // Prefer installed paste-stack-aware vc-composer.sh (vim: number,
+        // laststatus=0, nowrap default, F2 toggles wrap, Ctrl+p paste-stack).
+        // On :wq the body lands in the underlying pane unexecuted and is
+        // pushed onto the Paste Stack.
+        bind "Super e" {
+            Run "sh" "-c" "if [ -x \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\"; elif [ -x \"${HOME}/.config/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vc-frame/vc-composer.sh\"; else f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${EDITOR:-vim} -c 'set number' -c 'set laststatus=0' -c 'set nowrap' -c 'set textwidth=0' -c 'set sidescroll=1' -c 'nnoremap <silent> <F2> :set wrap! wrap?<CR>' \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"; fi" {
                 floating true
                 close_on_exit true
-                name "Composer"
+                name "✍ Composer · ⧉ Paste stack"
             }
         }
     }
@@ -450,10 +458,13 @@ load_plugins {
 // theme "default"
 
 // The name of the default layout to load on startup
-// Default: "default"
 // (Requires restart)
 //
-// default_layout "compact"
+// Unset, this resolves to "vibecrafted" — the operator entrypoint with the
+// "Start here" guide tab and the Shell banner. A file named default.kdl in
+// your layout directory still wins. Set "default" for bare rail chrome.
+//
+// default_layout "vibecrafted"
 
 // Choose the mode that zellij uses when starting up.
 // Default: normal

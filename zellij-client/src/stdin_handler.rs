@@ -1,5 +1,5 @@
 use crate::InputInstruction;
-use crate::keyboard_parser::{KittyKeyboardParser, KittyParseOutcome};
+use crate::keyboard_parser::{KittyFeedRest, KittyKeyboardParser};
 use crate::os_input_output::ClientOsApi;
 use crate::stdin_ansi_parser::StdinAnsiParser;
 #[cfg(windows)]
@@ -99,7 +99,7 @@ pub(crate) fn stdin_loop(
             }
         });
     let mut needs_finalization = false;
-    loop {
+    'stdin: loop {
         match if needs_finalization {
             stdin_rx.recv_timeout(Duration::from_millis(50))
         } else {
@@ -152,25 +152,45 @@ pub(crate) fn stdin_loop(
                         }
                         current_buffer.append(&mut residue.clone());
 
+                        // first we try to parse with the KittyKeyboardParser
+                        // if we fail, we try to parse normally.
+                        // A coalesced read can carry several complete Kitty
+                        // sequences — each resolved key is sent with its own
+                        // raw bytes. Only the unconsumed tail (an Incomplete
+                        // prefix kept by the parser, or Passthrough bytes)
+                        // reaches the termwiz parser below.
+                        let mut fallback_bytes = residue;
                         if !explicitly_disable_kitty_keyboard_protocol {
-                            // first we try to parse with the KittyKeyboardParser
-                            // if we fail, we try to parse normally.
-                            // Incomplete and NoMatch both fall through to the
-                            // termwiz parser below; on Incomplete the Kitty
-                            // parser keeps its state so the next chunk's
-                            // continuation completes the sequence.
-                            match kitty_parser.feed(&residue) {
-                                KittyParseOutcome::Complete(key_with_modifier) => {
-                                    send_input_instructions
+                            let feed_result = kitty_parser.feed(&fallback_bytes);
+                            if !feed_result.keys.is_empty() {
+                                // The resolved keys own their bytes; the
+                                // stash only tracks the unresolved tail now.
+                                current_buffer =
+                                    fallback_bytes[feed_result.consumed_up_to..].to_vec();
+                                for (key_with_modifier, seq_bytes) in feed_result.keys {
+                                    // Receiver gone = session switch/teardown;
+                                    // this thread's work is over, not a panic.
+                                    if send_input_instructions
                                         .send(InputInstruction::KeyWithModifierEvent(
                                             key_with_modifier,
-                                            std::mem::take(&mut current_buffer),
+                                            seq_bytes,
                                             true,
                                         ))
-                                        .unwrap();
+                                        .is_err()
+                                    {
+                                        log::debug!("input receiver gone; stopping stdin handler");
+                                        break 'stdin;
+                                    }
+                                }
+                            }
+                            match feed_result.rest {
+                                KittyFeedRest::Consumed => {
                                     continue;
                                 },
-                                KittyParseOutcome::Incomplete | KittyParseOutcome::NoMatch => {},
+                                KittyFeedRest::Incomplete | KittyFeedRest::Passthrough => {
+                                    fallback_bytes =
+                                        fallback_bytes[feed_result.consumed_up_to..].to_vec();
+                                },
                             }
                         }
 
@@ -181,7 +201,7 @@ pub(crate) fn stdin_loop(
                         let maybe_more = true;
                         let mut events = vec![];
                         input_parser.parse(
-                            &residue,
+                            &fallback_bytes,
                             |input_event: InputEvent| {
                                 events.push(input_event);
                             },
@@ -193,12 +213,18 @@ pub(crate) fn stdin_loop(
                         // before the keyboard parser sees the bytes.
                         // Every termwiz event is a key/mouse/paste/etc.
                         for input_event in events.into_iter() {
-                            send_input_instructions
+                            // Receiver gone = session switch/teardown; this
+                            // thread's work is over, not a panic.
+                            if send_input_instructions
                                 .send(InputInstruction::KeyEvent(
                                     input_event,
                                     std::mem::take(&mut current_buffer),
                                 ))
-                                .unwrap();
+                                .is_err()
+                            {
+                                log::debug!("input receiver gone; stopping stdin handler");
+                                break 'stdin;
+                            }
                         }
 
                         needs_finalization = true;

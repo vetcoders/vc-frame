@@ -640,7 +640,7 @@ mod tests {
         let ret = full_length_shortcut(false, keyvec, "Foobar", palette);
         let ret = unstyle(ret);
 
-        assert_eq!(ret, " / Ctrl + <a> Foobar");
+        assert_eq!(ret, " / ⌃ + <a> Foobar");
     }
 
     #[test]
@@ -651,7 +651,7 @@ mod tests {
         let ret = full_length_shortcut(false, keyvec, "Foobar", palette);
         let ret = unstyle(ret);
 
-        assert_eq!(ret, " / Alt + <a> Foobar");
+        assert_eq!(ret, " / ⌥ + <a> Foobar");
     }
 
     #[test]
@@ -681,7 +681,7 @@ mod tests {
         let ret = full_length_shortcut(false, keyvec, "Foobar", palette);
         let ret = unstyle(ret);
 
-        assert_eq!(ret, " / <a|Ctrl b|ENTER> Foobar");
+        assert_eq!(ret, " / <a|⌃b|ENTER> Foobar");
     }
 
     #[test]
@@ -696,7 +696,7 @@ mod tests {
         let ret = full_length_shortcut(false, keyvec, "Foobar", palette);
         let ret = unstyle(ret);
 
-        assert_eq!(ret, " / Ctrl + <a|b|c> Foobar");
+        assert_eq!(ret, " / ⌃ + <a|b|c> Foobar");
     }
     //pub fn keybinds(help: &ModeInfo, tip_name: &str, max_width: usize) -> LinePart {
 
@@ -887,7 +887,7 @@ mod tests {
 
         assert_eq!(
             ret,
-            " <BACKSPACE> New / Ctrl + <a|ENTER|1|SPACE> Change Focus / <ESC> Close / <END> Toggle Fullscreen"
+            " <BACKSPACE> New / ⌃ + <a|ENTER|1|SPACE> Change Focus / <ESC> Close / <END> Toggle Fullscreen"
         );
     }
 }

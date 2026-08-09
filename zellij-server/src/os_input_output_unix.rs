@@ -192,6 +192,10 @@ static FAIL_MONITOR_SPAWN_FOR_TERMINAL: AtomicU32 = AtomicU32::new(u32::MAX);
 static UNIX_CHILD_GUARD_CLEANUPS: AtomicU32 = AtomicU32::new(0);
 #[cfg(test)]
 static LAST_REAPED_UNIX_CHILD: AtomicU32 = AtomicU32::new(0);
+#[cfg(test)]
+thread_local! {
+    static OPENPTY_CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
 
 type ChildQuitCallback = Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>;
 
@@ -445,6 +449,8 @@ fn handle_terminal(
 
     // Create a pipe to allow the child the communicate the shell's pid to its
     // parent.
+    #[cfg(test)]
+    OPENPTY_CALLS.with(|calls| calls.set(calls.get() + 1));
     match openpty(None, &orig_termios) {
         Ok(open_pty_res) => handle_openpty(open_pty_res, cmd, quit_cb, terminal_id),
         Err(e) => match failover_cmd {
@@ -742,21 +748,6 @@ mod tests {
     use nix::sys::termios;
     use std::io::Read;
 
-    fn open_file_descriptor_count() -> usize {
-        // Prefer a closed-form probe that does not open /dev/fd (macOS /dev/fd
-        // enumeration is noisy under parallel cargo-test threads).
-        let mut open = 0usize;
-        for fd in 0..1024 {
-            // SAFETY: F_GETFD on an arbitrary candidate fd is a pure query; EBADF
-            // means the slot is closed and is the expected non-open result.
-            let result = fcntl(fd, FcntlArg::F_GETFD);
-            if result.is_ok() {
-                open += 1;
-            }
-        }
-        open
-    }
-
     fn reject_missing_command(terminal_id: u32) {
         let command = RunCommand {
             command: format!("/definitely/not/a/real/vc-frame-command-{terminal_id}").into(),
@@ -772,29 +763,15 @@ mod tests {
 
     #[test]
     fn repeated_missing_commands_do_not_leak_pty_file_descriptors() {
-        // Missing executables are rejected before openpty (see handle_terminal).
-        // Assert no *proportional* FD growth across batches: an absolute
-        // before/after delta is racy under parallel cargo-test threads that
-        // share this process's FD table (seen on dragon-macos as before=15,
-        // after=18 with zero PTY involvement). Develop later raised the
-        // absolute allowance to 32; proportional batches still catch real
-        // per-attempt PTY leaks without that noise floor.
-        let measure = |start_id: u32, iters: u32| -> isize {
-            let before = open_file_descriptor_count() as isize;
-            for terminal_id in start_id..(start_id + iters) {
-                reject_missing_command(terminal_id);
-            }
-            let after = open_file_descriptor_count() as isize;
-            after - before
-        };
-
-        let small = measure(0, 16);
-        let large = measure(16, 128);
-        assert!(
-            large <= small.max(0) + 4,
-            "rejected missing commands grew open FDs with iteration count \
-             (PTY leak): small_batch_delta={small}, large_batch_delta={large}"
-        );
+        // A missing executable must return before openpty. Counting that exact
+        // boundary is stronger than sampling the process-global FD table,
+        // which changes underneath parallel tests for unrelated reasons.
+        let before = OPENPTY_CALLS.with(|calls| calls.get());
+        for terminal_id in 0..128 {
+            reject_missing_command(terminal_id);
+        }
+        let after = OPENPTY_CALLS.with(|calls| calls.get());
+        assert_eq!(after, before, "missing commands must not allocate a PTY");
     }
 
     #[test]

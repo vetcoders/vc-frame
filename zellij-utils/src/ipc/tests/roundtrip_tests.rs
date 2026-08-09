@@ -708,6 +708,10 @@ fn test_client_messages() {
         client_id: None,
         is_cli_client: false,
     });
+    test_client_roundtrip!(ClientToServerMsg::DeclareCaller {
+        caller: "settlement".to_string(),
+    });
+    test_client_roundtrip!(ClientToServerMsg::DoctorRoutes { json: true });
     test_client_roundtrip!(ClientToServerMsg::Action {
         action: Action::Quit,
         terminal_id: Some(1),

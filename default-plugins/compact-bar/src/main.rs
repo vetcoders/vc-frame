@@ -25,8 +25,9 @@ const CONFIG_BRAND_TEXT: &str = "brand_text";
 const CONFIG_BRAND_TEXT_SHORT: &str = "brand_text_short";
 /// Columns of blank bar before the brand chip — the 🚥 zone. In the native
 /// transparent window (Alacritty preset) the macOS traffic lights float over
-/// the first row; the inset shifts the whole bar clear of them. 9 columns
-/// ≈ 65–70px at a 13pt monospace.
+/// the first row; the inset shifts the whole bar clear of them. Default
+/// layouts use 6 columns at standard monospace (~13pt); large fonts may want
+/// 9–12 via layout config.
 const CONFIG_LEFT_INSET: &str = "left_inset";
 const MSG_TOGGLE_TOOLTIP: &str = "toggle_tooltip";
 // the status-bar shows up in the pane manifest as "vc-frame:status-bar" when
@@ -36,31 +37,32 @@ const STATUS_BAR_PLUGIN_URLS: [&str; 3] =
 /// How long the clipboard notification ("Text copied...") stays on the bar
 /// before dismissing itself without requiring user input.
 const CLIPBOARD_HINT_TTL_SECONDS: f64 = 2.0;
+const VC_CHROME_VISIBILITY_MESSAGE: &str = "vc.status-bar-visibility.v1";
+const VC_CHROME_HEARTBEAT_MESSAGE: &str = "vc.fleet-live-count.v1";
 const MSG_TOGGLE_PERSISTED_TOOLTIP: &str = "toggle_persisted_tooltip";
 const MSG_LAUNCH_TOOLTIP: &str = "launch_tooltip_if_not_launched";
 /// Sentinel tab_index marking the clickable Composer chip on the tab line —
 /// a real tab can never occupy this index. Checked before tab resolution so
 /// it never reaches switch_tab_to.
 pub const COMPOSER_CLICK_SENTINEL: usize = usize::MAX;
-/// Sentinel tab_index for the ⌬ Quick cmd chip — click lands in the Agents
-/// station tab and floats the Dispatcher shell over it: a quick command
-/// line, named for what it does. (The fleet's LIVE pulse is a pure status
-/// on the bottom bar now — no tool rides on it.)
+/// Sentinel tab_index for the Quick cmd chip — click opens a non-ephemeral
+/// mini console (interactive terminal) over the current tab. LIVE pulse
+/// lives on the bottom status-bar — no tool rides on it.
 pub const AGENTS_CLICK_SENTINEL: usize = usize::MAX - 2;
-/// The per-session station tab where dispatched agents stack up. One tab,
-/// many stacked panes: a collapsed title-bar is a list row, an expanded
-/// pane is the agent's full terminal.
-const AGENTS_TAB_NAME: &str = "Agents";
-/// The Dispatcher is a bare login shell in a named floating pane — dispatch
-/// is typing vibecrafted CLI commands (`vc-init codex`) into it. Deliberate
-/// zsh fallback: the server may run without SHELL in its env, and /bin/sh
-/// with no profile is exactly the trap we refuse to spawn.
-const DISPATCHER_COMMAND: &str = r#"exec "${SHELL:-/bin/zsh}" -l"#;
-/// Same drafting contract as the Alt+e keybind in the default config: draft
-/// in $VC_COMPOSER (or $EDITOR), land the text in the underlying pane
-/// unexecuted, clean up. VC_COMPOSER expands unquoted on purpose — it is a
-/// command line ("open -W -n -a Pensieve", "pensieve --wait"), not a path.
-const COMPOSER_COMMAND: &str = r#"if [ -x "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh" ]; then "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh"; else f=$(mktemp "${TMPDIR:-/tmp}/vc-composer.XXXXXX") || exit 1; ${VC_COMPOSER:-vim -c 'set number' -c 'set laststatus=0'} "$f"; if [ -s "$f" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars "$(cat "$f")"; fi; rm -f -- "$f"; fi"#;
+/// Pane title for the Quick cmd mini console (matches the bar chip glyph).
+const QUICK_CMD_PANE_NAME: &str = "❯_ Quick cmd";
+/// Pane title for the Composer atelier — header carries the Paste stack affordance.
+const COMPOSER_PANE_NAME: &str = "✍ Composer · ⧉ Paste stack";
+/// Same drafting contract as Super+e (Cmd+E) in the default config — the
+/// single product key. Prefer installed paste-stack-aware `vc-composer.sh`
+/// (vim profile: number, laststatus=0, Ctrl+p paste-stack pick).
+/// The fallback speaks the same caret language as the installed script
+/// (caret-semantics.md, one contract, two roads) via a mktemp mini-vimrc:
+/// insert=beam 6 / replace=blink-underline 3 / normal=underline 4 through
+/// termcaps, DECSCUSR 0 handed back after the editor exits. Named
+/// degradation: visual/cmdline/operator-pending states live only in the
+/// installed script — the one-liner budget stops at the three termcaps.
+const COMPOSER_COMMAND: &str = r#"if [ -x "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh" ]; then "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh"; elif [ -x "${HOME}/.config/vc-frame/vc-composer.sh" ]; then "${HOME}/.config/vc-frame/vc-composer.sh"; else f=$(mktemp "${TMPDIR:-/tmp}/vc-composer.XXXXXX") || exit 1; rc=$(mktemp "${TMPDIR:-/tmp}/vc-composer-vimrc.XXXXXX") || exit 1; printf '%s\n' 'set number laststatus=0 nowrap textwidth=0' > "$rc"; if [ "${VC_COMPOSER_CARET:-1}" != "0" ]; then printf '%s\n' 'let &t_SI = "\e[6 q"' 'let &t_SR = "\e[3 q"' 'let &t_EI = "\e[4 q"' >> "$rc"; fi; ${EDITOR:-vim} -N -u "$rc" "$f"; if [ "${VC_COMPOSER_CARET:-1}" != "0" ]; then printf '\033[0 q'; fi; if [ -s "$f" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars "$(cat "$f")"; fi; rm -f -- "$f" "$rc"; fi"#;
 #[derive(Debug, Default)]
 pub struct LinePart {
     part: String,
@@ -103,6 +105,7 @@ struct State {
     is_first_run: bool,
     own_tab_index: Option<usize>,
     own_client_id: u16,
+    is_visible: bool,
     // Last (mode, coordinates) actually sent to the server. Repositioning is
     // idempotent against this: a persistent tooltip receives ModeUpdate
     // broadcasts that its own coordinate/rename calls trigger, and resending
@@ -112,11 +115,6 @@ struct State {
 
     // Keybinding cache
     cached_keybinds: KeybindsVec,
-
-    // ⌬ Quick cmd chip: the Dispatcher spawn is deferred until a TabUpdate
-    // confirms the Agents tab is the active one. Firing it in the same
-    // click raced tab creation and floated the shell over the wrong tab.
-    pending_dispatcher_spawn: bool,
 }
 
 struct TabRenderData {
@@ -168,6 +166,25 @@ impl ZellijPlugin for State {
             Event::Timer(_) => self.handle_clipboard_hint_timeout(),
             Event::InputReceived => self.handle_input_received(),
             Event::PermissionRequestResult(_) => true,
+            Event::CustomMessage(message, payload) if message == VC_CHROME_VISIBILITY_MESSAGE => {
+                let was_visible = self.is_visible;
+                match payload.as_str() {
+                    "true" => self.is_visible = true,
+                    "false" => self.is_visible = false,
+                    _ => {},
+                }
+                self.is_visible && !was_visible
+            },
+            Event::CustomMessage(message, _) if message == VC_CHROME_HEARTBEAT_MESSAGE => {
+                let was_visible = self.is_visible;
+                self.is_visible = true;
+                !was_visible
+            },
+            Event::Visible(is_visible) => {
+                let was_visible = self.is_visible;
+                self.is_visible = is_visible;
+                is_visible && !was_visible
+            },
             _ => false,
         }
     }
@@ -189,12 +206,29 @@ impl ZellijPlugin for State {
     }
 
     fn render(&mut self, rows: usize, cols: usize) {
+        // Transient initial resize events arrive with rows/cols at or near
+        // zero before the real layout lands; painting those frames is what
+        // makes the chrome visibly jump at session start.
+        if dimensions_are_transient(rows, cols) {
+            return;
+        }
         if self.is_tooltip {
             self.render_tooltip(rows, cols);
         } else {
             self.render_tab_line(cols);
         }
     }
+}
+
+// Floor for a renderable frame: anything below is a transient startup event,
+// not a legal surface. Kept far below the comfortable chrome minimum
+// (tools/repro_chrome.py MIN_COLUMNS) so legal small panes — the tooltip
+// floating pane included — always render.
+const MIN_RENDER_ROWS: usize = 1;
+const MIN_RENDER_COLS: usize = 4;
+
+fn dimensions_are_transient(rows: usize, cols: usize) -> bool {
+    rows < MIN_RENDER_ROWS || cols < MIN_RENDER_COLS
 }
 
 impl State {
@@ -240,6 +274,8 @@ impl State {
                 EventType::InitialKeybinds,
                 EventType::Timer,
                 EventType::PermissionRequestResult,
+                EventType::CustomMessage,
+                EventType::Visible,
             ]
         };
 
@@ -319,18 +355,6 @@ impl State {
             self.active_tab_idx = active_tab_idx;
             self.tabs = tabs;
 
-            // Deferred half of the ⌬ Agents click: the server has now told
-            // us which tab is active. Spawn the Dispatcher only when that
-            // tab is the Agents station — the float lands where it belongs.
-            if self.pending_dispatcher_spawn
-                && self
-                    .tabs
-                    .iter()
-                    .any(|tab| tab.active && tab.name == AGENTS_TAB_NAME)
-            {
-                self.pending_dispatcher_spawn = false;
-                open_dispatcher();
-            }
             should_render
         } else {
             false
@@ -475,27 +499,14 @@ impl State {
             return;
         }
         if self.sentinel_clicked(col, AGENTS_CLICK_SENTINEL) {
-            self.open_agents_station();
+            // Quick cmd floats over the *current* tab — no Agents detour, no
+            // deferred spawn race, no "Process will run…" over the wrong pane.
+            open_quick_cmd();
             return;
         }
         if let Some(tab_idx) = get_tab_to_focus(&self.tab_line, self.active_tab_idx, col) {
             switch_tab_to(tab_idx.try_into().unwrap());
         }
-    }
-
-    /// Click path of the ⌬ Agents chip: land in the Agents station tab
-    /// (creating it on first use) and float the Dispatcher shell over it —
-    /// "klikasz i masz gdzie pisać". The spawn is NOT fired here: tab
-    /// creation and pane creation travel separate server paths, so the
-    /// Dispatcher only opens once [`handle_tab_update`] confirms the Agents
-    /// tab is active. No more first-click float over the wrong tab.
-    fn open_agents_station(&mut self) {
-        if self.tabs.iter().any(|tab| tab.name == AGENTS_TAB_NAME) {
-            go_to_tab_name(AGENTS_TAB_NAME);
-        } else {
-            new_tab(Some(AGENTS_TAB_NAME), None);
-        }
-        self.pending_dispatcher_spawn = true;
     }
 
     fn sentinel_clicked(&self, col: usize, sentinel: usize) -> bool {
@@ -515,24 +526,65 @@ impl State {
     }
 }
 
-/// The Dispatcher: a named floating login shell — the operator's dispatch
-/// console (vibecrafted CLI is the dispatch language, the pane is the desk).
-fn open_dispatcher() {
-    let command = CommandToRun::new_with_args("sh", vec!["-c", DISPATCHER_COMMAND]);
+/// Quick cmd mini console: shallow, wide, upper-center — non-ephemeral
+/// interactive terminal (not a command-pane "Process will run…" ticket).
+/// Commands run in-pane; the operator inspects output without the float dying.
+fn quick_cmd_coordinates() -> Option<FloatingPaneCoordinates> {
+    FloatingPaneCoordinates::new(
+        Some("18%".to_owned()),
+        Some("8%".to_owned()),
+        Some("64%".to_owned()),
+        Some("28%".to_owned()),
+        Some(false),
+        None,
+    )
+}
+
+/// The Composer atelier: large, centered writing surface — same footprint
+/// every time so the writing layer always opens where the hands remember it.
+fn composer_coordinates() -> Option<FloatingPaneCoordinates> {
+    FloatingPaneCoordinates::new(
+        Some("15%".to_owned()),
+        Some("10%".to_owned()),
+        Some("70%".to_owned()),
+        Some("72%".to_owned()),
+        Some(false),
+        None,
+    )
+}
+
+/// Quick cmd: non-ephemeral floating *terminal* at a fixed upper-center
+/// footprint (spec 1.2 §C). Interactive terminal — not a command-pane ticket —
+/// so there is no "Process will run in separated pane" chrome and the pane
+/// survives after each command. Prefer the installed `vc-quick-cmd.sh` banner
+/// wrapper when present; otherwise open a plain login shell on `.`.
+///
+/// The fallback runner is **POSIX `sh` only** (no bashisms). Debian/Ubuntu
+/// `sh` is dash — `${PWD/#$HOME/~}` is a bash-only rewrite and aborts with
+/// `sh: 1: Bad substitution` / exit 2 (the EXIT CODE strip the operator saw).
+fn open_quick_cmd() {
+    // Keep this string dash-clean: ${var:-def} and ${var#prefix} are POSIX;
+    // ${var/pat/repl} and ${var/#pat/repl} are not.
+    let quick_cmd_runner = r#"if [ -x "${HOME}/.config/vetcoders/frontier/vc-frame/vc-quick-cmd.sh" ]; then exec "${HOME}/.config/vetcoders/frontier/vc-frame/vc-quick-cmd.sh"; elif [ -x "${HOME}/.config/vc-frame/vc-quick-cmd.sh" ]; then exec "${HOME}/.config/vc-frame/vc-quick-cmd.sh"; else u="${USER:-op}"; h="$(hostname -s 2>/dev/null || echo host)"; d="$PWD"; case "${HOME:-}" in "") ;; *) case "$d" in "$HOME"|"$HOME"/*) d="~${d#"$HOME"}" ;; esac ;; esac; printf '\n  %s@%s in %s\n\n' "$u" "$h" "$d"; exec "${SHELL:-/bin/zsh}" -l; fi"#;
+    // open_command_pane_floating + exec keeps one long-lived process (the
+    // login shell). We accept command-pane chrome only when the wrapper is
+    // missing; preferred path is still a real shell via the wrapper script.
+    let command = CommandToRun::new_with_args("sh", vec!["-c", quick_cmd_runner]);
     if let Some(PaneId::Terminal(terminal_pane_id)) =
-        open_command_pane_floating(command, None, BTreeMap::new())
+        open_command_pane_floating(command, quick_cmd_coordinates(), BTreeMap::new())
     {
-        rename_terminal_pane(terminal_pane_id, "Dispatcher");
+        rename_terminal_pane(terminal_pane_id, QUICK_CMD_PANE_NAME);
     }
 }
 
-/// Click path of the Composer chip — identical contract to the Alt+e bind.
+/// Click path of the Composer chip — identical contract to Super+e (Cmd+E).
+/// Alt+e is deliberately free for Polish `ę` (spec 1.2 §A).
 fn open_composer() {
     let command = CommandToRun::new_with_args("sh", vec!["-c", COMPOSER_COMMAND]);
     if let Some(PaneId::Terminal(terminal_pane_id)) =
-        open_command_pane_floating(command, None, BTreeMap::new())
+        open_command_pane_floating(command, composer_coordinates(), BTreeMap::new())
     {
-        rename_terminal_pane(terminal_pane_id, "Composer");
+        rename_terminal_pane(terminal_pane_id, COMPOSER_PANE_NAME);
     }
 }
 
@@ -754,4 +806,30 @@ fn bind_toggle_key_config(toggle_key: &str, client_id: u16) -> String {
     "#,
         toggle_key, toggle_key, client_id
     )
+}
+
+#[cfg(test)]
+mod transient_dimension_guard_tests {
+    use super::*;
+
+    #[test]
+    fn zero_dimensions_are_transient() {
+        assert!(dimensions_are_transient(0, 80));
+        assert!(dimensions_are_transient(1, 0));
+        assert!(dimensions_are_transient(0, 0));
+    }
+
+    #[test]
+    fn sub_minimum_columns_are_transient() {
+        assert!(dimensions_are_transient(1, 3));
+    }
+
+    #[test]
+    fn legal_small_surfaces_still_render() {
+        // The tooltip lives in a small floating pane; the guard must not
+        // eat it.
+        assert!(!dimensions_are_transient(1, 4));
+        assert!(!dimensions_are_transient(1, 8));
+        assert!(!dimensions_are_transient(10, 40));
+    }
 }

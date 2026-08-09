@@ -31,11 +31,25 @@ The `session-rail` plugin alias in `zellij-utils/assets/config/default.kdl`
 points at `zellij:session-manager` with `rail true`.
 
 The operator entrypoint layout (`vibecrafted`) replaces the top `tab-bar` with
-the redesigned `compact-bar`: brand chip, inverted mode chip, session anchor,
-fisheye tab ribbons, the Quick cmd station chip, and the Command Composer chip
-(`Cmd+E`). Its `left_inset` option clears the macOS traffic lights in a
-decoration-free host window. The bottom `status-bar` owns pure status: the
-fleet `LIVE` count, host CPU/memory/disk cockpit, health, and layout state.
+the redesigned `compact-bar`: brand chip, inverted mode chip, fisheye tab
+ribbons, the Quick cmd chip, and the Command Composer chip (`Cmd+E`). Zones
+follow the Fixed Character Grid Model — brand 14 cols, mode 8 cols, entry chips
+12+18 — so mode switches never shift the tab zone. `left_inset` (default **6**
+at standard monospace; raise to 9–12 for large fonts) clears the macOS traffic
+lights in a decoration-free host window. Quick cmd floats a login shell over
+the current tab; Composer drafts via `$VC_COMPOSER`/`$EDITOR`, seeds from and
+pushes to the Paste Stack (`~/.cache/vc-frame/paste-stack.json`), then
+`write-chars` into the pane beneath (Enter stays human). Inside the Composer,
+`?` (normal mode) toggles a built-in cheat sheet — `q`/`Esc` closes it;
+backward-search is deliberately traded away, `/` still searches. The bottom
+`status-bar` owns pure status: the fleet `LIVE` count, host CPU/memory/disk
+cockpit (fixed-width fields), health, and layout state.
+The diodes live in the resting mode only (LOCK when the base mode is locked,
+NORMAL otherwise) — action modes hand every column to the shortcut hints and
+keep just the swap-layout chip as arrangement context. On a narrow bar the
+segment degrades block by block (DISK, then MEM, then CPU, then the swap
+chip, then HEALTH; the fleet pulse goes last) instead of vanishing whole,
+and a two-cell seam always separates hints from statuses.
 
 `LIVE` has a bounded background-cost contract. The server derives the count
 once from the session snapshot it already owns and sends a small scalar message
@@ -65,7 +79,10 @@ owner (contract v3):
 
 - `Cmd+←/→` — previous/next tab, **every mode including LOCK**
 - `Cmd+↑/↓` — previous/next session, **every mode including LOCK**
-- `Cmd+E` — Command Composer
+- `Cmd+E` / `Super+e` — Command Composer (sole product key; **not** Alt+e —
+  Alt+e types Polish `ę` on macOS)
+- `Ctrl+s` then `v` — mouseless scrollback selection (read-only vim; `y`
+  copies to clipboard + Paste Stack)
 - `Ctrl+arrows` — the same switcher outside LOCK; inside LOCK they pass
   through to the pane (the shell owns Ctrl there)
 - `Alt` — belongs entirely to the writer: diacritics layer and host-side

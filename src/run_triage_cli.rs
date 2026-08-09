@@ -459,7 +459,7 @@ impl CliTriageIo {
 /// `start_suspended true` is what makes the rerun a single keypress — the pane
 /// holds the original command without running it until the operator says so.
 fn bucket_tab_layout(scrollback: &Path, tab_instance_id: &str, meta: &RunMeta) -> String {
-    // Chrome mirrors `default_tab_template` in assets/layouts/vibecrafted.kdl:
+    // Chrome mirrors `session_layer` in assets/layouts/vibecrafted.kdl:
     // compact-bar on top, the left Sessions rail, status-bar below. The layout
     // contract ("every tab keeps the left Sessions rail") applies to transferred
     // bucket tabs too — a fullscreen scrollback that hides the rail strands the

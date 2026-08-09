@@ -553,17 +553,26 @@ impl ZellijPlugin for State {
             Event::SessionUpdate(live_sessions, _dead_sessions) => {
                 for session in live_sessions {
                     if session.is_current_session {
-                        if session.plugins != self.plugins {
+                        let plugins_changed = session.plugins != self.plugins;
+                        if plugins_changed {
                             self.plugins = session.plugins;
                             self.reset_selection();
                             self.update_search_term();
                         }
-                        for tab in session.tabs {
-                            self.tab_position_to_tab_name.insert(tab.position, tab.name);
+                        let tab_position_to_tab_name = session
+                            .tabs
+                            .into_iter()
+                            .map(|tab| (tab.position, tab.name))
+                            .collect();
+                        let tabs_changed =
+                            tab_position_to_tab_name != self.tab_position_to_tab_name;
+                        if tabs_changed {
+                            self.tab_position_to_tab_name = tab_position_to_tab_name;
                         }
+                        should_render = plugins_changed || tabs_changed;
+                        break;
                     }
                 }
-                should_render = true;
             },
             Event::PaneUpdate(pane_manifest) => {
                 for (tab_position, panes) in pane_manifest.panes {
@@ -1098,4 +1107,52 @@ fn truncate_search_result(
         })
         .collect();
     (truncated_location, adjusted_indices)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn current_session(tab_name: &str, plugins: BTreeMap<u32, PluginInfo>) -> SessionInfo {
+        SessionInfo {
+            is_current_session: true,
+            tabs: vec![TabInfo {
+                position: 0,
+                name: tab_name.to_owned(),
+                ..Default::default()
+            }],
+            plugins,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn identical_session_snapshots_do_not_repaint() {
+        let mut state = State::default();
+        let session = current_session("work", BTreeMap::new());
+
+        assert!(state.update(Event::SessionUpdate(vec![session.clone()], vec![])));
+        assert!(!state.update(Event::SessionUpdate(vec![session], vec![])));
+    }
+
+    #[test]
+    fn changed_session_snapshot_repaints() {
+        let mut state = State::default();
+        let initial = current_session("work", BTreeMap::new());
+        assert!(state.update(Event::SessionUpdate(vec![initial], vec![])));
+
+        let renamed = current_session("review", BTreeMap::new());
+        assert!(state.update(Event::SessionUpdate(vec![renamed], vec![])));
+
+        let mut plugins = BTreeMap::new();
+        plugins.insert(
+            42,
+            PluginInfo {
+                location: "vc-frame:about".to_owned(),
+                ..Default::default()
+            },
+        );
+        let plugin_added = current_session("review", plugins);
+        assert!(state.update(Event::SessionUpdate(vec![plugin_added], vec![])));
+    }
 }

@@ -862,6 +862,17 @@ impl Page {
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new(
+                        "Lost inside the editor? Press ? — a built-in cheat sheet opens (q closes).",
+                    )
+                    .color_substring(3, "Press ?"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("Ctrl+p inserts from the Paste Stack · F2 toggles line wrap.")
+                        .color_substring(2, "Ctrl+p")
+                        .color_substring(2, "F2"),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
                         "Save an empty draft to cancel — nothing is sent, nothing runs.",
                     )
                     .color_substring(2, "cancel"),

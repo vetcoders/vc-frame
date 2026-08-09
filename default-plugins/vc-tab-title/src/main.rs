@@ -1,18 +1,21 @@
-//! vc-tab-title — background plugin that auto-titles tabs from the running
-//! command of their focused terminal pane.
+//! vc-tab-title — background plugin that auto-titles tabs and terminal panes
+//! from their running commands.
 //!
 //! Contract (operator doctrine):
 //! - Protected names are never touched: "Start here", "Shell", spawn names
 //!   (`scaf-*`, `resume-*`, `marbles-*`, run-id shaped), and anything the user
-//!   set manually (any name that is neither the default "Tab #N" nor a label
+//!   set manually (any name that is neither a spawn default nor a label
 //!   this plugin applied earlier).
-//! - Only "soft" names are replaced: "Tab #N", "shell", or our own previous
-//!   auto-label.
-//! - The label comes from the foreground child of the focused pane's shell
-//!   (never the PID-1 shell itself); a bare shell falls back to basename(cwd).
-//! - Agent labels are sticky: when an agent process exits and the pane drops
-//!   back to a bare shell, the last agent label stays (less flicker).
-//! - Renames are debounced so short-lived commands do not flash the tab bar.
+//! - Only "soft" names are replaced: "Tab #N", "shell", "Pane #N", the pane's
+//!   own spawn command echo, or our own previous auto-label.
+//! - The label comes from the foreground child of the pane's shell (never the
+//!   PID-1 shell itself); a bare shell falls back to basename(cwd).
+//! - Labels track the CURRENT foreground process. Agent labels are sticky only
+//!   over a bare shell: when an agent exits and nothing replaced it, the last
+//!   agent label stays (less flicker); a new real command always wins.
+//! - Tabs are labeled from their focused pane; every terminal pane is labeled
+//!   individually from its own foreground command.
+//! - Renames are debounced so short-lived commands do not flash the UI.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -63,6 +66,10 @@ struct State {
     auto_labels: HashMap<usize, String>,
     /// Labels computed but not yet applied (waiting out the debounce window).
     pending: HashMap<usize, String>,
+    /// Pane titles this plugin applied, keyed by terminal pane id.
+    pane_auto_labels: HashMap<u32, String>,
+    /// Pane titles computed but not yet applied (debounce window).
+    pane_pending: HashMap<u32, String>,
     timer_armed: bool,
 }
 
@@ -100,6 +107,10 @@ impl ZellijPlugin for State {
                 self.pane_commands
                     .retain(|id, _| live_terminal_ids.contains(id));
                 self.pane_cwds
+                    .retain(|id, _| live_terminal_ids.contains(id));
+                self.pane_auto_labels
+                    .retain(|id, _| live_terminal_ids.contains(id));
+                self.pane_pending
                     .retain(|id, _| live_terminal_ids.contains(id));
                 self.panes = pane_manifest.panes;
                 self.recompute_and_arm();
@@ -144,7 +155,13 @@ impl State {
         for (tab_id, label) in desired {
             self.pending.insert(tab_id, label);
         }
-        if !self.pending.is_empty() && !self.timer_armed {
+        let desired_panes = self.desired_pane_labels();
+        self.pane_pending
+            .retain(|id, label| desired_panes.get(id) == Some(label));
+        for (pane_id, label) in desired_panes {
+            self.pane_pending.insert(pane_id, label);
+        }
+        if (!self.pending.is_empty() || !self.pane_pending.is_empty()) && !self.timer_armed {
             set_timeout(DEBOUNCE_SECS);
             self.timer_armed = true;
         }
@@ -163,7 +180,17 @@ impl State {
                 self.pending.insert(tab_id, new_label.clone());
             }
         }
-        if !self.pending.is_empty() {
+        let desired_panes = self.desired_pane_labels();
+        let pane_pending = std::mem::take(&mut self.pane_pending);
+        for (pane_id, label) in pane_pending {
+            if desired_panes.get(&pane_id) == Some(&label) {
+                rename_terminal_pane(pane_id, &label);
+                self.pane_auto_labels.insert(pane_id, label);
+            } else if let Some(new_label) = desired_panes.get(&pane_id) {
+                self.pane_pending.insert(pane_id, new_label.clone());
+            }
+        }
+        if !self.pending.is_empty() || !self.pane_pending.is_empty() {
             set_timeout(DEBOUNCE_SECS);
             self.timer_armed = true;
         }
@@ -179,17 +206,17 @@ impl State {
             if !is_soft_name(&tab.name, tab.position, previous_auto_label) {
                 continue;
             }
-            let Some(label) = self.label_for_tab(tab) else {
+            let Some((label, is_shell_fallback)) = self.label_for_tab(tab) else {
                 continue;
             };
             if label == tab.name {
                 continue;
             }
-            // Sticky agent labels: a dead agent's tab keeps its name instead
-            // of flashing back to a shell/cwd label.
+            // Sticky agent labels: a dead agent's tab keeps its name instead of
+            // flashing back to a shell/cwd label. A new real command always wins.
             if previous_auto_label == Some(tab.name.as_str())
                 && is_agent_label(&tab.name)
-                && !is_agent_label(&label)
+                && is_shell_fallback
             {
                 continue;
             }
@@ -198,25 +225,74 @@ impl State {
         desired
     }
 
+    /// The full map of pane renames we currently want: terminal id -> label.
+    /// A pane is absent when its title is protected, user-set, already correct,
+    /// or when we have nothing better to offer.
+    fn desired_pane_labels(&self) -> HashMap<u32, String> {
+        let mut desired = HashMap::new();
+        for panes in self.panes.values() {
+            for pane in panes {
+                if pane.is_plugin || !pane.is_selectable {
+                    continue;
+                }
+                let previous_auto_label = self.pane_auto_labels.get(&pane.id).map(|s| s.as_str());
+                if !is_soft_pane_title(
+                    &pane.title,
+                    pane.terminal_command.as_deref(),
+                    previous_auto_label,
+                ) {
+                    continue;
+                }
+                let Some((label, is_shell_fallback)) = self.label_for_terminal(pane.id) else {
+                    continue;
+                };
+                if label == pane.title {
+                    continue;
+                }
+                // Same stickiness as tabs: a dead agent's pane keeps its label
+                // until a new real command shows up.
+                if previous_auto_label == Some(pane.title.as_str())
+                    && is_agent_label(&pane.title)
+                    && is_shell_fallback
+                {
+                    continue;
+                }
+                desired.insert(pane.id, label);
+            }
+        }
+        desired
+    }
+
     /// Compute the label for a tab from its focused terminal pane.
-    fn label_for_tab(&self, tab: &TabInfo) -> Option<String> {
+    fn label_for_tab(&self, tab: &TabInfo) -> Option<(String, bool)> {
         let panes = self.panes.get(&tab.position)?;
         let pane = panes
             .iter()
             .find(|p| !p.is_plugin && p.is_focused)
             .or_else(|| panes.iter().find(|p| !p.is_plugin))?;
-        let (command, is_foreground) = self.pane_commands.get(&pane.id)?;
-        let label = if *is_foreground && !command.is_empty() {
+        self.label_for_terminal(pane.id)
+    }
+
+    /// Compute the label for a terminal pane from its foreground command.
+    /// Returns `(label, is_shell_fallback)`; the flag marks cwd/shell fallback
+    /// labels so callers can keep sticky agent labels over a bare shell.
+    fn label_for_terminal(&self, terminal_id: u32) -> Option<(String, bool)> {
+        let (command, is_foreground) = self.pane_commands.get(&terminal_id)?;
+        let (label, is_shell_fallback) = if *is_foreground && !command.is_empty() {
             match classify_command(command) {
-                CommandClass::Agent(label) => label.to_string(),
-                CommandClass::Shell => self.cwd_label(pane.id),
-                CommandClass::Other(name) => name,
+                CommandClass::Agent(label) => (label.to_string(), false),
+                CommandClass::Shell => (self.cwd_label(terminal_id), true),
+                CommandClass::Other(name) => (name, false),
             }
         } else {
-            self.cwd_label(pane.id)
+            (self.cwd_label(terminal_id), true)
         };
         let label = truncate_label(&label);
-        if label.is_empty() { None } else { Some(label) }
+        if label.is_empty() {
+            None
+        } else {
+            Some((label, is_shell_fallback))
+        }
     }
 
     fn cwd_label(&self, terminal_id: u32) -> String {
@@ -300,6 +376,39 @@ fn is_soft_name(name: &str, tab_position: usize, previous_auto_label: Option<&st
     name == format!("Tab #{}", tab_position + 1)
         || name == "shell"
         || previous_auto_label == Some(name)
+}
+
+/// A pane title is soft (safe to auto-replace) when it is empty, the default
+/// "Pane #N", the pane's own spawn-command echo (zellij titles command panes
+/// with their command line), or the label we applied ourselves. Protected
+/// names and anything the user typed are never soft.
+fn is_soft_pane_title(
+    title: &str,
+    terminal_command: Option<&str>,
+    previous_auto_label: Option<&str>,
+) -> bool {
+    if PROTECTED_EXACT.contains(&title)
+        || PROTECTED_PREFIXES.iter().any(|p| title.starts_with(p))
+        || looks_like_run_id(title)
+    {
+        return false;
+    }
+    if title.is_empty() || previous_auto_label == Some(title) {
+        return true;
+    }
+    if let Some(number) = title.strip_prefix("Pane #")
+        && !number.is_empty()
+        && number.chars().all(|c| c.is_ascii_digit())
+    {
+        return true;
+    }
+    if let Some(command) = terminal_command {
+        let command = command.trim();
+        if title == command || Some(title.to_lowercase()) == command.split(' ').next().map(token_basename) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Vibecrafted spawn names carry run ids shaped like `work-260722-075023-97000`;
@@ -422,5 +531,56 @@ mod tests {
     fn labels_are_truncated() {
         assert_eq!(truncate_label("family-onko-portal"), "family-onko-");
         assert_eq!(truncate_label("  codex  "), "codex");
+    }
+
+    #[test]
+    fn protected_pane_titles_are_never_soft() {
+        for title in [
+            "Start here",
+            "Shell",
+            "scaf-260722-073900-12345",
+            "work-260722-075023-97000",
+            "my important pane", // user-named
+        ] {
+            assert!(
+                !is_soft_pane_title(title, None, None),
+                "{} must be protected",
+                title
+            );
+        }
+    }
+
+    #[test]
+    fn soft_pane_titles_allow_auto_rename() {
+        assert!(is_soft_pane_title("", None, None));
+        assert!(is_soft_pane_title("Pane #3", None, None));
+        assert!(!is_soft_pane_title("Pane #", None, None));
+        assert!(!is_soft_pane_title("Pane #x", None, None));
+        // Command panes are titled with their own command line by default.
+        assert!(is_soft_pane_title(
+            "htop -d 10",
+            Some("htop -d 10"),
+            None
+        ));
+        assert!(is_soft_pane_title("htop", Some("/usr/bin/htop -d 10"), None));
+        // Our own previous label stays soft; the same text typed by a user is not.
+        assert!(is_soft_pane_title("codex", None, Some("codex")));
+        assert!(!is_soft_pane_title("codex", None, None));
+    }
+
+    #[test]
+    fn agent_labels_are_sticky_only_over_shell_fallback() {
+        // Simulated at the rule level used by desired_labels/desired_pane_labels:
+        // previous auto label "claude" + shell fallback -> keep; real command -> replace.
+        let previous = Some("claude");
+        let keeps = |new_label: &str, is_shell_fallback: bool| {
+            previous == Some("claude")
+                && is_agent_label("claude")
+                && is_shell_fallback
+                && new_label != "claude"
+        };
+        assert!(keeps("codescribe", true), "shell fallback must not evict a dead agent label");
+        assert!(!keeps("htop", false), "a real new command must win over a dead agent label");
+        assert!(!keeps("codex", false), "a new agent must win over a dead agent label");
     }
 }

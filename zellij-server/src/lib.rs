@@ -20,6 +20,7 @@ mod plugins;
 mod pty;
 mod pty_writer;
 mod route;
+mod route_telemetry;
 mod screen;
 mod session_layout_metadata;
 mod terminal_bytes;
@@ -2133,7 +2134,12 @@ fn init_session(params: SessionInitParams) -> SessionMetaData {
             let plugin_bus = Bus::new(
                 vec![plugin_receiver],
                 ThreadSenders {
-                    to_screen: Some(to_screen_bounded.clone()),
+                    // Unbounded on purpose: Screen blocks inside the layout
+                    // transaction ACK wait, and a bounded wasm→screen channel
+                    // deadlocks the two threads until every ACK times out
+                    // (plugin thread stuck on send, Screen stuck on recv).
+                    // Backpressure stays on the pty sender, the real firehose.
+                    to_screen: Some(to_screen.clone()),
                     to_pty: Some(to_pty.clone()),
                     to_plugin: Some(to_plugin.clone()),
                     to_server: Some(to_server.clone()),
