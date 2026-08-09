@@ -2569,6 +2569,7 @@ impl Screen {
         }
         Ok(())
     }
+}
 
 pub struct ScreenOptions<'a> {
     pub bus: Bus<ScreenInstruction>,
@@ -9484,7 +9485,6 @@ pub(crate) struct ScreenThreadParams {
 
 // The box is here in order to make the
 // NewClient enum smaller
-#[allow(clippy::boxed_local)]
 pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
     let ScreenThreadParams {
         bus,

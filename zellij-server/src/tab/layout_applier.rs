@@ -317,6 +317,8 @@ impl<'a> LayoutApplier<'a> {
         let should_show_floating_panes = layout_has_floating_panes && !hide_floating_panes;
         Ok(should_show_floating_panes)
     }
+}
+
 pub struct LayoutApplierOverrideOptions {
     pub tiled_panes_layout: TiledPaneLayout,
     pub floating_panes_layout: Vec<FloatingPaneLayout>,
@@ -715,7 +717,7 @@ impl<'a> LayoutApplier<'a> {
             .get_mut(&run)
             .and_then(|ids| ids.pop())
             .with_context(err_context)?;
-        let mut new_plugin = PluginPane::new(crate::panes::plugin_pane::PluginPaneOptions {
+        let mut new_plugin = PluginPane::new(crate::panes::PluginPaneOptions {
             pid,
             position_and_size: *position_and_size,
             send_plugin_instructions: self.senders
@@ -763,7 +765,7 @@ impl<'a> LayoutApplier<'a> {
             .get_mut(&run)
             .and_then(|ids| ids.pop())
             .with_context(err_context)?;
-        let mut new_pane = PluginPane::new(crate::panes::plugin_pane::PluginPaneOptions {
+        let mut new_pane = PluginPane::new(crate::panes::PluginPaneOptions {
             pid,
             position_and_size,
             send_plugin_instructions: self.senders

@@ -28,6 +28,7 @@ mod thread_bus;
 mod ui;
 
 use background_jobs::{BackgroundJob, background_jobs_main};
+use crate::plugins::PluginThreadParams;
 use log::info;
 use pty_writer::{PtyWriteInstruction, pty_writer_main};
 use std::collections::{BTreeMap, HashMap, HashSet};

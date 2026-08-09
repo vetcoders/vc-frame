@@ -45,7 +45,7 @@ use crate::{
     panes::grid::namespace_notification_id,
     panes::sixel::SixelImageStore,
     panes::{FloatingPanes, FloatingPanesLayoutSnapshot, TiledPanes, TiledPanesLayoutSnapshot},
-    panes::{LinkHandler, PaneId, PluginPane, TerminalPane},
+    panes::{LinkHandler, PaneId, PluginPane, TerminalPane, TerminalPaneOptions},
     plugins::PluginInstruction,
     pty::{ClientTabIndexOrPaneId, LayoutTransactionId, PtyInstruction, VteBytes},
     thread_bus::ThreadSenders,
@@ -1484,8 +1484,9 @@ impl Tab {
             }
         }
     }
+}
 
-pub struct TabOptions {
+pub(crate) struct TabOptions {
     pub id: usize,
     pub position: usize,
     pub name: String,
@@ -1585,7 +1586,7 @@ impl Tab {
         let connected_clients = Rc::new(RefCell::new(connected_clients));
         let mode_info = Rc::new(RefCell::new(HashMap::new()));
 
-        let tiled_panes = TiledPanes::new(crate::panes::tiled_panes::TiledPanesOptions {
+        let tiled_panes = TiledPanes::new(crate::panes::TiledPanesOptions {
             display_area: display_area.clone(),
             viewport: viewport.clone(),
             connected_clients: connected_clients.clone(),
@@ -1686,6 +1687,7 @@ impl Tab {
             tab_bell_ring: false,
         }
     }
+}
 
 pub struct ApplyLayoutOptions {
     pub layout: TiledPaneLayout,
@@ -2373,6 +2375,8 @@ impl Tab {
             invoked_with
         }
     }
+}
+
 pub struct NewPaneOptions {
     pub pid: PaneId,
     pub initial_pane_title: Option<String>,
@@ -2509,6 +2513,8 @@ impl Tab {
             blocking_notification,
         })
     }
+}
+
 pub struct NewNoPreferencePaneOptions {
     pub pid: PaneId,
     pub initial_pane_title: Option<String>,
@@ -2564,6 +2570,7 @@ pub struct NewStackedPaneOptions {
     pub borderless: Option<bool>,
 }
 
+impl Tab {
     pub fn new_no_preference_pane(&mut self, opts: NewNoPreferencePaneOptions) -> Result<()> {
         let NewNoPreferencePaneOptions {
             pid,
@@ -2603,7 +2610,7 @@ pub struct NewStackedPaneOptions {
                 })) as Box<dyn Pane>
             },
             PaneId::Plugin(plugin_pid) => {
-                Box::new(PluginPane::new(crate::panes::plugin_pane::PluginPaneOptions {
+                Box::new(PluginPane::new(crate::panes::PluginPaneOptions {
                     pid: plugin_pid,
                     position_and_size: PaneGeom::default(), // this will be filled out later
                     send_plugin_instructions: self.senders
@@ -2714,7 +2721,7 @@ pub struct NewStackedPaneOptions {
                 })) as Box<dyn Pane>
             },
             PaneId::Plugin(plugin_pid) => {
-                Box::new(PluginPane::new(crate::panes::plugin_pane::PluginPaneOptions {
+                Box::new(PluginPane::new(crate::panes::PluginPaneOptions {
                     pid: plugin_pid,
                     position_and_size: PaneGeom::default(), // this will be filled out later
                     send_plugin_instructions: self.senders
@@ -2794,54 +2801,57 @@ pub struct NewStackedPaneOptions {
         let mut new_pane = match pid {
             PaneId::Terminal(term_pid) => {
                 let next_terminal_position = self.get_next_terminal_position();
-                Box::new(TerminalPane::new(
-                    term_pid,
-                    PaneGeom::default(), // this will be filled out later
-                    self.style,
-                    next_terminal_position,
-                    initial_pane_title.clone().unwrap_or_default(),
-                    self.link_handler.clone(),
-                    self.character_cell_size.clone(),
-                    self.sixel_image_store.clone(),
-                    self.terminal_emulator_colors.clone(),
-                    self.terminal_emulator_color_codes.clone(),
+                Box::new(TerminalPane::new(TerminalPaneOptions {
+                    pid: term_pid,
+                    position_and_size: PaneGeom::default(), // this will be filled out later
+                    style: self.style,
+                    pane_index: next_terminal_position,
+                    pane_name: initial_pane_title.clone().unwrap_or_default(),
+                    link_handler: self.link_handler.clone(),
+                    character_cell_size: self.character_cell_size.clone(),
+                    sixel_image_store: self.sixel_image_store.clone(),
+                    terminal_emulator_colors: self.terminal_emulator_colors.clone(),
+                    terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
                     initial_pane_title,
                     invoked_with,
-                    self.debug,
-                    self.arrow_fonts,
-                    self.styled_underlines,
-                    self.osc8_hyperlinks,
-                    self.explicitly_disable_kitty_keyboard_protocol,
-                    blocking_notification,
-                )) as Box<dyn Pane>
+                    debug: self.debug,
+                    arrow_fonts: self.arrow_fonts,
+                    styled_underlines: self.styled_underlines,
+                    osc8_hyperlinks: self.osc8_hyperlinks,
+                    explicitly_disable_keyboard_protocol: self
+                        .explicitly_disable_kitty_keyboard_protocol,
+                    notification_end: blocking_notification,
+                })) as Box<dyn Pane>
             },
             PaneId::Plugin(plugin_pid) => {
-                Box::new(PluginPane::new(
-                    plugin_pid,
-                    PaneGeom::default(), // this will be filled out later
-                    self.senders
+                Box::new(PluginPane::new(crate::panes::PluginPaneOptions {
+                    pid: plugin_pid,
+                    position_and_size: PaneGeom::default(), // this will be filled out later
+                    send_plugin_instructions: self
+                        .senders
                         .to_plugin
                         .as_ref()
                         .with_context(err_context)?
                         .clone(),
-                    initial_pane_title.unwrap_or("".to_owned()),
-                    String::new(),
-                    self.sixel_image_store.clone(),
-                    self.terminal_emulator_colors.clone(),
-                    self.terminal_emulator_color_codes.clone(),
-                    self.link_handler.clone(),
-                    self.character_cell_size.clone(),
-                    self.connected_clients_in_app
+                    title: initial_pane_title.unwrap_or("".to_owned()),
+                    pane_name: String::new(),
+                    sixel_image_store: self.sixel_image_store.clone(),
+                    terminal_emulator_colors: self.terminal_emulator_colors.clone(),
+                    terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
+                    link_handler: self.link_handler.clone(),
+                    character_cell_size: self.character_cell_size.clone(),
+                    currently_connected_clients: self
+                        .connected_clients_in_app
                         .borrow()
                         .keys()
                         .copied()
                         .collect(),
-                    self.style,
+                    style: self.style,
                     invoked_with,
-                    self.debug,
-                    self.arrow_fonts,
-                    self.styled_underlines,
-                )) as Box<dyn Pane>
+                    debug: self.debug,
+                    arrow_fonts: self.arrow_fonts,
+                    styled_underlines: self.styled_underlines,
+                })) as Box<dyn Pane>
             },
         };
 
@@ -2940,54 +2950,57 @@ pub struct NewStackedPaneOptions {
         let mut new_pane = match pid {
             PaneId::Terminal(term_pid) => {
                 let next_terminal_position = self.get_next_terminal_position();
-                Box::new(TerminalPane::new(
-                    term_pid,
-                    PaneGeom::default(), // this will be filled out later
-                    self.style,
-                    next_terminal_position,
-                    initial_pane_title.clone().unwrap_or_default(),
-                    self.link_handler.clone(),
-                    self.character_cell_size.clone(),
-                    self.sixel_image_store.clone(),
-                    self.terminal_emulator_colors.clone(),
-                    self.terminal_emulator_color_codes.clone(),
+                Box::new(TerminalPane::new(TerminalPaneOptions {
+                    pid: term_pid,
+                    position_and_size: PaneGeom::default(), // this will be filled out later
+                    style: self.style,
+                    pane_index: next_terminal_position,
+                    pane_name: initial_pane_title.clone().unwrap_or_default(),
+                    link_handler: self.link_handler.clone(),
+                    character_cell_size: self.character_cell_size.clone(),
+                    sixel_image_store: self.sixel_image_store.clone(),
+                    terminal_emulator_colors: self.terminal_emulator_colors.clone(),
+                    terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
                     initial_pane_title,
                     invoked_with,
-                    self.debug,
-                    self.arrow_fonts,
-                    self.styled_underlines,
-                    self.osc8_hyperlinks,
-                    self.explicitly_disable_kitty_keyboard_protocol,
-                    blocking_notification,
-                )) as Box<dyn Pane>
+                    debug: self.debug,
+                    arrow_fonts: self.arrow_fonts,
+                    styled_underlines: self.styled_underlines,
+                    osc8_hyperlinks: self.osc8_hyperlinks,
+                    explicitly_disable_keyboard_protocol: self
+                        .explicitly_disable_kitty_keyboard_protocol,
+                    notification_end: blocking_notification,
+                })) as Box<dyn Pane>
             },
             PaneId::Plugin(plugin_pid) => {
-                Box::new(PluginPane::new(
-                    plugin_pid,
-                    PaneGeom::default(), // this will be filled out later
-                    self.senders
+                Box::new(PluginPane::new(crate::panes::PluginPaneOptions {
+                    pid: plugin_pid,
+                    position_and_size: PaneGeom::default(), // this will be filled out later
+                    send_plugin_instructions: self
+                        .senders
                         .to_plugin
                         .as_ref()
                         .with_context(err_context)?
                         .clone(),
-                    initial_pane_title.unwrap_or("".to_owned()),
-                    String::new(),
-                    self.sixel_image_store.clone(),
-                    self.terminal_emulator_colors.clone(),
-                    self.terminal_emulator_color_codes.clone(),
-                    self.link_handler.clone(),
-                    self.character_cell_size.clone(),
-                    self.connected_clients_in_app
+                    title: initial_pane_title.unwrap_or("".to_owned()),
+                    pane_name: String::new(),
+                    sixel_image_store: self.sixel_image_store.clone(),
+                    terminal_emulator_colors: self.terminal_emulator_colors.clone(),
+                    terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
+                    link_handler: self.link_handler.clone(),
+                    character_cell_size: self.character_cell_size.clone(),
+                    currently_connected_clients: self
+                        .connected_clients_in_app
                         .borrow()
                         .keys()
                         .copied()
                         .collect(),
-                    self.style,
+                    style: self.style,
                     invoked_with,
-                    self.debug,
-                    self.arrow_fonts,
-                    self.styled_underlines,
-                )) as Box<dyn Pane>
+                    debug: self.debug,
+                    arrow_fonts: self.arrow_fonts,
+                    styled_underlines: self.styled_underlines,
+                })) as Box<dyn Pane>
             },
         };
 
@@ -3153,26 +3166,27 @@ pub struct NewStackedPaneOptions {
         match new_pane_id {
             PaneId::Terminal(new_pane_id) => {
                 let next_terminal_position = self.get_next_terminal_position(); // TODO: this is not accurate in this case
-                let mut new_pane = TerminalPane::new(
-                    new_pane_id,
-                    PaneGeom::default(), // the initial size will be set later
-                    self.style,
-                    next_terminal_position,
-                    String::new(),
-                    self.link_handler.clone(),
-                    self.character_cell_size.clone(),
-                    self.sixel_image_store.clone(),
-                    self.terminal_emulator_colors.clone(),
-                    self.terminal_emulator_color_codes.clone(),
-                    None,
-                    run,
-                    self.debug,
-                    self.arrow_fonts,
-                    self.styled_underlines,
-                    self.osc8_hyperlinks,
-                    self.explicitly_disable_kitty_keyboard_protocol,
-                    completion_tx,
-                );
+                let mut new_pane = TerminalPane::new(TerminalPaneOptions {
+                    pid: new_pane_id,
+                    position_and_size: PaneGeom::default(), // the initial size will be set later
+                    style: self.style,
+                    pane_index: next_terminal_position,
+                    pane_name: String::new(),
+                    link_handler: self.link_handler.clone(),
+                    character_cell_size: self.character_cell_size.clone(),
+                    sixel_image_store: self.sixel_image_store.clone(),
+                    terminal_emulator_colors: self.terminal_emulator_colors.clone(),
+                    terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
+                    initial_pane_title: None,
+                    invoked_with: run,
+                    debug: self.debug,
+                    arrow_fonts: self.arrow_fonts,
+                    styled_underlines: self.styled_underlines,
+                    osc8_hyperlinks: self.osc8_hyperlinks,
+                    explicitly_disable_keyboard_protocol: self
+                        .explicitly_disable_kitty_keyboard_protocol,
+                    notification_end: completion_tx,
+                });
                 if let Some(borderless) = borderless {
                     new_pane.set_borderless(borderless);
                 }
@@ -3217,32 +3231,34 @@ pub struct NewStackedPaneOptions {
                 }
             },
             PaneId::Plugin(plugin_pid) => {
-                let mut new_pane = PluginPane::new(
-                    plugin_pid,
-                    PaneGeom::default(), // this will be filled out later
-                    self.senders
+                let mut new_pane = PluginPane::new(crate::panes::PluginPaneOptions {
+                    pid: plugin_pid,
+                    position_and_size: PaneGeom::default(), // this will be filled out later
+                    send_plugin_instructions: self
+                        .senders
                         .to_plugin
                         .as_ref()
                         .with_context(err_context)?
                         .clone(),
-                    String::new(),
-                    String::new(),
-                    self.sixel_image_store.clone(),
-                    self.terminal_emulator_colors.clone(),
-                    self.terminal_emulator_color_codes.clone(),
-                    self.link_handler.clone(),
-                    self.character_cell_size.clone(),
-                    self.connected_clients_in_app
+                    title: String::new(),
+                    pane_name: String::new(),
+                    sixel_image_store: self.sixel_image_store.clone(),
+                    terminal_emulator_colors: self.terminal_emulator_colors.clone(),
+                    terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
+                    link_handler: self.link_handler.clone(),
+                    character_cell_size: self.character_cell_size.clone(),
+                    currently_connected_clients: self
+                        .connected_clients_in_app
                         .borrow()
                         .keys()
                         .copied()
                         .collect(),
-                    self.style,
-                    run,
-                    self.debug,
-                    self.arrow_fonts,
-                    self.styled_underlines,
-                );
+                    style: self.style,
+                    invoked_with: run,
+                    debug: self.debug,
+                    arrow_fonts: self.arrow_fonts,
+                    styled_underlines: self.styled_underlines,
+                });
                 if let Some(borderless) = borderless {
                     new_pane.set_borderless(borderless);
                 }
@@ -3357,26 +3373,27 @@ pub struct NewStackedPaneOptions {
         if self.tiled_panes.can_split_pane_horizontally(client_id) {
             if let PaneId::Terminal(term_pid) = pid {
                 let next_terminal_position = self.get_next_terminal_position();
-                let mut new_terminal = TerminalPane::new(
-                    term_pid,
-                    PaneGeom::default(), // the initial size will be set later
-                    self.style,
-                    next_terminal_position,
-                    String::new(),
-                    self.link_handler.clone(),
-                    self.character_cell_size.clone(),
-                    self.sixel_image_store.clone(),
-                    self.terminal_emulator_colors.clone(),
-                    self.terminal_emulator_color_codes.clone(),
+                let mut new_terminal = TerminalPane::new(TerminalPaneOptions {
+                    pid: term_pid,
+                    position_and_size: PaneGeom::default(), // the initial size will be set later
+                    style: self.style,
+                    pane_index: next_terminal_position,
+                    pane_name: String::new(),
+                    link_handler: self.link_handler.clone(),
+                    character_cell_size: self.character_cell_size.clone(),
+                    sixel_image_store: self.sixel_image_store.clone(),
+                    terminal_emulator_colors: self.terminal_emulator_colors.clone(),
+                    terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
                     initial_pane_title,
-                    None,
-                    self.debug,
-                    self.arrow_fonts,
-                    self.styled_underlines,
-                    self.osc8_hyperlinks,
-                    self.explicitly_disable_kitty_keyboard_protocol,
-                    completion_tx,
-                );
+                    invoked_with: None,
+                    debug: self.debug,
+                    arrow_fonts: self.arrow_fonts,
+                    styled_underlines: self.styled_underlines,
+                    osc8_hyperlinks: self.osc8_hyperlinks,
+                    explicitly_disable_keyboard_protocol: self
+                        .explicitly_disable_kitty_keyboard_protocol,
+                    notification_end: completion_tx,
+                });
                 if let Some(borderless) = borderless {
                     new_terminal.set_borderless(borderless);
                 }
@@ -3424,26 +3441,27 @@ pub struct NewStackedPaneOptions {
         if self.tiled_panes.can_split_pane_vertically(client_id) {
             if let PaneId::Terminal(term_pid) = pid {
                 let next_terminal_position = self.get_next_terminal_position();
-                let mut new_terminal = TerminalPane::new(
-                    term_pid,
-                    PaneGeom::default(), // the initial size will be set later
-                    self.style,
-                    next_terminal_position,
-                    String::new(),
-                    self.link_handler.clone(),
-                    self.character_cell_size.clone(),
-                    self.sixel_image_store.clone(),
-                    self.terminal_emulator_colors.clone(),
-                    self.terminal_emulator_color_codes.clone(),
+                let mut new_terminal = TerminalPane::new(TerminalPaneOptions {
+                    pid: term_pid,
+                    position_and_size: PaneGeom::default(), // the initial size will be set later
+                    style: self.style,
+                    pane_index: next_terminal_position,
+                    pane_name: String::new(),
+                    link_handler: self.link_handler.clone(),
+                    character_cell_size: self.character_cell_size.clone(),
+                    sixel_image_store: self.sixel_image_store.clone(),
+                    terminal_emulator_colors: self.terminal_emulator_colors.clone(),
+                    terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
                     initial_pane_title,
-                    None,
-                    self.debug,
-                    self.arrow_fonts,
-                    self.styled_underlines,
-                    self.osc8_hyperlinks,
-                    self.explicitly_disable_kitty_keyboard_protocol,
-                    completion_tx,
-                );
+                    invoked_with: None,
+                    debug: self.debug,
+                    arrow_fonts: self.arrow_fonts,
+                    styled_underlines: self.styled_underlines,
+                    osc8_hyperlinks: self.osc8_hyperlinks,
+                    explicitly_disable_keyboard_protocol: self
+                        .explicitly_disable_kitty_keyboard_protocol,
+                    notification_end: completion_tx,
+                });
                 if let Some(borderless) = borderless {
                     new_terminal.set_borderless(borderless);
                 }
@@ -7154,7 +7172,9 @@ pub struct NewStackedPaneOptions {
     pub fn get_client_input_mode(&self, client_id: ClientId) -> Option<InputMode> {
         self.mode_info.borrow().get(&client_id).map(|m| m.mode)
     }
-    #[allow(unused)] // this is used for tests
+    // Only cfg(test) suites read the hover projection; keep it out of the
+    // release surface without muting real dead-code drift.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn query_mouse_hover_pane_id(&self) -> HashMap<ClientId, PaneId> {
         self.mouse_hover_pane_id.clone()
     }

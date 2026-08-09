@@ -52,21 +52,21 @@ macro_rules! get_or_create_grid {
         let explicitly_disable_kitty_keyboard_protocol = false; // N/A for plugins
 
         $self.grids.entry($client_id).or_insert_with(|| {
-            let mut grid = Grid::new(
+            let mut grid = Grid::new(crate::panes::grid::GridOptions {
                 rows,
-                cols,
-                $self.terminal_emulator_colors.clone(),
-                $self.terminal_emulator_color_codes.clone(),
-                $self.link_handler.clone(),
-                $self.character_cell_size.clone(),
-                $self.sixel_image_store.clone(),
-                $self.style.clone(),
-                $self.debug,
-                $self.arrow_fonts,
-                $self.styled_underlines,
+                columns: cols,
+                terminal_emulator_colors: $self.terminal_emulator_colors.clone(),
+                terminal_emulator_color_codes: $self.terminal_emulator_color_codes.clone(),
+                link_handler: $self.link_handler.clone(),
+                character_cell_size: $self.character_cell_size.clone(),
+                sixel_image_store: $self.sixel_image_store.clone(),
+                style: $self.style.clone(),
+                debug: $self.debug,
+                arrow_fonts: $self.arrow_fonts,
+                styled_underlines: $self.styled_underlines,
                 osc8_hyperlinks,
                 explicitly_disable_kitty_keyboard_protocol,
-            );
+            });
             grid.hide_cursor();
             grid
         })

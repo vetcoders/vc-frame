@@ -417,6 +417,8 @@ impl<'a> PluginLoader<'a> {
 
         Ok((store, instance))
     }
+}
+
 pub struct WasiCtxParams<'a> {
     pub host_dir: &'a Path,
     pub data_dir: &'a Path,
@@ -428,15 +430,15 @@ pub struct WasiCtxParams<'a> {
     pub stdout_pipe: Arc<Mutex<VecDeque<u8>>>,
 }
 
-impl PluginLoader {
+impl PluginLoader<'_> {
     pub fn create_wasi_ctx(params: WasiCtxParams<'_>) -> Result<WasiCtx> {
         let WasiCtxParams {
             host_dir,
             data_dir,
             cache_dir,
             tmp_dir,
-            plugin_url: _plugin_url,
-            plugin_id: _plugin_id,
+            plugin_url,
+            plugin_id,
             stdin_pipe,
             stdout_pipe,
         } = params;

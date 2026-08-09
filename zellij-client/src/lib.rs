@@ -643,8 +643,9 @@ pub struct StartRemoteClientOptions<'a> {
     pub async_worker_tasks: Option<usize>,
 }
 
+#[cfg(feature = "web_server_capability")]
 pub fn start_remote_client(
-    mut opts: StartRemoteClientOptions<'_>,
+    opts: StartRemoteClientOptions<'_>,
 ) -> Result<Option<ConnectToSession>, RemoteClientError> {
     info!("Starting vc-frame client!");
 
@@ -690,6 +691,7 @@ pub fn start_remote_client(
 
     envs::set_zellij("0".to_string());
 
+    let mut os_input = opts.os_input;
     let full_screen_ws = os_input.get_terminal_size();
 
     os_input.set_raw_mode();
