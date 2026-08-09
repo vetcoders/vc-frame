@@ -42,11 +42,10 @@ const MSG_LAUNCH_TOOLTIP: &str = "launch_tooltip_if_not_launched";
 /// a real tab can never occupy this index. Checked before tab resolution so
 /// it never reaches switch_tab_to.
 pub const COMPOSER_CLICK_SENTINEL: usize = usize::MAX;
-/// Sentinel tab_index for the ䷅ LIVE fleet chip — click opens the Gallery.
-pub const GALLERY_CLICK_SENTINEL: usize = usize::MAX - 1;
-/// Sentinel tab_index for the ⌬ Agents chip — click lands in the Agents
-/// station (the NOW-view of the fleet; ䷅ LIVE → Gallery is the WAS-view)
-/// and floats the Dispatcher shell over it.
+/// Sentinel tab_index for the ⌬ Quick cmd chip — click lands in the Agents
+/// station tab and floats the Dispatcher shell over it: a quick command
+/// line, named for what it does. (The fleet's LIVE pulse is a pure status
+/// on the bottom bar now — no tool rides on it.)
 pub const AGENTS_CLICK_SENTINEL: usize = usize::MAX - 2;
 /// The per-session station tab where dispatched agents stack up. One tab,
 /// many stacked panes: a collapsed title-bar is a list row, an expanded
@@ -61,17 +60,7 @@ const DISPATCHER_COMMAND: &str = r#"exec "${SHELL:-/bin/zsh}" -l"#;
 /// in $VC_COMPOSER (or $EDITOR), land the text in the underlying pane
 /// unexecuted, clean up. VC_COMPOSER expands unquoted on purpose — it is a
 /// command line ("open -W -n -a Pensieve", "pensieve --wait"), not a path.
-const COMPOSER_COMMAND: &str = r#"f=$(mktemp "${TMPDIR:-/tmp}/vc-composer.XXXXXX") || exit 1; ${VC_COMPOSER:-${EDITOR:-vim}} "$f"; if [ -s "$f" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars "$(cat "$f")"; fi; rm -f -- "$f""#;
-/// Gallery v0: the aicx wizard is the cross-agent session gallery — one
-/// timeline over claude/codex/grok/gemini histories. The chip opens it in a
-/// floating pane; a missing aicx leaves an explanatory line instead of a
-/// silently vanishing pane.
-const GALLERY_COMMAND: &str = r#"command -v aicx >/dev/null 2>&1 && exec aicx wizard; echo "aicx not found on PATH — the Gallery rides on aicx (Loctree/aicx)"; read -r _"#;
-/// Status-bucket session names — wire contract with the triage reaper, kept
-/// identical to `run_triage.rs` (see the session-manager's matching pin).
-/// Bucket sessions never count toward the fleet pulse.
-const BUCKET_SESSION_NAMES: [&str; 3] = ["Finalized runs", "Failed runs", "Needs attention"];
-
+const COMPOSER_COMMAND: &str = r#"if [ -x "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh" ]; then "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh"; else f=$(mktemp "${TMPDIR:-/tmp}/vc-composer.XXXXXX") || exit 1; ${VC_COMPOSER:-vim -c 'set number' -c 'set laststatus=0'} "$f"; if [ -s "$f" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars "$(cat "$f")"; fi; rm -f -- "$f"; fi"#;
 #[derive(Debug, Default)]
 pub struct LinePart {
     part: String,
@@ -114,15 +103,17 @@ struct State {
     is_first_run: bool,
     own_tab_index: Option<usize>,
     own_client_id: u16,
+    // Last (mode, coordinates) actually sent to the server. Repositioning is
+    // idempotent against this: a persistent tooltip receives ModeUpdate
+    // broadcasts that its own coordinate/rename calls trigger, and resending
+    // on every echo made a self-sustaining ~12/s reposition storm (the
+    // jumping screen of 2026-07-31).
+    last_sent_tooltip_state: Option<(InputMode, FloatingPaneCoordinates)>,
 
     // Keybinding cache
     cached_keybinds: KeybindsVec,
 
-    // Fleet pulse: live agent-process count across every session (the rail's
-    // LIVE number promoted to the bar). Fed by SessionUpdate.
-    live_count: usize,
-
-    // ⌬ Agents chip: the Dispatcher spawn is deferred until a TabUpdate
+    // ⌬ Quick cmd chip: the Dispatcher spawn is deferred until a TabUpdate
     // confirms the Agents tab is the active one. Firing it in the same
     // click raced tab creation and floated the shell over the wrong tab.
     pending_dispatcher_spawn: bool,
@@ -141,8 +132,6 @@ impl ZellijPlugin for State {
         self.own_plugin_id = Some(plugin_ids.plugin_id);
         self.own_client_id = plugin_ids.client_id;
         self.initialize_configuration(configuration);
-        // The fleet pulse needs the cross-session snapshot (SessionUpdate).
-        request_permission(&[PermissionType::ReadApplicationState]);
         self.setup_subscriptions();
         self.configure_keybinds();
     }
@@ -178,12 +167,6 @@ impl ZellijPlugin for State {
             Event::SystemClipboardFailure => self.handle_clipboard_failure(),
             Event::Timer(_) => self.handle_clipboard_hint_timeout(),
             Event::InputReceived => self.handle_input_received(),
-            Event::SessionUpdate(sessions, _) => {
-                let live_count = fleet_live_count(&sessions);
-                let should_render = self.live_count != live_count;
-                self.live_count = live_count;
-                should_render
-            },
             Event::PermissionRequestResult(_) => true,
             _ => false,
         }
@@ -256,7 +239,6 @@ impl State {
                 EventType::SystemClipboardFailure,
                 EventType::InitialKeybinds,
                 EventType::Timer,
-                EventType::SessionUpdate,
                 EventType::PermissionRequestResult,
             ]
         };
@@ -492,10 +474,6 @@ impl State {
             open_composer();
             return;
         }
-        if self.sentinel_clicked(col, GALLERY_CLICK_SENTINEL) {
-            open_gallery();
-            return;
-        }
         if self.sentinel_clicked(col, AGENTS_CLICK_SENTINEL) {
             self.open_agents_station();
             return;
@@ -558,40 +536,6 @@ fn open_composer() {
     }
 }
 
-/// Click path of the ䷅ LIVE chip: the Gallery — cross-agent session history
-/// in a floating pane (aicx wizard, Gallery v0).
-fn open_gallery() {
-    let command = CommandToRun::new_with_args("sh", vec!["-c", GALLERY_COMMAND]);
-    if let Some(PaneId::Terminal(terminal_pane_id)) =
-        open_command_pane_floating(command, None, BTreeMap::new())
-    {
-        rename_terminal_pane(terminal_pane_id, "Gallery");
-    }
-}
-
-/// The rail's LIVE number, recomputed from the same predicate the rail uses:
-/// a tab is "live" when it holds at least one non-plugin pane that has not
-/// exited and is not held. Bucket sessions are pinned drawers, not fleet.
-fn fleet_live_count(sessions: &[SessionInfo]) -> usize {
-    sessions
-        .iter()
-        .filter(|session| !BUCKET_SESSION_NAMES.contains(&session.name.as_str()))
-        .map(|session| {
-            session
-                .tabs
-                .iter()
-                .filter(|tab| {
-                    session.panes.panes.get(&tab.position).is_some_and(|panes| {
-                        panes
-                            .iter()
-                            .any(|pane| !pane.is_plugin && !pane.exited && !pane.is_held)
-                    })
-                })
-                .count()
-        })
-        .sum()
-}
-
 impl State {
     fn scroll_tab_down(&self) {
         let prev_tab = max(self.active_tab_idx.saturating_sub(1), 1);
@@ -648,11 +592,16 @@ impl State {
         args
     }
 
-    fn update_tooltip_for_mode_change(&self, new_mode: InputMode) {
+    fn update_tooltip_for_mode_change(&mut self, new_mode: InputMode) {
         if let Some(plugin_id) = self.own_plugin_id {
             let coordinates = self.calculate_tooltip_coordinates();
+            let next_state = (new_mode, coordinates.clone());
+            if self.last_sent_tooltip_state.as_ref() == Some(&next_state) {
+                return;
+            }
             change_floating_panes_coordinates(vec![(PaneId::Plugin(plugin_id), coordinates)]);
             rename_plugin_pane(plugin_id, format!("{:?}", new_mode));
+            self.last_sent_tooltip_state = Some(next_state);
         }
     }
 
@@ -737,7 +686,6 @@ impl State {
             tooltip_is_active: self.tooltip_is_active,
             brand_text: self.brand_text.clone(),
             brand_text_short: self.brand_text_short.clone(),
-            live_count: self.live_count,
             left_inset: self.left_inset,
         };
         self.tab_line = tab_line(&self.mode_info, tab_data, cols, config);

@@ -22,7 +22,6 @@ pub struct TabLineConfig {
     pub tooltip_is_active: bool,
     pub brand_text: Option<String>,
     pub brand_text_short: Option<String>,
-    pub live_count: usize,
     pub left_inset: usize,
 }
 
@@ -417,23 +416,23 @@ impl RightSideElementsBuilder {
         let mut elements = Vec::new();
 
         elements.push(self.create_composer_chip());
-        elements.push(self.create_agents_chip());
+        elements.push(self.create_quick_cmd_chip());
 
         if let Some(ref tooltip_key) = config.toggle_tooltip_key {
             elements.push(self.create_tooltip_indicator(tooltip_key, config.tooltip_is_active));
         }
 
-        elements.push(self.create_live_chip(config.live_count));
-
         elements
     }
 
-    /// The Agents station entry point — the NOW-view of the fleet, sibling
-    /// of ䷅ LIVE → Gallery (the WAS-view). ⌬ (U+232C BENZENE RING) is
-    /// EAW-narrow, text-presentation only. Click lands in the station and
-    /// floats the Dispatcher.
-    fn create_agents_chip(&self) -> LinePart {
-        let plain = " · ⌬ Agents";
+    /// The Quick cmd chip — honest about what the click gives: a floating
+    /// dispatch shell to type into, not an agents dashboard (operator call
+    /// 2026-07-31: "to tak naprawdę Quick command line"). ⌬ (U+232C BENZENE
+    /// RING) is EAW-narrow, text-presentation only. The fleet's LIVE count
+    /// lives on the bottom status-bar now — the bar's right side is entry
+    /// points only, statuses belong below.
+    fn create_quick_cmd_chip(&self) -> LinePart {
+        let plain = " · ❯_ Quick cmd ";
         let styled_parts = [
             style!(
                 self.palette.text_unselected.emphasis_2,
@@ -445,7 +444,7 @@ impl RightSideElementsBuilder {
                 self.palette.text_unselected.background
             )
             .bold()
-            .paint("⌬ Agents"),
+            .paint("❯_ Quick cmd "),
         ];
 
         LinePart {
@@ -472,35 +471,6 @@ impl RightSideElementsBuilder {
             part: styled.to_string(),
             len: text.width(),
             tab_index: Some(crate::COMPOSER_CLICK_SENTINEL),
-        }
-    }
-
-    /// The fleet pulse: live agent-process count across every session of
-    /// every vendor — the rail's LIVE counter promoted to the window corner.
-    /// Clicking it opens the Gallery (cross-agent session history).
-    fn create_live_chip(&self, live_count: usize) -> LinePart {
-        let dot_color = if live_count > 0 {
-            self.palette.text_unselected.emphasis_1
-        } else {
-            self.palette.text_unselected.emphasis_2
-        };
-        let label = format!("LIVE {}", live_count);
-        let plain = format!(" · ䷅ {} ", label);
-        let styled_parts = [
-            style!(
-                self.palette.text_unselected.emphasis_2,
-                self.palette.text_unselected.background
-            )
-            .paint(" · "),
-            style!(dot_color, self.palette.text_unselected.background)
-                .bold()
-                .paint(format!("䷅ {} ", label)),
-        ];
-
-        LinePart {
-            part: AnsiStrings(&styled_parts).to_string(),
-            len: plain.width(),
-            tab_index: Some(crate::GALLERY_CLICK_SENTINEL),
         }
     }
 
@@ -664,19 +634,19 @@ pub fn tab_separator(capabilities: PluginCapabilities) -> &'static str {
 /// an artificial state.
 pub fn mode_chip(mode: InputMode) -> (&'static str, &'static str) {
     match mode {
-        InputMode::Normal => ("▷", "NRM"),
-        InputMode::Locked => ("⊝", "LCK"),
-        InputMode::Pane => ("◫", "PAN"),
-        InputMode::Tab => ("𝌁", "TAB"),
-        InputMode::Resize => ("⿺", "RES"),
-        InputMode::Move => ("⿻", "MOV"),
-        InputMode::Scroll => ("↕", "SCR"),
-        InputMode::Search => ("⌕", "FND"),
-        InputMode::EnterSearch => ("⌕↵", "FND"),
-        InputMode::RenameTab => ("✎", "RNT"),
-        InputMode::RenamePane => ("✎", "RNP"),
-        InputMode::Session => ("𝌆", "SES"),
-        InputMode::Prompt => ("⟩", "PMT"),
-        InputMode::Tmux => ("ⓣ", "TMX"),
+        InputMode::Normal => ("│ ▷", "N"),
+        InputMode::Locked => ("│ ⊝", "L"),
+        InputMode::Pane => ("│ ◫", "P"),
+        InputMode::Tab => ("│𝌁", "T"),
+        InputMode::Resize => ("│ ⤢", "R"),
+        InputMode::Move => ("│ ⟷", "M"),
+        InputMode::Scroll => ("│ ⇅", "S"),
+        InputMode::Search => ("│ ⌕", "F"),
+        InputMode::EnterSearch => ("│ ↵", "F"),
+        InputMode::RenameTab => ("│ ✎", "RT"),
+        InputMode::RenamePane => ("│ ✎", "RP"),
+        InputMode::Session => ("│𝌆", "S"),
+        InputMode::Prompt => ("│ ❯", "P"),
+        InputMode::Tmux => ("│ ⓣ", "T"),
     }
 }

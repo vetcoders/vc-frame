@@ -29,7 +29,7 @@
 //! - `tab_history: BTreeMap<ClientId, Vec<usize>>`: History of tab IDs per client
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -59,7 +59,7 @@ use zellij_utils::input::mouse::{MouseEvent, MouseEventType};
 use zellij_utils::input::options::Clipboard;
 use zellij_utils::ipc::{ExitReason, ServerToClientMsg};
 use zellij_utils::pane_size::{PaneGeom, Size, SizeInPixels};
-use zellij_utils::run_triage::{ViewerCreationFence, ViewerCreationFenceRejection};
+use zellij_utils::run_triage::{BucketKind, ViewerCreationFence, ViewerCreationFenceRejection};
 use zellij_utils::shared::clean_string_from_control_and_linebreak;
 use zellij_utils::{
     channels,
@@ -72,6 +72,107 @@ use zellij_utils::{
     },
     position::Position,
 };
+
+/// Lightweight host-to-plugin signal carrying the fleet's live terminal-tab
+/// count. Keep this wire name in sync with the status-bar plugin.
+pub(crate) const VC_FLEET_LIVE_COUNT_MESSAGE: &str = "vc.fleet-live-count.v1";
+/// Exact per-plugin/client deactivation signal. Generic `Visible(false)` is
+/// tab-global and is therefore insufficient when several clients view
+/// different tabs in one non-mirrored session.
+pub(crate) const VC_STATUS_BAR_VISIBILITY_MESSAGE: &str = "vc.status-bar-visibility.v1";
+// Plugin panes retain either the canonical built-in URL or their layout alias.
+// Keep the three runtime spellings as a fallback and also inspect an alias's
+// resolved RunPlugin so renamed aliases of the built-in status bar keep the
+// same lifecycle behavior.
+const STATUS_BAR_PLUGIN_URLS: [&str; 3] =
+    ["vc-frame:status-bar", "zellij:status-bar", "status-bar"];
+
+/// Count live terminal-bearing tabs across working sessions. Triage bucket
+/// sessions are drawers, not fleet, and plugin-only/exited/held tabs do not
+/// represent a running agent process.
+fn fleet_live_count(sessions: &[SessionInfo]) -> usize {
+    sessions
+        .iter()
+        .filter(|session| BucketKind::from_session_name(&session.name).is_none())
+        .map(|session| {
+            session
+                .tabs
+                .iter()
+                .filter(|tab| {
+                    session.panes.panes.get(&tab.position).is_some_and(|panes| {
+                        panes
+                            .iter()
+                            .any(|pane| !pane.is_plugin && !pane.exited && !pane.is_held)
+                    })
+                })
+                .count()
+        })
+        .sum()
+}
+
+fn is_status_bar_plugin_run(run: Option<&Run>) -> bool {
+    let Some(Run::Plugin(run_plugin_or_alias)) = run else {
+        return false;
+    };
+    match run_plugin_or_alias {
+        RunPluginOrAlias::RunPlugin(run_plugin) => {
+            STATUS_BAR_PLUGIN_URLS.contains(&run_plugin.location.display().as_str())
+        },
+        RunPluginOrAlias::Alias(alias) => match &alias.run_plugin {
+            Some(run_plugin) => {
+                STATUS_BAR_PLUGIN_URLS.contains(&run_plugin.location.display().as_str())
+            },
+            None => STATUS_BAR_PLUGIN_URLS.contains(&alias.name.as_str()),
+        },
+    }
+}
+
+/// Build the ordinary broadcast session update plus a scalar update targeted
+/// only at this server's status-bar instances. A broadcast `CustomMessage`
+/// would wake every third-party plugin subscribed to that public event type.
+fn session_update_events(
+    live_sessions: Vec<SessionInfo>,
+    resurrectable_sessions: Vec<(String, Duration)>,
+    status_bar_plugin_targets: Vec<(PluginId, ClientId)>,
+    hidden_status_bar_plugin_targets: Vec<(PluginId, ClientId)>,
+) -> Vec<(Option<PluginId>, Option<ClientId>, Event)> {
+    let live_count = fleet_live_count(&live_sessions).to_string();
+
+    let mut updates = vec![(
+        None,
+        None,
+        Event::SessionUpdate(live_sessions, resurrectable_sessions),
+    )];
+    updates.extend(
+        hidden_status_bar_plugin_targets
+            .into_iter()
+            .map(|(plugin_id, client_id)| {
+                (
+                    Some(plugin_id),
+                    Some(client_id),
+                    Event::CustomMessage(
+                        VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
+                        "false".to_owned(),
+                    ),
+                )
+            }),
+    );
+    updates.extend(
+        status_bar_plugin_targets
+            .into_iter()
+            .map(|(plugin_id, client_id)| {
+                (
+                    Some(plugin_id),
+                    Some(client_id),
+                    Event::CustomMessage(
+                        VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
+                        live_count.clone(),
+                    ),
+                )
+            }),
+    );
+    updates
+}
 
 use crate::background_jobs::{BackgroundJob, reserve_session_state_generation};
 use crate::os_input_output::ResizeCache;
@@ -1519,6 +1620,10 @@ pub(crate) struct Screen {
     connected_clients: Rc<RefCell<HashMap<ClientId, bool>>>, // bool -> is_web_client
     /// The indices of this [`Screen`]'s active [`Tab`]s.
     active_tab_ids: BTreeMap<ClientId, usize>,
+    /// Last status-bar plugin/client pairs known to be active. This lets the
+    /// status-bar lifecycle emit exact per-client deactivation events without
+    /// changing the tab-global `Visible` contract used by other plugins.
+    active_status_bar_plugin_targets_cache: BTreeSet<(PluginId, ClientId)>,
     /// Per-regular-client viewport sizes, used to compute per-tab sizing.
     client_sizes: HashMap<ClientId, Size>,
     global_last_active_tab_id: usize,
@@ -1923,10 +2028,17 @@ const STARTUP_SENTINEL_TOKEN: u32 = 0;
 /// client always replies first; only the old-client and
 /// network-pathological cases ever see this fire.
 const SERVER_FORWARD_TIMEOUT_MS: u64 = 1000;
+// Production: cold hosted CI + first-load wasm plugin workers can stall the
+// plugin bus past 2s; triage-runtime-e2e then fails with "ACK timeout" on
+// ordinary terminal-only new-tab layouts. Tests keep the tight budget so
+// unit suites still fail fast on real hangs.
 #[cfg(not(test))]
-const LAYOUT_COMMIT_ACK_TIMEOUT: Duration = Duration::from_secs(2);
+const LAYOUT_COMMIT_ACK_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(test)]
 const LAYOUT_COMMIT_ACK_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(not(test))]
+const LAYOUT_COMMIT_ACK_ATTEMPTS: usize = 3;
+#[cfg(test)]
 const LAYOUT_COMMIT_ACK_ATTEMPTS: usize = 2;
 #[cfg(not(test))]
 const LAYOUT_CLEANUP_ACK_TIMEOUT: Duration = Duration::from_secs(2);
@@ -2497,6 +2609,7 @@ impl Screen {
             style: client_attributes.style,
             connected_clients: Rc::new(RefCell::new(HashMap::new())),
             active_tab_ids: BTreeMap::new(),
+            active_status_bar_plugin_targets_cache: BTreeSet::new(),
             client_sizes: HashMap::new(),
             global_last_active_tab_id: 0,
             tabs: BTreeMap::new(),
@@ -6157,6 +6270,39 @@ impl Screen {
         }
     }
 
+    fn active_status_bar_plugin_targets(&self) -> BTreeSet<(PluginId, ClientId)> {
+        self.active_tab_ids
+            .iter()
+            .flat_map(|(client_id, tab_id)| {
+                self.tabs
+                    .get(tab_id)
+                    .into_iter()
+                    .flat_map(|tab| {
+                        tab.get_plugin_ids().into_iter().filter(|plugin_id| {
+                            tab.get_pane_with_id(PaneId::Plugin(*plugin_id))
+                                .is_some_and(|pane| {
+                                    is_status_bar_plugin_run(pane.invoked_with().as_ref())
+                                })
+                        })
+                    })
+                    .map(|plugin_id| (plugin_id, *client_id))
+            })
+            .collect()
+    }
+
+    fn status_bar_plugin_target_transition(
+        &mut self,
+    ) -> (Vec<(PluginId, ClientId)>, Vec<(PluginId, ClientId)>) {
+        let active_targets = self.active_status_bar_plugin_targets();
+        let hidden_targets = self
+            .active_status_bar_plugin_targets_cache
+            .difference(&active_targets)
+            .copied()
+            .collect();
+        self.active_status_bar_plugin_targets_cache = active_targets.clone();
+        (active_targets.into_iter().collect(), hidden_targets)
+    }
+
     fn log_and_report_session_state(&mut self) -> Result<()> {
         let err_context = || "Failed to log and report session state".to_string();
 
@@ -6236,13 +6382,16 @@ impl Screen {
             .iter()
             .map(|(n, d)| (n.clone(), *d))
             .collect();
+        let (status_bar_plugin_targets, hidden_status_bar_plugin_targets) =
+            self.status_bar_plugin_target_transition();
         self.bus
             .senders
-            .send_to_plugin(PluginInstruction::Update(vec![(
-                None,
-                None,
-                Event::SessionUpdate(live_sessions, resurrectable_sessions),
-            )]))
+            .send_to_plugin(PluginInstruction::Update(session_update_events(
+                live_sessions,
+                resurrectable_sessions,
+                status_bar_plugin_targets,
+                hidden_status_bar_plugin_targets,
+            )))
             .with_context(err_context)?;
 
         self.bus
@@ -6275,19 +6424,22 @@ impl Screen {
     ) -> Result<()> {
         self.peer_sessions_cache = new_session_infos;
         self.resurrectable_sessions_cache = resurrectable_sessions;
+        let live_sessions: Vec<SessionInfo> = self.peer_sessions_cache.values().cloned().collect();
+        let resurrectable_sessions: Vec<(String, Duration)> = self
+            .resurrectable_sessions_cache
+            .iter()
+            .map(|(name, created_at)| (name.clone(), *created_at))
+            .collect();
+        let (status_bar_plugin_targets, hidden_status_bar_plugin_targets) =
+            self.status_bar_plugin_target_transition();
         self.bus
             .senders
-            .send_to_plugin(PluginInstruction::Update(vec![(
-                None,
-                None,
-                Event::SessionUpdate(
-                    self.peer_sessions_cache.values().cloned().collect(),
-                    self.resurrectable_sessions_cache
-                        .iter()
-                        .map(|(n, c)| (n.clone(), *c))
-                        .collect(),
-                ),
-            )]))
+            .send_to_plugin(PluginInstruction::Update(session_update_events(
+                live_sessions,
+                resurrectable_sessions,
+                status_bar_plugin_targets,
+                hidden_status_bar_plugin_targets,
+            )))
             .context("failed to update session info")?;
         Ok(())
     }

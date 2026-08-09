@@ -68,8 +68,8 @@ macro_rules! log_actions_in_thread {
                 let mut exit_event_count = 0;
                 move || loop {
                     let (event, _err_ctx) = $receiver
-                        .recv()
-                        .expect("failed to receive event on channel");
+                        .recv_timeout(std::time::Duration::from_secs(60))
+                        .expect("timed out or disconnected waiting for event on channel");
                     match event {
                         $exit_event(..) => {
                             exit_event_count += 1;
@@ -97,8 +97,8 @@ macro_rules! log_actions_in_thread_struct {
                 let mut exit_event_count = 0;
                 move || loop {
                     let (event, _err_ctx) = $receiver
-                        .recv()
-                        .expect("failed to receive event on channel");
+                        .recv_timeout(std::time::Duration::from_secs(60))
+                        .expect("timed out or disconnected waiting for event on channel");
                     match event {
                         $exit_event { .. } => {
                             exit_event_count += 1;
@@ -128,8 +128,8 @@ macro_rules! grant_permissions_and_log_actions_in_thread {
                 let plugin_thread_sender = $plugin_thread_sender.clone();
                 move || loop {
                     let (event, _err_ctx) = $receiver
-                        .recv()
-                        .expect("failed to receive event on channel");
+                        .recv_timeout(std::time::Duration::from_secs(60))
+                        .expect("timed out or disconnected waiting for event on channel");
                     match event {
                         $exit_event(..) => {
                             exit_event_count += 1;
@@ -182,8 +182,8 @@ macro_rules! deny_permissions_and_log_actions_in_thread {
                 let plugin_thread_sender = $plugin_thread_sender.clone();
                 move || loop {
                     let (event, _err_ctx) = $receiver
-                        .recv()
-                        .expect("failed to receive event on channel");
+                        .recv_timeout(std::time::Duration::from_secs(60))
+                        .expect("timed out or disconnected waiting for event on channel");
                     match event {
                         $exit_event(..) => {
                             exit_event_count += 1;
@@ -225,8 +225,8 @@ macro_rules! grant_permissions_and_log_actions_in_thread_naked_variant {
                 let plugin_thread_sender = $plugin_thread_sender.clone();
                 move || loop {
                     let (event, _err_ctx) = $receiver
-                        .recv()
-                        .expect("failed to receive event on channel");
+                        .recv_timeout(std::time::Duration::from_secs(60))
+                        .expect("timed out or disconnected waiting for event on channel");
                     match event {
                         $exit_event => {
                             exit_event_count += 1;
@@ -279,8 +279,8 @@ macro_rules! grant_permissions_and_log_actions_in_thread_struct_variant {
                 let plugin_thread_sender = $plugin_thread_sender.clone();
                 move || loop {
                     let (event, _err_ctx) = $receiver
-                        .recv()
-                        .expect("failed to receive event on channel");
+                        .recv_timeout(std::time::Duration::from_secs(60))
+                        .expect("timed out or disconnected waiting for event on channel");
                     match event {
                         $exit_event { .. } => {
                             exit_event_count += 1;
@@ -6171,8 +6171,8 @@ pub fn granted_permission_request_result() {
             let plugin_thread_sender = plugin_thread_sender.clone();
             move || loop {
                 let (event, _err_ctx) = screen_receiver
-                    .recv()
-                    .expect("failed to receive event on channel");
+                    .recv_timeout(std::time::Duration::from_secs(60))
+                    .expect("timed out or disconnected waiting for event on channel");
                 match event {
                     ScreenInstruction::RequestPluginPermissions(_, plugin_permission) => {
                         let _ =
@@ -6266,8 +6266,8 @@ pub fn denied_permission_request_result() {
             let plugin_thread_sender = plugin_thread_sender.clone();
             move || loop {
                 let (event, _err_ctx) = screen_receiver
-                    .recv()
-                    .expect("failed to receive event on channel");
+                    .recv_timeout(std::time::Duration::from_secs(60))
+                    .expect("timed out or disconnected waiting for event on channel");
                 match event {
                     ScreenInstruction::RequestPluginPermissions(_, plugin_permission) => {
                         let _ =
@@ -12890,8 +12890,8 @@ pub fn mode_update_payload_is_lightweight_for_opted_in_plugins() {
             let plugin_thread_sender = plugin_thread_sender.clone();
             move || loop {
                 let (event, _err_ctx) = screen_receiver
-                    .recv()
-                    .expect("failed to receive event on channel");
+                    .recv_timeout(std::time::Duration::from_secs(60))
+                    .expect("timed out or disconnected waiting for event on channel");
                 match event {
                     ScreenInstruction::RequestPluginPermissions(plugin_id, plugin_permission) => {
                         let _ =
@@ -13055,8 +13055,8 @@ pub fn reconfiguration_resends_keybinds_to_opted_in_plugins() {
             let plugin_thread_sender = plugin_thread_sender.clone();
             move || loop {
                 let (event, _err_ctx) = screen_receiver
-                    .recv()
-                    .expect("failed to receive event on channel");
+                    .recv_timeout(std::time::Duration::from_secs(60))
+                    .expect("timed out or disconnected waiting for event on channel");
                 match event {
                     ScreenInstruction::RequestPluginPermissions(plugin_id, plugin_permission) => {
                         let _ =

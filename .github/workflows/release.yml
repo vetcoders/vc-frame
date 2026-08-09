@@ -15,7 +15,7 @@ concurrency:
 jobs:
   verify-release:
     name: verify-release-contract
-    runs-on: [self-hosted, ops-linux]
+    runs-on: ubuntu-latest
     environment: release
     steps:
       - name: Checkout repository
@@ -164,7 +164,7 @@ jobs:
 
   create-release:
     needs: verify-release
-    runs-on: [self-hosted, ops-linux]
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
@@ -247,22 +247,22 @@ jobs:
           - windows x64
         include:
           - build: linux musl x64
-            runner: [self-hosted, ops-linux]
+            runner: ubuntu-latest
             target: x86_64-unknown-linux-musl
           - build: linux musl aarch64
-            runner: [self-hosted, linux-vetcoders]
+            runner: ubuntu-latest
             target: aarch64-unknown-linux-musl
 #          - build: linux musl riscv64
-#            runner: [self-hosted, ops-linux]
+#            runner: ubuntu-latest
 #            target: riscv64gc-unknown-linux-musl
           - build: macos x64
-            runner: [self-hosted, dragon-macos]
+            runner: macos-latest
             target: x86_64-apple-darwin
           - build: macos aarch64
-            runner: [self-hosted, dragon-macos]
+            runner: macos-latest
             target: aarch64-apple-darwin
           - build: windows x64
-            runner: [self-hosted, windows]
+            runner: windows-latest
             target: x86_64-pc-windows-msvc
     steps:
       - name: Checkout repository
@@ -502,22 +502,22 @@ jobs:
           - windows x64
         include:
           - build: linux musl x64
-            runner: [self-hosted, ops-linux]
+            runner: ubuntu-latest
             target: x86_64-unknown-linux-musl
           - build: linux musl aarch64
-            runner: [self-hosted, linux-vetcoders]
+            runner: ubuntu-latest
             target: aarch64-unknown-linux-musl
 #          - build: linux musl riscv64
-#            runner: [self-hosted, ops-linux]
+#            runner: ubuntu-latest
 #            target: riscv64gc-unknown-linux-musl
           - build: macos x64
-            runner: [self-hosted, dragon-macos]
+            runner: macos-latest
             target: x86_64-apple-darwin
           - build: macos aarch64
-            runner: [self-hosted, dragon-macos]
+            runner: macos-latest
             target: aarch64-apple-darwin
           - build: windows x64
-            runner: [self-hosted, windows]
+            runner: windows-latest
             target: x86_64-pc-windows-msvc
     steps:
       - name: Checkout repository
@@ -740,7 +740,7 @@ jobs:
   publish-manifest:
     needs: [create-release, build-release-normal, build-release-noweb]
     name: publish-manifest
-    runs-on: [self-hosted, ops-linux]
+    runs-on: ubuntu-latest
     environment: release
     permissions:
       contents: write
@@ -853,7 +853,7 @@ jobs:
   verify-and-publish:
     needs: [build-release-normal, build-release-noweb, publish-manifest]
     name: verify-assets-and-publish
-    runs-on: [self-hosted, ops-linux]
+    runs-on: ubuntu-latest
     environment: release
     permissions:
       contents: write

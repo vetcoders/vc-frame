@@ -2,13 +2,13 @@
 source: src/tests/e2e/cases.rs
 expression: last_snapshot
 ---
- 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. (e2e-test)  Tab #1                                                                                                    Alt <[]>  VERTICAL 
+ 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. (e2e-test)   ◉ Tab #1                                                                                                 
 ┌ Pane #1 ────────────────────────────────────────────────────────────────┐┌ /usr/src/zellij/fixtures/append-echo-script.sh ─────────────────────────┐
 │$ /usr/src/zellij/zellij run -s -- "/usr/src/zellij/fixtures/append-echo-││foo                                                                      │
 │script.sh"                                                               ││foo                                                                      │
-│terminal_1                                                               ││█                                                                        │
-│$                                                                        ││                                                                         │
-│$                                                                        ││                                                                         │
+│terminal_1                                                               ││foo                                                                      │
+│$                                                                        ││foo                                                                      │
+│$                                                                        ││█                                                                        │
 │                                                                         ││                                                                         │
 │                                                                         ││                                                                         │
 │                                                                         ││                                                                         │
@@ -25,4 +25,3 @@ expression: last_snapshot
 │                                                                         ││                                                                         │
 │                                                                         ││                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘└ [ EXIT CODE: 0 ] <ENTER> re-run, <ESC> drop to shell, <Ctrl-c> exit ────┘
- Ctrl + <g> LOCK  <p> PANE  <t> TAB  <n> RESIZE  <h> MOVE  <s> SEARCH  <o> SESSION  <q> QUIT                                      ...

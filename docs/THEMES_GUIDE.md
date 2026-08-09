@@ -65,17 +65,16 @@ color index. Components rendered through the `Text` API resolve
 ### `text_selected` — selection and the block highlight
 
 `background` is the full-width bar behind: rail hover, keyboard selection,
-the current-session **block tint** (the whole block of the session you
-are in, header plus its process rows), and the **active tab chip** on the
-compact-bar (bold ink, `●` marker — one step lighter than the rhythm
-shades, never a full inversion). Emphasis slots mirror `text_unselected`
-so accents survive selection.
+and the current-session **block tint** (the whole block of the session you
+are in, header plus its process rows). Emphasis slots mirror
+`text_unselected` so accents survive selection.
 
-### `ribbon_selected` — "this is armed"
+### `ribbon_selected` — "this is armed / this is where you are"
 
-`background`/`base` paint the armed-mode chip (PANE, TAB, SESSION, …) and
-the inverted LOCK chip. This is the hard inversion of the bar — it belongs
-to the MODE alone; the active tab uses the softer `text_selected` surface.
+`background`/`base` paint the armed-mode chip (PANE, TAB, SESSION, …), the
+inverted LOCK chip, and the **active tab chip** (`◉`, bold) — the same
+hard inversion the bottom bar's selected ribbon uses, so the whole chrome
+answers "where am I" with one surface.
 
 ### `ribbon_unselected` — inactive ribbons
 
@@ -102,13 +101,18 @@ never will.
 
 1. **Single accent over grayscale.** One accent color (`emphasis_1`) means
    "you are here", everywhere. Everything else is ink, dim ink, or ground.
-2. **State is a glyph and a weight, not a shade.** Active tab: `●` in bold
-   on the block tint. Inactive: `○` in dim, one shared ink color for the
-   whole zone. Current session: `*`. Others: `-`. Locked: `⚿`. Normal:
-   `⌁`. Alternating ribbon shades are rhythm — they carry no state, so
-   recoloring them can never lie about focus. Chip edges are half-block
-   seams (`▐`/`▌`, fg = chip, bg = ground): the boundary between two tabs
-   is split 50|50 on the border line, never a painted-on rule.
+2. **State is a glyph and a contrast, not a shade.** The tab zone speaks
+   the exact chip language of the bottom status-bar: active tab = `◉`
+   (fisheye) with `ribbon_selected` ink on the `ribbon_selected`
+   background; inactive tabs = `○` with `ribbon_unselected` ink on the
+   `ribbon_unselected` background — everything bold. Alternating ribbon
+   shades (`ribbon_unselected.emphasis_1`) are rhythm — they carry no
+   state, so recoloring them can never lie about focus. Chips are
+   separated by one cell of bar ground on each side: the seam is
+   breathing room, never a painted-on rule and never a half-block.
+   The same `◉`/`○` pair marks the rail: current session `◉`, every
+   other session and bucket row `○` — one "you are here" glyph across
+   the whole chrome. Locked: `⊝`. Normal: `▷`.
 3. **Three highlight levels.** Ground < block tint (`text_selected`
    background) < inversion (accent background). The rail uses all three:
    plain rows, the current-session block, the active tab row inside it.
@@ -125,9 +129,10 @@ Four decisions produce a coherent theme; everything else derives:
    shades near it).
 2. **Ink** — `text_unselected.base`, readable on ground.
 3. **Accent** — `text_unselected.emphasis_1` *and*
-   `ribbon_selected.background`: one hue for "you are here" and the armed
-   MODE chip keeps the whole chrome speaking one language. The active tab
-   does not take the accent — it sits on the block tint with bold ink.
+   `ribbon_selected.background`: one hue for "you are here", the armed
+   MODE chip and the active tab chip — the top bar, the rail and the
+   bottom shortcut bar all invert on the same ribbon accent, so the whole
+   chrome speaks one language.
 4. **Alarm** — `emphasis_3`, reserved for bells; nothing else may use it.
 
 Then set `text_selected.background` to a step between ground and accent

@@ -85,6 +85,10 @@ frame still misbehaves; the restart closes exactly that gap.
 | `config-shadowing` | WARN | contract verbs simply absent: session `x`, session `r` (rail), LOCK navigation | same, or add the binds by hand |
 | `lock-stranding` | WARN | `auto_lock_after_seconds > 0` while LOCK has no navigation beyond `Ctrl+g` — the frame appears to freeze every N seconds | repair, or set `auto_lock_after_seconds 0` |
 | `install-freshness` | WARN | the installed binary is older than the checkout — a fix in the source that is not in the binary looks exactly like a fix that does not work | `make install` |
+| `asset-integrity` | CRITICAL | embedded plugin bytes disagree with the binary's own SHA-256 receipt — the build mixes plugin generations | `make install` (rebuilds a consistent binary) |
+| `asset-integrity` | WARN | the plugin receipt and the embedded plugin set name different files | `make plugins-assets`, then reinstall |
+| `host-terminal` | CRITICAL | Alacritty does not map Option to Alt (`option_as_alt` absent or `"None"`) — the whole Alt writer layer emits accented glyphs instead of reaching vc-frame | set `option_as_alt = "Both"` in alacritty.toml |
+| `host-terminal` | WARN | the host terminal binds Command/Super keys itself — those fire in the terminal before vc-frame ever sees them | remove or rebind the listed entries |
 | `shell` | INFO | no `SHELL` in the **caller** environment (the process running `doctor`); the live server has its own env → passwd → `/bin/sh` chain | none; informational |
 | `config-shadowing` | WARN | selected layout could not be analysed — doctor refuses to claim a match because layout may override keybinds | fix `default_layout` / `layout_dir`, or drop them for the built-in default |
 | `config-parse` | ERROR | the config does not parse — vc-frame is running on defaults and your file is doing nothing | fix the reported KDL error |

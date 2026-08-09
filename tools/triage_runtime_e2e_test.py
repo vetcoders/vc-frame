@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -682,9 +683,15 @@ class EvidenceAndCleanupTests(unittest.TestCase):
             member_snapshots: list[list[dict[str, object]]] = []
 
             def observe() -> dict[str, object] | None:
+                # write_text is open→write→close; another process can observe
+                # an empty file between create and flush. Only treat a
+                # non-empty pid body as "ready".
                 if not marker.is_file():
                     return None
-                return {"marker": marker.read_text(encoding="utf-8")}
+                text = marker.read_text(encoding="utf-8").strip()
+                if not text:
+                    return None
+                return {"marker": text}
 
             def signal_exact_process(pid: int, signal_number: int) -> None:
                 exact_signals.append((pid, signal_number))
@@ -698,7 +705,12 @@ class EvidenceAndCleanupTests(unittest.TestCase):
             def record_stopped_child(
                 state: dict[str, object],
             ) -> dict[str, object]:
-                child_pid = int(marker.read_text(encoding="utf-8"))
+                text = marker.read_text(encoding="utf-8").strip()
+                deadline = time.monotonic() + 2.0
+                while not text and time.monotonic() < deadline:
+                    time.sleep(0.001)
+                    text = marker.read_text(encoding="utf-8").strip()
+                child_pid = int(text)
                 return {
                     **state,
                     "child_pid": child_pid,

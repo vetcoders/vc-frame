@@ -4,7 +4,7 @@ on:
   push:
     # Direct delivery only. Do not add `develop` here: the open develop→main
     # PR already re-runs on every develop push, and a second push trigger would
-    # double the self-hosted fleet load.
+    # double every CI run.
     branches: [main]
   pull_request:
     # Feature branches targeting develop need the same gate as main-bound PRs.
@@ -27,9 +27,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [linux-vetcoders, dragon-macos]
+        os: [ubuntu-latest, macos-latest]
 
-    runs-on: [self-hosted, '${{ matrix.os }}']
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -70,7 +70,7 @@ jobs:
   build-windows:
     name: Build (Windows)
     timeout-minutes: 60
-    runs-on: [self-hosted, windows]
+    runs-on: windows-latest
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -92,71 +92,11 @@ jobs:
       - name: Install NASM
         uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1
 
-      - name: Configure Windows tools for vendored OpenSSL
-        shell: pwsh
-        run: |
-          $gitPerl = Join-Path $env:ProgramFiles 'Git\usr\bin'
-          $perl = Join-Path $gitPerl 'perl.exe'
-          if (-not (Test-Path $perl)) {
-            throw "MSYS Perl is required at $perl for OpenSSL's mingw build"
-          }
-          $platform = & $perl -e 'print $^O'
-          if ($platform -ne 'msys') {
-            throw "Expected MSYS Perl, got $platform"
-          }
-          $strawberryLib = 'C:\Strawberry\perl\lib'
-          $simpleModule = Join-Path $strawberryLib 'Locale\Maketext\Simple.pm'
-          $moduleRoots = @(
-            (Join-Path $strawberryLib 'ExtUtils')
-            (Join-Path $strawberryLib 'Pod')
-          )
-          $gmake = 'C:\Strawberry\c\bin\gmake.exe'
-          $requiredPaths = @($simpleModule, $gmake) + $moduleRoots
-          foreach ($requiredPath in $requiredPaths) {
-            if (-not (Test-Path $requiredPath)) {
-              throw "Required OpenSSL build tool is missing at $requiredPath"
-            }
-          }
-          $perlLib = Join-Path $env:RUNNER_TEMP 'vc-frame-perl-lib'
-          $buildTools = Join-Path $env:RUNNER_TEMP 'vc-frame-build-tools'
-          New-Item -ItemType Directory -Force -Path $buildTools | Out-Null
-          $make = Join-Path $buildTools 'make.exe'
-          Copy-Item -LiteralPath $gmake -Destination $make -Force
-          $makeVersion = @(& $make --version)
-          if ($LASTEXITCODE -ne 0 -or $makeVersion[0] -notmatch '^GNU Make ') {
-            throw "GNU make preflight failed at $make"
-          }
-          $moduleFiles = @(Get-Item -LiteralPath $simpleModule)
-          foreach ($moduleRoot in $moduleRoots) {
-            $moduleFiles += @(
-              Get-ChildItem -LiteralPath $moduleRoot -Recurse -File -Filter '*.pm'
-            )
-          }
-          foreach ($moduleFile in $moduleFiles) {
-            $relativePath = $moduleFile.FullName.Substring($strawberryLib.Length + 1)
-            $destination = Join-Path $perlLib $relativePath
-            New-Item -ItemType Directory -Force -Path (Split-Path $destination -Parent) |
-              Out-Null
-            Copy-Item -LiteralPath $moduleFile.FullName -Destination $destination -Force
-          }
-          $cygpath = Join-Path $gitPerl 'cygpath.exe'
-          $msysPerlLib = & $cygpath -u $perlLib
-          if ($LASTEXITCODE -ne 0 -or -not $msysPerlLib) {
-            throw "Could not translate $perlLib for MSYS Perl"
-          }
-          $env:PERL5OPT = "-I$msysPerlLib"
-          & $perl -MLocale::Maketext::Simple -MIPC::Cmd -MPod::Usage `
-            -MExtUtils::MakeMaker -e 'print qq(modules=ok\n)'
-          if ($LASTEXITCODE -ne 0) {
-            throw "MSYS Perl cannot load the OpenSSL configure modules"
-          }
-          $gitPerl | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          $buildTools | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          "OPENSSL_SRC_PERL=$perl" |
-            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "PERL5OPT=-I$msysPerlLib" |
-            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
+      # Vendored OpenSSL on the MSVC toolchain needs only perl + nasm; the
+      # hosted windows-latest image ships Strawberry Perl on PATH. The MSYS
+      # perl relocation dance that used to live here was scaffolding for the
+      # self-hosted mingw runner (retired 2026-08-02, public repos run on
+      # GitHub-hosted runners only).
       - name: Build
         run: cargo xtask build
 
@@ -167,9 +107,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [linux-vetcoders, dragon-macos]
+        os: [ubuntu-latest, macos-latest]
 
-    runs-on: [self-hosted, '${{ matrix.os }}']
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -199,7 +139,7 @@ jobs:
   test-windows:
     name: Test (Windows)
     timeout-minutes: 60
-    runs-on: [self-hosted, windows]
+    runs-on: windows-latest
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -229,7 +169,7 @@ jobs:
   test-no-web:
     name: Test (No Web)
     timeout-minutes: 90
-    runs-on: [self-hosted, linux-vetcoders]
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -254,7 +194,7 @@ jobs:
   format:
     name: Check Formatting
     timeout-minutes: 15
-    runs-on: [self-hosted, linux-vetcoders]
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4

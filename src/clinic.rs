@@ -91,6 +91,8 @@ pub enum Section {
     ConfigShadowing,
     LockStranding,
     InstallFreshness,
+    AssetIntegrity,
+    HostTerminal,
     Shell,
     ConfigParse,
 }
@@ -102,6 +104,8 @@ impl Section {
             Section::ConfigShadowing => "config-shadowing",
             Section::LockStranding => "lock-stranding",
             Section::InstallFreshness => "install-freshness",
+            Section::AssetIntegrity => "asset-integrity",
+            Section::HostTerminal => "host-terminal",
             Section::Shell => "shell",
             Section::ConfigParse => "config-parse",
         }
@@ -112,15 +116,19 @@ impl Section {
             Section::ConfigShadowing => "CONFIG SHADOWING",
             Section::LockStranding => "LOCK STRANDING",
             Section::InstallFreshness => "INSTALL FRESHNESS",
+            Section::AssetIntegrity => "ASSET INTEGRITY",
+            Section::HostTerminal => "HOST TERMINAL",
             Section::Shell => "SHELL",
             Section::ConfigParse => "CONFIG PARSE",
         }
     }
 
-    const ORDER: [Section; 5] = [
+    const ORDER: [Section; 7] = [
         Section::ConfigShadowing,
         Section::LockStranding,
         Section::InstallFreshness,
+        Section::AssetIntegrity,
+        Section::HostTerminal,
         Section::Shell,
         Section::ConfigParse,
     ];
@@ -607,6 +615,9 @@ fn diagnose_full(
         },
     };
 
+    diagnose_config_resolution(&mut diagnosis, config_path);
+    diagnose_version_receipt(&mut diagnosis);
+
     match (config_path, raw) {
         (Some(path), Some(raw)) => {
             diagnose_config(&mut diagnosis, path, raw, &contract);
@@ -637,8 +648,108 @@ fn diagnose_full(
     }
 
     diagnose_freshness(&mut diagnosis);
+    diagnose_assets(&mut diagnosis);
+    diagnose_host_terminal(&mut diagnosis);
     diagnose_shell(&mut diagnosis);
     diagnosis
+}
+
+/// List every config-dir candidate and mark which one won — the operator
+/// must never have to guess why a session is chrome-less.
+fn diagnose_config_resolution(diagnosis: &mut Diagnosis, winner: Option<&Path>) {
+    use zellij_utils::home::{default_config_dirs, frontier_config_dir, home_config_dir};
+
+    let mut lines = Vec::new();
+    if let Ok(env) = std::env::var("VC_FRAME_CONFIG_DIR") {
+        lines.push(format!("env VC_FRAME_CONFIG_DIR={env}"));
+    } else {
+        lines.push("env VC_FRAME_CONFIG_DIR=(unset)".to_owned());
+    }
+    for (label, path) in [
+        ("home", home_config_dir()),
+        ("frontier", frontier_config_dir()),
+    ] {
+        match path {
+            Some(p) => {
+                let kdl = p.join("config.kdl");
+                let mark = if kdl.is_file() {
+                    "config.kdl present"
+                } else if p.exists() {
+                    "dir exists, no config.kdl"
+                } else {
+                    "missing"
+                };
+                lines.push(format!("{label}: {} [{mark}]", p.display()));
+            },
+            None => lines.push(format!("{label}: (none)")),
+        }
+    }
+    // Remaining candidates from the shared list (XDG + system).
+    for (idx, cand) in default_config_dirs().into_iter().flatten().enumerate() {
+        let label = format!("candidate[{idx}]");
+        let kdl = cand.join("config.kdl");
+        let mark = if kdl.is_file() {
+            "config.kdl present"
+        } else if cand.exists() {
+            "dir exists, no config.kdl"
+        } else {
+            "missing"
+        };
+        // Skip duplicates already printed as home/frontier.
+        let already = lines
+            .iter()
+            .any(|line| line.contains(&cand.display().to_string()));
+        if !already {
+            lines.push(format!("{label}: {} [{mark}]", cand.display()));
+        }
+    }
+    match winner {
+        Some(path) => lines.push(format!("WINNER → {}", path.display())),
+        None => lines.push("WINNER → (shipped assets only)".to_owned()),
+    }
+    diagnosis.ok_notes.push((
+        Section::ConfigParse,
+        format!("config resolution\n  {}", lines.join("\n  ")),
+    ));
+}
+
+/// Always surface the binary's build identity + plugin receipt summary so
+/// mixed generations cannot silently "jakoś działa".
+fn diagnose_version_receipt(diagnosis: &mut Diagnosis) {
+    use zellij_utils::asset_integrity::{PluginReceiptCheck, verify_embedded_plugins};
+    use zellij_utils::build_info::build_info;
+    use zellij_utils::consts::{CLIENT_SERVER_CONTRACT_VERSION, VERSION};
+
+    let info = build_info();
+    let version_line = format!(
+        "bin {VERSION} · contract_version_{CLIENT_SERVER_CONTRACT_VERSION} · build {}",
+        info.human_version()
+    );
+    let receipt_line = match verify_embedded_plugins() {
+        PluginReceiptCheck::NotApplicable(reason) => format!("plugins: n/a ({reason})"),
+        PluginReceiptCheck::Report {
+            verified,
+            mismatched,
+            unreceipted,
+            unembedded,
+        } => {
+            if mismatched.is_empty() && unreceipted.is_empty() && unembedded.is_empty() {
+                format!("plugins: {} verified against receipt", verified.len())
+            } else {
+                format!(
+                    "plugins: {} ok, {} mismatch, {} unreceipted, {} unembedded",
+                    verified.len(),
+                    mismatched.len(),
+                    unreceipted.len(),
+                    unembedded.len()
+                )
+            }
+        },
+    };
+    diagnosis.ok_notes.push((
+        Section::AssetIntegrity,
+        format!("{version_line} · {receipt_line}"),
+    ));
 }
 
 fn diagnose_config(diagnosis: &mut Diagnosis, path: &Path, raw: &str, contract: &Config) {
@@ -1053,6 +1164,309 @@ fn diagnose_freshness(diagnosis: &mut Diagnosis) {
         diagnosis
             .ok_notes
             .push((Section::InstallFreshness, freshness.diagnostic_line()));
+    }
+}
+
+fn diagnose_assets(diagnosis: &mut Diagnosis) {
+    use zellij_utils::asset_integrity::{PluginReceiptCheck, verify_embedded_plugins};
+    match verify_embedded_plugins() {
+        PluginReceiptCheck::NotApplicable(reason) => {
+            diagnosis
+                .ok_notes
+                .push((Section::AssetIntegrity, reason.to_owned()));
+        },
+        PluginReceiptCheck::Report {
+            verified,
+            mismatched,
+            unreceipted,
+            unembedded,
+        } => {
+            if mismatched.is_empty() && unreceipted.is_empty() && unembedded.is_empty() {
+                diagnosis.ok_notes.push((
+                    Section::AssetIntegrity,
+                    format!(
+                        "{} embedded plugins match the shipped SHA-256 receipt",
+                        verified.len()
+                    ),
+                ));
+                return;
+            }
+            if !mismatched.is_empty() {
+                diagnosis.findings.push(
+                    Finding::new(
+                        Section::AssetIntegrity,
+                        Severity::Critical,
+                        "embedded plugin bytes disagree with this binary's own receipt",
+                        "reinstall vc-frame (make install) — this build mixes plugin generations",
+                    )
+                    .with_detail(mismatched),
+                );
+            }
+            if !unreceipted.is_empty() || !unembedded.is_empty() {
+                let mut detail = Vec::new();
+                if !unreceipted.is_empty() {
+                    detail.push(format!(
+                        "embedded but missing from the receipt: {}",
+                        unreceipted.join(", ")
+                    ));
+                }
+                if !unembedded.is_empty() {
+                    detail.push(format!(
+                        "in the receipt but not embedded: {}",
+                        unembedded.join(", ")
+                    ));
+                }
+                diagnosis.findings.push(
+                    Finding::new(
+                        Section::AssetIntegrity,
+                        Severity::Warn,
+                        "the plugin receipt and the embedded plugin set disagree",
+                        "rebuild plugin assets (make plugins-assets) and reinstall",
+                    )
+                    .with_detail(detail),
+                );
+            }
+        },
+    }
+}
+
+/// Where the host terminal's own keyboard config can eat vc-frame's contract
+/// before the app ever sees the key. Reads only what it can prove: the
+/// caller's environment plus the host config file when it is findable.
+fn diagnose_host_terminal(diagnosis: &mut Diagnosis) {
+    let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default();
+    let in_alacritty = std::env::var("ALACRITTY_WINDOW_ID").is_ok()
+        || term_program.eq_ignore_ascii_case("alacritty");
+
+    if !in_alacritty {
+        if term_program.is_empty() {
+            diagnosis.ok_notes.push((
+                Section::HostTerminal,
+                "host terminal not identified from the caller environment — key \
+                 interception not audited"
+                    .to_owned(),
+            ));
+        } else {
+            diagnosis.ok_notes.push((
+                Section::HostTerminal,
+                format!(
+                    "{term_program} (caller environment) — its own shortcuts fire before \
+                     vc-frame; this doctor cannot read that app's bindings"
+                ),
+            ));
+        }
+        return;
+    }
+
+    let Some(config_path) = alacritty_config_path() else {
+        diagnosis.findings.push(Finding::new(
+            Section::HostTerminal,
+            Severity::Info,
+            "running under Alacritty but no alacritty.toml was found",
+            "none; with no config Alacritty keeps macOS Option composing — the Alt \
+             writer layer may emit accented glyphs instead of Alt keys",
+        ));
+        return;
+    };
+    let Ok(raw) = std::fs::read_to_string(&config_path) else {
+        diagnosis.findings.push(Finding::new(
+            Section::HostTerminal,
+            Severity::Warn,
+            format!(
+                "Alacritty config at {} exists but cannot be read",
+                config_path.display()
+            ),
+            "fix the file's permissions — key interception cannot be audited",
+        ));
+        return;
+    };
+
+    let shape = alacritty_key_shape(&raw);
+    if !shape.option_as_alt {
+        diagnosis.findings.push(
+            Finding::new(
+                Section::HostTerminal,
+                Severity::Critical,
+                "Alacritty does not map Option to Alt — the Alt writer layer is dead on macOS",
+                "set `option_as_alt = \"Both\"` in alacritty.toml",
+            )
+            .with_detail(vec![format!("scanned {}", config_path.display())]),
+        );
+    }
+    if shape.super_bindings.is_empty() {
+        diagnosis.ok_notes.push((
+            Section::HostTerminal,
+            format!(
+                "Alacritty ({}) declares no Command/Super bindings — the global \
+                 switcher reaches vc-frame",
+                config_path.display()
+            ),
+        ));
+    } else {
+        diagnosis.findings.push(
+            Finding::new(
+                Section::HostTerminal,
+                Severity::Warn,
+                "Alacritty binds Command/Super keys — the terminal fires them before vc-frame",
+                "remove or rebind the listed entries if the global switcher misses keys",
+            )
+            .with_detail(shape.super_bindings),
+        );
+    }
+}
+
+/// The standard Alacritty config locations, first hit wins — mirrors
+/// Alacritty's own lookup order closely enough to audit the common installs.
+fn alacritty_config_path() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    let xdg = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| format!("{home}/.config"));
+    [
+        format!("{xdg}/alacritty/alacritty.toml"),
+        format!("{home}/.alacritty.toml"),
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .find(|path| path.exists())
+}
+
+struct AlacrittyKeyShape {
+    option_as_alt: bool,
+    super_bindings: Vec<String>,
+}
+
+/// Text-level scan of alacritty.toml — deliberately not a TOML parser. The
+/// doctor needs two truths (is Option mapped to Alt, which bindings claim the
+/// Command/Super mod) and a text scan states them without a new dependency;
+/// anything it cannot prove it simply does not report.
+///
+/// Binding tables often span lines (`bindings = [\n { key = …, mods = … },\n]`),
+/// so Command/Super detection walks a comment-stripped, whitespace-collapsed
+/// blob rather than requiring key+mods on one line. `option_as_alt` still
+/// reads assignment lines, tolerating trailing comments and either quote style.
+fn alacritty_key_shape(raw: &str) -> AlacrittyKeyShape {
+    let mut option_as_alt = false;
+    let mut code_chunks = Vec::new();
+    for line in raw.lines() {
+        let without_comment = match line.find('#') {
+            Some(idx) => &line[..idx],
+            None => line,
+        };
+        let trimmed = without_comment.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(value) = option_as_alt_value(trimmed) {
+            // "None" (any case/quote) = unmapped; any other value = mapped.
+            option_as_alt = !value.eq_ignore_ascii_case("none");
+        }
+        code_chunks.push(trimmed);
+    }
+    let collapsed = code_chunks.join(" ");
+    let lower = collapsed.to_ascii_lowercase();
+    let mut super_bindings = Vec::new();
+    // Walk each `{ … }` binding-ish span in the collapsed text.
+    let mut search_from = 0;
+    while let Some(rel_open) = lower[search_from..].find('{') {
+        let open = search_from + rel_open;
+        let Some(rel_close) = lower[open + 1..].find('}') else {
+            break;
+        };
+        let close = open + 1 + rel_close;
+        let span = &lower[open..=close];
+        if span.contains("key")
+            && span.contains("mods")
+            && (span.contains("command") || span.contains("super"))
+        {
+            // Report the original-casing span from `collapsed`.
+            super_bindings.push(collapsed[open..=close].trim().to_owned());
+        }
+        search_from = close + 1;
+    }
+    AlacrittyKeyShape {
+        option_as_alt,
+        super_bindings,
+    }
+}
+
+/// Parse `option_as_alt = <value>` from a single non-comment line. Returns the
+/// bare value without quotes when the assignment is recognized.
+fn option_as_alt_value(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    let rest = trimmed.strip_prefix("option_as_alt")?.trim_start();
+    let rest = rest.strip_prefix('=')?.trim_start();
+    let value = rest
+        .trim_matches(|c: char| c == '"' || c == '\'' || c.is_whitespace())
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_matches(|c: char| c == '"' || c == '\'');
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_owned())
+    }
+}
+
+#[cfg(test)]
+mod host_terminal_tests {
+    use super::alacritty_key_shape;
+
+    #[test]
+    fn option_as_alt_both_counts_as_mapped() {
+        let shape = alacritty_key_shape("option_as_alt = \"Both\"\n");
+        assert!(shape.option_as_alt);
+        assert!(shape.super_bindings.is_empty());
+    }
+
+    #[test]
+    fn option_as_alt_none_or_absent_reads_as_unmapped() {
+        assert!(!alacritty_key_shape("option_as_alt = \"None\"\n").option_as_alt);
+        assert!(!alacritty_key_shape("[window]\ndecorations = \"none\"\n").option_as_alt);
+    }
+
+    #[test]
+    fn option_as_alt_tolerates_inline_comments_and_single_quotes() {
+        assert!(alacritty_key_shape("option_as_alt = \"Both\" # macOS\n").option_as_alt);
+        assert!(alacritty_key_shape("option_as_alt = 'Both'\n").option_as_alt);
+        assert!(!alacritty_key_shape("option_as_alt = \"None\" # off\n").option_as_alt);
+        assert!(!alacritty_key_shape("option_as_alt = 'None'\n").option_as_alt);
+    }
+
+    #[test]
+    fn a_commented_line_proves_nothing() {
+        assert!(!alacritty_key_shape("# option_as_alt = \"Both\"\n").option_as_alt);
+    }
+
+    #[test]
+    fn command_bindings_are_listed_verbatim() {
+        let toml = "[keyboard]\nbindings = [\n\
+                    { key = \"N\", mods = \"Command\", action = \"CreateNewWindow\" },\n\
+                    { key = \"K\", mods = \"Control\", chars = \"x\" },\n]\n";
+        let shape = alacritty_key_shape(toml);
+        assert_eq!(shape.super_bindings.len(), 1);
+        assert!(shape.super_bindings[0].contains("Command"));
+    }
+
+    #[test]
+    fn multiline_command_bindings_are_still_detected() {
+        let toml = "[keyboard]\nbindings = [\n\
+                    {\n\
+                    key = \"N\",\n\
+                    mods = \"Command\",\n\
+                    action = \"CreateNewWindow\",\n\
+                    },\n\
+                    {\n\
+                    key = \"K\",\n\
+                    mods = \"Control\",\n\
+                    chars = \"x\",\n\
+                    },\n]\n";
+        let shape = alacritty_key_shape(toml);
+        assert_eq!(shape.super_bindings.len(), 1);
+        assert!(
+            shape.super_bindings[0]
+                .to_ascii_lowercase()
+                .contains("command")
+        );
     }
 }
 

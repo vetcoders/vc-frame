@@ -48,85 +48,64 @@ configuration\.
 
 .SH "LAYOUTS"
 .PP
-Layouts are yaml files which vc\-frame can load on startup when \fI\-\-layout\fP flag is
-provided\.
-By default vc\-frame will load a layout called `\f[CR]default\.yaml\fP`,
-but this can be changed by using the `\f[CR]default_layout: [LAYOUT_NAME]\fP` configuration option\.
+Layouts are \f[B]KDL\fP files which vc\-frame can load on startup when the
+\fI\-\-layout\fP flag is provided\.
+YAML layout/config conversion (\f[CR]convert\-config\fP, \f[CR]convert\-layout\fP,
+\f[CR]convert\-theme\fP) has been removed — KDL is the only supported
+configuration format\.
+.PP
+By default vc\-frame will load a layout called \f[CR]default\fP (file
+\f[CR]default\.kdl\fP), but this can be changed with the
+\f[CR]default_layout "name"\fP configuration option\.
 .PP
 For example a file like this:
 .RS
 .PP
 .nf
-\-\-\-
-direction: Vertical
-parts:
-    \- direction: Horizontal
-      split_size:
-        Percent: 50
-      parts:
-        \- direction: Vertical
-          split_size:
-            Percent: 50
-        \- direction: Vertical
-          split_size:
-            Percent: 50
-    \- direction: Horizontal
-      split_size:
-        Percent: 50
+layout {
+    pane split_direction="vertical" {
+        pane
+        pane split_direction="horizontal" {
+            pane
+            pane
+        }
+    }
+}
 .fi
 .RE
 .PP
 will tell vc\-frame to create this layout:
-.RS
-.PP
+.IP
 .nf
-+\-\-\-\-\-+\-\-\-\-\-+|     |     |+\-\-\-\-\-+     ||     |     |+\-\-\-\-\-+\-\-\-\-\-+
+┌─────┬─────┐
+│     │     │
+├─────┤     │
+│     │     │
+└─────┴─────┘
 .fi
-.RE
-
 .SS "CREATING LAYOUTS"
 .PP
-A layout file is a nested tree structure\. Each node describes either a pane
-(leaf), or a space in which its parts (children) will be created\.
+A layout file is a nested tree of \f[CR]pane\fP nodes\.
+Each node describes either a terminal pane (leaf), a split container, or a
+plugin pane\.
 .PP
-Each node has following fields:
-.RS
-.Bl
-.IP \(bu 4
-\fBdirection: <Horizontal / Vertical>\fP \- node's children will be created by a
-split in given direction\.
-.El
-.Bl
-.IP \(bu 4
-\fBsplit_size:\fP \- this indicates either a percentage of the node's parent's
-space or a fixed size of columns/rows from its parent's space\.
-.RS
-.Bl
-.IP \(bu 4
-\fBPercent: <1\-100>\fP
-.El
-.Bl
-.IP \(bu 4
-\fBFixed: <lines_number/columns_number>\fP
-.El
-.RE
-.El
-.Bl
-.IP \(bu 4
-\fBplugin: /path/to/plugin\.wasm\fP \- optional path to a compiled vc\-frame plugin\.
-If indicated loads a plugin into the created space\. For more information see
-PLUGINS section\.
-.El
-.Bl
-.IP \(bu 4
-\fBdefault_fg: <color>\fP \- set the default foreground color for a pane (e\.g\. `\f[CR]"#00e000"\fP`)\.
-.El
-.Bl
-.IP \(bu 4
-\fBdefault_bg: <color>\fP \- set the default background color for a pane (e\.g\. `\f[CR]"#001a3a"\fP`)\.
-.El
-.RE
-
+Common attributes:
+.IP \(bu 2
+\fBsplit_direction="horizontal|vertical"\fP — how children are laid out\.
+.IP \(bu 2
+\fBsize=<n>\fP — fixed size in rows/columns, or a share of the parent\.
+.IP \(bu 2
+\fBplugin location="…"\fP — load a compiled vc\-frame plugin into the pane
+(see PLUGINS)\. Built\-in plugins use the \f[CR]vc\-frame:\fP / short\-name form\.
+.IP \(bu 2
+\fBcommand="…" / args "…"\fP — run a command in the pane instead of a shell\.
+.IP \(bu 2
+\fBborderless true|false\fP — hide pane frames for chrome rails\.
+.PP
+Full layout syntax is documented upstream at
+https://zellij\.dev/documentation/layouts\.html (KDL) and in the in\-repo layout
+fixtures under \f[CR]zellij\-utils/assets/layouts/\fP\.
+.PP
 .SH "KEYBINDINGS"
 .PP
 vc\-frame comes with a default set of keybindings which aims to fit as many users
@@ -137,10 +116,11 @@ will create a new tab and go to tab 1 after pressing 'c' one can write:
 .RS
 .PP
 .nf
-keybinds:
-    normal:
-        \- action: [ NewTab, GoToTab: 1,]
-          key: [ Char: 'c',]
+keybinds {
+    normal {
+        bind "c" { NewTab; GoToTab 1; }
+    }
+}
 .fi
 .RE
 .PP

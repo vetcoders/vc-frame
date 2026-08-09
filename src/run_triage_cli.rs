@@ -2411,8 +2411,12 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().canonicalize().unwrap().join("transfer.lock");
         let parent = RunTransferLock::acquire(&path).unwrap();
-        let child_fd = nix::unistd::dup(parent._file.as_raw_fd()).unwrap();
+        // Match the other inherited-lock scenarios: the duplicated descriptor
+        // must already be CLOEXEC at creation time. A plain dup() + later
+        // F_SETFD leaves a window where a spawned child can keep the flock.
+        let child_fd = duplicate_close_on_exec(parent._file.as_raw_fd());
         let inherited = RunTransferLock::acquire_inherited(&path, child_fd).unwrap();
+        assert_close_on_exec(inherited._file.as_raw_fd());
         drop(parent);
 
         let mut sleeping_child = Command::new("/bin/sh")

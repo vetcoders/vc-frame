@@ -3,5 +3,5 @@ source: zellij-server/src/plugins/./unit/plugin_tests.rs
 expression: "format!(\"{:#?}\", plugin_bytes_event)"
 ---
 Some(
-    "Layout dump success: layout {\n\r    pane size=1 borderless=true {\n\r        plugin location=\"tab-bar\"\n\r    }\n\r    pane\n\r    pane size=1 borderless=true {\n\r        plugin location=\"status-bar\"\n\r    }\n\r}\n\r",
+    "Layout dump success: layout {\n\r    pane size=1 borderless=true {\n\r        plugin location=\"tab-bar\" {\n\r            // 🚥 zone: clear the macOS traffic lights in the native window\n\r            left_inset \"9\"\n\r        }\n\r    }\n\r    pane split_direction=\"vertical\" {\n\r        pane size=24 borderless=true {\n\r            plugin location=\"session-manager\" {\n\r                rail true\n\r                pane_title \"Sessions\"\n\r            }\n\r        }\n\r        pane\n\r    }\n\r    pane size=1 borderless=true {\n\r        plugin location=\"status-bar\"\n\r    }\n\r}\n\r",
 )

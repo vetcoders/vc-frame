@@ -4,18 +4,11 @@ use unicode_width::UnicodeWidthStr;
 use zellij_tile::prelude::*;
 use zellij_tile_utils::style;
 
-/// Fisheye tab markers. The alternating ribbon shades stay, but shade alone
-/// used to double as state — a lighter alternate ribbon read as "active".
-/// Now every inactive tab carries ○ and only the focused tab carries ●, so
-/// the marker is the state and the shade is just rhythm.
-const ACTIVE_TAB_MARKER: &str = "●";
+/// Fisheye tab markers: the focused tab carries ◉ (fisheye, alive center),
+/// every inactive tab carries ○. The marker carries state together with the
+/// chip contrast — shade alone is never the signal.
+const ACTIVE_TAB_MARKER: &str = "◉";
 const INACTIVE_TAB_MARKER: &str = "○";
-
-/// Tab chip edges: each chip owns exactly half of the seam cell on either
-/// side (fg = own background, bg = bar ground), so the boundary between two
-/// chips is split 50|50 on the border line — no painted-on rules.
-const LEFT_EDGE: &str = "▐";
-const RIGHT_EDGE: &str = "▌";
 
 fn cursors<'a>(
     focused_clients: &'a [ClientId],
@@ -41,14 +34,13 @@ pub fn render_tab(
     palette: Styling,
 ) -> LinePart {
     let focused_clients = tab.other_focused_clients.as_slice();
-    // One letter color across the whole tab zone: state is carried by
-    // dim/bold and the ○/● marker, never by switching ink — that is what
-    // used to produce near-white ink on the near-white alternate shade.
-    // The active chip is the soft-selected surface (text_selected), one
-    // step lighter than the rhythm shades; the hard accent inversion
-    // belongs to the mode chip alone.
+    // The tab zone speaks the exact chip language of the bottom status-bar
+    // (`color_elements()` in status-bar): selected = ribbon_selected base on
+    // its background, unselected = ribbon_unselected base on its background,
+    // alternate rows shift the background one step for countable rhythm —
+    // everything bold. Chips are separated by bar ground, not by drawn rules.
     let background_color = if tab.active {
-        palette.text_selected.background
+        palette.ribbon_selected.background
     } else if is_alternate_tab {
         palette.ribbon_unselected.emphasis_1
     } else {
@@ -57,7 +49,7 @@ pub fn render_tab(
     let foreground_color = if tab.is_flashing_bell {
         palette.ribbon_unselected.emphasis_3
     } else if tab.active {
-        palette.text_selected.base
+        palette.ribbon_selected.base
     } else {
         palette.ribbon_unselected.base
     };
@@ -67,15 +59,14 @@ pub fn render_tab(
         INACTIVE_TAB_MARKER
     };
     let ground = palette.text_unselected.background;
-    let text_style = if tab.active {
-        style!(foreground_color, background_color).bold()
-    } else {
-        style!(foreground_color, background_color).dimmed()
-    };
+    let text_style = style!(foreground_color, background_color).bold();
     let padded_text = format!(" {} {} ", marker, text);
-    let left_edge = style!(background_color, ground).paint(LEFT_EDGE);
-    let right_edge = style!(background_color, ground).paint(RIGHT_EDGE);
-    let mut tab_text_len = padded_text.width() + 2; // half-block edge cells
+    // One ground cell on each side keeps chips separated by the bar itself —
+    // the seam is breathing room, never a painted-on rule.
+    let gap = style!(ground, ground);
+    let left_edge = gap.paint(" ");
+    let right_edge = gap.paint(" ");
+    let mut tab_text_len = padded_text.width() + 2; // ground gap cells
 
     let tab_styled_text = text_style.paint(padded_text);
 
@@ -120,8 +111,6 @@ pub fn tab_style(
     if tab.has_bell_notification || tab.is_flashing_bell {
         tabname.push_str(" [!]");
     }
-    // The alternating shade is pure rhythm and no longer depends on host
-    // font capabilities — the half-block edges separate chips everywhere.
     render_tab(tabname, tab, is_alternate_tab, palette)
 }
 

@@ -33,6 +33,7 @@ struct State {
     tab_line: Vec<LinePart>,
     hide_swap_layout_indication: bool,
     cached_keybinds: KeybindsVec,
+    left_inset: usize,
 }
 
 static ARROW_SEPARATOR: &str = "";
@@ -45,6 +46,12 @@ impl ZellijPlugin for State {
             .get("hide_swap_layout_indication")
             .map(|s| s == "true")
             .unwrap_or(false);
+        // 🚥 zone: blank columns before the prefix so the bar clears the
+        // macOS traffic lights — the same knob compact-bar honours.
+        self.left_inset = configuration
+            .get("left_inset")
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .unwrap_or(0);
         set_selectable(false);
         subscribe(&[
             EventType::TabUpdate,
@@ -158,6 +165,7 @@ impl ZellijPlugin for State {
             mode_info: &self.mode_info,
             hide_swap_layout_indicator: self.hide_swap_layout_indication,
             background: &background,
+            left_inset: self.left_inset,
         });
 
         let output = self

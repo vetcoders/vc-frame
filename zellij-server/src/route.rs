@@ -37,11 +37,12 @@ use zellij_utils::{
 use crate::ClientId;
 
 const ACTION_COMPLETION_TIMEOUT: Duration = Duration::from_secs(1);
-// Most `CliTriageIo` child commands have a 10-second outer budget; NewTab gets
-// extra process-start headroom and reconciles its durable tab identity after an
-// ambiguous ACK. The route still must resolve critical actions explicitly
-// instead of blocking forever.
-const CRITICAL_ACTION_COMPLETION_TIMEOUT: Duration = Duration::from_secs(8);
+// Most `CliTriageIo` child commands have a 10-second outer budget. NewTab is
+// the exception: `NEW_TAB_COMMAND_TIMEOUT` is 30s because cold debug wasm
+// plugin load on layout activation (tab-bar/status-bar/session-manager) can
+// legitimately exceed 8s on hosted CI. Keep critical completion under that
+// outer budget so the route still fails closed instead of hanging forever.
+const CRITICAL_ACTION_COMPLETION_TIMEOUT: Duration = Duration::from_secs(25);
 
 #[derive(Debug, Clone)]
 pub struct ActionCompletionResult {
@@ -3674,8 +3675,11 @@ mod tests {
     }
 
     #[test]
-    fn critical_action_deadline_finishes_before_the_outer_cli_timeout() {
-        assert!(CRITICAL_ACTION_COMPLETION_TIMEOUT < Duration::from_secs(10));
+    fn critical_action_deadline_finishes_before_the_outer_new_tab_cli_timeout() {
+        // `CliTriageIo::NEW_TAB_COMMAND_TIMEOUT` is 30s; critical completion must
+        // stay strictly inside that outer budget so the route fails first.
+        assert!(CRITICAL_ACTION_COMPLETION_TIMEOUT < Duration::from_secs(30));
+        assert!(CRITICAL_ACTION_COMPLETION_TIMEOUT > Duration::from_secs(8));
     }
 
     #[test]

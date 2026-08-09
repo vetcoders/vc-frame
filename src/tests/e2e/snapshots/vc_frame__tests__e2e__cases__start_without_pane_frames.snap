@@ -2,27 +2,27 @@
 source: src/tests/e2e/cases.rs
 expression: last_snapshot
 ---
- 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. (e2e-test)  Tab #1 
-$                                                          │$ █                                                         
-$                                                          │                                                            
-                                                           │                                                            
-                                                           │                                                            
-                                                           │                                                            
-                                                           │                                                            
-                                                           │                                                            
-                                                           │                                                            
-                                                           │                                                            
-                                                           │                                                            
-                                                           │                                                            
-                                                           │                                                            
-                                                           │                                                            
-                                                           │                                                            
-                                                           │                                                            
-                                                           │                                                            
-                                                           │                                                            
-                                                           │                                                            
-                                                           │                                                            
-                                                           │                                                            
-                                                           │                                                            
-                                                           │                                                            
- Ctrl + <g> LOCK  <p> PANE  <t> TAB  <n> RESIZE  <h> MOVE  <s> SEARCH  <o> SESSION  <q> QUIT        ...
+          𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. (e2e-test)   ◉ Tab #1                                                          
+SESSIONS 1 · e2e-test  │$ █                                                                                             
+01 ◉ e2e-test          │                                                                                                
+   ◉ Tab #1 · terminal │                                                                                                
+                       │                                                                                                
+                       │                                                                                                
+                       │                                                                                                
+                       │                                                                                                
+                       │                                                                                                
+                       │                                                                                                
+                       │                                                                                                
+                       │                                                                                                
+                       │                                                                                                
+                       │                                                                                                
+                       │                                                                                                
+                       │                                                                                                
+                       │                                                                                                
+                       │                                                                                                
+                       │                                                                                                
+                       │                                                                                                
+ f ○   ? · final       │                                                                                                
+ x ○   ? · fail        │                                                                                                
+ n ○   ? · needs       │                                                                                                
+                                                        ...

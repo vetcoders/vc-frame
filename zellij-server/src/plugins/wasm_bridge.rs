@@ -2128,17 +2128,7 @@ impl WasmBridge {
             .plugin_map
             .lock()
             .unwrap()
-            .running_plugins_and_subscriptions()
-            .iter()
-            .filter(
-                |&(plugin_id, _client_id, _running_plugin, _subscriptions)| {
-                    !&self
-                        .cached_events_for_pending_plugins
-                        .contains_key(plugin_id)
-                },
-            )
-            .cloned()
-            .collect();
+            .running_plugins_and_subscriptions();
 
         // Execute each plugin update on its respective pinned thread.
         // Snapshot each plugin's subscriptions ONCE per call — locking and
@@ -2151,6 +2141,8 @@ impl WasmBridge {
         let plugin_executor = self.plugin_executor.clone();
         for (pid, cid, event) in updates.iter() {
             let (pid, cid) = (*pid, *cid);
+            let refreshable_status_bar_state =
+                Self::is_refreshable_status_bar_state(pid, cid, event);
             // FIXME: This is very janky... Maybe I should write my own macro for Event -> EventType?
             let Ok(event_type) = EventType::from_str(&event.to_string()) else {
                 continue;
@@ -2158,7 +2150,12 @@ impl WasmBridge {
             for ((plugin_id, client_id, running_plugin, _), subs) in
                 plugins_to_update.iter().zip(&plugin_subscription_snapshots)
             {
-                if (subs.contains(&event_type) || event_type == EventType::PermissionRequestResult)
+                if (!self
+                    .cached_events_for_pending_plugins
+                    .contains_key(plugin_id)
+                    || refreshable_status_bar_state)
+                    && (subs.contains(&event_type)
+                        || event_type == EventType::PermissionRequestResult)
                     && Self::message_is_directed_at_plugin(pid, cid, plugin_id, client_id)
                 {
                     // Execute directly on pinned thread (no async I/O needed for event processing)
@@ -2209,7 +2206,15 @@ impl WasmBridge {
 
         // loop once more to update the cached events for the pending plugins (probably currently
         // being loaded, we'll send them these events when they load)
-        for (pid, _cid, event) in updates.drain(..) {
+        for (pid, cid, event) in updates.drain(..) {
+            if Self::is_refreshable_status_bar_state(pid, cid, &event) {
+                // These are current-state signals, not edge-triggered events.
+                // Deliver them directly to an already-ready exact target even
+                // while another client instance is loading, but never put them
+                // in the shared per-plugin cache. A newly loaded status bar
+                // starts idle and requests a fresh server snapshot on success.
+                continue;
+            }
             for (plugin_id, cached_events) in self.cached_events_for_pending_plugins.iter_mut() {
                 if pid.is_none() || pid.as_ref() == Some(plugin_id) {
                     // Keep the newest events — a stuck or crash-looping load
@@ -3193,6 +3198,18 @@ impl WasmBridge {
             || (message_cid.is_none() && message_pid == Some(*plugin_id))
             || (message_cid == Some(*client_id) && message_pid == Some(*plugin_id))
     }
+    fn is_refreshable_status_bar_state(
+        message_pid: Option<PluginId>,
+        message_cid: Option<ClientId>,
+        event: &Event,
+    ) -> bool {
+        message_pid.is_some()
+            && message_cid.is_some()
+            && matches!(event,
+                Event::CustomMessage(message, _)
+                    if message == crate::screen::VC_FLEET_LIVE_COUNT_MESSAGE
+                        || message == crate::screen::VC_STATUS_BAR_VISIBILITY_MESSAGE)
+    }
     pub fn client_is_connected(&self, client_id: &ClientId) -> bool {
         self.connected_clients.lock().unwrap().contains(client_id)
     }
@@ -3850,6 +3867,58 @@ mod layout_plugin_transaction_tests {
             skip_cache: false,
             client_id,
         }
+    }
+
+    #[test]
+    fn refreshable_status_bar_state_bypasses_the_pending_plugin_cache() {
+        let mut bridge = test_bridge(1);
+        let plugin_id = 77;
+        let client_id = 2;
+        bridge
+            .cached_events_for_pending_plugins
+            .insert(plugin_id, vec![]);
+        let (shutdown_sender, _shutdown_receiver) = tokio::sync::mpsc::channel(1);
+
+        bridge
+            .update_plugins(
+                vec![
+                    (
+                        Some(plugin_id),
+                        Some(client_id),
+                        Event::CustomMessage(
+                            crate::screen::VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
+                            "4".to_owned(),
+                        ),
+                    ),
+                    (
+                        Some(plugin_id),
+                        Some(client_id),
+                        Event::CustomMessage(
+                            crate::screen::VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
+                            "false".to_owned(),
+                        ),
+                    ),
+                ],
+                shutdown_sender,
+            )
+            .unwrap();
+
+        assert!(
+            bridge
+                .cached_events_for_pending_plugins
+                .get(&plugin_id)
+                .unwrap()
+                .is_empty(),
+            "refreshable state must be regenerated after load, not trapped in a shared cache"
+        );
+        assert!(!WasmBridge::is_refreshable_status_bar_state(
+            Some(plugin_id),
+            None,
+            &Event::CustomMessage(
+                crate::screen::VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
+                "false".to_owned(),
+            ),
+        ));
     }
 
     #[test]
