@@ -4,7 +4,7 @@ use super::{
     VC_FLEET_LIVE_COUNT_MESSAGE, VC_STATUS_BAR_VISIBILITY_MESSAGE, fleet_live_count,
     is_parkable_chrome_plugin_run, register_viewer_creation_post_install_test_hook,
     reject_after_apply_prepare_for_test, reserve_durable_tab_layout_recovery,
-    reserve_new_durable_tab_layout_generation, screen_thread_main, session_update_events,
+    reserve_new_durable_tab_layout_generation, ScreenThreadParams, screen_thread_main, session_update_events,
 };
 use crate::panes::PaneId;
 use crate::{
@@ -1231,16 +1231,16 @@ impl MockScreen {
                 thread_id_tx
                     .send(std::thread::current().id())
                     .expect("test must retain the screen thread-id receiver");
-                screen_thread_main(
-                    screen_bus,
-                    None,
+                screen_thread_main(ScreenThreadParams {
+                    bus: screen_bus,
+                    max_panes: None,
                     client_attributes,
                     config,
                     debug,
-                    Box::default(),
-                    Arc::new(AtomicBool::new(false)),
-                    Some(session_name),
-                )
+                    default_layout: Box::default(),
+                    has_clients_flag: Arc::new(AtomicBool::new(false)),
+                    session_name_override: Some(session_name),
+                })
                 .expect("TEST")
             })
             .unwrap();
@@ -1334,16 +1334,16 @@ impl MockScreen {
         let screen_thread = std::thread::Builder::new()
             .name("screen_thread".to_string())
             .spawn(move || {
-                screen_thread_main(
-                    screen_bus,
-                    None,
+                screen_thread_main(ScreenThreadParams {
+                    bus: screen_bus,
+                    max_panes: None,
                     client_attributes,
                     config,
                     debug,
-                    Box::default(),
-                    Arc::new(AtomicBool::new(false)),
-                    Some("zellij-test".to_owned()),
-                )
+                    default_layout: Box::default(),
+                    has_clients_flag: Arc::new(AtomicBool::new(false)),
+                    session_name_override: Some("zellij-test".to_owned()),
+                })
                 .expect("TEST")
             })
             .unwrap();

@@ -50,7 +50,7 @@ use crate::{
     os_input_output::ServerOsApi,
     plugins::{PluginInstruction, plugin_thread_main},
     pty::{Pty, PtyInstruction, get_default_shell, pty_thread_main},
-    screen::{ScreenInstruction, screen_thread_main},
+    screen::{ScreenInstruction, ScreenThreadParams, screen_thread_main},
     thread_bus::{Bus, ThreadSenders},
 };
 use route::{NotificationEnd, route_thread_main};
@@ -2108,16 +2108,16 @@ fn init_session(params: SessionInitParams) -> SessionMetaData {
             let config = config.clone();
             let has_clients_flag = has_clients_flag.clone();
             move || {
-                screen_thread_main(
-                    screen_bus,
+                screen_thread_main(ScreenThreadParams {
+                    bus: screen_bus,
                     max_panes,
-                    client_attributes_clone,
+                    client_attributes: client_attributes_clone,
                     config,
                     debug,
-                    layout,
+                    default_layout: layout,
                     has_clients_flag,
-                    None,
-                )
+                    session_name_override: None,
+                })
                 .fatal();
             }
         })

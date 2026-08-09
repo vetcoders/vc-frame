@@ -9471,18 +9471,31 @@ fn find_already_running_panes(
 
 // The box is here in order to make the
 // NewClient enum smaller
+pub(crate) struct ScreenThreadParams {
+    pub bus: Bus<ScreenInstruction>,
+    pub max_panes: Option<usize>,
+    pub client_attributes: ClientAttributes,
+    pub config: Config,
+    pub debug: bool,
+    pub default_layout: Box<Layout>,
+    pub has_clients_flag: Arc<AtomicBool>,
+    pub session_name_override: Option<String>,
+}
+
+// The box is here in order to make the
+// NewClient enum smaller
 #[allow(clippy::boxed_local)]
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn screen_thread_main(
-    bus: Bus<ScreenInstruction>,
-    max_panes: Option<usize>,
-    client_attributes: ClientAttributes,
-    config: Config,
-    debug: bool,
-    default_layout: Box<Layout>,
-    has_clients_flag: Arc<AtomicBool>,
-    session_name_override: Option<String>,
-) -> Result<()> {
+pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
+    let ScreenThreadParams {
+        bus,
+        max_panes,
+        client_attributes,
+        config,
+        debug,
+        default_layout,
+        has_clients_flag,
+        session_name_override,
+    } = params;
     // Resolve `theme_dark` / `theme_light` to concrete `Styling` from the
     // bundled themes BEFORE `config.options` is moved out below. These
     // populate Screen's auto-switch state at startup; runtime updates

@@ -123,7 +123,6 @@ type IsFirstRun = bool;
 
 // FIXME: This should hold an os_api handle so that terminal panes can set their own size via FD in
 // their `reflow_lines()` method. Drop a Box<dyn ServerOsApi> in here somewhere.
-#[allow(clippy::too_many_arguments)]
 pub struct TerminalPane {
     pub grid: Grid,
     pub pid: u32,
