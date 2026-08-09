@@ -1,4 +1,49 @@
-use super::super::TerminalPane;
+use super::super::{TerminalPane as TerminalPaneImpl, TerminalPaneOptions};
+
+struct TerminalPane;
+impl TerminalPane {
+    pub fn new(
+        pid: u32,
+        position_and_size: PaneGeom,
+        style: Style,
+        pane_index: usize,
+        pane_name: String,
+        link_handler: Rc<RefCell<LinkHandler>>,
+        character_cell_size: Rc<RefCell<Option<zellij_utils::pane_size::SizeInPixels>>>,
+        sixel_image_store: Rc<RefCell<SixelImageStore>>,
+        terminal_emulator_colors: Rc<RefCell<Palette>>,
+        terminal_emulator_color_codes: Rc<RefCell<HashMap<usize, String>>>,
+        initial_pane_title: Option<String>,
+        invoked_with: Option<zellij_utils::data::Run>,
+        debug: bool,
+        arrow_fonts: bool,
+        styled_underlines: bool,
+        osc8_hyperlinks: bool,
+        explicitly_disable_keyboard_protocol: bool,
+        notification_end: Option<crate::route::NotificationEnd>,
+    ) -> TerminalPaneImpl {
+        TerminalPaneImpl::new(TerminalPaneOptions {
+            pid,
+            position_and_size,
+            style,
+            pane_index,
+            pane_name,
+            link_handler,
+            character_cell_size,
+            sixel_image_store,
+            terminal_emulator_colors,
+            terminal_emulator_color_codes,
+            initial_pane_title,
+            invoked_with,
+            debug,
+            arrow_fonts,
+            styled_underlines,
+            osc8_hyperlinks,
+            explicitly_disable_keyboard_protocol,
+            notification_end,
+        })
+    }
+}
 use crate::panes::LinkHandler;
 use crate::panes::sixel::SixelImageStore;
 use crate::tab::Pane;

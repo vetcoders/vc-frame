@@ -111,26 +111,45 @@ pub(crate) struct PluginPane {
     layout_reflow_deferred: bool,
 }
 
+pub struct PluginPaneOptions {
+    pub pid: u32,
+    pub position_and_size: PaneGeom,
+    pub send_plugin_instructions: SenderWithContext<PluginInstruction>,
+    pub title: String,
+    pub pane_name: String,
+    pub sixel_image_store: Rc<RefCell<SixelImageStore>>,
+    pub terminal_emulator_colors: Rc<RefCell<Palette>>,
+    pub terminal_emulator_color_codes: Rc<RefCell<HashMap<usize, String>>>,
+    pub link_handler: Rc<RefCell<LinkHandler>>,
+    pub character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
+    pub currently_connected_clients: Vec<ClientId>,
+    pub style: Style,
+    pub invoked_with: Option<Run>,
+    pub debug: bool,
+    pub arrow_fonts: bool,
+    pub styled_underlines: bool,
+}
+
 impl PluginPane {
-    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
-    pub fn new(
-        pid: u32,
-        position_and_size: PaneGeom,
-        send_plugin_instructions: SenderWithContext<PluginInstruction>,
-        title: String,
-        pane_name: String,
-        sixel_image_store: Rc<RefCell<SixelImageStore>>,
-        terminal_emulator_colors: Rc<RefCell<Palette>>,
-        terminal_emulator_color_codes: Rc<RefCell<HashMap<usize, String>>>,
-        link_handler: Rc<RefCell<LinkHandler>>,
-        character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
-        currently_connected_clients: Vec<ClientId>,
-        style: Style,
-        invoked_with: Option<Run>,
-        debug: bool,
-        arrow_fonts: bool,
-        styled_underlines: bool,
-    ) -> Self {
+    pub fn new(opts: PluginPaneOptions) -> Self {
+        let PluginPaneOptions {
+            pid,
+            position_and_size,
+            send_plugin_instructions,
+            title,
+            pane_name,
+            sixel_image_store,
+            terminal_emulator_colors,
+            terminal_emulator_color_codes,
+            link_handler,
+            character_cell_size,
+            currently_connected_clients,
+            style,
+            invoked_with,
+            debug,
+            arrow_fonts,
+            styled_underlines,
+        } = opts;
         let loading_indication = LoadingIndication::new(title.clone()).with_colors(style.colors);
         let initial_loading_message = loading_indication.to_string();
         let mut plugin = PluginPane {

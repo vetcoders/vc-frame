@@ -913,23 +913,39 @@ fn resolve_highlight_colors(
     }
 }
 
+pub struct GridOptions {
+    pub rows: usize,
+    pub columns: usize,
+    pub terminal_emulator_colors: Rc<RefCell<Palette>>,
+    pub terminal_emulator_color_codes: Rc<RefCell<HashMap<usize, String>>>,
+    pub link_handler: Rc<RefCell<LinkHandler>>,
+    pub character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
+    pub sixel_image_store: Rc<RefCell<SixelImageStore>>,
+    pub style: Style,
+    pub debug: bool,
+    pub arrow_fonts: bool,
+    pub styled_underlines: bool,
+    pub osc8_hyperlinks: bool,
+    pub explicitly_disable_kitty_keyboard_protocol: bool,
+}
+
 impl Grid {
-    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
-    pub fn new(
-        rows: usize,
-        columns: usize,
-        terminal_emulator_colors: Rc<RefCell<Palette>>,
-        terminal_emulator_color_codes: Rc<RefCell<HashMap<usize, String>>>,
-        link_handler: Rc<RefCell<LinkHandler>>,
-        character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
-        sixel_image_store: Rc<RefCell<SixelImageStore>>,
-        style: Style, // TODO: consolidate this with terminal_emulator_colors
-        debug: bool,
-        arrow_fonts: bool,
-        styled_underlines: bool,
-        osc8_hyperlinks: bool,
-        explicitly_disable_kitty_keyboard_protocol: bool,
-    ) -> Self {
+    pub fn new(opts: GridOptions) -> Self {
+        let GridOptions {
+            rows,
+            columns,
+            terminal_emulator_colors,
+            terminal_emulator_color_codes,
+            link_handler,
+            character_cell_size,
+            sixel_image_store,
+            style,
+            debug,
+            arrow_fonts,
+            styled_underlines,
+            osc8_hyperlinks,
+            explicitly_disable_kitty_keyboard_protocol,
+        } = opts;
         let sixel_grid = SixelGrid::new(character_cell_size.clone(), sixel_image_store);
         // make sure this is initialized as it is used internally
         // if it was already initialized (which should happen normally unless this is a test or

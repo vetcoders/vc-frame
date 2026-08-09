@@ -1124,33 +1124,54 @@ impl Pane for TerminalPane {
     }
 }
 
+pub struct TerminalPaneOptions {
+    pub pid: u32,
+    pub position_and_size: PaneGeom,
+    pub style: Style,
+    pub pane_index: usize,
+    pub pane_name: String,
+    pub link_handler: Rc<RefCell<LinkHandler>>,
+    pub character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
+    pub sixel_image_store: Rc<RefCell<SixelImageStore>>,
+    pub terminal_emulator_colors: Rc<RefCell<Palette>>,
+    pub terminal_emulator_color_codes: Rc<RefCell<HashMap<usize, String>>>,
+    pub initial_pane_title: Option<String>,
+    pub invoked_with: Option<Run>,
+    pub debug: bool,
+    pub arrow_fonts: bool,
+    pub styled_underlines: bool,
+    pub osc8_hyperlinks: bool,
+    pub explicitly_disable_keyboard_protocol: bool,
+    pub notification_end: Option<NotificationEnd>,
+}
+
 impl TerminalPane {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        pid: u32,
-        position_and_size: PaneGeom,
-        style: Style,
-        pane_index: usize,
-        pane_name: String,
-        link_handler: Rc<RefCell<LinkHandler>>,
-        character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
-        sixel_image_store: Rc<RefCell<SixelImageStore>>,
-        terminal_emulator_colors: Rc<RefCell<Palette>>,
-        terminal_emulator_color_codes: Rc<RefCell<HashMap<usize, String>>>,
-        initial_pane_title: Option<String>,
-        invoked_with: Option<Run>,
-        debug: bool,
-        arrow_fonts: bool,
-        styled_underlines: bool,
-        osc8_hyperlinks: bool,
-        explicitly_disable_keyboard_protocol: bool,
-        mut notification_end: Option<NotificationEnd>,
-    ) -> TerminalPane {
+    pub fn new(opts: TerminalPaneOptions) -> TerminalPane {
+        let TerminalPaneOptions {
+            pid,
+            position_and_size,
+            style,
+            pane_index,
+            pane_name,
+            link_handler,
+            character_cell_size,
+            sixel_image_store,
+            terminal_emulator_colors,
+            terminal_emulator_color_codes,
+            initial_pane_title,
+            invoked_with,
+            debug,
+            arrow_fonts,
+            styled_underlines,
+            osc8_hyperlinks,
+            explicitly_disable_keyboard_protocol,
+            mut notification_end,
+        } = opts;
         let initial_pane_title =
             initial_pane_title.unwrap_or_else(|| format!("Pane #{}", pane_index));
-        let grid = Grid::new(
-            position_and_size.rows.as_usize(),
-            position_and_size.cols.as_usize(),
+        let grid = Grid::new(crate::panes::grid::GridOptions {
+            rows: position_and_size.rows.as_usize(),
+            columns: position_and_size.cols.as_usize(),
             terminal_emulator_colors,
             terminal_emulator_color_codes,
             link_handler,
@@ -1161,8 +1182,8 @@ impl TerminalPane {
             arrow_fonts,
             styled_underlines,
             osc8_hyperlinks,
-            explicitly_disable_keyboard_protocol,
-        );
+            explicitly_disable_kitty_keyboard_protocol: explicitly_disable_keyboard_protocol,
+        });
         if let Some(notification_end) = notification_end.as_mut() {
             notification_end.set_affected_pane_id(PaneId::Terminal(pid));
         }

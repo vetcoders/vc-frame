@@ -2478,54 +2478,54 @@ impl Tab {
         let mut new_pane = match pid {
             PaneId::Terminal(term_pid) => {
                 let next_terminal_position = self.get_next_terminal_position();
-                Box::new(TerminalPane::new(
-                    term_pid,
-                    PaneGeom::default(), // this will be filled out later
-                    self.style,
-                    next_terminal_position,
-                    initial_pane_title.clone().unwrap_or_default(),
-                    self.link_handler.clone(),
-                    self.character_cell_size.clone(),
-                    self.sixel_image_store.clone(),
-                    self.terminal_emulator_colors.clone(),
-                    self.terminal_emulator_color_codes.clone(),
+                Box::new(TerminalPane::new(crate::panes::terminal_pane::TerminalPaneOptions {
+                    pid: term_pid,
+                    position_and_size: PaneGeom::default(), // this will be filled out later
+                    style: self.style,
+                    pane_index: next_terminal_position,
+                    pane_name: initial_pane_title.clone().unwrap_or_default(),
+                    link_handler: self.link_handler.clone(),
+                    character_cell_size: self.character_cell_size.clone(),
+                    sixel_image_store: self.sixel_image_store.clone(),
+                    terminal_emulator_colors: self.terminal_emulator_colors.clone(),
+                    terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
                     initial_pane_title,
                     invoked_with,
-                    self.debug,
-                    self.arrow_fonts,
-                    self.styled_underlines,
-                    self.osc8_hyperlinks,
-                    self.explicitly_disable_kitty_keyboard_protocol,
-                    blocking_notification,
-                )) as Box<dyn Pane>
+                    debug: self.debug,
+                    arrow_fonts: self.arrow_fonts,
+                    styled_underlines: self.styled_underlines,
+                    osc8_hyperlinks: self.osc8_hyperlinks,
+                    explicitly_disable_keyboard_protocol: self.explicitly_disable_kitty_keyboard_protocol,
+                    notification_end: blocking_notification,
+                })) as Box<dyn Pane>
             },
             PaneId::Plugin(plugin_pid) => {
-                Box::new(PluginPane::new(
-                    plugin_pid,
-                    PaneGeom::default(), // this will be filled out later
-                    self.senders
+                Box::new(PluginPane::new(crate::panes::plugin_pane::PluginPaneOptions {
+                    pid: plugin_pid,
+                    position_and_size: PaneGeom::default(), // this will be filled out later
+                    send_plugin_instructions: self.senders
                         .to_plugin
                         .as_ref()
                         .with_context(err_context)?
                         .clone(),
-                    initial_pane_title.unwrap_or("".to_owned()),
-                    String::new(),
-                    self.sixel_image_store.clone(),
-                    self.terminal_emulator_colors.clone(),
-                    self.terminal_emulator_color_codes.clone(),
-                    self.link_handler.clone(),
-                    self.character_cell_size.clone(),
-                    self.connected_clients_in_app
+                    title: initial_pane_title.unwrap_or("".to_owned()),
+                    pane_name: String::new(),
+                    sixel_image_store: self.sixel_image_store.clone(),
+                    terminal_emulator_colors: self.terminal_emulator_colors.clone(),
+                    terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
+                    link_handler: self.link_handler.clone(),
+                    character_cell_size: self.character_cell_size.clone(),
+                    currently_connected_clients: self.connected_clients_in_app
                         .borrow()
                         .keys()
                         .copied()
                         .collect(),
-                    self.style,
+                    style: self.style,
                     invoked_with,
-                    self.debug,
-                    self.arrow_fonts,
-                    self.styled_underlines,
-                )) as Box<dyn Pane>
+                    debug: self.debug,
+                    arrow_fonts: self.arrow_fonts,
+                    styled_underlines: self.styled_underlines,
+                })) as Box<dyn Pane>
             },
         };
 
@@ -7061,26 +7061,26 @@ impl Tab {
     }
     fn new_scrollback_editor_pane(&self, pid: u32) -> TerminalPane {
         let next_terminal_position = self.get_next_terminal_position();
-        let mut new_pane = TerminalPane::new(
+        let mut new_pane = TerminalPane::new(crate::panes::terminal_pane::TerminalPaneOptions {
             pid,
-            PaneGeom::default(), // the initial size will be set later
-            self.style,
-            next_terminal_position,
-            String::new(),
-            self.link_handler.clone(),
-            self.character_cell_size.clone(),
-            self.sixel_image_store.clone(),
-            self.terminal_emulator_colors.clone(),
-            self.terminal_emulator_color_codes.clone(),
-            None,
-            None,
-            self.debug,
-            self.arrow_fonts,
-            self.styled_underlines,
-            self.osc8_hyperlinks,
-            self.explicitly_disable_kitty_keyboard_protocol,
-            None,
-        );
+            position_and_size: PaneGeom::default(), // the initial size will be set later
+            style: self.style,
+            pane_index: next_terminal_position,
+            pane_name: String::new(),
+            link_handler: self.link_handler.clone(),
+            character_cell_size: self.character_cell_size.clone(),
+            sixel_image_store: self.sixel_image_store.clone(),
+            terminal_emulator_colors: self.terminal_emulator_colors.clone(),
+            terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
+            initial_pane_title: None,
+            invoked_with: None,
+            debug: self.debug,
+            arrow_fonts: self.arrow_fonts,
+            styled_underlines: self.styled_underlines,
+            osc8_hyperlinks: self.osc8_hyperlinks,
+            explicitly_disable_keyboard_protocol: self.explicitly_disable_kitty_keyboard_protocol,
+            notification_end: None,
+        });
         new_pane.update_name("EDITING SCROLLBACK"); // we do this here and not in the
         // constructor so it won't be overrided
         // by the editor

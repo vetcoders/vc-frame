@@ -680,28 +680,28 @@ impl<'a> LayoutApplier<'a> {
             .get_mut(&run)
             .and_then(|ids| ids.pop())
             .with_context(err_context)?;
-        let mut new_plugin = PluginPane::new(
+        let mut new_plugin = PluginPane::new(crate::panes::plugin_pane::PluginPaneOptions {
             pid,
-            *position_and_size,
-            self.senders
+            position_and_size: *position_and_size,
+            send_plugin_instructions: self.senders
                 .to_plugin
                 .as_ref()
                 .with_context(err_context)?
                 .clone(),
-            pane_title,
-            layout.name.clone().unwrap_or_default(),
-            self.sixel_image_store.clone(),
-            self.terminal_emulator_colors.clone(),
-            self.terminal_emulator_color_codes.clone(),
-            self.link_handler.clone(),
-            self.character_cell_size.clone(),
-            self.connected_clients.borrow().keys().copied().collect(),
-            self.style,
-            layout.run.clone(),
-            self.debug,
-            self.arrow_fonts,
-            self.styled_underlines,
-        );
+            title: pane_title,
+            pane_name: layout.name.clone().unwrap_or_default(),
+            sixel_image_store: self.sixel_image_store.clone(),
+            terminal_emulator_colors: self.terminal_emulator_colors.clone(),
+            terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
+            link_handler: self.link_handler.clone(),
+            character_cell_size: self.character_cell_size.clone(),
+            currently_connected_clients: self.connected_clients.borrow().keys().copied().collect(),
+            style: self.style,
+            invoked_with: layout.run.clone(),
+            debug: self.debug,
+            arrow_fonts: self.arrow_fonts,
+            styled_underlines: self.styled_underlines,
+        });
         if let Some(pane_initial_contents) = &layout.pane_initial_contents {
             self.apply_or_defer_pane_initial_contents(&mut new_plugin, pane_initial_contents);
         }
@@ -728,28 +728,28 @@ impl<'a> LayoutApplier<'a> {
             .get_mut(&run)
             .and_then(|ids| ids.pop())
             .with_context(err_context)?;
-        let mut new_pane = PluginPane::new(
+        let mut new_pane = PluginPane::new(crate::panes::plugin_pane::PluginPaneOptions {
             pid,
             position_and_size,
-            self.senders
+            send_plugin_instructions: self.senders
                 .to_plugin
                 .as_ref()
                 .with_context(err_context)?
                 .clone(),
-            pane_title,
-            floating_pane_layout.name.clone().unwrap_or_default(),
-            self.sixel_image_store.clone(),
-            self.terminal_emulator_colors.clone(),
-            self.terminal_emulator_color_codes.clone(),
-            self.link_handler.clone(),
-            self.character_cell_size.clone(),
-            self.connected_clients.borrow().keys().copied().collect(),
-            self.style,
-            floating_pane_layout.run.clone(),
-            self.debug,
-            self.arrow_fonts,
-            self.styled_underlines,
-        );
+            title: pane_title,
+            pane_name: floating_pane_layout.name.clone().unwrap_or_default(),
+            sixel_image_store: self.sixel_image_store.clone(),
+            terminal_emulator_colors: self.terminal_emulator_colors.clone(),
+            terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
+            link_handler: self.link_handler.clone(),
+            character_cell_size: self.character_cell_size.clone(),
+            currently_connected_clients: self.connected_clients.borrow().keys().copied().collect(),
+            style: self.style,
+            invoked_with: floating_pane_layout.run.clone(),
+            debug: self.debug,
+            arrow_fonts: self.arrow_fonts,
+            styled_underlines: self.styled_underlines,
+        });
         if let Some(pane_initial_contents) = &floating_pane_layout.pane_initial_contents {
             self.apply_or_defer_pane_initial_contents(&mut new_pane, pane_initial_contents);
         }
@@ -781,26 +781,26 @@ impl<'a> LayoutApplier<'a> {
             Some(Run::Command(run_command)) => Some(run_command.to_string()),
             _ => None,
         };
-        let mut new_pane = TerminalPane::new(
-            *pid,
+        let mut new_pane = TerminalPane::new(crate::panes::terminal_pane::TerminalPaneOptions {
+            pid: *pid,
             position_and_size,
-            self.style,
-            next_terminal_position,
-            floating_pane_layout.name.clone().unwrap_or_default(),
-            self.link_handler.clone(),
-            self.character_cell_size.clone(),
-            self.sixel_image_store.clone(),
-            self.terminal_emulator_colors.clone(),
-            self.terminal_emulator_color_codes.clone(),
-            initial_title,
-            floating_pane_layout.run.clone(),
-            self.debug,
-            self.arrow_fonts,
-            self.styled_underlines,
-            self.osc8_hyperlinks,
-            self.explicitly_disable_kitty_keyboard_protocol,
-            None,
-        );
+            style: self.style,
+            pane_index: next_terminal_position,
+            pane_name: floating_pane_layout.name.clone().unwrap_or_default(),
+            link_handler: self.link_handler.clone(),
+            character_cell_size: self.character_cell_size.clone(),
+            sixel_image_store: self.sixel_image_store.clone(),
+            terminal_emulator_colors: self.terminal_emulator_colors.clone(),
+            terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
+            initial_pane_title: initial_title,
+            invoked_with: floating_pane_layout.run.clone(),
+            debug: self.debug,
+            arrow_fonts: self.arrow_fonts,
+            styled_underlines: self.styled_underlines,
+            osc8_hyperlinks: self.osc8_hyperlinks,
+            explicitly_disable_keyboard_protocol: self.explicitly_disable_kitty_keyboard_protocol,
+            notification_end: None,
+        });
         if let Some(pane_initial_contents) = &floating_pane_layout.pane_initial_contents {
             self.apply_or_defer_pane_initial_contents(&mut new_pane, pane_initial_contents);
         }
@@ -854,26 +854,26 @@ impl<'a> LayoutApplier<'a> {
             None
         };
 
-        let mut new_pane = TerminalPane::new(
+        let mut new_pane = TerminalPane::new(crate::panes::terminal_pane::TerminalPaneOptions {
             pid,
-            *position_and_size,
-            self.style,
-            next_terminal_position,
-            layout.name.clone().unwrap_or_default(),
-            self.link_handler.clone(),
-            self.character_cell_size.clone(),
-            self.sixel_image_store.clone(),
-            self.terminal_emulator_colors.clone(),
-            self.terminal_emulator_color_codes.clone(),
-            initial_title,
-            layout.run.clone(),
-            self.debug,
-            self.arrow_fonts,
-            self.styled_underlines,
-            self.osc8_hyperlinks,
-            self.explicitly_disable_kitty_keyboard_protocol,
+            position_and_size: *position_and_size,
+            style: self.style,
+            pane_index: next_terminal_position,
+            pane_name: layout.name.clone().unwrap_or_default(),
+            link_handler: self.link_handler.clone(),
+            character_cell_size: self.character_cell_size.clone(),
+            sixel_image_store: self.sixel_image_store.clone(),
+            terminal_emulator_colors: self.terminal_emulator_colors.clone(),
+            terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
+            initial_pane_title: initial_title,
+            invoked_with: layout.run.clone(),
+            debug: self.debug,
+            arrow_fonts: self.arrow_fonts,
+            styled_underlines: self.styled_underlines,
+            osc8_hyperlinks: self.osc8_hyperlinks,
+            explicitly_disable_keyboard_protocol: self.explicitly_disable_kitty_keyboard_protocol,
             notification_end,
-        );
+        });
         if let Some(pane_initial_contents) = &layout.pane_initial_contents {
             self.apply_or_defer_pane_initial_contents(&mut new_pane, pane_initial_contents);
         }
