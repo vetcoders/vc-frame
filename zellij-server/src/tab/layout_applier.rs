@@ -178,31 +178,55 @@ pub struct LayoutApplier<'a> {
     deferred_pane_initial_bytes: Vec<(PaneId, Vec<u8>)>,
 }
 
+pub struct LayoutApplierOptions<'a> {
+    pub viewport: &'a Rc<RefCell<Viewport>>,
+    pub senders: &'a ThreadSenders,
+    pub sixel_image_store: &'a Rc<RefCell<SixelImageStore>>,
+    pub link_handler: &'a Rc<RefCell<LinkHandler>>,
+    pub terminal_emulator_colors: &'a Rc<RefCell<Palette>>,
+    pub terminal_emulator_color_codes: &'a Rc<RefCell<HashMap<usize, String>>>,
+    pub character_cell_size: &'a Rc<RefCell<Option<SizeInPixels>>>,
+    pub connected_clients: &'a Rc<RefCell<HashMap<ClientId, bool>>>,
+    pub style: &'a Style,
+    pub display_area: &'a Rc<RefCell<Size>>,
+    pub tiled_panes: &'a mut TiledPanes,
+    pub floating_panes: &'a mut FloatingPanes,
+    pub draw_pane_frames: bool,
+    pub focus_pane_id: &'a mut Option<PaneId>,
+    pub _os_api: &'a dyn ServerOsApi,
+    pub debug: bool,
+    pub arrow_fonts: bool,
+    pub styled_underlines: bool,
+    pub osc8_hyperlinks: bool,
+    pub explicitly_disable_kitty_keyboard_protocol: bool,
+    pub blocking_terminal: Option<(u32, NotificationEnd)>,
+}
+
 impl<'a> LayoutApplier<'a> {
-    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
-    pub fn new(
-        viewport: &Rc<RefCell<Viewport>>,
-        senders: &ThreadSenders,
-        sixel_image_store: &Rc<RefCell<SixelImageStore>>,
-        link_handler: &Rc<RefCell<LinkHandler>>,
-        terminal_emulator_colors: &Rc<RefCell<Palette>>,
-        terminal_emulator_color_codes: &Rc<RefCell<HashMap<usize, String>>>,
-        character_cell_size: &Rc<RefCell<Option<SizeInPixels>>>,
-        connected_clients: &Rc<RefCell<HashMap<ClientId, bool>>>,
-        style: &Style,
-        display_area: &Rc<RefCell<Size>>, // includes all panes (including eg. the status bar and tab bar in the default layout)
-        tiled_panes: &'a mut TiledPanes,
-        floating_panes: &'a mut FloatingPanes,
-        draw_pane_frames: bool,
-        focus_pane_id: &'a mut Option<PaneId>,
-        _os_api: &dyn ServerOsApi,
-        debug: bool,
-        arrow_fonts: bool,
-        styled_underlines: bool,
-        osc8_hyperlinks: bool,
-        explicitly_disable_kitty_keyboard_protocol: bool,
-        blocking_terminal: Option<(u32, NotificationEnd)>,
-    ) -> Self {
+    pub fn new(opts: LayoutApplierOptions<'a>) -> Self {
+        let LayoutApplierOptions {
+            viewport,
+            senders,
+            sixel_image_store,
+            link_handler,
+            terminal_emulator_colors,
+            terminal_emulator_color_codes,
+            character_cell_size,
+            connected_clients,
+            style,
+            display_area,
+            tiled_panes,
+            floating_panes,
+            draw_pane_frames,
+            focus_pane_id,
+            _os_api,
+            debug,
+            arrow_fonts,
+            styled_underlines,
+            osc8_hyperlinks,
+            explicitly_disable_kitty_keyboard_protocol,
+            blocking_terminal,
+        } = opts;
         let viewport = viewport.clone();
         let senders = senders.clone();
         let sixel_image_store = sixel_image_store.clone();
@@ -293,18 +317,31 @@ impl<'a> LayoutApplier<'a> {
         let should_show_floating_panes = layout_has_floating_panes && !hide_floating_panes;
         Ok(should_show_floating_panes)
     }
-    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
-    pub fn override_layout(
-        &mut self,
-        tiled_panes_layout: TiledPaneLayout,
-        floating_panes_layout: Vec<FloatingPaneLayout>,
-        new_terminal_ids: Vec<(u32, HoldForCommand)>,
-        new_floating_terminal_ids: Vec<(u32, HoldForCommand)>,
-        mut new_plugin_ids: HashMap<RunPluginOrAlias, Vec<u32>>,
-        retain_existing_terminal_panes: bool,
-        retain_existing_plugin_panes: bool,
-        client_id: ClientId,
-    ) -> Result<bool> {
+}
+
+pub struct LayoutApplierOverrideOptions {
+    pub tiled_panes_layout: TiledPaneLayout,
+    pub floating_panes_layout: Vec<FloatingPaneLayout>,
+    pub new_terminal_ids: Vec<(u32, HoldForCommand)>,
+    pub new_floating_terminal_ids: Vec<(u32, HoldForCommand)>,
+    pub new_plugin_ids: HashMap<RunPluginOrAlias, Vec<u32>>,
+    pub retain_existing_terminal_panes: bool,
+    pub retain_existing_plugin_panes: bool,
+    pub client_id: ClientId,
+}
+
+impl<'a> LayoutApplier<'a> {
+    pub fn override_layout(&mut self, opts: LayoutApplierOverrideOptions) -> Result<bool> {
+        let LayoutApplierOverrideOptions {
+            tiled_panes_layout,
+            floating_panes_layout,
+            new_terminal_ids,
+            new_floating_terminal_ids,
+            mut new_plugin_ids,
+            retain_existing_terminal_panes,
+            retain_existing_plugin_panes,
+            client_id,
+        } = opts;
         // true => should_show_floating_panes
         let hide_floating_panes = tiled_panes_layout.hide_floating_panes;
         self.override_tiled_panes_layout_for_existing_panes(
@@ -680,28 +717,29 @@ impl<'a> LayoutApplier<'a> {
             .get_mut(&run)
             .and_then(|ids| ids.pop())
             .with_context(err_context)?;
-        let mut new_plugin = PluginPane::new(
+        let mut new_plugin = PluginPane::new(crate::panes::PluginPaneOptions {
             pid,
-            *position_and_size,
-            self.senders
+            position_and_size: *position_and_size,
+            send_plugin_instructions: self
+                .senders
                 .to_plugin
                 .as_ref()
                 .with_context(err_context)?
                 .clone(),
-            pane_title,
-            layout.name.clone().unwrap_or_default(),
-            self.sixel_image_store.clone(),
-            self.terminal_emulator_colors.clone(),
-            self.terminal_emulator_color_codes.clone(),
-            self.link_handler.clone(),
-            self.character_cell_size.clone(),
-            self.connected_clients.borrow().keys().copied().collect(),
-            self.style,
-            layout.run.clone(),
-            self.debug,
-            self.arrow_fonts,
-            self.styled_underlines,
-        );
+            title: pane_title,
+            pane_name: layout.name.clone().unwrap_or_default(),
+            sixel_image_store: self.sixel_image_store.clone(),
+            terminal_emulator_colors: self.terminal_emulator_colors.clone(),
+            terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
+            link_handler: self.link_handler.clone(),
+            character_cell_size: self.character_cell_size.clone(),
+            currently_connected_clients: self.connected_clients.borrow().keys().copied().collect(),
+            style: self.style,
+            invoked_with: layout.run.clone(),
+            debug: self.debug,
+            arrow_fonts: self.arrow_fonts,
+            styled_underlines: self.styled_underlines,
+        });
         if let Some(pane_initial_contents) = &layout.pane_initial_contents {
             self.apply_or_defer_pane_initial_contents(&mut new_plugin, pane_initial_contents);
         }
@@ -728,28 +766,29 @@ impl<'a> LayoutApplier<'a> {
             .get_mut(&run)
             .and_then(|ids| ids.pop())
             .with_context(err_context)?;
-        let mut new_pane = PluginPane::new(
+        let mut new_pane = PluginPane::new(crate::panes::PluginPaneOptions {
             pid,
             position_and_size,
-            self.senders
+            send_plugin_instructions: self
+                .senders
                 .to_plugin
                 .as_ref()
                 .with_context(err_context)?
                 .clone(),
-            pane_title,
-            floating_pane_layout.name.clone().unwrap_or_default(),
-            self.sixel_image_store.clone(),
-            self.terminal_emulator_colors.clone(),
-            self.terminal_emulator_color_codes.clone(),
-            self.link_handler.clone(),
-            self.character_cell_size.clone(),
-            self.connected_clients.borrow().keys().copied().collect(),
-            self.style,
-            floating_pane_layout.run.clone(),
-            self.debug,
-            self.arrow_fonts,
-            self.styled_underlines,
-        );
+            title: pane_title,
+            pane_name: floating_pane_layout.name.clone().unwrap_or_default(),
+            sixel_image_store: self.sixel_image_store.clone(),
+            terminal_emulator_colors: self.terminal_emulator_colors.clone(),
+            terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
+            link_handler: self.link_handler.clone(),
+            character_cell_size: self.character_cell_size.clone(),
+            currently_connected_clients: self.connected_clients.borrow().keys().copied().collect(),
+            style: self.style,
+            invoked_with: floating_pane_layout.run.clone(),
+            debug: self.debug,
+            arrow_fonts: self.arrow_fonts,
+            styled_underlines: self.styled_underlines,
+        });
         if let Some(pane_initial_contents) = &floating_pane_layout.pane_initial_contents {
             self.apply_or_defer_pane_initial_contents(&mut new_pane, pane_initial_contents);
         }
@@ -781,26 +820,26 @@ impl<'a> LayoutApplier<'a> {
             Some(Run::Command(run_command)) => Some(run_command.to_string()),
             _ => None,
         };
-        let mut new_pane = TerminalPane::new(
-            *pid,
+        let mut new_pane = TerminalPane::new(crate::panes::terminal_pane::TerminalPaneOptions {
+            pid: *pid,
             position_and_size,
-            self.style,
-            next_terminal_position,
-            floating_pane_layout.name.clone().unwrap_or_default(),
-            self.link_handler.clone(),
-            self.character_cell_size.clone(),
-            self.sixel_image_store.clone(),
-            self.terminal_emulator_colors.clone(),
-            self.terminal_emulator_color_codes.clone(),
-            initial_title,
-            floating_pane_layout.run.clone(),
-            self.debug,
-            self.arrow_fonts,
-            self.styled_underlines,
-            self.osc8_hyperlinks,
-            self.explicitly_disable_kitty_keyboard_protocol,
-            None,
-        );
+            style: self.style,
+            pane_index: next_terminal_position,
+            pane_name: floating_pane_layout.name.clone().unwrap_or_default(),
+            link_handler: self.link_handler.clone(),
+            character_cell_size: self.character_cell_size.clone(),
+            sixel_image_store: self.sixel_image_store.clone(),
+            terminal_emulator_colors: self.terminal_emulator_colors.clone(),
+            terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
+            initial_pane_title: initial_title,
+            invoked_with: floating_pane_layout.run.clone(),
+            debug: self.debug,
+            arrow_fonts: self.arrow_fonts,
+            styled_underlines: self.styled_underlines,
+            osc8_hyperlinks: self.osc8_hyperlinks,
+            explicitly_disable_keyboard_protocol: self.explicitly_disable_kitty_keyboard_protocol,
+            notification_end: None,
+        });
         if let Some(pane_initial_contents) = &floating_pane_layout.pane_initial_contents {
             self.apply_or_defer_pane_initial_contents(&mut new_pane, pane_initial_contents);
         }
@@ -854,26 +893,26 @@ impl<'a> LayoutApplier<'a> {
             None
         };
 
-        let mut new_pane = TerminalPane::new(
+        let mut new_pane = TerminalPane::new(crate::panes::terminal_pane::TerminalPaneOptions {
             pid,
-            *position_and_size,
-            self.style,
-            next_terminal_position,
-            layout.name.clone().unwrap_or_default(),
-            self.link_handler.clone(),
-            self.character_cell_size.clone(),
-            self.sixel_image_store.clone(),
-            self.terminal_emulator_colors.clone(),
-            self.terminal_emulator_color_codes.clone(),
-            initial_title,
-            layout.run.clone(),
-            self.debug,
-            self.arrow_fonts,
-            self.styled_underlines,
-            self.osc8_hyperlinks,
-            self.explicitly_disable_kitty_keyboard_protocol,
+            position_and_size: *position_and_size,
+            style: self.style,
+            pane_index: next_terminal_position,
+            pane_name: layout.name.clone().unwrap_or_default(),
+            link_handler: self.link_handler.clone(),
+            character_cell_size: self.character_cell_size.clone(),
+            sixel_image_store: self.sixel_image_store.clone(),
+            terminal_emulator_colors: self.terminal_emulator_colors.clone(),
+            terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
+            initial_pane_title: initial_title,
+            invoked_with: layout.run.clone(),
+            debug: self.debug,
+            arrow_fonts: self.arrow_fonts,
+            styled_underlines: self.styled_underlines,
+            osc8_hyperlinks: self.osc8_hyperlinks,
+            explicitly_disable_keyboard_protocol: self.explicitly_disable_kitty_keyboard_protocol,
             notification_end,
-        );
+        });
         if let Some(pane_initial_contents) = &layout.pane_initial_contents {
             self.apply_or_defer_pane_initial_contents(&mut new_pane, pane_initial_contents);
         }

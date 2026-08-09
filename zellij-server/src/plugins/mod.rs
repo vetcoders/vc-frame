@@ -30,7 +30,7 @@ use zellij_utils::data::PaneRenderReport;
 use zellij_utils::input::layout::TabLayoutInfo;
 
 pub use wasm_bridge::PluginRenderAsset;
-use wasm_bridge::{LayoutPluginReservationRequest, WasmBridge};
+use wasm_bridge::{GetOrLoadPluginsParams, LayoutPluginReservationRequest, WasmBridge};
 
 use zellij_utils::{
     channels,
@@ -380,29 +380,44 @@ impl From<&PluginInstruction> for PluginContext {
     }
 }
 
-#[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
-pub(crate) fn plugin_thread_main(
-    bus: Bus<PluginInstruction>,
-    engine: Engine,
-    data_dir: PathBuf,
-    mut layout: Box<Layout>,
-    layout_dir: Option<PathBuf>,
-    available_layouts: Vec<LayoutInfo>,
-    available_layout_errors: Vec<LayoutWithError>,
-    path_to_default_shell: PathBuf,
-    zellij_cwd: PathBuf,
-    session_env_vars: std::collections::BTreeMap<String, String>,
-    default_shell: Option<TerminalAction>,
-    plugin_aliases: PluginAliases,
-    default_mode: InputMode,
-    default_keybinds: Keybinds,
-    background_plugins: Vec<RunPluginOrAlias>,
-    // the client id that started the session,
-    // we need it here because the thread's own list of connected clients might not yet be updated
-    // on session start when we need to load the background plugins, and so we must have an
-    // explicit client_id that has started the session
-    initiating_client_id: ClientId,
-) -> Result<()> {
+pub(crate) struct PluginThreadParams {
+    pub bus: Bus<PluginInstruction>,
+    pub engine: Engine,
+    pub data_dir: PathBuf,
+    pub layout: Box<Layout>,
+    pub layout_dir: Option<PathBuf>,
+    pub available_layouts: Vec<LayoutInfo>,
+    pub available_layout_errors: Vec<LayoutWithError>,
+    pub path_to_default_shell: PathBuf,
+    pub zellij_cwd: PathBuf,
+    pub session_env_vars: std::collections::BTreeMap<String, String>,
+    pub default_shell: Option<TerminalAction>,
+    pub plugin_aliases: PluginAliases,
+    pub default_mode: InputMode,
+    pub default_keybinds: Keybinds,
+    pub background_plugins: Vec<RunPluginOrAlias>,
+    pub initiating_client_id: ClientId,
+}
+
+pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
+    let PluginThreadParams {
+        bus,
+        engine,
+        data_dir,
+        mut layout,
+        layout_dir,
+        available_layouts,
+        available_layout_errors,
+        path_to_default_shell,
+        zellij_cwd,
+        session_env_vars,
+        default_shell,
+        plugin_aliases,
+        default_mode,
+        default_keybinds,
+        background_plugins,
+        initiating_client_id,
+    } = params;
     info!("Wasm main thread starts");
     let plugin_dir = data_dir.join("plugins/");
     let plugin_global_data_dir = plugin_dir.join("data");
@@ -412,12 +427,12 @@ pub(crate) fn plugin_thread_main(
     // https://tokio.rs/tokio/topics/shutdown#waiting-for-things-to-finish-shutting-down
     let (shutdown_send, mut shutdown_receive) = tokio::sync::mpsc::channel::<()>(1);
 
-    let mut wasm_bridge = WasmBridge::new(
-        bus.senders.clone(),
+    let mut wasm_bridge = WasmBridge::new(wasm_bridge::WasmBridgeOptions {
+        senders: bus.senders.clone(),
         engine,
         plugin_dir,
         path_to_default_shell,
-        zellij_cwd.clone(),
+        zellij_cwd: zellij_cwd.clone(),
         session_env_vars,
         default_shell,
         layout_dir,
@@ -425,7 +440,7 @@ pub(crate) fn plugin_thread_main(
         available_layout_errors,
         default_mode,
         default_keybinds,
-    );
+    });
 
     for run_plugin_or_alias in background_plugins {
         load_background_plugin(
@@ -1380,26 +1395,26 @@ pub(crate) fn plugin_thread_main(
                 match plugin {
                     Some(plugin_url) => {
                         // send to specific plugin(s)
-                        pipe_to_specific_plugins(
-                            PipeSource::Cli(pipe_id.clone()),
-                            &plugin_url,
-                            &configuration,
-                            &cwd,
+                        pipe_to_specific_plugins(PipeToSpecificPluginsParams {
+                            pipe_source: PipeSource::Cli(pipe_id.clone()),
+                            plugin_url: &plugin_url,
+                            configuration: &configuration,
+                            cwd: &cwd,
                             skip_cache,
                             should_float,
-                            &pane_id_to_replace,
-                            &pane_title,
-                            Some(cli_client_id),
-                            &mut pipe_messages,
-                            &name,
-                            &payload,
-                            &args,
-                            &bus,
-                            &mut wasm_bridge,
-                            &plugin_aliases,
+                            pane_id_to_replace: &pane_id_to_replace,
+                            pane_title: &pane_title,
+                            cli_client_id: Some(cli_client_id),
+                            pipe_messages: &mut pipe_messages,
+                            name: &name,
+                            payload: &payload,
+                            args: &args,
+                            bus: &bus,
+                            wasm_bridge: &mut wasm_bridge,
+                            plugin_aliases: &plugin_aliases,
                             floating_pane_coordinates,
-                            None,
-                        );
+                            should_focus: None,
+                        });
                     },
                     None => {
                         // no specific destination, send to all plugins
@@ -1444,26 +1459,26 @@ pub(crate) fn plugin_thread_main(
                     match plugin {
                         Some(plugin_url) => {
                             // send to specific plugin(s)
-                            pipe_to_specific_plugins(
-                                PipeSource::Keybind,
-                                &plugin_url,
-                                &configuration,
-                                &cwd,
+                            pipe_to_specific_plugins(PipeToSpecificPluginsParams {
+                                pipe_source: PipeSource::Keybind,
+                                plugin_url: &plugin_url,
+                                configuration: &configuration,
+                                cwd: &cwd,
                                 skip_cache,
                                 should_float,
-                                &pane_id_to_replace,
-                                &pane_title,
-                                Some(cli_client_id),
-                                &mut pipe_messages,
-                                &name,
-                                &payload,
-                                &args,
-                                &bus,
-                                &mut wasm_bridge,
-                                &plugin_aliases,
+                                pane_id_to_replace: &pane_id_to_replace,
+                                pane_title: &pane_title,
+                                cli_client_id: Some(cli_client_id),
+                                pipe_messages: &mut pipe_messages,
+                                name: &name,
+                                payload: &payload,
+                                args: &args,
+                                bus: &bus,
+                                wasm_bridge: &mut wasm_bridge,
+                                plugin_aliases: &plugin_aliases,
                                 floating_pane_coordinates,
-                                None,
-                            );
+                                should_focus: None,
+                            });
                         },
                         None => {
                             // no specific destination, send to all plugins
@@ -1514,26 +1529,33 @@ pub(crate) fn plugin_thread_main(
                 match (message.plugin_url, message.destination_plugin_id) {
                     (Some(plugin_url), None) => {
                         // send to specific plugin(s)
-                        pipe_to_specific_plugins(
-                            PipeSource::Plugin(source_plugin_id),
-                            &plugin_url,
-                            &Some(message.plugin_config),
-                            &None,
+                        let pane_id_to_replace_converted = pane_id_to_replace.map(|p| p.into());
+                        let configuration = Some(message.plugin_config);
+                        let args = Some(message.message_args);
+                        let should_focus = message
+                            .new_plugin_args
+                            .as_ref()
+                            .and_then(|n| n.should_focus);
+                        pipe_to_specific_plugins(PipeToSpecificPluginsParams {
+                            pipe_source: PipeSource::Plugin(source_plugin_id),
+                            plugin_url: &plugin_url,
+                            configuration: &configuration,
+                            cwd: &None,
                             skip_cache,
                             should_float,
-                            &pane_id_to_replace.map(|p| p.into()),
-                            &pane_title,
-                            None,
-                            &mut pipe_messages,
-                            &message.message_name,
-                            &message.message_payload,
-                            &Some(message.message_args),
-                            &bus,
-                            &mut wasm_bridge,
-                            &plugin_aliases,
+                            pane_id_to_replace: &pane_id_to_replace_converted,
+                            pane_title: &pane_title,
+                            cli_client_id: None,
+                            pipe_messages: &mut pipe_messages,
+                            name: &message.message_name,
+                            payload: &message.message_payload,
+                            args: &args,
+                            bus: &bus,
+                            wasm_bridge: &mut wasm_bridge,
+                            plugin_aliases: &plugin_aliases,
                             floating_pane_coordinates,
-                            message.new_plugin_args.and_then(|n| n.should_focus),
-                        );
+                            should_focus,
+                        });
                     },
                     (None, Some(destination_plugin_id)) => {
                         let is_private = true;
@@ -1794,45 +1816,66 @@ fn pipe_to_all_plugins(
     }
 }
 
-#[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
-fn pipe_to_specific_plugins(
+struct PipeToSpecificPluginsParams<'a> {
     pipe_source: PipeSource,
-    plugin_url: &str,
-    configuration: &Option<BTreeMap<String, String>>,
-    cwd: &Option<PathBuf>,
+    plugin_url: &'a str,
+    configuration: &'a Option<BTreeMap<String, String>>,
+    cwd: &'a Option<PathBuf>,
     skip_cache: bool,
     should_float: bool,
-    pane_id_to_replace: &Option<PaneId>,
-    pane_title: &Option<String>,
+    pane_id_to_replace: &'a Option<PaneId>,
+    pane_title: &'a Option<String>,
     cli_client_id: Option<ClientId>,
-    pipe_messages: &mut Vec<(Option<PluginId>, Option<ClientId>, PipeMessage)>,
-    name: &str,
-    payload: &Option<String>,
-    args: &Option<BTreeMap<String, String>>,
-    bus: &Bus<PluginInstruction>,
-    wasm_bridge: &mut WasmBridge,
-    plugin_aliases: &PluginAliases,
+    pipe_messages: &'a mut Vec<(Option<PluginId>, Option<ClientId>, PipeMessage)>,
+    name: &'a str,
+    payload: &'a Option<String>,
+    args: &'a Option<BTreeMap<String, String>>,
+    bus: &'a Bus<PluginInstruction>,
+    wasm_bridge: &'a mut WasmBridge,
+    plugin_aliases: &'a PluginAliases,
     floating_pane_coordinates: Option<FloatingPaneCoordinates>,
     should_focus: Option<bool>,
-) {
+}
+
+fn pipe_to_specific_plugins(params: PipeToSpecificPluginsParams) {
+    let PipeToSpecificPluginsParams {
+        pipe_source,
+        plugin_url,
+        configuration,
+        cwd,
+        skip_cache,
+        should_float,
+        pane_id_to_replace,
+        pane_title,
+        cli_client_id,
+        pipe_messages,
+        name,
+        payload,
+        args,
+        bus,
+        wasm_bridge,
+        plugin_aliases,
+        floating_pane_coordinates,
+        should_focus,
+    } = params;
     let is_private = true;
     let size = Size::default();
     match RunPluginOrAlias::from_url(plugin_url, configuration, Some(plugin_aliases), cwd.clone()) {
         Ok(run_plugin_or_alias) => {
             let initial_cwd = run_plugin_or_alias.get_initial_cwd();
-            let all_plugin_ids = wasm_bridge.get_or_load_plugins(
+            let all_plugin_ids = wasm_bridge.get_or_load_plugins(GetOrLoadPluginsParams {
                 run_plugin_or_alias,
                 size,
-                initial_cwd.or_else(|| cwd.clone()),
+                cwd: initial_cwd.or_else(|| cwd.clone()),
                 skip_cache,
                 should_float,
-                pane_id_to_replace.is_some(),
-                pane_title.clone(),
-                *pane_id_to_replace,
+                should_be_open_in_place: pane_id_to_replace.is_some(),
+                pane_title: pane_title.clone(),
+                pane_id_to_replace: *pane_id_to_replace,
                 cli_client_id,
                 floating_pane_coordinates,
-                should_focus.unwrap_or(false),
-            );
+                should_focus: should_focus.unwrap_or(false),
+            });
             for (plugin_id, client_id) in all_plugin_ids {
                 pipe_messages.push((
                     Some(plugin_id),

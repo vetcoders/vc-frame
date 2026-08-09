@@ -1,8 +1,46 @@
-use super::plugin_thread_main;
+use super::{PluginThreadParams, plugin_thread_main as plugin_thread_main_impl};
+
+fn plugin_thread_main(
+    bus: Bus<PluginInstruction>,
+    engine: Engine,
+    data_dir: PathBuf,
+    layout: Box<Layout>,
+    layout_dir: Option<PathBuf>,
+    available_layouts: Vec<LayoutInfo>,
+    available_layout_errors: Vec<LayoutWithError>,
+    path_to_default_shell: PathBuf,
+    zellij_cwd: PathBuf,
+    session_env_vars: std::collections::BTreeMap<String, String>,
+    default_shell: Option<TerminalAction>,
+    plugin_aliases: PluginAliases,
+    default_mode: InputMode,
+    default_keybinds: Keybinds,
+    background_plugins: Vec<RunPluginOrAlias>,
+    initiating_client_id: ClientId,
+) -> Result<()> {
+    plugin_thread_main_impl(PluginThreadParams {
+        bus,
+        engine,
+        data_dir,
+        layout,
+        layout_dir,
+        available_layouts,
+        available_layout_errors,
+        path_to_default_shell,
+        zellij_cwd,
+        session_env_vars,
+        default_shell,
+        plugin_aliases,
+        default_mode,
+        default_keybinds,
+        background_plugins,
+        initiating_client_id,
+    })
+}
 use crate::route::NotificationEnd;
 use crate::screen::{LayoutPreparationCleanup, ScreenInstruction};
 use crate::{
-    ServerInstruction,
+    ClientId, ServerInstruction,
     channels::SenderWithContext,
     thread_bus::{Bus, ThreadSenders},
 };
@@ -13,14 +51,17 @@ use std::path::PathBuf;
 use tempfile::tempdir;
 use wasmi::Engine;
 use zellij_utils::data::{
-    BareKey, Event, InputMode, KeyWithModifier, ModeInfo, PermissionStatus, PermissionType,
+    BareKey, Event, InputMode, KeyWithModifier, LayoutInfo, LayoutWithError, ModeInfo,
+    PermissionStatus, PermissionType,
 };
 use zellij_utils::errors::ErrorContext;
+use zellij_utils::errors::prelude::*;
 use zellij_utils::input::actions::Action;
+use zellij_utils::input::command::TerminalAction;
 use zellij_utils::input::keybinds::Keybinds;
 use zellij_utils::input::layout::{
-    PluginAlias, PluginUserConfiguration, Run, RunPlugin, RunPluginLocation, RunPluginOrAlias,
-    TiledPaneLayout,
+    Layout, PluginAlias, PluginUserConfiguration, Run, RunPlugin, RunPluginLocation,
+    RunPluginOrAlias, TiledPaneLayout,
 };
 use zellij_utils::input::permission::PermissionCache;
 use zellij_utils::input::plugins::PluginAliases;
@@ -958,7 +999,7 @@ fn layout_plugins_remain_suspended_until_resolution_and_release_replays() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn load_new_plugin_from_hd() {
     // here we load our fixture plugin into the plugin thread, and then send it an update message
     // expecting tha thte plugin will log the received event and render it later after the update
@@ -1043,7 +1084,7 @@ pub fn load_new_plugin_from_hd() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn load_new_plugin_with_plugin_alias() {
     // here we load our fixture plugin into the plugin thread, and then send it an update message
     // expecting tha thte plugin will log the received event and render it later after the update
@@ -1128,7 +1169,7 @@ pub fn load_new_plugin_with_plugin_alias() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn plugin_workers() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -1213,7 +1254,7 @@ pub fn plugin_workers() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn plugin_workers_persist_state() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -1307,7 +1348,7 @@ pub fn plugin_workers_persist_state() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn can_subscribe_to_hd_events() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -1391,7 +1432,7 @@ pub fn can_subscribe_to_hd_events() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn switch_to_mode_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -1468,7 +1509,7 @@ pub fn switch_to_mode_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn switch_to_mode_plugin_command_permission_denied() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -1545,7 +1586,7 @@ pub fn switch_to_mode_plugin_command_permission_denied() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn new_tabs_with_layout_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -1636,7 +1677,7 @@ pub fn new_tabs_with_layout_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn new_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -1713,7 +1754,7 @@ pub fn new_tab_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn go_to_next_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -1789,7 +1830,7 @@ pub fn go_to_next_tab_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn go_to_previous_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -1865,7 +1906,7 @@ pub fn go_to_previous_tab_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn resize_focused_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -1941,7 +1982,7 @@ pub fn resize_focused_pane_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn resize_focused_pane_with_direction_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -2017,7 +2058,7 @@ pub fn resize_focused_pane_with_direction_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn focus_next_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -2093,7 +2134,7 @@ pub fn focus_next_pane_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn focus_previous_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -2169,7 +2210,7 @@ pub fn focus_previous_pane_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn move_focus_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -2245,7 +2286,7 @@ pub fn move_focus_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn move_focus_or_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -2321,7 +2362,7 @@ pub fn move_focus_or_tab_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn edit_scrollback_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -2397,7 +2438,7 @@ pub fn edit_scrollback_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn write_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -2473,7 +2514,7 @@ pub fn write_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn write_chars_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -2549,7 +2590,7 @@ pub fn write_chars_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn toggle_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -2625,7 +2666,7 @@ pub fn toggle_tab_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn move_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -2701,7 +2742,7 @@ pub fn move_pane_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn move_pane_with_direction_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -2777,7 +2818,7 @@ pub fn move_pane_with_direction_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn clear_screen_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -2854,7 +2895,7 @@ pub fn clear_screen_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn scroll_up_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -2931,7 +2972,7 @@ pub fn scroll_up_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn scroll_down_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -3007,7 +3048,7 @@ pub fn scroll_down_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn scroll_to_top_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -3083,7 +3124,7 @@ pub fn scroll_to_top_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn scroll_to_bottom_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -3159,7 +3200,7 @@ pub fn scroll_to_bottom_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn page_scroll_up_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -3235,7 +3276,7 @@ pub fn page_scroll_up_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn page_scroll_down_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -3311,7 +3352,7 @@ pub fn page_scroll_down_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn toggle_focus_fullscreen_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -3387,7 +3428,7 @@ pub fn toggle_focus_fullscreen_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn toggle_pane_frames_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -3463,7 +3504,7 @@ pub fn toggle_pane_frames_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn toggle_pane_embed_or_eject_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -3539,7 +3580,7 @@ pub fn toggle_pane_embed_or_eject_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn undo_rename_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -3615,7 +3656,7 @@ pub fn undo_rename_pane_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn close_focus_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -3691,7 +3732,7 @@ pub fn close_focus_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn toggle_active_tab_sync_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -3767,7 +3808,7 @@ pub fn toggle_active_tab_sync_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn close_focused_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -3843,7 +3884,7 @@ pub fn close_focused_tab_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn undo_rename_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -3919,7 +3960,7 @@ pub fn undo_rename_tab_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn previous_swap_layout_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -3995,7 +4036,7 @@ pub fn previous_swap_layout_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn next_swap_layout_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -4071,7 +4112,7 @@ pub fn next_swap_layout_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn go_to_tab_name_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -4147,7 +4188,7 @@ pub fn go_to_tab_name_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn focus_or_create_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -4223,7 +4264,7 @@ pub fn focus_or_create_tab_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn go_to_tab() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -4299,7 +4340,7 @@ pub fn go_to_tab() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn start_or_reload_plugin() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -4375,7 +4416,7 @@ pub fn start_or_reload_plugin() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn quit_zellij_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -4458,7 +4499,7 @@ pub fn quit_zellij_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn detach_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -4541,7 +4582,7 @@ pub fn detach_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn open_file_floating_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -4628,7 +4669,7 @@ pub fn open_file_floating_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn open_file_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -4715,7 +4756,7 @@ pub fn open_file_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn open_file_with_line_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -4803,7 +4844,7 @@ pub fn open_file_with_line_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn open_file_with_line_floating_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -4890,7 +4931,7 @@ pub fn open_file_with_line_floating_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn open_terminal_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -4973,7 +5014,7 @@ pub fn open_terminal_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn open_terminal_floating_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -5056,7 +5097,7 @@ pub fn open_terminal_floating_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn open_command_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -5139,7 +5180,7 @@ pub fn open_command_pane_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn open_command_pane_floating_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -5222,7 +5263,7 @@ pub fn open_command_pane_floating_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn switch_to_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -5298,7 +5339,7 @@ pub fn switch_to_tab_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn hide_self_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -5374,7 +5415,7 @@ pub fn hide_self_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn show_self_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -5449,7 +5490,7 @@ pub fn show_self_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn close_terminal_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -5525,7 +5566,7 @@ pub fn close_terminal_pane_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn close_plugin_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -5601,7 +5642,7 @@ pub fn close_plugin_pane_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn focus_terminal_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -5677,7 +5718,7 @@ pub fn focus_terminal_pane_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn focus_plugin_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -5753,7 +5794,7 @@ pub fn focus_plugin_pane_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn rename_terminal_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -5829,7 +5870,7 @@ pub fn rename_terminal_pane_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn rename_plugin_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -5905,7 +5946,7 @@ pub fn rename_plugin_pane_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn rename_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -5981,7 +6022,7 @@ pub fn rename_tab_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn send_configuration_to_plugins() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -6069,7 +6110,7 @@ pub fn send_configuration_to_plugins() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn request_plugin_permissions() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -6139,7 +6180,7 @@ pub fn request_plugin_permissions() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn granted_permission_request_result() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -6234,7 +6275,7 @@ pub fn granted_permission_request_result() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn denied_permission_request_result() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -6324,7 +6365,7 @@ pub fn denied_permission_request_result() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn run_command_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -6407,7 +6448,7 @@ pub fn run_command_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn run_command_with_env_vars_and_cwd_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -6490,7 +6531,7 @@ pub fn run_command_with_env_vars_and_cwd_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn web_request_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -6573,7 +6614,7 @@ pub fn web_request_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn unblock_input_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -6660,7 +6701,7 @@ pub fn unblock_input_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn block_input_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -6748,7 +6789,7 @@ pub fn block_input_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn pipe_output_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -6843,7 +6884,7 @@ pub fn pipe_output_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn pipe_message_to_plugin_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -6935,7 +6976,7 @@ pub fn pipe_message_to_plugin_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn switch_session_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -7026,7 +7067,7 @@ pub fn switch_session_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn switch_session_with_layout_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -7117,7 +7158,7 @@ pub fn switch_session_with_layout_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn switch_session_with_layout_and_cwd_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -7203,7 +7244,7 @@ pub fn switch_session_with_layout_and_cwd_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn disconnect_other_clients_plugins_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -7289,7 +7330,7 @@ pub fn disconnect_other_clients_plugins_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn reconfigure_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -7375,7 +7416,7 @@ pub fn reconfigure_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn run_plugin_in_specific_cwd() {
     // note that this test might sometimes fail when run alone without the rest of the suite due to
     // timing issues
@@ -7465,7 +7506,7 @@ pub fn run_plugin_in_specific_cwd() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn hide_pane_with_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -7541,7 +7582,7 @@ pub fn hide_pane_with_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn show_pane_with_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -7617,7 +7658,7 @@ pub fn show_pane_with_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn open_command_pane_background_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -7704,7 +7745,7 @@ pub fn open_command_pane_background_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn rerun_command_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -7780,7 +7821,7 @@ pub fn rerun_command_pane_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn resize_pane_with_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -7856,7 +7897,7 @@ pub fn resize_pane_with_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn edit_scrollback_for_pane_with_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -7932,7 +7973,7 @@ pub fn edit_scrollback_for_pane_with_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn write_to_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -8008,7 +8049,7 @@ pub fn write_to_pane_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn write_chars_to_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -8084,7 +8125,7 @@ pub fn write_chars_to_pane_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn move_pane_with_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -8160,7 +8201,7 @@ pub fn move_pane_with_pane_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn move_pane_with_pane_id_in_direction_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -8236,7 +8277,7 @@ pub fn move_pane_with_pane_id_in_direction_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn clear_screen_for_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -8312,7 +8353,7 @@ pub fn clear_screen_for_pane_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn scroll_up_in_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -8388,7 +8429,7 @@ pub fn scroll_up_in_pane_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn scroll_down_in_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -8464,7 +8505,7 @@ pub fn scroll_down_in_pane_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn scroll_to_top_in_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -8540,7 +8581,7 @@ pub fn scroll_to_top_in_pane_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn scroll_to_bottom_in_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -8616,7 +8657,7 @@ pub fn scroll_to_bottom_in_pane_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn page_scroll_up_in_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -8692,7 +8733,7 @@ pub fn page_scroll_up_in_pane_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn page_scroll_down_in_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -8768,7 +8809,7 @@ pub fn page_scroll_down_in_pane_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn toggle_pane_id_fullscreen_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -8844,7 +8885,7 @@ pub fn toggle_pane_id_fullscreen_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn toggle_pane_embed_or_eject_for_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -8920,7 +8961,7 @@ pub fn toggle_pane_embed_or_eject_for_pane_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn close_tab_with_index_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -8996,7 +9037,7 @@ pub fn close_tab_with_index_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn break_panes_to_new_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -9072,7 +9113,7 @@ pub fn break_panes_to_new_tab_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn break_panes_to_tab_with_index_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -9148,7 +9189,7 @@ pub fn break_panes_to_tab_with_index_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn reload_plugin_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -9218,7 +9259,7 @@ pub fn reload_plugin_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn load_new_plugin_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -9288,7 +9329,7 @@ pub fn load_new_plugin_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn rebind_keys_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -9374,7 +9415,7 @@ pub fn rebind_keys_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn list_clients_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -9450,7 +9491,7 @@ pub fn list_clients_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn before_close_plugin_event() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -9526,7 +9567,7 @@ pub fn before_close_plugin_event() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn show_cursor_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -9606,7 +9647,7 @@ pub fn show_cursor_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn hide_cursor_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -9687,7 +9728,7 @@ pub fn hide_cursor_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn copy_to_clipboard_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -9767,7 +9808,7 @@ pub fn copy_to_clipboard_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn run_action_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
     // destructor removes the directory
@@ -9847,7 +9888,7 @@ pub fn run_action_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn send_sigint_to_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -9937,7 +9978,7 @@ pub fn send_sigint_to_pane_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn send_sigkill_to_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -10027,7 +10068,7 @@ pub fn send_sigkill_to_pane_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn copy_to_clipboard_without_permission() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -10115,7 +10156,7 @@ pub fn copy_to_clipboard_without_permission() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn run_action_without_permission() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -10201,7 +10242,7 @@ pub fn run_action_without_permission() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn generate_random_name_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -10291,7 +10332,7 @@ pub fn generate_random_name_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn dump_layout_success_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -10381,7 +10422,7 @@ pub fn dump_layout_success_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn dump_layout_not_found_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -10471,7 +10512,7 @@ pub fn dump_layout_not_found_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn get_layout_dir_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -10561,7 +10602,7 @@ pub fn get_layout_dir_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn get_focused_pane_info_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -10646,7 +10687,7 @@ pub fn get_focused_pane_info_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn dump_session_layout_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -10730,7 +10771,7 @@ pub fn dump_session_layout_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn dump_session_layout_for_tab_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -10814,7 +10855,7 @@ pub fn dump_session_layout_for_tab_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn parse_layout_success_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -10904,7 +10945,7 @@ pub fn parse_layout_success_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn parse_layout_error_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -10994,7 +11035,7 @@ pub fn parse_layout_error_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn save_layout_success_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -11084,7 +11125,7 @@ pub fn save_layout_success_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn save_layout_already_exists_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -11188,7 +11229,7 @@ pub fn save_layout_already_exists_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn save_layout_with_overwrite_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -11278,7 +11319,7 @@ pub fn save_layout_with_overwrite_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn save_layout_invalid_kdl_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -11368,7 +11409,7 @@ pub fn save_layout_invalid_kdl_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn rename_layout_success_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -11472,7 +11513,7 @@ pub fn rename_layout_success_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn rename_layout_not_found_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -11562,7 +11603,7 @@ pub fn rename_layout_not_found_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn delete_layout_success_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -11679,7 +11720,7 @@ pub fn delete_layout_success_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn delete_layout_not_found_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -11769,7 +11810,7 @@ pub fn delete_layout_not_found_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn save_layout_path_traversal_blocked_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -11859,7 +11900,7 @@ pub fn save_layout_path_traversal_blocked_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn edit_layout_plugin_command() {
     let temp_host_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_host_folder.path());
@@ -11963,7 +12004,7 @@ pub fn edit_layout_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn override_layout_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -12048,7 +12089,7 @@ pub fn override_layout_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn generate_random_name_permission_denied() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -12145,7 +12186,7 @@ pub fn generate_random_name_permission_denied() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn save_layout_permission_denied() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -12242,7 +12283,7 @@ pub fn save_layout_permission_denied() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn plugin_receives_config_change_event() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -12361,7 +12402,7 @@ pub fn plugin_receives_config_change_event() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn plugin_does_not_receive_event_when_config_unchanged() {
     // Test that plugin does NOT receive event when config hasn't changed
     let temp_folder = tempdir().unwrap();
@@ -12473,7 +12514,7 @@ pub fn plugin_does_not_receive_event_when_config_unchanged() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn get_session_environment_variables_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -12579,7 +12620,7 @@ pub fn get_session_environment_variables_plugin_command() {
 use crate::panes::PaneId;
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn set_pane_regex_highlights_via_plugin() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -12671,7 +12712,7 @@ pub fn set_pane_regex_highlights_via_plugin() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn clear_pane_highlights_via_plugin() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -12754,7 +12795,7 @@ pub fn clear_pane_highlights_via_plugin() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn highlight_clicked_event_delivered_to_plugin() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -12843,7 +12884,7 @@ pub fn highlight_clicked_event_delivered_to_plugin() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn mode_update_payload_is_lightweight_for_opted_in_plugins() {
     // Plugin A subscribes to ModeUpdate only (legacy behavior — receives full keybinds)
     // Plugin B subscribes to InitialKeybinds + ModeUpdate (receives stripped keybinds)
@@ -13020,7 +13061,7 @@ pub fn mode_update_payload_is_lightweight_for_opted_in_plugins() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn reconfiguration_resends_keybinds_to_opted_in_plugins() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());

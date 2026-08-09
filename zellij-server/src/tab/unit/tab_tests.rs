@@ -1,4 +1,143 @@
-use super::{PendingTabLayoutCleanup, Tab};
+use super::{
+    ApplyLayoutOptions, NewFloatingPaneOptions, NewPaneOptions, PendingTabLayoutCleanup,
+    Tab as TabImpl, TabOptions,
+};
+
+trait TabTestHelper {
+    fn new_pane_compat(
+        &mut self,
+        pid: PaneId,
+        initial_pane_title: Option<String>,
+        invoked_with: Option<zellij_utils::input::layout::Run>,
+        start_suppressed: bool,
+        should_focus_pane: bool,
+        new_pane_placement: zellij_utils::data::NewPanePlacement,
+        client_id: Option<ClientId>,
+        blocking_notification: Option<crate::route::NotificationEnd>,
+    ) -> Result<()>;
+}
+
+impl TabTestHelper for TabImpl {
+    fn new_pane_compat(
+        &mut self,
+        pid: PaneId,
+        initial_pane_title: Option<String>,
+        invoked_with: Option<zellij_utils::input::layout::Run>,
+        start_suppressed: bool,
+        should_focus_pane: bool,
+        new_pane_placement: zellij_utils::data::NewPanePlacement,
+        client_id: Option<ClientId>,
+        blocking_notification: Option<crate::route::NotificationEnd>,
+    ) -> Result<()> {
+        self.new_pane(NewPaneOptions {
+            pid,
+            initial_pane_title,
+            invoked_with,
+            start_suppressed,
+            should_focus_pane,
+            new_pane_placement,
+            client_id,
+            blocking_notification,
+        })
+    }
+}
+
+struct Tab;
+impl Tab {
+    // Positional compat shim: `new` deliberately returns the real (aliased)
+    // type, not the unit-struct namespace it hangs off.
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new(
+        id: usize,
+        position: usize,
+        name: String,
+        display_area: Size,
+        character_cell_size: std::rc::Rc<std::cell::RefCell<Option<SizeInPixels>>>,
+        stacked_resize: std::rc::Rc<std::cell::RefCell<bool>>,
+        sixel_image_store: std::rc::Rc<std::cell::RefCell<SixelImageStore>>,
+        os_api: Box<dyn ServerOsApi>,
+        senders: ThreadSenders,
+        max_panes: Option<usize>,
+        style: Style,
+        default_mode_info: ModeInfo,
+        draw_pane_frames: bool,
+        auto_layout: bool,
+        connected_clients_in_app: std::rc::Rc<
+            std::cell::RefCell<std::collections::HashMap<ClientId, bool>>,
+        >,
+        session_is_mirrored: bool,
+        client_id: Option<ClientId>,
+        copy_options: CopyOptions,
+        terminal_emulator_colors: std::rc::Rc<std::cell::RefCell<Palette>>,
+        terminal_emulator_color_codes: std::rc::Rc<
+            std::cell::RefCell<std::collections::HashMap<usize, String>>,
+        >,
+        swap_layouts: (
+            Vec<zellij_utils::input::layout::SwapTiledLayout>,
+            Vec<zellij_utils::input::layout::SwapFloatingLayout>,
+        ),
+        default_shell: PathBuf,
+        debug: bool,
+        arrow_fonts: bool,
+        styled_underlines: bool,
+        osc8_hyperlinks: bool,
+        explicitly_disable_kitty_keyboard_protocol: bool,
+        default_editor: Option<PathBuf>,
+        web_clients_allowed: bool,
+        web_sharing: WebSharing,
+        current_pane_group: std::rc::Rc<std::cell::RefCell<PaneGroups>>,
+        currently_marking_pane_group: std::rc::Rc<
+            std::cell::RefCell<std::collections::HashMap<ClientId, bool>>,
+        >,
+        advanced_mouse_actions: bool,
+        mouse_hover_effects: bool,
+        focus_follows_mouse: bool,
+        mouse_click_through: bool,
+        web_server_ip: IpAddr,
+        web_server_port: u16,
+    ) -> TabImpl {
+        TabImpl::new(TabOptions {
+            id,
+            position,
+            name,
+            display_area,
+            character_cell_size,
+            stacked_resize,
+            sixel_image_store,
+            os_api,
+            senders,
+            max_panes,
+            style,
+            default_mode_info,
+            draw_pane_frames,
+            auto_layout,
+            connected_clients_in_app,
+            session_is_mirrored,
+            client_id,
+            copy_options,
+            terminal_emulator_colors,
+            terminal_emulator_color_codes,
+            swap_layouts,
+            default_shell,
+            debug,
+            arrow_fonts,
+            styled_underlines,
+            osc8_hyperlinks,
+            explicitly_disable_kitty_keyboard_protocol,
+            default_editor,
+            web_clients_allowed,
+            web_sharing,
+            current_pane_group,
+            currently_marking_pane_group,
+            advanced_mouse_actions,
+            mouse_hover_effects,
+            focus_follows_mouse,
+            mouse_click_through,
+            web_server_ip,
+            web_server_port,
+        })
+    }
+}
 use crate::pane_groups::PaneGroups;
 use crate::panes::sixel::SixelImageStore;
 use crate::screen::CopyOptions;
@@ -130,15 +269,15 @@ fn layout_commit_preflight_rejects_a_conflicting_blocking_completion() {
     let mut tab = create_new_tab(Size { cols: 80, rows: 20 }, false);
     let (requested_tx, _requested_rx) = oneshot::channel();
     let transaction = tab
-        .begin_apply_layout(
-            TiledPaneLayout::default(),
-            vec![],
-            vec![(2, None)],
-            vec![],
-            HashMap::new(),
-            1,
-            Some((2, NotificationEnd::new(requested_tx))),
-        )
+        .begin_apply_layout(ApplyLayoutOptions {
+            layout: TiledPaneLayout::default(),
+            floating_panes_layout: vec![],
+            new_terminal_ids: vec![(2, None)],
+            new_floating_terminal_ids: vec![],
+            new_plugin_ids: HashMap::new(),
+            client_id: 1,
+            blocking_terminal: Some((2, NotificationEnd::new(requested_tx))),
+        })
         .expect("layout preparation should install terminal 2");
     let (existing_tx, _existing_rx) = oneshot::channel();
     assert!(
@@ -241,12 +380,12 @@ impl ServerOsApi for FakeInputOutput {
     }
 }
 
-fn tab_resize_increase(tab: &mut Tab, id: ClientId) {
+fn tab_resize_increase(tab: &mut TabImpl, id: ClientId) {
     tab.resize(id, ResizeStrategy::new(Resize::Increase, None))
         .unwrap();
 }
 
-fn tab_resize_left(tab: &mut Tab, id: ClientId) {
+fn tab_resize_left(tab: &mut TabImpl, id: ClientId) {
     tab.resize(
         id,
         ResizeStrategy::new(Resize::Increase, Some(Direction::Left)),
@@ -254,7 +393,7 @@ fn tab_resize_left(tab: &mut Tab, id: ClientId) {
     .unwrap();
 }
 
-fn tab_resize_down(tab: &mut Tab, id: ClientId) {
+fn tab_resize_down(tab: &mut TabImpl, id: ClientId) {
     tab.resize(
         id,
         ResizeStrategy::new(Resize::Increase, Some(Direction::Down)),
@@ -262,7 +401,7 @@ fn tab_resize_down(tab: &mut Tab, id: ClientId) {
     .unwrap();
 }
 
-fn tab_resize_up(tab: &mut Tab, id: ClientId) {
+fn tab_resize_up(tab: &mut TabImpl, id: ClientId) {
     tab.resize(
         id,
         ResizeStrategy::new(Resize::Increase, Some(Direction::Up)),
@@ -270,7 +409,7 @@ fn tab_resize_up(tab: &mut Tab, id: ClientId) {
     .unwrap();
 }
 
-fn tab_resize_right(tab: &mut Tab, id: ClientId) {
+fn tab_resize_right(tab: &mut TabImpl, id: ClientId) {
     tab.resize(
         id,
         ResizeStrategy::new(Resize::Increase, Some(Direction::Right)),
@@ -278,7 +417,7 @@ fn tab_resize_right(tab: &mut Tab, id: ClientId) {
     .unwrap();
 }
 
-fn create_new_tab(size: Size, stacked_resize: bool) -> Tab {
+fn create_new_tab(size: Size, stacked_resize: bool) -> TabImpl {
     let index = 0;
     let position = 0;
     let name = String::new();
@@ -351,20 +490,20 @@ fn create_new_tab(size: Size, stacked_resize: bool) -> Tab {
         web_server_ip,
         web_server_port,
     );
-    tab.apply_layout(
-        TiledPaneLayout::default(),
-        vec![],
-        vec![(1, None)],
-        vec![],
-        HashMap::new(),
+    tab.apply_layout(ApplyLayoutOptions {
+        layout: TiledPaneLayout::default(),
+        floating_panes_layout: vec![],
+        new_terminal_ids: vec![(1, None)],
+        new_floating_terminal_ids: vec![],
+        new_plugin_ids: HashMap::new(),
         client_id,
-        None,
-    )
+        blocking_terminal: None,
+    })
     .unwrap();
     tab
 }
 
-fn create_new_tab_with_layout(size: Size, layout: TiledPaneLayout) -> Tab {
+fn create_new_tab_with_layout(size: Size, layout: TiledPaneLayout) -> TabImpl {
     let index = 0;
     let position = 0;
     let name = String::new();
@@ -441,15 +580,15 @@ fn create_new_tab_with_layout(size: Size, layout: TiledPaneLayout) -> Tab {
     for i in 0..layout.extract_run_instructions().len() {
         new_terminal_ids.push((i as u32, None));
     }
-    tab.apply_layout(
+    tab.apply_layout(ApplyLayoutOptions {
         layout,
-        vec![],
+        floating_panes_layout: vec![],
         new_terminal_ids,
-        vec![],
-        HashMap::new(),
+        new_floating_terminal_ids: vec![],
+        new_plugin_ids: HashMap::new(),
         client_id,
-        None,
-    )
+        blocking_terminal: None,
+    })
     .unwrap();
     tab
 }
@@ -457,7 +596,7 @@ fn create_new_tab_with_layout(size: Size, layout: TiledPaneLayout) -> Tab {
 fn create_new_tab_with_cell_size(
     size: Size,
     character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
-) -> Tab {
+) -> TabImpl {
     let index = 0;
     let position = 0;
     let name = String::new();
@@ -529,15 +668,15 @@ fn create_new_tab_with_cell_size(
         web_server_ip,
         web_server_port,
     );
-    tab.apply_layout(
-        TiledPaneLayout::default(),
-        vec![],
-        vec![(1, None)],
-        vec![],
-        HashMap::new(),
+    tab.apply_layout(ApplyLayoutOptions {
+        layout: TiledPaneLayout::default(),
+        floating_panes_layout: vec![],
+        new_terminal_ids: vec![(1, None)],
+        new_floating_terminal_ids: vec![],
+        new_plugin_ids: HashMap::new(),
         client_id,
-        None,
-    )
+        blocking_terminal: None,
+    })
     .unwrap();
     tab
 }
@@ -831,7 +970,7 @@ fn split_largest_pane() {
     let mut tab = create_new_tab(size, stacked_resize);
     for i in 2..5 {
         let new_pane_id = PaneId::Terminal(i);
-        tab.new_pane(
+        tab.new_pane_test(
             new_pane_id,
             None,
             None,
@@ -1051,7 +1190,7 @@ pub fn cannot_split_largest_pane_when_there_is_no_room() {
     let size = Size { cols: 8, rows: 4 };
     let stacked_resize = true;
     let mut tab = create_new_tab(size, stacked_resize);
-    tab.new_pane(
+    tab.new_pane_test(
         PaneId::Terminal(2),
         None,
         None,
@@ -1152,7 +1291,7 @@ pub fn toggle_focused_pane_fullscreen() {
     let mut tab = create_new_tab(size, stacked_resize);
     for i in 2..5 {
         let new_pane_id = PaneId::Terminal(i);
-        tab.new_pane(
+        tab.new_pane_test(
             new_pane_id,
             None,
             None,
@@ -1237,7 +1376,7 @@ pub fn toggle_focused_pane_fullscreen_with_stacked_resizes() {
     let mut tab = create_new_tab(size, stacked_resize);
     for i in 2..5 {
         let new_pane_id = PaneId::Terminal(i);
-        tab.new_pane(
+        tab.new_pane_compat(
             new_pane_id,
             None,
             None,
@@ -1324,7 +1463,7 @@ pub fn resize_whole_tab_while_fullscreen_preserves_fullscreen() {
     let mut tab = create_new_tab(initial_size, stacked_resize);
     for i in 2..5 {
         let new_pane_id = PaneId::Terminal(i);
-        tab.new_pane(
+        tab.new_pane_test(
             new_pane_id,
             None,
             None,
@@ -1388,7 +1527,7 @@ pub fn resize_while_fullscreen_updates_hidden_pane_geometry() {
     let stacked_resize = false;
     let mut tab = create_new_tab(initial_size, stacked_resize);
     for i in 2..6 {
-        tab.new_pane(
+        tab.new_pane_compat(
             PaneId::Terminal(i),
             None,
             None,
@@ -1462,7 +1601,7 @@ pub fn closing_fullscreen_scrollback_editor_restores_consistent_layout() {
     let client_id = 1;
     let mut tab = create_new_tab(size, stacked_resize);
     for i in 2..5 {
-        tab.new_pane(
+        tab.new_pane_test(
             PaneId::Terminal(i),
             None,
             None,
@@ -1567,7 +1706,7 @@ pub fn opening_scrollback_editor_on_fullscreen_pane_retargets_fullscreen() {
     let client_id = 1;
     let mut tab = create_new_tab(size, stacked_resize);
     for i in 2..5 {
-        tab.new_pane(
+        tab.new_pane_test(
             PaneId::Terminal(i),
             None,
             None,
@@ -1650,7 +1789,7 @@ fn switch_to_next_pane_fullscreen() {
     let mut active_tab = create_new_tab(size, stacked_resize);
 
     active_tab
-        .new_pane(
+        .new_pane_test(
             PaneId::Terminal(1),
             None,
             None,
@@ -1662,7 +1801,7 @@ fn switch_to_next_pane_fullscreen() {
         )
         .unwrap();
     active_tab
-        .new_pane(
+        .new_pane_test(
             PaneId::Terminal(2),
             None,
             None,
@@ -1674,7 +1813,7 @@ fn switch_to_next_pane_fullscreen() {
         )
         .unwrap();
     active_tab
-        .new_pane(
+        .new_pane_test(
             PaneId::Terminal(3),
             None,
             None,
@@ -1686,7 +1825,7 @@ fn switch_to_next_pane_fullscreen() {
         )
         .unwrap();
     active_tab
-        .new_pane(
+        .new_pane_test(
             PaneId::Terminal(4),
             None,
             None,
@@ -1727,7 +1866,7 @@ fn switch_to_prev_pane_fullscreen() {
     //testing four consecutive switches in fullscreen mode
 
     active_tab
-        .new_pane(
+        .new_pane_test(
             PaneId::Terminal(1),
             None,
             None,
@@ -1739,7 +1878,7 @@ fn switch_to_prev_pane_fullscreen() {
         )
         .unwrap();
     active_tab
-        .new_pane(
+        .new_pane_test(
             PaneId::Terminal(2),
             None,
             None,
@@ -1751,7 +1890,7 @@ fn switch_to_prev_pane_fullscreen() {
         )
         .unwrap();
     active_tab
-        .new_pane(
+        .new_pane_test(
             PaneId::Terminal(3),
             None,
             None,
@@ -1763,7 +1902,7 @@ fn switch_to_prev_pane_fullscreen() {
         )
         .unwrap();
     active_tab
-        .new_pane(
+        .new_pane_test(
             PaneId::Terminal(4),
             None,
             None,
@@ -15635,7 +15774,7 @@ fn correctly_resize_frameless_panes_on_pane_close() {
     let content_size = (pane.get_content_columns(), pane.get_content_rows());
     assert_eq!(content_size, (cols, rows));
 
-    tab.new_pane(
+    tab.new_pane_compat(
         PaneId::Terminal(2),
         None,
         None,
@@ -15665,12 +15804,28 @@ fn floating_pane_z_index_is_tracked() {
     let _client_id = 1;
 
     // Create first floating pane (should_float = true means it will be a floating pane)
-    tab.new_floating_pane(PaneId::Terminal(2), None, None, false, true, None, None)
-        .unwrap();
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: PaneId::Terminal(2),
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: None,
+        blocking_notification: None,
+    })
+    .unwrap();
 
     // Create second floating pane
-    tab.new_floating_pane(PaneId::Terminal(3), None, None, false, true, None, None)
-        .unwrap();
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: PaneId::Terminal(3),
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: None,
+        blocking_notification: None,
+    })
+    .unwrap();
 
     // Verify z-indices exist and are different
     let z_index_pane2 = tab.floating_panes.get_pane_z_index(PaneId::Terminal(2));
@@ -15701,12 +15856,28 @@ fn pinned_floating_pane_has_higher_z_index() {
     let _client_id = 1;
 
     // Create first floating pane (will be unpinned)
-    tab.new_floating_pane(PaneId::Terminal(2), None, None, false, true, None, None)
-        .unwrap();
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: PaneId::Terminal(2),
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: None,
+        blocking_notification: None,
+    })
+    .unwrap();
 
     // Create second floating pane and pin it
-    tab.new_floating_pane(PaneId::Terminal(3), None, None, false, true, None, None)
-        .unwrap();
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: PaneId::Terminal(3),
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: None,
+        blocking_notification: None,
+    })
+    .unwrap();
     tab.set_floating_pane_pinned(PaneId::Terminal(3), true);
 
     // Get z-indices
@@ -15738,12 +15909,28 @@ fn pinned_pane_z_index_higher_than_regular_floating_panes() {
     let _client_id = 1;
 
     // Create first floating pane
-    tab.new_floating_pane(PaneId::Terminal(2), None, None, false, true, None, None)
-        .unwrap();
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: PaneId::Terminal(2),
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: None,
+        blocking_notification: None,
+    })
+    .unwrap();
 
     // Create second floating pane
-    tab.new_floating_pane(PaneId::Terminal(3), None, None, false, true, None, None)
-        .unwrap();
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: PaneId::Terminal(3),
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: None,
+        blocking_notification: None,
+    })
+    .unwrap();
 
     // Pin the second pane so it's on top
     tab.set_floating_pane_pinned(PaneId::Terminal(3), true);
@@ -15787,8 +15974,16 @@ fn active_pane_z_index_retrieved_for_cursor_visibility() {
     );
 
     // Create a floating pane
-    tab.new_floating_pane(PaneId::Terminal(2), None, None, false, true, None, None)
-        .unwrap();
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: PaneId::Terminal(2),
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: None,
+        blocking_notification: None,
+    })
+    .unwrap();
 
     // Active pane should now have a z-index
     let active_pane_id_floating = tab.get_active_pane_id(client_id).unwrap();
@@ -15810,10 +16005,26 @@ fn get_pane_z_index_returns_none_for_nonexistent_pane() {
     let _client_id = 1;
 
     // Create two floating panes
-    tab.new_floating_pane(PaneId::Terminal(2), None, None, false, true, None, None)
-        .unwrap();
-    tab.new_floating_pane(PaneId::Terminal(3), None, None, false, true, None, None)
-        .unwrap();
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: PaneId::Terminal(2),
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: None,
+        blocking_notification: None,
+    })
+    .unwrap();
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: PaneId::Terminal(3),
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: None,
+        blocking_notification: None,
+    })
+    .unwrap();
 
     // Query for a pane that doesn't exist
     let z_index_nonexistent = tab.floating_panes.get_pane_z_index(PaneId::Terminal(999));

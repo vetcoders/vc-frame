@@ -28,6 +28,8 @@ use zellij_utils::data::{Event, PipeMessage};
 /// This trait should be implemented - once per plugin - on a struct (normally representing the
 /// plugin state). This struct should then be registered with the
 /// [`register_plugin!`](register_plugin) macro.
+// Default trait methods keep named (non-underscore) parameters: they are the
+// documented public plugin API and rustdoc renders these names verbatim.
 #[allow(unused_variables)]
 pub trait ZellijPlugin: Default {
     /// Will be called when the plugin is loaded, this is a good place to [`subscribe`](shim::subscribe) to events that are interesting for this plugin.
@@ -62,6 +64,7 @@ pub trait ZellijPlugin: Default {
 /// [`post_message_to_plugin`](shim::post_message_to_plugin) method (but be sure the plugin has
 /// [`subscribe`](shim::subscribe)d to the [`CustomMessage`](prelude::Event::CustomMessage)) event
 /// first!
+// Same contract as ZellijPlugin above: named params are rustdoc-visible API.
 #[allow(unused_variables)]
 pub trait ZellijWorker<'de>: Default + Serialize + Deserialize<'de> {
     /// Triggered whenever the plugin sends the worker a message using the

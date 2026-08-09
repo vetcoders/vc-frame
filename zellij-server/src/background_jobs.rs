@@ -1,13 +1,15 @@
-#[allow(unused_imports)] // some imports used only with web_server_capability feature
+// Parts of these three imports are consumed only under web_server_capability;
+// builds without the feature would otherwise flag them.
+#[cfg_attr(not(feature = "web_server_capability"), allow(unused_imports))]
 use zellij_utils::consts::{
     VERSION, ZELLIJ_SESSION_INFO_CACHE_DIR, ZELLIJ_SOCK_DIR, session_info_cache_file_name,
     session_info_folder_for_session, session_layout_cache_file_name,
 };
-#[allow(unused_imports)]
+#[cfg_attr(not(feature = "web_server_capability"), allow(unused_imports))]
 use zellij_utils::data::{Event, HttpVerb, LayoutInfo, SessionInfo, WebServerStatus};
 use zellij_utils::errors::{BackgroundJobContext, ContextType, prelude::*};
 use zellij_utils::input::layout::RunPlugin;
-#[allow(unused_imports)]
+#[cfg_attr(not(feature = "web_server_capability"), allow(unused_imports))]
 use zellij_utils::shared::parse_base_url;
 
 #[cfg(feature = "web_server_capability")]
@@ -202,7 +204,8 @@ pub fn session_scan_state() -> Option<&'static SessionScanState> {
     SESSION_SCAN_STATE.get()
 }
 
-#[allow(unused_variables)] // web_server_base_url used only with web_server_capability feature
+// web_server_base_url is read only under web_server_capability.
+#[cfg_attr(not(feature = "web_server_capability"), allow(unused_variables))]
 pub(crate) fn background_jobs_main(
     bus: Bus<BackgroundJob>,
     serialization_interval: Option<u64>,

@@ -145,12 +145,7 @@ pub fn truncate_display_width(text: &str, max_cols: usize) -> String {
 /// frame bar (the datum `⎮` is the partition, not a chip separator).
 pub fn format_mode_zone(mode: InputMode) -> String {
     let (glyph, code) = mode_chip(mode);
-    let glyph_width = glyph.width();
-    let body = if glyph_width == 2 {
-        format!("│{} {}", glyph, code)
-    } else {
-        format!("│ {} {}", glyph, code)
-    };
+    let body = format!(" {} {}", glyph, code);
     pad_to_cols(&body, MODE_ZONE_COLS)
 }
 
@@ -837,13 +832,19 @@ mod tests {
     }
 
     #[test]
-    fn mode_zone_has_leading_vertical_separator() {
-        // Mode chip starts with │ to anchor flush against the rail continuum.
+    fn mode_zone_has_leading_space_and_no_bar() {
+        // Mode chip starts with a space and contains no leading vertical line.
         for mode in ALL_MODES {
             let zone = format_mode_zone(mode);
             assert!(
-                zone.starts_with('│'),
-                "mode {:?} must start with │ (got {:?})",
+                zone.starts_with(' '),
+                "mode {:?} must start with space (got {:?})",
+                mode,
+                zone
+            );
+            assert!(
+                !zone.contains('│'),
+                "mode {:?} must not contain vertical bar (got {:?})",
                 mode,
                 zone
             );
@@ -908,7 +909,7 @@ mod tests {
         // 𝌆 is EAW wide (2). Budget of 4 must absorb it without overshoot.
         let s = pad_to_cols("𝌆", 4);
         assert_eq!(display_width(&s), 4);
-        let s2 = pad_to_cols("│𝌆", 3);
+        let s2 = pad_to_cols(" 𝌆", 3);
         assert_eq!(display_width(&s2), 3);
     }
 

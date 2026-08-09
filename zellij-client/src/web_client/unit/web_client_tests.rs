@@ -1,5 +1,30 @@
-use super::serve_web_client;
 use super::*;
+use super::{ServeWebClientParams, serve_web_client as serve_web_client_impl};
+
+async fn serve_web_client(
+    config: Config,
+    config_options: Options,
+    config_file_path: Option<PathBuf>,
+    listener: std::net::TcpListener,
+    rustls_config: Option<RustlsConfig>,
+    session_manager: Option<Arc<dyn SessionManager>>,
+    client_os_api_factory: Option<Arc<dyn ClientOsApiFactory>>,
+    web_server_ip: IpAddr,
+    web_server_port: u16,
+) {
+    serve_web_client_impl(ServeWebClientParams {
+        config,
+        config_options,
+        config_file_path,
+        listener,
+        rustls_config,
+        session_manager,
+        client_os_api_factory,
+        web_server_ip,
+        web_server_port,
+    })
+    .await
+}
 use futures_util::{SinkExt, StreamExt};
 use isahc::prelude::*;
 use serde_json;

@@ -2725,7 +2725,6 @@ pub fn replace_pane_with_existing_pane(
 
 // Utility Functions
 
-#[allow(unused)]
 /// Returns the `TabInfo` corresponding to the currently active tab
 pub fn get_focused_tab(tab_infos: &Vec<TabInfo>) -> Option<TabInfo> {
     for tab_info in tab_infos {
@@ -2736,7 +2735,6 @@ pub fn get_focused_tab(tab_infos: &Vec<TabInfo>) -> Option<TabInfo> {
     None
 }
 
-#[allow(unused)]
 /// Returns the `PaneInfo` corresponding to the currently active pane (ignoring plugins)
 pub fn get_focused_pane(tab_position: usize, pane_manifest: &PaneManifest) -> Option<PaneInfo> {
     let panes = pane_manifest.panes.get(&tab_position);

@@ -1,6 +1,7 @@
 use super::{
-    ActiveLayoutTransaction, CopyOptions, DurableTabLayoutGeneration, LayoutPreparationCleanup,
-    LayoutTabOwner, Screen, ScreenInstruction, ScreenLayoutTransactionKind, TabOverrideResult,
+    ActiveLayoutTransaction, ApplyLayoutParams, CopyOptions, DurableTabLayoutGeneration,
+    LayoutPreparationCleanup, LayoutTabOwner, Screen, ScreenInstruction,
+    ScreenLayoutTransactionKind, ScreenOptions, ScreenThreadParams, TabOverrideResult,
     VC_FLEET_LIVE_COUNT_MESSAGE, VC_STATUS_BAR_VISIBILITY_MESSAGE, fleet_live_count,
     is_parkable_chrome_plugin_run, register_viewer_creation_post_install_test_hook,
     reject_after_apply_prepare_for_test, reserve_durable_tab_layout_recovery,
@@ -66,6 +67,31 @@ use std::rc::Rc;
 use tokio::sync::oneshot;
 use zellij_utils::data::{PaneContents, PaneRenderReport};
 use zellij_utils::ipc::ExitReason;
+
+// Positional compat shim: the arg list deliberately mirrors the pre-sweep
+// Tab::new_pane signature so 18 historical call sites stay byte-stable.
+#[allow(clippy::too_many_arguments)]
+fn new_pane_options(
+    pid: PaneId,
+    initial_pane_title: Option<String>,
+    invoked_with: Option<Run>,
+    start_suppressed: bool,
+    should_focus_pane: bool,
+    new_pane_placement: NewPanePlacement,
+    client_id: Option<ClientId>,
+    blocking_notification: Option<NotificationEnd>,
+) -> crate::tab::NewPaneOptions {
+    crate::tab::NewPaneOptions {
+        pid,
+        initial_pane_title,
+        invoked_with,
+        start_suppressed,
+        should_focus_pane,
+        new_pane_placement,
+        client_id,
+        blocking_notification,
+    }
+}
 
 fn normalize_layout_debug(output: String) -> String {
     output
@@ -254,17 +280,17 @@ fn new_tab_with_status_bar_and_worker(
         )
         .unwrap();
     screen
-        .apply_layout(
+        .apply_layout(ApplyLayoutParams {
             layout,
-            vec![],
-            vec![(terminal_id, None)],
-            vec![],
-            plugin_ids,
+            floating_panes_layout: vec![],
+            new_terminal_ids: vec![(terminal_id, None)],
+            new_floating_terminal_ids: vec![],
+            new_plugin_ids: plugin_ids,
             tab_id,
-            true,
-            (1, false),
-            None,
-        )
+            should_change_client_focus: true,
+            client_id_and_is_web_client: (1, false),
+            blocking_terminal: None,
+        })
         .unwrap();
 }
 
@@ -781,21 +807,21 @@ fn take_snapshots_and_cursor_coordinates_from_render_events<'a>(
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
-        screen_size.rows,
-        screen_size.cols,
-        Rc::new(RefCell::new(Palette::default())),
+    let mut grid = Grid::new(crate::panes::grid::GridOptions {
+        rows: screen_size.rows,
+        columns: screen_size.cols,
+        terminal_emulator_colors: Rc::new(RefCell::new(Palette::default())),
         terminal_emulator_color_codes,
-        Rc::new(RefCell::new(LinkHandler::new())),
+        link_handler: Rc::new(RefCell::new(LinkHandler::new())),
         character_cell_size,
         sixel_image_store,
-        Style::default(),
+        style: Style::default(),
         debug,
         arrow_fonts,
         styled_underlines,
         osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
-    );
+    });
     let snapshots: Vec<(Option<(usize, usize)>, String)> = all_events
         .filter_map(|server_instruction| {
             match server_instruction {
@@ -833,17 +859,17 @@ fn send_cli_action_to_server(
         .default_mode
         .unwrap_or(InputMode::Normal);
     for action in actions {
-        route_action(
+        route_action(crate::route::RouteActionParams {
             action,
-            "test",
+            caller: "test",
             client_id,
-            None,
-            None,
-            senders.clone(),
-            default_shell.clone(),
-            None,
+            cli_client_id: None,
+            pane_id: None,
+            senders: senders.clone(),
+            default_shell: default_shell.clone(),
+            seen_cli_pipes: None,
             default_mode,
-        )
+        })
         .unwrap();
     }
 }
@@ -997,9 +1023,9 @@ fn create_new_screen(
     let web_server_port = 8080;
     let visual_bell = true;
 
-    Screen::new(
+    Screen::new(ScreenOptions {
         bus,
-        &client_attributes,
+        client_attributes: &client_attributes,
         max_panes,
         mode_info,
         draw_pane_frames,
@@ -1019,18 +1045,18 @@ fn create_new_screen(
         layout_dir,
         explicitly_disable_kitty_keyboard_protocol,
         stacked_resize,
-        None,
-        false,
+        default_editor: None,
+        web_clients_allowed: false,
         web_sharing,
         advanced_mouse_actions,
         mouse_hover_effects,
         visual_bell,
-        false, // focus_follows_mouse
-        false, // mouse_click_through
+        focus_follows_mouse: false,
+        mouse_click_through: false,
         web_server_ip,
         web_server_port,
-        Arc::new(AtomicBool::new(false)),
-    )
+        has_clients_flag: Arc::new(AtomicBool::new(false)),
+    })
 }
 
 #[test]
@@ -1231,16 +1257,16 @@ impl MockScreen {
                 thread_id_tx
                     .send(std::thread::current().id())
                     .expect("test must retain the screen thread-id receiver");
-                screen_thread_main(
-                    screen_bus,
-                    None,
+                screen_thread_main(ScreenThreadParams {
+                    bus: screen_bus,
+                    max_panes: None,
                     client_attributes,
                     config,
                     debug,
-                    Box::default(),
-                    Arc::new(AtomicBool::new(false)),
-                    Some(session_name),
-                )
+                    default_layout: Box::default(),
+                    has_clients_flag: Arc::new(AtomicBool::new(false)),
+                    session_name_override: Some(session_name),
+                })
                 .expect("TEST")
             })
             .unwrap();
@@ -1334,16 +1360,16 @@ impl MockScreen {
         let screen_thread = std::thread::Builder::new()
             .name("screen_thread".to_string())
             .spawn(move || {
-                screen_thread_main(
-                    screen_bus,
-                    None,
+                screen_thread_main(ScreenThreadParams {
+                    bus: screen_bus,
+                    max_panes: None,
                     client_attributes,
                     config,
                     debug,
-                    Box::default(),
-                    Arc::new(AtomicBool::new(false)),
-                    Some("zellij-test".to_owned()),
-                )
+                    default_layout: Box::default(),
+                    has_clients_flag: Arc::new(AtomicBool::new(false)),
+                    session_name_override: Some("zellij-test".to_owned()),
+                })
                 .expect("TEST")
             })
             .unwrap();
@@ -1714,17 +1740,17 @@ fn new_tab(screen: &mut Screen, pid: u32, tab_index: usize) {
         )
         .expect("TEST");
     screen
-        .apply_layout(
-            TiledPaneLayout::default(),
-            vec![], // floating panes layout
+        .apply_layout(ApplyLayoutParams {
+            layout: TiledPaneLayout::default(),
+            floating_panes_layout: vec![],
             new_terminal_ids,
-            vec![], // new floating terminal ids
+            new_floating_terminal_ids: vec![],
             new_plugin_ids,
-            tab_index,
-            true,
-            (client_id, false),
-            None,
-        )
+            tab_id: tab_index,
+            should_change_client_focus: true,
+            client_id_and_is_web_client: (client_id, false),
+            blocking_terminal: None,
+        })
         .expect("TEST");
 }
 
@@ -1786,17 +1812,17 @@ fn new_named_tab_with_placement_and_focus(
         )
         .expect("TEST");
     screen
-        .apply_layout(
-            TiledPaneLayout::default(),
-            vec![],
-            vec![(pid, None)],
-            vec![],
-            HashMap::new(),
-            tab_index,
-            should_change_focus,
-            (client_id, false),
-            None,
-        )
+        .apply_layout(ApplyLayoutParams {
+            layout: TiledPaneLayout::default(),
+            floating_panes_layout: vec![],
+            new_terminal_ids: vec![(pid, None)],
+            new_floating_terminal_ids: vec![],
+            new_plugin_ids: HashMap::new(),
+            tab_id: tab_index,
+            should_change_client_focus: should_change_focus,
+            client_id_and_is_web_client: (client_id, false),
+            blocking_terminal: None,
+        })
         .expect("TEST");
 }
 
@@ -2529,7 +2555,7 @@ fn switch_to_tab_with_fullscreen() {
     {
         let active_tab = screen.get_active_tab_mut(1).unwrap();
         active_tab
-            .new_pane(
+            .new_pane(new_pane_options(
                 PaneId::Terminal(2),
                 None,
                 None,
@@ -2538,7 +2564,7 @@ fn switch_to_tab_with_fullscreen() {
                 NewPanePlacement::default(),
                 Some(1),
                 None,
-            )
+            ))
             .unwrap();
         active_tab.toggle_active_pane_fullscreen(1);
     }
@@ -2653,7 +2679,7 @@ fn attach_after_first_tab_closed() {
     {
         let active_tab = screen.get_active_tab_mut(1).unwrap();
         active_tab
-            .new_pane(
+            .new_pane(new_pane_options(
                 PaneId::Terminal(2),
                 None,
                 None,
@@ -2662,7 +2688,7 @@ fn attach_after_first_tab_closed() {
                 NewPanePlacement::default(),
                 Some(1),
                 None,
-            )
+            ))
             .unwrap();
         active_tab.toggle_active_pane_fullscreen(1);
     }
@@ -2684,7 +2710,7 @@ fn open_new_floating_pane_with_custom_coordinates() {
     new_tab(&mut screen, 1, 0);
     let active_tab = screen.get_active_tab_mut(1).unwrap();
     active_tab
-        .new_pane(
+        .new_pane(new_pane_options(
             PaneId::Terminal(2),
             None,
             None,
@@ -2700,7 +2726,7 @@ fn open_new_floating_pane_with_custom_coordinates() {
             })),
             Some(1),
             None,
-        )
+        ))
         .unwrap();
     let active_pane = active_tab.get_active_pane(1).unwrap();
     assert_eq!(active_pane.x(), 12, "x coordinates set properly");
@@ -2720,7 +2746,7 @@ fn open_new_floating_pane_with_custom_coordinates_exceeding_viewport() {
     new_tab(&mut screen, 1, 0);
     let active_tab = screen.get_active_tab_mut(1).unwrap();
     active_tab
-        .new_pane(
+        .new_pane(new_pane_options(
             PaneId::Terminal(2),
             None,
             None,
@@ -2736,7 +2762,7 @@ fn open_new_floating_pane_with_custom_coordinates_exceeding_viewport() {
             })),
             Some(1),
             None,
-        )
+        ))
         .unwrap();
     let active_pane = active_tab.get_active_pane(1).unwrap();
     assert_eq!(active_pane.x(), 111, "x coordinates set properly");
@@ -2756,7 +2782,7 @@ fn floating_pane_auto_centers_horizontally_with_only_width() {
     new_tab(&mut screen, 1, 0);
     let active_tab = screen.get_active_tab_mut(1).unwrap();
     active_tab
-        .new_pane(
+        .new_pane(new_pane_options(
             PaneId::Terminal(2),
             None,
             None,
@@ -2772,7 +2798,7 @@ fn floating_pane_auto_centers_horizontally_with_only_width() {
             })),
             Some(1),
             None,
-        )
+        ))
         .unwrap();
     let active_pane = active_tab.get_active_pane(1).unwrap();
     assert_eq!(active_pane.x(), 30, "x centered: (120-60)/2 = 30");
@@ -2792,7 +2818,7 @@ fn floating_pane_auto_centers_vertically_with_only_height() {
     new_tab(&mut screen, 1, 0);
     let active_tab = screen.get_active_tab_mut(1).unwrap();
     active_tab
-        .new_pane(
+        .new_pane(new_pane_options(
             PaneId::Terminal(2),
             None,
             None,
@@ -2808,7 +2834,7 @@ fn floating_pane_auto_centers_vertically_with_only_height() {
             })),
             Some(1),
             None,
-        )
+        ))
         .unwrap();
     let active_pane = active_tab.get_active_pane(1).unwrap();
     assert_eq!(active_pane.x(), 10, "x explicitly set");
@@ -2828,7 +2854,7 @@ fn floating_pane_auto_centers_both_axes_with_only_size() {
     new_tab(&mut screen, 1, 0);
     let active_tab = screen.get_active_tab_mut(1).unwrap();
     active_tab
-        .new_pane(
+        .new_pane(new_pane_options(
             PaneId::Terminal(2),
             None,
             None,
@@ -2844,7 +2870,7 @@ fn floating_pane_auto_centers_both_axes_with_only_size() {
             })),
             Some(1),
             None,
-        )
+        ))
         .unwrap();
     let active_pane = active_tab.get_active_pane(1).unwrap();
     assert_eq!(active_pane.x(), 20, "x centered: (120-80)/2 = 20");
@@ -2864,7 +2890,7 @@ fn floating_pane_respects_explicit_coordinates_with_size() {
     new_tab(&mut screen, 1, 0);
     let active_tab = screen.get_active_tab_mut(1).unwrap();
     active_tab
-        .new_pane(
+        .new_pane(new_pane_options(
             PaneId::Terminal(2),
             None,
             None,
@@ -2880,7 +2906,7 @@ fn floating_pane_respects_explicit_coordinates_with_size() {
             })),
             Some(1),
             None,
-        )
+        ))
         .unwrap();
     let active_pane = active_tab.get_active_pane(1).unwrap();
     assert_eq!(active_pane.x(), 15, "x explicitly set, not centered");
@@ -2900,7 +2926,7 @@ fn floating_pane_centers_with_percentage_width() {
     new_tab(&mut screen, 1, 0);
     let active_tab = screen.get_active_tab_mut(1).unwrap();
     active_tab
-        .new_pane(
+        .new_pane(new_pane_options(
             PaneId::Terminal(2),
             None,
             None,
@@ -2916,7 +2942,7 @@ fn floating_pane_centers_with_percentage_width() {
             })),
             Some(1),
             None,
-        )
+        ))
         .unwrap();
     let active_pane = active_tab.get_active_pane(1).unwrap();
     let expected_width = ((50.0_f64 / 100.0) * 120.0).floor() as usize;
@@ -2941,7 +2967,7 @@ fn floating_pane_centers_large_pane_safely() {
     new_tab(&mut screen, 1, 0);
     let active_tab = screen.get_active_tab_mut(1).unwrap();
     active_tab
-        .new_pane(
+        .new_pane(new_pane_options(
             PaneId::Terminal(2),
             None,
             None,
@@ -2957,7 +2983,7 @@ fn floating_pane_centers_large_pane_safely() {
             })),
             Some(1),
             None,
-        )
+        ))
         .unwrap();
     let active_pane = active_tab.get_active_pane(1).unwrap();
     assert_eq!(
@@ -3209,7 +3235,7 @@ fn group_panes_following_focus() {
         let active_tab = screen.get_active_tab_mut(client_id).unwrap();
         for i in 2..5 {
             active_tab
-                .new_pane(
+                .new_pane(new_pane_options(
                     PaneId::Terminal(i),
                     None,
                     None,
@@ -3221,7 +3247,7 @@ fn group_panes_following_focus() {
                     },
                     Some(client_id),
                     None,
-                )
+                ))
                 .unwrap();
         }
     }
@@ -3278,7 +3304,7 @@ fn break_group_with_mouse() {
         let active_tab = screen.get_active_tab_mut(client_id).unwrap();
         for i in 2..5 {
             active_tab
-                .new_pane(
+                .new_pane(new_pane_options(
                     PaneId::Terminal(i),
                     None,
                     None,
@@ -3290,7 +3316,7 @@ fn break_group_with_mouse() {
                     },
                     Some(client_id),
                     None,
-                )
+                ))
                 .unwrap();
         }
     }
@@ -7044,7 +7070,9 @@ fn dispatch_transactional_new_tab(
     }
 }
 
-#[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
+// Positional test-harness helper: mirrors the transactional apply pipeline
+// arg-for-arg; collapsing it into a struct would just duplicate ApplyLayoutParams.
+#[allow(clippy::too_many_arguments)]
 fn send_transactional_apply(
     mock_screen: &MockScreen,
     tab_id: usize,
@@ -9451,8 +9479,8 @@ pub fn rejected_layout_preserves_terminal_grid_selection_and_scrollback() {
         RunPluginOrAlias::from_url("file:/missing-grid-rollback.wasm", &None, None, None).unwrap();
     let provided_plugin =
         RunPluginOrAlias::from_url("file:/provided-grid-rollback.wasm", &None, None, None).unwrap();
-    let result = tab.begin_override_layout(
-        TiledPaneLayout {
+    let result = tab.begin_override_layout(crate::tab::OverrideLayoutOptions {
+        layout: TiledPaneLayout {
             run: Some(Run::Command(RunCommand {
                 command: PathBuf::from("grid-rollback-writer"),
                 ..Default::default()
@@ -9460,20 +9488,20 @@ pub fn rejected_layout_preserves_terminal_grid_selection_and_scrollback() {
             focus: Some(true),
             ..Default::default()
         },
-        vec![FloatingPaneLayout {
+        floating_panes_layout: vec![FloatingPaneLayout {
             run: Some(Run::Plugin(missing_plugin)),
             ..Default::default()
         }],
-        Some(vec![]),
-        Some(vec![]),
-        vec![(970, None)],
-        vec![],
-        HashMap::from([(provided_plugin, vec![971])]),
-        false,
-        false,
+        new_swap_tiled_layouts: Some(vec![]),
+        new_swap_floating_layouts: Some(vec![]),
+        new_terminal_ids: vec![(970, None)],
+        new_floating_terminal_ids: vec![],
+        new_plugin_ids: HashMap::from([(provided_plugin, vec![971])]),
+        retain_existing_terminal_panes: false,
+        retain_existing_plugin_panes: false,
         client_id,
-        None,
-    );
+        blocking_terminal: None,
+    });
     assert!(
         result.is_err(),
         "the injected floating-pane gap must reject"
@@ -10500,16 +10528,16 @@ pub fn gc_safe_close_accepts_all_runtime_viewer_plugin_locations() {
             screen
                 .get_tab_by_id_mut(1)
                 .unwrap()
-                .new_tiled_pane(
-                    PaneId::Plugin(90),
-                    Some(plugin.location_string()),
-                    Some(Run::Plugin(plugin)),
-                    false,
-                    false,
-                    None,
-                    None,
-                    Some(false),
-                )
+                .new_tiled_pane(crate::tab::NewTiledPaneOptions {
+                    pid: PaneId::Plugin(90),
+                    initial_pane_title: Some(plugin.location_string()),
+                    invoked_with: Some(Run::Plugin(plugin)),
+                    start_suppressed: false,
+                    should_focus_pane: false,
+                    client_id: None,
+                    blocking_notification: None,
+                    borderless: Some(false),
+                })
                 .expect("viewer plugin pane should use the runtime creation path");
             screen.get_tab_by_id_mut(1).unwrap().name = "viewer".to_owned();
             screen.get_tab_by_id_mut(1).unwrap().hold_pane(
@@ -10619,16 +10647,16 @@ pub fn gc_safe_close_refuses_an_unexpected_plugin_surface() {
     screen
         .get_tab_by_id_mut(1)
         .unwrap()
-        .new_tiled_pane(
-            PaneId::Plugin(90),
-            Some(plugin.location_string()),
-            Some(Run::Plugin(plugin)),
-            false,
-            false,
-            None,
-            None,
-            Some(false),
-        )
+        .new_tiled_pane(crate::tab::NewTiledPaneOptions {
+            pid: PaneId::Plugin(90),
+            initial_pane_title: Some(plugin.location_string()),
+            invoked_with: Some(Run::Plugin(plugin)),
+            start_suppressed: false,
+            should_focus_pane: false,
+            client_id: None,
+            blocking_notification: None,
+            borderless: Some(false),
+        })
         .expect("fixture plugin pane should use the runtime creation path");
     screen.get_tab_by_id_mut(1).unwrap().name = "viewer".to_owned();
     screen.get_tab_by_id_mut(1).unwrap().hold_pane(
@@ -10888,9 +10916,9 @@ fn create_new_screen_with_message_capture(size: Size) -> ScreenWithMessageCaptur
     let web_server_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
     let web_server_port = 8080;
     let visual_bell = true;
-    let screen = Screen::new(
+    let screen = Screen::new(crate::screen::ScreenOptions {
         bus,
-        &client_attributes,
+        client_attributes: &client_attributes,
         max_panes,
         mode_info,
         draw_pane_frames,
@@ -10910,18 +10938,18 @@ fn create_new_screen_with_message_capture(size: Size) -> ScreenWithMessageCaptur
         layout_dir,
         explicitly_disable_kitty_keyboard_protocol,
         stacked_resize,
-        None,
-        false,
+        default_editor: None,
+        web_clients_allowed: false,
         web_sharing,
-        true,
-        true,
+        advanced_mouse_actions: true,
+        mouse_hover_effects: true,
         visual_bell,
-        false, // focus_follows_mouse
-        false, // mouse_click_through
+        focus_follows_mouse: false,
+        mouse_click_through: false,
         web_server_ip,
         web_server_port,
-        Arc::new(AtomicBool::new(false)),
-    );
+        has_clients_flag: Arc::new(AtomicBool::new(false)),
+    });
     (screen, messages)
 }
 
@@ -12801,17 +12829,17 @@ pub fn copy_pane_scrollback_action_pipes_focused_pane_full_scrollback_to_copy_co
         .send(ScreenInstruction::PtyBytes(0, pane_text.into_bytes()));
     std::thread::sleep(std::time::Duration::from_millis(100));
 
-    route_action(
-        Action::CopyPaneScrollback,
-        "test",
+    route_action(crate::route::RouteActionParams {
+        action: Action::CopyPaneScrollback,
+        caller: "test",
         client_id,
-        None,
-        None,
-        session_metadata.senders.clone(),
-        None,
-        None,
-        InputMode::Normal,
-    )
+        cli_client_id: None,
+        pane_id: None,
+        senders: session_metadata.senders.clone(),
+        default_shell: None,
+        seen_cli_pipes: None,
+        default_mode: InputMode::Normal,
+    })
     .unwrap();
     // The copy command is a separate process; on a cold hosted CI runner
     // powershell.exe alone can take seconds to start. Poll for the fully
@@ -14026,9 +14054,9 @@ fn create_new_screen_with_forward_capture(size: Size) -> (Screen, ForwardCapture
     let web_server_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
     let web_server_port = 8080;
     let visual_bell = true;
-    let screen = Screen::new(
+    let screen = Screen::new(crate::screen::ScreenOptions {
         bus,
-        &client_attributes,
+        client_attributes: &client_attributes,
         max_panes,
         mode_info,
         draw_pane_frames,
@@ -14048,18 +14076,18 @@ fn create_new_screen_with_forward_capture(size: Size) -> (Screen, ForwardCapture
         layout_dir,
         explicitly_disable_kitty_keyboard_protocol,
         stacked_resize,
-        None,
-        false,
+        default_editor: None,
+        web_clients_allowed: false,
         web_sharing,
-        true,
-        true,
+        advanced_mouse_actions: true,
+        mouse_hover_effects: true,
         visual_bell,
-        false, // focus_follows_mouse
-        false, // mouse_click_through
+        focus_follows_mouse: false,
+        mouse_click_through: false,
         web_server_ip,
         web_server_port,
-        Arc::new(AtomicBool::new(true)),
-    );
+        has_clients_flag: Arc::new(AtomicBool::new(true)),
+    });
     (
         screen,
         ForwardCapture {
@@ -14612,40 +14640,40 @@ fn create_new_screen_with_theme_capture(size: Size) -> (Screen, ThemeCapture) {
     let web_sharing = WebSharing::Off;
     let web_server_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
     let web_server_port = 8080;
-    let screen = Screen::new(
+    let screen = Screen::new(crate::screen::ScreenOptions {
         bus,
-        &client_attributes,
-        None,
+        client_attributes: &client_attributes,
+        max_panes: None,
         mode_info,
-        false,
-        true,
-        true,
+        draw_pane_frames: false,
+        auto_layout: true,
+        session_is_mirrored: true,
         copy_options,
-        false,
+        debug: false,
         default_layout,
-        None,
+        default_layout_name: None,
         default_shell,
-        true,
-        false,
-        None,
-        true,
-        true,
-        true,
-        None,
-        false,
-        true,
-        None,
-        false,
+        session_serialization: true,
+        serialize_pane_viewport: false,
+        scrollback_lines_to_serialize: None,
+        styled_underlines: true,
+        osc8_hyperlinks: true,
+        arrow_fonts: true,
+        layout_dir: None,
+        explicitly_disable_kitty_keyboard_protocol: false,
+        stacked_resize: true,
+        default_editor: None,
+        web_clients_allowed: false,
         web_sharing,
-        true,
-        true,
-        true,
-        false,
-        false,
+        advanced_mouse_actions: true,
+        mouse_hover_effects: true,
+        visual_bell: true,
+        focus_follows_mouse: false,
+        mouse_click_through: false,
         web_server_ip,
         web_server_port,
-        Arc::new(AtomicBool::new(true)),
-    );
+        has_clients_flag: Arc::new(AtomicBool::new(true)),
+    });
     (
         screen,
         ThemeCapture {
@@ -14847,29 +14875,29 @@ fn new_terminal_pane_for_pause_test(pid: u32) -> TerminalPane {
     let mut geom = PaneGeom::default();
     geom.cols.set_inner(20);
     geom.rows.set_inner(10);
-    TerminalPane::new(
+    TerminalPane::new(crate::panes::terminal_pane::TerminalPaneOptions {
         pid,
-        geom,
-        Style::default(),
-        0,
-        String::new(),
-        Rc::new(RefCell::new(LinkHandler::new())),
-        Rc::new(RefCell::new(Some(SizeInPixels {
+        position_and_size: geom,
+        style: Style::default(),
+        pane_index: 0,
+        pane_name: String::new(),
+        link_handler: Rc::new(RefCell::new(LinkHandler::new())),
+        character_cell_size: Rc::new(RefCell::new(Some(SizeInPixels {
             width: 8,
             height: 16,
         }))),
-        Rc::new(RefCell::new(SixelImageStore::default())),
-        Rc::new(RefCell::new(Palette::default())),
-        Rc::new(RefCell::new(HashMap::new())),
-        None,
-        None,
-        false,
-        true,
-        true,
-        true,
-        false,
-        None,
-    )
+        sixel_image_store: Rc::new(RefCell::new(SixelImageStore::default())),
+        terminal_emulator_colors: Rc::new(RefCell::new(Palette::default())),
+        terminal_emulator_color_codes: Rc::new(RefCell::new(HashMap::new())),
+        initial_pane_title: None,
+        invoked_with: None,
+        debug: false,
+        arrow_fonts: true,
+        styled_underlines: true,
+        osc8_hyperlinks: true,
+        explicitly_disable_keyboard_protocol: false,
+        notification_end: None,
+    })
 }
 
 #[test]
@@ -15105,40 +15133,40 @@ fn create_non_mirrored_screen(size: Size) -> Screen {
         session_name: Some("zellij-test".into()),
         ..Default::default()
     };
-    Screen::new(
+    Screen::new(crate::screen::ScreenOptions {
         bus,
-        &client_attributes,
-        None, // max_panes
+        client_attributes: &client_attributes,
+        max_panes: None,
         mode_info,
-        false, // draw_pane_frames
-        true,  // auto_layout
-        false, // session_is_mirrored
-        CopyOptions::default(),
-        false, // debug
-        Box::default(),
-        None, // default_layout_name
-        PathBuf::from("my_default_shell"),
-        true,  // session_serialization
-        false, // serialize_pane_viewport
-        None,  // scrollback_lines_to_serialize
-        true,  // styled_underlines
-        true,  // osc8_hyperlinks
-        true,  // arrow_fonts
-        None,  // layout_dir
-        false, // explicitly_disable_kitty_keyboard_protocol
-        true,  // stacked_resize
-        None,
-        false,
-        WebSharing::Off,
-        true,  // advanced_mouse_actions
-        true,  // mouse_hover_effects
-        true,  // visual_bell
-        false, // focus_follows_mouse
-        false, // mouse_click_through
-        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-        8080,
-        Arc::new(AtomicBool::new(false)),
-    )
+        draw_pane_frames: false,
+        auto_layout: true,
+        session_is_mirrored: false,
+        copy_options: CopyOptions::default(),
+        debug: false,
+        default_layout: Box::default(),
+        default_layout_name: None,
+        default_shell: PathBuf::from("my_default_shell"),
+        session_serialization: true,
+        serialize_pane_viewport: false,
+        scrollback_lines_to_serialize: None,
+        styled_underlines: true,
+        osc8_hyperlinks: true,
+        arrow_fonts: true,
+        layout_dir: None,
+        explicitly_disable_kitty_keyboard_protocol: false,
+        stacked_resize: true,
+        default_editor: None,
+        web_clients_allowed: false,
+        web_sharing: WebSharing::Off,
+        advanced_mouse_actions: true,
+        mouse_hover_effects: true,
+        visual_bell: true,
+        focus_follows_mouse: false,
+        mouse_click_through: false,
+        web_server_ip: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+        web_server_port: 8080,
+        has_clients_flag: Arc::new(AtomicBool::new(false)),
+    })
 }
 
 #[test]
@@ -15325,7 +15353,7 @@ fn break_pane_to_new_tab_recomputes_source_and_destination() {
     {
         let active_tab = screen.get_active_tab_mut(1).unwrap();
         active_tab
-            .new_pane(
+            .new_pane(new_pane_options(
                 PaneId::Terminal(99),
                 None,
                 None,
@@ -15334,7 +15362,7 @@ fn break_pane_to_new_tab_recomputes_source_and_destination() {
                 NewPanePlacement::default(),
                 Some(1),
                 None,
-            )
+            ))
             .unwrap();
     }
 
@@ -15369,7 +15397,7 @@ fn break_pane_plugin_handoff_failure_keeps_moved_process_in_degraded_tab() {
     screen
         .get_active_tab_mut(1)
         .unwrap()
-        .new_pane(
+        .new_pane(new_pane_options(
             moved_pane_id,
             None,
             None,
@@ -15378,7 +15406,7 @@ fn break_pane_plugin_handoff_failure_keeps_moved_process_in_degraded_tab() {
             NewPanePlacement::default(),
             Some(1),
             None,
-        )
+        ))
         .unwrap();
 
     let result = screen.break_pane(None, screen.default_layout.clone(), 1, None);
@@ -15424,7 +15452,7 @@ fn break_multiple_plugin_handoff_failure_keeps_all_extracted_processes() {
         screen
             .get_active_tab_mut(1)
             .unwrap()
-            .new_pane(
+            .new_pane(new_pane_options(
                 PaneId::Terminal(terminal_id),
                 None,
                 None,
@@ -15433,7 +15461,7 @@ fn break_multiple_plugin_handoff_failure_keeps_all_extracted_processes() {
                 NewPanePlacement::default(),
                 Some(1),
                 None,
-            )
+            ))
             .unwrap();
     }
 
@@ -15484,7 +15512,7 @@ fn break_pane_preflight_conflict_leaves_exact_source_untouched() {
     screen
         .get_active_tab_mut(1)
         .unwrap()
-        .new_pane(
+        .new_pane(new_pane_options(
             moved_pane_id,
             None,
             None,
@@ -15493,7 +15521,7 @@ fn break_pane_preflight_conflict_leaves_exact_source_untouched() {
             NewPanePlacement::default(),
             Some(1),
             None,
-        )
+        ))
         .unwrap();
     let baseline_active = screen.tabs.get(&0).unwrap().get_active_pane_id(1);
     let baseline_geoms = [PaneId::Terminal(1), moved_pane_id]
@@ -15580,7 +15608,7 @@ fn break_multiple_preflight_conflict_leaves_every_source_owner_untouched() {
         screen
             .get_active_tab_mut(1)
             .unwrap()
-            .new_pane(
+            .new_pane(new_pane_options(
                 PaneId::Terminal(terminal_id),
                 None,
                 None,
@@ -15589,7 +15617,7 @@ fn break_multiple_preflight_conflict_leaves_every_source_owner_untouched() {
                 NewPanePlacement::default(),
                 Some(1),
                 None,
-            )
+            ))
             .unwrap();
     }
     let baseline_active = screen.tabs.get(&0).unwrap().get_active_pane_id(1);
@@ -15718,7 +15746,7 @@ fn moving_panes_between_tabs_with_focus_change_recomputes_both() {
     {
         let active_tab = screen.get_active_tab_mut(1).unwrap();
         active_tab
-            .new_pane(
+            .new_pane(new_pane_options(
                 pane_to_move,
                 None,
                 None,
@@ -15727,7 +15755,7 @@ fn moving_panes_between_tabs_with_focus_change_recomputes_both() {
                 NewPanePlacement::default(),
                 Some(1),
                 None,
-            )
+            ))
             .unwrap();
     }
 

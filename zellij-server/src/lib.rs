@@ -27,6 +27,7 @@ mod terminal_bytes;
 mod thread_bus;
 mod ui;
 
+use crate::plugins::PluginThreadParams;
 use background_jobs::{BackgroundJob, background_jobs_main};
 use log::info;
 use pty_writer::{PtyWriteInstruction, pty_writer_main};
@@ -50,7 +51,7 @@ use crate::{
     os_input_output::ServerOsApi,
     plugins::{PluginInstruction, plugin_thread_main},
     pty::{Pty, PtyInstruction, get_default_shell, pty_thread_main},
-    screen::{ScreenInstruction, screen_thread_main},
+    screen::{ScreenInstruction, ScreenThreadParams, screen_thread_main},
     thread_bus::{Bus, ThreadSenders},
 };
 use route::{NotificationEnd, route_thread_main};
@@ -2108,16 +2109,16 @@ fn init_session(params: SessionInitParams) -> SessionMetaData {
             let config = config.clone();
             let has_clients_flag = has_clients_flag.clone();
             move || {
-                screen_thread_main(
-                    screen_bus,
+                screen_thread_main(ScreenThreadParams {
+                    bus: screen_bus,
                     max_panes,
-                    client_attributes_clone,
+                    client_attributes: client_attributes_clone,
                     config,
                     debug,
-                    layout,
+                    default_layout: layout,
                     has_clients_flag,
-                    None,
-                )
+                    session_name_override: None,
+                })
                 .fatal();
             }
         })
@@ -2160,8 +2161,8 @@ fn init_session(params: SessionInitParams) -> SessionMetaData {
             let background_plugins = config.background_plugins.clone();
             let session_env_vars = session_env_vars.clone();
             move || {
-                plugin_thread_main(
-                    plugin_bus,
+                plugin_thread_main(PluginThreadParams {
+                    bus: plugin_bus,
                     engine,
                     data_dir,
                     layout,
@@ -2176,8 +2177,8 @@ fn init_session(params: SessionInitParams) -> SessionMetaData {
                     default_mode,
                     default_keybinds,
                     background_plugins,
-                    client_id,
-                )
+                    initiating_client_id: client_id,
+                })
                 .fatal()
             }
         })

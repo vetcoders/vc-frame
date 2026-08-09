@@ -182,17 +182,18 @@ async fn handle_ws_terminal(
 
     let (attachment_complete_tx, attachment_complete_rx) = tokio::sync::oneshot::channel();
 
-    zellij_server_listener(
-        os_input.box_clone(),
-        state.connection_table.clone(),
-        session_name.map(|p| p.0),
-        state.config.lock().unwrap().clone(),
-        state.config_options.clone(),
-        Some(state.config_file_path.clone()),
-        web_client_id.clone(),
-        state.session_manager.clone(),
-        Some(attachment_complete_tx),
-    );
+    use crate::web_client::server_listener::ServerListenerOptions;
+    zellij_server_listener(ServerListenerOptions {
+        os_input: os_input.box_clone(),
+        connection_table: state.connection_table.clone(),
+        session_name: session_name.map(|p| p.0),
+        config: state.config.lock().unwrap().clone(),
+        config_options: state.config_options.clone(),
+        config_file_path: Some(state.config_file_path.clone()),
+        web_client_id: web_client_id.clone(),
+        session_manager: state.session_manager.clone(),
+        attachment_complete_tx: Some(attachment_complete_tx),
+    });
 
     let terminal_channel_cancellation_token = CancellationToken::new();
     let should_not_reconnect = state

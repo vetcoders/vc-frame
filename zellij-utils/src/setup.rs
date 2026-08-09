@@ -1,10 +1,13 @@
 #[cfg(not(target_family = "wasm"))]
 use crate::consts::ASSET_MAP;
+// Feeds get_default_themes, which is cfg(not(test)) — test builds would
+// otherwise flag the import as dead.
+#[cfg(not(test))]
+use crate::consts::ZELLIJ_DEFAULT_THEMES;
 use crate::input::theme::Themes;
-#[allow(unused_imports)]
 use crate::{
-    cli::{CliArgs, CliOptions, Command, SessionCommand, Sessions},
-    consts::{FEATURES, ZELLIJ_CACHE_DIR, ZELLIJ_DEFAULT_THEMES},
+    cli::{CliArgs, Command, SessionCommand, Sessions},
+    consts::{FEATURES, ZELLIJ_CACHE_DIR},
     data::LayoutInfo,
     errors::prelude::*,
     home::*,

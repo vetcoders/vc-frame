@@ -97,23 +97,39 @@ pub(crate) struct TiledPanesLayoutSnapshot {
     layout_resizes_enabled: bool,
 }
 
+pub struct TiledPanesOptions {
+    pub display_area: Rc<RefCell<Size>>,
+    pub viewport: Rc<RefCell<Viewport>>,
+    pub connected_clients: Rc<RefCell<HashSet<ClientId>>>,
+    pub connected_clients_in_app: Rc<RefCell<HashMap<ClientId, bool>>>,
+    pub mode_info: Rc<RefCell<HashMap<ClientId, ModeInfo>>>,
+    pub character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
+    pub stacked_resize: Rc<RefCell<bool>>,
+    pub session_is_mirrored: bool,
+    pub draw_pane_frames: bool,
+    pub default_mode_info: ModeInfo,
+    pub style: Style,
+    pub os_api: Box<dyn ServerOsApi>,
+    pub senders: ThreadSenders,
+}
+
 impl TiledPanes {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        display_area: Rc<RefCell<Size>>,
-        viewport: Rc<RefCell<Viewport>>,
-        connected_clients: Rc<RefCell<HashSet<ClientId>>>,
-        connected_clients_in_app: Rc<RefCell<HashMap<ClientId, bool>>>, // bool -> is_web_client
-        mode_info: Rc<RefCell<HashMap<ClientId, ModeInfo>>>,
-        character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
-        stacked_resize: Rc<RefCell<bool>>,
-        session_is_mirrored: bool,
-        draw_pane_frames: bool,
-        default_mode_info: ModeInfo,
-        style: Style,
-        os_api: Box<dyn ServerOsApi>,
-        senders: ThreadSenders,
-    ) -> Self {
+    pub fn new(opts: TiledPanesOptions) -> Self {
+        let TiledPanesOptions {
+            display_area,
+            viewport,
+            connected_clients,
+            connected_clients_in_app,
+            mode_info,
+            character_cell_size,
+            stacked_resize,
+            session_is_mirrored,
+            draw_pane_frames,
+            default_mode_info,
+            style,
+            os_api,
+            senders,
+        } = opts;
         TiledPanes {
             panes: BTreeMap::new(),
             display_area,
@@ -618,7 +634,6 @@ impl TiledPanes {
                 pane.set_frame(draw_pane_frames);
             }
 
-            #[allow(clippy::if_same_then_else)]
             if draw_pane_frames && !pane.borderless() {
                 // there's definitely a frame around this pane, offset its contents
                 pane.set_content_offset(Offset::frame(1));
@@ -1034,6 +1049,8 @@ impl TiledPanes {
     pub fn focused_pane_id(&self, client_id: ClientId) -> Option<PaneId> {
         self.active_panes.get(&client_id).copied()
     }
+    // &Box return/arg shape is a ~50-callsite internal contract; flattening to
+    // &dyn Pane is its own follow-up cut (sweep 2026-08-09).
     #[allow(clippy::borrowed_box)]
     pub fn get_pane(&self, pane_id: PaneId) -> Option<&Box<dyn Pane>> {
         self.panes.get(&pane_id)
@@ -2881,6 +2898,8 @@ impl TiledPanes {
     }
 }
 
+// &Box return/arg shape is a ~50-callsite internal contract; flattening to
+// &dyn Pane is its own follow-up cut (sweep 2026-08-09).
 #[allow(clippy::borrowed_box)]
 pub fn is_inside_viewport(viewport: &Viewport, pane: &Box<dyn Pane>) -> bool {
     let pane_position_and_size = pane.current_geom();

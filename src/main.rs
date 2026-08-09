@@ -234,10 +234,10 @@ fn main() {
             command,
         })) = opts.command
         {
-            match run_triage_cli::triage_run(
+            match run_triage_cli::triage_run(run_triage_cli::TriageRunParams {
                 run,
                 exit_code,
-                bucket,
+                bucket_verdict: bucket,
                 origin_session,
                 origin_tab,
                 pane_id,
@@ -247,7 +247,7 @@ fn main() {
                 transfer_lock_fd,
                 settlement_revision,
                 command,
-            ) {
+            }) {
                 Ok(report) => {
                     println!(
                         "{} → {} (scrollback: {})",

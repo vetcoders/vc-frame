@@ -204,17 +204,17 @@ pub(crate) fn start_web_server(
                 process::exit(1);
             },
         };
-    start_web_client_impl(
+    start_web_client_impl(zellij_client::web_client::StartWebClientParams {
         config,
         config_options,
-        opts.config,
+        config_file_path: opts.config,
         run_daemonized,
-        ip,
-        port,
-        cert,
-        key,
+        custom_ip: ip,
+        custom_port: port,
+        custom_server_cert: cert,
+        custom_server_key: key,
         startup_timeout,
-    );
+    });
 }
 
 #[cfg(not(feature = "web_server_capability"))]
@@ -769,16 +769,18 @@ pub(crate) fn start_client(opts: CliArgs) {
                 }
 
                 #[cfg(feature = "web_server_capability")]
-                if let Err(e) = zellij_client::start_remote_client(
-                    Box::new(os_input.clone()),
-                    remote_session_url,
-                    token,
-                    remember,
-                    forget,
-                    ca_cert,
-                    insecure,
-                    config_options.client_async_worker_tasks,
-                ) {
+                if let Err(e) =
+                    zellij_client::start_remote_client(zellij_client::StartRemoteClientOptions {
+                        os_input: Box::new(os_input.clone()),
+                        remote_session_url,
+                        token,
+                        remember,
+                        forget,
+                        ca_cert,
+                        insecure,
+                        async_worker_tasks: config_options.client_async_worker_tasks,
+                    })
+                {
                     eprintln!("{}", e);
                     std::process::exit(2);
                 }

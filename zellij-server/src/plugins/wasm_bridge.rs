@@ -762,22 +762,57 @@ pub struct WasmBridge {
     rejected_layout_plugin_releases: HashSet<LayoutTransactionId>,
 }
 
+pub struct WasmBridgeOptions {
+    pub senders: ThreadSenders,
+    pub engine: Engine,
+    pub plugin_dir: PathBuf,
+    pub path_to_default_shell: PathBuf,
+    pub zellij_cwd: PathBuf,
+    pub session_env_vars: std::collections::BTreeMap<String, String>,
+    pub default_shell: Option<TerminalAction>,
+    pub layout_dir: Option<PathBuf>,
+    pub available_layouts: Vec<LayoutInfo>,
+    pub available_layout_errors: Vec<LayoutWithError>,
+    pub default_mode: InputMode,
+    pub default_keybinds: Keybinds,
+}
+
+/// Arguments for [`WasmBridge::get_or_load_plugins`].
+///
+/// The lookup-or-load path needs the full pane-placement description of the
+/// plugin it may have to create, which is a wide but cohesive surface. Passing
+/// it as one named struct keeps the call sites readable instead of hiding
+/// eleven positional arguments behind a lint silencer.
+pub(crate) struct GetOrLoadPluginsParams {
+    pub run_plugin_or_alias: RunPluginOrAlias,
+    pub size: Size,
+    pub cwd: Option<PathBuf>,
+    pub skip_cache: bool,
+    pub should_float: bool,
+    pub should_be_open_in_place: bool,
+    pub pane_title: Option<String>,
+    pub pane_id_to_replace: Option<PaneId>,
+    pub cli_client_id: Option<ClientId>,
+    pub floating_pane_coordinates: Option<FloatingPaneCoordinates>,
+    pub should_focus: bool,
+}
+
 impl WasmBridge {
-    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
-    pub fn new(
-        senders: ThreadSenders,
-        engine: Engine,
-        plugin_dir: PathBuf,
-        path_to_default_shell: PathBuf,
-        zellij_cwd: PathBuf,
-        session_env_vars: std::collections::BTreeMap<String, String>,
-        default_shell: Option<TerminalAction>,
-        layout_dir: Option<PathBuf>,
-        available_layouts: Vec<LayoutInfo>,
-        available_layout_errors: Vec<LayoutWithError>,
-        default_mode: InputMode,
-        default_keybinds: Keybinds,
-    ) -> Self {
+    pub fn new(opts: WasmBridgeOptions) -> Self {
+        let WasmBridgeOptions {
+            senders,
+            engine,
+            plugin_dir,
+            path_to_default_shell,
+            zellij_cwd,
+            session_env_vars,
+            default_shell,
+            layout_dir,
+            available_layouts,
+            available_layout_errors,
+            default_mode,
+            default_keybinds,
+        } = opts;
         let plugin_map = Arc::new(Mutex::new(PluginMap::default()));
         let connected_clients: Arc<Mutex<Vec<ClientId>>> = Arc::new(Mutex::new(vec![]));
         let plugin_cache: Arc<Mutex<HashMap<PathBuf, Module>>> =
@@ -2796,14 +2831,16 @@ impl WasmBridge {
                             let stdin_pipe = plugin_env.stdin_pipe.clone();
                             let stdout_pipe = plugin_env.stdout_pipe.clone();
                             let wasi_ctx = PluginLoader::create_wasi_ctx(
-                                &new_host_dir,
-                                &plugin_env.plugin_own_data_dir,
-                                &plugin_env.plugin_own_cache_dir,
-                                &ZELLIJ_TMP_DIR,
-                                &plugin_env.plugin.location.to_string(),
-                                plugin_env.plugin_id,
-                                stdin_pipe.clone(),
-                                stdout_pipe.clone(),
+                                crate::plugins::plugin_loader::WasiCtxParams {
+                                    host_dir: &new_host_dir,
+                                    data_dir: &plugin_env.plugin_own_data_dir,
+                                    cache_dir: &plugin_env.plugin_own_cache_dir,
+                                    tmp_dir: &ZELLIJ_TMP_DIR,
+                                    plugin_url: &plugin_env.plugin.location.to_string(),
+                                    plugin_id: plugin_env.plugin_id,
+                                    stdin_pipe: stdin_pipe.clone(),
+                                    stdout_pipe: stdout_pipe.clone(),
+                                },
                             );
                             match wasi_ctx {
                                 Ok(wasi_ctx) => {
@@ -3588,21 +3625,23 @@ impl WasmBridge {
 
     // gets all running plugins details matching this run_plugin, if none are running, loads one and
     // returns its details
-    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
     pub fn get_or_load_plugins(
         &mut self,
-        run_plugin_or_alias: RunPluginOrAlias,
-        size: Size,
-        cwd: Option<PathBuf>,
-        skip_cache: bool,
-        should_float: bool,
-        should_be_open_in_place: bool,
-        pane_title: Option<String>,
-        pane_id_to_replace: Option<PaneId>,
-        cli_client_id: Option<ClientId>,
-        floating_pane_coordinates: Option<FloatingPaneCoordinates>,
-        should_focus: bool,
+        params: GetOrLoadPluginsParams,
     ) -> Vec<(PluginId, Option<ClientId>)> {
+        let GetOrLoadPluginsParams {
+            run_plugin_or_alias,
+            size,
+            cwd,
+            skip_cache,
+            should_float,
+            should_be_open_in_place,
+            pane_title,
+            pane_id_to_replace,
+            cli_client_id,
+            floating_pane_coordinates,
+            should_focus,
+        } = params;
         let run_plugin = run_plugin_or_alias.get_run_plugin();
         match run_plugin {
             Some(run_plugin) => {
@@ -4371,20 +4410,20 @@ mod layout_plugin_transaction_tests {
         let engine = Engine::default();
         let plugin_dir = tempfile::tempdir().unwrap().path().to_path_buf();
         let zellij_cwd = tempfile::tempdir().unwrap().path().to_path_buf();
-        let mut bridge = WasmBridge::new(
+        let mut bridge = WasmBridge::new(WasmBridgeOptions {
             senders,
-            engine.clone(),
+            engine: engine.clone(),
             plugin_dir,
-            PathBuf::from("/bin/sh"),
+            path_to_default_shell: PathBuf::from("/bin/sh"),
             zellij_cwd,
-            BTreeMap::new(),
-            None,
-            None,
-            vec![],
-            vec![],
-            InputMode::Normal,
-            Keybinds::default(),
-        );
+            session_env_vars: BTreeMap::new(),
+            default_shell: None,
+            layout_dir: None,
+            available_layouts: vec![],
+            available_layout_errors: vec![],
+            default_mode: InputMode::Normal,
+            default_keybinds: Keybinds::default(),
+        });
         let plugin_cache = Arc::new(Mutex::new(HashMap::new()));
         bridge.plugin_executor = Arc::new(PinnedExecutor::new(
             max_threads,

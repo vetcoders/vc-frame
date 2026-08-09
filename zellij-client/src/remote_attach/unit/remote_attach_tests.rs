@@ -422,16 +422,16 @@ mod tests {
         tokio::task::spawn_blocking(move || {
             let runtime = crate::async_runtime(None);
             let os_input: Box<dyn crate::os_input_output::ClientOsApi> = Box::new(MockClientOsApi);
-            attach_to_remote_session(
+            attach_to_remote_session(AttachRemoteSessionOptions {
                 runtime,
-                os_input,
-                &remote_session_url,
+                _os_input: os_input,
+                remote_session_url: &remote_session_url,
                 token,
                 remember,
                 forget,
-                None,
-                true, // insecure for tests
-            )
+                ca_cert: None,
+                insecure: true, // for tests
+            })
         })
         .await
         .unwrap()

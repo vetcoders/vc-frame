@@ -13,7 +13,9 @@
 
 use anyhow::Context;
 use colored::*;
-#[allow(unused_imports)] // used in set_panic_handler; may appear unused under wasm target
+// Used by set_panic_handler, which is compiled out on wasm — the import only
+// looks dead on that target.
+#[cfg_attr(target_family = "wasm", allow(unused_imports))]
 use log::error;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Error, Formatter};

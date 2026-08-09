@@ -277,18 +277,32 @@ fn complete_action_immediately(sender: oneshot::Sender<ActionCompletionResult>) 
 // otherwise blocking-CLI actions
 // (`critical_completion=true`) park this function while still holding the guard,
 // deadlocking concurrent `session_data.write()`s.
-#[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
+pub(crate) struct RouteActionParams<'a> {
+    pub action: Action,
+    pub caller: &'a str,
+    pub client_id: ClientId,
+    pub cli_client_id: Option<ClientId>,
+    pub pane_id: Option<PaneId>,
+    pub senders: ThreadSenders,
+    pub default_shell: Option<TerminalAction>,
+    pub seen_cli_pipes: Option<&'a mut HashSet<String>>,
+    pub default_mode: InputMode,
+}
+
 pub(crate) fn route_action(
-    action: Action,
-    caller: &str,
-    client_id: ClientId,
-    cli_client_id: Option<ClientId>,
-    pane_id: Option<PaneId>,
-    senders: ThreadSenders,
-    default_shell: Option<TerminalAction>,
-    mut seen_cli_pipes: Option<&mut HashSet<String>>,
-    default_mode: InputMode,
+    params: RouteActionParams<'_>,
 ) -> Result<(bool, Option<ActionCompletionResult>)> {
+    let RouteActionParams {
+        action,
+        caller,
+        client_id,
+        cli_client_id,
+        pane_id,
+        senders,
+        default_shell,
+        mut seen_cli_pipes,
+        default_mode,
+    } = params;
     let route_started = Instant::now();
     let mut should_break = false;
     let err_context = || format!("failed to route action for client {client_id}");
@@ -1387,7 +1401,6 @@ pub(crate) fn route_action(
             // contract
             complete_action_immediately(completion_tx);
         },
-        #[allow(clippy::single_match)]
         Action::SkipConfirm { action } => match *action {
             Action::Quit => {
                 complete_action_immediately(completion_tx);
@@ -2437,17 +2450,17 @@ pub(crate) fn route_thread_main(
                                         cli_client_id: None,
                                     });
 
-                                    match route_action(
+                                    match route_action(RouteActionParams {
                                         action,
-                                        "interactive",
+                                        caller: "interactive",
                                         client_id,
-                                        None,
-                                        None,
-                                        senders.clone(),
-                                        default_shell.clone(),
-                                        Some(&mut seen_cli_pipes),
-                                        client_input_mode,
-                                    ) {
+                                        cli_client_id: None,
+                                        pane_id: None,
+                                        senders: senders.clone(),
+                                        default_shell: default_shell.clone(),
+                                        seen_cli_pipes: Some(&mut seen_cli_pipes),
+                                        default_mode: client_input_mode,
+                                    }) {
                                         Ok(route_action_should_break) => {
                                             if route_action_should_break.0 {
                                                 should_break = true;
@@ -2516,17 +2529,17 @@ pub(crate) fn route_thread_main(
                                 let completion_client_id = (is_cli_client
                                     && !cli_action_has_dedicated_response(&action))
                                 .then_some(cli_client_id);
-                                match route_action(
+                                match route_action(RouteActionParams {
                                     action,
-                                    &caller,
+                                    caller: &caller,
                                     client_id,
-                                    Some(cli_client_id),
-                                    maybe_pane_id.map(PaneId::Terminal),
+                                    cli_client_id: Some(cli_client_id),
+                                    pane_id: maybe_pane_id.map(PaneId::Terminal),
                                     senders,
                                     default_shell,
-                                    Some(&mut seen_cli_pipes),
-                                    client_input_mode,
-                                ) {
+                                    seen_cli_pipes: Some(&mut seen_cli_pipes),
+                                    default_mode: client_input_mode,
+                                }) {
                                     Ok((route_action_should_break, completion)) => {
                                         if route_action_should_break {
                                             should_break = true;

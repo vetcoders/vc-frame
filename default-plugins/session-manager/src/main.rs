@@ -1474,7 +1474,7 @@ impl State {
 
         // The LIVE number lives in the bottom status-bar's fleet chip; the
         // header keeps the session count and the current-session anchor — the
-        // top bar carries brand │ mode │ tabs only, so "where am I" lives
+        // top bar carries brand   mode   tabs only, so "where am I" lives
         // here, right above the session list.
         let session_count = working_session_indices(&self.sessions.session_ui_infos).len();
         let current_session_name = self

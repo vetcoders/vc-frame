@@ -20,18 +20,30 @@ use zellij_utils::{
     setup::Setup,
 };
 
-#[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
-pub fn zellij_server_listener(
-    os_input: Box<dyn ClientOsApi>,
-    connection_table: Arc<Mutex<ConnectionTable>>,
-    session_name: Option<String>,
-    mut config: Config,
-    mut config_options: Options,
-    config_file_path: Option<PathBuf>,
-    web_client_id: String,
-    session_manager: Arc<dyn SessionManager>,
-    attachment_complete_tx: Option<tokio::sync::oneshot::Sender<()>>,
-) {
+pub struct ServerListenerOptions {
+    pub os_input: Box<dyn ClientOsApi>,
+    pub connection_table: Arc<Mutex<ConnectionTable>>,
+    pub session_name: Option<String>,
+    pub config: Config,
+    pub config_options: Options,
+    pub config_file_path: Option<PathBuf>,
+    pub web_client_id: String,
+    pub session_manager: Arc<dyn SessionManager>,
+    pub attachment_complete_tx: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+pub fn zellij_server_listener(opts: ServerListenerOptions) {
+    let ServerListenerOptions {
+        os_input,
+        connection_table,
+        session_name,
+        mut config,
+        mut config_options,
+        config_file_path,
+        web_client_id,
+        session_manager,
+        attachment_complete_tx,
+    } = opts;
     let _server_listener_thread = std::thread::Builder::new()
         .name("server_listener".to_string())
         .spawn({

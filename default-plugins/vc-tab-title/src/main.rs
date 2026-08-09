@@ -404,7 +404,9 @@ fn is_soft_pane_title(
     }
     if let Some(command) = terminal_command {
         let command = command.trim();
-        if title == command || Some(title.to_lowercase()) == command.split(' ').next().map(token_basename) {
+        if title == command
+            || Some(title.to_lowercase()) == command.split(' ').next().map(token_basename)
+        {
             return true;
         }
     }
@@ -557,12 +559,12 @@ mod tests {
         assert!(!is_soft_pane_title("Pane #", None, None));
         assert!(!is_soft_pane_title("Pane #x", None, None));
         // Command panes are titled with their own command line by default.
+        assert!(is_soft_pane_title("htop -d 10", Some("htop -d 10"), None));
         assert!(is_soft_pane_title(
-            "htop -d 10",
-            Some("htop -d 10"),
+            "htop",
+            Some("/usr/bin/htop -d 10"),
             None
         ));
-        assert!(is_soft_pane_title("htop", Some("/usr/bin/htop -d 10"), None));
         // Our own previous label stays soft; the same text typed by a user is not.
         assert!(is_soft_pane_title("codex", None, Some("codex")));
         assert!(!is_soft_pane_title("codex", None, None));
@@ -579,8 +581,17 @@ mod tests {
                 && is_shell_fallback
                 && new_label != "claude"
         };
-        assert!(keeps("codescribe", true), "shell fallback must not evict a dead agent label");
-        assert!(!keeps("htop", false), "a real new command must win over a dead agent label");
-        assert!(!keeps("codex", false), "a new agent must win over a dead agent label");
+        assert!(
+            keeps("codescribe", true),
+            "shell fallback must not evict a dead agent label"
+        );
+        assert!(
+            !keeps("htop", false),
+            "a real new command must win over a dead agent label"
+        );
+        assert!(
+            !keeps("codex", false),
+            "a new agent must win over a dead agent label"
+        );
     }
 }
