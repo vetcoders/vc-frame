@@ -9768,15 +9768,16 @@ pub(crate) fn screen_thread_main(
                 match client_or_tab_index {
                     ClientTabIndexOrPaneId::ClientId(client_id) => {
                         active_tab_and_connected_client_id_with_first_tab_fallback!(screen, client_id, |tab: &mut Tab, client_id: Option<ClientId>| {
-                            tab.new_pane(pid,
-                               initial_pane_title,
-                               invoked_with,
-                               start_suppressed,
-                               true,
-                               new_pane_placement,
-                               client_id,
-                               blocking_notification
-                           )
+                            tab.new_pane(crate::tab::NewPaneOptions {
+                                pid,
+                                initial_pane_title,
+                                invoked_with,
+                                start_suppressed,
+                                should_focus_pane: true,
+                                new_pane_placement,
+                                client_id,
+                                blocking_notification: blocking_notification.clone(),
+                           })
                         }, ?);
                         if let Some(hold_for_command) = hold_for_command {
                             let is_first_run = true;
@@ -9817,16 +9818,16 @@ pub(crate) fn screen_thread_main(
                             None
                         };
                         if let Some(active_tab) = screen.tabs.get_mut(&tab_index) {
-                            active_tab.new_pane(
+                            active_tab.new_pane(crate::tab::NewPaneOptions {
                                 pid,
                                 initial_pane_title,
                                 invoked_with,
                                 start_suppressed,
-                                true,
+                                should_focus_pane: true,
                                 new_pane_placement,
                                 client_id,
                                 blocking_notification,
-                            )?;
+                            })?;
                             if let Some(hold_for_command) = hold_for_command {
                                 let is_first_run = true;
                                 active_tab.hold_pane(pid, None, is_first_run, hold_for_command);
@@ -9841,16 +9842,16 @@ pub(crate) fn screen_thread_main(
                         let should_focus_pane = false;
                         for tab in all_tabs.values_mut() {
                             if tab.has_pane_with_pid(&pane_id) {
-                                tab.new_pane(
+                                tab.new_pane(crate::tab::NewPaneOptions {
                                     pid,
                                     initial_pane_title,
                                     invoked_with,
                                     start_suppressed,
                                     should_focus_pane,
                                     new_pane_placement,
-                                    None,
-                                    blocking_notification, // TODO: is this correct?
-                                )?;
+                                    client_id: None,
+                                    blocking_notification,
+                                })?;
                                 if let Some(hold_for_command) = hold_for_command {
                                     let is_first_run = true;
                                     tab.hold_pane(pid, None, is_first_run, hold_for_command);
@@ -13862,30 +13863,30 @@ pub(crate) fn screen_thread_main(
                     }
                 } else if let Some(client_id) = client_id {
                     active_tab_and_connected_client_id!(screen, client_id, |active_tab: &mut Tab, _client_id: ClientId| {
-                        active_tab.new_pane(
-                            PaneId::Plugin(plugin_id),
-                            Some(pane_title),
-                            Some(run_plugin),
+                        active_tab.new_pane(crate::tab::NewPaneOptions {
+                            pid: PaneId::Plugin(plugin_id),
+                            initial_pane_title: Some(pane_title),
+                            invoked_with: Some(run_plugin),
                             start_suppressed,
-                            should_focus_plugin.unwrap_or(true),
+                            should_focus_pane: should_focus_plugin.unwrap_or(true),
                             new_pane_placement,
-                            Some(client_id),
-                            None,
-                        )
+                            client_id: Some(client_id),
+                            blocking_notification: None,
+                        })
                     }, ?);
                 } else if let Some(active_tab) =
                     tab_index.and_then(|tab_index| screen.tabs.get_mut(&tab_index))
                 {
-                    active_tab.new_pane(
-                        PaneId::Plugin(plugin_id),
-                        Some(pane_title),
-                        Some(run_plugin),
+                    active_tab.new_pane(crate::tab::NewPaneOptions {
+                        pid: PaneId::Plugin(plugin_id),
+                        initial_pane_title: Some(pane_title),
+                        invoked_with: Some(run_plugin),
                         start_suppressed,
-                        should_focus_plugin.unwrap_or(true),
+                        should_focus_pane: should_focus_plugin.unwrap_or(true),
                         new_pane_placement,
-                        None,
-                        None,
-                    )?;
+                        client_id: None,
+                        blocking_notification: None,
+                    })?;
                 } else {
                     log::error!("Tab index not found: {:?}", tab_index);
                 }

@@ -1,4 +1,43 @@
-use super::{PendingTabLayoutCleanup, Tab as TabImpl, TabOptions};
+use super::{NewPaneOptions, PendingTabLayoutCleanup, Tab as TabImpl, TabOptions};
+
+trait TabTestHelper {
+    fn new_pane_compat(
+        &mut self,
+        pid: PaneId,
+        initial_pane_title: Option<String>,
+        invoked_with: Option<zellij_utils::data::Run>,
+        start_suppressed: bool,
+        should_focus_pane: bool,
+        new_pane_placement: zellij_utils::data::NewPanePlacement,
+        client_id: Option<ClientId>,
+        blocking_notification: Option<crate::route::NotificationEnd>,
+    ) -> Result<()>;
+}
+
+impl TabTestHelper for TabImpl {
+    fn new_pane_compat(
+        &mut self,
+        pid: PaneId,
+        initial_pane_title: Option<String>,
+        invoked_with: Option<zellij_utils::data::Run>,
+        start_suppressed: bool,
+        should_focus_pane: bool,
+        new_pane_placement: zellij_utils::data::NewPanePlacement,
+        client_id: Option<ClientId>,
+        blocking_notification: Option<crate::route::NotificationEnd>,
+    ) -> Result<()> {
+        self.new_pane(NewPaneOptions {
+            pid,
+            initial_pane_title,
+            invoked_with,
+            start_suppressed,
+            should_focus_pane,
+            new_pane_placement,
+            client_id,
+            blocking_notification,
+        })
+    }
+}
 
 struct Tab;
 impl Tab {
@@ -916,7 +955,7 @@ fn split_largest_pane() {
     let mut tab = create_new_tab(size, stacked_resize);
     for i in 2..5 {
         let new_pane_id = PaneId::Terminal(i);
-        tab.new_pane(
+        tab.new_pane_test(
             new_pane_id,
             None,
             None,
@@ -1136,7 +1175,7 @@ pub fn cannot_split_largest_pane_when_there_is_no_room() {
     let size = Size { cols: 8, rows: 4 };
     let stacked_resize = true;
     let mut tab = create_new_tab(size, stacked_resize);
-    tab.new_pane(
+    tab.new_pane_test(
         PaneId::Terminal(2),
         None,
         None,
@@ -1237,7 +1276,7 @@ pub fn toggle_focused_pane_fullscreen() {
     let mut tab = create_new_tab(size, stacked_resize);
     for i in 2..5 {
         let new_pane_id = PaneId::Terminal(i);
-        tab.new_pane(
+        tab.new_pane_test(
             new_pane_id,
             None,
             None,
@@ -1409,7 +1448,7 @@ pub fn resize_whole_tab_while_fullscreen_preserves_fullscreen() {
     let mut tab = create_new_tab(initial_size, stacked_resize);
     for i in 2..5 {
         let new_pane_id = PaneId::Terminal(i);
-        tab.new_pane(
+        tab.new_pane_test(
             new_pane_id,
             None,
             None,
@@ -1547,7 +1586,7 @@ pub fn closing_fullscreen_scrollback_editor_restores_consistent_layout() {
     let client_id = 1;
     let mut tab = create_new_tab(size, stacked_resize);
     for i in 2..5 {
-        tab.new_pane(
+        tab.new_pane_test(
             PaneId::Terminal(i),
             None,
             None,
@@ -1652,7 +1691,7 @@ pub fn opening_scrollback_editor_on_fullscreen_pane_retargets_fullscreen() {
     let client_id = 1;
     let mut tab = create_new_tab(size, stacked_resize);
     for i in 2..5 {
-        tab.new_pane(
+        tab.new_pane_test(
             PaneId::Terminal(i),
             None,
             None,
@@ -1735,7 +1774,7 @@ fn switch_to_next_pane_fullscreen() {
     let mut active_tab = create_new_tab(size, stacked_resize);
 
     active_tab
-        .new_pane(
+        .new_pane_test(
             PaneId::Terminal(1),
             None,
             None,
@@ -1747,7 +1786,7 @@ fn switch_to_next_pane_fullscreen() {
         )
         .unwrap();
     active_tab
-        .new_pane(
+        .new_pane_test(
             PaneId::Terminal(2),
             None,
             None,
@@ -1759,7 +1798,7 @@ fn switch_to_next_pane_fullscreen() {
         )
         .unwrap();
     active_tab
-        .new_pane(
+        .new_pane_test(
             PaneId::Terminal(3),
             None,
             None,
@@ -1771,7 +1810,7 @@ fn switch_to_next_pane_fullscreen() {
         )
         .unwrap();
     active_tab
-        .new_pane(
+        .new_pane_test(
             PaneId::Terminal(4),
             None,
             None,
@@ -1812,7 +1851,7 @@ fn switch_to_prev_pane_fullscreen() {
     //testing four consecutive switches in fullscreen mode
 
     active_tab
-        .new_pane(
+        .new_pane_test(
             PaneId::Terminal(1),
             None,
             None,
@@ -1824,7 +1863,7 @@ fn switch_to_prev_pane_fullscreen() {
         )
         .unwrap();
     active_tab
-        .new_pane(
+        .new_pane_test(
             PaneId::Terminal(2),
             None,
             None,
@@ -1836,7 +1875,7 @@ fn switch_to_prev_pane_fullscreen() {
         )
         .unwrap();
     active_tab
-        .new_pane(
+        .new_pane_test(
             PaneId::Terminal(3),
             None,
             None,
@@ -1848,7 +1887,7 @@ fn switch_to_prev_pane_fullscreen() {
         )
         .unwrap();
     active_tab
-        .new_pane(
+        .new_pane_test(
             PaneId::Terminal(4),
             None,
             None,

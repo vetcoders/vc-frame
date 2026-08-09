@@ -2359,18 +2359,29 @@ impl Tab {
             invoked_with
         }
     }
-    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
-    pub fn new_pane(
-        &mut self,
-        pid: PaneId,
-        initial_pane_title: Option<String>,
-        invoked_with: Option<Run>,
-        start_suppressed: bool,
-        should_focus_pane: bool,
-        new_pane_placement: NewPanePlacement,
-        client_id: Option<ClientId>,
-        blocking_notification: Option<NotificationEnd>,
-    ) -> Result<()> {
+pub struct NewPaneOptions {
+    pub pid: PaneId,
+    pub initial_pane_title: Option<String>,
+    pub invoked_with: Option<Run>,
+    pub start_suppressed: bool,
+    pub should_focus_pane: bool,
+    pub new_pane_placement: NewPanePlacement,
+    pub client_id: Option<ClientId>,
+    pub blocking_notification: Option<NotificationEnd>,
+}
+
+impl Tab {
+    pub fn new_pane(&mut self, opts: NewPaneOptions) -> Result<()> {
+        let NewPaneOptions {
+            pid,
+            initial_pane_title,
+            invoked_with,
+            start_suppressed,
+            should_focus_pane,
+            new_pane_placement,
+            client_id,
+            blocking_notification,
+        } = opts;
         let invoked_with = self.normalize_invoked_with_for_default_shell(invoked_with);
         match new_pane_placement {
             NewPanePlacement::NoPreference { borderless } => self.new_no_preference_pane(NewNoPreferencePaneOptions {
@@ -2459,6 +2470,30 @@ impl Tab {
                 borderless,
             }),
         }
+    }
+
+    #[cfg(test)]
+    pub fn new_pane_test(
+        &mut self,
+        pid: PaneId,
+        initial_pane_title: Option<String>,
+        invoked_with: Option<Run>,
+        start_suppressed: bool,
+        should_focus_pane: bool,
+        new_pane_placement: NewPanePlacement,
+        client_id: Option<ClientId>,
+        blocking_notification: Option<NotificationEnd>,
+    ) -> Result<()> {
+        self.new_pane(NewPaneOptions {
+            pid,
+            initial_pane_title,
+            invoked_with,
+            start_suppressed,
+            should_focus_pane,
+            new_pane_placement,
+            client_id,
+            blocking_notification,
+        })
     }
 pub struct NewNoPreferencePaneOptions {
     pub pid: PaneId,
