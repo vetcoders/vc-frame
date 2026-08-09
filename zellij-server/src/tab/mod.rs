@@ -1876,14 +1876,16 @@ impl Tab {
         })
         .defer_side_effects();
         let application_result = layout_applier.override_layout(
-            layout,
-            floating_panes_layout,
-            new_terminal_ids,
-            new_floating_terminal_ids,
-            new_plugin_ids,
-            retain_existing_terminal_panes,
-            retain_existing_plugin_panes,
-            client_id,
+            crate::tab::layout_applier::LayoutApplierOverrideOptions {
+                tiled_panes_layout: layout,
+                floating_panes_layout,
+                new_terminal_ids,
+                new_floating_terminal_ids,
+                new_plugin_ids,
+                retain_existing_terminal_panes,
+                retain_existing_plugin_panes,
+                client_id,
+            },
         );
         let LayoutTransactionParts {
             side_effects,

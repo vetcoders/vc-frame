@@ -317,18 +317,29 @@ impl<'a> LayoutApplier<'a> {
         let should_show_floating_panes = layout_has_floating_panes && !hide_floating_panes;
         Ok(should_show_floating_panes)
     }
-    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
-    pub fn override_layout(
-        &mut self,
-        tiled_panes_layout: TiledPaneLayout,
-        floating_panes_layout: Vec<FloatingPaneLayout>,
-        new_terminal_ids: Vec<(u32, HoldForCommand)>,
-        new_floating_terminal_ids: Vec<(u32, HoldForCommand)>,
-        mut new_plugin_ids: HashMap<RunPluginOrAlias, Vec<u32>>,
-        retain_existing_terminal_panes: bool,
-        retain_existing_plugin_panes: bool,
-        client_id: ClientId,
-    ) -> Result<bool> {
+pub struct LayoutApplierOverrideOptions {
+    pub tiled_panes_layout: TiledPaneLayout,
+    pub floating_panes_layout: Vec<FloatingPaneLayout>,
+    pub new_terminal_ids: Vec<(u32, HoldForCommand)>,
+    pub new_floating_terminal_ids: Vec<(u32, HoldForCommand)>,
+    pub new_plugin_ids: HashMap<RunPluginOrAlias, Vec<u32>>,
+    pub retain_existing_terminal_panes: bool,
+    pub retain_existing_plugin_panes: bool,
+    pub client_id: ClientId,
+}
+
+impl<'a> LayoutApplier<'a> {
+    pub fn override_layout(&mut self, opts: LayoutApplierOverrideOptions) -> Result<bool> {
+        let LayoutApplierOverrideOptions {
+            tiled_panes_layout,
+            floating_panes_layout,
+            new_terminal_ids,
+            new_floating_terminal_ids,
+            mut new_plugin_ids,
+            retain_existing_terminal_panes,
+            retain_existing_plugin_panes,
+            client_id,
+        } = opts;
         // true => should_show_floating_panes
         let hide_floating_panes = tiled_panes_layout.hide_floating_panes;
         self.override_tiled_panes_layout_for_existing_panes(
