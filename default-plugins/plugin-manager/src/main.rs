@@ -546,7 +546,7 @@ impl ZellijPlugin for State {
     fn update(&mut self, event: Event) -> bool {
         let mut should_render = false;
         match event {
-            Event::ModeUpdate(mode_info) => {
+            Event::ModeUpdate(mode_info) if self.colors != mode_info.style.colors => {
                 self.colors = mode_info.style.colors;
                 should_render = true;
             },
