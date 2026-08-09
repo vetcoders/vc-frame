@@ -31,37 +31,40 @@ const MAX_AUTH_ATTEMPTS: u32 = 3;
 /// - Saving session tokens when --remember is used
 ///
 /// Returns WebSocketConnections on success
-#[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
+pub struct AttachRemoteSessionOptions<'a> {
+    pub runtime: Handle,
+    pub _os_input: Box<dyn ClientOsApi>,
+    pub remote_session_url: &'a str,
+    pub token: Option<String>,
+    pub remember: bool,
+    pub forget: bool,
+    pub ca_cert: Option<&'a std::path::Path>,
+    pub insecure: bool,
+}
+
 pub fn attach_to_remote_session(
-    runtime: Handle,
-    _os_input: Box<dyn ClientOsApi>,
-    remote_session_url: &str,
-    token: Option<String>,
-    remember: bool,
-    forget: bool,
-    ca_cert: Option<&std::path::Path>,
-    insecure: bool,
+    opts: AttachRemoteSessionOptions<'_>,
 ) -> Result<WebSocketConnections, RemoteClientError> {
     // Extract server URL for token management
-    let server_url = extract_server_url(remote_session_url)?;
+    let server_url = extract_server_url(opts.remote_session_url)?;
 
     // Handle --forget flag
-    if forget {
+    if opts.forget {
         let _ = remote_session_tokens::delete_session_token(&server_url);
     }
 
     // If --token provided, delete saved session token
-    if token.is_some() {
+    if opts.token.is_some() {
         let _ = remote_session_tokens::delete_session_token(&server_url);
     }
 
-    if token.is_none()
+    if opts.token.is_none()
         && let Some(connections) = try_to_connect_with_saved_session_token(
-            runtime.clone(),
-            remote_session_url,
+            opts.runtime.clone(),
+            opts.remote_session_url,
             &server_url,
-            ca_cert,
-            insecure,
+            opts.ca_cert,
+            opts.insecure,
         )?
     {
         return Ok(connections);
@@ -69,12 +72,12 @@ pub fn attach_to_remote_session(
 
     // Normal auth flow with retry logic
     authenticate_with_retry(
-        runtime,
-        remote_session_url,
-        token,
-        remember,
-        ca_cert,
-        insecure,
+        opts.runtime,
+        opts.remote_session_url,
+        opts.token,
+        opts.remember,
+        opts.ca_cert,
+        opts.insecure,
     )
 }
 

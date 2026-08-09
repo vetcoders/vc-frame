@@ -632,45 +632,50 @@ pub async fn run_remote_client_terminal_loop(
 }
 
 #[cfg(feature = "web_server_capability")]
-#[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
+pub struct StartRemoteClientOptions<'a> {
+    pub os_input: Box<dyn ClientOsApi>,
+    pub remote_session_url: &'a str,
+    pub token: Option<String>,
+    pub remember: bool,
+    pub forget: bool,
+    pub ca_cert: Option<std::path::PathBuf>,
+    pub insecure: bool,
+    pub async_worker_tasks: Option<usize>,
+}
+
 pub fn start_remote_client(
-    mut os_input: Box<dyn ClientOsApi>,
-    remote_session_url: &str,
-    token: Option<String>,
-    remember: bool,
-    forget: bool,
-    ca_cert: Option<std::path::PathBuf>,
-    insecure: bool,
-    async_worker_tasks: Option<usize>,
+    mut opts: StartRemoteClientOptions<'_>,
 ) -> Result<Option<ConnectToSession>, RemoteClientError> {
     info!("Starting vc-frame client!");
 
     // See start_client(): an interactive (remote) client needs a real TTY for
     // raw mode; fail fast instead of panicking in set_raw_mode() without one.
-    if !os_input.stdin_is_terminal() {
+    if !opts.os_input.stdin_is_terminal() {
         eprintln!(
             "vc-frame: stdin is not a terminal (TTY); cannot start an interactive session. Run vc-frame from a real terminal."
         );
         std::process::exit(1);
     }
 
-    let runtime = crate::async_runtime(async_worker_tasks);
+    let runtime = crate::async_runtime(opts.async_worker_tasks);
 
     let connections = remote_attach::attach_to_remote_session(
-        runtime.clone(),
-        os_input.clone(),
-        remote_session_url,
-        token,
-        remember,
-        forget,
-        ca_cert.as_deref(),
-        insecure,
+        remote_attach::AttachRemoteSessionOptions {
+            runtime: runtime.clone(),
+            _os_input: opts.os_input.clone(),
+            remote_session_url: opts.remote_session_url,
+            token: opts.token,
+            remember: opts.remember,
+            forget: opts.forget,
+            ca_cert: opts.ca_cert.as_deref(),
+            insecure: opts.insecure,
+        },
     )?;
 
     let reconnect_to_session = None;
-    os_input.unset_raw_mode().unwrap();
+    opts.os_input.unset_raw_mode().unwrap();
 
-    let mut stdout = os_input.get_stdout_writer();
+    let mut stdout = opts.os_input.get_stdout_writer();
     stdout.write_all(ENTER_ALTERNATE_SCREEN.as_bytes()).unwrap();
     stdout
         .write_all(CLEAR_CLIENT_TERMINAL_ATTRIBUTES.as_bytes())

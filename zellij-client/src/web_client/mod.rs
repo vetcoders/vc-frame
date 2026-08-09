@@ -58,18 +58,30 @@ use websocket_handlers::{ws_handler_control, ws_handler_terminal};
 #[allow(dead_code)] // used in #[cfg(not(unix))] code path
 const DEFAULT_SERVER_STARTUP_TIMEOUT_SECS: u64 = 10;
 
-#[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
-pub fn start_web_client(
-    config: Config,
-    config_options: Options,
-    config_file_path: Option<PathBuf>,
-    run_daemonized: bool,
-    custom_ip: Option<IpAddr>,
-    custom_port: Option<u16>,
-    custom_server_cert: Option<PathBuf>,
-    custom_server_key: Option<PathBuf>,
-    startup_timeout: Option<u64>,
-) {
+pub struct StartWebClientParams {
+    pub config: Config,
+    pub config_options: Options,
+    pub config_file_path: Option<PathBuf>,
+    pub run_daemonized: bool,
+    pub custom_ip: Option<IpAddr>,
+    pub custom_port: Option<u16>,
+    pub custom_server_cert: Option<PathBuf>,
+    pub custom_server_key: Option<PathBuf>,
+    pub startup_timeout: Option<u64>,
+}
+
+pub fn start_web_client(params: StartWebClientParams) {
+    let StartWebClientParams {
+        config,
+        config_options,
+        config_file_path,
+        run_daemonized,
+        custom_ip,
+        custom_port,
+        custom_server_cert,
+        custom_server_key,
+        startup_timeout,
+    } = params;
     std::panic::set_hook({
         Box::new(move |info| {
             let thread = thread::current();
@@ -158,31 +170,43 @@ pub fn start_web_client(
         }
     };
 
-    runtime.block_on(serve_web_client(
+    runtime.block_on(serve_web_client(ServeWebClientParams {
         config,
         config_options,
         config_file_path,
         listener,
-        tls_config,
-        None,
-        None,
+        rustls_config: tls_config,
+        session_manager: None,
+        client_os_api_factory: None,
         web_server_ip,
         web_server_port,
-    ));
+    }));
 }
 
-#[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
-pub async fn serve_web_client(
-    config: Config,
-    config_options: Options,
-    config_file_path: Option<PathBuf>,
-    listener: std::net::TcpListener,
-    rustls_config: Option<RustlsConfig>,
-    session_manager: Option<Arc<dyn SessionManager>>,
-    client_os_api_factory: Option<Arc<dyn ClientOsApiFactory>>,
-    web_server_ip: IpAddr,
-    web_server_port: u16,
-) {
+pub struct ServeWebClientParams {
+    pub config: Config,
+    pub config_options: Options,
+    pub config_file_path: Option<PathBuf>,
+    pub listener: std::net::TcpListener,
+    pub rustls_config: Option<RustlsConfig>,
+    pub session_manager: Option<Arc<dyn SessionManager>>,
+    pub client_os_api_factory: Option<Arc<dyn ClientOsApiFactory>>,
+    pub web_server_ip: IpAddr,
+    pub web_server_port: u16,
+}
+
+pub async fn serve_web_client(params: ServeWebClientParams) {
+    let ServeWebClientParams {
+        config,
+        config_options,
+        config_file_path,
+        listener,
+        rustls_config,
+        session_manager,
+        client_os_api_factory,
+        web_server_ip,
+        web_server_port,
+    } = params;
     if let Err(error) = listener.set_nonblocking(true) {
         log::error!("Failed to configure web server listener as non-blocking: {error}");
         return;
