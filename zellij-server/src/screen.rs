@@ -2570,42 +2570,78 @@ impl Screen {
         Ok(())
     }
 
+pub struct ScreenOptions<'a> {
+    pub bus: Bus<ScreenInstruction>,
+    pub client_attributes: &'a ClientAttributes,
+    pub max_panes: Option<usize>,
+    pub mode_info: ModeInfo,
+    pub draw_pane_frames: bool,
+    pub auto_layout: bool,
+    pub session_is_mirrored: bool,
+    pub copy_options: CopyOptions,
+    pub debug: bool,
+    pub default_layout: Box<Layout>,
+    pub default_layout_name: Option<String>,
+    pub default_shell: PathBuf,
+    pub session_serialization: bool,
+    pub serialize_pane_viewport: bool,
+    pub scrollback_lines_to_serialize: Option<usize>,
+    pub styled_underlines: bool,
+    pub osc8_hyperlinks: bool,
+    pub arrow_fonts: bool,
+    pub layout_dir: Option<PathBuf>,
+    pub explicitly_disable_kitty_keyboard_protocol: bool,
+    pub stacked_resize: bool,
+    pub default_editor: Option<PathBuf>,
+    pub web_clients_allowed: bool,
+    pub web_sharing: WebSharing,
+    pub advanced_mouse_actions: bool,
+    pub mouse_hover_effects: bool,
+    pub visual_bell: bool,
+    pub focus_follows_mouse: bool,
+    pub mouse_click_through: bool,
+    pub web_server_ip: IpAddr,
+    pub web_server_port: u16,
+    pub has_clients_flag: Arc<AtomicBool>,
+}
+
+impl Screen {
     /// Creates and returns a new [`Screen`].
-    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
-    pub fn new(
-        bus: Bus<ScreenInstruction>,
-        client_attributes: &ClientAttributes,
-        max_panes: Option<usize>,
-        mode_info: ModeInfo,
-        draw_pane_frames: bool,
-        auto_layout: bool,
-        session_is_mirrored: bool,
-        copy_options: CopyOptions,
-        debug: bool,
-        default_layout: Box<Layout>,
-        default_layout_name: Option<String>,
-        default_shell: PathBuf,
-        session_serialization: bool,
-        serialize_pane_viewport: bool,
-        scrollback_lines_to_serialize: Option<usize>,
-        styled_underlines: bool,
-        osc8_hyperlinks: bool,
-        arrow_fonts: bool,
-        layout_dir: Option<PathBuf>,
-        explicitly_disable_kitty_keyboard_protocol: bool,
-        stacked_resize: bool,
-        default_editor: Option<PathBuf>,
-        web_clients_allowed: bool,
-        web_sharing: WebSharing,
-        advanced_mouse_actions: bool,
-        mouse_hover_effects: bool,
-        visual_bell: bool,
-        focus_follows_mouse: bool,
-        mouse_click_through: bool,
-        web_server_ip: IpAddr,
-        web_server_port: u16,
-        has_clients_flag: Arc<AtomicBool>,
-    ) -> Self {
+    pub fn new(opts: ScreenOptions<'_>) -> Self {
+        let ScreenOptions {
+            bus,
+            client_attributes,
+            max_panes,
+            mode_info,
+            draw_pane_frames,
+            auto_layout,
+            session_is_mirrored,
+            copy_options,
+            debug,
+            default_layout,
+            default_layout_name,
+            default_shell,
+            session_serialization,
+            serialize_pane_viewport,
+            scrollback_lines_to_serialize,
+            styled_underlines,
+            osc8_hyperlinks,
+            arrow_fonts,
+            layout_dir,
+            explicitly_disable_kitty_keyboard_protocol,
+            stacked_resize,
+            default_editor,
+            web_clients_allowed,
+            web_sharing,
+            advanced_mouse_actions,
+            mouse_hover_effects,
+            visual_bell,
+            focus_follows_mouse,
+            mouse_click_through,
+            web_server_ip,
+            web_server_port,
+            has_clients_flag,
+        } = opts;
         let session_name = mode_info.session_name.clone().unwrap_or_default();
         let session_info = SessionInfo::new(session_name.clone());
         let mut peer_sessions_cache = BTreeMap::new();
@@ -9545,9 +9581,9 @@ pub(crate) fn screen_thread_main(
     }
 
     let thread_senders = bus.senders.clone();
-    let mut screen = Screen::new(
+    let mut screen = Screen::new(ScreenOptions {
         bus,
-        &client_attributes,
+        client_attributes: &client_attributes,
         max_panes,
         mode_info,
         draw_pane_frames,
@@ -9578,7 +9614,7 @@ pub(crate) fn screen_thread_main(
         web_server_ip,
         web_server_port,
         has_clients_flag,
-    );
+    });
     screen.host_theme_dark_styling = host_theme_dark_styling;
     screen.host_theme_light_styling = host_theme_light_styling;
 

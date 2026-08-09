@@ -1,6 +1,6 @@
 use super::{
     ActiveLayoutTransaction, CopyOptions, DurableTabLayoutGeneration, LayoutPreparationCleanup,
-    LayoutTabOwner, Screen, ScreenInstruction, ScreenLayoutTransactionKind, TabOverrideResult,
+    LayoutTabOwner, Screen, ScreenInstruction, ScreenLayoutTransactionKind, ScreenOptions, TabOverrideResult,
     VC_FLEET_LIVE_COUNT_MESSAGE, VC_STATUS_BAR_VISIBILITY_MESSAGE, fleet_live_count,
     is_parkable_chrome_plugin_run, register_viewer_creation_post_install_test_hook,
     reject_after_apply_prepare_for_test, reserve_durable_tab_layout_recovery,
@@ -997,9 +997,9 @@ fn create_new_screen(
     let web_server_port = 8080;
     let visual_bell = true;
 
-    Screen::new(
+    Screen::new(ScreenOptions {
         bus,
-        &client_attributes,
+        client_attributes: &client_attributes,
         max_panes,
         mode_info,
         draw_pane_frames,
@@ -1019,18 +1019,18 @@ fn create_new_screen(
         layout_dir,
         explicitly_disable_kitty_keyboard_protocol,
         stacked_resize,
-        None,
-        false,
+        default_editor: None,
+        web_clients_allowed: false,
         web_sharing,
         advanced_mouse_actions,
         mouse_hover_effects,
         visual_bell,
-        false, // focus_follows_mouse
-        false, // mouse_click_through
+        focus_follows_mouse: false,
+        mouse_click_through: false,
         web_server_ip,
         web_server_port,
-        Arc::new(AtomicBool::new(false)),
-    )
+        has_clients_flag: Arc::new(AtomicBool::new(false)),
+    })
 }
 
 #[test]
