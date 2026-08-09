@@ -40,6 +40,7 @@ fn plugin_thread_main(
 use crate::route::NotificationEnd;
 use crate::screen::{LayoutPreparationCleanup, ScreenInstruction};
 use crate::{
+    ClientId,
     ServerInstruction,
     channels::SenderWithContext,
     thread_bus::{Bus, ThreadSenders},
@@ -51,14 +52,17 @@ use std::path::PathBuf;
 use tempfile::tempdir;
 use wasmi::Engine;
 use zellij_utils::data::{
-    BareKey, Event, InputMode, KeyWithModifier, ModeInfo, PermissionStatus, PermissionType,
+    BareKey, Event, InputMode, KeyWithModifier, LayoutInfo, LayoutWithError, ModeInfo,
+    PermissionStatus, PermissionType,
 };
 use zellij_utils::errors::ErrorContext;
+use zellij_utils::errors::prelude::*;
 use zellij_utils::input::actions::Action;
+use zellij_utils::input::command::TerminalAction;
 use zellij_utils::input::keybinds::Keybinds;
 use zellij_utils::input::layout::{
-    PluginAlias, PluginUserConfiguration, Run, RunPlugin, RunPluginLocation, RunPluginOrAlias,
-    TiledPaneLayout,
+    Layout, PluginAlias, PluginUserConfiguration, Run, RunPlugin, RunPluginLocation,
+    RunPluginOrAlias, TiledPaneLayout,
 };
 use zellij_utils::input::permission::PermissionCache;
 use zellij_utils::input::plugins::PluginAliases;

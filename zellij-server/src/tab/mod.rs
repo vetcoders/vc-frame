@@ -1716,7 +1716,6 @@ pub struct OverrideLayoutOptions {
 impl Tab {
     #[cfg(test)]
     pub fn apply_layout(&mut self, opts: ApplyLayoutOptions) -> Result<()> {
-        let client_id = opts.client_id;
         let transaction = self.begin_apply_layout(opts)?;
         transaction.preflight_commit(self)?;
         let mut effects = transaction.commit_state(self);

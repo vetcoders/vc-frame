@@ -4388,20 +4388,20 @@ mod layout_plugin_transaction_tests {
         let engine = Engine::default();
         let plugin_dir = tempfile::tempdir().unwrap().path().to_path_buf();
         let zellij_cwd = tempfile::tempdir().unwrap().path().to_path_buf();
-        let mut bridge = WasmBridge::new(
+        let mut bridge = WasmBridge::new(WasmBridgeOptions {
             senders,
-            engine.clone(),
+            engine: engine.clone(),
             plugin_dir,
-            PathBuf::from("/bin/sh"),
+            path_to_default_shell: PathBuf::from("/bin/sh"),
             zellij_cwd,
-            BTreeMap::new(),
-            None,
-            None,
-            vec![],
-            vec![],
-            InputMode::Normal,
-            Keybinds::default(),
-        );
+            session_env_vars: BTreeMap::new(),
+            default_shell: None,
+            layout_dir: None,
+            available_layouts: vec![],
+            available_layout_errors: vec![],
+            default_mode: InputMode::Normal,
+            default_keybinds: Keybinds::default(),
+        });
         let plugin_cache = Arc::new(Mutex::new(HashMap::new()));
         bridge.plugin_executor = Arc::new(PinnedExecutor::new(
             max_threads,

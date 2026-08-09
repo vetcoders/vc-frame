@@ -14,7 +14,7 @@ impl TerminalPane {
         terminal_emulator_colors: Rc<RefCell<Palette>>,
         terminal_emulator_color_codes: Rc<RefCell<HashMap<usize, String>>>,
         initial_pane_title: Option<String>,
-        invoked_with: Option<zellij_utils::data::Run>,
+        invoked_with: Option<zellij_utils::input::layout::Run>,
         debug: bool,
         arrow_fonts: bool,
         styled_underlines: bool,
@@ -64,7 +64,7 @@ fn read_fixture() -> Vec<u8> {
         .unwrap_or_else(|_| panic!("could not read fixture ../src/tests/fixtures/grid_copy"))
 }
 
-fn create_pane() -> TerminalPane {
+fn create_pane() -> TerminalPaneImpl {
     let mut fake_win_size = PaneGeom::default();
     fake_win_size.cols.set_inner(121);
     fake_win_size.rows.set_inner(20);

@@ -1,11 +1,14 @@
-use super::{NewPaneOptions, PendingTabLayoutCleanup, Tab as TabImpl, TabOptions};
+use super::{
+    ApplyLayoutOptions, NewFloatingPaneOptions, NewPaneOptions, PendingTabLayoutCleanup,
+    Tab as TabImpl, TabOptions,
+};
 
 trait TabTestHelper {
     fn new_pane_compat(
         &mut self,
         pid: PaneId,
         initial_pane_title: Option<String>,
-        invoked_with: Option<zellij_utils::data::Run>,
+        invoked_with: Option<zellij_utils::input::layout::Run>,
         start_suppressed: bool,
         should_focus_pane: bool,
         new_pane_placement: zellij_utils::data::NewPanePlacement,
@@ -19,7 +22,7 @@ impl TabTestHelper for TabImpl {
         &mut self,
         pid: PaneId,
         initial_pane_title: Option<String>,
-        invoked_with: Option<zellij_utils::data::Run>,
+        invoked_with: Option<zellij_utils::input::layout::Run>,
         start_suppressed: bool,
         should_focus_pane: bool,
         new_pane_placement: zellij_utils::data::NewPanePlacement,
@@ -254,7 +257,7 @@ fn layout_commit_preflight_rejects_a_conflicting_blocking_completion() {
     let mut tab = create_new_tab(Size { cols: 80, rows: 20 }, false);
     let (requested_tx, _requested_rx) = oneshot::channel();
     let transaction = tab
-        .begin_apply_layout(super::ApplyLayoutOptions {
+        .begin_apply_layout(ApplyLayoutOptions {
             layout: TiledPaneLayout::default(),
             floating_panes_layout: vec![],
             new_terminal_ids: vec![(2, None)],
@@ -365,12 +368,12 @@ impl ServerOsApi for FakeInputOutput {
     }
 }
 
-fn tab_resize_increase(tab: &mut Tab, id: ClientId) {
+fn tab_resize_increase(tab: &mut TabImpl, id: ClientId) {
     tab.resize(id, ResizeStrategy::new(Resize::Increase, None))
         .unwrap();
 }
 
-fn tab_resize_left(tab: &mut Tab, id: ClientId) {
+fn tab_resize_left(tab: &mut TabImpl, id: ClientId) {
     tab.resize(
         id,
         ResizeStrategy::new(Resize::Increase, Some(Direction::Left)),
@@ -378,7 +381,7 @@ fn tab_resize_left(tab: &mut Tab, id: ClientId) {
     .unwrap();
 }
 
-fn tab_resize_down(tab: &mut Tab, id: ClientId) {
+fn tab_resize_down(tab: &mut TabImpl, id: ClientId) {
     tab.resize(
         id,
         ResizeStrategy::new(Resize::Increase, Some(Direction::Down)),
@@ -386,7 +389,7 @@ fn tab_resize_down(tab: &mut Tab, id: ClientId) {
     .unwrap();
 }
 
-fn tab_resize_up(tab: &mut Tab, id: ClientId) {
+fn tab_resize_up(tab: &mut TabImpl, id: ClientId) {
     tab.resize(
         id,
         ResizeStrategy::new(Resize::Increase, Some(Direction::Up)),
@@ -394,7 +397,7 @@ fn tab_resize_up(tab: &mut Tab, id: ClientId) {
     .unwrap();
 }
 
-fn tab_resize_right(tab: &mut Tab, id: ClientId) {
+fn tab_resize_right(tab: &mut TabImpl, id: ClientId) {
     tab.resize(
         id,
         ResizeStrategy::new(Resize::Increase, Some(Direction::Right)),
@@ -402,7 +405,7 @@ fn tab_resize_right(tab: &mut Tab, id: ClientId) {
     .unwrap();
 }
 
-fn create_new_tab(size: Size, stacked_resize: bool) -> Tab {
+fn create_new_tab(size: Size, stacked_resize: bool) -> TabImpl {
     let index = 0;
     let position = 0;
     let name = String::new();
@@ -475,20 +478,20 @@ fn create_new_tab(size: Size, stacked_resize: bool) -> Tab {
         web_server_ip,
         web_server_port,
     );
-    tab.apply_layout(
-        TiledPaneLayout::default(),
-        vec![],
-        vec![(1, None)],
-        vec![],
-        HashMap::new(),
+    tab.apply_layout(ApplyLayoutOptions {
+        layout: TiledPaneLayout::default(),
+        floating_panes_layout: vec![],
+        new_terminal_ids: vec![(1, None)],
+        new_floating_terminal_ids: vec![],
+        new_plugin_ids: HashMap::new(),
         client_id,
-        None,
-    )
+        blocking_terminal: None,
+    })
     .unwrap();
     tab
 }
 
-fn create_new_tab_with_layout(size: Size, layout: TiledPaneLayout) -> Tab {
+fn create_new_tab_with_layout(size: Size, layout: TiledPaneLayout) -> TabImpl {
     let index = 0;
     let position = 0;
     let name = String::new();
@@ -565,15 +568,15 @@ fn create_new_tab_with_layout(size: Size, layout: TiledPaneLayout) -> Tab {
     for i in 0..layout.extract_run_instructions().len() {
         new_terminal_ids.push((i as u32, None));
     }
-    tab.apply_layout(
+    tab.apply_layout(ApplyLayoutOptions {
         layout,
-        vec![],
+        floating_panes_layout: vec![],
         new_terminal_ids,
-        vec![],
-        HashMap::new(),
+        new_floating_terminal_ids: vec![],
+        new_plugin_ids: HashMap::new(),
         client_id,
-        None,
-    )
+        blocking_terminal: None,
+    })
     .unwrap();
     tab
 }
@@ -581,7 +584,7 @@ fn create_new_tab_with_layout(size: Size, layout: TiledPaneLayout) -> Tab {
 fn create_new_tab_with_cell_size(
     size: Size,
     character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
-) -> Tab {
+) -> TabImpl {
     let index = 0;
     let position = 0;
     let name = String::new();
@@ -653,15 +656,15 @@ fn create_new_tab_with_cell_size(
         web_server_ip,
         web_server_port,
     );
-    tab.apply_layout(
-        TiledPaneLayout::default(),
-        vec![],
-        vec![(1, None)],
-        vec![],
-        HashMap::new(),
+    tab.apply_layout(ApplyLayoutOptions {
+        layout: TiledPaneLayout::default(),
+        floating_panes_layout: vec![],
+        new_terminal_ids: vec![(1, None)],
+        new_floating_terminal_ids: vec![],
+        new_plugin_ids: HashMap::new(),
         client_id,
-        None,
-    )
+        blocking_terminal: None,
+    })
     .unwrap();
     tab
 }
@@ -1361,7 +1364,7 @@ pub fn toggle_focused_pane_fullscreen_with_stacked_resizes() {
     let mut tab = create_new_tab(size, stacked_resize);
     for i in 2..5 {
         let new_pane_id = PaneId::Terminal(i);
-        tab.new_pane(
+        tab.new_pane_compat(
             new_pane_id,
             None,
             None,
@@ -1512,7 +1515,7 @@ pub fn resize_while_fullscreen_updates_hidden_pane_geometry() {
     let stacked_resize = false;
     let mut tab = create_new_tab(initial_size, stacked_resize);
     for i in 2..6 {
-        tab.new_pane(
+        tab.new_pane_compat(
             PaneId::Terminal(i),
             None,
             None,
@@ -15759,7 +15762,7 @@ fn correctly_resize_frameless_panes_on_pane_close() {
     let content_size = (pane.get_content_columns(), pane.get_content_rows());
     assert_eq!(content_size, (cols, rows));
 
-    tab.new_pane(
+    tab.new_pane_compat(
         PaneId::Terminal(2),
         None,
         None,

@@ -1,10 +1,12 @@
 use crate::os_input_output::AsyncReader;
 use crate::panes::sixel::SixelImageStore;
-use crate::panes::{FloatingPanes, TiledPanes};
+use crate::panes::{FloatingPanes, FloatingPanesOptions, TiledPanes, TiledPanesOptions};
 use crate::panes::{LinkHandler, PaneId};
 use crate::plugins::PluginInstruction;
 use crate::pty::PtyInstruction;
-use crate::tab::layout_applier::{LayoutApplier as LayoutApplierImpl, LayoutApplierOptions};
+use crate::tab::layout_applier::{
+    LayoutApplier as LayoutApplierImpl, LayoutApplierOptions, LayoutApplierOverrideOptions,
+};
 
 struct LayoutApplier;
 impl LayoutApplier {
@@ -248,7 +250,7 @@ fn assert_floating_failure_happens_after_tiled_writer_install(override_layout: b
     let writer_plugin_ids = HashMap::from([(provided_plugin, vec![writer_plugin_id])]);
 
     let result = if override_layout {
-        applier.override_layout(super::LayoutApplierOverrideOptions {
+        applier.override_layout(LayoutApplierOverrideOptions {
             tiled_panes_layout: tiled_layout,
             floating_panes_layout: floating_layouts,
             new_terminal_ids: vec![(writer_terminal_id, None)],
@@ -357,36 +359,36 @@ fn create_layout_applier_fixtures(
     let draw_pane_frames = true;
     let default_mode_info = ModeInfo::default();
 
-    let tiled_panes = TiledPanes::new(
-        display_area.clone(),
-        viewport.clone(),
-        connected_clients_set.clone(),
-        connected_clients.clone(),
-        mode_info.clone(),
-        character_cell_size.clone(),
+    let tiled_panes = TiledPanes::new(TiledPanesOptions {
+        display_area: display_area.clone(),
+        viewport: viewport.clone(),
+        connected_clients: connected_clients_set.clone(),
+        connected_clients_in_app: connected_clients.clone(),
+        mode_info: mode_info.clone(),
+        character_cell_size: character_cell_size.clone(),
         stacked_resize,
         session_is_mirrored,
         draw_pane_frames,
-        default_mode_info.clone(),
+        default_mode_info: default_mode_info.clone(),
         style,
-        os_api.box_clone(),
-        senders.clone(),
-    );
+        os_api: os_api.box_clone(),
+        senders: senders.clone(),
+    });
 
     // Create FloatingPanes
-    let floating_panes = FloatingPanes::new(
-        display_area.clone(),
-        viewport.clone(),
-        connected_clients_set,
-        connected_clients.clone(),
+    let floating_panes = FloatingPanes::new(FloatingPanesOptions {
+        display_area: display_area.clone(),
+        viewport: viewport.clone(),
+        connected_clients: connected_clients_set,
+        connected_clients_in_app: connected_clients.clone(),
         mode_info,
-        character_cell_size.clone(),
+        character_cell_size: character_cell_size.clone(),
         session_is_mirrored,
         default_mode_info,
         style,
-        os_api.box_clone(),
-        senders.clone(),
-    );
+        os_input: os_api.box_clone(),
+        senders: senders.clone(),
+    });
 
     let focus_pane_id = None;
     let debug = false;
@@ -487,36 +489,36 @@ fn create_layout_applier_fixtures_with_receivers(
     let draw_pane_frames = true;
     let default_mode_info = ModeInfo::default();
 
-    let tiled_panes = TiledPanes::new(
-        display_area.clone(),
-        viewport.clone(),
-        connected_clients_set.clone(),
-        connected_clients.clone(),
-        mode_info.clone(),
-        character_cell_size.clone(),
+    let tiled_panes = TiledPanes::new(TiledPanesOptions {
+        display_area: display_area.clone(),
+        viewport: viewport.clone(),
+        connected_clients: connected_clients_set.clone(),
+        connected_clients_in_app: connected_clients.clone(),
+        mode_info: mode_info.clone(),
+        character_cell_size: character_cell_size.clone(),
         stacked_resize,
         session_is_mirrored,
         draw_pane_frames,
-        default_mode_info.clone(),
+        default_mode_info: default_mode_info.clone(),
         style,
-        os_api.box_clone(),
-        senders.clone(),
-    );
+        os_api: os_api.box_clone(),
+        senders: senders.clone(),
+    });
 
     // Create FloatingPanes
-    let floating_panes = FloatingPanes::new(
-        display_area.clone(),
-        viewport.clone(),
-        connected_clients_set,
-        connected_clients.clone(),
+    let floating_panes = FloatingPanes::new(FloatingPanesOptions {
+        display_area: display_area.clone(),
+        viewport: viewport.clone(),
+        connected_clients: connected_clients_set,
+        connected_clients_in_app: connected_clients.clone(),
         mode_info,
-        character_cell_size.clone(),
+        character_cell_size: character_cell_size.clone(),
         session_is_mirrored,
         default_mode_info,
         style,
-        os_api.box_clone(),
-        senders.clone(),
-    );
+        os_input: os_api.box_clone(),
+        senders: senders.clone(),
+    });
 
     let focus_pane_id = None;
     let debug = false;
@@ -3054,7 +3056,7 @@ fn test_override_layout_basic_with_both_tiled_and_floating() {
     let retain_existing_terminal_panes = false;
     let retain_existing_plugin_panes = false;
     let should_show_floating = applier
-        .override_layout(super::LayoutApplierOverrideOptions {
+        .override_layout(LayoutApplierOverrideOptions {
             tiled_panes_layout: override_tiled,
             floating_panes_layout: override_floating,
             new_terminal_ids,
@@ -3197,7 +3199,7 @@ fn test_override_layout_hide_floating_panes_true() {
     let retain_existing_terminal_panes = false;
     let retain_existing_plugin_panes = false;
     let should_show_floating = applier
-        .override_layout(super::LayoutApplierOverrideOptions {
+        .override_layout(LayoutApplierOverrideOptions {
             tiled_panes_layout: override_tiled,
             floating_panes_layout: override_floating,
             new_terminal_ids,
@@ -3326,7 +3328,7 @@ fn test_override_layout_show_floating_panes() {
     let retain_existing_terminal_panes = false;
     let retain_existing_plugin_panes = false;
     let should_show_floating = applier
-        .override_layout(super::LayoutApplierOverrideOptions {
+        .override_layout(LayoutApplierOverrideOptions {
             tiled_panes_layout: override_tiled,
             floating_panes_layout: override_floating,
             new_terminal_ids: vec![],
@@ -6275,7 +6277,7 @@ fn test_override_mixed_retain_terminal_panes_both_tiled_and_floating() {
     let retain_existing_terminal_panes = true;
     let retain_existing_plugin_panes = false;
     applier
-        .override_layout(super::LayoutApplierOverrideOptions {
+        .override_layout(LayoutApplierOverrideOptions {
             tiled_panes_layout: override_tiled,
             floating_panes_layout: override_floating,
             new_terminal_ids,
@@ -7201,7 +7203,7 @@ fn test_override_mixed_retain_plugin_panes_both_tiled_and_floating() {
     let retain_existing_terminal_panes = false;
     let retain_existing_plugin_panes = true;
     applier
-        .override_layout(super::LayoutApplierOverrideOptions {
+        .override_layout(LayoutApplierOverrideOptions {
             tiled_panes_layout: override_tiled,
             floating_panes_layout: override_floating,
             new_terminal_ids: vec![],

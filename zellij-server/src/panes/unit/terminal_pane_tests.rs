@@ -14,7 +14,7 @@ impl TerminalPane {
         terminal_emulator_colors: Rc<RefCell<Palette>>,
         terminal_emulator_color_codes: Rc<RefCell<HashMap<usize, String>>>,
         initial_pane_title: Option<String>,
-        invoked_with: Option<zellij_utils::data::Run>,
+        invoked_with: Option<zellij_utils::input::layout::Run>,
         debug: bool,
         arrow_fonts: bool,
         styled_underlines: bool,
@@ -749,7 +749,7 @@ pub fn pane_with_bottom_and_right_borders_position_is_on_frame() {
     assert!(!terminal_pane.position_is_on_frame(&Position::new(30, 131)));
 }
 
-fn make_terminal_pane_for_bell() -> TerminalPane {
+fn make_terminal_pane_for_bell() -> TerminalPaneImpl {
     let mut fake_win_size = PaneGeom::default();
     fake_win_size.cols.set_inner(121);
     fake_win_size.rows.set_inner(20);
