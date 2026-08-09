@@ -68,6 +68,8 @@ use tokio::sync::oneshot;
 use zellij_utils::data::{PaneContents, PaneRenderReport};
 use zellij_utils::ipc::ExitReason;
 
+// Positional compat shim: the arg list deliberately mirrors the pre-sweep
+// Tab::new_pane signature so 18 historical call sites stay byte-stable.
 #[allow(clippy::too_many_arguments)]
 fn new_pane_options(
     pid: PaneId,
@@ -7068,7 +7070,9 @@ fn dispatch_transactional_new_tab(
     }
 }
 
-#[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
+// Positional test-harness helper: mirrors the transactional apply pipeline
+// arg-for-arg; collapsing it into a struct would just duplicate ApplyLayoutParams.
+#[allow(clippy::too_many_arguments)]
 fn send_transactional_apply(
     mock_screen: &MockScreen,
     tab_id: usize,

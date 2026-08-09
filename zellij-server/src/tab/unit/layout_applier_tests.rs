@@ -300,6 +300,8 @@ fn override_layout_failure_exposes_partial_tiled_writer_for_transaction_cleanup(
 }
 
 /// Creates all the fixtures needed for LayoutApplier tests
+// Fixture tuple mirrors the LayoutApplier constructor surface 1:1; naming a
+// struct here would duplicate LayoutApplierOptions for no test benefit.
 #[allow(clippy::type_complexity)]
 fn create_layout_applier_fixtures(
     size: Size,
@@ -422,6 +424,7 @@ fn create_layout_applier_fixtures(
 }
 
 /// Creates fixtures with receivers for verifying messages sent to pty and plugin threads
+// Same rationale as create_layout_applier_fixtures above.
 #[allow(clippy::type_complexity)]
 fn create_layout_applier_fixtures_with_receivers(
     size: Size,
