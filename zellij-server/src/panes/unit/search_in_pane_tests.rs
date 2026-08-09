@@ -2,6 +2,9 @@ use super::super::{TerminalPane as TerminalPaneImpl, TerminalPaneOptions};
 
 struct TerminalPane;
 impl TerminalPane {
+    // Positional compat shim: `new` deliberately returns the real (aliased)
+    // type, not the unit-struct namespace it hangs off.
+    #[allow(clippy::new_ret_no_self)]
     pub fn new(
         pid: u32,
         position_and_size: PaneGeom,

@@ -44,6 +44,9 @@ impl TabTestHelper for TabImpl {
 
 struct Tab;
 impl Tab {
+    // Positional compat shim: `new` deliberately returns the real (aliased)
+    // type, not the unit-struct namespace it hangs off.
+    #[allow(clippy::new_ret_no_self)]
     pub fn new(
         id: usize,
         position: usize,

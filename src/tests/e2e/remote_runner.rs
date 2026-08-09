@@ -373,26 +373,28 @@ fn read_from_channel(
                 let arrow_fonts = true;
                 let styled_underlines = true;
                 let explicitly_disable_kitty_keyboard_protocol = false;
-                let mut terminal_output = TerminalPane::new(
-                    0,
-                    pane_geom,
-                    Style::default(),
-                    0,
-                    String::new(),
-                    Rc::new(RefCell::new(LinkHandler::new())),
-                    character_cell_size,
-                    sixel_image_store,
-                    Rc::new(RefCell::new(Palette::default())),
-                    Rc::new(RefCell::new(HashMap::new())),
-                    None,
-                    None,
-                    debug,
-                    arrow_fonts,
-                    styled_underlines,
-                    true, // osc8_hyperlinks
-                    explicitly_disable_kitty_keyboard_protocol,
-                    None,
-                ); // 0 is the pane index
+                let mut terminal_output =
+                    TerminalPane::new(zellij_server::panes::TerminalPaneOptions {
+                        pid: 0,
+                        position_and_size: pane_geom,
+                        style: Style::default(),
+                        pane_index: 0,
+                        pane_name: String::new(),
+                        link_handler: Rc::new(RefCell::new(LinkHandler::new())),
+                        character_cell_size,
+                        sixel_image_store,
+                        terminal_emulator_colors: Rc::new(RefCell::new(Palette::default())),
+                        terminal_emulator_color_codes: Rc::new(RefCell::new(HashMap::new())),
+                        initial_pane_title: None,
+                        invoked_with: None,
+                        debug,
+                        arrow_fonts,
+                        styled_underlines,
+                        osc8_hyperlinks: true,
+                        explicitly_disable_keyboard_protocol:
+                            explicitly_disable_kitty_keyboard_protocol,
+                        notification_end: None,
+                    });
                 loop {
                     if !should_keep_running.load(Ordering::SeqCst) {
                         break;
@@ -518,12 +520,18 @@ impl RemoteTerminal {
         let s = self.last_snapshot.lock().unwrap();
         s.lines().map(|s| s.to_owned()).collect::<Vec<_>>()
     }
+    // e2e debugging helper: not called by the suite, kept for ad-hoc use when
+    // diagnosing remote-runner failures (sweep 2026-08-09).
+    #[allow(dead_code)]
     pub fn current_snapshot(&self) -> String {
         // convenience method for writing tests,
         // this should only be used when developing,
         // please prefer "snapsht_contains" instead
         self.last_snapshot.lock().unwrap().clone()
     }
+    // e2e debugging helper: not called by the suite, kept for ad-hoc use when
+    // diagnosing remote-runner failures (sweep 2026-08-09).
+    #[allow(dead_code)]
     pub fn current_cursor_position(&self) -> String {
         // convenience method for writing tests,
         // this should only be used when developing,
