@@ -687,13 +687,18 @@ Do not globally reformat unless explicitly requested.
 
 Do not change licensing headers or notices without explicit instruction.
 
-Do not add telemetry, network calls, or external services without explicit instruction.
-
 Do not introduce new dependencies without checking:
 
 - license
 - maintenance state
 - necessity
+
+---
+
+## Git & Commit Policy
+
+- **Obligatory Commits**: Every completed and verified code cut, feature, or refactoring step MUST be committed to Git immediately. Do not accumulate large uncommitted worktree drifts.
+- **Commit Formatting**: Commit messages must adhere to Conventional Commits format (`type(scope): description`), aligned with `../vibecrafted` hooks.
 
 ---
 
