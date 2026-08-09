@@ -698,7 +698,28 @@ Do not introduce new dependencies without checking:
 ## Git & Commit Policy
 
 - **Obligatory Commits**: Every completed and verified code cut, feature, or refactoring step MUST be committed to Git immediately. Do not accumulate large uncommitted worktree drifts.
-- **Commit Formatting**: Commit messages must adhere to Conventional Commits format (`type(scope): description`), aligned with `../vibecrafted` hooks.
+- **Canonical Commit Message Format**:
+  ```text
+  [<agent>/<runtime>] <type>(<scope>): <subject>
+
+  <detailed body explaining what was changed and why>
+
+  Authored-By: <agent> <agents@vetcoders.io>
+  session_id: <session_id>
+  time: YYYY-MM-DDTHH:MM:SS±HH:MM
+  runtime: <runtime>
+  ```
+  Example:
+  ```text
+  [antigravity/antigravity-ide] refactor(server): convert Screen::new parameters to ScreenOptions struct
+
+  Refactored Screen::new to take a dedicated ScreenOptions struct to reduce parameter bloat and eliminate the #[allow(clippy::too_many_arguments)] silencer. Updated all call sites in screen.rs and unit tests.
+
+  Authored-By: antigravity <agents@vetcoders.io>
+  session_id: 130c04d7-0387-4f43-af09-c78d61428704
+  time: 2026-08-09T15:15:23+02:00
+  runtime: antigravity-ide
+  ```
 
 ---
 
