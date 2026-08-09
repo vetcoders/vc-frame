@@ -5857,7 +5857,7 @@ impl Screen {
             .tabs
             .get_mut(&tab_id)
             .context("couldn't find tab with index {tab_id}")?
-            .begin_apply_layout(
+            .begin_apply_layout(crate::tab::ApplyLayoutOptions {
                 layout,
                 floating_panes_layout,
                 new_terminal_ids,
@@ -5865,7 +5865,7 @@ impl Screen {
                 new_plugin_ids,
                 client_id,
                 blocking_terminal,
-            )
+            })
             .with_context(err_context)?;
         Ok(PreparedApplyLayout {
             tab_id,
@@ -13195,19 +13195,19 @@ pub(crate) fn screen_thread_main(
                         if let Some(tab) = screen.tabs.get_mut(&tab_index) {
                             let new_tab_name = tab_result.tab_name.clone();
                             let mut transaction = tab
-                                .begin_override_layout(
-                                    tab_result.tiled_layout,
-                                    tab_result.floating_layouts,
-                                    tab_result.swap_tiled_layouts,
-                                    tab_result.swap_floating_layouts,
-                                    tab_result.new_terminal_pids,
-                                    tab_result.new_floating_pane_pids,
-                                    tab_result.plugin_ids,
+                                .begin_override_layout(crate::tab::OverrideLayoutOptions {
+                                    layout: tab_result.tiled_layout,
+                                    floating_panes_layout: tab_result.floating_layouts,
+                                    new_swap_tiled_layouts: tab_result.swap_tiled_layouts,
+                                    new_swap_floating_layouts: tab_result.swap_floating_layouts,
+                                    new_terminal_ids: tab_result.new_terminal_pids,
+                                    new_floating_terminal_ids: tab_result.new_floating_pane_pids,
+                                    new_plugin_ids: tab_result.plugin_ids,
                                     retain_existing_terminal_panes,
                                     retain_existing_plugin_panes,
                                     client_id,
-                                    None,
-                                )
+                                    blocking_terminal: None,
+                                })
                                 .with_context(|| {
                                     format!("failed to override layout for tab {tab_index}")
                                 })?;
@@ -13262,19 +13262,19 @@ pub(crate) fn screen_thread_main(
                                         "new tab {tab_index} disappeared during override completion"
                                     )
                                 })?
-                                .begin_override_layout(
-                                    tab_result.tiled_layout,
-                                    tab_result.floating_layouts,
-                                    tab_result.swap_tiled_layouts,
-                                    tab_result.swap_floating_layouts,
-                                    tab_result.new_terminal_pids,
-                                    tab_result.new_floating_pane_pids,
-                                    tab_result.plugin_ids,
+                                .begin_override_layout(crate::tab::OverrideLayoutOptions {
+                                    layout: tab_result.tiled_layout,
+                                    floating_panes_layout: tab_result.floating_layouts,
+                                    new_swap_tiled_layouts: tab_result.swap_tiled_layouts,
+                                    new_swap_floating_layouts: tab_result.swap_floating_layouts,
+                                    new_terminal_ids: tab_result.new_terminal_pids,
+                                    new_floating_terminal_ids: tab_result.new_floating_pane_pids,
+                                    new_plugin_ids: tab_result.plugin_ids,
                                     retain_existing_terminal_panes,
                                     retain_existing_plugin_panes,
                                     client_id,
-                                    None,
-                                )
+                                    blocking_terminal: None,
+                                })
                                 .with_context(|| {
                                     format!("failed to override layout for new tab {tab_index}")
                                 })?;

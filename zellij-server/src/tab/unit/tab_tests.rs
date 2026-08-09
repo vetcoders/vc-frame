@@ -254,15 +254,15 @@ fn layout_commit_preflight_rejects_a_conflicting_blocking_completion() {
     let mut tab = create_new_tab(Size { cols: 80, rows: 20 }, false);
     let (requested_tx, _requested_rx) = oneshot::channel();
     let transaction = tab
-        .begin_apply_layout(
-            TiledPaneLayout::default(),
-            vec![],
-            vec![(2, None)],
-            vec![],
-            HashMap::new(),
-            1,
-            Some((2, NotificationEnd::new(requested_tx))),
-        )
+        .begin_apply_layout(super::ApplyLayoutOptions {
+            layout: TiledPaneLayout::default(),
+            floating_panes_layout: vec![],
+            new_terminal_ids: vec![(2, None)],
+            new_floating_terminal_ids: vec![],
+            new_plugin_ids: HashMap::new(),
+            client_id: 1,
+            blocking_terminal: Some((2, NotificationEnd::new(requested_tx))),
+        })
         .expect("layout preparation should install terminal 2");
     let (existing_tx, _existing_rx) = oneshot::channel();
     assert!(

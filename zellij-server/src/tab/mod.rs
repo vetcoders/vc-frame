@@ -1687,27 +1687,35 @@ impl Tab {
         }
     }
 
+pub struct ApplyLayoutOptions {
+    pub layout: TiledPaneLayout,
+    pub floating_panes_layout: Vec<FloatingPaneLayout>,
+    pub new_terminal_ids: Vec<(u32, HoldForCommand)>,
+    pub new_floating_terminal_ids: Vec<(u32, HoldForCommand)>,
+    pub new_plugin_ids: HashMap<RunPluginOrAlias, Vec<u32>>,
+    pub client_id: ClientId,
+    pub blocking_terminal: Option<(u32, NotificationEnd)>,
+}
+
+pub struct OverrideLayoutOptions {
+    pub layout: TiledPaneLayout,
+    pub floating_panes_layout: Vec<FloatingPaneLayout>,
+    pub new_swap_tiled_layouts: Option<Vec<SwapTiledLayout>>,
+    pub new_swap_floating_layouts: Option<Vec<SwapFloatingLayout>>,
+    pub new_terminal_ids: Vec<(u32, HoldForCommand)>,
+    pub new_floating_terminal_ids: Vec<(u32, HoldForCommand)>,
+    pub new_plugin_ids: HashMap<RunPluginOrAlias, Vec<u32>>,
+    pub retain_existing_terminal_panes: bool,
+    pub retain_existing_plugin_panes: bool,
+    pub client_id: ClientId,
+    pub blocking_terminal: Option<(u32, NotificationEnd)>,
+}
+
+impl Tab {
     #[cfg(test)]
-    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
-    pub fn apply_layout(
-        &mut self,
-        layout: TiledPaneLayout,
-        floating_panes_layout: Vec<FloatingPaneLayout>,
-        new_terminal_ids: Vec<(u32, HoldForCommand)>,
-        new_floating_terminal_ids: Vec<(u32, HoldForCommand)>,
-        new_plugin_ids: HashMap<RunPluginOrAlias, Vec<u32>>,
-        client_id: ClientId,
-        blocking_terminal: Option<(u32, NotificationEnd)>,
-    ) -> Result<()> {
-        let transaction = self.begin_apply_layout(
-            layout,
-            floating_panes_layout,
-            new_terminal_ids,
-            new_floating_terminal_ids,
-            new_plugin_ids,
-            client_id,
-            blocking_terminal,
-        )?;
+    pub fn apply_layout(&mut self, opts: ApplyLayoutOptions) -> Result<()> {
+        let client_id = opts.client_id;
+        let transaction = self.begin_apply_layout(opts)?;
         transaction.preflight_commit(self)?;
         let mut effects = transaction.commit_state(self);
         let mut cleanup = effects.take_pending_cleanup();
@@ -1737,17 +1745,19 @@ impl Tab {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
     pub(crate) fn begin_apply_layout(
         &mut self,
-        layout: TiledPaneLayout,
-        floating_panes_layout: Vec<FloatingPaneLayout>,
-        new_terminal_ids: Vec<(u32, HoldForCommand)>,
-        new_floating_terminal_ids: Vec<(u32, HoldForCommand)>,
-        new_plugin_ids: HashMap<RunPluginOrAlias, Vec<u32>>,
-        client_id: ClientId,
-        blocking_terminal: Option<(u32, NotificationEnd)>,
+        opts: ApplyLayoutOptions,
     ) -> Result<TabLayoutTransaction> {
+        let ApplyLayoutOptions {
+            layout,
+            floating_panes_layout,
+            new_terminal_ids,
+            new_floating_terminal_ids,
+            new_plugin_ids,
+            client_id,
+            blocking_terminal,
+        } = opts;
         let snapshot = TabLayoutSnapshot::capture(self);
         self.begin_layout_transaction();
         self.swap_layouts
@@ -1814,21 +1824,23 @@ impl Tab {
         }
     }
 
-    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
     pub(crate) fn begin_override_layout(
         &mut self,
-        layout: TiledPaneLayout,
-        floating_panes_layout: Vec<FloatingPaneLayout>,
-        new_swap_tiled_layouts: Option<Vec<SwapTiledLayout>>,
-        new_swap_floating_layouts: Option<Vec<SwapFloatingLayout>>,
-        new_terminal_ids: Vec<(u32, HoldForCommand)>,
-        new_floating_terminal_ids: Vec<(u32, HoldForCommand)>,
-        new_plugin_ids: HashMap<RunPluginOrAlias, Vec<u32>>,
-        retain_existing_terminal_panes: bool,
-        retain_existing_plugin_panes: bool,
-        client_id: ClientId,
-        blocking_terminal: Option<(u32, NotificationEnd)>,
+        opts: OverrideLayoutOptions,
     ) -> Result<TabLayoutTransaction> {
+        let OverrideLayoutOptions {
+            layout,
+            floating_panes_layout,
+            new_swap_tiled_layouts,
+            new_swap_floating_layouts,
+            new_terminal_ids,
+            new_floating_terminal_ids,
+            new_plugin_ids,
+            retain_existing_terminal_panes,
+            retain_existing_plugin_panes,
+            client_id,
+            blocking_terminal,
+        } = opts;
         let snapshot = TabLayoutSnapshot::capture(self);
         self.begin_layout_transaction();
         let new_swap_tiled_layouts = new_swap_tiled_layouts.unwrap_or_default();

@@ -9451,8 +9451,8 @@ pub fn rejected_layout_preserves_terminal_grid_selection_and_scrollback() {
         RunPluginOrAlias::from_url("file:/missing-grid-rollback.wasm", &None, None, None).unwrap();
     let provided_plugin =
         RunPluginOrAlias::from_url("file:/provided-grid-rollback.wasm", &None, None, None).unwrap();
-    let result = tab.begin_override_layout(
-        TiledPaneLayout {
+    let result = tab.begin_override_layout(crate::tab::OverrideLayoutOptions {
+        layout: TiledPaneLayout {
             run: Some(Run::Command(RunCommand {
                 command: PathBuf::from("grid-rollback-writer"),
                 ..Default::default()
@@ -9460,20 +9460,20 @@ pub fn rejected_layout_preserves_terminal_grid_selection_and_scrollback() {
             focus: Some(true),
             ..Default::default()
         },
-        vec![FloatingPaneLayout {
+        floating_panes_layout: vec![FloatingPaneLayout {
             run: Some(Run::Plugin(missing_plugin)),
             ..Default::default()
         }],
-        Some(vec![]),
-        Some(vec![]),
-        vec![(970, None)],
-        vec![],
-        HashMap::from([(provided_plugin, vec![971])]),
-        false,
-        false,
+        new_swap_tiled_layouts: Some(vec![]),
+        new_swap_floating_layouts: Some(vec![]),
+        new_terminal_ids: vec![(970, None)],
+        new_floating_terminal_ids: vec![],
+        new_plugin_ids: HashMap::from([(provided_plugin, vec![971])]),
+        retain_existing_terminal_panes: false,
+        retain_existing_plugin_panes: false,
         client_id,
-        None,
-    );
+        blocking_terminal: None,
+    });
     assert!(
         result.is_err(),
         "the injected floating-pane gap must reject"
