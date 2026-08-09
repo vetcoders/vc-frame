@@ -1237,21 +1237,24 @@ fn load_runtime_transcript_manifest(
     Ok((manifest, canonical_transcript, transcript_file))
 }
 
-#[allow(clippy::too_many_arguments)] // capture origin wants a params struct; de-arg refactor is its own cut
+pub(crate) struct CaptureRuntimeTranscriptParams<'a> {
+    pub run_id: &'a str,
+    pub session: &'a str,
+    pub origin_tab: &'a str,
+    pub pane_id: Option<&'a str>,
+    pub transcript: &'a Path,
+    pub dest: &'a Path,
+    pub terminal_error: &'a str,
+    pub origin_tab_identity: Option<OriginTabIdentity>,
+}
+
 fn capture_runtime_transcript(
-    run_id: &str,
-    session: &str,
-    origin_tab: &str,
-    pane_id: Option<&str>,
-    transcript: &Path,
-    dest: &Path,
-    terminal_error: &str,
-    origin_tab_identity: Option<OriginTabIdentity>,
+    params: CaptureRuntimeTranscriptParams<'_>,
 ) -> Result<CaptureEvidence, String> {
     let (transcript_manifest, canonical_transcript, mut transcript_file) =
-        load_runtime_transcript_manifest(run_id, transcript)
-            .map_err(|error| format!("{}; {}", terminal_error, error))?;
-    let temporary = unique_staging_path(dest, "runtime-transcript")?;
+        load_runtime_transcript_manifest(params.run_id, params.transcript)
+            .map_err(|error| format!("{}; {}", params.terminal_error, error))?;
+    let temporary = unique_staging_path(params.dest, "runtime-transcript")?;
     let mut temporary_file = std::fs::OpenOptions::new()
         .write(true)
         .truncate(true)
@@ -1260,7 +1263,7 @@ fn capture_runtime_transcript(
     std::io::copy(&mut transcript_file, &mut temporary_file).map_err(|error| {
         format!(
             "{}; cannot copy runtime transcript {} to {}: {}",
-            terminal_error,
+            params.terminal_error,
             canonical_transcript.display(),
             temporary.display(),
             error
@@ -1278,7 +1281,7 @@ fn capture_runtime_transcript(
     {
         return Err(format!(
             "{}; runtime transcript {} changed or failed digest verification while being copied",
-            terminal_error,
+            params.terminal_error,
             canonical_transcript.display()
         ));
     }
@@ -1292,28 +1295,28 @@ fn capture_runtime_transcript(
     if after.len() != transcript_manifest.bytes {
         return Err(format!(
             "{}; runtime transcript {} changed during capture",
-            terminal_error,
+            params.terminal_error,
             canonical_transcript.display()
         ));
     }
     let source_identity = canonical_transcript.display().to_string();
     let mut manifest = CaptureCommitManifest {
         version: 1,
-        run_id: run_id.to_owned(),
-        session: session.to_owned(),
-        origin_tab: origin_tab.to_owned(),
-        pane_id: pane_id.map(str::to_owned),
-        runtime_transcript: capture_request_transcript(Some(transcript)),
+        run_id: params.run_id.to_owned(),
+        session: params.session.to_owned(),
+        origin_tab: params.origin_tab.to_owned(),
+        pane_id: params.pane_id.map(str::to_owned),
+        runtime_transcript: capture_request_transcript(Some(params.transcript)),
         staging_file: String::new(),
         evidence: CaptureEvidence {
             capture_source: CaptureSource::RuntimeTranscript,
             source_identity,
             bytes: 0,
             sha256: String::new(),
-            origin_tab_identity,
+            origin_tab_identity: params.origin_tab_identity,
         },
     };
-    commit_scrollback_capture(&temporary, dest, &mut manifest)
+    commit_scrollback_capture(&temporary, params.dest, &mut manifest)
 }
 
 fn atomic_write_json(
@@ -1575,16 +1578,16 @@ impl TriageIo for CliTriageIo {
             Err(error) => error,
         };
         let transcript = runtime_transcript.ok_or_else(|| terminal_error.clone())?;
-        capture_runtime_transcript(
+        capture_runtime_transcript(CaptureRuntimeTranscriptParams {
             run_id,
             session,
             origin_tab,
             pane_id,
             transcript,
             dest,
-            &terminal_error,
-            origin_tab_identity.ok(),
-        )
+            terminal_error: &terminal_error,
+            origin_tab_identity: origin_tab_identity.ok(),
+        })
     }
 
     fn load_receipt(&mut self, path: &Path) -> Result<Option<TransferReceipt>, String> {
@@ -1938,41 +1941,46 @@ impl TriageIo for CliTriageIo {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn triage_run(
-    run: String,
-    exit_code: i32,
-    bucket_verdict: Option<BucketKind>,
-    origin_session: Option<String>,
-    origin_tab: Option<String>,
-    pane_id: Option<String>,
-    runtime_transcript: Option<PathBuf>,
-    cwd: Option<PathBuf>,
-    dry_run: bool,
-    transfer_lock_fd: Option<i32>,
-    settlement_revision: u64,
-    command: Vec<String>,
-) -> Result<TransferReport, String> {
-    let origin_session = origin_session
+#[derive(Debug, Clone)]
+pub(crate) struct TriageRunParams {
+    pub run: String,
+    pub exit_code: i32,
+    pub bucket_verdict: Option<BucketKind>,
+    pub origin_session: Option<String>,
+    pub origin_tab: Option<String>,
+    pub pane_id: Option<String>,
+    pub runtime_transcript: Option<PathBuf>,
+    pub cwd: Option<PathBuf>,
+    pub dry_run: bool,
+    pub transfer_lock_fd: Option<i32>,
+    pub settlement_revision: u64,
+    pub command: Vec<String>,
+}
+
+pub(crate) fn triage_run(params: TriageRunParams) -> Result<TransferReport, String> {
+    let origin_session = params
+        .origin_session
         .or_else(|| zellij_utils::envs::get_session_name().ok())
         .ok_or_else(|| {
             "no origin session: pass --origin-session or run from inside a session".to_owned()
         })?;
-    let origin_tab = origin_tab.unwrap_or_else(|| run.clone());
-    let cwd = cwd.or_else(|| std::env::current_dir().ok());
+    let origin_tab = params.origin_tab.unwrap_or_else(|| params.run.clone());
+    let cwd = params.cwd.or_else(|| std::env::current_dir().ok());
 
     let finished = FinishedRun {
-        run,
-        exit_code,
+        run: params.run,
+        exit_code: params.exit_code,
         origin_session,
         origin_tab,
-        pane_id,
-        runtime_transcript,
-        command,
+        pane_id: params.pane_id,
+        runtime_transcript: params.runtime_transcript,
+        command: params.command,
         cwd,
-        bucket_verdict,
-        settlement_revision,
+        bucket_verdict: params.bucket_verdict,
+        settlement_revision: params.settlement_revision,
     };
+    let dry_run = params.dry_run;
+    let transfer_lock_fd = params.transfer_lock_fd;
     let root = control_plane_root()
         .ok_or_else(|| "cannot resolve the control plane root (set VIBECRAFTED_HOME)".to_owned())?;
     let captured_at = SystemTime::now()
@@ -2698,16 +2706,16 @@ mod tests {
         )
         .unwrap();
 
-        let capture = capture_runtime_transcript(
-            "run-1",
-            "workers",
-            "run-1",
-            None,
-            &transcript,
-            &dest,
-            "origin session not found",
-            None,
-        )
+        let capture = capture_runtime_transcript(CaptureRuntimeTranscriptParams {
+            run_id: "run-1",
+            session: "workers",
+            origin_tab: "run-1",
+            pane_id: None,
+            transcript: &transcript,
+            dest: &dest,
+            terminal_error: "origin session not found",
+            origin_tab_identity: None,
+        })
         .unwrap();
 
         assert_eq!(capture.capture_source, CaptureSource::RuntimeTranscript);
