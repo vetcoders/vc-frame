@@ -178,31 +178,55 @@ pub struct LayoutApplier<'a> {
     deferred_pane_initial_bytes: Vec<(PaneId, Vec<u8>)>,
 }
 
+pub struct LayoutApplierOptions<'a> {
+    pub viewport: &'a Rc<RefCell<Viewport>>,
+    pub senders: &'a ThreadSenders,
+    pub sixel_image_store: &'a Rc<RefCell<SixelImageStore>>,
+    pub link_handler: &'a Rc<RefCell<LinkHandler>>,
+    pub terminal_emulator_colors: &'a Rc<RefCell<Palette>>,
+    pub terminal_emulator_color_codes: &'a Rc<RefCell<HashMap<usize, String>>>,
+    pub character_cell_size: &'a Rc<RefCell<Option<SizeInPixels>>>,
+    pub connected_clients: &'a Rc<RefCell<HashMap<ClientId, bool>>>,
+    pub style: &'a Style,
+    pub display_area: &'a Rc<RefCell<Size>>,
+    pub tiled_panes: &'a mut TiledPanes,
+    pub floating_panes: &'a mut FloatingPanes,
+    pub draw_pane_frames: bool,
+    pub focus_pane_id: &'a mut Option<PaneId>,
+    pub _os_api: &'a dyn ServerOsApi,
+    pub debug: bool,
+    pub arrow_fonts: bool,
+    pub styled_underlines: bool,
+    pub osc8_hyperlinks: bool,
+    pub explicitly_disable_kitty_keyboard_protocol: bool,
+    pub blocking_terminal: Option<(u32, NotificationEnd)>,
+}
+
 impl<'a> LayoutApplier<'a> {
-    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
-    pub fn new(
-        viewport: &Rc<RefCell<Viewport>>,
-        senders: &ThreadSenders,
-        sixel_image_store: &Rc<RefCell<SixelImageStore>>,
-        link_handler: &Rc<RefCell<LinkHandler>>,
-        terminal_emulator_colors: &Rc<RefCell<Palette>>,
-        terminal_emulator_color_codes: &Rc<RefCell<HashMap<usize, String>>>,
-        character_cell_size: &Rc<RefCell<Option<SizeInPixels>>>,
-        connected_clients: &Rc<RefCell<HashMap<ClientId, bool>>>,
-        style: &Style,
-        display_area: &Rc<RefCell<Size>>, // includes all panes (including eg. the status bar and tab bar in the default layout)
-        tiled_panes: &'a mut TiledPanes,
-        floating_panes: &'a mut FloatingPanes,
-        draw_pane_frames: bool,
-        focus_pane_id: &'a mut Option<PaneId>,
-        _os_api: &dyn ServerOsApi,
-        debug: bool,
-        arrow_fonts: bool,
-        styled_underlines: bool,
-        osc8_hyperlinks: bool,
-        explicitly_disable_kitty_keyboard_protocol: bool,
-        blocking_terminal: Option<(u32, NotificationEnd)>,
-    ) -> Self {
+    pub fn new(opts: LayoutApplierOptions<'a>) -> Self {
+        let LayoutApplierOptions {
+            viewport,
+            senders,
+            sixel_image_store,
+            link_handler,
+            terminal_emulator_colors,
+            terminal_emulator_color_codes,
+            character_cell_size,
+            connected_clients,
+            style,
+            display_area,
+            tiled_panes,
+            floating_panes,
+            draw_pane_frames,
+            focus_pane_id,
+            _os_api,
+            debug,
+            arrow_fonts,
+            styled_underlines,
+            osc8_hyperlinks,
+            explicitly_disable_kitty_keyboard_protocol,
+            blocking_terminal,
+        } = opts;
         let viewport = viewport.clone();
         let senders = senders.clone();
         let sixel_image_store = sixel_image_store.clone();

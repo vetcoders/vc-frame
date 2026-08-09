@@ -4,7 +4,58 @@ use crate::panes::{FloatingPanes, TiledPanes};
 use crate::panes::{LinkHandler, PaneId};
 use crate::plugins::PluginInstruction;
 use crate::pty::PtyInstruction;
-use crate::tab::layout_applier::LayoutApplier;
+use crate::tab::layout_applier::{LayoutApplier as LayoutApplierImpl, LayoutApplierOptions};
+
+struct LayoutApplier;
+impl LayoutApplier {
+    pub fn new<'a>(
+        viewport: &'a Rc<RefCell<Viewport>>,
+        senders: &'a ThreadSenders,
+        sixel_image_store: &'a Rc<RefCell<SixelImageStore>>,
+        link_handler: &'a Rc<RefCell<LinkHandler>>,
+        terminal_emulator_colors: &'a Rc<RefCell<Palette>>,
+        terminal_emulator_color_codes: &'a Rc<RefCell<HashMap<usize, String>>>,
+        character_cell_size: &'a Rc<RefCell<Option<SizeInPixels>>>,
+        connected_clients: &'a Rc<RefCell<HashMap<ClientId, bool>>>,
+        style: &'a Style,
+        display_area: &'a Rc<RefCell<Size>>,
+        tiled_panes: &'a mut TiledPanes,
+        floating_panes: &'a mut FloatingPanes,
+        draw_pane_frames: bool,
+        focus_pane_id: &'a mut Option<PaneId>,
+        _os_api: &'a dyn ServerOsApi,
+        debug: bool,
+        arrow_fonts: bool,
+        styled_underlines: bool,
+        osc8_hyperlinks: bool,
+        explicitly_disable_kitty_keyboard_protocol: bool,
+        blocking_terminal: Option<(u32, crate::route::NotificationEnd)>,
+    ) -> LayoutApplierImpl<'a> {
+        LayoutApplierImpl::new(LayoutApplierOptions {
+            viewport,
+            senders,
+            sixel_image_store,
+            link_handler,
+            terminal_emulator_colors,
+            terminal_emulator_color_codes,
+            character_cell_size,
+            connected_clients,
+            style,
+            display_area,
+            tiled_panes,
+            floating_panes,
+            draw_pane_frames,
+            focus_pane_id,
+            _os_api,
+            debug,
+            arrow_fonts,
+            styled_underlines,
+            osc8_hyperlinks,
+            explicitly_disable_kitty_keyboard_protocol,
+            blocking_terminal,
+        })
+    }
+}
 use crate::{ClientId, os_input_output::ServerOsApi, thread_bus::ThreadSenders};
 use insta::assert_snapshot;
 use std::cell::RefCell;

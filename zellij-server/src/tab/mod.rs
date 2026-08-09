@@ -1752,29 +1752,29 @@ impl Tab {
         self.begin_layout_transaction();
         self.swap_layouts
             .set_base_layout((layout.clone(), floating_panes_layout.clone()));
-        let mut layout_applier = LayoutApplier::new(
-            &self.viewport,
-            &self.senders,
-            &self.sixel_image_store,
-            &self.link_handler,
-            &self.terminal_emulator_colors,
-            &self.terminal_emulator_color_codes,
-            &self.character_cell_size,
-            &self.connected_clients_in_app,
-            &self.style,
-            &self.display_area,
-            &mut self.tiled_panes,
-            &mut self.floating_panes,
-            self.draw_pane_frames,
-            &mut self.focus_pane_id,
-            &*self.os_api,
-            self.debug,
-            self.arrow_fonts,
-            self.styled_underlines,
-            self.osc8_hyperlinks,
-            self.explicitly_disable_kitty_keyboard_protocol,
+        let mut layout_applier = LayoutApplier::new(crate::tab::layout_applier::LayoutApplierOptions {
+            viewport: &self.viewport,
+            senders: &self.senders,
+            sixel_image_store: &self.sixel_image_store,
+            link_handler: &self.link_handler,
+            terminal_emulator_colors: &self.terminal_emulator_colors,
+            terminal_emulator_color_codes: &self.terminal_emulator_color_codes,
+            character_cell_size: &self.character_cell_size,
+            connected_clients: &self.connected_clients_in_app,
+            style: &self.style,
+            display_area: &self.display_area,
+            tiled_panes: &mut self.tiled_panes,
+            floating_panes: &mut self.floating_panes,
+            draw_pane_frames: self.draw_pane_frames,
+            focus_pane_id: &mut self.focus_pane_id,
+            _os_api: &*self.os_api,
+            debug: self.debug,
+            arrow_fonts: self.arrow_fonts,
+            styled_underlines: self.styled_underlines,
+            osc8_hyperlinks: self.osc8_hyperlinks,
+            explicitly_disable_kitty_keyboard_protocol: self.explicitly_disable_kitty_keyboard_protocol,
             blocking_terminal,
-        )
+        })
         .defer_side_effects();
         let application_result = layout_applier.apply_layout(
             layout,
@@ -1839,29 +1839,29 @@ impl Tab {
             .set_swap_floating_layouts(new_swap_floating_layouts);
         self.swap_layouts
             .set_base_layout((layout.clone(), floating_panes_layout.clone()));
-        let mut layout_applier = LayoutApplier::new(
-            &self.viewport,
-            &self.senders,
-            &self.sixel_image_store,
-            &self.link_handler,
-            &self.terminal_emulator_colors,
-            &self.terminal_emulator_color_codes,
-            &self.character_cell_size,
-            &self.connected_clients_in_app,
-            &self.style,
-            &self.display_area,
-            &mut self.tiled_panes,
-            &mut self.floating_panes,
-            self.draw_pane_frames,
-            &mut self.focus_pane_id,
-            &*self.os_api,
-            self.debug,
-            self.arrow_fonts,
-            self.styled_underlines,
-            self.osc8_hyperlinks,
-            self.explicitly_disable_kitty_keyboard_protocol,
+        let mut layout_applier = LayoutApplier::new(crate::tab::layout_applier::LayoutApplierOptions {
+            viewport: &self.viewport,
+            senders: &self.senders,
+            sixel_image_store: &self.sixel_image_store,
+            link_handler: &self.link_handler,
+            terminal_emulator_colors: &self.terminal_emulator_colors,
+            terminal_emulator_color_codes: &self.terminal_emulator_color_codes,
+            character_cell_size: &self.character_cell_size,
+            connected_clients: &self.connected_clients_in_app,
+            style: &self.style,
+            display_area: &self.display_area,
+            tiled_panes: &mut self.tiled_panes,
+            floating_panes: &mut self.floating_panes,
+            draw_pane_frames: self.draw_pane_frames,
+            focus_pane_id: &mut self.focus_pane_id,
+            _os_api: &*self.os_api,
+            debug: self.debug,
+            arrow_fonts: self.arrow_fonts,
+            styled_underlines: self.styled_underlines,
+            osc8_hyperlinks: self.osc8_hyperlinks,
+            explicitly_disable_kitty_keyboard_protocol: self.explicitly_disable_kitty_keyboard_protocol,
             blocking_terminal,
-        )
+        })
         .defer_side_effects();
         let application_result = layout_applier.override_layout(
             layout,
@@ -1921,29 +1921,29 @@ impl Tab {
             .swap_layouts
             .swap_floating_panes(&self.floating_panes, search_backwards)
         {
-            LayoutApplier::new(
-                &self.viewport,
-                &self.senders,
-                &self.sixel_image_store,
-                &self.link_handler,
-                &self.terminal_emulator_colors,
-                &self.terminal_emulator_color_codes,
-                &self.character_cell_size,
-                &self.connected_clients_in_app,
-                &self.style,
-                &self.display_area,
-                &mut self.tiled_panes,
-                &mut self.floating_panes,
-                self.draw_pane_frames,
-                &mut self.focus_pane_id,
-                &*self.os_api,
-                self.debug,
-                self.arrow_fonts,
-                self.styled_underlines,
-                self.osc8_hyperlinks,
-                self.explicitly_disable_kitty_keyboard_protocol,
-                None,
-            )
+            LayoutApplier::new(crate::tab::layout_applier::LayoutApplierOptions {
+                viewport: &self.viewport,
+                senders: &self.senders,
+                sixel_image_store: &self.sixel_image_store,
+                link_handler: &self.link_handler,
+                terminal_emulator_colors: &self.terminal_emulator_colors,
+                terminal_emulator_color_codes: &self.terminal_emulator_color_codes,
+                character_cell_size: &self.character_cell_size,
+                connected_clients: &self.connected_clients_in_app,
+                style: &self.style,
+                display_area: &self.display_area,
+                tiled_panes: &mut self.tiled_panes,
+                floating_panes: &mut self.floating_panes,
+                draw_pane_frames: self.draw_pane_frames,
+                focus_pane_id: &mut self.focus_pane_id,
+                _os_api: &*self.os_api,
+                debug: self.debug,
+                arrow_fonts: self.arrow_fonts,
+                styled_underlines: self.styled_underlines,
+                osc8_hyperlinks: self.osc8_hyperlinks,
+                explicitly_disable_kitty_keyboard_protocol: self.explicitly_disable_kitty_keyboard_protocol,
+                blocking_terminal: None,
+            })
             .apply_floating_panes_layout_to_existing_panes(&layout_candidate)
             .non_fatal();
         }
@@ -1963,29 +1963,29 @@ impl Tab {
             .swap_layouts
             .swap_tiled_panes(&self.tiled_panes, search_backwards)
         {
-            let application_res = LayoutApplier::new(
-                &self.viewport,
-                &self.senders,
-                &self.sixel_image_store,
-                &self.link_handler,
-                &self.terminal_emulator_colors,
-                &self.terminal_emulator_color_codes,
-                &self.character_cell_size,
-                &self.connected_clients_in_app,
-                &self.style,
-                &self.display_area,
-                &mut self.tiled_panes,
-                &mut self.floating_panes,
-                self.draw_pane_frames,
-                &mut self.focus_pane_id,
-                &*self.os_api,
-                self.debug,
-                self.arrow_fonts,
-                self.styled_underlines,
-                self.osc8_hyperlinks,
-                self.explicitly_disable_kitty_keyboard_protocol,
-                None,
-            )
+            let application_res = LayoutApplier::new(crate::tab::layout_applier::LayoutApplierOptions {
+                viewport: &self.viewport,
+                senders: &self.senders,
+                sixel_image_store: &self.sixel_image_store,
+                link_handler: &self.link_handler,
+                terminal_emulator_colors: &self.terminal_emulator_colors,
+                terminal_emulator_color_codes: &self.terminal_emulator_color_codes,
+                character_cell_size: &self.character_cell_size,
+                connected_clients: &self.connected_clients_in_app,
+                style: &self.style,
+                display_area: &self.display_area,
+                tiled_panes: &mut self.tiled_panes,
+                floating_panes: &mut self.floating_panes,
+                draw_pane_frames: self.draw_pane_frames,
+                focus_pane_id: &mut self.focus_pane_id,
+                _os_api: &*self.os_api,
+                debug: self.debug,
+                arrow_fonts: self.arrow_fonts,
+                styled_underlines: self.styled_underlines,
+                osc8_hyperlinks: self.osc8_hyperlinks,
+                explicitly_disable_kitty_keyboard_protocol: self.explicitly_disable_kitty_keyboard_protocol,
+                blocking_terminal: None,
+            })
             .apply_tiled_panes_layout_to_existing_panes(&layout_candidate);
             if application_res.is_err() {
                 self.swap_layouts.set_is_tiled_damaged();
