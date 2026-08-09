@@ -518,14 +518,12 @@ impl RemoteTerminal {
         let s = self.last_snapshot.lock().unwrap();
         s.lines().map(|s| s.to_owned()).collect::<Vec<_>>()
     }
-    #[allow(unused)]
     pub fn current_snapshot(&self) -> String {
         // convenience method for writing tests,
         // this should only be used when developing,
         // please prefer "snapsht_contains" instead
         self.last_snapshot.lock().unwrap().clone()
     }
-    #[allow(unused)]
     pub fn current_cursor_position(&self) -> String {
         // convenience method for writing tests,
         // this should only be used when developing,
@@ -1032,7 +1030,6 @@ impl RemoteRunner {
         self.panic_on_no_retries_left = false;
         self
     }
-    #[allow(unused)]
     pub fn retry_pause_ms(mut self, retry_pause_ms: usize) -> Self {
         self.retry_pause_ms = retry_pause_ms;
         self

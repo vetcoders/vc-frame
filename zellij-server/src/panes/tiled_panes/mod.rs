@@ -634,7 +634,6 @@ impl TiledPanes {
                 pane.set_frame(draw_pane_frames);
             }
 
-            #[allow(clippy::if_same_then_else)]
             if draw_pane_frames && !pane.borderless() {
                 // there's definitely a frame around this pane, offset its contents
                 pane.set_content_offset(Offset::frame(1));
@@ -1050,7 +1049,9 @@ impl TiledPanes {
     pub fn focused_pane_id(&self, client_id: ClientId) -> Option<PaneId> {
         self.active_panes.get(&client_id).copied()
     }
-    #[allow(clippy::borrowed_box)]
+   // &Box return/arg shape is a ~50-callsite internal contract; flattening to
+   // &dyn Pane is its own follow-up cut (sweep 2026-08-09).
+   #[allow(clippy::borrowed_box)]
     pub fn get_pane(&self, pane_id: PaneId) -> Option<&Box<dyn Pane>> {
         self.panes.get(&pane_id)
     }
@@ -2897,6 +2898,8 @@ impl TiledPanes {
     }
 }
 
+// &Box return/arg shape is a ~50-callsite internal contract; flattening to
+// &dyn Pane is its own follow-up cut (sweep 2026-08-09).
 #[allow(clippy::borrowed_box)]
 pub fn is_inside_viewport(viewport: &Viewport, pane: &Box<dyn Pane>) -> bool {
     let pane_position_and_size = pane.current_geom();

@@ -613,7 +613,9 @@ impl State {
 
     // Tooltip operations
     fn toggle_persisted_tooltip(&self, new_mode: InputMode) {
-        #[allow(unused_variables)]
+        // `message` is consumed only by the wasm-gated pipe below; native builds
+        // still type-check the construction but never send it.
+        #[cfg_attr(not(target_family = "wasm"), allow(unused_variables))]
         let message = self
             .create_tooltip_message(MSG_TOGGLE_PERSISTED_TOOLTIP, new_mode)
             .with_args(self.create_persist_args());

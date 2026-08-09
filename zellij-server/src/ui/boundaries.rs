@@ -445,7 +445,6 @@ pub struct Boundaries {
     pub boundary_characters: HashMap<Coordinates, BoundarySymbol>,
 }
 
-#[allow(clippy::if_same_then_else)]
 impl Boundaries {
     pub fn new(viewport: Viewport) -> Self {
         Boundaries {

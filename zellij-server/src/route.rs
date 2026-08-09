@@ -1401,7 +1401,6 @@ pub(crate) fn route_action(
             // contract
             complete_action_immediately(completion_tx);
         },
-        #[allow(clippy::single_match)]
         Action::SkipConfirm { action } => match *action {
             Action::Quit => {
                 complete_action_immediately(completion_tx);

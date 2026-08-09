@@ -4605,7 +4605,7 @@ fn try_edit_layout(
         senders: env.senders.clone(),
         default_shell: env.default_shell.clone(),
         seen_cli_pipes: None,
-        default_mode: env.default_mode.clone(),
+        default_mode: env.default_mode,
     })
     .map(|_| ())
     .map_err(|e| format!("Failed to route edit action: {:?}", e))

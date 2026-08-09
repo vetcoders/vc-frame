@@ -35,6 +35,9 @@ pub use super::generated_api::api::{
     key::Key as ProtobufKey,
     style::Style as ProtobufStyle,
 };
+// The generated-prost glob above re-exports ~18 names that these hand-rolled
+// data:: types deliberately shadow inside this module; replacing the glob with
+// an explicit list is a public plugin-api cut of its own (2026-08-09 sweep).
 #[allow(hidden_glob_reexports)]
 use crate::data::{
     ClientId, ClientInfo, CopyDestination, Event, EventType, FileMetadata, HostTerminalThemeMode,

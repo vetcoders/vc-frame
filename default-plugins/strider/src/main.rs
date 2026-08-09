@@ -178,8 +178,8 @@ impl ZellijPlugin for State {
                 self.close_on_selection = true;
             } else {
                 // Filepicker callback mode: send result back to caller.
-                #[allow(unused_variables)]
                 // pipe_id is used inside #[cfg(target_family = "wasm")] block
+                #[cfg_attr(not(target_family = "wasm"), allow(unused_variables))]
                 if let PipeSource::Cli(pipe_id) = &pipe_message.source {
                     #[cfg(target_family = "wasm")]
                     block_cli_pipe_input(pipe_id);

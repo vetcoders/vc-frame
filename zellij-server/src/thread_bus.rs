@@ -213,13 +213,11 @@ impl ThreadSenders {
         }
     }
 
-    #[allow(unused)]
     pub fn silently_fail_on_send(mut self) -> Self {
         // this is mostly used for the tests, see struct
         self.should_silently_fail = true;
         self
     }
-    #[allow(unused)]
     pub fn replace_to_pty_writer(
         &mut self,
         new_pty_writer: SenderWithContext<PtyWriteInstruction>,
@@ -227,13 +225,11 @@ impl ThreadSenders {
         // this is mostly used for the tests, see struct
         self.to_pty_writer.replace(new_pty_writer);
     }
-    #[allow(unused)]
     pub fn replace_to_pty(&mut self, new_pty: SenderWithContext<PtyInstruction>) {
         // this is mostly used for the tests, see struct
         self.to_pty.replace(new_pty);
     }
 
-    #[allow(unused)]
     pub fn replace_to_plugin(&mut self, new_to_plugin: SenderWithContext<PluginInstruction>) {
         // this is mostly used for the tests, see struct
         self.to_plugin.replace(new_to_plugin);
@@ -260,13 +256,14 @@ impl<T> Bus<T> {
             os_input,
         }
     }
-    #[allow(unused)]
+    // Test-harness constructor surface: only cfg(test) suites call these.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn should_silently_fail(mut self) -> Self {
         // this is mostly used for the tests
         self.senders.should_silently_fail = true;
         self
     }
-    #[allow(unused)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn empty() -> Self {
         // this is mostly used for the tests
         Bus {

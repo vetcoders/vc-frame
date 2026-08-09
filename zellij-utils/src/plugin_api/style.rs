@@ -25,6 +25,8 @@ impl TryFrom<ProtobufStyle> for Style {
     }
 }
 
+// Writes the deprecated protobuf `palette` field on purpose: older plugin
+// consumers still read it; drop only with a plugin-api version bump.
 #[allow(deprecated)]
 impl TryFrom<Style> for ProtobufStyle {
     type Error = &'static str;
