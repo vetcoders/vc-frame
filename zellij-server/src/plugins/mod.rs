@@ -380,29 +380,44 @@ impl From<&PluginInstruction> for PluginContext {
     }
 }
 
-#[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
-pub(crate) fn plugin_thread_main(
-    bus: Bus<PluginInstruction>,
-    engine: Engine,
-    data_dir: PathBuf,
-    mut layout: Box<Layout>,
-    layout_dir: Option<PathBuf>,
-    available_layouts: Vec<LayoutInfo>,
-    available_layout_errors: Vec<LayoutWithError>,
-    path_to_default_shell: PathBuf,
-    zellij_cwd: PathBuf,
-    session_env_vars: std::collections::BTreeMap<String, String>,
-    default_shell: Option<TerminalAction>,
-    plugin_aliases: PluginAliases,
-    default_mode: InputMode,
-    default_keybinds: Keybinds,
-    background_plugins: Vec<RunPluginOrAlias>,
-    // the client id that started the session,
-    // we need it here because the thread's own list of connected clients might not yet be updated
-    // on session start when we need to load the background plugins, and so we must have an
-    // explicit client_id that has started the session
-    initiating_client_id: ClientId,
-) -> Result<()> {
+pub(crate) struct PluginThreadParams {
+    pub bus: Bus<PluginInstruction>,
+    pub engine: Engine,
+    pub data_dir: PathBuf,
+    pub layout: Box<Layout>,
+    pub layout_dir: Option<PathBuf>,
+    pub available_layouts: Vec<LayoutInfo>,
+    pub available_layout_errors: Vec<LayoutWithError>,
+    pub path_to_default_shell: PathBuf,
+    pub zellij_cwd: PathBuf,
+    pub session_env_vars: std::collections::BTreeMap<String, String>,
+    pub default_shell: Option<TerminalAction>,
+    pub plugin_aliases: PluginAliases,
+    pub default_mode: InputMode,
+    pub default_keybinds: Keybinds,
+    pub background_plugins: Vec<RunPluginOrAlias>,
+    pub initiating_client_id: ClientId,
+}
+
+pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
+    let PluginThreadParams {
+        bus,
+        engine,
+        data_dir,
+        mut layout,
+        layout_dir,
+        available_layouts,
+        available_layout_errors,
+        path_to_default_shell,
+        zellij_cwd,
+        session_env_vars,
+        default_shell,
+        plugin_aliases,
+        default_mode,
+        default_keybinds,
+        background_plugins,
+        initiating_client_id,
+    } = params;
     info!("Wasm main thread starts");
     let plugin_dir = data_dir.join("plugins/");
     let plugin_global_data_dir = plugin_dir.join("data");
@@ -412,12 +427,12 @@ pub(crate) fn plugin_thread_main(
     // https://tokio.rs/tokio/topics/shutdown#waiting-for-things-to-finish-shutting-down
     let (shutdown_send, mut shutdown_receive) = tokio::sync::mpsc::channel::<()>(1);
 
-    let mut wasm_bridge = WasmBridge::new(
-        bus.senders.clone(),
+    let mut wasm_bridge = WasmBridge::new(wasm_bridge::WasmBridgeOptions {
+        senders: bus.senders.clone(),
         engine,
         plugin_dir,
         path_to_default_shell,
-        zellij_cwd.clone(),
+        zellij_cwd: zellij_cwd.clone(),
         session_env_vars,
         default_shell,
         layout_dir,
@@ -425,7 +440,7 @@ pub(crate) fn plugin_thread_main(
         available_layout_errors,
         default_mode,
         default_keybinds,
-    );
+    });
 
     for run_plugin_or_alias in background_plugins {
         load_background_plugin(

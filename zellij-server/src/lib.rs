@@ -2160,8 +2160,8 @@ fn init_session(params: SessionInitParams) -> SessionMetaData {
             let background_plugins = config.background_plugins.clone();
             let session_env_vars = session_env_vars.clone();
             move || {
-                plugin_thread_main(
-                    plugin_bus,
+                plugin_thread_main(PluginThreadParams {
+                    bus: plugin_bus,
                     engine,
                     data_dir,
                     layout,
@@ -2176,8 +2176,8 @@ fn init_session(params: SessionInitParams) -> SessionMetaData {
                     default_mode,
                     default_keybinds,
                     background_plugins,
-                    client_id,
-                )
+                    initiating_client_id: client_id,
+                })
                 .fatal()
             }
         })

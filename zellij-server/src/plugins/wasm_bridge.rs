@@ -762,22 +762,37 @@ pub struct WasmBridge {
     rejected_layout_plugin_releases: HashSet<LayoutTransactionId>,
 }
 
+pub struct WasmBridgeOptions {
+    pub senders: ThreadSenders,
+    pub engine: Engine,
+    pub plugin_dir: PathBuf,
+    pub path_to_default_shell: PathBuf,
+    pub zellij_cwd: PathBuf,
+    pub session_env_vars: std::collections::BTreeMap<String, String>,
+    pub default_shell: Option<TerminalAction>,
+    pub layout_dir: Option<PathBuf>,
+    pub available_layouts: Vec<LayoutInfo>,
+    pub available_layout_errors: Vec<LayoutWithError>,
+    pub default_mode: InputMode,
+    pub default_keybinds: Keybinds,
+}
+
 impl WasmBridge {
-    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
-    pub fn new(
-        senders: ThreadSenders,
-        engine: Engine,
-        plugin_dir: PathBuf,
-        path_to_default_shell: PathBuf,
-        zellij_cwd: PathBuf,
-        session_env_vars: std::collections::BTreeMap<String, String>,
-        default_shell: Option<TerminalAction>,
-        layout_dir: Option<PathBuf>,
-        available_layouts: Vec<LayoutInfo>,
-        available_layout_errors: Vec<LayoutWithError>,
-        default_mode: InputMode,
-        default_keybinds: Keybinds,
-    ) -> Self {
+    pub fn new(opts: WasmBridgeOptions) -> Self {
+        let WasmBridgeOptions {
+            senders,
+            engine,
+            plugin_dir,
+            path_to_default_shell,
+            zellij_cwd,
+            session_env_vars,
+            default_shell,
+            layout_dir,
+            available_layouts,
+            available_layout_errors,
+            default_mode,
+            default_keybinds,
+        } = opts;
         let plugin_map = Arc::new(Mutex::new(PluginMap::default()));
         let connected_clients: Arc<Mutex<Vec<ClientId>>> = Arc::new(Mutex::new(vec![]));
         let plugin_cache: Arc<Mutex<HashMap<PathBuf, Module>>> =

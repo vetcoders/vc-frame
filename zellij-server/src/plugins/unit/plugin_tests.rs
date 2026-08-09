@@ -1,4 +1,42 @@
-use super::plugin_thread_main;
+use super::{plugin_thread_main as plugin_thread_main_impl, PluginThreadParams};
+
+fn plugin_thread_main(
+    bus: Bus<PluginInstruction>,
+    engine: Engine,
+    data_dir: PathBuf,
+    layout: Box<Layout>,
+    layout_dir: Option<PathBuf>,
+    available_layouts: Vec<LayoutInfo>,
+    available_layout_errors: Vec<LayoutWithError>,
+    path_to_default_shell: PathBuf,
+    zellij_cwd: PathBuf,
+    session_env_vars: std::collections::BTreeMap<String, String>,
+    default_shell: Option<TerminalAction>,
+    plugin_aliases: PluginAliases,
+    default_mode: InputMode,
+    default_keybinds: Keybinds,
+    background_plugins: Vec<RunPluginOrAlias>,
+    initiating_client_id: ClientId,
+) -> Result<()> {
+    plugin_thread_main_impl(PluginThreadParams {
+        bus,
+        engine,
+        data_dir,
+        layout,
+        layout_dir,
+        available_layouts,
+        available_layout_errors,
+        path_to_default_shell,
+        zellij_cwd,
+        session_env_vars,
+        default_shell,
+        plugin_aliases,
+        default_mode,
+        default_keybinds,
+        background_plugins,
+        initiating_client_id,
+    })
+}
 use crate::route::NotificationEnd;
 use crate::screen::{LayoutPreparationCleanup, ScreenInstruction};
 use crate::{
