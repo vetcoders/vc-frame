@@ -904,11 +904,11 @@ fn pty_thread_main_loop(pty: &mut Pty, layout: Box<Layout>) -> Result<()> {
                 } else {
                     floating_panes_layout
                 };
-                if let Err(e) = pty.spawn_terminals_for_layout(
+                if let Err(e) = pty.spawn_terminals_for_layout(SpawnTerminalsForLayoutParams {
                     cwd,
-                    (*tab_layout).unwrap_or_else(|| layout.new_tab().0),
+                    layout: (*tab_layout).unwrap_or_else(|| layout.new_tab().0),
                     floating_panes_layout,
-                    terminal_action.clone(),
+                    default_shell: terminal_action.clone(),
                     plugin_ids,
                     initial_panes,
                     tab_index,
@@ -918,7 +918,7 @@ fn pty_thread_main_loop(pty: &mut Pty, layout: Box<Layout>) -> Result<()> {
                     client_id_and_is_web_client,
                     completion_tx,
                     layout_generation,
-                ) {
+                }) {
                     Err::<(), _>(e).with_context(err_context).non_fatal();
                 }
             },
@@ -934,17 +934,19 @@ fn pty_thread_main_loop(pty: &mut Pty, layout: Box<Layout>) -> Result<()> {
                 layout_generation,
             ) => {
                 let err_context = || "failed to override layout";
-                if let Err(error) = pty.override_layout_transaction(
-                    cwd,
-                    default_shell,
-                    tab_layouts_with_plugin_ids,
-                    transaction_id,
-                    retain_existing_terminal_panes,
-                    retain_existing_plugin_panes,
-                    client_id,
-                    completion_tx,
-                    layout_generation,
-                ) {
+                if let Err(error) =
+                    pty.override_layout_transaction(OverrideLayoutTransactionParams {
+                        cwd,
+                        default_shell,
+                        tab_layouts_with_plugin_ids,
+                        transaction_id,
+                        retain_existing_terminal_panes,
+                        retain_existing_plugin_panes,
+                        client_id,
+                        completion_tx,
+                        layout_generation,
+                    })
+                {
                     Err::<(), _>(error).with_context(err_context).non_fatal();
                 }
             },
@@ -1273,9 +1275,9 @@ fn pty_thread_main_loop(pty: &mut Pty, layout: Box<Layout>) -> Result<()> {
                 floating_pane_coordinates,
                 completion_tx,
             ) => {
-                pty.fill_plugin_cwd(
+                pty.fill_plugin_cwd(FillPluginCwdParams {
                     should_float,
-                    should_be_open_in_place,
+                    should_open_in_place: should_be_open_in_place,
                     close_replaced_pane,
                     pane_title,
                     run,
@@ -1288,7 +1290,7 @@ fn pty_thread_main_loop(pty: &mut Pty, layout: Box<Layout>) -> Result<()> {
                     should_focus_plugin,
                     floating_pane_coordinates,
                     completion_tx,
-                )?;
+                })?;
             },
             PtyInstruction::Reconfigure {
                 default_editor,
@@ -1359,6 +1361,66 @@ fn pty_thread_main_loop(pty: &mut Pty, layout: Box<Layout>) -> Result<()> {
         pty.retry_terminal_cleanup_debts();
     }
     Ok(())
+}
+
+pub(crate) struct SpawnTerminalsForLayoutParams {
+    pub(crate) cwd: Option<PathBuf>,
+    pub(crate) layout: TiledPaneLayout,
+    pub(crate) floating_panes_layout: Vec<FloatingPaneLayout>,
+    pub(crate) default_shell: Option<TerminalAction>,
+    pub(crate) plugin_ids: HashMap<RunPluginOrAlias, Vec<u32>>,
+    pub(crate) initial_panes: Option<Vec<CommandOrPlugin>>,
+    pub(crate) tab_index: usize,
+    pub(crate) transaction_id: LayoutTransactionId,
+    pub(crate) block_on_first_terminal: bool,
+    pub(crate) should_change_focus_to_new_tab: bool,
+    pub(crate) client_id_and_is_web_client: (ClientId, bool),
+    pub(crate) completion_tx: Option<NotificationEnd>,
+    pub(crate) layout_generation: Option<Box<DurableTabLayoutGeneration>>,
+}
+
+struct OverrideLayoutTransactionParams {
+    cwd: Option<PathBuf>,
+    default_shell: Option<TerminalAction>,
+    tab_layouts_with_plugin_ids: Vec<(TabLayoutInfo, HashMap<RunPluginOrAlias, Vec<u32>>)>,
+    transaction_id: LayoutTransactionId,
+    retain_existing_terminal_panes: bool,
+    retain_existing_plugin_panes: bool,
+    client_id: ClientId,
+    completion_tx: Option<NotificationEnd>,
+    layout_generation: Option<Box<DurableTabLayoutGeneration>>,
+}
+
+struct PrepareTerminalsForLayoutOverrideParams<'a> {
+    cwd: Option<PathBuf>,
+    layout: TiledPaneLayout,
+    floating_panes_layout: Vec<FloatingPaneLayout>,
+    default_shell: Option<TerminalAction>,
+    plugin_ids: HashMap<RunPluginOrAlias, Vec<u32>>,
+    tab_index: usize,
+    tab_name: Option<String>,
+    client_id: ClientId,
+    swap_tiled_layouts: Option<Vec<SwapTiledLayout>>,
+    swap_floating_layouts: Option<Vec<SwapFloatingLayout>>,
+    allocation_ledger: &'a mut LayoutAllocationLedger,
+}
+
+pub(crate) struct FillPluginCwdParams {
+    pub(crate) should_float: Option<bool>,
+    pub(crate) should_open_in_place: bool,
+    pub(crate) close_replaced_pane: bool,
+    pub(crate) pane_title: Option<String>,
+    pub(crate) run: RunPluginOrAlias,
+    pub(crate) tab_index: usize,
+    /// Pane id to replace if this is to be opened "in-place".
+    pub(crate) pane_id_to_replace: Option<PaneId>,
+    pub(crate) client_id: ClientId,
+    pub(crate) size: Size,
+    pub(crate) skip_cache: bool,
+    pub(crate) cwd: Option<PathBuf>,
+    pub(crate) should_focus_plugin: Option<bool>,
+    pub(crate) floating_pane_coordinates: Option<FloatingPaneCoordinates>,
+    pub(crate) completion_tx: Option<NotificationEnd>,
 }
 
 impl Pty {
@@ -2210,23 +2272,25 @@ impl Pty {
         let starts_held = false;
         Ok((terminal_id, starts_held))
     }
-    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
     pub fn spawn_terminals_for_layout(
         &mut self,
-        cwd: Option<PathBuf>,
-        layout: TiledPaneLayout,
-        floating_panes_layout: Vec<FloatingPaneLayout>,
-        default_shell: Option<TerminalAction>,
-        plugin_ids: HashMap<RunPluginOrAlias, Vec<u32>>,
-        initial_panes: Option<Vec<CommandOrPlugin>>,
-        tab_index: usize,
-        transaction_id: LayoutTransactionId,
-        block_on_first_terminal: bool,
-        should_change_focus_to_new_tab: bool,
-        client_id_and_is_web_client: (ClientId, bool),
-        mut completion_tx: Option<NotificationEnd>,
-        mut layout_generation: Option<Box<DurableTabLayoutGeneration>>,
+        params: SpawnTerminalsForLayoutParams,
     ) -> Result<()> {
+        let SpawnTerminalsForLayoutParams {
+            cwd,
+            layout,
+            floating_panes_layout,
+            default_shell,
+            plugin_ids,
+            initial_panes,
+            tab_index,
+            transaction_id,
+            block_on_first_terminal,
+            should_change_focus_to_new_tab,
+            client_id_and_is_web_client,
+            mut completion_tx,
+            mut layout_generation,
+        } = params;
         let err_context = || "failed to spawn terminals for layout for".to_string();
         let mut layout_plugin_ids = plugin_ids.values().flatten().copied().collect::<Vec<_>>();
         layout_plugin_ids.sort_unstable();
@@ -2484,19 +2548,21 @@ impl Pty {
         }
         Ok(())
     }
-    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
     fn override_layout_transaction(
         &mut self,
-        cwd: Option<PathBuf>,
-        default_shell: Option<TerminalAction>,
-        tab_layouts_with_plugin_ids: Vec<(TabLayoutInfo, HashMap<RunPluginOrAlias, Vec<u32>>)>,
-        transaction_id: LayoutTransactionId,
-        retain_existing_terminal_panes: bool,
-        retain_existing_plugin_panes: bool,
-        client_id: ClientId,
-        mut completion_tx: Option<NotificationEnd>,
-        mut layout_generation: Option<Box<DurableTabLayoutGeneration>>,
+        params: OverrideLayoutTransactionParams,
     ) -> Result<()> {
+        let OverrideLayoutTransactionParams {
+            cwd,
+            default_shell,
+            tab_layouts_with_plugin_ids,
+            transaction_id,
+            retain_existing_terminal_panes,
+            retain_existing_plugin_panes,
+            client_id,
+            mut completion_tx,
+            mut layout_generation,
+        } = params;
         let mut allocation_ledger = LayoutAllocationLedger::armed_for_bus(&self.bus);
         let mut layout_plugin_ids = tab_layouts_with_plugin_ids
             .iter()
@@ -2534,17 +2600,19 @@ impl Pty {
         for (tab_layout_info, plugin_ids) in tab_layouts_with_plugin_ids {
             let tab_index = tab_layout_info.tab_index;
             match self.prepare_terminals_for_layout_override(
-                cwd.clone(),
-                tab_layout_info.tiled_layout,
-                tab_layout_info.floating_layouts,
-                default_shell.clone(),
-                plugin_ids,
-                tab_index,
-                tab_layout_info.tab_name,
-                client_id,
-                tab_layout_info.swap_tiled_layouts,
-                tab_layout_info.swap_floating_layouts,
-                &mut allocation_ledger,
+                PrepareTerminalsForLayoutOverrideParams {
+                    cwd: cwd.clone(),
+                    layout: tab_layout_info.tiled_layout,
+                    floating_panes_layout: tab_layout_info.floating_layouts,
+                    default_shell: default_shell.clone(),
+                    plugin_ids,
+                    tab_index,
+                    tab_name: tab_layout_info.tab_name,
+                    client_id,
+                    swap_tiled_layouts: tab_layout_info.swap_tiled_layouts,
+                    swap_floating_layouts: tab_layout_info.swap_floating_layouts,
+                    allocation_ledger: &mut allocation_ledger,
+                },
             ) {
                 Ok(mut prepared_tab) => {
                     all_tab_results.push(prepared_tab.tab_result);
@@ -2644,21 +2712,23 @@ impl Pty {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
     fn prepare_terminals_for_layout_override(
         &mut self,
-        cwd: Option<PathBuf>,
-        layout: TiledPaneLayout,
-        floating_panes_layout: Vec<FloatingPaneLayout>,
-        default_shell: Option<TerminalAction>,
-        plugin_ids: HashMap<RunPluginOrAlias, Vec<u32>>,
-        tab_index: usize,
-        tab_name: Option<String>,
-        client_id: ClientId,
-        swap_tiled_layouts: Option<Vec<SwapTiledLayout>>,
-        swap_floating_layouts: Option<Vec<SwapFloatingLayout>>,
-        allocation_ledger: &mut LayoutAllocationLedger,
+        params: PrepareTerminalsForLayoutOverrideParams,
     ) -> Result<PreparedTabOverride> {
+        let PrepareTerminalsForLayoutOverrideParams {
+            cwd,
+            layout,
+            floating_panes_layout,
+            default_shell,
+            plugin_ids,
+            tab_index,
+            tab_name,
+            client_id,
+            swap_tiled_layouts,
+            swap_floating_layouts,
+            allocation_ledger,
+        } = params;
         let mut default_shell =
             default_shell.unwrap_or_else(|| self.get_default_terminal(cwd, None));
         self.fill_cwd(&mut default_shell, client_id);
@@ -3358,24 +3428,23 @@ impl Pty {
         session_layout_metadata.update_default_editor(&self.default_editor);
         session_layout_metadata.detect_editor_panes();
     }
-    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
-    pub fn fill_plugin_cwd(
-        &self,
-        should_float: Option<bool>,
-        should_open_in_place: bool, // should be opened in place
-        close_replaced_pane: bool,  // close_replaced_pane
-        pane_title: Option<String>, // pane title
-        mut run: RunPluginOrAlias,
-        tab_index: usize,                   // tab index
-        pane_id_to_replace: Option<PaneId>, // pane id to replace if this is to be opened "in-place"
-        client_id: ClientId,
-        size: Size,
-        skip_cache: bool,
-        cwd: Option<PathBuf>,
-        should_focus_plugin: Option<bool>,
-        floating_pane_coordinates: Option<FloatingPaneCoordinates>,
-        completion_tx: Option<NotificationEnd>,
-    ) -> Result<()> {
+    pub fn fill_plugin_cwd(&self, params: FillPluginCwdParams) -> Result<()> {
+        let FillPluginCwdParams {
+            should_float,
+            should_open_in_place,
+            close_replaced_pane,
+            pane_title,
+            mut run,
+            tab_index,
+            pane_id_to_replace,
+            client_id,
+            size,
+            skip_cache,
+            cwd,
+            should_focus_plugin,
+            floating_pane_coordinates,
+            completion_tx,
+        } = params;
         let get_focused_cwd = || {
             self.active_panes
                 .get(&client_id)

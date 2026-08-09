@@ -1,5 +1,6 @@
 use super::{
-    ActiveLayoutTransaction, CopyOptions, DurableTabLayoutGeneration, LayoutPreparationCleanup,
+    ActiveLayoutTransaction, ApplyLayoutParams, CopyOptions, DurableTabLayoutGeneration,
+    LayoutPreparationCleanup,
     LayoutTabOwner, Screen, ScreenInstruction, ScreenLayoutTransactionKind, ScreenOptions, TabOverrideResult,
     VC_FLEET_LIVE_COUNT_MESSAGE, VC_STATUS_BAR_VISIBILITY_MESSAGE, fleet_live_count,
     is_parkable_chrome_plugin_run, register_viewer_creation_post_install_test_hook,
@@ -277,17 +278,17 @@ fn new_tab_with_status_bar_and_worker(
         )
         .unwrap();
     screen
-        .apply_layout(
+        .apply_layout(ApplyLayoutParams {
             layout,
-            vec![],
-            vec![(terminal_id, None)],
-            vec![],
-            plugin_ids,
+            floating_panes_layout: vec![],
+            new_terminal_ids: vec![(terminal_id, None)],
+            new_floating_terminal_ids: vec![],
+            new_plugin_ids: plugin_ids,
             tab_id,
-            true,
-            (1, false),
-            None,
-        )
+            should_change_client_focus: true,
+            client_id_and_is_web_client: (1, false),
+            blocking_terminal: None,
+        })
         .unwrap();
 }
 
@@ -1737,17 +1738,17 @@ fn new_tab(screen: &mut Screen, pid: u32, tab_index: usize) {
         )
         .expect("TEST");
     screen
-        .apply_layout(
-            TiledPaneLayout::default(),
-            vec![], // floating panes layout
+        .apply_layout(ApplyLayoutParams {
+            layout: TiledPaneLayout::default(),
+            floating_panes_layout: vec![],
             new_terminal_ids,
-            vec![], // new floating terminal ids
+            new_floating_terminal_ids: vec![],
             new_plugin_ids,
-            tab_index,
-            true,
-            (client_id, false),
-            None,
-        )
+            tab_id: tab_index,
+            should_change_client_focus: true,
+            client_id_and_is_web_client: (client_id, false),
+            blocking_terminal: None,
+        })
         .expect("TEST");
 }
 
@@ -1809,17 +1810,17 @@ fn new_named_tab_with_placement_and_focus(
         )
         .expect("TEST");
     screen
-        .apply_layout(
-            TiledPaneLayout::default(),
-            vec![],
-            vec![(pid, None)],
-            vec![],
-            HashMap::new(),
-            tab_index,
-            should_change_focus,
-            (client_id, false),
-            None,
-        )
+        .apply_layout(ApplyLayoutParams {
+            layout: TiledPaneLayout::default(),
+            floating_panes_layout: vec![],
+            new_terminal_ids: vec![(pid, None)],
+            new_floating_terminal_ids: vec![],
+            new_plugin_ids: HashMap::new(),
+            tab_id: tab_index,
+            should_change_client_focus: should_change_focus,
+            client_id_and_is_web_client: (client_id, false),
+            blocking_terminal: None,
+        })
         .expect("TEST");
 }
 

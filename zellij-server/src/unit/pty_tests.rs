@@ -594,21 +594,21 @@ fn preparation_clear_failure_retains_debt_and_reports_exact_followup_receipt() {
         viewer_creation_fence: None,
     };
 
-    pty.spawn_terminals_for_layout(
-        None,
-        TiledPaneLayout::default(),
-        vec![],
-        None,
-        HashMap::new(),
-        None,
-        7,
-        66,
-        false,
-        true,
-        (1, false),
-        None,
-        Some(Box::new(generation.clone())),
-    )
+    pty.spawn_terminals_for_layout(SpawnTerminalsForLayoutParams {
+        cwd: None,
+        layout: TiledPaneLayout::default(),
+        floating_panes_layout: vec![],
+        default_shell: None,
+        plugin_ids: HashMap::new(),
+        initial_panes: None,
+        tab_index: 7,
+        transaction_id: 66,
+        block_on_first_terminal: false,
+        should_change_focus_to_new_tab: true,
+        client_id_and_is_web_client: (1, false),
+        completion_tx: None,
+        layout_generation: Some(Box::new(generation.clone())),
+    })
     .expect("the prepared layout must reach Screen");
     let rollback = pty.reject_pending_layout_send(66, anyhow!("injected Screen handoff failure"));
     pty.reject_layout_preparation(
@@ -680,21 +680,21 @@ fn partial_new_tab_activation_failure_releases_every_reserved_terminal() {
         ..Default::default()
     });
 
-    pty.spawn_terminals_for_layout(
-        None,
+    pty.spawn_terminals_for_layout(SpawnTerminalsForLayoutParams {
+        cwd: None,
         layout,
-        vec![],
-        Some(default_shell),
+        floating_panes_layout: vec![],
+        default_shell: Some(default_shell),
         plugin_ids,
-        None,
-        7,
-        1,
-        false,
-        true,
-        (1, false),
-        None,
-        None,
-    )
+        initial_panes: None,
+        tab_index: 7,
+        transaction_id: 1,
+        block_on_first_terminal: false,
+        should_change_focus_to_new_tab: true,
+        client_id_and_is_web_client: (1, false),
+        completion_tx: None,
+        layout_generation: None,
+    })
     .expect("prepare must reserve IDs without spawning");
     assert_eq!(probe.spawn_terminal_calls.load(Ordering::Relaxed), 0);
     assert_eq!(probe.reserved_terminal_ids(), vec![100, 101]);
@@ -738,24 +738,24 @@ fn floating_nth_activation_failure_releases_every_prior_terminal_exactly_once() 
 
     let (screen_tx, screen_rx) = channels::unbounded();
     pty.bus.senders.to_screen = Some(SenderWithContext::new(screen_tx));
-    pty.spawn_terminals_for_layout(
-        None,
-        TiledPaneLayout::default(),
-        vec![FloatingPaneLayout::default(), FloatingPaneLayout::default()],
-        Some(TerminalAction::RunCommand(RunCommand {
+    pty.spawn_terminals_for_layout(SpawnTerminalsForLayoutParams {
+        cwd: None,
+        layout: TiledPaneLayout::default(),
+        floating_panes_layout: vec![FloatingPaneLayout::default(), FloatingPaneLayout::default()],
+        default_shell: Some(TerminalAction::RunCommand(RunCommand {
             command: PathBuf::from("sh"),
             ..Default::default()
         })),
-        HashMap::from([(plugin, vec![77])]),
-        None,
-        7,
-        2,
-        false,
-        true,
-        (1, false),
-        None,
-        None,
-    )
+        plugin_ids: HashMap::from([(plugin, vec![77])]),
+        initial_panes: None,
+        tab_index: 7,
+        transaction_id: 2,
+        block_on_first_terminal: false,
+        should_change_focus_to_new_tab: true,
+        client_id_and_is_web_client: (1, false),
+        completion_tx: None,
+        layout_generation: None,
+    })
     .expect("all three terminal IDs must be reserved without spawning");
     assert_eq!(probe.spawn_terminal_calls.load(Ordering::Relaxed), 0);
     let transaction_id = match screen_rx.try_recv().expect("ApplyLayout").0 {
@@ -797,21 +797,21 @@ fn new_tab_apply_layout_failure_releases_terminals_and_plugins() {
     });
 
     let error = pty
-        .spawn_terminals_for_layout(
-            None,
-            TiledPaneLayout::default(),
-            vec![],
-            Some(default_shell),
+        .spawn_terminals_for_layout(SpawnTerminalsForLayoutParams {
+            cwd: None,
+            layout: TiledPaneLayout::default(),
+            floating_panes_layout: vec![],
+            default_shell: Some(default_shell),
             plugin_ids,
-            None,
-            7,
-            3,
-            false,
-            true,
-            (1, false),
-            None,
-            None,
-        )
+            initial_panes: None,
+            tab_index: 7,
+            transaction_id: 3,
+            block_on_first_terminal: false,
+            should_change_focus_to_new_tab: true,
+            client_id_and_is_web_client: (1, false),
+            completion_tx: None,
+            layout_generation: None,
+        })
         .expect_err("a missing screen receiver must reject ApplyLayout");
 
     assert!(
@@ -858,21 +858,21 @@ fn command_not_found_with_hold_transitions_only_after_commit() {
         })),
         ..Default::default()
     };
-    pty.spawn_terminals_for_layout(
-        None,
+    pty.spawn_terminals_for_layout(SpawnTerminalsForLayoutParams {
+        cwd: None,
         layout,
-        vec![],
-        None,
+        floating_panes_layout: vec![],
+        default_shell: None,
         plugin_ids,
-        None,
-        7,
-        4,
-        false,
-        true,
-        (1, false),
-        None,
-        None,
-    )
+        initial_panes: None,
+        tab_index: 7,
+        transaction_id: 4,
+        block_on_first_terminal: false,
+        should_change_focus_to_new_tab: true,
+        client_id_and_is_web_client: (1, false),
+        completion_tx: None,
+        layout_generation: None,
+    })
     .expect("optional notification failure must not revoke a transferred ApplyLayout");
 
     let (screen_instruction, _) = screen_rx
@@ -963,24 +963,24 @@ fn fast_exit_callback_waits_for_screen_commit_at_the_common_pty_fence() {
         ..Default::default()
     };
 
-    pty.spawn_terminals_for_layout(
-        None,
-        TiledPaneLayout {
+    pty.spawn_terminals_for_layout(SpawnTerminalsForLayoutParams {
+        cwd: None,
+        layout: TiledPaneLayout {
             run: Some(Run::Command(command.clone())),
             ..Default::default()
         },
-        vec![],
-        None,
-        HashMap::new(),
-        None,
-        7,
-        5,
-        false,
-        true,
-        (1, false),
-        None,
-        None,
-    )
+        floating_panes_layout: vec![],
+        default_shell: None,
+        plugin_ids: HashMap::new(),
+        initial_panes: None,
+        tab_index: 7,
+        transaction_id: 5,
+        block_on_first_terminal: false,
+        should_change_focus_to_new_tab: true,
+        client_id_and_is_web_client: (1, false),
+        completion_tx: None,
+        layout_generation: None,
+    })
     .expect("the fast process must reach the Screen ownership fence");
 
     let (instruction, _) = screen_rx.try_recv().expect("ApplyLayout");
@@ -1038,24 +1038,24 @@ fn rejected_screen_commit_spawns_nothing_and_rolls_back_terminal_reservations() 
         ..Default::default()
     };
 
-    pty.spawn_terminals_for_layout(
-        None,
-        TiledPaneLayout {
+    pty.spawn_terminals_for_layout(SpawnTerminalsForLayoutParams {
+        cwd: None,
+        layout: TiledPaneLayout {
             run: Some(Run::Command(command.clone())),
             ..Default::default()
         },
-        vec![],
-        None,
-        HashMap::from([(plugin, vec![77])]),
-        None,
-        7,
-        6,
-        false,
-        true,
-        (1, false),
-        None,
-        None,
-    )
+        floating_panes_layout: vec![],
+        default_shell: None,
+        plugin_ids: HashMap::from([(plugin, vec![77])]),
+        initial_panes: None,
+        tab_index: 7,
+        transaction_id: 6,
+        block_on_first_terminal: false,
+        should_change_focus_to_new_tab: true,
+        client_id_and_is_web_client: (1, false),
+        completion_tx: None,
+        layout_generation: None,
+    })
     .expect("the prepared layout must reach Screen");
     let (instruction, _) = screen_rx.try_recv().expect("ApplyLayout");
     let transaction_id = match instruction {
@@ -1117,21 +1117,21 @@ fn rejected_layout_ack_reports_only_real_cleanup_failure() {
     bus.senders.should_silently_fail = false;
     let mut pty = Pty::new(bus, false, None, None);
 
-    pty.spawn_terminals_for_layout(
-        None,
-        TiledPaneLayout::default(),
-        vec![],
-        None,
-        HashMap::new(),
-        None,
-        7,
-        60,
-        false,
-        true,
-        (1, false),
-        None,
-        None,
-    )
+    pty.spawn_terminals_for_layout(SpawnTerminalsForLayoutParams {
+        cwd: None,
+        layout: TiledPaneLayout::default(),
+        floating_panes_layout: vec![],
+        default_shell: None,
+        plugin_ids: HashMap::new(),
+        initial_panes: None,
+        tab_index: 7,
+        transaction_id: 60,
+        block_on_first_terminal: false,
+        should_change_focus_to_new_tab: true,
+        client_id_and_is_web_client: (1, false),
+        completion_tx: None,
+        layout_generation: None,
+    })
     .expect("the layout must reach the Screen ownership fence");
     let transaction_id = match screen_rx.try_recv().expect("ApplyLayout").0 {
         ScreenInstruction::ApplyLayout(_, _, _, _, _, _, _, _, _, _, _, transaction_id) => {
@@ -1193,9 +1193,9 @@ fn partial_activation_failure_keeps_guard_armed_and_rolls_back_every_allocation(
     bus.senders.should_silently_fail = false;
     let mut pty = Pty::new(bus, false, None, None);
 
-    pty.spawn_terminals_for_layout(
-        None,
-        TiledPaneLayout {
+    pty.spawn_terminals_for_layout(SpawnTerminalsForLayoutParams {
+        cwd: None,
+        layout: TiledPaneLayout {
             run: Some(Run::Command(RunCommand {
                 command: PathBuf::from("originating-plugin-command"),
                 originating_plugin: Some(OriginatingPlugin::new(77, 1, Default::default())),
@@ -1203,18 +1203,18 @@ fn partial_activation_failure_keeps_guard_armed_and_rolls_back_every_allocation(
             })),
             ..Default::default()
         },
-        vec![],
-        None,
-        HashMap::new(),
-        None,
-        7,
-        63,
-        false,
-        true,
-        (1, false),
-        None,
-        None,
-    )
+        floating_panes_layout: vec![],
+        default_shell: None,
+        plugin_ids: HashMap::new(),
+        initial_panes: None,
+        tab_index: 7,
+        transaction_id: 63,
+        block_on_first_terminal: false,
+        should_change_focus_to_new_tab: true,
+        client_id_and_is_web_client: (1, false),
+        completion_tx: None,
+        layout_generation: None,
+    })
     .expect("the prepared layout must reach Screen");
     let transaction_id = match screen_rx.try_recv().expect("ApplyLayout").0 {
         ScreenInstruction::ApplyLayout(_, _, _, _, _, _, _, _, _, _, _, transaction_id) => {
@@ -1267,9 +1267,9 @@ fn activation_cleanup_kill_failure_retains_exact_debt_until_same_outcome_retry()
     bus.senders.should_silently_fail = false;
     let mut pty = Pty::new(bus, false, None, None);
 
-    pty.spawn_terminals_for_layout(
-        None,
-        TiledPaneLayout {
+    pty.spawn_terminals_for_layout(SpawnTerminalsForLayoutParams {
+        cwd: None,
+        layout: TiledPaneLayout {
             run: Some(Run::Command(RunCommand {
                 command: PathBuf::from("cleanup-debt-command"),
                 originating_plugin: Some(OriginatingPlugin::new(77, 1, Default::default())),
@@ -1277,18 +1277,18 @@ fn activation_cleanup_kill_failure_retains_exact_debt_until_same_outcome_retry()
             })),
             ..Default::default()
         },
-        vec![],
-        None,
-        HashMap::new(),
-        None,
-        7,
-        65,
-        false,
-        true,
-        (1, false),
-        None,
-        None,
-    )
+        floating_panes_layout: vec![],
+        default_shell: None,
+        plugin_ids: HashMap::new(),
+        initial_panes: None,
+        tab_index: 7,
+        transaction_id: 65,
+        block_on_first_terminal: false,
+        should_change_focus_to_new_tab: true,
+        client_id_and_is_web_client: (1, false),
+        completion_tx: None,
+        layout_generation: None,
+    })
     .expect("the prepared layout must reach Screen");
     let transaction_id = match screen_rx.try_recv().expect("ApplyLayout").0 {
         ScreenInstruction::ApplyLayout(_, _, _, _, _, _, _, _, _, _, _, transaction_id) => {
@@ -1353,21 +1353,21 @@ fn runtime_panic_after_live_layout_spawn_is_caught_and_strictly_rolled_back() {
     bus.senders.should_silently_fail = false;
     let mut pty = Pty::new(bus, false, None, None);
 
-    pty.spawn_terminals_for_layout(
-        None,
-        TiledPaneLayout::default(),
-        vec![],
-        None,
-        HashMap::new(),
-        None,
-        7,
-        67,
-        false,
-        true,
-        (1, false),
-        None,
-        None,
-    )
+    pty.spawn_terminals_for_layout(SpawnTerminalsForLayoutParams {
+        cwd: None,
+        layout: TiledPaneLayout::default(),
+        floating_panes_layout: vec![],
+        default_shell: None,
+        plugin_ids: HashMap::new(),
+        initial_panes: None,
+        tab_index: 7,
+        transaction_id: 67,
+        block_on_first_terminal: false,
+        should_change_focus_to_new_tab: true,
+        client_id_and_is_web_client: (1, false),
+        completion_tx: None,
+        layout_generation: None,
+    })
     .expect("the prepared layout must reach Screen");
     let transaction_id = match screen_rx.try_recv().expect("ApplyLayout").0 {
         ScreenInstruction::ApplyLayout(_, _, _, _, _, _, _, _, _, _, _, transaction_id) => {
@@ -1892,27 +1892,27 @@ fn command_not_found_without_explicit_hold_never_enters_a_layout() {
         bus.senders.should_silently_fail = false;
         let mut pty = Pty::new(bus, false, None, None);
 
-        pty.spawn_terminals_for_layout(
-            None,
-            TiledPaneLayout {
+        pty.spawn_terminals_for_layout(SpawnTerminalsForLayoutParams {
+            cwd: None,
+            layout: TiledPaneLayout {
                 run,
                 ..Default::default()
             },
-            vec![],
-            Some(TerminalAction::RunCommand(RunCommand {
+            floating_panes_layout: vec![],
+            default_shell: Some(TerminalAction::RunCommand(RunCommand {
                 command: PathBuf::from("missing-default"),
                 ..Default::default()
             })),
-            HashMap::new(),
-            None,
-            7,
-            7,
-            false,
-            true,
-            (1, false),
-            None,
-            None,
-        )
+            plugin_ids: HashMap::new(),
+            initial_panes: None,
+            tab_index: 7,
+            transaction_id: 7,
+            block_on_first_terminal: false,
+            should_change_focus_to_new_tab: true,
+            client_id_and_is_web_client: (1, false),
+            completion_tx: None,
+            layout_generation: None,
+        })
         .expect("prepare must not probe command existence by spawning");
         assert_eq!(probe.spawn_terminal_calls.load(Ordering::Relaxed), 0);
         let transaction_id = match screen_rx.try_recv().expect("ApplyLayout").0 {
@@ -1959,9 +1959,9 @@ fn hold_on_start_is_an_explicit_held_terminal_without_notification() {
     bus.senders.should_silently_fail = false;
     let mut pty = Pty::new(bus, false, None, None);
 
-    pty.spawn_terminals_for_layout(
-        None,
-        TiledPaneLayout {
+    pty.spawn_terminals_for_layout(SpawnTerminalsForLayoutParams {
+        cwd: None,
+        layout: TiledPaneLayout {
             run: Some(Run::Command(RunCommand {
                 command: PathBuf::from("held-before-start"),
                 hold_on_start: true,
@@ -1969,18 +1969,18 @@ fn hold_on_start_is_an_explicit_held_terminal_without_notification() {
             })),
             ..Default::default()
         },
-        vec![],
-        None,
-        HashMap::new(),
-        None,
-        7,
-        8,
-        false,
-        true,
-        (1, false),
-        None,
-        None,
-    )
+        floating_panes_layout: vec![],
+        default_shell: None,
+        plugin_ids: HashMap::new(),
+        initial_panes: None,
+        tab_index: 7,
+        transaction_id: 8,
+        block_on_first_terminal: false,
+        should_change_focus_to_new_tab: true,
+        client_id_and_is_web_client: (1, false),
+        completion_tx: None,
+        layout_generation: None,
+    })
     .expect("hold_on_start must commit as an explicit held terminal");
 
     let (instruction, _) = screen_rx.try_recv().expect("ApplyLayout");
@@ -2020,9 +2020,9 @@ fn mismatched_command_not_found_never_transfers_or_clears_the_foreign_payload_id
     let mut pty = Pty::new(bus, false, None, None);
     let plugin = RunPluginOrAlias::from_url("file:/foreign-id.wasm", &None, None, None).unwrap();
 
-    pty.spawn_terminals_for_layout(
-        None,
-        TiledPaneLayout {
+    pty.spawn_terminals_for_layout(SpawnTerminalsForLayoutParams {
+        cwd: None,
+        layout: TiledPaneLayout {
             run: Some(Run::Command(RunCommand {
                 command: PathBuf::from("missing-command"),
                 hold_on_close: true,
@@ -2030,18 +2030,18 @@ fn mismatched_command_not_found_never_transfers_or_clears_the_foreign_payload_id
             })),
             ..Default::default()
         },
-        vec![],
-        None,
-        HashMap::from([(plugin, vec![77])]),
-        None,
-        7,
-        9,
-        false,
-        true,
-        (1, false),
-        None,
-        None,
-    )
+        floating_panes_layout: vec![],
+        default_shell: None,
+        plugin_ids: HashMap::from([(plugin, vec![77])]),
+        initial_panes: None,
+        tab_index: 7,
+        transaction_id: 9,
+        block_on_first_terminal: false,
+        should_change_focus_to_new_tab: true,
+        client_id_and_is_web_client: (1, false),
+        completion_tx: None,
+        layout_generation: None,
+    })
     .expect("prepare must only reserve the real terminal ID");
     let transaction_id = match screen_rx.try_recv().expect("ApplyLayout").0 {
         ScreenInstruction::ApplyLayout(_, _, _, _, _, _, _, _, _, _, _, transaction_id) => {
@@ -2131,10 +2131,10 @@ fn override_notification_failure_rolls_back_before_screen_commit() {
     };
     fail_command_not_found_notification_between_messages();
 
-    pty.override_layout_transaction(
-        None,
-        None,
-        vec![(
+    pty.override_layout_transaction(OverrideLayoutTransactionParams {
+        cwd: None,
+        default_shell: None,
+        tab_layouts_with_plugin_ids: vec![(
             TabLayoutInfo {
                 tab_index: 7,
                 tab_name: Some("Recovered tab".to_owned()),
@@ -2145,13 +2145,13 @@ fn override_notification_failure_rolls_back_before_screen_commit() {
             },
             plugin_ids,
         )],
-        10,
-        true,
-        true,
-        1,
-        None,
-        None,
-    )
+        transaction_id: 10,
+        retain_existing_terminal_panes: true,
+        retain_existing_plugin_panes: true,
+        client_id: 1,
+        completion_tx: None,
+        layout_generation: None,
+    })
     .expect("prepare must reserve the override without spawning");
 
     let (screen_instruction, _) = screen_rx
@@ -2228,10 +2228,10 @@ fn partial_override_activation_failure_releases_all_terminal_reservations() {
         ..Default::default()
     });
 
-    pty.override_layout_transaction(
-        None,
-        Some(default_shell),
-        vec![(
+    pty.override_layout_transaction(OverrideLayoutTransactionParams {
+        cwd: None,
+        default_shell: Some(default_shell),
+        tab_layouts_with_plugin_ids: vec![(
             TabLayoutInfo {
                 tab_index: 7,
                 tab_name: Some("Finalized runs".to_owned()),
@@ -2242,13 +2242,13 @@ fn partial_override_activation_failure_releases_all_terminal_reservations() {
             },
             plugin_ids,
         )],
-        11,
-        true,
-        true,
-        1,
-        None,
-        None,
-    )
+        transaction_id: 11,
+        retain_existing_terminal_panes: true,
+        retain_existing_plugin_panes: true,
+        client_id: 1,
+        completion_tx: None,
+        layout_generation: None,
+    })
     .expect("prepare must reserve both override terminals");
     assert_eq!(probe.spawn_terminal_calls.load(Ordering::Relaxed), 0);
     let transaction_id = match screen_rx.try_recv().expect("OverrideLayoutComplete").0 {
@@ -2288,10 +2288,10 @@ fn override_per_tab_activation_failure_rolls_back_current_and_all_prior_tabs() {
         ..Default::default()
     };
 
-    pty.override_layout_transaction(
-        None,
-        None,
-        vec![
+    pty.override_layout_transaction(OverrideLayoutTransactionParams {
+        cwd: None,
+        default_shell: None,
+        tab_layouts_with_plugin_ids: vec![
             (
                 override_tab(0, TiledPaneLayout::default(), vec![]),
                 override_plugin("file:/first-tab.wasm", 71),
@@ -2301,13 +2301,13 @@ fn override_per_tab_activation_failure_rolls_back_current_and_all_prior_tabs() {
                 override_plugin("file:/second-tab.wasm", 72),
             ),
         ],
-        12,
-        true,
-        true,
-        1,
-        None,
-        None,
-    )
+        transaction_id: 12,
+        retain_existing_terminal_panes: true,
+        retain_existing_plugin_panes: true,
+        client_id: 1,
+        completion_tx: None,
+        layout_generation: None,
+    })
     .expect("all tabs must reserve without spawning");
     assert_eq!(probe.spawn_terminal_calls.load(Ordering::Relaxed), 0);
     let transaction_id = match screen_rx.try_recv().expect("OverrideLayoutComplete").0 {
@@ -2350,10 +2350,10 @@ fn override_final_send_failure_rolls_back_the_union_exactly_once() {
     let mut pty = Pty::new(bus, false, None, None);
 
     let error = pty
-        .override_layout_transaction(
-            None,
-            None,
-            vec![
+        .override_layout_transaction(OverrideLayoutTransactionParams {
+            cwd: None,
+            default_shell: None,
+            tab_layouts_with_plugin_ids: vec![
                 (
                     override_tab(0, TiledPaneLayout::default(), vec![]),
                     override_plugin("file:/first-final-send.wasm", 71),
@@ -2363,13 +2363,13 @@ fn override_final_send_failure_rolls_back_the_union_exactly_once() {
                     override_plugin("file:/second-final-send.wasm", 72),
                 ),
             ],
-            13,
-            true,
-            true,
-            1,
-            None,
-            None,
-        )
+            transaction_id: 13,
+            retain_existing_terminal_panes: true,
+            retain_existing_plugin_panes: true,
+            client_id: 1,
+            completion_tx: None,
+            layout_generation: None,
+        })
         .expect_err("a missing screen sender must reject the final transaction");
 
     assert!(format!("{error:#}").contains("failed to get screen sender"));
@@ -2391,10 +2391,10 @@ fn rejected_multi_tab_override_ack_rolls_back_the_union_exactly_once() {
     bus.senders.should_silently_fail = false;
     let mut pty = Pty::new(bus, false, None, None);
 
-    pty.override_layout_transaction(
-        None,
-        None,
-        vec![
+    pty.override_layout_transaction(OverrideLayoutTransactionParams {
+        cwd: None,
+        default_shell: None,
+        tab_layouts_with_plugin_ids: vec![
             (
                 override_tab(0, TiledPaneLayout::default(), vec![]),
                 override_plugin("file:/first-screen-rejected.wasm", 71),
@@ -2404,13 +2404,13 @@ fn rejected_multi_tab_override_ack_rolls_back_the_union_exactly_once() {
                 override_plugin("file:/second-screen-rejected.wasm", 72),
             ),
         ],
-        14,
-        true,
-        true,
-        1,
-        None,
-        None,
-    )
+        transaction_id: 14,
+        retain_existing_terminal_panes: true,
+        retain_existing_plugin_panes: true,
+        client_id: 1,
+        completion_tx: None,
+        layout_generation: None,
+    })
     .expect("the complete multi-tab payload must reach Screen");
     let (instruction, _) = screen_rx.try_recv().expect("OverrideLayoutComplete");
     let transaction_id = match instruction {

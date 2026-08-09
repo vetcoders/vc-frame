@@ -30,7 +30,7 @@ use zellij_utils::data::PaneRenderReport;
 use zellij_utils::input::layout::TabLayoutInfo;
 
 pub use wasm_bridge::PluginRenderAsset;
-use wasm_bridge::{LayoutPluginReservationRequest, WasmBridge};
+use wasm_bridge::{GetOrLoadPluginsParams, LayoutPluginReservationRequest, WasmBridge};
 
 use zellij_utils::{
     channels,
@@ -1860,19 +1860,19 @@ fn pipe_to_specific_plugins(params: PipeToSpecificPluginsParams) {
     match RunPluginOrAlias::from_url(plugin_url, configuration, Some(plugin_aliases), cwd.clone()) {
         Ok(run_plugin_or_alias) => {
             let initial_cwd = run_plugin_or_alias.get_initial_cwd();
-            let all_plugin_ids = wasm_bridge.get_or_load_plugins(
+            let all_plugin_ids = wasm_bridge.get_or_load_plugins(GetOrLoadPluginsParams {
                 run_plugin_or_alias,
                 size,
-                initial_cwd.or_else(|| cwd.clone()),
+                cwd: initial_cwd.or_else(|| cwd.clone()),
                 skip_cache,
                 should_float,
-                pane_id_to_replace.is_some(),
-                pane_title.clone(),
-                *pane_id_to_replace,
+                should_be_open_in_place: pane_id_to_replace.is_some(),
+                pane_title: pane_title.clone(),
+                pane_id_to_replace: *pane_id_to_replace,
                 cli_client_id,
                 floating_pane_coordinates,
-                should_focus.unwrap_or(false),
-            );
+                should_focus: should_focus.unwrap_or(false),
+            });
             for (plugin_id, client_id) in all_plugin_ids {
                 pipe_messages.push((
                     Some(plugin_id),

@@ -777,6 +777,26 @@ pub struct WasmBridgeOptions {
     pub default_keybinds: Keybinds,
 }
 
+/// Arguments for [`WasmBridge::get_or_load_plugins`].
+///
+/// The lookup-or-load path needs the full pane-placement description of the
+/// plugin it may have to create, which is a wide but cohesive surface. Passing
+/// it as one named struct keeps the call sites readable instead of hiding
+/// eleven positional arguments behind a lint silencer.
+pub(crate) struct GetOrLoadPluginsParams {
+    pub run_plugin_or_alias: RunPluginOrAlias,
+    pub size: Size,
+    pub cwd: Option<PathBuf>,
+    pub skip_cache: bool,
+    pub should_float: bool,
+    pub should_be_open_in_place: bool,
+    pub pane_title: Option<String>,
+    pub pane_id_to_replace: Option<PaneId>,
+    pub cli_client_id: Option<ClientId>,
+    pub floating_pane_coordinates: Option<FloatingPaneCoordinates>,
+    pub should_focus: bool,
+}
+
 impl WasmBridge {
     pub fn new(opts: WasmBridgeOptions) -> Self {
         let WasmBridgeOptions {
@@ -3605,21 +3625,23 @@ impl WasmBridge {
 
     // gets all running plugins details matching this run_plugin, if none are running, loads one and
     // returns its details
-    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
     pub fn get_or_load_plugins(
         &mut self,
-        run_plugin_or_alias: RunPluginOrAlias,
-        size: Size,
-        cwd: Option<PathBuf>,
-        skip_cache: bool,
-        should_float: bool,
-        should_be_open_in_place: bool,
-        pane_title: Option<String>,
-        pane_id_to_replace: Option<PaneId>,
-        cli_client_id: Option<ClientId>,
-        floating_pane_coordinates: Option<FloatingPaneCoordinates>,
-        should_focus: bool,
+        params: GetOrLoadPluginsParams,
     ) -> Vec<(PluginId, Option<ClientId>)> {
+        let GetOrLoadPluginsParams {
+            run_plugin_or_alias,
+            size,
+            cwd,
+            skip_cache,
+            should_float,
+            should_be_open_in_place,
+            pane_title,
+            pane_id_to_replace,
+            cli_client_id,
+            floating_pane_coordinates,
+            should_focus,
+        } = params;
         let run_plugin = run_plugin_or_alias.get_run_plugin();
         match run_plugin {
             Some(run_plugin) => {

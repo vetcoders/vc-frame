@@ -2606,6 +2606,77 @@ pub struct ScreenOptions<'a> {
     pub has_clients_flag: Arc<AtomicBool>,
 }
 
+/// Arguments for [`Screen::reconcile_indeterminate_layout_transaction`].
+///
+/// The borrowed fields are the `screen_thread_main` loop state the
+/// reconciliation mutates in place; they all share the caller's lifetime.
+struct ReconcileIndeterminateLayoutTransactionParams<'a> {
+    transaction_id: LayoutTransactionId,
+    coordination: LayoutCoordination,
+    pending_tab_ids: &'a mut HashSet<usize>,
+    durable_tab_layout_generations: &'a HashMap<String, DurableTabLayoutGeneration>,
+    pending_tab_switches: &'a mut HashSet<(usize, ClientId)>,
+    pending_events_waiting_for_client: &'a mut Vec<ScreenInstruction>,
+    pending_events_waiting_for_tab: &'a mut Vec<ScreenInstruction>,
+    plugin_loading_message_cache: &'a mut HashMap<PluginId, LoadingIndication>,
+}
+
+/// Arguments for [`Screen::prepare_apply_layout`].
+struct PrepareApplyLayoutParams {
+    layout: TiledPaneLayout,
+    floating_panes_layout: Vec<FloatingPaneLayout>,
+    new_terminal_ids: Vec<(u32, HoldForCommand)>,
+    new_floating_terminal_ids: Vec<(u32, HoldForCommand)>,
+    new_plugin_ids: HashMap<RunPluginOrAlias, Vec<u32>>,
+    tab_id: usize,
+    should_change_client_focus: bool,
+    client_id_and_is_web_client: (ClientId, bool),
+    blocking_terminal: Option<(u32, NotificationEnd)>,
+}
+
+/// Arguments for the test-only [`Screen::apply_layout`] shorthand.
+#[cfg(test)]
+pub(crate) struct ApplyLayoutParams {
+    pub layout: TiledPaneLayout,
+    pub floating_panes_layout: Vec<FloatingPaneLayout>,
+    pub new_terminal_ids: Vec<(u32, HoldForCommand)>,
+    pub new_floating_terminal_ids: Vec<(u32, HoldForCommand)>,
+    pub new_plugin_ids: HashMap<RunPluginOrAlias, Vec<u32>>,
+    pub tab_id: usize,
+    pub should_change_client_focus: bool,
+    pub client_id_and_is_web_client: (ClientId, bool),
+    pub blocking_terminal: Option<(u32, NotificationEnd)>,
+}
+
+/// Arguments for [`Screen::reconfigure`].
+///
+/// Named `ScreenReconfigureParams` rather than `ReconfigureParams` because the
+/// latter is already the `ScreenInstruction::Reconfigure` payload, which also
+/// carries the `host_theme_dark` / `host_theme_light` styling the instruction
+/// handler applies to `Screen` directly instead of forwarding here.
+pub(crate) struct ScreenReconfigureParams {
+    pub new_keybinds: Keybinds,
+    pub new_default_mode: InputMode,
+    pub theme: Styling,
+    pub simplified_ui: bool,
+    pub default_shell: Option<PathBuf>,
+    pub pane_frames: bool,
+    pub copy_command: Option<String>,
+    pub copy_to_clipboard: Option<Clipboard>,
+    pub copy_on_select: bool,
+    pub auto_layout: bool,
+    pub rounded_corners: bool,
+    pub hide_session_name: bool,
+    pub stacked_resize: bool,
+    pub default_editor: Option<PathBuf>,
+    pub advanced_mouse_actions: bool,
+    pub mouse_hover_effects: bool,
+    pub visual_bell: bool,
+    pub focus_follows_mouse: bool,
+    pub mouse_click_through: bool,
+    pub client_id: ClientId,
+}
+
 impl Screen {
     /// Creates and returns a new [`Screen`].
     pub fn new(opts: ScreenOptions<'_>) -> Self {
@@ -3091,18 +3162,20 @@ impl Screen {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn reconcile_indeterminate_layout_transaction(
         &mut self,
-        transaction_id: LayoutTransactionId,
-        coordination: LayoutCoordination,
-        pending_tab_ids: &mut HashSet<usize>,
-        durable_tab_layout_generations: &HashMap<String, DurableTabLayoutGeneration>,
-        pending_tab_switches: &mut HashSet<(usize, ClientId)>,
-        pending_events_waiting_for_client: &mut Vec<ScreenInstruction>,
-        pending_events_waiting_for_tab: &mut Vec<ScreenInstruction>,
-        plugin_loading_message_cache: &mut HashMap<PluginId, LoadingIndication>,
+        params: ReconcileIndeterminateLayoutTransactionParams<'_>,
     ) -> Result<()> {
+        let ReconcileIndeterminateLayoutTransactionParams {
+            transaction_id,
+            coordination,
+            pending_tab_ids,
+            durable_tab_layout_generations,
+            pending_tab_switches,
+            pending_events_waiting_for_client,
+            pending_events_waiting_for_tab,
+            plugin_loading_message_cache,
+        } = params;
         let Some(indeterminate) = self
             .indeterminate_layout_transactions
             .remove(&transaction_id)
@@ -5721,20 +5794,8 @@ impl Screen {
         Ok(())
     }
     #[cfg(test)]
-    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
-    pub fn apply_layout(
-        &mut self,
-        layout: TiledPaneLayout,
-        floating_panes_layout: Vec<FloatingPaneLayout>,
-        new_terminal_ids: Vec<(u32, HoldForCommand)>,
-        new_floating_terminal_ids: Vec<(u32, HoldForCommand)>,
-        new_plugin_ids: HashMap<RunPluginOrAlias, Vec<u32>>,
-        tab_id: usize,
-        should_change_client_focus: bool,
-        client_id_and_is_web_client: (ClientId, bool),
-        blocking_terminal: Option<(u32, NotificationEnd)>,
-    ) -> Result<()> {
-        let prepared = self.prepare_apply_layout(
+    pub fn apply_layout(&mut self, params: ApplyLayoutParams) -> Result<()> {
+        let ApplyLayoutParams {
             layout,
             floating_panes_layout,
             new_terminal_ids,
@@ -5744,7 +5805,18 @@ impl Screen {
             should_change_client_focus,
             client_id_and_is_web_client,
             blocking_terminal,
-        )?;
+        } = params;
+        let prepared = self.prepare_apply_layout(PrepareApplyLayoutParams {
+            layout,
+            floating_panes_layout,
+            new_terminal_ids,
+            new_floating_terminal_ids,
+            new_plugin_ids,
+            tab_id,
+            should_change_client_focus,
+            client_id_and_is_web_client,
+            blocking_terminal,
+        })?;
         prepared
             .transaction
             .preflight_commit(self.tabs.get(&prepared.tab_id).with_context(|| {
@@ -5817,19 +5889,21 @@ impl Screen {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
     fn prepare_apply_layout(
         &mut self,
-        layout: TiledPaneLayout,
-        floating_panes_layout: Vec<FloatingPaneLayout>,
-        new_terminal_ids: Vec<(u32, HoldForCommand)>,
-        new_floating_terminal_ids: Vec<(u32, HoldForCommand)>,
-        new_plugin_ids: HashMap<RunPluginOrAlias, Vec<u32>>,
-        tab_id: usize,
-        should_change_client_focus: bool,
-        client_id_and_is_web_client: (ClientId, bool),
-        blocking_terminal: Option<(u32, NotificationEnd)>,
+        params: PrepareApplyLayoutParams,
     ) -> Result<PreparedApplyLayout> {
+        let PrepareApplyLayoutParams {
+            layout,
+            floating_panes_layout,
+            new_terminal_ids,
+            new_floating_terminal_ids,
+            new_plugin_ids,
+            tab_id,
+            should_change_client_focus,
+            client_id_and_is_web_client,
+            blocking_terminal,
+        } = params;
         if !self.tabs.contains_key(&tab_id) {
             // TODO: we should prevent this situation with a UI - eg. cannot close tabs with a
             // pending state
@@ -8139,30 +8213,29 @@ impl Screen {
         }
         let _ = self.log_and_report_session_state();
     }
-    #[allow(clippy::too_many_arguments)] // inherited pre-fork surface; de-arg refactor is its own cut
-    pub fn reconfigure(
-        &mut self,
-        new_keybinds: Keybinds,
-        new_default_mode: InputMode,
-        theme: Styling,
-        simplified_ui: bool,
-        default_shell: Option<PathBuf>,
-        pane_frames: bool,
-        copy_command: Option<String>,
-        copy_to_clipboard: Option<Clipboard>,
-        copy_on_select: bool,
-        auto_layout: bool,
-        rounded_corners: bool,
-        hide_session_name: bool,
-        stacked_resize: bool,
-        default_editor: Option<PathBuf>,
-        advanced_mouse_actions: bool,
-        mouse_hover_effects: bool,
-        visual_bell: bool,
-        focus_follows_mouse: bool,
-        mouse_click_through: bool,
-        client_id: ClientId,
-    ) -> Result<()> {
+    pub fn reconfigure(&mut self, params: ScreenReconfigureParams) -> Result<()> {
+        let ScreenReconfigureParams {
+            new_keybinds,
+            new_default_mode,
+            theme,
+            simplified_ui,
+            default_shell,
+            pane_frames,
+            copy_command,
+            copy_to_clipboard,
+            copy_on_select,
+            auto_layout,
+            rounded_corners,
+            hide_session_name,
+            stacked_resize,
+            default_editor,
+            advanced_mouse_actions,
+            mouse_hover_effects,
+            visual_bell,
+            focus_follows_mouse,
+            mouse_click_through,
+            client_id,
+        } = params;
         let should_support_arrow_fonts = !simplified_ui;
 
         // global configuration
@@ -9651,14 +9724,16 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
     loop {
         for (transaction_id, coordination) in screen.take_resolved_layout_reconciliations() {
             if let Err(error) = screen.reconcile_indeterminate_layout_transaction(
-                transaction_id,
-                coordination,
-                &mut pending_tab_ids,
-                &durable_tab_layout_generations,
-                &mut pending_tab_switches,
-                &mut pending_events_waiting_for_client,
-                &mut pending_events_waiting_for_tab,
-                &mut plugin_loading_message_cache,
+                ReconcileIndeterminateLayoutTransactionParams {
+                    transaction_id,
+                    coordination,
+                    pending_tab_ids: &mut pending_tab_ids,
+                    durable_tab_layout_generations: &durable_tab_layout_generations,
+                    pending_tab_switches: &mut pending_tab_switches,
+                    pending_events_waiting_for_client: &mut pending_events_waiting_for_client,
+                    pending_events_waiting_for_tab: &mut pending_events_waiting_for_tab,
+                    plugin_loading_message_cache: &mut plugin_loading_message_cache,
+                },
             ) {
                 log::error!(
                     "failed to finalize reconciled layout transaction {transaction_id}: {error:#}"
@@ -11562,17 +11637,18 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                     if !screen.tabs.contains_key(&tab_id) {
                         bail!("Tab with index {tab_id} not found. Cannot apply layout!");
                     }
-                    prepared_apply_layout = Some(screen.prepare_apply_layout(
-                        layout,
-                        floating_panes_layout,
-                        new_pane_pids.clone(),
-                        new_floating_pane_pids,
-                        new_plugin_ids.clone(),
-                        tab_id,
-                        should_change_focus_to_new_tab,
-                        (client_id, is_web_client),
-                        blocking_terminal.take(),
-                    )?);
+                    prepared_apply_layout =
+                        Some(screen.prepare_apply_layout(PrepareApplyLayoutParams {
+                            layout,
+                            floating_panes_layout,
+                            new_terminal_ids: new_pane_pids.clone(),
+                            new_floating_terminal_ids: new_floating_pane_pids,
+                            new_plugin_ids: new_plugin_ids.clone(),
+                            tab_id,
+                            should_change_client_focus: should_change_focus_to_new_tab,
+                            client_id_and_is_web_client: (client_id, is_web_client),
+                            blocking_terminal: blocking_terminal.take(),
+                        })?);
                     if let Some(tab) = screen.tabs.get_mut(&tab_id) {
                         tab.bind_plugin_projectors(&screen.plugin_projector_bindings);
                     }
@@ -14664,9 +14740,9 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                 screen.host_theme_dark_styling = host_theme_dark;
                 screen.host_theme_light_styling = host_theme_light;
                 screen
-                    .reconfigure(
-                        keybinds,
-                        default_mode,
+                    .reconfigure(ScreenReconfigureParams {
+                        new_keybinds: keybinds,
+                        new_default_mode: default_mode,
                         theme,
                         simplified_ui,
                         default_shell,
@@ -14685,7 +14761,7 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                         focus_follows_mouse,
                         mouse_click_through,
                         client_id,
-                    )
+                    })
                     .non_fatal();
             },
             ScreenInstruction::RerunCommandPane(terminal_pane_id, completion_tx) => {
