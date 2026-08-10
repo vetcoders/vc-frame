@@ -451,7 +451,7 @@ impl ZellijPlugin for State {
                 }
                 self.resurrectable_sessions
                     .update(resurrectable_session_list);
-                self.update_session_infos(session_infos);
+                let session_display_changed = self.update_session_infos(session_infos);
                 if !self.is_multi_screen {
                     self.single_screen_state.update_search_term(
                         &self.sessions.session_ui_infos,
@@ -471,7 +471,7 @@ impl ZellijPlugin for State {
                     self.single_screen_state.layout_list.selected_layout_index =
                         previous_selection.min(self.single_screen_state.layout_list.max_index());
                 }
-                should_render = true;
+                should_render = !self.is_rail || session_display_changed;
             },
             _ => (),
         };
@@ -1034,7 +1034,7 @@ fn format_process_tab_rail_entry(tab: &TabUiInfo, mode: RailWidthMode) -> String
     let tab_name = sanitize_display_label(&tab.name);
     let mut text = format!("   {} {}", activity, tab_name);
     if let Some(process_label) = tab.primary_process_label() {
-        let process_label = sanitize_display_label(process_label);
+        let process_label = stable_process_label(process_label);
         if process_label != tab_name && !process_label.contains(&tab_name) {
             text.push_str(" · ");
             text.push_str(&process_label);
@@ -1045,6 +1045,23 @@ fn format_process_tab_rail_entry(tab: &TabUiInfo, mode: RailWidthMode) -> String
         text.push_str(&format!(" +{}", additional_processes));
     }
     text
+}
+
+/// Remove a leading braille animation frame while preserving the meaningful
+/// process status that follows it. Terminal-local progress stays visible, but
+/// spinner-only title churn cannot repaint the whole session rail.
+fn stable_process_label(input: &str) -> String {
+    let sanitized = sanitize_display_label(input);
+    let mut chars = sanitized.chars();
+    let Some(first) = chars.next() else {
+        return sanitized;
+    };
+    let remainder = chars.as_str().trim_start();
+    if ('\u{2800}'..='\u{28ff}').contains(&first) && !remainder.is_empty() {
+        remainder.to_owned()
+    } else {
+        sanitized
+    }
 }
 
 // Direct rail navigation (vc_rail_nav pipe): product contract v3 is
@@ -1207,6 +1224,22 @@ fn session_rail_rows_with_truth(
     settlement_feed_degraded: bool,
     mode: RailWidthMode,
 ) -> Vec<SessionRailRow> {
+    let mut rows = session_rail_session_rows(sessions, mode);
+    rows.extend(bucket_rail_rows(
+        sessions,
+        settlement_history,
+        settlement_feed_degraded,
+    ));
+    rows
+}
+
+/// Session/process portion of the rail, excluding independently refreshed
+/// settlement buckets. This is also the stable render projection used to
+/// suppress redraws when only terminal animation frames changed.
+fn session_rail_session_rows(
+    sessions: &[SessionUiInfo],
+    mode: RailWidthMode,
+) -> Vec<SessionRailRow> {
     let mut rows = vec![];
     for (ordinal, session_index) in working_session_indices(sessions).into_iter().enumerate() {
         let session = &sessions[session_index];
@@ -1228,11 +1261,6 @@ fn session_rail_rows_with_truth(
                 }),
         );
     }
-    rows.extend(bucket_rail_rows(
-        sessions,
-        settlement_history,
-        settlement_feed_degraded,
-    ));
     rows
 }
 
@@ -2792,7 +2820,7 @@ impl State {
         }
         self.resurrectable_sessions
             .update(snapshot.resurrectable_sessions);
-        self.update_session_infos(snapshot.live_sessions);
+        let session_display_changed = self.update_session_infos(snapshot.live_sessions);
         if !self.is_multi_screen {
             self.single_screen_state.update_search_term(
                 &self.sessions.session_ui_infos,
@@ -2810,10 +2838,13 @@ impl State {
             self.single_screen_state.layout_list.selected_layout_index =
                 previous_selection.min(self.single_screen_state.layout_list.max_index());
         }
-        true
+        !self.is_rail || session_display_changed
     }
 
-    fn update_session_infos(&mut self, session_infos: Vec<SessionInfo>) {
+    fn update_session_infos(&mut self, session_infos: Vec<SessionInfo>) -> bool {
+        let previous_rail_projection = self.is_rail.then(|| {
+            session_rail_session_rows(&self.sessions.session_ui_infos, RailWidthMode::Wide)
+        });
         let session_ui_infos: Vec<SessionUiInfo> = session_infos
             .iter()
             .filter_map(|s| {
@@ -2853,6 +2884,10 @@ impl State {
         }
         self.sessions
             .set_sessions(session_ui_infos, forbidden_sessions);
+        previous_rail_projection.is_none_or(|previous| {
+            previous
+                != session_rail_session_rows(&self.sessions.session_ui_infos, RailWidthMode::Wide)
+        })
     }
     fn main_menu_size(&self, rows: usize, cols: usize) -> (usize, usize, usize, usize) {
         // x, y, width, height
@@ -3444,6 +3479,52 @@ mod rail_tests {
         assert_eq!(
             format_process_tab_rail_entry(&tab, RailWidthMode::Wide),
             "   ◉ claude"
+        );
+    }
+
+    #[test]
+    fn rail_strips_spinner_frame_but_keeps_meaningful_process_progress() {
+        let spinning = TabUiInfo::for_rail_test("resume-codex", true, "⣧ vc", 1);
+        let progressing = TabUiInfo::for_rail_test("resume-codex", true, "⣇ indexing workspace", 1);
+
+        assert_eq!(
+            format_process_tab_rail_entry(&spinning, RailWidthMode::Wide),
+            "   ◉ resume-codex · vc"
+        );
+        assert_eq!(
+            format_process_tab_rail_entry(&progressing, RailWidthMode::Wide),
+            "   ◉ resume-codex · indexing workspace"
+        );
+    }
+
+    #[test]
+    fn spinner_frame_changes_do_not_change_the_rail_projection() {
+        let mut first = session("vc-frame", true);
+        first.tabs = vec![TabUiInfo::for_rail_test("resume-codex", true, "⣧ vc", 1)];
+        let mut next = session("vc-frame", true);
+        next.tabs = vec![TabUiInfo::for_rail_test("resume-codex", true, "⣇ vc", 1)];
+
+        assert_eq!(
+            session_rail_session_rows(&[first], RailWidthMode::Wide),
+            session_rail_session_rows(&[next], RailWidthMode::Wide)
+        );
+    }
+
+    #[test]
+    fn meaningful_progress_changes_still_change_the_rail_projection() {
+        let mut first = session("vc-frame", true);
+        first.tabs = vec![TabUiInfo::for_rail_test("resume-codex", true, "⣧ vc", 1)];
+        let mut next = session("vc-frame", true);
+        next.tabs = vec![TabUiInfo::for_rail_test(
+            "resume-codex",
+            true,
+            "⣇ applying patch",
+            1,
+        )];
+
+        assert_ne!(
+            session_rail_session_rows(&[first], RailWidthMode::Wide),
+            session_rail_session_rows(&[next], RailWidthMode::Wide)
         );
     }
 
