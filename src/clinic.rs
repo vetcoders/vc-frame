@@ -92,6 +92,7 @@ pub enum Section {
     ConfigShadowing,
     LockStranding,
     InstallFreshness,
+    ServerDrift,
     AssetIntegrity,
     HostTerminal,
     Shell,
@@ -105,6 +106,7 @@ impl Section {
             Section::ConfigShadowing => "config-shadowing",
             Section::LockStranding => "lock-stranding",
             Section::InstallFreshness => "install-freshness",
+            Section::ServerDrift => "server-drift",
             Section::AssetIntegrity => "asset-integrity",
             Section::HostTerminal => "host-terminal",
             Section::Shell => "shell",
@@ -117,6 +119,7 @@ impl Section {
             Section::ConfigShadowing => "CONFIG SHADOWING",
             Section::LockStranding => "LOCK STRANDING",
             Section::InstallFreshness => "INSTALL FRESHNESS",
+            Section::ServerDrift => "SERVER DRIFT",
             Section::AssetIntegrity => "ASSET INTEGRITY",
             Section::HostTerminal => "HOST TERMINAL",
             Section::Shell => "SHELL",
@@ -124,10 +127,11 @@ impl Section {
         }
     }
 
-    const ORDER: [Section; 7] = [
+    const ORDER: [Section; 8] = [
         Section::ConfigShadowing,
         Section::LockStranding,
         Section::InstallFreshness,
+        Section::ServerDrift,
         Section::AssetIntegrity,
         Section::HostTerminal,
         Section::Shell,
@@ -649,6 +653,7 @@ fn diagnose_full(
     }
 
     diagnose_freshness(&mut diagnosis);
+    diagnose_server_drift(&mut diagnosis);
     diagnose_assets(&mut diagnosis);
     diagnose_host_terminal(&mut diagnosis);
     diagnose_shell(&mut diagnosis);
@@ -1171,6 +1176,146 @@ fn diagnose_freshness(diagnosis: &mut Diagnosis) {
         diagnosis
             .ok_notes
             .push((Section::InstallFreshness, freshness.diagnostic_line()));
+    }
+}
+
+/// Reinstalls do not restart running servers: an exec'd inode never changes
+/// under a live process, so after `make install` the central workspace can
+/// keep running yesterday's build — with yesterday's bugs and a state the new
+/// client no longer matches (the observed split-brain: a server two days older
+/// than the binary on disk, storming OSC8 warnings). Detection is
+/// start-time-vs-binary-mtime; the remedy is a *deliberate* restart, because
+/// killing a server closes every tab it serves.
+const SERVER_DRIFT_SLACK_SECS: u64 = 5;
+
+fn server_predates_install(server_elapsed_secs: u64, install_age_secs: u64) -> bool {
+    server_elapsed_secs > install_age_secs.saturating_add(SERVER_DRIFT_SLACK_SECS)
+}
+
+/// `ps -o etime=`: `MM:SS`, `HH:MM:SS` or `D-HH:MM:SS`.
+fn parse_ps_etime(raw: &str) -> Option<u64> {
+    let raw = raw.trim();
+    let (days, clock) = match raw.split_once('-') {
+        Some((days, clock)) => (days.parse::<u64>().ok()?, clock),
+        None => (0, raw),
+    };
+    let parts = clock
+        .split(':')
+        .map(|part| part.parse::<u64>().ok())
+        .collect::<Option<Vec<u64>>>()?;
+    let (hours, minutes, seconds) = match parts.as_slice() {
+        [minutes, seconds] => (0, *minutes, *seconds),
+        [hours, minutes, seconds] => (*hours, *minutes, *seconds),
+        _ => return None,
+    };
+    Some(days * 86_400 + hours * 3_600 + minutes * 60 + seconds)
+}
+
+fn format_age(seconds: u64) -> String {
+    match seconds {
+        0..=119 => format!("{seconds}s"),
+        120..=7_199 => format!("{}m", seconds / 60),
+        7_200..=172_799 => format!("{}h", seconds / 3_600),
+        _ => format!("{}d", seconds / 86_400),
+    }
+}
+
+/// Every `--server` process spawned from a binary with our basename,
+/// as `(pid, elapsed_secs)`. Empty when `ps` is unavailable.
+fn running_frame_servers(exe: &Path) -> Vec<(i32, u64)> {
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-axo", "pid=,etime=,args="])
+        .output()
+    else {
+        return vec![];
+    };
+    let own_basename = exe
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("vc-frame")
+        .to_owned();
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid: i32 = fields.next()?.parse().ok()?;
+            let elapsed = parse_ps_etime(fields.next()?)?;
+            let args: Vec<&str> = fields.collect();
+            let argv0 = args.first()?;
+            if !args.contains(&"--server") {
+                return None;
+            }
+            if Path::new(argv0)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_none_or(|name| name != own_basename)
+            {
+                return None;
+            }
+            Some((pid, elapsed))
+        })
+        .collect()
+}
+
+fn diagnose_server_drift(diagnosis: &mut Diagnosis) {
+    let Ok(exe) = std::env::current_exe() else {
+        diagnosis.ok_notes.push((
+            Section::ServerDrift,
+            "cannot resolve own binary — drift not judged".to_owned(),
+        ));
+        return;
+    };
+    let Ok(installed_at) = std::fs::metadata(&exe).and_then(|meta| meta.modified()) else {
+        diagnosis.ok_notes.push((
+            Section::ServerDrift,
+            "binary mtime unreadable — drift not judged".to_owned(),
+        ));
+        return;
+    };
+    let install_age_secs = std::time::SystemTime::now()
+        .duration_since(installed_at)
+        .unwrap_or_default()
+        .as_secs();
+    let servers = running_frame_servers(&exe);
+    if servers.is_empty() {
+        diagnosis.ok_notes.push((
+            Section::ServerDrift,
+            "no running servers visible to ps".to_owned(),
+        ));
+        return;
+    }
+    let mut fresh = 0;
+    for (pid, elapsed_secs) in &servers {
+        if server_predates_install(*elapsed_secs, install_age_secs) {
+            diagnosis.findings.push(
+                Finding::new(
+                    Section::ServerDrift,
+                    Severity::Warn,
+                    format!(
+                        "server pid {pid} predates the installed binary — \
+                         it is running a superseded build from memory"
+                    ),
+                    "finish or park that session's work, then restart it deliberately — \
+                     a plain kill closes every tab the server carries",
+                )
+                .with_detail(vec![format!(
+                    "server up {} · binary installed {} ago",
+                    format_age(*elapsed_secs),
+                    format_age(install_age_secs)
+                )]),
+            );
+        } else {
+            fresh += 1;
+        }
+    }
+    if fresh == servers.len() {
+        diagnosis.ok_notes.push((
+            Section::ServerDrift,
+            format!(
+                "{} running server(s), all newer than the installed binary",
+                servers.len()
+            ),
+        ));
     }
 }
 
@@ -2892,5 +3037,40 @@ layout_dir "{}"
             assert!(line.chars().count() <= 40, "{line}");
         }
         assert_eq!(lines.join(" · "), items.join(" · "));
+    }
+}
+
+#[cfg(test)]
+mod server_drift_tests {
+    use super::*;
+
+    #[test]
+    fn ps_etime_parses_all_three_shapes() {
+        assert_eq!(parse_ps_etime("04:05"), Some(245));
+        assert_eq!(parse_ps_etime("03:04:05"), Some(11_045));
+        assert_eq!(parse_ps_etime("2-03:04:05"), Some(183_845));
+        assert_eq!(parse_ps_etime(" 00:07 "), Some(7));
+        assert_eq!(parse_ps_etime("garbage"), None);
+        assert_eq!(parse_ps_etime("1:2:3:4"), None);
+    }
+
+    #[test]
+    fn drift_needs_the_server_to_be_older_than_the_binary_plus_slack() {
+        // Server started well before the binary landed → superseded build.
+        assert!(server_predates_install(172_800, 3_600));
+        // Server younger than the install → running the current build.
+        assert!(!server_predates_install(60, 3_600));
+        // Inside the slack window nothing is judged — installs are not atomic
+        // with process starts.
+        assert!(!server_predates_install(3_604, 3_600));
+        assert!(server_predates_install(3_606, 3_600));
+    }
+
+    #[test]
+    fn age_formatting_stays_single_unit() {
+        assert_eq!(format_age(45), "45s");
+        assert_eq!(format_age(600), "10m");
+        assert_eq!(format_age(7_200), "2h");
+        assert_eq!(format_age(200_000), "2d");
     }
 }
