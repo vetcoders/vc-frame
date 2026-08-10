@@ -21,7 +21,7 @@
 //! config parser and compared as `InputMode → key → actions` maps, so a
 //! reformatted config is not a finding and a renamed action is.
 //!
-//! 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by VetCoders (c)2024-2026 LibraxisAI
+//! 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
