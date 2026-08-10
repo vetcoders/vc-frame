@@ -415,6 +415,30 @@ pub(crate) fn background_jobs_main(
                                 resurrectable_sessions,
                             ));
                             let _ = senders.send_to_pty(PtyInstruction::UpdateAndReportCwds);
+                            // Control-plane Live census for the rail's `● Live N`
+                            // row: headless workers with a live pid, never Zellij
+                            // tabs (a viewer tab only observes a run). Re-sent
+                            // every cycle so the rail's freshness lease can tell
+                            // a quiet feed from a dead producer.
+                            if let Some(control_plane_root) =
+                                zellij_utils::run_triage::control_plane_root()
+                            {
+                                let census = crate::vc_live_runs::LiveRunsSnapshot::new(
+                                    crate::vc_live_runs::scan_live_runs(&control_plane_root),
+                                );
+                                if let Some(payload) = census.payload() {
+                                    let _ =
+                                        senders.send_to_plugin(PluginInstruction::Update(vec![(
+                                            None,
+                                            None,
+                                            Event::CustomMessage(
+                                                crate::vc_live_runs::VC_LIVE_RUNS_MESSAGE
+                                                    .to_owned(),
+                                                payload,
+                                            ),
+                                        )]));
+                                }
+                            }
                             if last_serialization_time
                                 .lock()
                                 .unwrap()

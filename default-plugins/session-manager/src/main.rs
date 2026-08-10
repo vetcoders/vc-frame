@@ -42,6 +42,13 @@ const SETTLEMENT_COUNTS_PIPE: &str = "vc_settlement_counts";
 const SETTLEMENT_HISTORY_SCHEMA: &str = "vibecrafted.settlement-history.v1";
 const VC_CHROME_VISIBILITY_MESSAGE: &str = "vc.status-bar-visibility.v1";
 const VC_CHROME_HEARTBEAT_MESSAGE: &str = "vc.fleet-live-count.v1";
+// Semantic Live-runs truth: control-plane census of headless workers with a
+// live pid, produced by the server's session-metadata loop. Never derived
+// from Zellij tabs — a viewer tab is only an observer of a run.
+const VC_LIVE_RUNS_MESSAGE: &str = "vc.live-runs.v1";
+// Same freshness lease as the settlement feed: the producer re-sends at least
+// every five seconds, so three missed windows demote exact counts.
+const LIVE_RUNS_FEED_STALE_AFTER_TICKS: u8 = 15;
 // Guardian republishes at least every five seconds. Three missed refresh
 // windows turn exact counts into lower bounds instead of letting a dead
 // producer leave stale values looking authoritative forever.
@@ -215,6 +222,11 @@ struct State {
     // Once a producer generation has been superseded, a delayed payload from
     // that retired generation must never roll the rail back.
     retired_settlement_generations: BTreeSet<String>,
+    // Control-plane Live census (`vc.live-runs.v1`). `None` until the first
+    // valid payload → the pinned row renders `…`, never a guessed digit.
+    live_runs_count: Option<u64>,
+    live_runs_feed_degraded: bool,
+    live_runs_feed_age_ticks: Option<u8>,
 }
 
 register_plugin!(State);
@@ -351,6 +363,9 @@ impl ZellijPlugin for State {
                 if self.age_settlement_feed() {
                     should_render = true;
                 }
+                if self.age_live_runs_feed() {
+                    should_render = true;
+                }
                 let new_saved_time = current_session_last_saved_time();
                 if new_saved_time != self.current_session_last_saved_time {
                     self.current_session_last_saved_time = new_saved_time;
@@ -414,6 +429,11 @@ impl ZellijPlugin for State {
                     }
                     self.arm_refresh_timer();
                 }
+            },
+            Event::CustomMessage(message, payload)
+                if self.is_rail && message == VC_LIVE_RUNS_MESSAGE =>
+            {
+                should_render = self.apply_live_runs_payload(&payload);
             },
             Event::ModeUpdate(mode_info) => {
                 self.colors = Colors::new(mode_info.style.colors);
@@ -964,6 +984,8 @@ enum RailClickTarget {
         tab_position: usize,
     },
     Bucket(BucketKind),
+    /// Pinned `● Live N` row — opens the control-plane Live read surface.
+    LiveRuns,
 }
 
 fn rail_row_click_target(kind: &SessionRailRowKind) -> RailClickTarget {
@@ -1158,6 +1180,70 @@ fn settlement_read_coordinates() -> Option<FloatingPaneCoordinates> {
         Some(false),
         None,
     )
+}
+
+/// `● Live N` — the rail's one semantic row for running work, pinned to the
+/// top. Count comes from the control-plane feed; `…`/`~n` reuse the
+/// bucket-count honesty language when the feed is absent or degraded.
+fn format_live_runs_rail_entry(
+    count: Option<u64>,
+    truth_is_exact: bool,
+    mode: RailWidthMode,
+) -> String {
+    let count = format_bucket_count(count, truth_is_exact);
+    if mode == RailWidthMode::Dense {
+        format!(" ●{count}")
+    } else {
+        format!(" ● Live {count}")
+    }
+}
+
+/// Floating Live view: one compact card per running worker straight from the
+/// control plane, then a combined `tail -F` of their transcripts. The card
+/// pane is only an observer — closing it never touches a run, and a finished
+/// run drops out on the next open because its pid is gone.
+fn open_live_runs_read_surface() {
+    // POSIX sh only (dash-clean). meta.json is runtime-owned, pretty-printed
+    // one key per line — the sed extraction reads exactly that shape and
+    // degrades to `?` fields rather than guessing.
+    let script = r#"root="${VIBECRAFTED_CONTROL_PLANE:-${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/control_plane}"
+runs_dir="$root/runtime_runs"
+printf '\n  VIBECRAFTED · Live runs (control plane, read-only)\n\n'
+count=0
+set --
+if [ -d "$runs_dir" ]; then
+  for dir in "$runs_dir"/*/; do
+    meta="${dir}meta.json"
+    [ -f "$meta" ] || continue
+    pid=$(sed -n 's/.*"worker_pid": *\([0-9][0-9]*\).*/\1/p' "$meta" | head -1)
+    [ -n "$pid" ] || continue
+    kill -0 "$pid" 2>/dev/null || continue
+    run_id=$(sed -n 's/.*"run_id": *"\([^"]*\)".*/\1/p' "$meta" | head -1)
+    agent=$(sed -n 's/.*"agent": *"\([^"]*\)".*/\1/p' "$meta" | head -1)
+    skill=$(sed -n 's/.*"skill": *"\([^"]*\)".*/\1/p' "$meta" | head -1)
+    workdir=$(sed -n 's/.*"root": *"\([^"]*\)".*/\1/p' "$meta" | head -1)
+    count=$((count + 1))
+    printf '  ● %s\n' "${run_id:-$(basename "$dir")}"
+    printf '      agent %s · skill %s · repo %s · pid %s\n' \
+      "${agent:-?}" "${skill:-?}" "$(basename "${workdir:-?}")" "$pid"
+    [ -f "${dir}transcript.log" ] && set -- "$@" "${dir}transcript.log"
+  done
+fi
+if [ "$count" -eq 0 ]; then
+  printf '  no live runs — workers appear here while their pid is alive\n\n  [enter to close]\n'
+  read -r _ || true
+  exit 0
+fi
+if [ "$#" -eq 0 ]; then
+  printf '\n  no transcripts yet for %s run(s)\n\n  [enter to close]\n' "$count"
+  read -r _ || true
+  exit 0
+fi
+printf '\n  tail -F · %s transcript(s) — close this pane to stop watching\n' "$count"
+exec tail -n 8 -F "$@"
+"#;
+    let command = CommandToRun::new_with_args("sh", vec!["-c", script]);
+    let _ = open_command_pane_floating(command, settlement_read_coordinates(), BTreeMap::new());
 }
 
 /// Floating diagnostic: control plane + loctree reports. No new Zellij session.
@@ -1461,6 +1547,46 @@ impl State {
         self.mark_settlement_feed_degraded()
     }
 
+    /// Ingest a `vc.live-runs.v1` payload. The rail only needs the census
+    /// size; the read surface re-reads the control plane itself, so richer
+    /// per-run fields never have to survive this hop.
+    fn apply_live_runs_payload(&mut self, payload: &str) -> bool {
+        #[derive(Deserialize)]
+        struct LiveRunsFeed {
+            schema: String,
+            runs: Vec<serde_json::Value>,
+        }
+        let previous = (self.live_runs_count, self.live_runs_feed_degraded);
+        let parsed: Option<LiveRunsFeed> = serde_json::from_str(payload)
+            .ok()
+            .filter(|feed: &LiveRunsFeed| feed.schema == VC_LIVE_RUNS_MESSAGE);
+        let Some(feed) = parsed else {
+            // Same contract as the settlement feed: a corrupt payload turns
+            // the last accepted count into a lower bound, never a blank.
+            return self.mark_live_runs_feed_degraded();
+        };
+        self.live_runs_count = Some(feed.runs.len() as u64);
+        self.live_runs_feed_degraded = false;
+        self.live_runs_feed_age_ticks = Some(0);
+        (self.live_runs_count, self.live_runs_feed_degraded) != previous
+    }
+
+    fn mark_live_runs_feed_degraded(&mut self) -> bool {
+        self.live_runs_count.is_some()
+            && !std::mem::replace(&mut self.live_runs_feed_degraded, true)
+    }
+
+    fn age_live_runs_feed(&mut self) -> bool {
+        let Some(age_ticks) = self.live_runs_feed_age_ticks.as_mut() else {
+            return false;
+        };
+        *age_ticks = age_ticks.saturating_add(1);
+        if *age_ticks < LIVE_RUNS_FEED_STALE_AFTER_TICKS {
+            return false;
+        }
+        self.mark_live_runs_feed_degraded()
+    }
+
     fn reset_selected_index(&mut self) {
         self.sessions.reset_selected_index();
     }
@@ -1536,8 +1662,39 @@ impl State {
             },
         }
         print_text_with_coordinates(header, 0, 0, None, None);
+        self.rail_click_map.clear();
 
-        let list_rows = rows.saturating_sub(1);
+        // Pinned `● Live N` row, right under the header: the ONE semantic
+        // entry for running work. Its truth is the control-plane census —
+        // the physical viewer tabs below are only observers of those runs.
+        let mut chrome_rows = 1;
+        if rows > 1 {
+            let live_row = chrome_rows;
+            let fitted = fit_rail_line(
+                &format_live_runs_rail_entry(
+                    self.live_runs_count,
+                    !self.live_runs_feed_degraded,
+                    mode,
+                ),
+                cols,
+            );
+            let fitted_chars = fitted.chars().count();
+            let mut live_text = Text::new(fitted);
+            if fitted_chars > 1 {
+                // The dot carries the accent — same colour language as the
+                // active-tab dot and the f/x/n glyphs.
+                live_text = live_text.color_range(1, 1..2);
+            }
+            if self.rail_hover_row == Some(live_row) {
+                live_text = live_text.selected();
+            }
+            self.rail_click_map
+                .insert(live_row, RailClickTarget::LiveRuns);
+            print_text_with_coordinates(live_text, 0, live_row, None, None);
+            chrome_rows += 1;
+        }
+
+        let list_rows = rows.saturating_sub(chrome_rows);
         if list_rows == 0 {
             return;
         }
@@ -1554,9 +1711,8 @@ impl State {
                 .position(|row| row.kind == SessionRailRowKind::Session(selected_session_index))
         });
         let (start, end) = rail_range_to_render(entry_rows, rail_rows.len(), selected_row_index);
-        let mut row = 1;
+        let mut row = chrome_rows;
 
-        self.rail_click_map.clear();
         for rail_row in &rail_rows[start..end] {
             let fitted = fit_rail_line(&rail_row.text, cols);
             let fitted_chars = fitted.chars().count();
@@ -1803,6 +1959,12 @@ impl State {
                     RailClickTarget::Bucket(bucket) => {
                         // Same entry point as the `f`/`x`/`n` hotkeys.
                         self.jump_to_bucket(bucket);
+                        true
+                    },
+                    RailClickTarget::LiveRuns => {
+                        // One compact read-only view over the control plane;
+                        // never a per-run tab hunt through the rail.
+                        open_live_runs_read_surface();
                         true
                     },
                 }
@@ -3536,6 +3698,73 @@ mod rail_tests {
             session_rail_session_rows(&[first], RailWidthMode::Wide),
             session_rail_session_rows(&[next], RailWidthMode::Wide)
         );
+    }
+
+    #[test]
+    fn live_runs_rail_entry_reuses_the_bucket_honesty_language() {
+        assert_eq!(
+            format_live_runs_rail_entry(None, true, RailWidthMode::Wide),
+            " ● Live …"
+        );
+        assert_eq!(
+            format_live_runs_rail_entry(Some(4), true, RailWidthMode::Wide),
+            " ● Live 4"
+        );
+        assert_eq!(
+            format_live_runs_rail_entry(Some(4), false, RailWidthMode::Wide),
+            " ● Live ~4"
+        );
+        assert_eq!(
+            format_live_runs_rail_entry(Some(4), true, RailWidthMode::Dense),
+            " ●4"
+        );
+    }
+
+    #[test]
+    fn live_runs_feed_accepts_only_the_canonical_schema() {
+        let mut state = State {
+            is_rail: true,
+            ..Default::default()
+        };
+        assert!(state.update(Event::CustomMessage(
+            VC_LIVE_RUNS_MESSAGE.to_owned(),
+            r#"{"schema":"vc.live-runs.v1","runs":[{"run_id":"a"},{"run_id":"b"}]}"#.to_owned(),
+        )));
+        assert_eq!(state.live_runs_count, Some(2));
+        assert!(!state.live_runs_feed_degraded);
+
+        // Same census again: no repaint for an unchanged truth.
+        assert!(!state.update(Event::CustomMessage(
+            VC_LIVE_RUNS_MESSAGE.to_owned(),
+            r#"{"schema":"vc.live-runs.v1","runs":[{"run_id":"a"},{"run_id":"b"}]}"#.to_owned(),
+        )));
+
+        // A corrupt payload demotes the count to a lower bound, never a blank.
+        assert!(state.update(Event::CustomMessage(
+            VC_LIVE_RUNS_MESSAGE.to_owned(),
+            r#"{"schema":"someone-elses.schema","runs":[]}"#.to_owned(),
+        )));
+        assert_eq!(state.live_runs_count, Some(2));
+        assert!(state.live_runs_feed_degraded);
+    }
+
+    #[test]
+    fn live_runs_feed_degrades_after_missed_refresh_windows() {
+        let mut state = State {
+            is_rail: true,
+            ..Default::default()
+        };
+        assert!(state.apply_live_runs_payload(r#"{"schema":"vc.live-runs.v1","runs":[{}]}"#));
+        for _ in 1..LIVE_RUNS_FEED_STALE_AFTER_TICKS {
+            assert!(!state.age_live_runs_feed());
+            assert!(!state.live_runs_feed_degraded);
+        }
+        assert!(state.age_live_runs_feed());
+        assert!(state.live_runs_feed_degraded);
+
+        // A fresh payload restores exact truth.
+        assert!(state.apply_live_runs_payload(r#"{"schema":"vc.live-runs.v1","runs":[{}]}"#));
+        assert!(!state.live_runs_feed_degraded);
     }
 
     #[test]

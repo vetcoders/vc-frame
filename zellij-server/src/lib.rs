@@ -26,6 +26,7 @@ mod session_layout_metadata;
 mod terminal_bytes;
 mod thread_bus;
 mod ui;
+mod vc_live_runs;
 
 use crate::plugins::PluginThreadParams;
 use background_jobs::{BackgroundJob, background_jobs_main};
