@@ -227,7 +227,7 @@ keybinds {
         // Cmd+arrows are empty real estate in every terminal — no shell, no
         // TUI and no writer layer ever sees them — so the switcher works in
         // EVERY mode, LOCK included. On macOS+Alacritty the shipped preset
-        // translates Cmd+arrows/Cmd+E into kitty CSI-u sequences with the
+        // translates Cmd+arrows/Cmd+K/Cmd+E into kitty CSI-u sequences with the
         // super bit; the client keyboard parser decodes them natively.
         bind "Super Left" { GoToPreviousTab; }
         bind "Super Right" { GoToNextTab; }
@@ -241,6 +241,14 @@ keybinds {
             MessagePlugin "session-rail" {
                 name "vc_rail_nav"
                 payload "down"
+            };
+        }
+        // Quick cmd reuses the compact-bar click path: the active bar owns
+        // the runner, fixed geometry and pane title. No parallel shell
+        // launcher lives in the keymap.
+        bind "Super k" {
+            MessagePlugin "compact-bar" {
+                name "vc_quick_cmd"
             };
         }
         // direct session-rail hop, deliberately alive in locked mode too:
