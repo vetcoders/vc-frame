@@ -2843,7 +2843,12 @@ impl State {
 
     fn update_session_infos(&mut self, session_infos: Vec<SessionInfo>) -> bool {
         let previous_rail_projection = self.is_rail.then(|| {
-            session_rail_session_rows(&self.sessions.session_ui_infos, RailWidthMode::Wide)
+            session_rail_rows_with_truth(
+                &self.sessions.session_ui_infos,
+                self.settlement_history.as_ref(),
+                self.settlement_feed_degraded,
+                RailWidthMode::Wide,
+            )
         });
         let session_ui_infos: Vec<SessionUiInfo> = session_infos
             .iter()
@@ -2886,7 +2891,12 @@ impl State {
             .set_sessions(session_ui_infos, forbidden_sessions);
         previous_rail_projection.is_none_or(|previous| {
             previous
-                != session_rail_session_rows(&self.sessions.session_ui_infos, RailWidthMode::Wide)
+                != session_rail_rows_with_truth(
+                    &self.sessions.session_ui_infos,
+                    self.settlement_history.as_ref(),
+                    self.settlement_feed_degraded,
+                    RailWidthMode::Wide,
+                )
         })
     }
     fn main_menu_size(&self, rows: usize, cols: usize) -> (usize, usize, usize, usize) {
@@ -3525,6 +3535,29 @@ mod rail_tests {
         assert_ne!(
             session_rail_session_rows(&[first], RailWidthMode::Wide),
             session_rail_session_rows(&[next], RailWidthMode::Wide)
+        );
+    }
+
+    #[test]
+    fn bucket_click_ownership_is_part_of_the_stable_rail_projection() {
+        let working = session("vc-frame", true);
+        let before = session_rail_rows_with_truth(
+            std::slice::from_ref(&working),
+            None,
+            false,
+            RailWidthMode::Wide,
+        );
+        let after = session_rail_rows_with_truth(
+            &[working, bucket_session("Needs attention", 0)],
+            None,
+            false,
+            RailWidthMode::Wide,
+        );
+
+        assert_eq!(before.last().unwrap().text, after.last().unwrap().text);
+        assert_ne!(
+            before, after,
+            "bucket session_index changes must refresh the click map"
         );
     }
 
