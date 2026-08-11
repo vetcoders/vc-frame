@@ -1685,7 +1685,7 @@ pub fn mirrored_sessions() {
                 let mut step_is_complete = false;
                 if remote_terminal.cursor_position_is(63, 2)
                     && remote_terminal.snapshot_contains("┐┌")
-                    && remote_terminal.snapshot_contains("𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍.")
+                    && remote_terminal.top_bar_appears()
                 {
                     // cursor is back in the first tab
                     step_is_complete = true;
@@ -1699,7 +1699,7 @@ pub fn mirrored_sessions() {
                 let mut step_is_complete = false;
                 if remote_terminal.cursor_position_is(63, 2)
                     && remote_terminal.snapshot_contains("┐┌")
-                    && remote_terminal.snapshot_contains("𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍.")
+                    && remote_terminal.top_bar_appears()
                 {
                     // cursor is back in the first tab
                     step_is_complete = true;

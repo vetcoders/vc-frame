@@ -508,6 +508,12 @@ impl RemoteTerminal {
         let snap = self.last_snapshot.lock().unwrap();
         snap.contains("LOCK") && snap.contains("PANE") && snap.contains("SESSION")
     }
+    pub fn top_bar_appears(&self) -> bool {
+        let snap = self.last_snapshot.lock().unwrap();
+        snap.lines()
+            .next()
+            .is_some_and(|line| line.contains("𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍."))
+    }
     pub fn ctrl_plus_appears(&self) -> bool {
         let snap = self.last_snapshot.lock().unwrap().clone();
         // Dense chips may drop the superkey prefix; treat mode chrome as enough.
