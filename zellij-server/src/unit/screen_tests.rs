@@ -379,6 +379,57 @@ fn status_bar_target_transition_hides_only_the_client_that_switched_tabs() {
 }
 
 #[test]
+fn last_client_detach_parks_the_chrome_it_leaves_behind() {
+    let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
+    let (to_plugin, _plugin_receiver): ChannelWithContext<PluginInstruction> =
+        channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    new_tab_with_status_bar_and_worker(&mut screen, 0, 1, 42, 99);
+    screen.active_tab_ids = BTreeMap::from([(1, 0)]);
+
+    let (active, hidden) = screen.status_bar_plugin_target_transition();
+    assert_eq!(active, vec![(42, 1)]);
+    assert!(hidden.is_empty());
+
+    // The last client detaches: Screen::remove_client drops it from
+    // active_tab_ids, so both target sets collapse to empty.
+    screen.active_tab_ids.remove(&1);
+    let (active_after_detach, hidden_after_detach) = screen.status_bar_plugin_target_transition();
+
+    assert!(
+        active_after_detach.is_empty(),
+        "a server with no clients has no visible chrome"
+    );
+    assert_eq!(
+        hidden_after_detach,
+        vec![(42, 1)],
+        "chrome that was visible must be told it no longer is, or it keeps \
+         refreshing the session list once a second on a server nobody watches"
+    );
+
+    let updates = session_update_events(
+        vec![fleet_session("working", &[(false, false, false)])],
+        vec![],
+        active_after_detach,
+        hidden_after_detach,
+    );
+    assert!(matches!(
+        updates.first(),
+        Some((
+            Some(42),
+            Some(1),
+            Event::CustomMessage(message, payload),
+        )) if message == VC_STATUS_BAR_VISIBILITY_MESSAGE && payload == "false"
+    ));
+
+    let (_, hidden_while_still_detached) = screen.status_bar_plugin_target_transition();
+    assert!(
+        hidden_while_still_detached.is_empty(),
+        "parking is a transition, not a per-broadcast message"
+    );
+}
+
+#[test]
 fn projector_tab_keeps_shared_status_bar_runtime_active() {
     let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
     let (to_plugin, _plugin_receiver): ChannelWithContext<PluginInstruction> =

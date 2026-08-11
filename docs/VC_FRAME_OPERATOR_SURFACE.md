@@ -56,7 +56,12 @@ once from the session snapshot it already owns and sends a small scalar message
 only to the status-bar plugin/client pairs viewing active tabs. When a client
 switches tabs, the server sends an exact plugin/client deactivation signal to
 the status bar it left; sampling does not rely on the tab-global `Visible`
-event, which cannot distinguish multiple clients in one session. Per-tab
+event, which cannot distinguish multiple clients in one session. A client that
+detaches is covered by the same transition: the chrome it had visible is parked
+as the client leaves, so a server with nobody attached holds no chrome that
+keeps polling for cross-session state. Attaching re-activates that chrome
+through the ordinary active-target path, and the session list it shows is
+rebuilt on the spot. Per-tab
 status bars never subscribe to the full cross-session `SessionUpdate`, and
 unrelated `CustomMessage` consumers are not awakened. Host resource sampling
 also runs only in active status-bar instances, and clipboard timers cannot
