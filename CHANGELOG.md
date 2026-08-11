@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 ## [Unreleased]
 
+* feat(input): `Cmd+K` / `Super+k` opens the existing `❯_ Quick cmd` mini-console in every mode including LOCK; the keybind messages the active compact-bar so keyboard and click share one runner, geometry and pane-title contract, with matching Alacritty CSI-u translation and help
+
 ## [0.47.3] - 2026-08-06
 
 * feat(rail): the session rail reads its allocated width and picks one of three faces — Wide (`cols >= 24`, today's full render), Normal (`14 <= cols < 24`, header drops the current-session anchor, names truncate, ◉/○ stay) and Dense (`cols < 14`, iconic strip: ordinal + state dot rows, `S N` badge header, no shredded prose); sharp thresholds, row variants built at row level, click-map stays full in every face

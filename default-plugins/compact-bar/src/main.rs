@@ -30,6 +30,7 @@ const CONFIG_BRAND_TEXT_SHORT: &str = "brand_text_short";
 /// 9–12 via layout config.
 const CONFIG_LEFT_INSET: &str = "left_inset";
 const MSG_TOGGLE_TOOLTIP: &str = "toggle_tooltip";
+const MSG_OPEN_QUICK_CMD: &str = "vc_quick_cmd";
 // the status-bar shows up in the pane manifest as "vc-frame:status-bar" when
 // loaded by url and as "status-bar" when loaded through its config alias
 const STATUS_BAR_PLUGIN_URLS: [&str; 3] =
@@ -192,6 +193,10 @@ impl ZellijPlugin for State {
     fn pipe(&mut self, message: PipeMessage) -> bool {
         if self.is_tooltip && message.is_private {
             self.handle_tooltip_pipe(message);
+        } else if self.quick_cmd_message_targets_active_bar(&message) {
+            // Keep keyboard and mouse on one runtime path: both end in the
+            // same runner, geometry and pane-title contract.
+            open_quick_cmd();
         } else if message.name == MSG_TOGGLE_TOOLTIP
             && message.is_private
             && self.toggle_tooltip_key.is_some()
@@ -232,6 +237,13 @@ fn dimensions_are_transient(rows: usize, cols: usize) -> bool {
 }
 
 impl State {
+    fn quick_cmd_message_targets_active_bar(&self, message: &PipeMessage) -> bool {
+        message.name == MSG_OPEN_QUICK_CMD
+            && message.is_private
+            && message.source == PipeSource::Keybind
+            && self.own_tab_index == Some(self.active_tab_idx.saturating_sub(1))
+    }
+
     fn initialize_configuration(&mut self, configuration: BTreeMap<String, String>) {
         self.config = configuration.clone();
         self.is_tooltip = self.parse_bool_config(CONFIG_IS_TOOLTIP, false);
@@ -833,5 +845,24 @@ mod transient_dimension_guard_tests {
         assert!(!dimensions_are_transient(1, 4));
         assert!(!dimensions_are_transient(1, 8));
         assert!(!dimensions_are_transient(10, 40));
+    }
+
+    #[test]
+    fn quick_cmd_keybind_targets_only_the_active_bar() {
+        let mut state = State {
+            active_tab_idx: 2,
+            own_tab_index: Some(1),
+            ..Default::default()
+        };
+        let message = PipeMessage::new(PipeSource::Keybind, MSG_OPEN_QUICK_CMD, &None, &None, true);
+
+        assert!(state.quick_cmd_message_targets_active_bar(&message));
+
+        state.own_tab_index = Some(0);
+        assert!(!state.quick_cmd_message_targets_active_bar(&message));
+
+        let public_message =
+            PipeMessage::new(PipeSource::Keybind, MSG_OPEN_QUICK_CMD, &None, &None, false);
+        assert!(!state.quick_cmd_message_targets_active_bar(&public_message));
     }
 }

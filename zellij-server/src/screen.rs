@@ -5253,7 +5253,12 @@ impl Screen {
         // when this job decides to render, it sends back the ScreenInstruction::RenderToClients
         // message, triggering our render_to_clients method which does the actual rendering
 
-        if self.has_render_recipients() {
+        // A plugin returning `false` from update/pipe produces an empty asset
+        // batch. It may still carry CLI pipe acknowledgement work, but it has
+        // no visual change and must not schedule a full-screen repaint.
+        let has_visual_change =
+            plugin_render_assets_have_visual_change(plugin_render_assets.as_deref());
+        if has_visual_change && self.has_render_recipients() {
             let _ = self
                 .bus
                 .senders
@@ -15945,6 +15950,12 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
     Ok(())
 }
 
+fn plugin_render_assets_have_visual_change(
+    plugin_render_assets: Option<&[PluginRenderAsset]>,
+) -> bool {
+    plugin_render_assets.is_none_or(|render_assets| !render_assets.is_empty())
+}
+
 #[cfg(test)]
 mod dump_screen_error_tests {
     use super::dump_screen_error_message;
@@ -15973,6 +15984,21 @@ mod dump_screen_error_tests {
         );
         assert!(message.contains("failed to write to file"), "{message}");
         assert!(message.contains("destination is a directory"), "{message}");
+    }
+}
+
+#[cfg(test)]
+mod plugin_render_scheduling_tests {
+    use super::{PluginRenderAsset, plugin_render_assets_have_visual_change};
+
+    #[test]
+    fn empty_plugin_asset_batches_have_no_visual_change() {
+        let empty: Vec<PluginRenderAsset> = Vec::new();
+        let rendered = vec![PluginRenderAsset::default()];
+
+        assert!(!plugin_render_assets_have_visual_change(Some(&empty)));
+        assert!(plugin_render_assets_have_visual_change(Some(&rendered)));
+        assert!(plugin_render_assets_have_visual_change(None));
     }
 }
 
