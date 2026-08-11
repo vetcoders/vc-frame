@@ -77,6 +77,7 @@ use zellij_utils::{
         plugins::PluginAliases,
     },
     ipc::{ClientAttributes, ExitReason, ServerToClientMsg},
+    sessions::SocketOwnership,
     shared::{default_palette, web_server_base_url},
 };
 
@@ -807,7 +808,33 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
             let to_server = to_server.clone();
             let socket_path = socket_path.clone();
             move || {
-                drop(std::fs::remove_file(&socket_path));
+                // Never take a socket away from a server that is still alive.
+                // Unlinking and re-binding here leaves the previous process
+                // running but unreachable: an orphan with zero clients that no
+                // reaper ever collects, burning CPU until reboot. A stale file
+                // left by a crashed server stays legal to clean up.
+                match zellij_utils::sessions::probe_socket_ownership(&socket_path) {
+                    SocketOwnership::Vacant => {
+                        drop(std::fs::remove_file(&socket_path));
+                    },
+                    SocketOwnership::Live => {
+                        log::error!(
+                            "Refusing to start: another server is alive on {}. \
+                             Attach to the existing session instead.",
+                            socket_path.display()
+                        );
+                        std::process::exit(1);
+                    },
+                    SocketOwnership::Unknown(reason) => {
+                        log::error!(
+                            "Refusing to start: cannot determine whether a server is alive on {} \
+                             ({}). Not evicting a possibly-live session.",
+                            socket_path.display(),
+                            reason
+                        );
+                        std::process::exit(1);
+                    },
+                }
                 let listener = ipc_bind(&socket_path).unwrap();
                 // set the sticky bit to avoid the socket file being potentially cleaned up
                 // https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html states that for XDG_RUNTIME_DIR:
@@ -951,6 +978,28 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
         err_ctx.add_call(ContextType::IPCServer((&instruction).into()));
         match instruction {
             ServerInstruction::FirstClientConnected(cli_assets, is_web_client, client_id) => {
+                if session_data.read().unwrap().is_some() {
+                    // A client that lost the create-session race spawned its
+                    // own server, that server refused to steal this socket and
+                    // exited, and the client landed here instead. Initializing
+                    // again would replace a live session's state wholesale, so
+                    // refuse: the caller retries and finds the session through
+                    // the ordinary attach path.
+                    log::error!(
+                        "Rejecting a new-session request for client {}: this server already runs a session",
+                        client_id
+                    );
+                    let _ = os_input.send_to_client(
+                        client_id,
+                        ServerToClientMsg::Exit {
+                            exit_reason: ExitReason::Error(
+                                "Session already exists on this server".to_owned(),
+                            ),
+                        },
+                    );
+                    remove_client!(client_id, os_input, session_state, session_data);
+                    continue;
+                }
                 let (config, layout) = cli_assets.load_config_and_layout();
                 let layout_is_welcome_screen = cli_assets.layout
                     == Some(LayoutInfo::BuiltIn("welcome".to_owned()))
