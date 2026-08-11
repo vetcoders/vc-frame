@@ -92,6 +92,12 @@ server that already runs a session also rejects a second new-session request
 rather than re-initializing over live state; the caller sees the refusal and
 can attach to the existing session instead.
 
+The probe is a Unix-only mechanism, because only there is the session path a
+socket that a second server can unlink and rebind. Off Unix the path is a
+marker file and the listener is a named pipe whose name the OS refuses to hand
+out twice, so the bind itself already decides ownership — the marker is written
+only after it succeeds.
+
 ## Key Contract
 
 The shipped defaults promise one navigation language — one modifier per
