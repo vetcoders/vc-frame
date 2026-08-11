@@ -356,14 +356,23 @@ fn check_ipc_pipe_length(ipc_pipe: &Path) {
 
 /// Spawn the Zellij server process.
 ///
-/// On Unix the server daemonizes (double-fork) inside start_server(), so
-/// the intermediate child exits immediately and `cmd.status()` returns.
+/// On Unix the server normally daemonizes (double-fork) inside start_server(),
+/// so the intermediate child exits immediately and `cmd.status()` returns.
+/// Isolated supervisors can request a directly-owned foreground server; in
+/// that mode the child handle is deliberately detached without waiting.
 #[cfg(not(windows))]
 pub fn spawn_server(socket_path: &Path, debug: bool) -> io::Result<()> {
     let mut cmd = Command::new(current_exe()?);
     cmd.arg("--server").arg(socket_path);
     if debug {
         cmd.arg("--debug");
+    }
+    if zellij_utils::envs::server_foreground_requested() {
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        cmd.spawn()?;
+        return Ok(());
     }
     let status = cmd.status()?;
     if status.success() {
