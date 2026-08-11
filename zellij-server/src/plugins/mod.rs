@@ -19,22 +19,27 @@ use wasmi::Engine;
 
 use crate::panes::PaneId;
 use crate::route::NotificationEnd;
-use crate::screen::ScreenInstruction;
+use crate::screen::{DurableTabLayoutGeneration, LayoutPreparationCleanup, ScreenInstruction};
 use crate::session_layout_metadata::SessionLayoutMetadata;
-use crate::{pty::PtyInstruction, thread_bus::Bus, ClientId, ServerInstruction};
+use crate::{
+    ClientId, ServerInstruction,
+    pty::{LayoutTransactionId, PtyInstruction},
+    thread_bus::Bus,
+};
 use zellij_utils::data::PaneRenderReport;
 use zellij_utils::input::layout::TabLayoutInfo;
 
 pub use wasm_bridge::PluginRenderAsset;
-use wasm_bridge::WasmBridge;
+use wasm_bridge::{GetOrLoadPluginsParams, LayoutPluginReservationRequest, WasmBridge};
 
 use zellij_utils::{
+    channels,
     data::{
         ClientInfo, CommandOrPlugin, Event, EventType, FloatingPaneCoordinates, InputMode,
         LayoutInfo, LayoutWithError, MessageToPlugin, PermissionStatus, PermissionType,
         PipeMessage, PipeSource, WebServerStatus,
     },
-    errors::{prelude::*, ContextType, PluginContext},
+    errors::{ContextType, PluginContext, prelude::*},
     input::{
         actions::Action,
         command::TerminalAction,
@@ -47,6 +52,56 @@ use zellij_utils::{
 };
 
 pub type PluginId = u32;
+
+/// Explicitly separates a pane's layout identity from the WASM runtime that
+/// supplies its surface. Ordinary plugin panes use the same id for both. A
+/// session-manager projector owns a distinct `pane_id` and forwards render,
+/// input, and resize work to `runtime_plugin_id`.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct PluginPaneId {
+    pub pane_id: PluginId,
+    pub runtime_plugin_id: PluginId,
+}
+
+impl PluginPaneId {
+    pub fn direct(plugin_id: PluginId) -> Self {
+        Self {
+            pane_id: plugin_id,
+            runtime_plugin_id: plugin_id,
+        }
+    }
+
+    pub fn projector(pane_id: PluginId, runtime_plugin_id: PluginId) -> Self {
+        Self {
+            pane_id,
+            runtime_plugin_id,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LayoutPluginResolution {
+    Activate,
+    Release { reason: String },
+    Compensate { reason: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LayoutPluginReceipt {
+    Activated {
+        plugin_ids: Vec<PluginId>,
+    },
+    Released {
+        plugin_ids: Vec<PluginId>,
+    },
+    Compensated {
+        plugin_ids: Vec<PluginId>,
+    },
+    ActivationRolledBack {
+        plugin_ids: Vec<PluginId>,
+        message: String,
+    },
+}
 
 #[derive(Clone, Debug)]
 pub struct DumpSessionLayoutResponse {
@@ -94,21 +149,48 @@ pub enum PluginInstruction {
         Option<TiledPaneLayout>,
         Vec<FloatingPaneLayout>,
         usize,                        // tab_id
+        LayoutTransactionId,          // allocated by Screen before any layout resource
         Option<Vec<CommandOrPlugin>>, // initial_panes
         bool,                         // block_on_first_terminal
         bool,                         // should change focus to new tab
         (ClientId, bool),             // bool -> is_web_client
         Option<NotificationEnd>,      // completion signal
+        Option<Box<DurableTabLayoutGeneration>>,
     ),
     OverrideLayout(
         Option<PathBuf>,        // cwd
         Option<TerminalAction>, // default_shell
         Vec<TabLayoutInfo>,     // layouts for each tab
+        LayoutTransactionId,    // allocated by Screen before any layout resource
         bool,                   // retain_existing_terminal_panes
         bool,                   // retain_existing_plugin_panes
         ClientId,
         Option<NotificationEnd>,
+        Option<Box<DurableTabLayoutGeneration>>,
     ),
+    ResolveLayoutPlugins {
+        transaction_id: LayoutTransactionId,
+        resolution: LayoutPluginResolution,
+        expected_plugin_ids: Vec<PluginId>,
+        ack: channels::Sender<std::result::Result<LayoutPluginReceipt, String>>,
+    },
+    ReleaseLayoutPluginsByTransaction {
+        transaction_id: LayoutTransactionId,
+        reason: String,
+        ack: channels::Sender<std::result::Result<LayoutPluginReceipt, String>>,
+    },
+    CleanupLayoutPlugins {
+        transaction_id: LayoutTransactionId,
+        plugin_ids: Vec<PluginId>,
+        ack: channels::Sender<std::result::Result<Vec<PluginId>, String>>,
+    },
+    LayoutPluginActivationFailed {
+        transaction_id: LayoutTransactionId,
+        plugin_ids: Vec<PluginId>,
+        message: String,
+    },
+    #[cfg(test)]
+    RejectNextLayoutPluginReleaseForTest(LayoutTransactionId),
     ApplyCachedEvents {
         plugin_ids: Vec<PluginId>,
         done_receiving_permissions: bool,
@@ -144,7 +226,11 @@ pub enum PluginInstruction {
         plugin_id: PluginId,
         response_channel: crossbeam::channel::Sender<DumpSessionLayoutResponse>,
     },
-    LogLayoutToHd(SessionLayoutMetadata),
+    LogLayoutToHd {
+        session_name: String,
+        generation: u64,
+        session_layout_metadata: SessionLayoutMetadata,
+    },
     CliPipe {
         pipe_id: String,
         name: String,
@@ -238,6 +324,12 @@ impl From<&PluginInstruction> for PluginContext {
             PluginInstruction::RemoveClient(_) => PluginContext::RemoveClient,
             PluginInstruction::NewTab(..) => PluginContext::NewTab,
             PluginInstruction::OverrideLayout(..) => PluginContext::OverrideLayout,
+            PluginInstruction::ResolveLayoutPlugins { .. }
+            | PluginInstruction::ReleaseLayoutPluginsByTransaction { .. }
+            | PluginInstruction::CleanupLayoutPlugins { .. }
+            | PluginInstruction::LayoutPluginActivationFailed { .. } => PluginContext::Update,
+            #[cfg(test)]
+            PluginInstruction::RejectNextLayoutPluginReleaseForTest(..) => PluginContext::Update,
             PluginInstruction::ApplyCachedEvents { .. } => PluginContext::ApplyCachedEvents,
             PluginInstruction::ApplyCachedWorkerMessages(..) => {
                 PluginContext::ApplyCachedWorkerMessages
@@ -254,7 +346,7 @@ impl From<&PluginInstruction> for PluginContext {
             },
             PluginInstruction::DumpLayout(..) => PluginContext::DumpLayout,
             PluginInstruction::ListClientsMetadata(..) => PluginContext::ListClientsMetadata,
-            PluginInstruction::LogLayoutToHd(..) => PluginContext::LogLayoutToHd,
+            PluginInstruction::LogLayoutToHd { .. } => PluginContext::LogLayoutToHd,
             PluginInstruction::CliPipe { .. } => PluginContext::CliPipe,
             PluginInstruction::CachePluginEvents { .. } => PluginContext::CachePluginEvents,
             PluginInstruction::MessageFromPlugin { .. } => PluginContext::MessageFromPlugin,
@@ -288,28 +380,44 @@ impl From<&PluginInstruction> for PluginContext {
     }
 }
 
-pub(crate) fn plugin_thread_main(
-    bus: Bus<PluginInstruction>,
-    engine: Engine,
-    data_dir: PathBuf,
-    mut layout: Box<Layout>,
-    layout_dir: Option<PathBuf>,
-    available_layouts: Vec<LayoutInfo>,
-    available_layout_errors: Vec<LayoutWithError>,
-    path_to_default_shell: PathBuf,
-    zellij_cwd: PathBuf,
-    session_env_vars: std::collections::BTreeMap<String, String>,
-    default_shell: Option<TerminalAction>,
-    plugin_aliases: PluginAliases,
-    default_mode: InputMode,
-    default_keybinds: Keybinds,
-    background_plugins: HashSet<RunPluginOrAlias>,
-    // the client id that started the session,
-    // we need it here because the thread's own list of connected clients might not yet be updated
-    // on session start when we need to load the background plugins, and so we must have an
-    // explicit client_id that has started the session
-    initiating_client_id: ClientId,
-) -> Result<()> {
+pub(crate) struct PluginThreadParams {
+    pub bus: Bus<PluginInstruction>,
+    pub engine: Engine,
+    pub data_dir: PathBuf,
+    pub layout: Box<Layout>,
+    pub layout_dir: Option<PathBuf>,
+    pub available_layouts: Vec<LayoutInfo>,
+    pub available_layout_errors: Vec<LayoutWithError>,
+    pub path_to_default_shell: PathBuf,
+    pub zellij_cwd: PathBuf,
+    pub session_env_vars: std::collections::BTreeMap<String, String>,
+    pub default_shell: Option<TerminalAction>,
+    pub plugin_aliases: PluginAliases,
+    pub default_mode: InputMode,
+    pub default_keybinds: Keybinds,
+    pub background_plugins: Vec<RunPluginOrAlias>,
+    pub initiating_client_id: ClientId,
+}
+
+pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
+    let PluginThreadParams {
+        bus,
+        engine,
+        data_dir,
+        mut layout,
+        layout_dir,
+        available_layouts,
+        available_layout_errors,
+        path_to_default_shell,
+        zellij_cwd,
+        session_env_vars,
+        default_shell,
+        plugin_aliases,
+        default_mode,
+        default_keybinds,
+        background_plugins,
+        initiating_client_id,
+    } = params;
     info!("Wasm main thread starts");
     let plugin_dir = data_dir.join("plugins/");
     let plugin_global_data_dir = plugin_dir.join("data");
@@ -319,12 +427,12 @@ pub(crate) fn plugin_thread_main(
     // https://tokio.rs/tokio/topics/shutdown#waiting-for-things-to-finish-shutting-down
     let (shutdown_send, mut shutdown_receive) = tokio::sync::mpsc::channel::<()>(1);
 
-    let mut wasm_bridge = WasmBridge::new(
-        bus.senders.clone(),
+    let mut wasm_bridge = WasmBridge::new(wasm_bridge::WasmBridgeOptions {
+        senders: bus.senders.clone(),
         engine,
         plugin_dir,
         path_to_default_shell,
-        zellij_cwd.clone(),
+        zellij_cwd: zellij_cwd.clone(),
         session_env_vars,
         default_shell,
         layout_dir,
@@ -332,7 +440,7 @@ pub(crate) fn plugin_thread_main(
         available_layout_errors,
         default_mode,
         default_keybinds,
-    );
+    });
 
     for run_plugin_or_alias in background_plugins {
         load_background_plugin(
@@ -345,7 +453,13 @@ pub(crate) fn plugin_thread_main(
     }
 
     loop {
-        let (event, mut err_ctx) = bus.recv().expect("failed to receive event on channel");
+        let (event, mut err_ctx) = match bus.recv() {
+            Ok(event) => event,
+            Err(error) => {
+                log::error!("Plugin instruction channel disconnected: {error}");
+                break;
+            },
+        };
         err_ctx.add_call(ContextType::Plugin((&event).into()));
         match event {
             PluginInstruction::Load(
@@ -516,11 +630,13 @@ pub(crate) fn plugin_thread_main(
                 mut tab_layout,
                 mut floating_panes_layout,
                 tab_id,
+                transaction_id,
                 initial_panes,
                 block_on_first_terminal,
                 should_change_focus_to_new_tab,
                 (client_id, is_web_client),
                 completion_tx,
+                layout_generation,
             ) => {
                 // prefer connected clients so as to avoid opening plugins in the background for
                 // CLI clients unless no-one else is connected
@@ -532,25 +648,22 @@ pub(crate) fn plugin_thread_main(
                     client_id
                 };
 
-                let mut plugin_ids: HashMap<RunPluginOrAlias, Vec<PluginId>> = HashMap::new();
                 tab_layout = tab_layout.or_else(|| Some(layout.new_tab().0));
 
                 // Match initial_panes plugins to empty slots in the layout
-                if let Some(ref initial_panes_vec) = initial_panes {
-                    if let Some(ref mut tiled_layout) = tab_layout {
-                        for initial_pane in initial_panes_vec.iter() {
-                            if let CommandOrPlugin::Plugin(run_plugin_or_alias) = initial_pane {
-                                if !tiled_layout.replace_next_empty_slot_with_run(Run::Plugin(
-                                    run_plugin_or_alias.clone(),
-                                )) {
-                                    log::warn!(
-                                        "More initial_panes provided than empty slots available"
-                                    );
-                                    break;
-                                }
-                            }
-                            // Skip CommandOrPlugin::Command entries (handled by pty thread)
+                if let Some(ref initial_panes_vec) = initial_panes
+                    && let Some(ref mut tiled_layout) = tab_layout
+                {
+                    for initial_pane in initial_panes_vec.iter() {
+                        if let CommandOrPlugin::Plugin(run_plugin_or_alias) = initial_pane
+                            && !tiled_layout.replace_next_empty_slot_with_run(Run::Plugin(
+                                run_plugin_or_alias.clone(),
+                            ))
+                        {
+                            log::warn!("More initial_panes provided than empty slots available");
+                            break;
                         }
+                        // Skip CommandOrPlugin::Command entries (handled by pty thread)
                     }
                 }
                 if let Some(t) = tab_layout.as_mut() {
@@ -582,55 +695,194 @@ pub(crate) fn plugin_thread_main(
                 let mut all_run_instructions = extracted_run_instructions;
                 all_run_instructions.append(&mut extracted_floating_plugins);
 
+                let mut plugin_reservation_error = None;
+                let mut planned_plugins = vec![];
                 for run_instruction in all_run_instructions {
                     if let Some(Run::Plugin(run_plugin_or_alias)) = run_instruction {
-                        let run_plugin = run_plugin_or_alias.get_run_plugin();
-                        let cwd = run_plugin_or_alias
+                        let Some(run_plugin) = run_plugin_or_alias.get_run_plugin() else {
+                            plugin_reservation_error = Some(anyhow!(
+                                "failed to resolve layout plugin {:?} for tab {}",
+                                run_plugin_or_alias,
+                                tab_id
+                            ));
+                            break;
+                        };
+                        let plugin_cwd = run_plugin_or_alias
                             .get_initial_cwd()
                             .or_else(|| cwd.clone());
-                        let skip_cache = false;
-                        match wasm_bridge.load_plugin(
-                            &run_plugin,
-                            Some(tab_id),
-                            size,
-                            cwd,
-                            skip_cache,
-                            Some(client_id),
-                        ) {
-                            Ok((plugin_id, _client_id)) => {
-                                plugin_ids
-                                    .entry(run_plugin_or_alias.clone())
-                                    .or_default()
-                                    .push(plugin_id);
+                        planned_plugins.push((
+                            run_plugin_or_alias,
+                            LayoutPluginReservationRequest {
+                                run_plugin,
+                                tab_index: Some(tab_id),
+                                size,
+                                cwd: plugin_cwd,
+                                skip_cache: false,
+                                client_id,
                             },
-                            Err(e) => {
-                                log::error!("Failed to load plugin: {}", e);
-                            },
-                        }
+                        ));
                     }
                 }
-                drop(bus.senders.send_to_pty(PtyInstruction::NewTab(
+                if let Some(error) = plugin_reservation_error {
+                    reject_layout_preparation(
+                        &bus,
+                        transaction_id,
+                        Some(tab_id),
+                        completion_tx,
+                        layout_generation,
+                        error.to_string(),
+                        LayoutPreparationCleanup::Resolved,
+                    );
+                    continue;
+                }
+                let reservation_requests = planned_plugins
+                    .iter()
+                    .map(|(_, request)| request.clone())
+                    .collect();
+                let reserved_plugin_ids = match wasm_bridge
+                    .reserve_layout_plugins(transaction_id, reservation_requests)
+                {
+                    Ok(plugin_ids) => plugin_ids,
+                    Err(message) => {
+                        reject_layout_preparation(
+                            &bus,
+                            transaction_id,
+                            Some(tab_id),
+                            completion_tx,
+                            layout_generation,
+                            message,
+                            LayoutPreparationCleanup::Resolved,
+                        );
+                        continue;
+                    },
+                };
+                if let Err(message) =
+                    register_layout_plugin_projectors(&wasm_bridge, &bus, transaction_id)
+                {
+                    let cleanup = match wasm_bridge
+                        .release_layout_plugins_by_transaction(transaction_id, message.clone())
+                    {
+                        Ok(_) => LayoutPreparationCleanup::Resolved,
+                        Err(_) => LayoutPreparationCleanup::ReleasePluginReservation {
+                            plugin_ids: reserved_plugin_ids.clone(),
+                            pty_cleanup_succeeded: true,
+                        },
+                    };
+                    reject_layout_preparation(
+                        &bus,
+                        transaction_id,
+                        Some(tab_id),
+                        completion_tx,
+                        layout_generation,
+                        message,
+                        cleanup,
+                    );
+                    continue;
+                }
+                let mut plugin_ids: HashMap<RunPluginOrAlias, Vec<PluginId>> = HashMap::new();
+                for ((run_plugin_or_alias, _), plugin_id) in
+                    planned_plugins.into_iter().zip(reserved_plugin_ids)
+                {
+                    plugin_ids
+                        .entry(run_plugin_or_alias)
+                        .or_default()
+                        .push(plugin_id);
+                }
+                let plugin_ids_for_handoff_failure = plugin_ids.clone();
+                let instruction = PtyInstruction::NewTab(
                     cwd,
                     terminal_action,
                     Box::new(tab_layout),
                     floating_panes_layout,
                     tab_id,
+                    transaction_id,
                     plugin_ids,
                     initial_panes,
                     block_on_first_terminal,
                     should_change_focus_to_new_tab,
                     (client_id, is_web_client),
                     completion_tx,
-                )));
+                    layout_generation,
+                );
+                if let Err(send_failure) = bus.senders.send_to_pty_recover(instruction) {
+                    let (instruction, handoff_error) = send_failure.into_parts();
+                    let (tab_id, transaction_id, plugin_ids, mut completion_tx, layout_generation) =
+                        match instruction {
+                            PtyInstruction::NewTab(
+                                _,
+                                _,
+                                _,
+                                _,
+                                tab_id,
+                                transaction_id,
+                                plugin_ids,
+                                _,
+                                _,
+                                _,
+                                _,
+                                completion_tx,
+                                layout_generation,
+                            ) => (
+                                tab_id,
+                                transaction_id,
+                                plugin_ids,
+                                completion_tx,
+                                layout_generation,
+                            ),
+                            _ => {
+                                let (release_error, cleanup) = release_layout_plugin_reservation(
+                                    &mut wasm_bridge,
+                                    transaction_id,
+                                    &plugin_ids_for_handoff_failure,
+                                    anyhow!(
+                                        "Plugin -> PTY handoff returned an unexpected instruction for layout transaction {transaction_id}: {handoff_error:#}"
+                                    ),
+                                );
+                                let message = release_error.to_string();
+                                reject_layout_preparation(
+                                    &bus,
+                                    transaction_id,
+                                    Some(tab_id),
+                                    None,
+                                    None,
+                                    message,
+                                    cleanup,
+                                );
+                                continue;
+                            },
+                        };
+                    let error = handoff_error.context(format!(
+                        "layout transaction {transaction_id} failed Plugin -> PTY handoff"
+                    ));
+                    let (release_error, cleanup) = release_layout_plugin_reservation(
+                        &mut wasm_bridge,
+                        transaction_id,
+                        &plugin_ids,
+                        error,
+                    );
+                    let message = release_error.to_string();
+                    mark_layout_completion_failed(completion_tx.as_mut(), &message);
+                    reject_layout_preparation(
+                        &bus,
+                        transaction_id,
+                        Some(tab_id),
+                        completion_tx,
+                        layout_generation,
+                        message,
+                        cleanup,
+                    );
+                }
             },
             PluginInstruction::OverrideLayout(
                 cwd,
                 default_shell,
                 tab_layouts,
+                transaction_id,
                 retain_existing_terminal_panes,
                 retain_existing_plugin_panes,
                 client_id,
                 completion_tx,
+                layout_generation,
             ) => {
                 // 1. Prefer connected clients over CLI clients
                 let client_id = if wasm_bridge.client_is_connected(&client_id) {
@@ -641,9 +893,11 @@ pub(crate) fn plugin_thread_main(
                     client_id
                 };
 
-                // 2. Process each tab layout
-                let mut tab_layouts_with_plugin_ids = Vec::new();
-
+                // 2. Process each tab layout and build one transaction-wide,
+                // side-effect-free reservation plan.
+                let mut tab_layouts_with_plugin_keys = Vec::new();
+                let mut reservation_requests = Vec::new();
+                let mut plugin_reservation_error = None;
                 for mut tab_layout_info in tab_layouts {
                     // Populate plugin aliases in layouts
                     tab_layout_info
@@ -671,51 +925,248 @@ pub(crate) fn plugin_thread_main(
                     let mut all_run_instructions = extracted_run_instructions;
                     all_run_instructions.extend(extracted_floating_plugins);
 
-                    // Load plugins for all Run::Plugin instructions
-                    let mut plugin_ids: HashMap<RunPluginOrAlias, Vec<PluginId>> = HashMap::new();
+                    let mut plugin_keys = Vec::new();
                     let size = Size::default();
 
                     for run_instruction in all_run_instructions {
                         if let Some(Run::Plugin(run_plugin_or_alias)) = run_instruction {
-                            let run_plugin = run_plugin_or_alias.get_run_plugin();
-                            let cwd = run_plugin_or_alias.get_initial_cwd();
-                            let skip_cache = false;
-
-                            match wasm_bridge.load_plugin(
-                                &run_plugin,
-                                Some(tab_layout_info.tab_index),
+                            let Some(run_plugin) = run_plugin_or_alias.get_run_plugin() else {
+                                plugin_reservation_error = Some(anyhow!(
+                                    "failed to resolve layout plugin {:?} for recovered tab {}",
+                                    run_plugin_or_alias,
+                                    tab_layout_info.tab_index
+                                ));
+                                break;
+                            };
+                            let plugin_cwd = run_plugin_or_alias.get_initial_cwd();
+                            plugin_keys.push(run_plugin_or_alias);
+                            reservation_requests.push(LayoutPluginReservationRequest {
+                                run_plugin,
+                                tab_index: Some(tab_layout_info.tab_index),
                                 size,
-                                cwd,
-                                skip_cache,
-                                Some(client_id),
-                            ) {
-                                Ok((plugin_id, _client_id)) => {
-                                    plugin_ids
-                                        .entry(run_plugin_or_alias.clone())
-                                        .or_default()
-                                        .push(plugin_id);
-                                },
-                                Err(e) => {
-                                    log::error!("Failed to load plugin: {}", e);
-                                },
-                            }
+                                cwd: plugin_cwd,
+                                skip_cache: false,
+                                client_id,
+                            });
                         }
                     }
 
-                    // Pair this tab's layout with its plugin IDs
-                    tab_layouts_with_plugin_ids.push((tab_layout_info, plugin_ids));
+                    tab_layouts_with_plugin_keys.push((tab_layout_info, plugin_keys));
+                    if plugin_reservation_error.is_some() {
+                        break;
+                    }
                 }
 
+                if let Some(error) = plugin_reservation_error {
+                    reject_layout_preparation(
+                        &bus,
+                        transaction_id,
+                        layout_generation
+                            .as_ref()
+                            .map(|generation| generation.tab_id),
+                        completion_tx,
+                        layout_generation,
+                        error.to_string(),
+                        LayoutPreparationCleanup::Resolved,
+                    );
+                    continue;
+                }
+                let reserved_plugin_ids = match wasm_bridge
+                    .reserve_layout_plugins(transaction_id, reservation_requests)
+                {
+                    Ok(plugin_ids) => plugin_ids,
+                    Err(message) => {
+                        reject_layout_preparation(
+                            &bus,
+                            transaction_id,
+                            layout_generation
+                                .as_ref()
+                                .map(|generation| generation.tab_id),
+                            completion_tx,
+                            layout_generation,
+                            message,
+                            LayoutPreparationCleanup::Resolved,
+                        );
+                        continue;
+                    },
+                };
+                if let Err(message) =
+                    register_layout_plugin_projectors(&wasm_bridge, &bus, transaction_id)
+                {
+                    let cleanup = match wasm_bridge
+                        .release_layout_plugins_by_transaction(transaction_id, message.clone())
+                    {
+                        Ok(_) => LayoutPreparationCleanup::Resolved,
+                        Err(_) => LayoutPreparationCleanup::ReleasePluginReservation {
+                            plugin_ids: reserved_plugin_ids.clone(),
+                            pty_cleanup_succeeded: true,
+                        },
+                    };
+                    reject_layout_preparation(
+                        &bus,
+                        transaction_id,
+                        layout_generation
+                            .as_ref()
+                            .map(|generation| generation.tab_id),
+                        completion_tx,
+                        layout_generation,
+                        message,
+                        cleanup,
+                    );
+                    continue;
+                }
+                let mut reserved_plugin_ids = reserved_plugin_ids.into_iter();
+                let mut tab_layouts_with_plugin_ids = Vec::new();
+                for (tab_layout_info, plugin_keys) in tab_layouts_with_plugin_keys {
+                    let mut plugin_ids = HashMap::new();
+                    for run_plugin_or_alias in plugin_keys {
+                        let plugin_id = reserved_plugin_ids.next().expect(
+                            "layout plugin reservation must return one id per planned plugin",
+                        );
+                        plugin_ids
+                            .entry(run_plugin_or_alias)
+                            .or_insert_with(Vec::new)
+                            .push(plugin_id);
+                    }
+                    tab_layouts_with_plugin_ids.push((tab_layout_info, plugin_ids));
+                }
+                debug_assert!(reserved_plugin_ids.next().is_none());
                 // 3. Send to pty thread with all tab layouts and their plugin IDs
-                drop(bus.senders.send_to_pty(PtyInstruction::OverrideLayout(
+                let plugin_ids_for_handoff_failure = tab_layouts_with_plugin_ids
+                    .iter()
+                    .map(|(_, plugin_ids)| plugin_ids.clone())
+                    .collect::<Vec<_>>();
+                let instruction = PtyInstruction::OverrideLayout(
                     cwd,
                     default_shell,
                     tab_layouts_with_plugin_ids,
+                    transaction_id,
                     retain_existing_terminal_panes,
                     retain_existing_plugin_panes,
                     client_id,
                     completion_tx,
-                )));
+                    layout_generation,
+                );
+                if let Err(send_failure) = bus.senders.send_to_pty_recover(instruction) {
+                    let (instruction, handoff_error) = send_failure.into_parts();
+                    let (
+                        tab_layouts_with_plugin_ids,
+                        transaction_id,
+                        mut completion_tx,
+                        layout_generation,
+                    ) = match instruction {
+                        PtyInstruction::OverrideLayout(
+                            _,
+                            _,
+                            tab_layouts_with_plugin_ids,
+                            transaction_id,
+                            _,
+                            _,
+                            _,
+                            completion_tx,
+                            layout_generation,
+                        ) => (
+                            tab_layouts_with_plugin_ids,
+                            transaction_id,
+                            completion_tx,
+                            layout_generation,
+                        ),
+                        _ => {
+                            let plugin_id_maps =
+                                plugin_ids_for_handoff_failure.iter().collect::<Vec<_>>();
+                            let (release_error, cleanup) = release_layout_plugin_reservation_maps(
+                                &mut wasm_bridge,
+                                transaction_id,
+                                &plugin_id_maps,
+                                anyhow!(
+                                    "Plugin -> PTY handoff returned an unexpected instruction for Override transaction {transaction_id}: {handoff_error:#}"
+                                ),
+                            );
+                            let message = release_error.to_string();
+                            reject_layout_preparation(
+                                &bus,
+                                transaction_id,
+                                None,
+                                None,
+                                None,
+                                message,
+                                cleanup,
+                            );
+                            continue;
+                        },
+                    };
+                    let all_plugin_ids = tab_layouts_with_plugin_ids
+                        .iter()
+                        .map(|(_, plugin_ids)| plugin_ids)
+                        .collect::<Vec<_>>();
+                    let error = handoff_error.context(format!(
+                        "layout transaction {transaction_id} failed Plugin -> PTY handoff"
+                    ));
+                    let (release_error, cleanup) = release_layout_plugin_reservation_maps(
+                        &mut wasm_bridge,
+                        transaction_id,
+                        &all_plugin_ids,
+                        error,
+                    );
+                    let message = release_error.to_string();
+                    mark_layout_completion_failed(completion_tx.as_mut(), &message);
+                    reject_layout_preparation(
+                        &bus,
+                        transaction_id,
+                        layout_generation
+                            .as_ref()
+                            .map(|generation| generation.tab_id),
+                        completion_tx,
+                        layout_generation,
+                        message,
+                        cleanup,
+                    );
+                }
+            },
+            PluginInstruction::ResolveLayoutPlugins {
+                transaction_id,
+                resolution,
+                expected_plugin_ids,
+                ack,
+            } => {
+                let result = wasm_bridge.resolve_layout_plugins(
+                    transaction_id,
+                    resolution,
+                    expected_plugin_ids,
+                );
+                let _ = ack.send(result);
+            },
+            PluginInstruction::ReleaseLayoutPluginsByTransaction {
+                transaction_id,
+                reason,
+                ack,
+            } => {
+                let result =
+                    wasm_bridge.release_layout_plugins_by_transaction(transaction_id, reason);
+                let _ = ack.send(result);
+            },
+            PluginInstruction::CleanupLayoutPlugins {
+                transaction_id,
+                plugin_ids,
+                ack,
+            } => {
+                let result = wasm_bridge.cleanup_layout_plugins(transaction_id, plugin_ids);
+                let _ = ack.send(result);
+            },
+            PluginInstruction::LayoutPluginActivationFailed {
+                transaction_id,
+                plugin_ids,
+                message,
+            } => {
+                wasm_bridge.handle_layout_plugin_activation_failure(
+                    transaction_id,
+                    plugin_ids,
+                    message,
+                );
+            },
+            #[cfg(test)]
+            PluginInstruction::RejectNextLayoutPluginReleaseForTest(transaction_id) => {
+                wasm_bridge.reject_next_layout_plugin_release_for_test(transaction_id);
             },
             PluginInstruction::ApplyCachedEvents {
                 plugin_ids,
@@ -907,17 +1358,22 @@ pub(crate) fn plugin_thread_main(
                 )];
                 wasm_bridge.update_plugins(updates, shutdown_send.clone())?;
             },
-            PluginInstruction::LogLayoutToHd(mut session_layout_metadata) => {
+            PluginInstruction::LogLayoutToHd {
+                session_name,
+                generation,
+                mut session_layout_metadata,
+            } => {
                 populate_session_layout_metadata(
                     &mut session_layout_metadata,
                     &wasm_bridge,
                     &plugin_aliases,
                     None,
                 );
-                drop(
-                    bus.senders
-                        .send_to_pty(PtyInstruction::LogLayoutToHd(session_layout_metadata)),
-                );
+                drop(bus.senders.send_to_pty(PtyInstruction::LogLayoutToHd {
+                    session_name,
+                    generation,
+                    session_layout_metadata,
+                }));
             },
             PluginInstruction::CliPipe {
                 pipe_id,
@@ -939,26 +1395,26 @@ pub(crate) fn plugin_thread_main(
                 match plugin {
                     Some(plugin_url) => {
                         // send to specific plugin(s)
-                        pipe_to_specific_plugins(
-                            PipeSource::Cli(pipe_id.clone()),
-                            &plugin_url,
-                            &configuration,
-                            &cwd,
+                        pipe_to_specific_plugins(PipeToSpecificPluginsParams {
+                            pipe_source: PipeSource::Cli(pipe_id.clone()),
+                            plugin_url: &plugin_url,
+                            configuration: &configuration,
+                            cwd: &cwd,
                             skip_cache,
                             should_float,
-                            &pane_id_to_replace,
-                            &pane_title,
-                            Some(cli_client_id),
-                            &mut pipe_messages,
-                            &name,
-                            &payload,
-                            &args,
-                            &bus,
-                            &mut wasm_bridge,
-                            &plugin_aliases,
+                            pane_id_to_replace: &pane_id_to_replace,
+                            pane_title: &pane_title,
+                            cli_client_id: Some(cli_client_id),
+                            pipe_messages: &mut pipe_messages,
+                            name: &name,
+                            payload: &payload,
+                            args: &args,
+                            bus: &bus,
+                            wasm_bridge: &mut wasm_bridge,
+                            plugin_aliases: &plugin_aliases,
                             floating_pane_coordinates,
-                            None,
-                        );
+                            should_focus: None,
+                        });
                     },
                     None => {
                         // no specific destination, send to all plugins
@@ -1003,26 +1459,26 @@ pub(crate) fn plugin_thread_main(
                     match plugin {
                         Some(plugin_url) => {
                             // send to specific plugin(s)
-                            pipe_to_specific_plugins(
-                                PipeSource::Keybind,
-                                &plugin_url,
-                                &configuration,
-                                &cwd,
+                            pipe_to_specific_plugins(PipeToSpecificPluginsParams {
+                                pipe_source: PipeSource::Keybind,
+                                plugin_url: &plugin_url,
+                                configuration: &configuration,
+                                cwd: &cwd,
                                 skip_cache,
                                 should_float,
-                                &pane_id_to_replace,
-                                &pane_title,
-                                Some(cli_client_id),
-                                &mut pipe_messages,
-                                &name,
-                                &payload,
-                                &args,
-                                &bus,
-                                &mut wasm_bridge,
-                                &plugin_aliases,
+                                pane_id_to_replace: &pane_id_to_replace,
+                                pane_title: &pane_title,
+                                cli_client_id: Some(cli_client_id),
+                                pipe_messages: &mut pipe_messages,
+                                name: &name,
+                                payload: &payload,
+                                args: &args,
+                                bus: &bus,
+                                wasm_bridge: &mut wasm_bridge,
+                                plugin_aliases: &plugin_aliases,
                                 floating_pane_coordinates,
-                                None,
-                            );
+                                should_focus: None,
+                            });
                         },
                         None => {
                             // no specific destination, send to all plugins
@@ -1073,26 +1529,33 @@ pub(crate) fn plugin_thread_main(
                 match (message.plugin_url, message.destination_plugin_id) {
                     (Some(plugin_url), None) => {
                         // send to specific plugin(s)
-                        pipe_to_specific_plugins(
-                            PipeSource::Plugin(source_plugin_id),
-                            &plugin_url,
-                            &Some(message.plugin_config),
-                            &None,
+                        let pane_id_to_replace_converted = pane_id_to_replace.map(|p| p.into());
+                        let configuration = Some(message.plugin_config);
+                        let args = Some(message.message_args);
+                        let should_focus = message
+                            .new_plugin_args
+                            .as_ref()
+                            .and_then(|n| n.should_focus);
+                        pipe_to_specific_plugins(PipeToSpecificPluginsParams {
+                            pipe_source: PipeSource::Plugin(source_plugin_id),
+                            plugin_url: &plugin_url,
+                            configuration: &configuration,
+                            cwd: &None,
                             skip_cache,
                             should_float,
-                            &pane_id_to_replace.map(|p| p.into()),
-                            &pane_title,
-                            None,
-                            &mut pipe_messages,
-                            &message.message_name,
-                            &message.message_payload,
-                            &Some(message.message_args),
-                            &bus,
-                            &mut wasm_bridge,
-                            &plugin_aliases,
+                            pane_id_to_replace: &pane_id_to_replace_converted,
+                            pane_title: &pane_title,
+                            cli_client_id: None,
+                            pipe_messages: &mut pipe_messages,
+                            name: &message.message_name,
+                            payload: &message.message_payload,
+                            args: &args,
+                            bus: &bus,
+                            wasm_bridge: &mut wasm_bridge,
+                            plugin_aliases: &plugin_aliases,
                             floating_pane_coordinates,
-                            message.new_plugin_args.and_then(|n| n.should_focus),
-                        );
+                            should_focus,
+                        });
                     },
                     (None, Some(destination_plugin_id)) => {
                         let is_private = true;
@@ -1109,7 +1572,9 @@ pub(crate) fn plugin_thread_main(
                         ));
                     },
                     (Some(plugin_url), Some(destination_plugin_id)) => {
-                        log::warn!("Message contains both a destination plugin url: {plugin_url} and a destination plugin id: {destination_plugin_id}, ignoring the url and prioritizing the id");
+                        log::warn!(
+                            "Message contains both a destination plugin url: {plugin_url} and a destination plugin id: {destination_plugin_id}, ignoring the url and prioritizing the id"
+                        );
                         let is_private = true;
                         pipe_messages.push((
                             Some(destination_plugin_id),
@@ -1307,6 +1772,7 @@ fn populate_session_layout_metadata(
     }
 
     let plugin_ids = session_layout_metadata.all_plugin_ids();
+    let plugin_ids_missing_run = session_layout_metadata.plugin_ids_missing_run();
     let mut plugin_ids_to_cmds: HashMap<u32, RunPlugin> = HashMap::new();
     for plugin_id in plugin_ids {
         let plugin_cmd = wasm_bridge.run_plugin_of_plugin_id(plugin_id);
@@ -1314,7 +1780,17 @@ fn populate_session_layout_metadata(
             Some(plugin_cmd) => {
                 plugin_ids_to_cmds.insert(plugin_id, plugin_cmd.clone());
             },
-            None => log::error!("Plugin with id: {plugin_id} not found"),
+            // Parked / not-yet-activated chrome has no bridge entry by design;
+            // its pane metadata still carries `invoked_with`, so nothing is
+            // lost. Only a pane with no run identity at all is a real problem.
+            None if plugin_ids_missing_run.contains(&plugin_id) => {
+                log::error!(
+                    "Plugin with id: {plugin_id} not found and its pane has no run identity"
+                )
+            },
+            None => log::debug!(
+                "Plugin with id: {plugin_id} not loaded (parked chrome); keeping the pane's own run identity"
+            ),
         }
     }
     session_layout_metadata.update_plugin_cmds(plugin_ids_to_cmds);
@@ -1340,44 +1816,66 @@ fn pipe_to_all_plugins(
     }
 }
 
-fn pipe_to_specific_plugins(
+struct PipeToSpecificPluginsParams<'a> {
     pipe_source: PipeSource,
-    plugin_url: &str,
-    configuration: &Option<BTreeMap<String, String>>,
-    cwd: &Option<PathBuf>,
+    plugin_url: &'a str,
+    configuration: &'a Option<BTreeMap<String, String>>,
+    cwd: &'a Option<PathBuf>,
     skip_cache: bool,
     should_float: bool,
-    pane_id_to_replace: &Option<PaneId>,
-    pane_title: &Option<String>,
+    pane_id_to_replace: &'a Option<PaneId>,
+    pane_title: &'a Option<String>,
     cli_client_id: Option<ClientId>,
-    pipe_messages: &mut Vec<(Option<PluginId>, Option<ClientId>, PipeMessage)>,
-    name: &str,
-    payload: &Option<String>,
-    args: &Option<BTreeMap<String, String>>,
-    bus: &Bus<PluginInstruction>,
-    wasm_bridge: &mut WasmBridge,
-    plugin_aliases: &PluginAliases,
+    pipe_messages: &'a mut Vec<(Option<PluginId>, Option<ClientId>, PipeMessage)>,
+    name: &'a str,
+    payload: &'a Option<String>,
+    args: &'a Option<BTreeMap<String, String>>,
+    bus: &'a Bus<PluginInstruction>,
+    wasm_bridge: &'a mut WasmBridge,
+    plugin_aliases: &'a PluginAliases,
     floating_pane_coordinates: Option<FloatingPaneCoordinates>,
     should_focus: Option<bool>,
-) {
+}
+
+fn pipe_to_specific_plugins(params: PipeToSpecificPluginsParams) {
+    let PipeToSpecificPluginsParams {
+        pipe_source,
+        plugin_url,
+        configuration,
+        cwd,
+        skip_cache,
+        should_float,
+        pane_id_to_replace,
+        pane_title,
+        cli_client_id,
+        pipe_messages,
+        name,
+        payload,
+        args,
+        bus,
+        wasm_bridge,
+        plugin_aliases,
+        floating_pane_coordinates,
+        should_focus,
+    } = params;
     let is_private = true;
     let size = Size::default();
     match RunPluginOrAlias::from_url(plugin_url, configuration, Some(plugin_aliases), cwd.clone()) {
         Ok(run_plugin_or_alias) => {
             let initial_cwd = run_plugin_or_alias.get_initial_cwd();
-            let all_plugin_ids = wasm_bridge.get_or_load_plugins(
+            let all_plugin_ids = wasm_bridge.get_or_load_plugins(GetOrLoadPluginsParams {
                 run_plugin_or_alias,
                 size,
-                initial_cwd.or_else(|| cwd.clone()),
+                cwd: initial_cwd.or_else(|| cwd.clone()),
                 skip_cache,
                 should_float,
-                pane_id_to_replace.is_some(),
-                pane_title.clone(),
-                *pane_id_to_replace,
+                should_be_open_in_place: pane_id_to_replace.is_some(),
+                pane_title: pane_title.clone(),
+                pane_id_to_replace: *pane_id_to_replace,
                 cli_client_id,
                 floating_pane_coordinates,
-                should_focus.unwrap_or(false),
-            );
+                should_focus: should_focus.unwrap_or(false),
+            });
             for (plugin_id, client_id) in all_plugin_ids {
                 pipe_messages.push((
                     Some(plugin_id),
@@ -1398,6 +1896,142 @@ fn pipe_to_specific_plugins(
                 log::error!("Failed to parse plugin url: {}", e);
             },
         },
+    }
+}
+
+fn mark_layout_completion_failed(completion: Option<&mut NotificationEnd>, message: &str) {
+    if let Some(completion) = completion {
+        completion.mark_failure(message);
+    }
+}
+
+fn register_layout_plugin_projectors(
+    wasm_bridge: &WasmBridge,
+    bus: &Bus<PluginInstruction>,
+    transaction_id: LayoutTransactionId,
+) -> std::result::Result<(), String> {
+    let bindings = wasm_bridge.layout_plugin_projector_bindings(transaction_id);
+    if bindings.is_empty() {
+        return Ok(());
+    }
+    // This instruction is queued before the Plugin -> PTY layout handoff, and
+    // both eventually reach Screen through the same ordered channel. Waiting
+    // synchronously for Screen here creates a bootstrap cycle: Screen can be
+    // waiting for Plugin activation while Plugin waits for this ACK. Preserve
+    // FIFO ordering and let Screen validate the transaction when it consumes
+    // the registration.
+    let (ack_tx, _ack_rx) = channels::bounded(1);
+    bus.senders
+        .send_to_screen(ScreenInstruction::RegisterPluginProjectors {
+            transaction_id,
+            bindings,
+            ack: ack_tx,
+        })
+        .map_err(|error| {
+            format!(
+                "failed to register plugin projectors for layout transaction {transaction_id}: {error:#}"
+            )
+        })
+}
+
+fn release_layout_plugin_reservation(
+    wasm_bridge: &mut WasmBridge,
+    transaction_id: LayoutTransactionId,
+    plugin_ids: &HashMap<RunPluginOrAlias, Vec<PluginId>>,
+    original_error: anyhow::Error,
+) -> (anyhow::Error, LayoutPreparationCleanup) {
+    release_layout_plugin_reservation_maps(
+        wasm_bridge,
+        transaction_id,
+        &[plugin_ids],
+        original_error,
+    )
+}
+
+fn release_layout_plugin_reservation_maps(
+    wasm_bridge: &mut WasmBridge,
+    transaction_id: LayoutTransactionId,
+    plugin_id_maps: &[&HashMap<RunPluginOrAlias, Vec<PluginId>>],
+    original_error: anyhow::Error,
+) -> (anyhow::Error, LayoutPreparationCleanup) {
+    let mut allocated_plugin_ids = plugin_id_maps
+        .iter()
+        .flat_map(|plugin_ids| plugin_ids.values())
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>();
+    allocated_plugin_ids.sort_unstable();
+    allocated_plugin_ids.dedup();
+    let unresolved_cleanup = LayoutPreparationCleanup::ReleasePluginReservation {
+        plugin_ids: allocated_plugin_ids.clone(),
+        pty_cleanup_succeeded: true,
+    };
+
+    match wasm_bridge.resolve_layout_plugins(
+        transaction_id,
+        LayoutPluginResolution::Release {
+            reason: original_error.to_string(),
+        },
+        allocated_plugin_ids.clone(),
+    ) {
+        Ok(LayoutPluginReceipt::Released { mut plugin_ids }) => {
+            plugin_ids.sort_unstable();
+            if plugin_ids == allocated_plugin_ids {
+                (original_error, LayoutPreparationCleanup::Resolved)
+            } else {
+                (
+                    original_error.context(format!(
+                        "layout plugin transaction {transaction_id} returned mismatched release ids {plugin_ids:?}, expected {allocated_plugin_ids:?}"
+                    )),
+                    unresolved_cleanup,
+                )
+            }
+        },
+        Ok(receipt) => (
+            original_error.context(format!(
+                "layout plugin transaction {transaction_id} returned unexpected release receipt: {receipt:?}"
+            )),
+            unresolved_cleanup,
+        ),
+        Err(error) => (
+            original_error.context(format!(
+                "failed to release suspended plugin allocation for transaction {transaction_id}: {error}"
+            )),
+            unresolved_cleanup,
+        ),
+    }
+}
+
+fn reject_layout_preparation(
+    bus: &Bus<PluginInstruction>,
+    transaction_id: LayoutTransactionId,
+    tab_id: Option<usize>,
+    mut completion_tx: Option<NotificationEnd>,
+    layout_generation: Option<Box<DurableTabLayoutGeneration>>,
+    message: String,
+    cleanup: LayoutPreparationCleanup,
+) {
+    mark_layout_completion_failed(completion_tx.as_mut(), &message);
+    let instruction = ScreenInstruction::LayoutPreparationFailed {
+        transaction_id,
+        tab_id,
+        completion_tx,
+        layout_generation,
+        message: message.clone(),
+        cleanup,
+    };
+    if let Err(send_failure) = bus.senders.send_to_screen_recover(instruction) {
+        let (recovered_instruction, send_error) = send_failure.into_parts();
+        // Dropping the recovered instruction now reports the already-marked
+        // failure to the original action waiter. Screen is gone, so there is
+        // no remaining owner capable of mutating pending-tab state.
+        log::error!(
+            "failed to report rejected layout transaction {} to Screen: {:#}; cause: {}",
+            transaction_id,
+            send_error,
+            message
+        );
+        drop(recovered_instruction);
     }
 }
 

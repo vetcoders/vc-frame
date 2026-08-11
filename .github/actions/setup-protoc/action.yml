@@ -1,0 +1,107 @@
+name: Setup pinned Protoc
+description: Install the exact Protoc release without GitHub Releases API discovery.
+
+runs:
+  using: composite
+  steps:
+    - name: Install Protoc on Unix
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        version="23.4"
+        case "$(uname -s)-$(uname -m)" in
+          Linux-x86_64)
+            asset="protoc-${version}-linux-x86_64.zip"
+            expected_sha256="0502f286ac9ed860b629a7965a14527b1f2dd131e4283fa23c2d7f184672aa9a"
+            ;;
+          Linux-aarch64|Linux-arm64)
+            asset="protoc-${version}-linux-aarch_64.zip"
+            expected_sha256="1c7750b6e038305b5a7fc3d0cda1ebefdf106a4f30a787bf826ed2fc47c3967d"
+            ;;
+          Darwin-x86_64)
+            asset="protoc-${version}-osx-x86_64.zip"
+            expected_sha256="07e5fdcf1b0708d3367dc5e6eb8d135de7e407d75316c93155cfd8ab362eec80"
+            ;;
+          Darwin-arm64)
+            asset="protoc-${version}-osx-aarch_64.zip"
+            expected_sha256="8c7afae8626b6811e7b5897d16d940c2dbf50b1e135ed958a01db6566bdda726"
+            ;;
+          *)
+            echo "Unsupported Protoc host: $(uname -s)-$(uname -m)" >&2
+            exit 1
+            ;;
+        esac
+
+        install_root="${RUNNER_TEMP:?RUNNER_TEMP is required}/vc-frame-protoc-${version}"
+        archive="${RUNNER_TEMP}/${asset}"
+        url="https://github.com/protocolbuffers/protobuf/releases/download/v${version}/${asset}"
+
+        curl \
+          --fail \
+          --location \
+          --show-error \
+          --silent \
+          --retry 5 \
+          --retry-delay 2 \
+          --retry-all-errors \
+          --connect-timeout 20 \
+          --max-time 180 \
+          --output "${archive}" \
+          "${url}"
+
+        if command -v sha256sum >/dev/null 2>&1; then
+          actual_sha256="$(sha256sum "${archive}" | awk '{print $1}')"
+        else
+          actual_sha256="$(shasum -a 256 "${archive}" | awk '{print $1}')"
+        fi
+        if [[ "${actual_sha256}" != "${expected_sha256}" ]]; then
+          echo "Protoc archive SHA-256 mismatch: expected ${expected_sha256}, got ${actual_sha256}" >&2
+          exit 1
+        fi
+
+        mkdir -p "${install_root}"
+        unzip -q -o "${archive}" -d "${install_root}"
+        echo "${install_root}/bin" >>"${GITHUB_PATH}"
+        "${install_root}/bin/protoc" --version
+
+    - name: Install Protoc on Windows
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+
+        $Version = "23.4"
+        $Asset = "protoc-$Version-win64.zip"
+        $ExpectedSha256 = "a309c39442fb75f0db343cb22c111a00f91cdf0767f332e170644b9378e2bcc6"
+        $InstallRoot = Join-Path $env:RUNNER_TEMP "vc-frame-protoc-$Version"
+        $Archive = Join-Path $env:RUNNER_TEMP $Asset
+        $Url = "https://github.com/protocolbuffers/protobuf/releases/download/v$Version/$Asset"
+
+        $Downloaded = $false
+        for ($Attempt = 1; $Attempt -le 5; $Attempt++) {
+          try {
+            Invoke-WebRequest -Uri $Url -OutFile $Archive
+            $Downloaded = $true
+            break
+          } catch {
+            if ($Attempt -eq 5) {
+              throw
+            }
+            Start-Sleep -Seconds ([Math]::Min(2 * $Attempt, 10))
+          }
+        }
+        if (-not $Downloaded) {
+          throw "Failed to download $Asset"
+        }
+
+        $ActualSha256 = (Get-FileHash -Path $Archive -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($ActualSha256 -ne $ExpectedSha256) {
+          throw "Protoc archive SHA-256 mismatch: expected $ExpectedSha256, got $ActualSha256"
+        }
+
+        New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
+        Expand-Archive -Path $Archive -DestinationPath $InstallRoot -Force
+        (Join-Path $InstallRoot "bin") | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        & (Join-Path $InstallRoot "bin/protoc.exe") --version

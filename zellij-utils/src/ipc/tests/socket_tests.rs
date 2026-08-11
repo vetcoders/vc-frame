@@ -1,12 +1,38 @@
 use crate::ipc::{
-    ClientToServerMsg, IpcReceiverWithContext, IpcSenderWithContext, ServerToClientMsg,
+    ClientReceiveOutcome, ClientToServerMsg, ExitReason, IpcReceiverWithContext,
+    IpcSenderWithContext, ServerToClientMsg,
 };
 use crate::pane_size::Size;
-use interprocess::local_socket::{prelude::*, ListenerOptions};
+use interprocess::local_socket::{ListenerOptions, prelude::*};
 
+use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 static IPC_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+struct CloneFails;
+
+impl Read for CloneFails {
+    fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+        Ok(0)
+    }
+}
+
+impl Write for CloneFails {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl super::super::IpcStream for CloneFails {
+    fn try_clone_stream(&self) -> io::Result<Box<dyn super::super::IpcStream>> {
+        Err(io::Error::from_raw_os_error(libc::EMFILE))
+    }
+}
 
 // --- Cross-platform IPC helpers ---
 // On Unix: use filesystem-based sockets (TempDir + PathBuf + GenericFilePath)
@@ -92,6 +118,23 @@ fn try_connect(name: &IpcName) -> std::io::Result<interprocess::local_socket::St
 }
 
 #[test]
+fn receiver_try_get_sender_reports_clone_error_instead_of_panicking() {
+    let receiver: IpcReceiverWithContext<ClientToServerMsg> =
+        IpcReceiverWithContext::from_boxed(Box::new(CloneFails));
+
+    let err = match receiver.try_get_sender::<ServerToClientMsg>() {
+        Ok(_) => panic!("clone failure should be returned"),
+        Err(err) => err,
+    };
+
+    assert_eq!(
+        err.downcast_ref::<io::Error>()
+            .and_then(|e| e.raw_os_error()),
+        Some(libc::EMFILE)
+    );
+}
+
+#[test]
 fn client_to_server_message_over_socket() {
     let (_guard, name) = new_ipc();
     let listener = bind_listener(&name);
@@ -125,6 +168,134 @@ fn client_to_server_message_over_socket() {
 }
 
 #[test]
+fn client_disconnect_is_typed_eof_not_unknown_message() {
+    let (_guard, name) = new_ipc();
+    let listener = bind_listener(&name);
+
+    let client = std::thread::spawn({
+        let name = name.clone();
+        move || {
+            // Connect and drop immediately — peer EOF without a frame.
+            let _stream = connect_stream(&name);
+        }
+    });
+
+    let stream = listener.incoming().next().unwrap().expect("accept failed");
+    let mut receiver: IpcReceiverWithContext<ClientToServerMsg> =
+        IpcReceiverWithContext::new(stream);
+
+    match receiver.recv_client_msg_outcome() {
+        ClientReceiveOutcome::Disconnected => {},
+        other => panic!("expected Disconnected after client hangup, got {other:?}"),
+    }
+
+    client.join().expect("client thread panicked");
+}
+
+#[test]
+fn client_garbage_frame_is_protocol_error_not_disconnect() {
+    let (_guard, name) = new_ipc();
+    let listener = bind_listener(&name);
+
+    let client = std::thread::spawn({
+        let name = name.clone();
+        move || {
+            use std::io::Write;
+            let mut stream = connect_stream(&name);
+            // Length-prefix claims 4 payload bytes of non-protobuf garbage.
+            stream.write_all(&4u32.to_le_bytes()).expect("len");
+            stream.write_all(&[0xff, 0xff, 0xff, 0xff]).expect("body");
+            stream.flush().expect("flush");
+            // Keep the socket open long enough for the server to read.
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    });
+
+    let stream = listener.incoming().next().unwrap().expect("accept failed");
+    let mut receiver: IpcReceiverWithContext<ClientToServerMsg> =
+        IpcReceiverWithContext::new(stream);
+
+    match receiver.recv_client_msg_outcome() {
+        ClientReceiveOutcome::ProtocolError(reason) => {
+            assert!(
+                reason.contains("decode") || reason.contains("conversion"),
+                "reason should name the protocol failure: {reason}"
+            );
+        },
+        other => panic!("expected ProtocolError for garbage frame, got {other:?}"),
+    }
+
+    client.join().expect("client thread panicked");
+}
+
+#[test]
+fn eof_inside_the_length_prefix_is_protocol_error_not_disconnect() {
+    let (_guard, name) = new_ipc();
+    let listener = bind_listener(&name);
+
+    let client = std::thread::spawn({
+        let name = name.clone();
+        move || {
+            use std::io::Write;
+            let mut stream = connect_stream(&name);
+            // Two of the four length-prefix bytes, then hang up.
+            stream.write_all(&[0x08, 0x00]).expect("partial prefix");
+            stream.flush().expect("flush");
+        }
+    });
+
+    let stream = listener.incoming().next().unwrap().expect("accept failed");
+    let mut receiver: IpcReceiverWithContext<ClientToServerMsg> =
+        IpcReceiverWithContext::new(stream);
+
+    match receiver.recv_client_msg_outcome() {
+        ClientReceiveOutcome::ProtocolError(reason) => {
+            assert!(
+                reason.contains("truncated"),
+                "reason should name the truncation: {reason}"
+            );
+        },
+        other => panic!("expected ProtocolError for a torn prefix, got {other:?}"),
+    }
+
+    client.join().expect("client thread panicked");
+}
+
+#[test]
+fn eof_inside_the_payload_is_protocol_error_not_disconnect() {
+    let (_guard, name) = new_ipc();
+    let listener = bind_listener(&name);
+
+    let client = std::thread::spawn({
+        let name = name.clone();
+        move || {
+            use std::io::Write;
+            let mut stream = connect_stream(&name);
+            // The prefix promises 64 bytes; only 3 arrive before the hangup.
+            stream.write_all(&64u32.to_le_bytes()).expect("len");
+            stream.write_all(&[0x01, 0x02, 0x03]).expect("partial body");
+            stream.flush().expect("flush");
+        }
+    });
+
+    let stream = listener.incoming().next().unwrap().expect("accept failed");
+    let mut receiver: IpcReceiverWithContext<ClientToServerMsg> =
+        IpcReceiverWithContext::new(stream);
+
+    match receiver.recv_client_msg_outcome() {
+        ClientReceiveOutcome::ProtocolError(reason) => {
+            assert!(
+                reason.contains("truncated"),
+                "reason should name the truncation: {reason}"
+            );
+        },
+        other => panic!("expected ProtocolError for a torn payload, got {other:?}"),
+    }
+
+    client.join().expect("client thread panicked");
+}
+
+#[test]
 fn server_to_client_message_over_socket() {
     let (_guard, name) = new_ipc();
     let listener = bind_listener(&name);
@@ -150,6 +321,121 @@ fn server_to_client_message_over_socket() {
         msg
     );
 
+    server.join().expect("server thread panicked");
+}
+
+#[cfg(unix)]
+#[test]
+fn async_kill_session_requires_normal_exit_ack() {
+    let (_guard, name) = new_ipc();
+    let listener = bind_listener(&name);
+    let server = std::thread::spawn(move || {
+        let stream = listener.incoming().next().unwrap().expect("accept failed");
+        let mut receiver: IpcReceiverWithContext<ClientToServerMsg> =
+            IpcReceiverWithContext::new(stream);
+        let mut sender: IpcSenderWithContext<ServerToClientMsg> = receiver.get_sender();
+        let (message, _) = receiver.recv_client_msg().expect("kill request");
+        assert!(matches!(message, ClientToServerMsg::KillSession));
+        sender
+            .send_server_msg(ServerToClientMsg::UnblockInputThread)
+            .expect("send transport prelude");
+        sender
+            .send_server_msg(ServerToClientMsg::Exit {
+                exit_reason: ExitReason::Normal,
+            })
+            .expect("send kill acknowledgement");
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .expect("runtime");
+
+    runtime
+        .block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                super::super::async_send_kill_and_await(&name),
+            )
+            .await
+        })
+        .expect("kill acknowledgement timeout")
+        .expect("valid kill acknowledgement");
+    server.join().expect("server thread panicked");
+}
+
+#[cfg(unix)]
+#[test]
+fn async_kill_session_rejects_accept_then_close_without_ack() {
+    let (_guard, name) = new_ipc();
+    let listener = bind_listener(&name);
+    let server = std::thread::spawn(move || {
+        let stream = listener.incoming().next().unwrap().expect("accept failed");
+        let mut receiver: IpcReceiverWithContext<ClientToServerMsg> =
+            IpcReceiverWithContext::new(stream);
+        let (message, _) = receiver.recv_client_msg().expect("kill request");
+        assert!(matches!(message, ClientToServerMsg::KillSession));
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .expect("runtime");
+
+    let error = runtime
+        .block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                super::super::async_send_kill_and_await(&name),
+            )
+            .await
+        })
+        .expect("transport should close promptly")
+        .expect_err("EOF is not a kill acknowledgement");
+
+    assert!(
+        matches!(
+            error.kind(),
+            io::ErrorKind::UnexpectedEof
+                | io::ErrorKind::ConnectionReset
+                | io::ErrorKind::BrokenPipe
+        ),
+        "unexpected close error: {error:?}"
+    );
+    server.join().expect("server thread panicked");
+}
+
+#[cfg(unix)]
+#[test]
+fn async_kill_session_silent_peer_is_bounded_by_caller() {
+    let (_guard, name) = new_ipc();
+    let listener = bind_listener(&name);
+    let server = std::thread::spawn(move || {
+        let stream = listener.incoming().next().unwrap().expect("accept failed");
+        let mut receiver: IpcReceiverWithContext<ClientToServerMsg> =
+            IpcReceiverWithContext::new(stream);
+        let (message, _) = receiver.recv_client_msg().expect("kill request");
+        assert!(matches!(message, ClientToServerMsg::KillSession));
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .expect("runtime");
+
+    let result = runtime.block_on(async {
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            super::super::async_send_kill_and_await(&name),
+        )
+        .await
+    });
+
+    assert!(
+        result.is_err(),
+        "a silent peer must hit the caller deadline"
+    );
     server.join().expect("server thread panicked");
 }
 

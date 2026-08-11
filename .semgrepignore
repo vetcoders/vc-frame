@@ -1,0 +1,2 @@
+# Vendored browser bundles from upstream xterm/web-links; do not patch minified third-party assets in-tree.
+zellij-client/assets/

@@ -1,12 +1,13 @@
 use crate::tab::Pane;
 
-use crate::{os_input_output::ServerOsApi, panes::PaneId, ClientId};
+use crate::{ClientId, os_input_output::ServerOsApi, panes::PaneId};
 use std::collections::{BTreeMap, HashMap};
 
 #[derive(Clone)]
 pub struct ActivePanes {
     active_panes: HashMap<ClientId, PaneId>,
     os_api: Box<dyn ServerOsApi>,
+    focus_events_enabled: bool,
 }
 
 impl std::fmt::Debug for ActivePanes {
@@ -21,6 +22,7 @@ impl ActivePanes {
         ActivePanes {
             active_panes: HashMap::new(),
             os_api,
+            focus_events_enabled: true,
         }
     }
     pub fn get(&self, client_id: &ClientId) -> Option<&PaneId> {
@@ -77,6 +79,9 @@ impl ActivePanes {
     pub fn contains_key(&self, client_id: &ClientId) -> bool {
         self.active_panes.contains_key(client_id)
     }
+    pub(crate) fn set_focus_events_enabled(&mut self, enabled: bool) {
+        self.focus_events_enabled = enabled;
+    }
     fn unfocus_pane_for_client(
         &self,
         client_id: ClientId,
@@ -87,21 +92,23 @@ impl ActivePanes {
         }
     }
     fn unfocus_pane(&self, pane_id: PaneId, panes: &mut BTreeMap<PaneId, Box<dyn Pane>>) {
-        if let PaneId::Terminal(terminal_id) = pane_id {
-            if let Some(focus_event) = panes.get(&pane_id).and_then(|p| p.unfocus_event()) {
-                let _ = self
-                    .os_api
-                    .write_to_tty_stdin(terminal_id, focus_event.as_bytes());
-            }
+        if self.focus_events_enabled
+            && let PaneId::Terminal(terminal_id) = pane_id
+            && let Some(focus_event) = panes.get(&pane_id).and_then(|p| p.unfocus_event())
+        {
+            let _ = self
+                .os_api
+                .write_to_tty_stdin(terminal_id, focus_event.as_bytes());
         }
     }
     fn focus_pane(&self, pane_id: PaneId, panes: &mut BTreeMap<PaneId, Box<dyn Pane>>) {
-        if let PaneId::Terminal(terminal_id) = pane_id {
-            if let Some(focus_event) = panes.get(&pane_id).and_then(|p| p.focus_event()) {
-                let _ = self
-                    .os_api
-                    .write_to_tty_stdin(terminal_id, focus_event.as_bytes());
-            }
+        if self.focus_events_enabled
+            && let PaneId::Terminal(terminal_id) = pane_id
+            && let Some(focus_event) = panes.get(&pane_id).and_then(|p| p.focus_event())
+        {
+            let _ = self
+                .os_api
+                .write_to_tty_stdin(terminal_id, focus_event.as_bytes());
         }
     }
     pub fn pane_id_is_focused(&self, pane_id: &PaneId) -> bool {

@@ -33,6 +33,7 @@ Some(
         completion_tx: Some(
             NotificationEnd {
                 channel: None,
+                resolution: None,
                 exit_status: None,
                 unblock_condition: None,
                 affected_pane_id: None,

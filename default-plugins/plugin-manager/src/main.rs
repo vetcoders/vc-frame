@@ -1,5 +1,5 @@
-use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 use uuid::Uuid;
 use zellij_tile::prelude::*;
 
@@ -178,7 +178,7 @@ impl NewPluginScreen {
         config_line_max_len: usize,
     ) -> NestedListItem {
         let config_line_max_len = config_line_max_len.saturating_sub(6); // 3 - line padding, 1 -
-                                                                         // cursor, 2 ": "
+        // cursor, 2 ": "
         let config_key_max_len = config_line_max_len / 2;
         let config_val_max_len = config_line_max_len.saturating_sub(config_key_max_len);
         let config_key = if config_key.chars().count() > config_key_max_len {
@@ -219,7 +219,7 @@ impl NewPluginScreen {
         config_line_max_len: usize,
     ) -> NestedListItem {
         let config_line_max_len = config_line_max_len.saturating_sub(5); // 3 - line padding,
-                                                                         // 2 - ": "
+        // 2 - ": "
         let config_key = if config_key.is_empty() {
             "<EMPTY>"
         } else {
@@ -546,24 +546,33 @@ impl ZellijPlugin for State {
     fn update(&mut self, event: Event) -> bool {
         let mut should_render = false;
         match event {
-            Event::ModeUpdate(mode_info) => {
+            Event::ModeUpdate(mode_info) if self.colors != mode_info.style.colors => {
                 self.colors = mode_info.style.colors;
                 should_render = true;
             },
             Event::SessionUpdate(live_sessions, _dead_sessions) => {
                 for session in live_sessions {
                     if session.is_current_session {
-                        if session.plugins != self.plugins {
+                        let plugins_changed = session.plugins != self.plugins;
+                        if plugins_changed {
                             self.plugins = session.plugins;
                             self.reset_selection();
                             self.update_search_term();
                         }
-                        for tab in session.tabs {
-                            self.tab_position_to_tab_name.insert(tab.position, tab.name);
+                        let tab_position_to_tab_name = session
+                            .tabs
+                            .into_iter()
+                            .map(|tab| (tab.position, tab.name))
+                            .collect();
+                        let tabs_changed =
+                            tab_position_to_tab_name != self.tab_position_to_tab_name;
+                        if tabs_changed {
+                            self.tab_position_to_tab_name = tab_position_to_tab_name;
                         }
+                        should_render = plugins_changed || tabs_changed;
+                        break;
                     }
                 }
-                should_render = true;
             },
             Event::PaneUpdate(pane_manifest) => {
                 for (tab_position, panes) in pane_manifest.panes {
@@ -861,15 +870,13 @@ impl State {
                 tab_of_plugin_id
             };
 
-        let tab_line = NestedListItem::new(format!("Tab: {}", tab_of_plugin_id))
+        NestedListItem::new(format!("Tab: {}", tab_of_plugin_id))
             .color_range(2, ..=3)
-            .indent(1);
-        tab_line
+            .indent(1)
     }
     pub fn render_help(&self, y: usize, cols: usize) {
         let full_text = "Help: <←↓↑→> - Navigate/Expand, <ENTER> - focus, <TAB> - Reload, <Del> - Close, <Ctrl a> - New, <ESC> - Exit";
-        let middle_text =
-            "Help: <←↓↑→/ENTER> - Navigate, <TAB> - Reload, <Del> - Close, <Ctrl a> - New, <ESC> - Exit";
+        let middle_text = "Help: <←↓↑→/ENTER> - Navigate, <TAB> - Reload, <Del> - Close, <Ctrl a> - New, <ESC> - Exit";
         let short_text =
             "<←↓↑→/ENTER/TAB/Del> - Navigate/Expand/Reload/Close, <Ctrl a> - New, <ESC> - Exit";
         if cols >= full_text.chars().count() {
@@ -956,7 +963,7 @@ impl State {
                     matches.push(SearchResult::new(*plugin_id, plugin_info, indices, score));
                 }
             }
-            matches.sort_by(|a, b| b.score.cmp(&a.score));
+            matches.sort_by_key(|b| std::cmp::Reverse(b.score));
             self.search_results = matches;
         }
     }
@@ -1100,4 +1107,52 @@ fn truncate_search_result(
         })
         .collect();
     (truncated_location, adjusted_indices)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn current_session(tab_name: &str, plugins: BTreeMap<u32, PluginInfo>) -> SessionInfo {
+        SessionInfo {
+            is_current_session: true,
+            tabs: vec![TabInfo {
+                position: 0,
+                name: tab_name.to_owned(),
+                ..Default::default()
+            }],
+            plugins,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn identical_session_snapshots_do_not_repaint() {
+        let mut state = State::default();
+        let session = current_session("work", BTreeMap::new());
+
+        assert!(state.update(Event::SessionUpdate(vec![session.clone()], vec![])));
+        assert!(!state.update(Event::SessionUpdate(vec![session], vec![])));
+    }
+
+    #[test]
+    fn changed_session_snapshot_repaints() {
+        let mut state = State::default();
+        let initial = current_session("work", BTreeMap::new());
+        assert!(state.update(Event::SessionUpdate(vec![initial], vec![])));
+
+        let renamed = current_session("review", BTreeMap::new());
+        assert!(state.update(Event::SessionUpdate(vec![renamed], vec![])));
+
+        let mut plugins = BTreeMap::new();
+        plugins.insert(
+            42,
+            PluginInfo {
+                location: "vc-frame:about".to_owned(),
+                ..Default::default()
+            },
+        );
+        let plugin_added = current_session("review", plugins);
+        assert!(state.update(Event::SessionUpdate(vec![plugin_added], vec![])));
+    }
 }

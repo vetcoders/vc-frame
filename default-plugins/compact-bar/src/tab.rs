@@ -1,13 +1,24 @@
-use crate::{line::tab_separator, LinePart};
-use ansi_term::{ANSIString, ANSIStrings};
+use crate::LinePart;
+use crate::line::truncate_display_width;
+use ansi_term::{AnsiString, AnsiStrings};
 use unicode_width::UnicodeWidthStr;
 use zellij_tile::prelude::*;
 use zellij_tile_utils::style;
 
+/// Soft max for a single tab label before the chip wastes Z2 budget.
+/// Overflow across many tabs is still handled by the `+N` compact badge.
+const TAB_LABEL_MAX_COLS: usize = 16;
+
+/// Fisheye tab markers: the focused tab carries ◉ (fisheye, alive center),
+/// every inactive tab carries ○. The marker carries state together with the
+/// chip contrast — shade alone is never the signal.
+const ACTIVE_TAB_MARKER: &str = "◉";
+const INACTIVE_TAB_MARKER: &str = "○";
+
 fn cursors<'a>(
     focused_clients: &'a [ClientId],
     colors: MultiplayerColors,
-) -> (Vec<ANSIString<'a>>, usize) {
+) -> (Vec<AnsiString<'a>>, usize) {
     // cursor section, text length
     let mut len = 0;
     let mut cursors = vec![];
@@ -26,65 +37,61 @@ pub fn render_tab(
     tab: &TabInfo,
     is_alternate_tab: bool,
     palette: Styling,
-    separator: &str,
 ) -> LinePart {
     let focused_clients = tab.other_focused_clients.as_slice();
-    let separator_width = separator.width();
-    let alternate_tab_color = if is_alternate_tab {
+    // The tab zone speaks the exact chip language of the bottom status-bar
+    // (`color_elements()` in status-bar): selected = ribbon_selected base on
+    // its background, unselected = ribbon_unselected base on its background,
+    // alternate rows shift the background one step for countable rhythm —
+    // everything bold. Chips are separated by bar ground, not by drawn rules.
+    let background_color = if tab.active {
+        palette.ribbon_selected.background
+    } else if is_alternate_tab {
         palette.ribbon_unselected.emphasis_1
     } else {
         palette.ribbon_unselected.background
     };
-    let background_color = if tab.active {
-        palette.ribbon_selected.background
-    } else if is_alternate_tab {
-        alternate_tab_color
-    } else {
-        palette.ribbon_unselected.background
-    };
     let foreground_color = if tab.is_flashing_bell {
-        if tab.active {
-            palette.ribbon_selected.emphasis_3
-        } else {
-            palette.ribbon_unselected.emphasis_3
-        }
+        palette.ribbon_unselected.emphasis_3
     } else if tab.active {
         palette.ribbon_selected.base
     } else {
         palette.ribbon_unselected.base
     };
-    let separator_fill_color = palette.text_unselected.background;
-    let left_separator = style!(separator_fill_color, background_color).paint(separator);
-    let mut tab_text_len = text.width() + (separator_width * 2) + 2; // + 2 for padding
+    let marker = if tab.active {
+        ACTIVE_TAB_MARKER
+    } else {
+        INACTIVE_TAB_MARKER
+    };
+    let ground = palette.text_unselected.background;
+    let text_style = style!(foreground_color, background_color).bold();
+    let padded_text = format!(" {} {} ", marker, text);
+    // One ground cell on each side keeps chips separated by the bar itself —
+    // the seam is breathing room, never a painted-on rule.
+    let gap = style!(ground, ground);
+    let left_edge = gap.paint(" ");
+    let right_edge = gap.paint(" ");
+    let mut tab_text_len = padded_text.width() + 2; // ground gap cells
 
-    let tab_styled_text = style!(foreground_color, background_color)
-        .bold()
-        .paint(format!(" {} ", text));
+    let tab_styled_text = text_style.paint(padded_text);
 
-    let right_separator = style!(background_color, separator_fill_color).paint(separator);
     let tab_styled_text = if !focused_clients.is_empty() {
         let (cursor_section, extra_length) =
             cursors(focused_clients, palette.multiplayer_user_colors);
         tab_text_len += extra_length;
         let mut s = String::new();
-        let cursor_beginning = style!(foreground_color, background_color)
-            .bold()
-            .paint("[")
-            .to_string();
-        let cursor_section = ANSIStrings(&cursor_section).to_string();
-        let cursor_end = style!(foreground_color, background_color)
-            .bold()
-            .paint("]")
-            .to_string();
-        s.push_str(&left_separator.to_string());
+        let cursor_beginning = text_style.paint("[").to_string();
+        let cursor_section = AnsiStrings(&cursor_section).to_string();
+        let cursor_end = text_style.paint("]").to_string();
+        s.push_str(&left_edge.to_string());
         s.push_str(&tab_styled_text.to_string());
         s.push_str(&cursor_beginning);
         s.push_str(&cursor_section);
         s.push_str(&cursor_end);
-        s.push_str(&right_separator.to_string());
+        s.push_str(&right_edge.to_string());
         s
     } else {
-        ANSIStrings(&[left_separator, tab_styled_text, right_separator]).to_string()
+        AnsiStrings(&[left_edge, tab_styled_text, right_edge]).to_string()
     };
 
     LinePart {
@@ -97,12 +104,12 @@ pub fn render_tab(
 pub fn tab_style(
     mut tabname: String,
     tab: &TabInfo,
-    mut is_alternate_tab: bool,
+    is_alternate_tab: bool,
     palette: Styling,
-    capabilities: PluginCapabilities,
+    _capabilities: PluginCapabilities,
 ) -> LinePart {
-    let separator = tab_separator(capabilities);
-
+    // Grapheme-safe soft truncate so long tab titles never explode Z2 width.
+    tabname = truncate_display_width(&tabname, TAB_LABEL_MAX_COLS);
     if tab.is_fullscreen_active {
         tabname.push_str(" (FULLSCREEN)");
     } else if tab.is_sync_panes_active {
@@ -111,12 +118,7 @@ pub fn tab_style(
     if tab.has_bell_notification || tab.is_flashing_bell {
         tabname.push_str(" [!]");
     }
-    // we only color alternate tabs differently if we can't use the arrow fonts to separate them
-    if !capabilities.arrow_fonts {
-        is_alternate_tab = false;
-    }
-
-    render_tab(tabname, tab, is_alternate_tab, palette, separator)
+    render_tab(tabname, tab, is_alternate_tab, palette)
 }
 
 pub(crate) fn get_tab_to_focus(

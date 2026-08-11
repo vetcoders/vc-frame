@@ -1,7 +1,7 @@
 //! Helper functions for querying cargo metadata
 use anyhow::Context;
 use serde_json::Value;
-use xshell::{cmd, Shell};
+use xshell::{Shell, cmd};
 
 /// Get cargo metadata for the workspace
 pub fn get_cargo_metadata(sh: &Shell) -> anyhow::Result<Value> {
@@ -37,10 +37,10 @@ pub fn get_no_web_features(sh: &Shell, crate_name: &str) -> anyhow::Result<Optio
 
             if let Some(default_features) = features.get("default").and_then(|v| v.as_array()) {
                 for feature_value in default_features {
-                    if let Some(feature_name) = feature_value.as_str() {
-                        if feature_name != "web_server_capability" {
-                            main_default_features.push(feature_name);
-                        }
+                    if let Some(feature_name) = feature_value.as_str()
+                        && feature_name != "web_server_capability"
+                    {
+                        main_default_features.push(feature_name);
                     }
                 }
             }

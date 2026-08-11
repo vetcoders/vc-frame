@@ -1,11 +1,11 @@
-if [[ -z "$ZELLIJ" ]]; then
-    if [[ "$ZELLIJ_AUTO_ATTACH" == "true" ]]; then
-        zellij attach -c
+if [[ -z "${VC_FRAME:-$ZELLIJ}" ]]; then
+    if [[ "${VC_FRAME_AUTO_ATTACH:-$ZELLIJ_AUTO_ATTACH}" == "true" ]]; then
+        vc-frame attach -c
     else
-        zellij
+        vc-frame
     fi
 
-    if [[ "$ZELLIJ_AUTO_EXIT" == "true" ]]; then
+    if [[ "${VC_FRAME_AUTO_EXIT:-$ZELLIJ_AUTO_EXIT}" == "true" ]]; then
         exit
     fi
 fi

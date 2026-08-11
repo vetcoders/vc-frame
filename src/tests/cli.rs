@@ -1,16 +1,22 @@
 use std::net::{IpAddr, Ipv4Addr};
 
-use clap::{CommandFactory, Parser};
+use clap::CommandFactory;
 use zellij_utils::cli::{CliArgs, Command};
 
 #[test]
 fn verify_cli() {
-    CliArgs::command().debug_assert();
+    std::thread::Builder::new()
+        .name("verify-cli-command".to_string())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| CliArgs::command().debug_assert())
+        .expect("failed to spawn CLI verifier")
+        .join()
+        .expect("CLI verifier panicked");
 }
 
 #[test]
 fn web_cli_status_alone_works() {
-    let args = CliArgs::try_parse_from(["zellij", "web", "--status"]);
+    let args = CliArgs::try_parse_from(["vc-frame", "web", "--status"]);
     assert!(args.is_ok());
     if let Ok(CliArgs {
         command: Some(Command::Web(web)),
@@ -26,7 +32,7 @@ fn web_cli_status_alone_works() {
 
 #[test]
 fn web_cli_status_with_timeout_works() {
-    let args = CliArgs::try_parse_from(["zellij", "web", "--status", "--timeout", "5"]);
+    let args = CliArgs::try_parse_from(["vc-frame", "web", "--status", "--timeout", "5"]);
     assert!(args.is_ok());
     if let Ok(CliArgs {
         command: Some(Command::Web(web)),
@@ -43,7 +49,7 @@ fn web_cli_status_with_timeout_works() {
 #[test]
 fn web_cli_timeout_with_status_works() {
     // Test with --timeout before --status (order shouldn't matter)
-    let args = CliArgs::try_parse_from(["zellij", "web", "--timeout", "10", "--status"]);
+    let args = CliArgs::try_parse_from(["vc-frame", "web", "--timeout", "10", "--status"]);
     assert!(args.is_ok());
     if let Ok(CliArgs {
         command: Some(Command::Web(web)),
@@ -59,25 +65,25 @@ fn web_cli_timeout_with_status_works() {
 
 #[test]
 fn web_cli_timeout_without_status_fails() {
-    let args = CliArgs::try_parse_from(["zellij", "web", "--timeout", "5"]);
+    let args = CliArgs::try_parse_from(["vc-frame", "web", "--timeout", "5"]);
     assert!(args.is_err());
 }
 
 #[test]
 fn web_cli_status_with_start_fails() {
-    let args = CliArgs::try_parse_from(["zellij", "web", "--status", "--start"]);
+    let args = CliArgs::try_parse_from(["vc-frame", "web", "--status", "--start"]);
     assert!(args.is_err());
 }
 
 #[test]
 fn web_cli_status_with_stop_fails() {
-    let args = CliArgs::try_parse_from(["zellij", "web", "--status", "--stop"]);
+    let args = CliArgs::try_parse_from(["vc-frame", "web", "--status", "--stop"]);
     assert!(args.is_err());
 }
 
 #[test]
 fn web_cli_status_with_ip_works() {
-    let args = CliArgs::try_parse_from(["zellij", "web", "--status", "--ip", "127.0.0.1"]);
+    let args = CliArgs::try_parse_from(["vc-frame", "web", "--status", "--ip", "127.0.0.1"]);
     assert!(args.is_ok());
     if let Ok(CliArgs {
         command: Some(Command::Web(web)),
@@ -93,7 +99,7 @@ fn web_cli_status_with_ip_works() {
 
 #[test]
 fn web_cli_status_with_port_works() {
-    let args = CliArgs::try_parse_from(["zellij", "web", "--status", "--port", "9000"]);
+    let args = CliArgs::try_parse_from(["vc-frame", "web", "--status", "--port", "9000"]);
     assert!(args.is_ok());
     if let Ok(CliArgs {
         command: Some(Command::Web(web)),
@@ -110,7 +116,7 @@ fn web_cli_status_with_port_works() {
 #[test]
 fn web_cli_status_with_ip_and_port_works() {
     let args = CliArgs::try_parse_from([
-        "zellij", "web", "--status", "--ip", "0.0.0.0", "--port", "9000",
+        "vc-frame", "web", "--status", "--ip", "0.0.0.0", "--port", "9000",
     ]);
     assert!(args.is_ok());
     if let Ok(CliArgs {

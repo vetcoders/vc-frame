@@ -277,10 +277,13 @@ message Action {
     SetDarkThemeAction set_dark_theme = 137;
     SetLightThemeAction set_light_theme = 138;
     ToggleThemeAction toggle_theme = 139;
+    CopyPaneScrollbackAction copy_pane_scrollback = 140;
+    CloseTabByIdIfNameAction close_tab_by_id_if_name = 141;
+    CloseTabByIdIfNameIfQuiescentAction close_tab_by_id_if_name_if_quiescent = 142;
   }
 }
 
-// Action message definitions (all 92 variants)
+// Action message definitions
 
 // Simple action types (no data)
 message QuitAction {}
@@ -289,6 +292,7 @@ message FocusPreviousPaneAction {}
 message SwitchFocusAction {}
 message MovePaneBackwardsAction {}
 message ClearScreenAction {}
+message CopyPaneScrollbackAction {}
 message DumpLayoutAction {}
 message SaveSessionAction {}
 message EditScrollbackAction {
@@ -434,6 +438,10 @@ message DumpScreenAction {
   optional PaneId pane_id = 3;
   bool dump_to_stdout = 4;
   bool ansi = 5;
+  optional uint64 expected_tab_id = 6;
+  optional string expected_tab_name = 7;
+  optional string expected_session_incarnation = 8;
+  optional string expected_tab_instance_id = 9;
 }
 
 message ScrollUpAtAction {
@@ -519,6 +527,8 @@ message NewTabAction {
   optional string cwd = 7;
   repeated CommandOrPlugin initial_panes = 8;
   optional UnblockCondition first_pane_unblock_condition = 9;
+  // UNSPECIFIED/absent == APPEND, so old clients keep the historical behaviour.
+  TabPlacement placement = 10;
 }
 
 message GoToTabAction {
@@ -655,6 +665,20 @@ message CloseTabByIdAction {
   uint64 id = 1;
 }
 
+message CloseTabByIdIfNameAction {
+  uint64 id = 1;
+  string expected_name = 2;
+  string expected_session_incarnation = 3;
+  string expected_tab_instance_id = 4;
+}
+
+message CloseTabByIdIfNameIfQuiescentAction {
+  uint64 id = 1;
+  string expected_name = 2;
+  string expected_session_incarnation = 3;
+  string expected_tab_instance_id = 4;
+}
+
 message RenameTabByIdAction {
   uint64 id = 1;
   string name = 2;
@@ -743,6 +767,12 @@ enum Direction {
   DIRECTION_RIGHT = 2;
   DIRECTION_UP = 3;
   DIRECTION_DOWN = 4;
+}
+
+enum TabPlacement {
+  TAB_PLACEMENT_UNSPECIFIED = 0;
+  TAB_PLACEMENT_APPEND = 1;
+  TAB_PLACEMENT_AFTER_BASE = 2;
 }
 
 enum UnblockCondition {
@@ -925,6 +955,7 @@ message TiledPaneLayout {
   optional string pane_initial_contents = 13;
   optional string default_fg = 14;
   optional string default_bg = 15;
+  optional string tab_instance_id = 16;
   // NOTE: run_instructions_to_ignore is not represented here because it's a field used only inside the server itself and not part of the server/client contract
 }
 
@@ -1174,6 +1205,7 @@ message Options {
   optional bool mouse_click_through = 45;
   optional string theme_dark = 46;
   optional string theme_light = 47;
+  optional uint64 auto_lock_after_seconds = 48;
 }
 
 enum OnForceClose {

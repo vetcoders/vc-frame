@@ -1,9 +1,9 @@
 use zellij_utils::pane_size::{Offset, Viewport};
 
 use crate::output::CharacterChunk;
-use crate::panes::terminal_character::{TerminalCharacter, EMPTY_TERMINAL_CHARACTER, RESET_STYLES};
+use crate::panes::terminal_character::{EMPTY_TERMINAL_CHARACTER, RESET_STYLES, TerminalCharacter};
 use crate::tab::Pane;
-use ansi_term::Colour::{Fixed, RGB};
+use ansi_term::Color::{Fixed, Rgb};
 use std::collections::HashMap;
 use zellij_utils::errors::prelude::*;
 use zellij_utils::{data::PaletteColor, shared::colors};
@@ -81,7 +81,7 @@ impl Display for BoundarySymbol {
             false => match self.color {
                 Some(color) => match color.0 {
                     PaletteColor::Rgb((r, g, b)) => {
-                        write!(f, "{}", RGB(r, g, b).paint(self.boundary_type))
+                        write!(f, "{}", Rgb(r, g, b).paint(self.boundary_type))
                     },
                     PaletteColor::EightBit(color) => {
                         write!(f, "{}", Fixed(color).paint(self.boundary_type))
@@ -445,7 +445,6 @@ pub struct Boundaries {
     pub boundary_characters: HashMap<Coordinates, BoundarySymbol>,
 }
 
-#[allow(clippy::if_same_then_else)]
 impl Boundaries {
     pub fn new(viewport: Viewport) -> Self {
         Boundaries {
@@ -591,9 +590,11 @@ impl Boundaries {
                 continue;
             }
             character_chunks.push(CharacterChunk::new(
-                vec![boundary_character
-                    .as_terminal_character()
-                    .context("failed to render as terminal character")?],
+                vec![
+                    boundary_character
+                        .as_terminal_character()
+                        .context("failed to render as terminal character")?,
+                ],
                 coordinates.x,
                 coordinates.y,
             ));
@@ -636,11 +637,7 @@ impl Boundaries {
         rect.y() + rect.rows()
     }
     fn rect_bottom_boundary_col_start(&self, rect: &dyn Pane) -> usize {
-        if rect.x() == 0 {
-            0
-        } else {
-            rect.x() - 1
-        }
+        if rect.x() == 0 { 0 } else { rect.x() - 1 }
     }
     fn rect_bottom_boundary_col_end(&self, rect: &dyn Pane) -> usize {
         rect.x() + rect.cols()

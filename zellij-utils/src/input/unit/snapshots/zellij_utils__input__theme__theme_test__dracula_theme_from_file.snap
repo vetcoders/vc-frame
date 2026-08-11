@@ -1,5 +1,6 @@
 ---
 source: zellij-utils/src/input/./unit/theme_test.rs
+assertion_line: 14
 expression: "format!(\"{:#?}\", theme)"
 ---
 {
@@ -398,7 +399,28 @@ expression: "format!(\"{:#?}\", theme)"
                     ),
                 ),
             },
-            frame_unselected: None,
+            frame_unselected: Some(
+                StyleDeclaration {
+                    base: EightBit(
+                        240,
+                    ),
+                    background: EightBit(
+                        234,
+                    ),
+                    emphasis_0: EightBit(
+                        244,
+                    ),
+                    emphasis_1: EightBit(
+                        240,
+                    ),
+                    emphasis_2: EightBit(
+                        16,
+                    ),
+                    emphasis_3: EightBit(
+                        240,
+                    ),
+                },
+            ),
             frame_selected: StyleDeclaration {
                 base: Rgb(
                     (

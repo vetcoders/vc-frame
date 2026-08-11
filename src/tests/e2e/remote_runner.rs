@@ -12,31 +12,62 @@ use ssh2::Session;
 use std::io::prelude::*;
 use std::net::TcpStream;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 const ZELLIJ_EXECUTABLE_LOCATION: &str = "/usr/src/zellij/zellij";
 const SET_ENV_VARIABLES: &str = "EDITOR=/usr/bin/vi";
+const E2E_RUNTIME_ROOT: &str = "/tmp/vc-frame-e2e";
+const E2E_SOCKET_DIR: &str = "/tmp/vc-frame-e2e/sockets";
+const E2E_CACHE_DIR: &str = "/tmp/vc-frame-e2e/cache";
 const ZELLIJ_CONFIG_PATH: &str = "/usr/src/zellij/fixtures/configs";
 const ZELLIJ_CONFIG_DIRS_PATH: &str = "/usr/src/zellij/fixtures/config-dirs";
 const ZELLIJ_DATA_DIR: &str = "/usr/src/zellij/e2e-data";
 const ZELLIJ_FIXTURE_PATH: &str = "/usr/src/zellij/fixtures";
+const E2E_DEFAULT_LAYOUT: &str = "/usr/src/zellij/fixtures/e2e-default.kdl";
 const CONNECTION_STRING: &str = "127.0.0.1:2222";
 const CONNECTION_USERNAME: &str = "test";
-const CONNECTION_PASSWORD: &str = "test";
+/// Points at the private key whose public half was handed to the e2e ssh
+/// container. Set by the workflow and by the local docker-compose flow
+/// (see CONTRIBUTING.md).
+const SSH_KEY_ENV: &str = "ZELLIJ_E2E_SSH_KEY";
 const SESSION_NAME: &str = "e2e-test";
-const RETRIES: usize = 10;
-const CLEANUP_DONE_MARKER: &str = "__ZELLIJ_CLEANUP_DONE__";
+const RETRIES: usize = 5;
+
+/// Public-key only. There is deliberately no password fallback: a static
+/// `test`/`test` credential on this service container is exactly what was
+/// abused on 2026-07-30 to plant a cryptominer on the runner.
+fn authenticate(sess: &ssh2::Session) {
+    let key_path = std::env::var(SSH_KEY_ENV).unwrap_or_else(|_| {
+        panic!(
+            "{SSH_KEY_ENV} is not set. It must point at the private key whose public half \
+             was given to the e2e ssh container (see CONTRIBUTING.md)."
+        )
+    });
+    let private_key = PathBuf::from(&key_path);
+    let public_key = PathBuf::from(format!("{key_path}.pub"));
+    let public_key = public_key.exists().then_some(public_key);
+    sess.userauth_pubkey_file(
+        CONNECTION_USERNAME,
+        public_key.as_deref(),
+        &private_key,
+        None,
+    )
+    .unwrap_or_else(|error| panic!("ssh public-key auth failed with {key_path}: {error}"));
+    assert!(
+        sess.authenticated(),
+        "ssh session did not authenticate with {key_path}"
+    );
+}
 
 fn ssh_connect() -> ssh2::Session {
     let tcp = TcpStream::connect(CONNECTION_STRING).unwrap();
     let mut sess = Session::new().unwrap();
     sess.set_tcp_stream(tcp);
     sess.handshake().unwrap();
-    sess.userauth_password(CONNECTION_USERNAME, CONNECTION_PASSWORD)
-        .unwrap();
+    authenticate(&sess);
     sess
 }
 
@@ -45,8 +76,7 @@ fn ssh_connect_without_timeout() -> ssh2::Session {
     let mut sess = Session::new().unwrap();
     sess.set_tcp_stream(tcp);
     sess.handshake().unwrap();
-    sess.userauth_password(CONNECTION_USERNAME, CONNECTION_PASSWORD)
-        .unwrap();
+    authenticate(&sess);
     sess
 }
 
@@ -57,41 +87,91 @@ fn setup_remote_environment(channel: &mut ssh2::Channel, win_size: Size) {
         .unwrap();
     channel.shell().unwrap();
     channel.write_all(b"export PS1=\"$ \"\n").unwrap();
-    channel.flush().unwrap();
-}
-
-fn stop_zellij(channel: &mut ssh2::Channel) {
-    // here we remove the status-bar-tips cache to make sure only the quicknav tip is loaded
-    channel
-        .write_all(b"find /tmp | grep status-bar-tips | xargs rm\n")
-        .unwrap();
-    channel.write_all(b"killall -KILL zellij\n").unwrap();
-    channel.write_all(b"rm -rf /tmp/*\n").unwrap(); // remove temporary artifacts from previous
-                                                    // tests
-    channel.write_all(b"rm -rf /tmp/*\n").unwrap(); // remove temporary artifacts from previous
-    channel.write_all(b"rm -rf /tmp/*\n").unwrap(); // remove temporary artifacts from previous
-    channel
-        .write_all(b"rm -rf ~/.cache/zellij/*/session_info\n")
-        .unwrap();
-    channel
-        .write_all(b"rm -rf ~/.cache/zellij/permissions.kdl\n")
-        .unwrap();
-    // create an arch-independent symlink so the binary path in snapshots is stable across
-    // x86_64 (CI) and aarch64 (Apple Silicon local dev)
-    channel
-        .write_all(
-            b"ln -sf /usr/src/zellij/$(uname -m)-unknown-linux-musl/release/zellij /usr/src/zellij/zellij\n",
-        )
-        .unwrap();
-}
-
-fn start_zellij(channel: &mut ssh2::Channel) {
-    stop_zellij(channel);
     channel
         .write_all(
             format!(
-                "{} {} --session {} --data-dir {} options --show-release-notes false --show-startup-tips false\n",
-                SET_ENV_VARIABLES, ZELLIJ_EXECUTABLE_LOCATION, SESSION_NAME, ZELLIJ_DATA_DIR
+                "export VC_FRAME_SOCKET_DIR={E2E_SOCKET_DIR}\n\
+                 export XDG_CACHE_HOME={E2E_CACHE_DIR}\n\
+                 mkdir -p \"$VC_FRAME_SOCKET_DIR\" \"$XDG_CACHE_HOME\"\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    channel.flush().unwrap();
+}
+
+fn cleanup_remote_runtime_command() -> String {
+    format!(
+        r#"export VC_FRAME_SOCKET_DIR={E2E_SOCKET_DIR}
+export ZELLIJ_SOCKET_DIR="$VC_FRAME_SOCKET_DIR"
+export XDG_CACHE_HOME={E2E_CACHE_DIR}
+mkdir -p "$VC_FRAME_SOCKET_DIR" "$XDG_CACHE_HOME"
+if [ -x {ZELLIJ_EXECUTABLE_LOCATION} ]; then
+  {ZELLIJ_EXECUTABLE_LOCATION} kill-all-sessions --yes >/dev/null 2>&1 || true
+fi
+cleanup_attempt=0
+while ps -eo args= | grep -Eq '([v]c-frame|[z]ellij) --server .*/vc-frame-e2e/sockets/' && [ "$cleanup_attempt" -lt 100 ]; do
+  sleep 0.1
+  cleanup_attempt=$((cleanup_attempt + 1))
+done
+if ps -eo args= | grep -Eq '([v]c-frame|[z]ellij) --server .*/vc-frame-e2e/sockets/'; then
+  printf 'vc-frame e2e cleanup failed: an isolated server did not stop gracefully\n' >&2
+  exit 1
+fi
+rm -rf {E2E_SOCKET_DIR} {E2E_CACHE_DIR}
+mkdir -p {E2E_SOCKET_DIR} {E2E_CACHE_DIR}
+"#
+    )
+    // NOTE: the arch-independent /usr/src/zellij/zellij symlink is created on the HOST
+    // — by the workflow step "Publish arch-stable binary path for the container", or
+    // by the local docker-compose flow in CONTRIBUTING.md. The mount is :ro, so the
+    // container must not (and cannot) write it; an `ln -sf` here would fail and, as
+    // the script's last command, poison the cleanup exit status.
+}
+
+fn cleanup_remote_runtime(sess: &ssh2::Session) -> Result<(), String> {
+    let mut channel = sess
+        .channel_session()
+        .map_err(|error| format!("failed to open remote cleanup channel: {error}"))?;
+    channel
+        .exec(&cleanup_remote_runtime_command())
+        .map_err(|error| format!("failed to execute remote cleanup: {error}"))?;
+
+    let mut stdout = String::new();
+    channel
+        .read_to_string(&mut stdout)
+        .map_err(|error| format!("failed to read remote cleanup stdout: {error}"))?;
+    let mut stderr = String::new();
+    channel
+        .stderr()
+        .read_to_string(&mut stderr)
+        .map_err(|error| format!("failed to read remote cleanup stderr: {error}"))?;
+    channel
+        .wait_close()
+        .map_err(|error| format!("failed to close remote cleanup channel: {error}"))?;
+    let exit_status = channel
+        .exit_status()
+        .map_err(|error| format!("failed to read remote cleanup exit status: {error}"))?;
+
+    if exit_status == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "remote cleanup exited with status {exit_status}; stdout={stdout:?}; stderr={stderr:?}"
+        ))
+    }
+}
+
+fn start_zellij(channel: &mut ssh2::Channel) {
+    channel
+        .write_all(
+            format!(
+                "{} {} --session {} --data-dir {} --new-session-with-layout {} options --show-release-notes false --show-startup-tips false\n",
+                SET_ENV_VARIABLES,
+                ZELLIJ_EXECUTABLE_LOCATION,
+                SESSION_NAME,
+                ZELLIJ_DATA_DIR,
+                E2E_DEFAULT_LAYOUT
             )
             .as_bytes(),
         )
@@ -100,7 +180,6 @@ fn start_zellij(channel: &mut ssh2::Channel) {
 }
 
 fn start_zellij_with_config_dir(channel: &mut ssh2::Channel, config_dir: &str) {
-    stop_zellij(channel);
     channel
         .write_all(
             format!(
@@ -114,7 +193,6 @@ fn start_zellij_with_config_dir(channel: &mut ssh2::Channel, config_dir: &str) {
 }
 
 fn start_zellij_mirrored_session(channel: &mut ssh2::Channel) {
-    stop_zellij(channel);
     channel
         .write_all(
             format!(
@@ -128,7 +206,6 @@ fn start_zellij_mirrored_session(channel: &mut ssh2::Channel) {
 }
 
 fn start_zellij_mirrored_session_with_layout(channel: &mut ssh2::Channel, layout_file_name: &str) {
-    stop_zellij(channel);
     channel
         .write_all(
             format!(
@@ -150,7 +227,6 @@ fn start_zellij_mirrored_session_with_layout_and_viewport_serialization(
     channel: &mut ssh2::Channel,
     layout_file_name: &str,
 ) {
-    stop_zellij(channel);
     channel
         .write_all(
             format!(
@@ -169,7 +245,6 @@ fn start_zellij_mirrored_session_with_layout_and_viewport_serialization(
 }
 
 fn start_zellij_in_session(channel: &mut ssh2::Channel, session_name: &str, mirrored: bool) {
-    stop_zellij(channel);
     channel
         .write_all(
             format!(
@@ -213,7 +288,6 @@ fn watch_existing_session(channel: &mut ssh2::Channel, session_name: &str) {
 }
 
 fn start_zellij_without_frames(channel: &mut ssh2::Channel) {
-    stop_zellij(channel);
     channel
         .write_all(
             format!(
@@ -227,7 +301,6 @@ fn start_zellij_without_frames(channel: &mut ssh2::Channel) {
 }
 
 fn start_zellij_with_config(channel: &mut ssh2::Channel, config_path: &str) {
-    stop_zellij(channel);
     channel
         .write_all(
             format!(
@@ -248,7 +321,11 @@ fn wait_for_startup(last_snapshot: &Arc<Mutex<String>>) {
     let start = std::time::Instant::now();
     let timeout = std::time::Duration::from_secs(10);
     loop {
-        if last_snapshot.lock().unwrap().contains("Ctrl +") {
+        // Accept classic (`Ctrl +` / `LOCK`) and current chrome (`LIVE`,
+        // `HEALTH`, dense mode chips) so startup does not hang for 10s when
+        // the status-bar language moves.
+        let snap = last_snapshot.lock().unwrap().clone();
+        if chrome_appears_in(&snap) {
             break;
         }
         if start.elapsed() > timeout {
@@ -258,24 +335,14 @@ fn wait_for_startup(last_snapshot: &Arc<Mutex<String>>) {
     }
 }
 
-fn wait_for_shell_output(channel: &mut ssh2::Channel, needle: &str) {
-    let start = std::time::Instant::now();
-    let timeout = std::time::Duration::from_secs(10);
-    let mut output = String::new();
-    let mut buf = [0u8; 4096];
-    loop {
-        if output.contains(needle) || start.elapsed() > timeout {
-            break;
-        }
-        match channel.read(&mut buf) {
-            Ok(0) => std::thread::sleep(std::time::Duration::from_millis(50)),
-            Ok(count) => output.push_str(&String::from_utf8_lossy(&buf[..count])),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            },
-            Err(_) => break,
-        }
-    }
+/// True when the terminal dump shows any recognizable vc-frame chrome.
+fn chrome_appears_in(snap: &str) -> bool {
+    (snap.contains("Ctrl +") && snap.contains("LOCK"))
+        || snap.contains("LIVE ")
+        || snap.contains("HEALTH ")
+        || snap.contains(" Tab #1")
+        || snap.contains("Tab #1 ")
+        || (snap.contains("LOCK") && snap.contains("PANE"))
 }
 
 fn read_from_channel(
@@ -306,26 +373,28 @@ fn read_from_channel(
                 let arrow_fonts = true;
                 let styled_underlines = true;
                 let explicitly_disable_kitty_keyboard_protocol = false;
-                let mut terminal_output = TerminalPane::new(
-                    0,
-                    pane_geom,
-                    Style::default(),
-                    0,
-                    String::new(),
-                    Rc::new(RefCell::new(LinkHandler::new())),
-                    character_cell_size,
-                    sixel_image_store,
-                    Rc::new(RefCell::new(Palette::default())),
-                    Rc::new(RefCell::new(HashMap::new())),
-                    None,
-                    None,
-                    debug,
-                    arrow_fonts,
-                    styled_underlines,
-                    true, // osc8_hyperlinks
-                    explicitly_disable_kitty_keyboard_protocol,
-                    None,
-                ); // 0 is the pane index
+                let mut terminal_output =
+                    TerminalPane::new(zellij_server::panes::TerminalPaneOptions {
+                        pid: 0,
+                        position_and_size: pane_geom,
+                        style: Style::default(),
+                        pane_index: 0,
+                        pane_name: String::new(),
+                        link_handler: Rc::new(RefCell::new(LinkHandler::new())),
+                        character_cell_size,
+                        sixel_image_store,
+                        terminal_emulator_colors: Rc::new(RefCell::new(Palette::default())),
+                        terminal_emulator_color_codes: Rc::new(RefCell::new(HashMap::new())),
+                        initial_pane_title: None,
+                        invoked_with: None,
+                        debug,
+                        arrow_fonts,
+                        styled_underlines,
+                        osc8_hyperlinks: true,
+                        explicitly_disable_keyboard_protocol:
+                            explicitly_disable_kitty_keyboard_protocol,
+                        notification_end: None,
+                    });
                 loop {
                     if !should_keep_running.load(Ordering::SeqCst) {
                         break;
@@ -392,11 +461,12 @@ pub fn take_snapshot(terminal_output: &mut TerminalPane) -> String {
     let mut snapshot = String::new();
     for (line_index, line) in output_lines.iter().enumerate() {
         for (character_index, terminal_character) in line.iter().enumerate() {
-            if let Some((cursor_x, cursor_y)) = cursor_coordinates {
-                if line_index == cursor_y && character_index == cursor_x {
-                    snapshot.push('█');
-                    continue;
-                }
+            if let Some((cursor_x, cursor_y)) = cursor_coordinates
+                && line_index == cursor_y
+                && character_index == cursor_x
+            {
+                snapshot.push('█');
+                continue;
             }
             snapshot.push(terminal_character.character);
         }
@@ -431,14 +501,27 @@ impl RemoteTerminal {
         x == self.cursor_x && y == self.cursor_y
     }
     pub fn status_bar_appears(&self) -> bool {
-        self.last_snapshot.lock().unwrap().contains("Ctrl +")
-            && self.last_snapshot.lock().unwrap().contains("LOCK")
+        let snap = self.last_snapshot.lock().unwrap().clone();
+        chrome_appears_in(&snap)
+    }
+    pub fn mode_status_bar_appears(&self) -> bool {
+        let snap = self.last_snapshot.lock().unwrap();
+        snap.contains("LOCK") && snap.contains("PANE") && snap.contains("SESSION")
+    }
+    pub fn top_bar_appears(&self) -> bool {
+        let snap = self.last_snapshot.lock().unwrap();
+        snap.lines()
+            .next()
+            .is_some_and(|line| line.contains("𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍."))
     }
     pub fn ctrl_plus_appears(&self) -> bool {
-        self.last_snapshot.lock().unwrap().contains("Ctrl +")
+        let snap = self.last_snapshot.lock().unwrap().clone();
+        // Dense chips may drop the superkey prefix; treat mode chrome as enough.
+        snap.contains("Ctrl +") || snap.contains("LOCK") || snap.contains("LIVE ")
     }
     pub fn tab_bar_appears(&self) -> bool {
-        self.last_snapshot.lock().unwrap().contains("Tab #1")
+        let snap = self.last_snapshot.lock().unwrap().clone();
+        snap.contains("Tab #1") || snap.contains("Tab#1")
     }
     pub fn snapshot_contains(&self, text: &str) -> bool {
         self.last_snapshot.lock().unwrap().contains(text)
@@ -447,14 +530,18 @@ impl RemoteTerminal {
         let s = self.last_snapshot.lock().unwrap();
         s.lines().map(|s| s.to_owned()).collect::<Vec<_>>()
     }
-    #[allow(unused)]
+    // e2e debugging helper: not called by the suite, kept for ad-hoc use when
+    // diagnosing remote-runner failures (sweep 2026-08-09).
+    #[allow(dead_code)]
     pub fn current_snapshot(&self) -> String {
         // convenience method for writing tests,
         // this should only be used when developing,
         // please prefer "snapsht_contains" instead
         self.last_snapshot.lock().unwrap().clone()
     }
-    #[allow(unused)]
+    // e2e debugging helper: not called by the suite, kept for ad-hoc use when
+    // diagnosing remote-runner failures (sweep 2026-08-09).
+    #[allow(dead_code)]
     pub fn current_cursor_position(&self) -> String {
         // convenience method for writing tests,
         // this should only be used when developing,
@@ -755,17 +842,10 @@ impl RemoteRunner {
             reader_thread,
         }
     }
-    pub fn kill_running_sessions(win_size: Size) {
+    pub fn kill_running_sessions(_win_size: Size) {
         let sess = ssh_connect();
-        let mut channel = sess.channel_session().unwrap();
-        setup_remote_environment(&mut channel, win_size);
-        stop_zellij(&mut channel);
-        channel
-            .write_all(format!("printf '{}\\n'\n", CLEANUP_DONE_MARKER).as_bytes())
-            .unwrap();
-        channel.flush().unwrap();
-        sess.set_blocking(false);
-        wait_for_shell_output(&mut channel, CLEANUP_DONE_MARKER);
+        cleanup_remote_runtime(&sess)
+            .unwrap_or_else(|error| panic!("remote E2E cleanup failed: {error}"));
     }
     pub fn new_with_session_name(win_size: Size, session_name: &str, mirrored: bool) -> Self {
         // notice that this method does not have a timeout, so use with caution!
@@ -968,7 +1048,6 @@ impl RemoteRunner {
         self.panic_on_no_retries_left = false;
         self
     }
-    #[allow(unused)]
     pub fn retry_pause_ms(mut self, retry_pause_ms: usize) -> Self {
         self.retry_pause_ms = retry_pause_ms;
         self
@@ -1017,14 +1096,19 @@ impl RemoteRunner {
                 return self.last_snapshot.lock().unwrap().clone();
             }
             let (cursor_x, cursor_y) = *self.cursor_coordinates.lock().unwrap();
+            // Evaluate the readiness predicate against the exact frame we will
+            // return. The reader thread can otherwise replace `last_snapshot`
+            // between the predicate and the clone, producing a frame that no
+            // longer satisfies the condition that accepted it.
+            let snapshot = self.last_snapshot.lock().unwrap().clone();
             let remote_terminal = RemoteTerminal {
                 cursor_x,
                 cursor_y,
-                last_snapshot: self.last_snapshot.clone(),
+                last_snapshot: Arc::new(Mutex::new(snapshot.clone())),
                 channel: self.channel.clone(),
             };
             if instruction(remote_terminal) {
-                return self.last_snapshot.lock().unwrap().clone();
+                return snapshot;
             } else {
                 retries_left -= 1;
                 std::thread::sleep(std::time::Duration::from_millis(100));
@@ -1048,8 +1132,72 @@ impl RemoteRunner {
 
 impl Drop for RemoteRunner {
     fn drop(&mut self) {
-        let _ = self.channel.lock().unwrap().close();
         let reader_thread_running = &mut self.reader_thread.0;
         reader_thread_running.store(false, Ordering::SeqCst);
+        let mut channel = match self.channel.lock() {
+            Ok(channel) => channel,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let _ = channel.close();
+    }
+}
+
+#[cfg(test)]
+mod cleanup_contract_tests {
+    use super::*;
+
+    #[test]
+    fn cleanup_is_scoped_graceful_and_waits_for_server_exit() {
+        let command = cleanup_remote_runtime_command();
+
+        assert!(command.contains("kill-all-sessions --yes"));
+        assert!(command.contains("cleanup_attempt"));
+        assert!(command.contains(E2E_SOCKET_DIR));
+        assert!(command.contains(E2E_CACHE_DIR));
+        assert!(command.contains("export VC_FRAME_SOCKET_DIR="));
+        assert!(command.contains("export ZELLIJ_SOCKET_DIR=\"$VC_FRAME_SOCKET_DIR\""));
+        assert!(!command.contains("killall"));
+        assert!(!command.contains("-KILL"));
+        assert!(!command.contains("rm -rf /tmp/*"));
+    }
+
+    #[test]
+    fn runtime_root_is_an_explicit_non_global_tmp_subdirectory() {
+        assert_eq!(E2E_RUNTIME_ROOT, "/tmp/vc-frame-e2e");
+        assert!(E2E_SOCKET_DIR.starts_with(&format!("{E2E_RUNTIME_ROOT}/")));
+        assert!(E2E_CACHE_DIR.starts_with(&format!("{E2E_RUNTIME_ROOT}/")));
+    }
+
+    #[test]
+    fn default_runner_pins_the_legacy_e2e_layout() {
+        let layout = include_str!("../fixtures/e2e-default.kdl");
+
+        assert_eq!(
+            E2E_DEFAULT_LAYOUT,
+            "/usr/src/zellij/fixtures/e2e-default.kdl"
+        );
+        assert!(layout.contains("plugin location=\"tab-bar\""));
+        assert!(layout.contains("plugin location=\"status-bar\""));
+        assert!(!layout.contains("session-manager"));
+    }
+
+    #[test]
+    fn insta_snapshots_follow_the_current_binary_crate_name() {
+        let snapshot_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tests/e2e/snapshots");
+        let expected_prefix = format!("{}__", env!("CARGO_PKG_NAME").replace('-', "_"));
+        let snapshot_names: Vec<_> = std::fs::read_dir(snapshot_dir)
+            .expect("E2E snapshot directory must exist")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".snap"))
+            .collect();
+
+        assert!(!snapshot_names.is_empty(), "E2E snapshots must be tracked");
+        assert!(
+            snapshot_names
+                .iter()
+                .all(|name| name.starts_with(&expected_prefix)),
+            "E2E snapshots must start with {expected_prefix:?}; found {snapshot_names:?}"
+        );
     }
 }

@@ -1,5 +1,30 @@
-use super::serve_web_client;
 use super::*;
+use super::{ServeWebClientParams, serve_web_client as serve_web_client_impl};
+
+async fn serve_web_client(
+    config: Config,
+    config_options: Options,
+    config_file_path: Option<PathBuf>,
+    listener: std::net::TcpListener,
+    rustls_config: Option<RustlsConfig>,
+    session_manager: Option<Arc<dyn SessionManager>>,
+    client_os_api_factory: Option<Arc<dyn ClientOsApiFactory>>,
+    web_server_ip: IpAddr,
+    web_server_port: u16,
+) {
+    serve_web_client_impl(ServeWebClientParams {
+        config,
+        config_options,
+        config_file_path,
+        listener,
+        rustls_config,
+        session_manager,
+        client_os_api_factory,
+        web_server_ip,
+        web_server_port,
+    })
+    .await
+}
 use futures_util::{SinkExt, StreamExt};
 use isahc::prelude::*;
 use serde_json;
@@ -13,11 +38,11 @@ use zellij_utils::input::layout::Layout;
 use zellij_utils::{consts::VERSION, input::config::Config, input::options::Options};
 
 use crate::os_input_output::ClientOsApi;
+use crate::web_client::ClientOsApiFactory;
 use crate::web_client::control_message::{
     WebClientToWebServerControlMessage, WebClientToWebServerControlMessagePayload,
     WebServerToWebClientControlMessage,
 };
-use crate::web_client::ClientOsApiFactory;
 use zellij_utils::{
     data::Palette,
     errors::ErrorContext,
@@ -33,6 +58,9 @@ mod tests {
 
     use std::time::{Duration, Instant};
 
+    // Delete the shared debug token database only at the start of a serial test.
+    // End-of-test deletion races detached Axum request tasks that are drained when
+    // the per-test Tokio runtime drops, producing SQLITE_IOERR_DELETE_NOENT on macOS.
     async fn wait_for_server(port: u16, timeout: Duration) -> Result<(), String> {
         let start = Instant::now();
         let url = format!("http://127.0.0.1:{}/info/version", port);
@@ -1214,7 +1242,9 @@ mod tests {
                     connection_terminated = true;
                 },
                 _ => {
-                    println!("Connection still active after server abort - this may indicate the cancellation token isn't working as expected in test environment");
+                    println!(
+                        "Connection still active after server abort - this may indicate the cancellation token isn't working as expected in test environment"
+                    );
                     // In test environment, server abort might not trigger cancellation tokens immediately
                     // We'll consider the test successful if we've aborted the server
                     termination_reason = "server_aborted";
@@ -1462,7 +1492,6 @@ mod tests {
         );
 
         server_handle.abort();
-        let _ = delete_db();
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
@@ -1552,7 +1581,9 @@ mod tests {
                 .unwrap();
 
             if all_messages.is_empty() {
-                panic!("No messages were sent to mock session manager. This indicates the server_listener didn't call spawn_session_if_needed.");
+                panic!(
+                    "No messages were sent to mock session manager. This indicates the server_listener didn't call spawn_session_if_needed."
+                );
             }
 
             let (_session_name, msg) = all_messages
@@ -1639,7 +1670,6 @@ mod tests {
         let _ = readonly_control_sink.close().await;
         let _ = readonly_terminal_sink.close().await;
         server_handle.abort();
-        let _ = delete_db();
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
@@ -1755,7 +1785,6 @@ mod tests {
         let _ = control_sink.close().await;
         let _ = terminal_sink.close().await;
         server_handle.abort();
-        let _ = delete_db();
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
@@ -1865,7 +1894,6 @@ mod tests {
         );
 
         server_handle.abort();
-        let _ = delete_db();
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
@@ -2592,7 +2620,6 @@ mod tests {
 
         let _ = control_sink.close().await;
         server_handle.abort();
-        let _ = delete_db();
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
@@ -2690,7 +2717,6 @@ mod tests {
 
         let _ = control_sink.close().await;
         server_handle.abort();
-        let _ = delete_db();
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
@@ -2775,7 +2801,6 @@ mod tests {
         }
 
         server_handle.abort();
-        let _ = delete_db();
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
@@ -3273,6 +3298,7 @@ impl ClientOsApi for MockClientOsApi {
         &self,
         _sigwinch_cb: Box<dyn Fn()>,
         _quit_cb: Box<dyn Fn()>,
+        _detach_cb: Box<dyn Fn()>,
         _resize_receiver: Option<std::sync::mpsc::Receiver<()>>,
     ) {
     }

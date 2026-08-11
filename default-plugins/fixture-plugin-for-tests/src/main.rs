@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-#[allow(unused_imports)]
 use std::io::prelude::*;
-#[allow(unused_imports)] // Action is used in non-test code paths (run_action call)
 use zellij_tile::prelude::actions::Action;
 use zellij_tile::prelude::*;
 
@@ -10,7 +8,6 @@ use zellij_tile::prelude::*;
 // it is not (and should not!) be included in the mainline executable
 // it's included here for convenience so that it will be built by the CI
 
-#[allow(dead_code)]
 #[derive(Default)]
 struct State {
     received_events: Vec<Event>,
@@ -20,7 +17,6 @@ struct State {
     explicit_string_to_render: Option<String>,
 }
 
-#[allow(dead_code)] // used when compiled as wasm plugin, not in native test target
 #[derive(Default, Serialize, Deserialize)]
 struct TestWorker {
     number_of_messages_received: usize,
@@ -468,7 +464,7 @@ impl ZellijPlugin for State {
                     let load_in_background = true;
                     let skip_plugin_cache = true;
                     load_new_plugin(
-                        "zellij:OWN_URL",
+                        "vc-frame:OWN_URL",
                         config,
                         load_in_background,
                         skip_plugin_cache,
@@ -938,10 +934,8 @@ impl ZellijPlugin for State {
                 },
                 _ => {},
             },
-            Event::CustomMessage(message, payload) => {
-                if message == "pong" {
-                    self.received_payload = Some(payload.clone());
-                }
+            Event::CustomMessage(message, payload) if message == "pong" => {
+                self.received_payload = Some(payload.clone());
             },
             Event::BeforeClose => {
                 // this is just to assert something to make sure this event was triggered

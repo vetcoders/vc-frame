@@ -1,5 +1,5 @@
 use super::super::Grid;
-use crate::panes::grid::SixelImageStore;
+use crate::panes::grid::{GridOptions, SixelImageStore};
 use crate::panes::link_handler::LinkHandler;
 use insta::assert_snapshot;
 use std::cell::RefCell;
@@ -13,6 +13,42 @@ use zellij_utils::{
 };
 
 use std::fmt::Write;
+
+// Positional shim preserving the pre-GridOptions call shape of the ~125 Grid::new
+// call sites below. Keeps this test file's diff minimal while Grid::new(opts: GridOptions)
+// takes a single struct argument in production code (see zellij-server/src/panes/grid.rs).
+#[allow(clippy::too_many_arguments)]
+fn new_grid(
+    rows: usize,
+    columns: usize,
+    terminal_emulator_colors: Rc<RefCell<Palette>>,
+    terminal_emulator_color_codes: Rc<RefCell<HashMap<usize, String>>>,
+    link_handler: Rc<RefCell<LinkHandler>>,
+    character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
+    sixel_image_store: Rc<RefCell<SixelImageStore>>,
+    style: Style,
+    debug: bool,
+    arrow_fonts: bool,
+    styled_underlines: bool,
+    osc8_hyperlinks: bool,
+    explicitly_disable_kitty_keyboard_protocol: bool,
+) -> Grid {
+    Grid::new(GridOptions {
+        rows,
+        columns,
+        terminal_emulator_colors,
+        terminal_emulator_color_codes,
+        link_handler,
+        character_cell_size,
+        sixel_image_store,
+        style,
+        debug,
+        arrow_fonts,
+        styled_underlines,
+        osc8_hyperlinks,
+        explicitly_disable_kitty_keyboard_protocol,
+    })
+}
 
 fn read_fixture(fixture_name: &str) -> Vec<u8> {
     let mut path_to_file = std::path::PathBuf::new();
@@ -34,7 +70,7 @@ fn vttest1_0() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         41,
         110,
         Rc::new(RefCell::new(Palette::default())),
@@ -67,7 +103,7 @@ fn vttest1_1() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         41,
         110,
         Rc::new(RefCell::new(Palette::default())),
@@ -100,7 +136,7 @@ fn vttest1_2() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         41,
         110,
         Rc::new(RefCell::new(Palette::default())),
@@ -133,7 +169,7 @@ fn vttest1_3() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         41,
         110,
         Rc::new(RefCell::new(Palette::default())),
@@ -166,7 +202,7 @@ fn vttest1_4() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         41,
         110,
         Rc::new(RefCell::new(Palette::default())),
@@ -199,7 +235,7 @@ fn vttest1_5() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         41,
         110,
         Rc::new(RefCell::new(Palette::default())),
@@ -232,7 +268,7 @@ fn vttest2_0() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         41,
         110,
         Rc::new(RefCell::new(Palette::default())),
@@ -265,7 +301,7 @@ fn vttest2_1() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         41,
         110,
         Rc::new(RefCell::new(Palette::default())),
@@ -298,7 +334,7 @@ fn vttest2_2() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         41,
         110,
         Rc::new(RefCell::new(Palette::default())),
@@ -331,7 +367,7 @@ fn vttest2_3() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         41,
         110,
         Rc::new(RefCell::new(Palette::default())),
@@ -364,7 +400,7 @@ fn vttest2_4() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         41,
         110,
         Rc::new(RefCell::new(Palette::default())),
@@ -397,7 +433,7 @@ fn vttest2_5() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         41,
         110,
         Rc::new(RefCell::new(Palette::default())),
@@ -430,7 +466,7 @@ fn vttest2_6() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         41,
         110,
         Rc::new(RefCell::new(Palette::default())),
@@ -463,7 +499,7 @@ fn vttest2_7() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         41,
         110,
         Rc::new(RefCell::new(Palette::default())),
@@ -496,7 +532,7 @@ fn vttest2_8() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         41,
         110,
         Rc::new(RefCell::new(Palette::default())),
@@ -529,7 +565,7 @@ fn vttest2_9() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         41,
         110,
         Rc::new(RefCell::new(Palette::default())),
@@ -562,7 +598,7 @@ fn vttest2_10() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         41,
         110,
         Rc::new(RefCell::new(Palette::default())),
@@ -595,7 +631,7 @@ fn vttest2_11() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         41,
         110,
         Rc::new(RefCell::new(Palette::default())),
@@ -628,7 +664,7 @@ fn vttest2_12() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         41,
         110,
         Rc::new(RefCell::new(Palette::default())),
@@ -661,7 +697,7 @@ fn vttest2_13() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         41,
         110,
         Rc::new(RefCell::new(Palette::default())),
@@ -694,7 +730,7 @@ fn vttest2_14() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         41,
         110,
         Rc::new(RefCell::new(Palette::default())),
@@ -727,7 +763,7 @@ fn vttest3_0() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         41,
         110,
         Rc::new(RefCell::new(Palette::default())),
@@ -760,7 +796,7 @@ fn vttest8_0() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         51,
         97,
         Rc::new(RefCell::new(Palette::default())),
@@ -793,7 +829,7 @@ fn vttest8_1() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         51,
         97,
         Rc::new(RefCell::new(Palette::default())),
@@ -826,7 +862,7 @@ fn vttest8_2() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         51,
         97,
         Rc::new(RefCell::new(Palette::default())),
@@ -859,7 +895,7 @@ fn vttest8_3() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         51,
         97,
         Rc::new(RefCell::new(Palette::default())),
@@ -892,7 +928,7 @@ fn vttest8_4() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         51,
         97,
         Rc::new(RefCell::new(Palette::default())),
@@ -925,7 +961,7 @@ fn vttest8_5() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         51,
         97,
         Rc::new(RefCell::new(Palette::default())),
@@ -958,7 +994,7 @@ fn csi_b() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         51,
         97,
         Rc::new(RefCell::new(Palette::default())),
@@ -991,7 +1027,7 @@ fn csi_capital_i() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         51,
         97,
         Rc::new(RefCell::new(Palette::default())),
@@ -1024,7 +1060,7 @@ fn csi_capital_z() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         51,
         97,
         Rc::new(RefCell::new(Palette::default())),
@@ -1057,7 +1093,7 @@ fn terminal_reports() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         51,
         97,
         Rc::new(RefCell::new(Palette::default())),
@@ -1090,7 +1126,7 @@ fn wide_characters() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         21,
         104,
         Rc::new(RefCell::new(Palette::default())),
@@ -1123,7 +1159,7 @@ fn wide_characters_line_wrap() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         21,
         104,
         Rc::new(RefCell::new(Palette::default())),
@@ -1156,7 +1192,7 @@ fn insert_character_in_line_with_wide_character() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         21,
         104,
         Rc::new(RefCell::new(Palette::default())),
@@ -1189,7 +1225,7 @@ fn delete_char_in_middle_of_line_with_widechar() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         21,
         104,
         Rc::new(RefCell::new(Palette::default())),
@@ -1222,7 +1258,7 @@ fn delete_char_in_middle_of_line_with_multiple_widechars() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         21,
         104,
         Rc::new(RefCell::new(Palette::default())),
@@ -1255,7 +1291,7 @@ fn fish_wide_characters_override_clock() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         21,
         104,
         Rc::new(RefCell::new(Palette::default())),
@@ -1288,7 +1324,7 @@ fn bash_delete_wide_characters() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         21,
         104,
         Rc::new(RefCell::new(Palette::default())),
@@ -1321,7 +1357,7 @@ fn delete_wide_characters_before_cursor() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         21,
         104,
         Rc::new(RefCell::new(Palette::default())),
@@ -1354,7 +1390,7 @@ fn delete_wide_characters_before_cursor_when_cursor_is_on_wide_character() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         21,
         104,
         Rc::new(RefCell::new(Palette::default())),
@@ -1387,7 +1423,7 @@ fn delete_wide_character_under_cursor() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         21,
         104,
         Rc::new(RefCell::new(Palette::default())),
@@ -1420,7 +1456,7 @@ fn replace_wide_character_under_cursor() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         21,
         104,
         Rc::new(RefCell::new(Palette::default())),
@@ -1453,7 +1489,7 @@ fn wrap_wide_characters() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         21,
         90,
         Rc::new(RefCell::new(Palette::default())),
@@ -1486,7 +1522,7 @@ fn wrap_wide_characters_on_size_change() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         21,
         93,
         Rc::new(RefCell::new(Palette::default())),
@@ -1520,7 +1556,7 @@ fn unwrap_wide_characters_on_size_change() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         21,
         93,
         Rc::new(RefCell::new(Palette::default())),
@@ -1555,7 +1591,7 @@ fn wrap_wide_characters_in_the_middle_of_the_line() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         21,
         91,
         Rc::new(RefCell::new(Palette::default())),
@@ -1588,7 +1624,7 @@ fn wrap_wide_characters_at_the_end_of_the_line() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         21,
         90,
         Rc::new(RefCell::new(Palette::default())),
@@ -1621,7 +1657,7 @@ fn copy_selected_text_from_viewport() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         27,
         125,
         Rc::new(RefCell::new(Palette::default())),
@@ -1662,7 +1698,7 @@ fn copy_wrapped_selected_text_from_viewport() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         22,
         73,
         Rc::new(RefCell::new(Palette::default())),
@@ -1702,7 +1738,7 @@ fn copy_selected_text_from_lines_above() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         27,
         125,
         Rc::new(RefCell::new(Palette::default())),
@@ -1743,7 +1779,7 @@ fn copy_selected_text_from_lines_below() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         27,
         125,
         Rc::new(RefCell::new(Palette::default())),
@@ -1792,7 +1828,7 @@ fn run_bandwhich_from_fish_shell() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         28,
         116,
         Rc::new(RefCell::new(Palette::default())),
@@ -1825,7 +1861,7 @@ fn fish_tab_completion_options() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         28,
         116,
         Rc::new(RefCell::new(Palette::default())),
@@ -1864,7 +1900,7 @@ pub fn fish_select_tab_completion_options() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         28,
         116,
         Rc::new(RefCell::new(Palette::default())),
@@ -1907,7 +1943,7 @@ pub fn vim_scroll_region_down() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         28,
         116,
         Rc::new(RefCell::new(Palette::default())),
@@ -1947,7 +1983,7 @@ pub fn vim_ctrl_d() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         28,
         116,
         Rc::new(RefCell::new(Palette::default())),
@@ -1986,7 +2022,7 @@ pub fn vim_ctrl_u() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         28,
         116,
         Rc::new(RefCell::new(Palette::default())),
@@ -2019,7 +2055,7 @@ pub fn htop() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         28,
         116,
         Rc::new(RefCell::new(Palette::default())),
@@ -2052,7 +2088,7 @@ pub fn htop_scrolling() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         28,
         116,
         Rc::new(RefCell::new(Palette::default())),
@@ -2085,7 +2121,7 @@ pub fn htop_right_scrolling() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         28,
         116,
         Rc::new(RefCell::new(Palette::default())),
@@ -2128,7 +2164,7 @@ pub fn vim_overwrite() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         28,
         116,
         Rc::new(RefCell::new(Palette::default())),
@@ -2163,7 +2199,7 @@ pub fn clear_scroll_region() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         28,
         116,
         Rc::new(RefCell::new(Palette::default())),
@@ -2196,7 +2232,7 @@ pub fn display_tab_characters_properly() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         28,
         116,
         Rc::new(RefCell::new(Palette::default())),
@@ -2229,7 +2265,7 @@ pub fn neovim_insert_mode() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         28,
         116,
         Rc::new(RefCell::new(Palette::default())),
@@ -2262,7 +2298,7 @@ pub fn bash_cursor_linewrap() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         28,
         116,
         Rc::new(RefCell::new(Palette::default())),
@@ -2297,7 +2333,7 @@ pub fn fish_paste_multiline() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         28,
         149,
         Rc::new(RefCell::new(Palette::default())),
@@ -2330,7 +2366,7 @@ pub fn git_log() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         28,
         149,
         Rc::new(RefCell::new(Palette::default())),
@@ -2365,7 +2401,7 @@ pub fn git_diff_scrollup() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         28,
         149,
         Rc::new(RefCell::new(Palette::default())),
@@ -2398,7 +2434,7 @@ pub fn emacs_longbuf() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         60,
         284,
         Rc::new(RefCell::new(Palette::default())),
@@ -2431,7 +2467,7 @@ pub fn top_and_quit() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         56,
         235,
         Rc::new(RefCell::new(Palette::default())),
@@ -2471,7 +2507,7 @@ pub fn exa_plus_omf_theme() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         56,
         235,
         Rc::new(RefCell::new(Palette::default())),
@@ -2504,7 +2540,7 @@ pub fn scroll_up() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         10,
         50,
         Rc::new(RefCell::new(Palette::default())),
@@ -2538,7 +2574,7 @@ pub fn scroll_down() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         10,
         50,
         Rc::new(RefCell::new(Palette::default())),
@@ -2573,7 +2609,7 @@ pub fn scroll_up_with_line_wraps() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         10,
         25,
         Rc::new(RefCell::new(Palette::default())),
@@ -2607,7 +2643,7 @@ pub fn scroll_down_with_line_wraps() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         10,
         25,
         Rc::new(RefCell::new(Palette::default())),
@@ -2642,7 +2678,7 @@ pub fn scroll_up_decrease_width_and_scroll_down() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         10,
         50,
         Rc::new(RefCell::new(Palette::default())),
@@ -2682,7 +2718,7 @@ pub fn scroll_up_increase_width_and_scroll_down() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         10,
         25,
         Rc::new(RefCell::new(Palette::default())),
@@ -2722,7 +2758,7 @@ fn saved_cursor_across_resize() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         4,
         20,
         Rc::new(RefCell::new(Palette::default())),
@@ -2771,7 +2807,7 @@ fn saved_cursor_across_resize_longline() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         4,
         20,
         Rc::new(RefCell::new(Palette::default())),
@@ -2813,7 +2849,7 @@ fn saved_cursor_across_resize_rewrap() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         4,
         4 * 8,
         Rc::new(RefCell::new(Palette::default())),
@@ -2855,7 +2891,7 @@ pub fn move_cursor_below_scroll_region() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         34,
         114,
         Rc::new(RefCell::new(Palette::default())),
@@ -2888,7 +2924,7 @@ pub fn insert_wide_characters_in_existing_line() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         21,
         86,
         Rc::new(RefCell::new(Palette::default())),
@@ -2927,7 +2963,7 @@ pub fn full_screen_scroll_region_and_scroll_up() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         54,
         80,
         Rc::new(RefCell::new(Palette::default())),
@@ -2963,7 +2999,7 @@ pub fn ring_bell() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         134,
         64,
         Rc::new(RefCell::new(Palette::default())),
@@ -2996,7 +3032,7 @@ pub fn alternate_screen_change_size() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         20,
         20,
         Rc::new(RefCell::new(Palette::default())),
@@ -3033,7 +3069,7 @@ pub fn fzf_fullscreen() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         51,
         112,
         Rc::new(RefCell::new(Palette::default())),
@@ -3070,7 +3106,7 @@ pub fn replace_multiple_wide_characters_under_cursor() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         51,
         112,
         Rc::new(RefCell::new(Palette::default())),
@@ -3107,7 +3143,7 @@ pub fn replace_non_wide_characters_with_wide_characters() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         51,
         112,
         Rc::new(RefCell::new(Palette::default())),
@@ -3140,7 +3176,7 @@ pub fn scroll_down_ansi() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         51,
         112,
         Rc::new(RefCell::new(Palette::default())),
@@ -3173,7 +3209,7 @@ pub fn ansi_capital_t() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         51,
         112,
         Rc::new(RefCell::new(Palette::default())),
@@ -3205,7 +3241,7 @@ pub fn ansi_capital_s() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         51,
         112,
         Rc::new(RefCell::new(Palette::default())),
@@ -3237,7 +3273,7 @@ fn terminal_pixel_size_reports() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         51,
         97,
         Rc::new(RefCell::new(Palette::default())),
@@ -3283,7 +3319,7 @@ fn terminal_pixel_size_reports_in_unsupported_terminals() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         51,
         97,
         Rc::new(RefCell::new(Palette::default())),
@@ -3327,7 +3363,7 @@ pub fn ansi_csi_at_sign() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         51,
         112,
         Rc::new(RefCell::new(Palette::default())),
@@ -3363,7 +3399,7 @@ pub fn sixel_images_are_reaped_when_scrolled_off() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         51,
         112,
         Rc::new(RefCell::new(Palette::default())),
@@ -3408,7 +3444,7 @@ pub fn sixel_images_are_reaped_when_resetting() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         51,
         112,
         Rc::new(RefCell::new(Palette::default())),
@@ -3450,7 +3486,7 @@ pub fn sixel_image_in_alternate_buffer() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         30,
         112,
         Rc::new(RefCell::new(Palette::default())),
@@ -3476,7 +3512,7 @@ pub fn sixel_image_in_alternate_buffer() {
         vte_parser.advance(&mut grid, byte);
     }
     assert_snapshot!(format!("{:?}", grid)); // should include the image
-                                             //
+    //
     let move_away_from_alternate_screen = "\u{1b}[?1049l";
     for byte in move_away_from_alternate_screen.as_bytes() {
         vte_parser.advance(&mut grid, *byte);
@@ -3503,7 +3539,7 @@ pub fn sixel_with_image_scrolling_decsdm() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         30,
         112,
         Rc::new(RefCell::new(Palette::default())),
@@ -3575,7 +3611,7 @@ pub fn osc_4_background_query() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         51,
         97,
         Rc::new(RefCell::new(Palette::default())),
@@ -3616,7 +3652,7 @@ pub fn osc_4_foreground_query() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         51,
         97,
         Rc::new(RefCell::new(Palette::default())),
@@ -3656,7 +3692,7 @@ pub fn osc_4_color_query() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         51,
         97,
         Rc::new(RefCell::new(Palette::default())),
@@ -3695,7 +3731,7 @@ pub fn xtsmgraphics_color_register_count() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         51,
         97,
         Rc::new(RefCell::new(Palette::default())),
@@ -3739,7 +3775,7 @@ pub fn xtsmgraphics_pixel_graphics_geometry() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         51,
         97,
         Rc::new(RefCell::new(Palette::default())),
@@ -3783,7 +3819,7 @@ pub fn cursor_hide_persists_through_alternate_screen() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         30,
         112,
         Rc::new(RefCell::new(Palette::default())),
@@ -3846,7 +3882,7 @@ fn table_ui_component() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         41,
         110,
         Rc::new(RefCell::new(Palette::default())),
@@ -3879,7 +3915,7 @@ fn table_ui_component_with_coordinates() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         41,
         110,
         Rc::new(RefCell::new(Palette::default())),
@@ -3912,7 +3948,7 @@ fn ribbon_ui_component() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         41,
         110,
         Rc::new(RefCell::new(Palette::default())),
@@ -3945,7 +3981,7 @@ fn ribbon_ui_component_with_coordinates() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         41,
         110,
         Rc::new(RefCell::new(Palette::default())),
@@ -3978,7 +4014,7 @@ fn nested_list_ui_component() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         41,
         120,
         Rc::new(RefCell::new(Palette::default())),
@@ -4011,7 +4047,7 @@ fn nested_list_ui_component_with_coordinates() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         41,
         120,
         Rc::new(RefCell::new(Palette::default())),
@@ -4044,7 +4080,7 @@ fn text_ui_component() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         41,
         120,
         Rc::new(RefCell::new(Palette::default())),
@@ -4077,7 +4113,7 @@ fn text_ui_component_with_coordinates() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         41,
         120,
         Rc::new(RefCell::new(Palette::default())),
@@ -4118,7 +4154,7 @@ fn cannot_escape_scroll_region() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         41,
         120,
         Rc::new(RefCell::new(Palette::default())),
@@ -4152,7 +4188,7 @@ fn preserve_background_color_on_resize() {
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         10,
         20,
         Rc::new(RefCell::new(Palette::default())),
@@ -4235,7 +4271,7 @@ fn create_grid_with_content(content: &str) -> Grid {
     let mut vte_parser = vte::Parser::new();
     let sixel_image_store = Rc::new(RefCell::new(SixelImageStore::default()));
     let terminal_emulator_color_codes = Rc::new(RefCell::new(HashMap::new()));
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         20,
         80,
         Rc::new(RefCell::new(Palette::default())),
@@ -4379,7 +4415,7 @@ fn osc_11_set_and_query_pane_default_bg() {
     let mut vte_parser = vte::Parser::new();
     let sixel_image_store = Rc::new(RefCell::new(SixelImageStore::default()));
     let terminal_emulator_color_codes = Rc::new(RefCell::new(HashMap::new()));
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         10,
         20,
         Rc::new(RefCell::new(Palette::default())),
@@ -4428,7 +4464,7 @@ fn osc_10_set_and_query_pane_default_fg() {
     let mut vte_parser = vte::Parser::new();
     let sixel_image_store = Rc::new(RefCell::new(SixelImageStore::default()));
     let terminal_emulator_color_codes = Rc::new(RefCell::new(HashMap::new()));
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         10,
         20,
         Rc::new(RefCell::new(Palette::default())),
@@ -4474,7 +4510,7 @@ fn osc_110_111_reset_pane_default_colors() {
     let mut vte_parser = vte::Parser::new();
     let sixel_image_store = Rc::new(RefCell::new(SixelImageStore::default()));
     let terminal_emulator_color_codes = Rc::new(RefCell::new(HashMap::new()));
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         10,
         20,
         Rc::new(RefCell::new(Palette::default())),
@@ -4527,7 +4563,7 @@ fn osc_11_set_bg_produces_ansi_in_render_output() {
     let mut vte_parser = vte::Parser::new();
     let sixel_image_store = Rc::new(RefCell::new(SixelImageStore::default()));
     let terminal_emulator_color_codes = Rc::new(RefCell::new(HashMap::new()));
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         5,
         10,
         Rc::new(RefCell::new(Palette::default())),
@@ -4793,7 +4829,7 @@ fn plugin_highlight_at_wrapped_line() {
     // Create a narrow grid (10 cols) so that a long string wraps
     let sixel_image_store = Rc::new(RefCell::new(SixelImageStore::default()));
     let terminal_emulator_color_codes = Rc::new(RefCell::new(HashMap::new()));
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         5,
         10,
         Rc::new(RefCell::new(Palette::default())),
@@ -4952,7 +4988,7 @@ fn highlight_style_variants_resolve_colors() {
 fn create_grid_with_scrollback() -> Grid {
     let sixel_image_store = Rc::new(RefCell::new(SixelImageStore::default()));
     let terminal_emulator_color_codes = Rc::new(RefCell::new(HashMap::new()));
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         5,
         40,
         Rc::new(RefCell::new(Palette::default())),
@@ -5044,7 +5080,7 @@ fn pane_contents_no_scrollback_when_flag_false() {
 fn create_grid_with_colored_scrollback() -> Grid {
     let sixel_image_store = Rc::new(RefCell::new(SixelImageStore::default()));
     let terminal_emulator_color_codes = Rc::new(RefCell::new(HashMap::new()));
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         5,
         40,
         Rc::new(RefCell::new(Palette::default())),
@@ -5399,7 +5435,7 @@ fn create_grid_with_size_and_raw(rows: usize, cols: usize, content: &[u8]) -> Gr
     let mut vte_parser = vte::Parser::new();
     let sixel_image_store = Rc::new(RefCell::new(SixelImageStore::default()));
     let terminal_emulator_color_codes = Rc::new(RefCell::new(HashMap::new()));
-    let mut grid = Grid::new(
+    let mut grid = new_grid(
         rows,
         cols,
         Rc::new(RefCell::new(Palette::default())),
@@ -5699,7 +5735,7 @@ fn row_without_scroll_has_no_bg_color() {
 }
 
 fn new_grid_for_forwarding_test() -> Grid {
-    Grid::new(
+    new_grid(
         10,
         20,
         Rc::new(RefCell::new(Palette::default())),

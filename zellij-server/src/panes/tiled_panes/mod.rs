@@ -3,18 +3,18 @@ mod stacked_panes;
 mod tiled_pane_grid;
 
 use crate::resize_pty;
-use tiled_pane_grid::{split, TiledPaneGrid, RESIZE_PERCENT};
+use tiled_pane_grid::{RESIZE_PERCENT, TiledPaneGrid, split};
 
 use crate::{
+    ClientId,
     os_input_output::ServerOsApi,
     output::Output,
     panes::{ActivePanes, PaneId},
     plugins::PluginInstruction,
-    tab::{pane_info_for_pane, Pane, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH},
+    tab::{MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH, Pane, pane_info_for_pane},
     thread_bus::ThreadSenders,
     ui::boundaries::Boundaries,
     ui::pane_contents_and_ui::PaneContentsAndUi,
-    ClientId,
 };
 use stacked_panes::StackedPanes;
 use zellij_utils::{
@@ -33,6 +33,16 @@ use std::{
     rc::Rc,
     time::Instant,
 };
+
+macro_rules! resize_pty_if_layout_io_enabled {
+    ($enabled:expr, $($args:tt)*) => {{
+        if $enabled {
+            resize_pty!($($args)*)
+        } else {
+            Ok::<(), anyhow::Error>(())
+        }
+    }};
+}
 
 fn pane_content_offset(position_and_size: &PaneGeom, viewport: &Viewport) -> (usize, usize) {
     // (columns_offset, rows_offset)
@@ -74,25 +84,52 @@ pub struct TiledPanes {
     client_id_to_boundaries: HashMap<ClientId, Boundaries>,
     tombstones_before_increase: Option<(PaneId, Vec<HashMap<PaneId, PaneGeom>>)>,
     tombstones_before_decrease: Option<(PaneId, Vec<HashMap<PaneId, PaneGeom>>)>,
+    layout_resizes_enabled: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct TiledPanesLayoutSnapshot {
+    active_panes: ActivePanes,
+    panes_to_hide: HashSet<PaneId>,
+    fullscreen_is_active: Option<PaneId>,
+    tombstones_before_increase: Option<(PaneId, Vec<HashMap<PaneId, PaneGeom>>)>,
+    tombstones_before_decrease: Option<(PaneId, Vec<HashMap<PaneId, PaneGeom>>)>,
+    layout_resizes_enabled: bool,
+}
+
+pub struct TiledPanesOptions {
+    pub display_area: Rc<RefCell<Size>>,
+    pub viewport: Rc<RefCell<Viewport>>,
+    pub connected_clients: Rc<RefCell<HashSet<ClientId>>>,
+    pub connected_clients_in_app: Rc<RefCell<HashMap<ClientId, bool>>>,
+    pub mode_info: Rc<RefCell<HashMap<ClientId, ModeInfo>>>,
+    pub character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
+    pub stacked_resize: Rc<RefCell<bool>>,
+    pub session_is_mirrored: bool,
+    pub draw_pane_frames: bool,
+    pub default_mode_info: ModeInfo,
+    pub style: Style,
+    pub os_api: Box<dyn ServerOsApi>,
+    pub senders: ThreadSenders,
 }
 
 impl TiledPanes {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        display_area: Rc<RefCell<Size>>,
-        viewport: Rc<RefCell<Viewport>>,
-        connected_clients: Rc<RefCell<HashSet<ClientId>>>,
-        connected_clients_in_app: Rc<RefCell<HashMap<ClientId, bool>>>, // bool -> is_web_client
-        mode_info: Rc<RefCell<HashMap<ClientId, ModeInfo>>>,
-        character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
-        stacked_resize: Rc<RefCell<bool>>,
-        session_is_mirrored: bool,
-        draw_pane_frames: bool,
-        default_mode_info: ModeInfo,
-        style: Style,
-        os_api: Box<dyn ServerOsApi>,
-        senders: ThreadSenders,
-    ) -> Self {
+    pub fn new(opts: TiledPanesOptions) -> Self {
+        let TiledPanesOptions {
+            display_area,
+            viewport,
+            connected_clients,
+            connected_clients_in_app,
+            mode_info,
+            character_cell_size,
+            stacked_resize,
+            session_is_mirrored,
+            draw_pane_frames,
+            default_mode_info,
+            style,
+            os_api,
+            senders,
+        } = opts;
         TiledPanes {
             panes: BTreeMap::new(),
             display_area,
@@ -114,7 +151,51 @@ impl TiledPanes {
             client_id_to_boundaries: HashMap::new(),
             tombstones_before_increase: None,
             tombstones_before_decrease: None,
+            layout_resizes_enabled: true,
         }
+    }
+
+    pub(crate) fn layout_snapshot(&self) -> TiledPanesLayoutSnapshot {
+        TiledPanesLayoutSnapshot {
+            active_panes: self.active_panes.clone(),
+            panes_to_hide: self.panes_to_hide.clone(),
+            fullscreen_is_active: self.fullscreen_is_active,
+            tombstones_before_increase: self.tombstones_before_increase.clone(),
+            tombstones_before_decrease: self.tombstones_before_decrease.clone(),
+            layout_resizes_enabled: self.layout_resizes_enabled,
+        }
+    }
+
+    pub(crate) fn take_panes_for_layout_rollback(&mut self) -> BTreeMap<PaneId, Box<dyn Pane>> {
+        std::mem::take(&mut self.panes)
+    }
+
+    pub(crate) fn restore_layout_snapshot(
+        &mut self,
+        snapshot: TiledPanesLayoutSnapshot,
+        panes: BTreeMap<PaneId, Box<dyn Pane>>,
+    ) {
+        self.panes = panes;
+        self.active_panes = snapshot.active_panes;
+        self.panes_to_hide = snapshot.panes_to_hide;
+        self.fullscreen_is_active = snapshot.fullscreen_is_active;
+        self.tombstones_before_increase = snapshot.tombstones_before_increase;
+        self.tombstones_before_decrease = snapshot.tombstones_before_decrease;
+        self.layout_resizes_enabled = snapshot.layout_resizes_enabled;
+        self.client_id_to_boundaries.clear();
+    }
+
+    pub(crate) fn set_layout_io_enabled(&mut self, enabled: bool) {
+        self.active_panes.set_focus_events_enabled(enabled);
+        self.layout_resizes_enabled = enabled;
+    }
+
+    pub(crate) fn layout_io_enabled(&self) -> bool {
+        self.layout_resizes_enabled
+    }
+
+    pub(crate) fn layout_focused_panes(&self) -> HashMap<ClientId, PaneId> {
+        self.active_panes.clone_active_panes()
     }
     pub fn add_pane_with_existing_geom(&mut self, pane_id: PaneId, mut pane: Box<dyn Pane>) {
         if self.draw_pane_frames {
@@ -237,15 +318,14 @@ impl TiledPanes {
                 }
             })
             .copied()
+            && let Some(mut pane) = self.panes.remove(&pane_id)
         {
-            if let Some(mut pane) = self.panes.remove(&pane_id) {
-                // we must strip the logical position here because it's likely a straggler from
-                // this pane's previous tab and would cause chaos if considered in the new one
-                let mut pane_geom = pane.position_and_size();
-                pane_geom.logical_position = None;
-                pane.set_geom(pane_geom);
-                self.add_pane_with_existing_geom(pane.pid(), pane);
-            }
+            // we must strip the logical position here because it's likely a straggler from
+            // this pane's previous tab and would cause chaos if considered in the new one
+            let mut pane_geom = pane.position_and_size();
+            pane_geom.logical_position = None;
+            pane.set_geom(pane_geom);
+            self.add_pane_with_existing_geom(pane.pid(), pane);
         }
     }
     pub fn add_pane_to_stack(&mut self, pane_id_in_stack: &PaneId, mut pane: Box<dyn Pane>) {
@@ -280,11 +360,12 @@ impl TiledPanes {
         }
         let stacked_resize = { *self.stacked_resize.borrow() };
 
-        if let Some(client_id) = client_id {
-            if stacked_resize && self.is_connected(&client_id) {
-                self.add_pane_with_stacked_resize(pane_id, pane, should_relayout, client_id);
-                return;
-            }
+        if let Some(client_id) = client_id
+            && stacked_resize
+            && self.is_connected(&client_id)
+        {
+            self.add_pane_with_stacked_resize(pane_id, pane, should_relayout, client_id);
+            return;
         }
         self.add_pane_without_stacked_resize(pane_id, pane, should_relayout)
     }
@@ -452,10 +533,8 @@ impl TiledPanes {
             .get_pane_geom(&root_pane_id)
             .map(|p| p.is_stacked())
             .unwrap_or(false);
-        if !pane_id_is_stacked {
-            if let Err(e) = pane_grid.make_pane_stacked(&root_pane_id) {
-                log::error!("Failed to make pane stacked: {:?}", e);
-            }
+        if !pane_id_is_stacked && let Err(e) = pane_grid.make_pane_stacked(&root_pane_id) {
+            log::error!("Failed to make pane stacked: {:?}", e);
         }
         match pane_grid.make_room_in_stack_of_pane_id_for_pane(&root_pane_id) {
             Ok(new_pane_geom) => {
@@ -555,7 +634,6 @@ impl TiledPanes {
                 pane.set_frame(draw_pane_frames);
             }
 
-            #[allow(clippy::if_same_then_else)]
             if draw_pane_frames && !pane.borderless() {
                 // there's definitely a frame around this pane, offset its contents
                 pane.set_content_offset(Offset::frame(1));
@@ -597,56 +675,63 @@ impl TiledPanes {
                 }
             }
 
-            resize_pty!(pane, self.os_api, self.senders, self.character_cell_size).unwrap();
+            resize_pty_if_layout_io_enabled!(
+                self.layout_resizes_enabled,
+                pane,
+                self.os_api,
+                self.senders,
+                self.character_cell_size
+            )
+            .non_fatal();
         }
         self.reset_boundaries();
     }
     pub fn can_split_pane_horizontally(&mut self, client_id: ClientId) -> bool {
-        if let Some(active_pane_id) = &self.active_panes.get(&client_id) {
-            if let Some(active_pane) = self.panes.get_mut(active_pane_id) {
-                let mut full_pane_size = active_pane.position_and_size();
+        if let Some(active_pane_id) = &self.active_panes.get(&client_id)
+            && let Some(active_pane) = self.panes.get_mut(active_pane_id)
+        {
+            let mut full_pane_size = active_pane.position_and_size();
 
-                if full_pane_size.is_stacked() {
-                    let Some(position_and_size_of_stack) =
-                        StackedPanes::new_from_btreemap(&mut self.panes, &self.panes_to_hide)
-                            .position_and_size_of_stack(active_pane_id)
-                    else {
-                        log::error!("Failed to find position and size of stack");
-                        return false;
-                    };
-                    full_pane_size = position_and_size_of_stack;
-                }
-
-                if full_pane_size.rows.as_usize() < MIN_TERMINAL_HEIGHT * 2 {
+            if full_pane_size.is_stacked() {
+                let Some(position_and_size_of_stack) =
+                    StackedPanes::new_from_btreemap(&mut self.panes, &self.panes_to_hide)
+                        .position_and_size_of_stack(active_pane_id)
+                else {
+                    log::error!("Failed to find position and size of stack");
                     return false;
-                } else {
-                    return split(SplitDirection::Horizontal, &full_pane_size).is_some();
-                }
+                };
+                full_pane_size = position_and_size_of_stack;
+            }
+
+            if full_pane_size.rows.as_usize() < MIN_TERMINAL_HEIGHT * 2 {
+                return false;
+            } else {
+                return split(SplitDirection::Horizontal, &full_pane_size).is_some();
             }
         }
         false
     }
     pub fn can_split_pane_vertically(&mut self, client_id: ClientId) -> bool {
-        if let Some(active_pane_id) = &self.active_panes.get(&client_id) {
-            if let Some(active_pane) = self.panes.get_mut(active_pane_id) {
-                let mut full_pane_size = active_pane.position_and_size();
+        if let Some(active_pane_id) = &self.active_panes.get(&client_id)
+            && let Some(active_pane) = self.panes.get_mut(active_pane_id)
+        {
+            let mut full_pane_size = active_pane.position_and_size();
 
-                if full_pane_size.is_stacked() {
-                    let Some(position_and_size_of_stack) =
-                        StackedPanes::new_from_btreemap(&mut self.panes, &self.panes_to_hide)
-                            .position_and_size_of_stack(active_pane_id)
-                    else {
-                        log::error!("Failed to find position and size of stack");
-                        return false;
-                    };
-                    full_pane_size = position_and_size_of_stack;
-                }
-
-                if full_pane_size.cols.as_usize() < MIN_TERMINAL_WIDTH * 2 {
+            if full_pane_size.is_stacked() {
+                let Some(position_and_size_of_stack) =
+                    StackedPanes::new_from_btreemap(&mut self.panes, &self.panes_to_hide)
+                        .position_and_size_of_stack(active_pane_id)
+                else {
+                    log::error!("Failed to find position and size of stack");
                     return false;
-                }
-                return split(SplitDirection::Vertical, &full_pane_size).is_some();
+                };
+                full_pane_size = position_and_size_of_stack;
             }
+
+            if full_pane_size.cols.as_usize() < MIN_TERMINAL_WIDTH * 2 {
+                return false;
+            }
+            return split(SplitDirection::Vertical, &full_pane_size).is_some();
         }
         false
     }
@@ -855,12 +940,12 @@ impl TiledPanes {
                 let connected_clients: Vec<ClientId> =
                     self.connected_clients.borrow().iter().copied().collect();
                 for client_id in connected_clients {
-                    if let Some(focused_pane_id_for_client) = self.active_panes.get(&client_id) {
-                        if all_panes_in_stack.contains(focused_pane_id_for_client) {
-                            self.active_panes
-                                .insert(client_id, pane_id, &mut self.panes);
-                            self.set_pane_active_at(pane_id);
-                        }
+                    if let Some(focused_pane_id_for_client) = self.active_panes.get(&client_id)
+                        && all_panes_in_stack.contains(focused_pane_id_for_client)
+                    {
+                        self.active_panes
+                            .insert(client_id, pane_id, &mut self.panes);
+                        self.set_pane_active_at(pane_id);
                     }
                 }
                 self.set_force_render();
@@ -925,25 +1010,22 @@ impl TiledPanes {
             .iter()
             .find(|(_pid, pane)| pane.position_and_size() == position_and_size)
             .map(|(pid, _p)| *pid)
+            && let Some(currently_active_pane_id) = self.active_panes.get(&client_id)
         {
-            if let Some(currently_active_pane_id) = self.active_panes.get(&client_id) {
-                let prev_geom = {
-                    if let Some(currently_focused_pane) =
-                        self.panes.get_mut(currently_active_pane_id)
-                    {
-                        let prev_geom = currently_focused_pane.position_and_size();
-                        currently_focused_pane.set_geom(position_and_size);
-                        Some(prev_geom)
-                    } else {
-                        None
-                    }
-                };
-                if let Some(prev_geom) = prev_geom {
-                    if let Some(previous_pane) = self.panes.get_mut(&pane_id) {
-                        previous_pane.set_geom(prev_geom);
-                        self.reset_boundaries();
-                    }
+            let prev_geom = {
+                if let Some(currently_focused_pane) = self.panes.get_mut(currently_active_pane_id) {
+                    let prev_geom = currently_focused_pane.position_and_size();
+                    currently_focused_pane.set_geom(position_and_size);
+                    Some(prev_geom)
+                } else {
+                    None
                 }
+            };
+            if let Some(prev_geom) = prev_geom
+                && let Some(previous_pane) = self.panes.get_mut(&pane_id)
+            {
+                previous_pane.set_geom(prev_geom);
+                self.reset_boundaries();
             }
         }
     }
@@ -967,6 +1049,8 @@ impl TiledPanes {
     pub fn focused_pane_id(&self, client_id: ClientId) -> Option<PaneId> {
         self.active_panes.get(&client_id).copied()
     }
+    // &Box return/arg shape is a ~50-callsite internal contract; flattening to
+    // &dyn Pane is its own follow-up cut (sweep 2026-08-09).
     #[allow(clippy::borrowed_box)]
     pub fn get_pane(&self, pane_id: PaneId) -> Option<&Box<dyn Pane>> {
         self.panes.get(&pane_id)
@@ -1107,12 +1191,12 @@ impl TiledPanes {
                         .mode;
                     let err_context =
                         || format!("failed to render tiled panes for client {client_id}");
-                    if let PaneId::Plugin(..) = kind {
-                        if !pane_is_one_liner_in_stack {
-                            pane_contents_and_ui
-                                .render_pane_contents_for_client(*client_id)
-                                .with_context(err_context)?;
-                        }
+                    if let PaneId::Plugin(..) = kind
+                        && !pane_is_one_liner_in_stack
+                    {
+                        pane_contents_and_ui
+                            .render_pane_contents_for_client(*client_id)
+                            .with_context(err_context)?;
                     }
                     let is_floating = false;
                     if self.draw_pane_frames {
@@ -1173,14 +1257,12 @@ impl TiledPanes {
                         .render_fake_cursor_if_needed(*client_id)
                         .with_context(err_context)?;
                 }
-                if let PaneId::Terminal(..) = kind {
-                    if !pane_is_one_liner_in_stack {
-                        pane_contents_and_ui
-                            .render_pane_contents_to_multiple_clients(
-                                connected_clients.iter().copied(),
-                            )
-                            .with_context(err_context)?;
-                    }
+                if let PaneId::Terminal(..) = kind
+                    && !pane_is_one_liner_in_stack
+                {
+                    pane_contents_and_ui
+                        .render_pane_contents_to_multiple_clients(connected_clients.iter().copied())
+                        .with_context(err_context)?;
                 }
             }
         }
@@ -1360,8 +1442,13 @@ impl TiledPanes {
             if let Some(pane_ids_to_resize) = pane_grid.stack_pane_up(&pane_id) {
                 for pane_id in pane_ids_to_resize {
                     if let Some(pane) = self.panes.get_mut(&pane_id) {
-                        let _ =
-                            resize_pty!(pane, self.os_api, self.senders, self.character_cell_size);
+                        let _ = resize_pty_if_layout_io_enabled!(
+                            self.layout_resizes_enabled,
+                            pane,
+                            self.os_api,
+                            self.senders,
+                            self.character_cell_size
+                        );
                     }
                 }
                 return true;
@@ -1388,8 +1475,13 @@ impl TiledPanes {
             if let Some(pane_ids_to_resize) = pane_grid.stack_pane_down(&pane_id) {
                 for pane_id in pane_ids_to_resize {
                     if let Some(pane) = self.panes.get_mut(&pane_id) {
-                        let _ =
-                            resize_pty!(pane, self.os_api, self.senders, self.character_cell_size);
+                        let _ = resize_pty_if_layout_io_enabled!(
+                            self.layout_resizes_enabled,
+                            pane,
+                            self.os_api,
+                            self.senders,
+                            self.character_cell_size
+                        );
                     }
                 }
                 return true;
@@ -1416,8 +1508,13 @@ impl TiledPanes {
             if let Some(pane_ids_to_resize) = pane_grid.stack_pane_left(&pane_id) {
                 for pane_id in pane_ids_to_resize {
                     if let Some(pane) = self.panes.get_mut(&pane_id) {
-                        let _ =
-                            resize_pty!(pane, self.os_api, self.senders, self.character_cell_size);
+                        let _ = resize_pty_if_layout_io_enabled!(
+                            self.layout_resizes_enabled,
+                            pane,
+                            self.os_api,
+                            self.senders,
+                            self.character_cell_size
+                        );
                     }
                 }
                 return true;
@@ -1444,8 +1541,13 @@ impl TiledPanes {
             if let Some(pane_ids_to_resize) = pane_grid.stack_pane_right(&pane_id) {
                 for pane_id in pane_ids_to_resize {
                     if let Some(pane) = self.panes.get_mut(&pane_id) {
-                        let _ =
-                            resize_pty!(pane, self.os_api, self.senders, self.character_cell_size);
+                        let _ = resize_pty_if_layout_io_enabled!(
+                            self.layout_resizes_enabled,
+                            pane,
+                            self.os_api,
+                            self.senders,
+                            self.character_cell_size
+                        );
                     }
                 }
                 return true;
@@ -1657,8 +1759,14 @@ impl TiledPanes {
                 if let Some(pane_ids_to_resize) = pane_grid.unstack_pane_up(&pane_id) {
                     for pane_id in pane_ids_to_resize {
                         if let Some(pane) = self.panes.get_mut(&pane_id) {
-                            resize_pty!(pane, self.os_api, self.senders, self.character_cell_size)
-                                .unwrap();
+                            resize_pty_if_layout_io_enabled!(
+                                self.layout_resizes_enabled,
+                                pane,
+                                self.os_api,
+                                self.senders,
+                                self.character_cell_size
+                            )
+                            .non_fatal();
                         }
                     }
                     self.reapply_pane_frames();
@@ -1751,7 +1859,14 @@ impl TiledPanes {
 
         for pane in self.panes.values_mut() {
             // TODO: only for the panes whose width/height actually changed
-            resize_pty!(pane, self.os_api, self.senders, self.character_cell_size).unwrap();
+            resize_pty_if_layout_io_enabled!(
+                self.layout_resizes_enabled,
+                pane,
+                self.os_api,
+                self.senders,
+                self.character_cell_size
+            )
+            .non_fatal();
         }
         self.reset_boundaries();
         Ok(pane_size_changed)
@@ -1779,7 +1894,14 @@ impl TiledPanes {
         }
 
         for pane in self.panes.values_mut() {
-            resize_pty!(pane, self.os_api, self.senders, self.character_cell_size).unwrap();
+            resize_pty_if_layout_io_enabled!(
+                self.layout_resizes_enabled,
+                pane,
+                self.os_api,
+                self.senders,
+                self.character_cell_size
+            )
+            .non_fatal();
         }
         self.reset_boundaries();
         Ok(())
@@ -2082,13 +2204,14 @@ impl TiledPanes {
             if let Some(geom) = prev_geom_override {
                 new_position.set_geom_override(geom);
             }
-            resize_pty!(
+            resize_pty_if_layout_io_enabled!(
+                self.layout_resizes_enabled,
                 new_position,
                 self.os_api,
                 self.senders,
                 self.character_cell_size
             )
-            .unwrap();
+            .non_fatal();
             new_position.set_should_render(true);
 
             let current_position = self.panes.get_mut(&active_pane_id).unwrap();
@@ -2096,13 +2219,14 @@ impl TiledPanes {
             if let Some(geom) = next_geom_override {
                 current_position.set_geom_override(geom);
             }
-            resize_pty!(
+            resize_pty_if_layout_io_enabled!(
+                self.layout_resizes_enabled,
                 current_position,
                 self.os_api,
                 self.senders,
                 self.character_cell_size
             )
-            .unwrap();
+            .non_fatal();
             current_position.set_should_render(true);
             self.focus_pane_for_all_clients(active_pane_id);
             self.set_pane_frames(self.draw_pane_frames);
@@ -2148,13 +2272,14 @@ impl TiledPanes {
         if let Some(geom) = prev_geom_override {
             new_position.set_geom_override(geom);
         }
-        resize_pty!(
+        resize_pty_if_layout_io_enabled!(
+            self.layout_resizes_enabled,
             new_position,
             self.os_api,
             self.senders,
             self.character_cell_size
         )
-        .unwrap();
+        .non_fatal();
         new_position.set_should_render(true);
 
         let current_position = self.panes.get_mut(&pane_id).unwrap();
@@ -2162,13 +2287,14 @@ impl TiledPanes {
         if let Some(geom) = next_geom_override {
             current_position.set_geom_override(geom);
         }
-        resize_pty!(
+        resize_pty_if_layout_io_enabled!(
+            self.layout_resizes_enabled,
             current_position,
             self.os_api,
             self.senders,
             self.character_cell_size
         )
-        .unwrap();
+        .non_fatal();
         current_position.set_should_render(true);
         self.reapply_pane_focus();
         self.set_pane_frames(self.draw_pane_frames);
@@ -2200,13 +2326,14 @@ impl TiledPanes {
             if let Some(geom) = prev_geom_override {
                 new_position.set_geom_override(geom);
             }
-            resize_pty!(
+            resize_pty_if_layout_io_enabled!(
+                self.layout_resizes_enabled,
                 new_position,
                 self.os_api,
                 self.senders,
                 self.character_cell_size
             )
-            .unwrap();
+            .non_fatal();
             new_position.set_should_render(true);
 
             let current_position = self.panes.get_mut(&pane_id).unwrap();
@@ -2214,13 +2341,14 @@ impl TiledPanes {
             if let Some(geom) = next_geom_override {
                 current_position.set_geom_override(geom);
             }
-            resize_pty!(
+            resize_pty_if_layout_io_enabled!(
+                self.layout_resizes_enabled,
                 current_position,
                 self.os_api,
                 self.senders,
                 self.character_cell_size
             )
-            .unwrap();
+            .non_fatal();
             current_position.set_should_render(true);
             self.reapply_pane_focus();
             self.set_pane_frames(self.draw_pane_frames);
@@ -2251,13 +2379,14 @@ impl TiledPanes {
             if let Some(geom) = prev_geom_override {
                 new_position.set_geom_override(geom);
             }
-            resize_pty!(
+            resize_pty_if_layout_io_enabled!(
+                self.layout_resizes_enabled,
                 new_position,
                 self.os_api,
                 self.senders,
                 self.character_cell_size
             )
-            .unwrap();
+            .non_fatal();
             new_position.set_should_render(true);
 
             let current_position = self.panes.get_mut(&pane_id).unwrap();
@@ -2265,13 +2394,14 @@ impl TiledPanes {
             if let Some(geom) = next_geom_override {
                 current_position.set_geom_override(geom);
             }
-            resize_pty!(
+            resize_pty_if_layout_io_enabled!(
+                self.layout_resizes_enabled,
                 current_position,
                 self.os_api,
                 self.senders,
                 self.character_cell_size
             )
-            .unwrap();
+            .non_fatal();
             current_position.set_should_render(true);
             self.reapply_pane_focus();
             self.set_pane_frames(self.draw_pane_frames);
@@ -2302,13 +2432,14 @@ impl TiledPanes {
             if let Some(geom) = prev_geom_override {
                 new_position.set_geom_override(geom);
             }
-            resize_pty!(
+            resize_pty_if_layout_io_enabled!(
+                self.layout_resizes_enabled,
                 new_position,
                 self.os_api,
                 self.senders,
                 self.character_cell_size
             )
-            .unwrap();
+            .non_fatal();
             new_position.set_should_render(true);
 
             let current_position = self.panes.get_mut(&pane_id).unwrap();
@@ -2316,13 +2447,14 @@ impl TiledPanes {
             if let Some(geom) = next_geom_override {
                 current_position.set_geom_override(geom);
             }
-            resize_pty!(
+            resize_pty_if_layout_io_enabled!(
+                self.layout_resizes_enabled,
                 current_position,
                 self.os_api,
                 self.senders,
                 self.character_cell_size
             )
-            .unwrap();
+            .non_fatal();
             current_position.set_should_render(true);
             self.reapply_pane_focus();
             self.set_pane_frames(self.draw_pane_frames);
@@ -2355,13 +2487,14 @@ impl TiledPanes {
             if let Some(geom) = prev_geom_override {
                 new_position.set_geom_override(geom);
             }
-            resize_pty!(
+            resize_pty_if_layout_io_enabled!(
+                self.layout_resizes_enabled,
                 new_position,
                 self.os_api,
                 self.senders,
                 self.character_cell_size
             )
-            .unwrap();
+            .non_fatal();
             new_position.set_should_render(true);
 
             let current_position = self.panes.get_mut(&pane_id).unwrap();
@@ -2369,13 +2502,14 @@ impl TiledPanes {
             if let Some(geom) = next_geom_override {
                 current_position.set_geom_override(geom);
             }
-            resize_pty!(
+            resize_pty_if_layout_io_enabled!(
+                self.layout_resizes_enabled,
                 current_position,
                 self.os_api,
                 self.senders,
                 self.character_cell_size
             )
-            .unwrap();
+            .non_fatal();
             current_position.set_should_render(true);
             self.reapply_pane_focus();
             self.set_pane_frames(self.draw_pane_frames);
@@ -2674,7 +2808,8 @@ impl TiledPanes {
     pub fn pane_info(&self, current_pane_group: &HashMap<ClientId, Vec<PaneId>>) -> Vec<PaneInfo> {
         let mut pane_infos = vec![];
         for (pane_id, pane) in self.panes.iter() {
-            let mut pane_info_for_pane = pane_info_for_pane(pane_id, pane, current_pane_group);
+            let mut pane_info_for_pane =
+                pane_info_for_pane(pane_id, pane.as_ref(), current_pane_group);
             let is_focused = self.active_panes.pane_id_is_focused(pane_id);
             pane_info_for_pane.is_floating = false;
             pane_info_for_pane.is_suppressed = false;
@@ -2763,6 +2898,8 @@ impl TiledPanes {
     }
 }
 
+// &Box return/arg shape is a ~50-callsite internal contract; flattening to
+// &dyn Pane is its own follow-up cut (sweep 2026-08-09).
 #[allow(clippy::borrowed_box)]
 pub fn is_inside_viewport(viewport: &Viewport, pane: &Box<dyn Pane>) -> bool {
     let pane_position_and_size = pane.current_geom();

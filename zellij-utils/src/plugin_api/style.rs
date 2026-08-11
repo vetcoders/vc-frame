@@ -1,7 +1,7 @@
 use super::generated_api::api::style::{
-    color::Payload as ProtobufColorPayload, Color as ProtobufColor, ColorType as ProtobufColorType,
-    Palette as ProtobufPalette, RgbColorPayload as ProtobufRgbColorPayload, Style as ProtobufStyle,
-    Styling as ProtobufStyling, ThemeHue as ProtobufThemeHue,
+    Color as ProtobufColor, ColorType as ProtobufColorType, Palette as ProtobufPalette,
+    RgbColorPayload as ProtobufRgbColorPayload, Style as ProtobufStyle, Styling as ProtobufStyling,
+    ThemeHue as ProtobufThemeHue, color::Payload as ProtobufColorPayload,
 };
 use crate::data::{
     MultiplayerColors, Palette, PaletteColor, Style, StyleDeclaration, Styling, ThemeHue,
@@ -25,6 +25,8 @@ impl TryFrom<ProtobufStyle> for Style {
     }
 }
 
+// Writes the deprecated protobuf `palette` field on purpose: older plugin
+// consumers still read it; drop only with a plugin-api version bump.
 #[allow(deprecated)]
 impl TryFrom<Style> for ProtobufStyle {
     type Error = &'static str;
@@ -77,7 +79,7 @@ fn to_multiplayer_colors(
 
 #[macro_export]
 macro_rules! color_definitions {
-    ($proto:expr, $declaration:ident, $size:expr) => {
+    ($proto:expr_2021, $declaration:ident, $size:expr_2021) => {
         to_style_declaration(to_array::<PaletteColor, $size>(
             $proto
                 .$declaration
@@ -90,7 +92,7 @@ macro_rules! color_definitions {
 
 #[macro_export]
 macro_rules! multiplayer_colors {
-    ($proto:expr, $size: expr) => {
+    ($proto:expr_2021, $size: expr_2021) => {
         to_multiplayer_colors(to_array::<PaletteColor, $size>(
             $proto
                 .multiplayer_user_colors

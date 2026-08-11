@@ -1,9 +1,9 @@
-use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 
 use crate::ui::{
-    components::{minimize_lines, Colors, LineToRender, ListItem},
     SelectedIndex, SessionUiInfo,
+    components::{Colors, LineToRender, ListItem, minimize_lines},
 };
 
 type FlatSessionAssets = Vec<(ListItem, String, Option<usize>, Option<(u32, bool)>, bool)>;
@@ -78,16 +78,21 @@ impl SessionList {
         mut session_ui_infos: Vec<SessionUiInfo>,
         mut forbidden_sessions: Vec<SessionUiInfo>,
     ) {
-        session_ui_infos.sort_unstable_by(|a, b| {
-            if a.is_current_session {
-                std::cmp::Ordering::Less
-            } else if b.is_current_session {
-                std::cmp::Ordering::Greater
-            } else {
-                a.name.cmp(&b.name)
-            }
-        });
-        forbidden_sessions.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        // Launch order is the canonical rail order: the session started first
+        // holds slot 01 for as long as it lives, and when a session dies the
+        // ones below move up one slot. Activation, clicks and attach must
+        // never reshuffle the rail — every plugin instance sees a different
+        // `is_current_session`, so any current-dependent order makes each
+        // rail render the same inventory differently. Name is only the
+        // deterministic tie-break (equal or missing creation times, e.g.
+        // when another session's metadata has not been read yet).
+        let launch_order = |a: &SessionUiInfo, b: &SessionUiInfo| {
+            a.creation_time
+                .cmp(&b.creation_time)
+                .then_with(|| a.name.cmp(&b.name))
+        };
+        session_ui_infos.sort_unstable_by(launch_order);
+        forbidden_sessions.sort_unstable_by(launch_order);
         self.session_ui_infos = session_ui_infos;
         self.forbidden_sessions = forbidden_sessions;
     }
@@ -265,7 +270,7 @@ impl SessionList {
                 ));
             }
         }
-        matches.sort_by(|a, b| b.score.cmp(&a.score));
+        matches.sort_by_key(|b| std::cmp::Reverse(b.score));
         self.search_results = matches;
         self.is_searching = !search_term.is_empty();
         self.selected_search_index = Some(0);
@@ -386,10 +391,8 @@ impl SessionList {
             }
         } else {
             match self.selected_index {
-                SelectedIndex(None, None, None) => {
-                    if !self.session_ui_infos.is_empty() {
-                        self.selected_index.0 = Some(0);
-                    }
+                SelectedIndex(None, None, None) if !self.session_ui_infos.is_empty() => {
+                    self.selected_index.0 = Some(0);
                 },
                 SelectedIndex(Some(selected_session), None, None) => {
                     if self.session_ui_infos.len() > selected_session + 1 {
@@ -441,10 +444,8 @@ impl SessionList {
             }
         } else {
             match self.selected_index {
-                SelectedIndex(None, None, None) => {
-                    if !self.session_ui_infos.is_empty() {
-                        self.selected_index.0 = Some(self.session_ui_infos.len().saturating_sub(1))
-                    }
+                SelectedIndex(None, None, None) if !self.session_ui_infos.is_empty() => {
+                    self.selected_index.0 = Some(self.session_ui_infos.len().saturating_sub(1))
                 },
                 SelectedIndex(Some(selected_session), None, None) => {
                     if selected_session > 0 {
@@ -518,16 +519,47 @@ impl SessionList {
                 .enumerate()
                 .take(i + 1)
                 .fold(0, |acc, s| acc + s.1.lines_to_render())
-        }) {
-            if search_result_rows_until_selected > rows
-                || self.selected_search_index >= Some(self.search_results.len())
-            {
-                self.selected_search_index = None;
-            }
+        }) && (search_result_rows_until_selected > rows
+            || self.selected_search_index >= Some(self.search_results.len()))
+        {
+            self.selected_search_index = None;
         }
     }
     pub fn reset_selected_index(&mut self) {
         self.selected_index.reset();
+    }
+    pub fn select_session_index(&mut self, session_index: usize) -> bool {
+        if session_index >= self.session_ui_infos.len() {
+            return false;
+        }
+        self.selected_index.0 = Some(session_index);
+        self.selected_index.1 = None;
+        self.selected_index.2 = None;
+        true
+    }
+    pub fn move_session_selection_down(&mut self) {
+        let session_count = self.session_ui_infos.len();
+        if session_count == 0 {
+            self.reset_selected_index();
+            return;
+        }
+        let next_index = match self.selected_index.0 {
+            Some(index) if index + 1 < session_count => index + 1,
+            _ => 0,
+        };
+        self.select_session_index(next_index);
+    }
+    pub fn move_session_selection_up(&mut self) {
+        let session_count = self.session_ui_infos.len();
+        if session_count == 0 {
+            self.reset_selected_index();
+            return;
+        }
+        let next_index = match self.selected_index.0 {
+            Some(0) | None => session_count.saturating_sub(1),
+            Some(index) => index.saturating_sub(1),
+        };
+        self.select_session_index(next_index);
     }
     /// After deleting one or more entries (and re-running `update_search_term`
     /// to rebuild `search_results`), put the cursor back on a sensible

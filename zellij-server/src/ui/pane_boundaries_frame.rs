@@ -1,8 +1,8 @@
-use crate::output::CharacterChunk;
-use crate::panes::{AnsiCode, RcCharacterStyles, TerminalCharacter, EMPTY_TERMINAL_CHARACTER};
-use crate::ui::boundaries::boundary_type;
 use crate::ClientId;
-use zellij_utils::data::{client_id_to_colors, PaletteColor, Style};
+use crate::output::CharacterChunk;
+use crate::panes::{AnsiCode, EMPTY_TERMINAL_CHARACTER, RcCharacterStyles, TerminalCharacter};
+use crate::ui::boundaries::boundary_type;
+use zellij_utils::data::{PaletteColor, Style, client_id_to_colors};
 use zellij_utils::errors::prelude::*;
 use zellij_utils::pane_size::{Offset, Viewport};
 use zellij_utils::position::Position;
@@ -237,8 +237,11 @@ impl PaneFrame {
         &self,
         max_length: usize,
     ) -> Option<(Vec<TerminalCharacter>, usize)> {
-        let is_checked = if self.is_pinned { '+' } else { ' ' };
-        let full_indication = format!(" PIN [{}] ", is_checked);
+        // Fisheye contract (same language as tab/session chips): ○ unpinned,
+        // ◉ pinned. Brackets `[ ]` / `[+]` are gone — they read as form UI,
+        // not as state (operator call 2026-08-03).
+        let pin_glyph = if self.is_pinned { '◉' } else { '○' };
+        let full_indication = format!(" PIN {} ", pin_glyph);
         let full_indication_len = full_indication.chars().count();
         if full_indication_len <= max_length {
             Some((

@@ -6,17 +6,17 @@ pub use crate::os_input_output_common::{AsyncSignals, SignalEvent};
 
 #[cfg(not(windows))]
 use crate::os_input_output_unix::{
-    disable_mouse_support, enable_mouse_support, setup_ipc, AsyncSignalListener,
-    BlockingSignalIterator,
+    AsyncSignalListener, BlockingSignalIterator, disable_mouse_support, enable_mouse_support,
+    setup_ipc,
 };
 #[cfg(windows)]
 use crate::os_input_output_windows::{
-    disable_mouse_support, enable_mouse_support, restore_console_mode, setup_ipc,
-    AsyncSignalListener, BlockingSignalIterator,
+    AsyncSignalListener, BlockingSignalIterator, disable_mouse_support, enable_mouse_support,
+    restore_console_mode, setup_ipc,
 };
 
-use std::io::prelude::*;
 use std::io::IsTerminal;
+use std::io::prelude::*;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::{io, thread, time};
@@ -125,6 +125,7 @@ pub trait ClientOsApi: Send + Sync + std::fmt::Debug {
         &self,
         sigwinch_cb: Box<dyn Fn()>,
         quit_cb: Box<dyn Fn()>,
+        detach_cb: Box<dyn Fn()>,
         resize_receiver: Option<std::sync::mpsc::Receiver<()>>,
     );
     /// Establish a connection with the server socket.
@@ -246,6 +247,7 @@ impl ClientOsApi for ClientOsInputOutput {
         &self,
         sigwinch_cb: Box<dyn Fn()>,
         quit_cb: Box<dyn Fn()>,
+        detach_cb: Box<dyn Fn()>,
         resize_receiver: Option<std::sync::mpsc::Receiver<()>>,
     ) {
         let mut sigwinch_cb_timestamp = time::Instant::now();
@@ -262,6 +264,10 @@ impl ClientOsApi for ClientOsInputOutput {
                 },
                 SignalEvent::Quit => {
                     quit_cb();
+                    break;
+                },
+                SignalEvent::Detach => {
+                    detach_cb();
                     break;
                 },
             }
@@ -343,8 +349,6 @@ pub fn get_cli_client_os_input() -> Result<ClientOsInputOutput, std::io::Error> 
         session_name: Arc::new(Mutex::new(None)),
     })
 }
-
-pub const DEFAULT_STDIN_POLL_TIMEOUT_MS: u64 = 10;
 
 #[cfg(test)]
 mod tests {

@@ -1,11 +1,11 @@
 use super::PluginInstruction;
+use crate::ServerInstruction;
 use crate::background_jobs::BackgroundJob;
 use crate::global_async_runtime::get_tokio_runtime;
 use crate::plugins::plugin_map::PluginEnv;
 use crate::plugins::wasm_bridge::handle_plugin_crash;
 use crate::pty::{ClientTabIndexOrPaneId, PtyInstruction};
-use crate::route::{route_action, wait_for_action_completion, NotificationEnd};
-use crate::ServerInstruction;
+use crate::route::{NotificationEnd, RouteActionParams, route_action, wait_for_action_completion};
 use log::warn;
 use serde::Serialize;
 use std::{
@@ -38,7 +38,7 @@ use zellij_utils::data::{
     OpenTerminalFloatingResponse, OpenTerminalInPlaceOfPluginResponse, OpenTerminalInPlaceResponse,
     OpenTerminalNearPluginResponse, OpenTerminalPaneInPlaceOfPaneIdResponse, OpenTerminalResponse,
     OriginatingPlugin, PaneScrollbackResponse, PermissionStatus, PermissionType, PluginPermission,
-    RegexHighlight, RenameLayoutResponse, SaveLayoutResponse, TabMetadata,
+    RegexHighlight, RenameLayoutResponse, SaveLayoutResponse, TabMetadata, TabPlacement,
 };
 use zellij_utils::home::default_layout_dir;
 use zellij_utils::input::permission::PermissionCache;
@@ -70,12 +70,10 @@ use zellij_utils::{
     },
     plugin_api::{
         event::{
-            layout_parsing_error::ErrorType as ProtobufLayoutParsingErrorType,
             ProtobufLayoutParsingError, ProtobufPaneScrollbackResponse, ProtobufSyntaxError,
+            layout_parsing_error::ErrorType as ProtobufLayoutParsingErrorType,
         },
         plugin_command::{
-            dump_layout_response, dump_session_layout_response, hide_floating_panes_response,
-            parse_layout_response, save_session_response, show_floating_panes_response,
             ProtobufBreakPanesToNewTabResponse, ProtobufBreakPanesToTabWithIdResponse,
             ProtobufBreakPanesToTabWithIndexResponse, ProtobufDeleteAllDeadSessionsResponse,
             ProtobufDeleteDeadSessionResponse, ProtobufDeleteLayoutResponse,
@@ -104,7 +102,9 @@ use zellij_utils::{
             ProtobufOpenTerminalPaneInPlaceOfPaneIdResponse, ProtobufOpenTerminalResponse,
             ProtobufParseLayoutResponse, ProtobufPluginCommand, ProtobufRenameLayoutResponse,
             ProtobufSaveLayoutResponse, ProtobufSaveSessionResponse,
-            ProtobufShowFloatingPanesResponse,
+            ProtobufShowFloatingPanesResponse, dump_layout_response, dump_session_layout_response,
+            hide_floating_panes_response, parse_layout_response, save_session_response,
+            show_floating_panes_response,
         },
         plugin_ids::{ProtobufPluginIds, ProtobufZellijVersion},
     },
@@ -118,17 +118,17 @@ use zellij_utils::plugin_api::plugin_command::{
 
 macro_rules! apply_action {
     ($action:ident, $error_message:ident, $env: ident) => {
-        match route_action(
-            $action,
-            $env.client_id,
-            None,
-            Some(PaneId::Plugin($env.plugin_id)),
-            $env.senders.clone(),
-            $env.default_shell.clone(),
-            None,
-            $env.default_mode.clone(),
-            None,
-        ) {
+        match route_action(RouteActionParams {
+            action: $action,
+            caller: "plugin",
+            client_id: $env.client_id,
+            cli_client_id: None,
+            pane_id: Some(PaneId::Plugin($env.plugin_id)),
+            senders: $env.senders.clone(),
+            default_shell: $env.default_shell.clone(),
+            seen_cli_pipes: None,
+            default_mode: $env.default_mode.clone(),
+        }) {
             Ok((_, result)) => result,
             Err(e) => {
                 log::error!("{}: {:?}", $error_message(), e);
@@ -806,7 +806,11 @@ fn cli_pipe_output(env: &PluginEnv, pipe_name: String, output: String) -> Result
 }
 
 fn message_to_plugin(env: &PluginEnv, mut message_to_plugin: MessageToPlugin) -> Result<()> {
-    if message_to_plugin.plugin_url.as_deref() == Some("zellij:OWN_URL") {
+    // Built-in self-pipe sentinel: accept canonical and legacy scheme.
+    if matches!(
+        message_to_plugin.plugin_url.as_deref(),
+        Some("vc-frame:OWN_URL" | "zellij:OWN_URL")
+    ) {
         message_to_plugin.plugin_url = Some(env.plugin.location.display());
     }
     if !message_to_plugin.has_cwd() {
@@ -882,8 +886,12 @@ fn show_cursor(env: &PluginEnv, cursor_position: Option<(usize, usize)>) {
 }
 
 fn request_permission(env: &PluginEnv, permissions: Vec<PermissionType>) -> Result<()> {
-    if PermissionCache::from_path_or_default(None)
-        .check_permissions(env.plugin.location.to_string(), &permissions)
+    // Built-in plugins are granted silently, mirroring check_event_permission and
+    // check_command_permission: they ship inside the binary, and their panes (the
+    // bars) are not focusable, so an interactive y/n prompt would deadlock.
+    if env.plugin.is_builtin()
+        || PermissionCache::from_path_or_default(None)
+            .check_permissions(env.plugin.location.to_string(), &permissions)
     {
         return env
             .senders
@@ -1058,6 +1066,7 @@ fn open_command_pane_in_new_tab(
         cwd: None,
         initial_panes,
         first_pane_unblock_condition: None,
+        placement: TabPlacement::Append,
     };
     let error_msg = || "Failed to open command pane in new tab".to_string();
     let result = apply_action!(action, error_msg, env);
@@ -1112,6 +1121,7 @@ fn open_plugin_pane_in_new_tab(
         cwd: None,
         initial_panes,
         first_pane_unblock_condition: None,
+        placement: TabPlacement::Append,
     };
     let error_msg = || "Failed to open plugin pane in new tab".to_string();
     let result = apply_action!(action, error_msg, env);
@@ -1203,6 +1213,7 @@ fn open_editor_pane_in_new_tab(
         cwd: None,
         initial_panes,
         first_pane_unblock_condition: None,
+        placement: TabPlacement::Append,
     };
     let error_msg = || "Failed to open editor pane in new tab".to_string();
     let result = apply_action!(action, error_msg, env);
@@ -1432,17 +1443,17 @@ fn run_action(env: &PluginEnv, mut action: Action, context: BTreeMap<String, Str
     // Spawn a new thread to execute the action
     thread::spawn(move || {
         // Execute the action and capture the result
-        let pane_id = match route_action(
+        let pane_id = match route_action(RouteActionParams {
             action,
+            caller: "plugin",
             client_id,
-            None,
-            Some(PaneId::Plugin(plugin_id)),
-            senders.clone(),
+            cli_client_id: None,
+            pane_id: Some(PaneId::Plugin(plugin_id)),
+            senders: senders.clone(),
             default_shell,
-            None,
+            seen_cli_pipes: None,
             default_mode,
-            None,
-        ) {
+        }) {
             Ok((_should_break, result)) => {
                 // Extract pane_id from ActionCompletionResult
                 result.and_then(|r| r.affected_pane_id)
@@ -2489,7 +2500,9 @@ fn set_timeout(env: &PluginEnv, secs: f64) {
 }
 
 fn exec_cmd(env: &PluginEnv, mut command_line: Vec<String>) {
-    log::warn!("The ExecCmd plugin command is deprecated and will be removed in a future version. Please use RunCmd instead (it has all the things and can even show you STDOUT/STDERR and an exit code!)");
+    log::warn!(
+        "The ExecCmd plugin command is deprecated and will be removed in a future version. Please use RunCmd instead (it has all the things and can even show you STDOUT/STDERR and an exit code!)"
+    );
     let err_context = || {
         format!(
             "failed to execute command on host for plugin '{}'",
@@ -2500,8 +2513,11 @@ fn exec_cmd(env: &PluginEnv, mut command_line: Vec<String>) {
 
     // Bail out if we're forbidden to run command
     if !env.plugin._allow_exec_host_cmd {
-        warn!("This plugin isn't allow to run command in host side, skip running this command: '{cmd} {args}'.",
-        	cmd = command, args = command_line.join(" "));
+        warn!(
+            "This plugin isn't allow to run command in host side, skip running this command: '{cmd} {args}'.",
+            cmd = command,
+            args = command_line.join(" ")
+        );
         return;
     }
 
@@ -2732,6 +2748,7 @@ fn apply_layout(env: &PluginEnv, layout: Layout) {
             cwd,
             initial_panes: None,
             first_pane_unblock_condition: None,
+            placement: TabPlacement::Append,
         };
         tabs_to_open.push(action);
     } else {
@@ -2752,6 +2769,7 @@ fn apply_layout(env: &PluginEnv, layout: Layout) {
                 cwd: cwd.clone(),
                 initial_panes: None,
                 first_pane_unblock_condition: None,
+                placement: TabPlacement::Append,
             };
             tabs_to_open.push(action);
         }
@@ -2787,6 +2805,7 @@ fn new_tab(env: &PluginEnv, name: Option<String>, cwd: Option<String>) {
         cwd,
         initial_panes: None,
         first_pane_unblock_condition: None,
+        placement: TabPlacement::Append,
     };
     let error_msg = || "Failed to open new tab".to_string();
     let result = apply_action!(action, error_msg, env);
@@ -2923,12 +2942,11 @@ fn delete_all_dead_sessions() -> Result<()> {
     let mut live_sessions = vec![];
     if let Ok(files) = std::fs::read_dir(&*ZELLIJ_SOCK_DIR) {
         files.for_each(|file| {
-            if let Ok(file) = file {
-                if let Ok(file_name) = file.file_name().into_string() {
-                    if is_ipc_socket(&file.file_type().unwrap()) {
-                        live_sessions.push(file_name);
-                    }
-                }
+            if let Ok(file) = file
+                && let Ok(file_name) = file.file_name().into_string()
+                && is_ipc_socket(&file.file_type().unwrap())
+            {
+                live_sessions.push(file_name);
             }
         });
     }
@@ -3104,7 +3122,7 @@ fn undo_rename_tab(env: &PluginEnv) {
 }
 
 fn quit_zellij(env: &PluginEnv) {
-    let error_msg = || format!("failed to quit zellij in plugin {}", env.name());
+    let error_msg = || format!("failed to quit vc-frame in plugin {}", env.name());
     let action = Action::Quit;
     apply_action!(action, error_msg, env);
 }
@@ -4169,20 +4187,32 @@ fn get_pane_running_command(env: &PluginEnv, pane_id: PaneId) {
 }
 
 fn get_session_list(env: &PluginEnv) {
-    use crate::background_jobs::{scan_session_list_default_dirs, session_scan_state};
+    use crate::background_jobs::{
+        overlay_current_session_info, scan_session_list_default_dirs, session_scan_state,
+    };
     use zellij_utils::data::{GetSessionListResponse, SessionListSnapshot};
 
     let response = match session_scan_state() {
         Some(state) => {
-            let (session_name, available_layouts, plugin_list) = {
+            let (session_name, current_session_info, plugin_list) = {
                 let name = state.current_session_name.lock().unwrap().clone();
                 let info = state.current_session_info.lock().unwrap().clone();
                 let plugins = state.current_session_plugin_list.lock().unwrap().clone();
-                (name, info.available_layouts, plugins)
+                (name, info, plugins)
             };
 
-            let (live_sessions_map, resurrectable_sessions_map) =
-                scan_session_list_default_dirs(&session_name, &available_layouts, &plugin_list);
+            let (mut live_sessions_map, resurrectable_sessions_map) =
+                scan_session_list_default_dirs(
+                    &session_name,
+                    &current_session_info.available_layouts,
+                    &plugin_list,
+                );
+            overlay_current_session_info(
+                &mut live_sessions_map,
+                &session_name,
+                &current_session_info,
+                &plugin_list,
+            );
 
             let _ = env
                 .senders
@@ -4384,14 +4414,14 @@ fn try_save_layout(
 
     // Step 7: Write to disk
     let mut parsed_layout: KdlDocument = layout_kdl.parse().unwrap(); // unwrap
-                                                                      // should
-                                                                      // be
-                                                                      // safe,
-                                                                      // but
-                                                                      // let's
-                                                                      // do
-                                                                      // it
-                                                                      // nicer
+    // should
+    // be
+    // safe,
+    // but
+    // let's
+    // do
+    // it
+    // nicer
     parsed_layout.fmt();
     std::fs::write(&file_path, parsed_layout.to_string())
         .map_err(|io_error| format!("Failed to write layout file: {}", io_error))?;
@@ -4564,17 +4594,17 @@ fn try_edit_layout(
     };
 
     // Route the action - this is fallible
-    route_action(
+    route_action(RouteActionParams {
         action,
-        env.client_id,
-        None,
-        Some(PaneId::Plugin(env.plugin_id)),
-        env.senders.clone(),
-        env.default_shell.clone(),
-        None,
-        env.default_mode,
-        None,
-    )
+        caller: "plugin",
+        client_id: env.client_id,
+        cli_client_id: None,
+        pane_id: Some(PaneId::Plugin(env.plugin_id)),
+        senders: env.senders.clone(),
+        default_shell: env.default_shell.clone(),
+        seen_cli_pipes: None,
+        default_mode: env.default_mode,
+    })
     .map(|_| ())
     .map_err(|e| format!("Failed to route edit action: {:?}", e))
 }
@@ -4852,7 +4882,7 @@ fn load_new_plugin(
     load_in_background: bool,
     skip_plugin_cache: bool,
 ) {
-    let url = if &url == "zellij:OWN_URL" {
+    let url = if matches!(url.as_str(), "zellij:OWN_URL" | "vc-frame:OWN_URL") {
         env.plugin.location.display()
     } else {
         url
@@ -4918,7 +4948,7 @@ fn stop_web_server(_env: &PluginEnv) {
     #[cfg(feature = "web_server_capability")]
     let _ = shutdown_all_webserver_instances();
     #[cfg(not(feature = "web_server_capability"))]
-    log::error!("This instance of Zellij was compiled without web server capabilities");
+    log::error!("This instance of vc-frame was compiled without web server capabilities");
 }
 
 fn query_web_server_status(env: &PluginEnv) {
@@ -5019,7 +5049,7 @@ fn generate_web_login_token(env: &PluginEnv, token_label: Option<String>, read_o
 
 #[cfg(not(feature = "web_server_capability"))]
 fn generate_web_login_token(env: &PluginEnv, _token_label: Option<String>, _read_only: bool) {
-    log::error!("This version of Zellij was compiled without the web server capabilities!");
+    log::error!("This version of vc-frame was compiled without the web server capabilities!");
     let empty_vec: Vec<&str> = vec![];
     let _ = wasi_write_object(env, &empty_vec);
 }
@@ -5045,7 +5075,7 @@ fn revoke_web_login_token(env: &PluginEnv, token_label: String) {
 
 #[cfg(not(feature = "web_server_capability"))]
 fn revoke_web_login_token(env: &PluginEnv, _token_label: String) {
-    log::error!("This version of Zellij was compiled without the web server capabilities!");
+    log::error!("This version of vc-frame was compiled without the web server capabilities!");
     let empty_vec: Vec<&str> = vec![];
     let _ = wasi_write_object(env, &empty_vec);
 }
@@ -5067,7 +5097,7 @@ fn revoke_all_web_login_tokens(env: &PluginEnv) {
 
 #[cfg(not(feature = "web_server_capability"))]
 fn revoke_all_web_login_tokens(env: &PluginEnv) {
-    log::error!("This version of Zellij was compiled without the web server capabilities!");
+    log::error!("This version of vc-frame was compiled without the web server capabilities!");
     let empty_vec: Vec<&str> = vec![];
     let _ = wasi_write_object(env, &empty_vec);
 }
@@ -5089,7 +5119,7 @@ fn rename_web_login_token(env: &PluginEnv, old_name: String, new_name: String) {
 
 #[cfg(not(feature = "web_server_capability"))]
 fn rename_web_login_token(env: &PluginEnv, _old_name: String, _new_name: String) {
-    log::error!("This version of Zellij was compiled without the web server capabilities!");
+    log::error!("This version of vc-frame was compiled without the web server capabilities!");
     let empty_vec: Vec<&str> = vec![];
     let _ = wasi_write_object(env, &empty_vec);
 }
@@ -5115,7 +5145,7 @@ fn list_web_login_tokens(env: &PluginEnv) {
 
 #[cfg(not(feature = "web_server_capability"))]
 fn list_web_login_tokens(env: &PluginEnv) {
-    log::error!("This version of Zellij was compiled without the web server capabilities!");
+    log::error!("This version of vc-frame was compiled without the web server capabilities!");
     let empty_vec: Vec<&str> = vec![];
     let _ = wasi_write_object(env, &empty_vec);
 }
@@ -5468,10 +5498,10 @@ fn check_command_permission(
         _ => return (PermissionStatus::Granted, None),
     };
 
-    if let Some(permissions) = plugin_env.permissions.lock().unwrap().as_ref() {
-        if permissions.contains(&permission) {
-            return (PermissionStatus::Granted, None);
-        }
+    if let Some(permissions) = plugin_env.permissions.lock().unwrap().as_ref()
+        && permissions.contains(&permission)
+    {
+        return (PermissionStatus::Granted, None);
     }
 
     (PermissionStatus::Denied, Some(permission))

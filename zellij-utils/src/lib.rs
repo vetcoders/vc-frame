@@ -1,3 +1,6 @@
+#[cfg(not(target_family = "wasm"))]
+pub mod asset_integrity;
+pub mod build_info;
 pub mod cli;
 pub mod client_server_contract;
 pub mod consts;
@@ -10,10 +13,12 @@ mod home_unix;
 #[cfg(windows)]
 mod home_windows;
 pub mod input;
+pub mod install_freshness;
 pub mod kdl;
 pub mod pane_size;
 pub mod plugin_api;
 pub mod position;
+pub mod run_triage;
 pub mod session_serialization;
 pub mod setup;
 pub mod shared;

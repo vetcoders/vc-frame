@@ -61,6 +61,7 @@ pub(crate) fn command_exists(cmd: &RunCommand) -> bool {
 }
 
 /// A null `AsyncReader` for held panes (produces EOF immediately).
+#[cfg(test)]
 pub(crate) struct NullAsyncReader;
 
 // async fn in traits is not supported by rust, so dtolnay's excellent async_trait macro is being
@@ -70,6 +71,7 @@ pub trait AsyncReader: Send + Sync {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, io::Error>;
 }
 
+#[cfg(test)]
 #[async_trait]
 impl AsyncReader for NullAsyncReader {
     async fn read(&mut self, _buf: &mut [u8]) -> Result<usize, io::Error> {

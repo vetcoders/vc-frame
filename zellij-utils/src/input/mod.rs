@@ -91,12 +91,12 @@ mod not_wasm {
             return KeyWithModifier::new(BareKey::Char('h')).with_ctrl_modifier();
         };
 
-        if raw_bytes == [10] {
-            if let Some((keybinds, mode)) = keybinds_mode {
-                let ctrl_j = KeyWithModifier::new(BareKey::Char('j')).with_ctrl_modifier();
-                if key_is_bound(&ctrl_j, keybinds, mode) {
-                    return ctrl_j;
-                }
+        if raw_bytes == [10]
+            && let Some((keybinds, mode)) = keybinds_mode
+        {
+            let ctrl_j = KeyWithModifier::new(BareKey::Char('j')).with_ctrl_modifier();
+            if key_is_bound(&ctrl_j, keybinds, mode) {
+                return ctrl_j;
             }
         }
         let mut modifiers = BTreeSet::new();

@@ -92,6 +92,13 @@ pub struct Options {
     #[clap(long, value_parser)]
     pub scroll_buffer_size: Option<usize>,
 
+    /// Automatically switch this client to Locked mode after this many
+    /// seconds without keyboard or mouse input (0 or unset = never; the
+    /// shipped config template sets 30)
+    #[clap(long, value_parser)]
+    #[serde(default)]
+    pub auto_lock_after_seconds: Option<u64>,
+
     /// Switch to using a user supplied command for clipboard instead of OSC52
     #[clap(long, value_parser)]
     #[serde(default)]
@@ -122,7 +129,7 @@ pub struct Options {
     #[clap(long, value_parser)]
     pub scrollback_editor: Option<PathBuf>,
 
-    /// The name of the session to create when starting Zellij
+    /// The name of the session to create when starting vc-frame
     #[clap(long, value_parser)]
     #[serde(default)]
     pub session_name: Option<String>,
@@ -174,12 +181,12 @@ pub struct Options {
     #[serde(default)]
     pub support_kitty_keyboard_protocol: Option<bool>,
 
-    /// Whether to make sure a local web server is running when a new Zellij session starts.
+    /// Whether to make sure a local web server is running when a new vc-frame session starts.
     /// This web server will allow creating new sessions and attaching to existing ones that have
     /// opted in to being shared in the browser.
     ///
-    /// Note: a local web server can still be manually started from within a Zellij session or from the CLI.
-    /// If this is not desired, one can use a version of Zellij compiled without
+    /// Note: a local web server can still be manually started from within a vc-frame session or from the CLI.
+    /// If this is not desired, one can use a version of vc-frame compiled without
     /// web_server_capability
     ///
     /// Possible values:
@@ -194,7 +201,7 @@ pub struct Options {
     /// Whether to allow new sessions to be shared through a local web server, assuming one is
     /// running (see the `web_server` option for more details).
     ///
-    /// Note: if Zellij was compiled without web_server_capability, this option will be locked to
+    /// Note: if vc-frame was compiled without web_server_capability, this option will be locked to
     /// "disabled"
     ///
     /// Possible values:
@@ -321,6 +328,9 @@ impl Options {
         let theme_light = other.theme_light.or_else(|| self.theme_light.clone());
         let on_force_close = other.on_force_close.or(self.on_force_close);
         let scroll_buffer_size = other.scroll_buffer_size.or(self.scroll_buffer_size);
+        let auto_lock_after_seconds = other
+            .auto_lock_after_seconds
+            .or(self.auto_lock_after_seconds);
         let copy_command = other.copy_command.or_else(|| self.copy_command.clone());
         let copy_clipboard = other.copy_clipboard.or(self.copy_clipboard);
         let copy_on_select = other.copy_on_select.or(self.copy_on_select);
@@ -387,6 +397,7 @@ impl Options {
             mirror_session,
             on_force_close,
             scroll_buffer_size,
+            auto_lock_after_seconds,
             copy_command,
             copy_clipboard,
             copy_on_select,
@@ -458,6 +469,9 @@ impl Options {
         let theme_light = other.theme_light.or_else(|| self.theme_light.clone());
         let on_force_close = other.on_force_close.or(self.on_force_close);
         let scroll_buffer_size = other.scroll_buffer_size.or(self.scroll_buffer_size);
+        let auto_lock_after_seconds = other
+            .auto_lock_after_seconds
+            .or(self.auto_lock_after_seconds);
         let copy_command = other.copy_command.or_else(|| self.copy_command.clone());
         let copy_clipboard = other.copy_clipboard.or(self.copy_clipboard);
         let copy_on_select = other.copy_on_select.or(self.copy_on_select);
@@ -520,6 +534,7 @@ impl Options {
             mirror_session,
             on_force_close,
             scroll_buffer_size,
+            auto_lock_after_seconds,
             copy_command,
             copy_clipboard,
             copy_on_select,

@@ -2,7 +2,7 @@ use crate::os_input_output::ClientOsApi;
 use crate::web_client::control_message::WebServerToWebClientControlMessage;
 use crate::web_client::types::{ClientChannels, ClientConnectionBus, ConnectionTable};
 use axum::extract::ws::{CloseFrame, Message};
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::{Arc, atomic::AtomicBool};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 

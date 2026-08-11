@@ -1,11 +1,11 @@
 use crate::input_handler::from_termwiz;
-use crate::keyboard_parser::{KittyKeyboardParser, KittyParseOutcome};
+use crate::keyboard_parser::{KittyFeedRest, KittyKeyboardParser};
 use crate::os_input_output::ClientOsApi;
 use crate::web_client::types::BRACKETED_PASTE_END;
 use crate::web_client::types::BRACKETED_PASTE_START;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
 use zellij_utils::{
@@ -140,7 +140,7 @@ fn dispatch_termwiz_event(
 }
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
-use futures::{prelude::stream::SplitSink, SinkExt};
+use futures::{SinkExt, prelude::stream::SplitSink};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio_util::sync::CancellationToken;
 
@@ -212,17 +212,26 @@ pub fn parse_stdin(
     mouse_old_event: &mut MouseEvent,
     session: &mut StdinSession,
 ) {
+    // A coalesced WebSocket frame can carry several complete Kitty
+    // sequences — each resolved key is sent with its own raw bytes.
+    // Only the unconsumed tail falls through to the termwiz parser.
+    let mut buf = buf;
     if !session.explicitly_disable_kitty_keyboard_protocol {
-        match session.kitty_parser.feed(buf) {
-            KittyParseOutcome::Complete(key_with_modifier) => {
-                os_input.send_to_server(ClientToServerMsg::Key {
-                    key: key_with_modifier.clone(),
-                    raw_bytes: buf.to_vec(),
-                    is_kitty_keyboard_protocol: true,
-                });
+        let feed_result = session.kitty_parser.feed(buf);
+        for (key_with_modifier, seq_bytes) in feed_result.keys {
+            os_input.send_to_server(ClientToServerMsg::Key {
+                key: key_with_modifier,
+                raw_bytes: seq_bytes,
+                is_kitty_keyboard_protocol: true,
+            });
+        }
+        match feed_result.rest {
+            KittyFeedRest::Consumed => {
                 return;
             },
-            KittyParseOutcome::Incomplete | KittyParseOutcome::NoMatch => {},
+            KittyFeedRest::Incomplete | KittyFeedRest::Passthrough => {
+                buf = &buf[feed_result.consumed_up_to..];
+            },
         }
     }
 
@@ -331,6 +340,7 @@ mod tests {
             &self,
             _sigwinch_cb: Box<dyn Fn()>,
             _quit_cb: Box<dyn Fn()>,
+            _detach_cb: Box<dyn Fn()>,
             _resize_receiver: Option<std::sync::mpsc::Receiver<()>>,
         ) {
         }

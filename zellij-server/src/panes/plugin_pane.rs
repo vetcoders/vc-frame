@@ -1,21 +1,21 @@
 use std::collections::{BTreeSet, HashMap};
 use std::time::Instant;
 
+use crate::ClientId;
 use crate::output::{CharacterChunk, SixelImageChunk};
 use crate::panes::{
+    LinkHandler, PaneId,
     grid::Grid,
     sixel::SixelImageStore,
     terminal_pane::{BRACKETED_PASTE_BEGIN, BRACKETED_PASTE_END},
-    LinkHandler, PaneId,
 };
-use crate::plugins::PluginInstruction;
+use crate::plugins::{PluginId, PluginInstruction};
 use crate::pty::VteBytes;
 use crate::tab::{AdjustedInput, Pane};
 use crate::ui::{
     loading_indication::LoadingIndication,
     pane_boundaries_frame::{FrameParams, PaneFrame},
 };
-use crate::ClientId;
 use std::cell::RefCell;
 use std::rc::Rc;
 use vte;
@@ -38,7 +38,7 @@ use zellij_utils::{
 macro_rules! style {
     ($fg:expr) => {
         ansi_term::Style::new().fg(match $fg {
-            PaletteColor::Rgb((r, g, b)) => ansi_term::Color::RGB(r, g, b),
+            PaletteColor::Rgb((r, g, b)) => ansi_term::Color::Rgb(r, g, b),
             PaletteColor::EightBit(color) => ansi_term::Color::Fixed(color),
         })
     };
@@ -52,21 +52,21 @@ macro_rules! get_or_create_grid {
         let explicitly_disable_kitty_keyboard_protocol = false; // N/A for plugins
 
         $self.grids.entry($client_id).or_insert_with(|| {
-            let mut grid = Grid::new(
+            let mut grid = Grid::new(crate::panes::grid::GridOptions {
                 rows,
-                cols,
-                $self.terminal_emulator_colors.clone(),
-                $self.terminal_emulator_color_codes.clone(),
-                $self.link_handler.clone(),
-                $self.character_cell_size.clone(),
-                $self.sixel_image_store.clone(),
-                $self.style.clone(),
-                $self.debug,
-                $self.arrow_fonts,
-                $self.styled_underlines,
+                columns: cols,
+                terminal_emulator_colors: $self.terminal_emulator_colors.clone(),
+                terminal_emulator_color_codes: $self.terminal_emulator_color_codes.clone(),
+                link_handler: $self.link_handler.clone(),
+                character_cell_size: $self.character_cell_size.clone(),
+                sixel_image_store: $self.sixel_image_store.clone(),
+                style: $self.style.clone(),
+                debug: $self.debug,
+                arrow_fonts: $self.arrow_fonts,
+                styled_underlines: $self.styled_underlines,
                 osc8_hyperlinks,
                 explicitly_disable_kitty_keyboard_protocol,
-            );
+            });
             grid.hide_cursor();
             grid
         })
@@ -75,6 +75,7 @@ macro_rules! get_or_create_grid {
 
 pub(crate) struct PluginPane {
     pub pid: u32,
+    runtime_plugin_id: u32,
     pub should_render: HashMap<ClientId, bool>,
     pub selectable: bool,
     pub geom: PaneGeom,
@@ -107,31 +108,53 @@ pub(crate) struct PluginPane {
     should_be_suppressed: bool,
     text_being_pasted: Option<Vec<u8>>,
     supports_mouse_selection: bool,
+    layout_reflow_deferred: bool,
+}
+
+pub struct PluginPaneOptions {
+    pub pid: u32,
+    pub position_and_size: PaneGeom,
+    pub send_plugin_instructions: SenderWithContext<PluginInstruction>,
+    pub title: String,
+    pub pane_name: String,
+    pub sixel_image_store: Rc<RefCell<SixelImageStore>>,
+    pub terminal_emulator_colors: Rc<RefCell<Palette>>,
+    pub terminal_emulator_color_codes: Rc<RefCell<HashMap<usize, String>>>,
+    pub link_handler: Rc<RefCell<LinkHandler>>,
+    pub character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
+    pub currently_connected_clients: Vec<ClientId>,
+    pub style: Style,
+    pub invoked_with: Option<Run>,
+    pub debug: bool,
+    pub arrow_fonts: bool,
+    pub styled_underlines: bool,
 }
 
 impl PluginPane {
-    pub fn new(
-        pid: u32,
-        position_and_size: PaneGeom,
-        send_plugin_instructions: SenderWithContext<PluginInstruction>,
-        title: String,
-        pane_name: String,
-        sixel_image_store: Rc<RefCell<SixelImageStore>>,
-        terminal_emulator_colors: Rc<RefCell<Palette>>,
-        terminal_emulator_color_codes: Rc<RefCell<HashMap<usize, String>>>,
-        link_handler: Rc<RefCell<LinkHandler>>,
-        character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
-        currently_connected_clients: Vec<ClientId>,
-        style: Style,
-        invoked_with: Option<Run>,
-        debug: bool,
-        arrow_fonts: bool,
-        styled_underlines: bool,
-    ) -> Self {
+    pub fn new(opts: PluginPaneOptions) -> Self {
+        let PluginPaneOptions {
+            pid,
+            position_and_size,
+            send_plugin_instructions,
+            title,
+            pane_name,
+            sixel_image_store,
+            terminal_emulator_colors,
+            terminal_emulator_color_codes,
+            link_handler,
+            character_cell_size,
+            currently_connected_clients,
+            style,
+            invoked_with,
+            debug,
+            arrow_fonts,
+            styled_underlines,
+        } = opts;
         let loading_indication = LoadingIndication::new(title.clone()).with_colors(style.colors);
         let initial_loading_message = loading_indication.to_string();
         let mut plugin = PluginPane {
             pid,
+            runtime_plugin_id: pid,
             should_render: HashMap::new(),
             selectable: true,
             geom: position_and_size,
@@ -164,6 +187,7 @@ impl PluginPane {
             should_be_suppressed: false,
             text_being_pasted: None,
             supports_mouse_selection: false,
+            layout_reflow_deferred: false,
         };
         for client_id in currently_connected_clients {
             plugin.handle_plugin_bytes(client_id, initial_loading_message.as_bytes().to_vec());
@@ -328,7 +352,7 @@ impl Pane for PluginPane {
                         let _ = self
                             .send_plugin_instructions
                             .send(PluginInstruction::Update(vec![(
-                                Some(self.pid),
+                                Some(self.runtime_plugin_id),
                                 client_id,
                                 Event::PastedText(pasted_text),
                             )]));
@@ -365,6 +389,9 @@ impl Pane for PluginPane {
             .for_each(|v| *v = should_render);
     }
     fn render_full_viewport(&mut self) {
+        if self.layout_reflow_deferred {
+            return;
+        }
         // this marks the pane for a full re-render, rather than just rendering the
         // diff as it usually does with the OutputBuffer
         self.frame.clear();
@@ -385,7 +412,7 @@ impl Pane for PluginPane {
     fn request_permissions_from_user(&mut self, permissions: Option<PluginPermission>) {
         self.requesting_permissions = permissions;
         self.handle_plugin_bytes_for_all_clients(Default::default()); // to trigger the render of
-                                                                      // the permission message
+        // the permission message
     }
     fn render(
         &mut self,
@@ -394,23 +421,23 @@ impl Pane for PluginPane {
         if client_id.is_none() {
             return Ok(None);
         }
-        if let Some(client_id) = client_id {
-            if self.should_render.get(&client_id).copied().unwrap_or(false) {
-                let content_x = self.get_content_x();
-                let content_y = self.get_content_y();
-                let rows = self.get_content_rows();
-                let columns = self.get_content_columns();
-                if rows < 1 || columns < 1 {
-                    return Ok(None);
-                }
-                if let Some(grid) = self.grids.get_mut(&client_id) {
-                    match grid.render(content_x, content_y, &self.style) {
-                        Ok(rendered_assets) => {
-                            self.should_render.insert(client_id, false);
-                            return Ok(rendered_assets);
-                        },
-                        e => return e,
-                    }
+        if let Some(client_id) = client_id
+            && self.should_render.get(&client_id).copied().unwrap_or(false)
+        {
+            let content_x = self.get_content_x();
+            let content_y = self.get_content_y();
+            let rows = self.get_content_rows();
+            let columns = self.get_content_columns();
+            if rows < 1 || columns < 1 {
+                return Ok(None);
+            }
+            if let Some(grid) = self.grids.get_mut(&client_id) {
+                match grid.render(content_x, content_y, &self.style) {
+                    Ok(rendered_assets) => {
+                        self.should_render.insert(client_id, false);
+                        return Ok(rendered_assets);
+                    },
+                    e => return e,
                 }
             }
         }
@@ -520,6 +547,12 @@ impl Pane for PluginPane {
     fn pid(&self) -> PaneId {
         PaneId::Plugin(self.pid)
     }
+    fn plugin_runtime_id(&self) -> Option<PluginId> {
+        Some(self.runtime_plugin_id)
+    }
+    fn bind_plugin_runtime_id(&mut self, runtime_plugin_id: PluginId) {
+        self.runtime_plugin_id = runtime_plugin_id;
+    }
     fn reduce_height(&mut self, percent: f64) {
         if let Some(p) = self.geom.rows.as_percent() {
             self.geom.rows.set_percent(p - percent);
@@ -577,7 +610,7 @@ impl Pane for PluginPane {
     fn scroll_up(&mut self, count: usize, client_id: ClientId) {
         self.send_plugin_instructions
             .send(PluginInstruction::Update(vec![(
-                Some(self.pid),
+                Some(self.runtime_plugin_id),
                 Some(client_id),
                 Event::Mouse(Mouse::ScrollUp(count)),
             )]))
@@ -586,7 +619,7 @@ impl Pane for PluginPane {
     fn scroll_down(&mut self, count: usize, client_id: ClientId) {
         self.send_plugin_instructions
             .send(PluginInstruction::Update(vec![(
-                Some(self.pid),
+                Some(self.runtime_plugin_id),
                 Some(client_id),
                 Event::Mouse(Mouse::ScrollDown(count)),
             )]))
@@ -607,7 +640,7 @@ impl Pane for PluginPane {
         } else {
             self.send_plugin_instructions
                 .send(PluginInstruction::Update(vec![(
-                    Some(self.pid),
+                    Some(self.runtime_plugin_id),
                     Some(client_id),
                     Event::Mouse(Mouse::LeftClick(start.line.0, start.column.0)),
                 )]))
@@ -623,7 +656,7 @@ impl Pane for PluginPane {
         } else {
             self.send_plugin_instructions
                 .send(PluginInstruction::Update(vec![(
-                    Some(self.pid),
+                    Some(self.runtime_plugin_id),
                     Some(client_id),
                     Event::Mouse(Mouse::Hold(position.line.0, position.column.0)),
                 )]))
@@ -638,7 +671,7 @@ impl Pane for PluginPane {
         } else {
             self.send_plugin_instructions
                 .send(PluginInstruction::Update(vec![(
-                    Some(self.pid),
+                    Some(self.runtime_plugin_id),
                     Some(client_id),
                     Event::Mouse(Mouse::Release(end.line(), end.column())),
                 )]))
@@ -674,7 +707,9 @@ impl Pane for PluginPane {
         self.active_at = time;
     }
     fn set_frame(&mut self, _frame: bool) {
-        self.frame.clear();
+        if !self.layout_reflow_deferred {
+            self.frame.clear();
+        }
     }
     fn set_content_offset(&mut self, offset: Offset) {
         self.content_offset = offset;
@@ -716,7 +751,7 @@ impl Pane for PluginPane {
     fn handle_right_click(&mut self, to: &Position, client_id: ClientId) {
         self.send_plugin_instructions
             .send(PluginInstruction::Update(vec![(
-                Some(self.pid),
+                Some(self.runtime_plugin_id),
                 Some(client_id),
                 Event::Mouse(Mouse::RightClick(to.line.0, to.column.0)),
             )]))
@@ -747,6 +782,20 @@ impl Pane for PluginPane {
     }
     fn set_title(&mut self, title: String) {
         self.pane_title = title;
+    }
+    fn layout_title(&self) -> String {
+        self.pane_title.clone()
+    }
+    fn begin_layout_transaction(&mut self) {
+        self.layout_reflow_deferred = true;
+    }
+    fn commit_layout_transaction(&mut self) {
+        self.layout_reflow_deferred = false;
+        self.resize_grids();
+        self.render_full_viewport();
+    }
+    fn rollback_layout_transaction(&mut self) {
+        self.layout_reflow_deferred = false;
     }
     fn update_loading_indication(&mut self, loading_indication: LoadingIndication) {
         if self.loading_indication.ended && !loading_indication.is_error() {
@@ -822,11 +871,11 @@ impl Pane for PluginPane {
     fn intercept_left_mouse_click(&mut self, position: &Position, client_id: ClientId) -> bool {
         if self.position_is_on_frame(position) {
             let relative_position = self.relative_position(position);
-            if let Some(client_frame) = self.frame.get_mut(&client_id) {
-                if client_frame.clicked_on_pinned(relative_position) {
-                    self.toggle_pinned();
-                    return true;
-                }
+            if let Some(client_frame) = self.frame.get_mut(&client_id)
+                && client_frame.clicked_on_pinned(relative_position)
+            {
+                self.toggle_pinned();
+                return true;
             }
         }
         false
@@ -834,13 +883,12 @@ impl Pane for PluginPane {
     fn intercept_mouse_event_on_frame(&mut self, event: &MouseEvent, client_id: ClientId) -> bool {
         if self.position_is_on_frame(&event.position) {
             let relative_position = self.relative_position(&event.position);
-            if let MouseEventType::Press = event.event_type {
-                if let Some(client_frame) = self.frame.get_mut(&client_id) {
-                    if client_frame.clicked_on_pinned(relative_position) {
-                        self.toggle_pinned();
-                        return true;
-                    }
-                }
+            if let MouseEventType::Press = event.event_type
+                && let Some(client_frame) = self.frame.get_mut(&client_id)
+                && client_frame.clicked_on_pinned(relative_position)
+            {
+                self.toggle_pinned();
+                return true;
             }
         }
         false
@@ -860,7 +908,7 @@ impl Pane for PluginPane {
                 let _ = self
                     .send_plugin_instructions
                     .send(PluginInstruction::Update(vec![(
-                        Some(self.pid),
+                        Some(self.runtime_plugin_id),
                         Some(client_id),
                         Event::Mouse(Mouse::Hover(event.position.line(), event.position.column())),
                     )]));
@@ -904,6 +952,9 @@ impl Pane for PluginPane {
 
 impl PluginPane {
     fn resize_grids(&mut self) {
+        if self.layout_reflow_deferred {
+            return;
+        }
         let content_rows = self.get_content_rows();
         let content_columns = self.get_content_columns();
         for grid in self.grids.values_mut() {

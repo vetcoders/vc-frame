@@ -24,51 +24,51 @@ impl KeybindProcessor {
             // Find the first matching action for this predicate
             let mut found_match = false;
             for (_key, actions) in &keybinds {
-                if let Some(first_action) = actions.first() {
-                    if predicate(first_action) {
-                        let action_type = ActionType::from_action(first_action);
+                if let Some(first_action) = actions.first()
+                    && predicate(first_action)
+                {
+                    let action_type = ActionType::from_action(first_action);
 
-                        // Skip if we've already processed this action type
-                        if processed_action_types.contains(&action_type) {
-                            found_match = true;
-                            break;
-                        }
-
-                        let mut matching_keys = Vec::new();
-
-                        // Find all keys that match this action type (including different directions)
-                        for (inner_key, inner_actions) in &keybinds {
-                            if let Some(inner_first_action) = inner_actions.first() {
-                                if ActionType::from_action(inner_first_action) == action_type {
-                                    matching_keys.push(format!("{}", inner_key));
-                                }
-                            }
-                        }
-
-                        if !matching_keys.is_empty() {
-                            let description = action_type.description();
-                            let should_add_brackets_to_keys = mode != InputMode::Normal;
-
-                            // Check if this is switching to normal mode
-                            let is_switching_to_locked = matches!(
-                                first_action,
-                                Action::SwitchToMode {
-                                    input_mode: InputMode::Locked
-                                }
-                            );
-
-                            let grouped_keys = Self::group_key_sets(
-                                &matching_keys,
-                                should_add_brackets_to_keys,
-                                is_switching_to_locked,
-                            );
-                            result.push((grouped_keys, description));
-                            processed_action_types.insert(action_type);
-                        }
-
+                    // Skip if we've already processed this action type
+                    if processed_action_types.contains(&action_type) {
                         found_match = true;
                         break;
                     }
+
+                    let mut matching_keys = Vec::new();
+
+                    // Find all keys that match this action type (including different directions)
+                    for (inner_key, inner_actions) in &keybinds {
+                        if let Some(inner_first_action) = inner_actions.first()
+                            && ActionType::from_action(inner_first_action) == action_type
+                        {
+                            matching_keys.push(format!("{}", inner_key));
+                        }
+                    }
+
+                    if !matching_keys.is_empty() {
+                        let description = action_type.description();
+                        let should_add_brackets_to_keys = mode != InputMode::Normal;
+
+                        // Check if this is switching to normal mode
+                        let is_switching_to_locked = matches!(
+                            first_action,
+                            Action::SwitchToMode {
+                                input_mode: InputMode::Locked
+                            }
+                        );
+
+                        let grouped_keys = Self::group_key_sets(
+                            &matching_keys,
+                            should_add_brackets_to_keys,
+                            is_switching_to_locked,
+                        );
+                        result.push((grouped_keys, description));
+                        processed_action_types.insert(action_type);
+                    }
+
+                    found_match = true;
+                    break;
                 }
             }
 
@@ -486,6 +486,7 @@ impl KeybindProcessor {
                                 cwd: None,
                                 initial_panes: _,
                                 first_pane_unblock_condition: _,
+                                placement: _,
                             }
                         )
                     },
@@ -723,9 +724,12 @@ impl KeybindProcessor {
                 let ordered_predicates = vec![
                     |action: &Action| matches!(action, Action::Detach),
                     |action: &Action| action.launches_plugin("session-manager"),
+                    |action: &Action| action.launches_plugin("vc-frame:layout-manager"),
                     |action: &Action| action.launches_plugin("plugin-manager"),
                     |action: &Action| action.launches_plugin("configuration"),
-                    |action: &Action| action.launches_plugin("zellij:about"),
+                    |action: &Action| action.launches_plugin("vc-frame:share"),
+                    |action: &Action| action.launches_plugin("vc-frame:about"),
+                    |action: &Action| matches!(action, Action::Quit),
                 ];
                 Self::find_predetermined_actions(mode_info, mode, ordered_predicates)
             },

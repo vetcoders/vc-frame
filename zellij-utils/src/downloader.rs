@@ -1,5 +1,5 @@
 use isahc::prelude::*;
-use isahc::{config::RedirectPolicy, HttpClient, Request};
+use isahc::{HttpClient, Request, config::RedirectPolicy};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -71,7 +71,9 @@ impl Downloader {
         file_name: Option<&str>,
     ) -> Result<(), DownloaderError> {
         let Some(client) = &self.client else {
-            log::error!("No Http client found, cannot perform requests - this is likely a misconfiguration of isahc::HttpClient");
+            log::error!(
+                "No Http client found, cannot perform requests - this is likely a misconfiguration of isahc::HttpClient"
+            );
             return Ok(());
         };
         let file_name = match file_name {
@@ -198,7 +200,7 @@ impl Downloader {
             _ => {
                 return Err(DownloaderError::Io(std::io::Error::other(
                     "failed to spawn runtime for download task",
-                )))
+                )));
             },
         };
         runtime_handle.block_on(async move { Downloader::download_without_cache(url).await })

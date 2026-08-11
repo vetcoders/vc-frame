@@ -1,8 +1,8 @@
 //! Handle running `cargo clippy` on the sources.
-use crate::{build, flags, WorkspaceMember};
+use crate::{WorkspaceMember, build, flags};
 use anyhow::Context;
 use std::path::{Path, PathBuf};
-use xshell::{cmd, Shell};
+use xshell::{Shell, cmd};
 
 pub fn clippy(sh: &Shell, _flags: flags::Clippy) -> anyhow::Result<()> {
     let _pd = sh.push_dir(crate::project_root());

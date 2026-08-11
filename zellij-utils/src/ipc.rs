@@ -1,7 +1,7 @@
 //! IPC stuff for starting to split things into a client and server model.
 use crate::{
     data::{ClientId, ConnectToSession, HostTerminalThemeMode, KeyWithModifier, PaneId, Style},
-    errors::{prelude::*, ErrorContext},
+    errors::{ErrorContext, prelude::*},
     input::{actions::Action, cli_assets::CliAssets},
     pane_size::{Size, SizeInPixels},
 };
@@ -93,7 +93,6 @@ impl PixelDimensions {
 }
 
 // Types of messages sent from the client to the server
-#[allow(clippy::large_enum_variant)]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum ClientToServerMsg {
     DetachSession {
@@ -133,6 +132,12 @@ pub enum ClientToServerMsg {
         terminal_id: Option<u32>,
         client_id: Option<ClientId>,
         is_cli_client: bool,
+    },
+    DeclareCaller {
+        caller: String,
+    },
+    DoctorRoutes {
+        json: bool,
     },
     Key {
         key: KeyWithModifier,
@@ -241,7 +246,7 @@ pub enum ExitReason {
 impl Display for ExitReason {
     fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
         match self {
-            Self::Normal => write!(f, "Bye from Zellij!"),
+            Self::Normal => write!(f, "Bye from 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍."),
             Self::NormalDetached => write!(f, "Session detached"),
             Self::ForceDetached => write!(
                 f,
@@ -257,15 +262,15 @@ impl Display for ExitReason {
             ),
             Self::Disconnect => {
                 let session_tip = match crate::envs::get_session_name() {
-                    Ok(name) => format!("`zellij attach {}`", name),
-                    Err(_) => "see `zellij ls` and `zellij attach`".to_string(),
+                    Ok(name) => format!("`vc-frame attach {}`", name),
+                    Err(_) => "see `vc-frame ls` and `vc-frame attach`".to_string(),
                 };
                 write!(
                     f,
                     "
-Your zellij client lost connection to the zellij server.
+Your vc-frame client lost connection to the vc-frame server.
 
-As a safety measure, you have been disconnected from the current zellij session.
+As a safety measure, you have been disconnected from the current vc-frame session.
 However, the session should still exist and none of your data should be lost.
 
 This usually means that your terminal didn't process server messages quick
@@ -323,12 +328,21 @@ impl<T: Serialize> IpcSenderWithContext<T> {
     }
 
     /// Returns an [`IpcReceiverWithContext`] with the same socket as this sender.
+    pub fn try_get_receiver<F>(&self) -> Result<IpcReceiverWithContext<F>>
+    where
+        F: for<'de> Deserialize<'de> + Serialize,
+    {
+        let socket = self.sender.get_ref().try_clone_stream()?;
+        Ok(IpcReceiverWithContext::from_boxed(socket))
+    }
+
+    /// Returns an [`IpcReceiverWithContext`] with the same socket as this sender.
     pub fn get_receiver<F>(&self) -> IpcReceiverWithContext<F>
     where
         F: for<'de> Deserialize<'de> + Serialize,
     {
-        let socket = self.sender.get_ref().try_clone_stream().unwrap();
-        IpcReceiverWithContext::from_boxed(socket)
+        self.try_get_receiver()
+            .expect("failed to clone IPC sender stream")
     }
 }
 
@@ -357,16 +371,42 @@ where
         }
     }
 
-    pub fn recv_client_msg(&mut self) -> Option<(ClientToServerMsg, ErrorContext)> {
+    /// Typed client receive: preserve the distinction between a normal
+    /// disconnect, a protocol failure, and a usable message.
+    ///
+    /// The historical `Option` surface collapsed EOF, decode errors, and
+    /// conversion failures into `None`, which made the server route loop treat
+    /// a clean disconnect as "unknown message" and spin until logout.
+    pub fn recv_client_msg_outcome(&mut self) -> ClientReceiveOutcome {
         match read_protobuf_message::<ProtoClientToServerMsg>(&mut self.receiver) {
             Ok(proto_msg) => match proto_msg.try_into() {
-                Ok(rust_msg) => Some((rust_msg, ErrorContext::default())),
+                Ok(rust_msg) => {
+                    ClientReceiveOutcome::Message(Box::new(rust_msg), ErrorContext::default())
+                },
                 Err(e) => {
                     warn!("Error converting protobuf to ClientToServerMsg: {:?}", e);
-                    None
+                    ClientReceiveOutcome::ProtocolError(format!(
+                        "protobuf → ClientToServerMsg conversion failed: {e:?}"
+                    ))
                 },
             },
-            Err(_e) => None,
+            Err(e) => {
+                if ipc_error_is_disconnect(&e) {
+                    ClientReceiveOutcome::Disconnected
+                } else {
+                    warn!("Error reading ClientToServerMsg protobuf: {:?}", e);
+                    ClientReceiveOutcome::ProtocolError(format!(
+                        "ClientToServerMsg decode failed: {e}"
+                    ))
+                }
+            },
+        }
+    }
+
+    pub fn recv_client_msg(&mut self) -> Option<(ClientToServerMsg, ErrorContext)> {
+        match self.recv_client_msg_outcome() {
+            ClientReceiveOutcome::Message(msg, ctx) => Some((*msg, ctx)),
+            ClientReceiveOutcome::Disconnected | ClientReceiveOutcome::ProtocolError(_) => None,
         }
     }
 
@@ -384,21 +424,94 @@ where
     }
 
     /// Returns an [`IpcSenderWithContext`] with the same socket as this receiver.
-    pub fn get_sender<F: Serialize>(&self) -> IpcSenderWithContext<F> {
-        let socket = self.receiver.get_ref().try_clone_stream().unwrap();
-        IpcSenderWithContext::from_boxed(socket)
+    pub fn try_get_sender<F: Serialize>(&self) -> Result<IpcSenderWithContext<F>> {
+        let socket = self.receiver.get_ref().try_clone_stream()?;
+        Ok(IpcSenderWithContext::from_boxed(socket))
     }
+
+    /// Returns an [`IpcSenderWithContext`] with the same socket as this receiver.
+    pub fn get_sender<F: Serialize>(&self) -> IpcSenderWithContext<F> {
+        self.try_get_sender()
+            .expect("failed to clone IPC receiver stream")
+    }
+}
+
+/// Outcome of a typed client → server receive.
+///
+/// Callers that care about availability (the server route loop) must match on
+/// this enum. Collapsing everything into `Option::None` is how clean
+/// disconnects were misread as unknown messages.
+#[derive(Debug)]
+pub enum ClientReceiveOutcome {
+    /// Boxed: `ClientToServerMsg` is large; keep the enum stack-small.
+    Message(Box<ClientToServerMsg>, ErrorContext),
+    /// Peer closed the socket (EOF / broken pipe / reset). End the route
+    /// without a retry loop.
+    Disconnected,
+    /// Decode or conversion failure. Fail closed; do not spin.
+    ProtocolError(String),
+}
+
+fn ipc_error_is_disconnect(error: &anyError) -> bool {
+    use std::io::ErrorKind;
+    for cause in error.chain() {
+        if let Some(io_error) = cause.downcast_ref::<io::Error>() {
+            match io_error.kind() {
+                ErrorKind::UnexpectedEof
+                | ErrorKind::ConnectionReset
+                | ErrorKind::BrokenPipe
+                | ErrorKind::ConnectionAborted
+                | ErrorKind::NotConnected => return true,
+                _ => {},
+            }
+        }
+    }
+    false
 }
 
 // Protobuf wire format utilities
 fn read_protobuf_message<T: Message + Default>(reader: &mut impl Read) -> Result<T> {
-    // Read length-prefixed protobuf message
+    // Read length-prefixed protobuf message. EOF is only a clean disconnect
+    // when it lands BETWEEN frames (zero bytes read); an EOF in the middle
+    // of the 4-byte prefix or the payload means the peer died mid-sentence —
+    // that is a protocol truncation (`InvalidData`, mapped to
+    // `ProtocolError`), not a `Disconnected`.
     let mut len_bytes = [0u8; 4];
-    reader.read_exact(&mut len_bytes)?;
+    let mut filled = 0usize;
+    while filled < len_bytes.len() {
+        match reader.read(&mut len_bytes[filled..]) {
+            Ok(0) if filled == 0 => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "clean EOF between frames",
+                )
+                .into());
+            },
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("truncated frame: EOF after {filled} of 4 length-prefix bytes"),
+                )
+                .into());
+            },
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
     let len = u32::from_le_bytes(len_bytes) as usize;
 
     let mut buf = vec![0u8; len];
-    reader.read_exact(&mut buf)?;
+    if let Err(e) = reader.read_exact(&mut buf) {
+        if e.kind() == io::ErrorKind::UnexpectedEof {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("truncated frame: EOF inside a {len}-byte payload"),
+            )
+            .into());
+        }
+        return Err(e.into());
+    }
 
     T::decode(&buf[..]).map_err(Into::into)
 }
@@ -468,20 +581,31 @@ pub fn recv_protobuf_server_to_client(
 }
 
 /// Asynchronously send `ClientToServerMsg::KillSession` to the peer at `path`
-/// and wait until the peer's existing shutdown path replies (or its socket
-/// closes). Either of those outcomes confirms the kill landed; the caller
-/// wraps this in `tokio::time::timeout` to bound the wait against a wedged
-/// peer.
+/// and require the exact `Exit { Normal }` acknowledgement. EOF is not an
+/// acknowledgement: a process can accept and close a socket without ever
+/// dispatching the kill.
 ///
-/// On Unix the local socket is bidirectional, so the same async stream is
-/// used for both send and receive. On Windows the named pipe is half-duplex
-/// and the existing sync `ipc_connect` / `ipc_connect_reply` flow is
-/// dispatched onto a blocking task.
+/// On Unix the local socket is bidirectional. On Windows the named pipe is
+/// half-duplex, so its blocking reply read runs on a bounded helper thread.
+fn validate_kill_session_ack(message: ServerToClientMsg) -> io::Result<()> {
+    match message {
+        ServerToClientMsg::Exit {
+            exit_reason: ExitReason::Normal,
+        } => Ok(()),
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unexpected kill-session acknowledgement: {other:?}"),
+        )),
+    }
+}
+
 #[cfg(unix)]
 pub async fn async_send_kill_and_await(path: &std::path::Path) -> io::Result<()> {
     use interprocess::local_socket::traits::tokio::Stream as _;
-    use interprocess::local_socket::{prelude::*, GenericFilePath};
+    use interprocess::local_socket::{GenericFilePath, prelude::*};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const MAX_KILL_ACK_BYTES: usize = 64 * 1024;
 
     let fs_name = path.to_fs_name::<GenericFilePath>()?;
     let mut stream: interprocess::local_socket::tokio::Stream =
@@ -493,37 +617,80 @@ pub async fn async_send_kill_and_await(path: &std::path::Path) -> io::Result<()>
 
     stream.write_all(&len_bytes).await?;
     stream.write_all(&encoded).await?;
-    // Best-effort flush; failing here doesn't mean the kill failed.
-    let _ = stream.flush().await;
+    stream.flush().await?;
 
-    // The peer's shutdown path sends `ServerToClientMsg::Exit { Normal }`
-    // (zellij-server/src/lib.rs ServerInstruction::KillSession) over this
-    // same socket before exiting; if it dies without ACKing, the stream
-    // closes. Either outcome -- a successful 4-byte length-prefix read or a
-    // read error/EOF -- confirms the kill is no longer in flight.
-    let mut len_buf = [0u8; 4];
-    let _ = stream.read_exact(&mut len_buf).await;
-    Ok(())
+    loop {
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).await?;
+        let len = u32::from_le_bytes(len_buf) as usize;
+        if len > MAX_KILL_ACK_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("kill-session acknowledgement is too large: {len} bytes"),
+            ));
+        }
+        let mut encoded_ack = vec![0u8; len];
+        stream.read_exact(&mut encoded_ack).await?;
+        let proto_ack = ProtoServerToClientMsg::decode(encoded_ack.as_slice())
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+        let ack = proto_ack.try_into().map_err(|error: anyhow::Error| {
+            io::Error::new(io::ErrorKind::InvalidData, error.to_string())
+        })?;
+        if matches!(ack, ServerToClientMsg::UnblockInputThread) {
+            continue;
+        }
+        return validate_kill_session_ack(ack);
+    }
 }
 
 #[cfg(windows)]
 pub async fn async_send_kill_and_await(path: &std::path::Path) -> io::Result<()> {
+    const WINDOWS_KILL_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
     let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        use crate::consts::{ipc_connect, ipc_connect_reply};
-        let stream = ipc_connect(&path)?;
-        let reply = ipc_connect_reply(&path);
-        let mut sender = IpcSenderWithContext::<ClientToServerMsg>::new(stream);
-        sender
-            .send_client_msg(ClientToServerMsg::KillSession)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-        if let Ok(reply_stream) = reply {
-            let mut receiver: IpcReceiverWithContext<ServerToClientMsg> =
-                IpcReceiverWithContext::new(reply_stream);
-            let _ = receiver.recv_server_msg();
-        }
-        Ok::<(), io::Error>(())
-    })
-    .await
-    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("kill_session_ack".to_owned())
+        .spawn(move || {
+            let result = (|| {
+                use crate::consts::{ipc_connect, ipc_connect_reply};
+                let stream = ipc_connect(&path)?;
+                let reply_stream = ipc_connect_reply(&path)?;
+                let mut sender = IpcSenderWithContext::<ClientToServerMsg>::new(stream);
+                sender
+                    .send_client_msg(ClientToServerMsg::KillSession)
+                    .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?;
+                let mut receiver: IpcReceiverWithContext<ServerToClientMsg> =
+                    IpcReceiverWithContext::new(reply_stream);
+                loop {
+                    let (ack, _) = receiver.recv_server_msg().ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "kill-session reply pipe closed without acknowledgement",
+                        )
+                    })?;
+                    if matches!(ack, ServerToClientMsg::UnblockInputThread) {
+                        continue;
+                    }
+                    break validate_kill_session_ack(ack);
+                }
+            })();
+            let _ = result_tx.send(result);
+        })
+        .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?;
+
+    match tokio::time::timeout(WINDOWS_KILL_ACK_TIMEOUT, result_rx).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "kill-session acknowledgement worker exited without a result",
+        )),
+        Err(_) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "kill-session reply pipe was silent for {:.1}s",
+                WINDOWS_KILL_ACK_TIMEOUT.as_secs_f64()
+            ),
+        )),
+    }
 }

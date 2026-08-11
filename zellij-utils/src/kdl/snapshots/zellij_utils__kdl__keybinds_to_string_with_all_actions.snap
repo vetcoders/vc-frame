@@ -1,6 +1,6 @@
 ---
 source: zellij-utils/src/kdl/mod.rs
-assertion_line: 2731
+assertion_line: 6673
 expression: serialized.to_string()
 ---
 keybinds clear-defaults=true {
@@ -33,7 +33,7 @@ keybinds clear-defaults=true {
         bind "Alt i" { GoToNextTab; }
         bind "Ctrl j" { MoveFocusOrTab "right"; }
         bind "Ctrl Alt j" {
-            MessagePlugin "zellij:session-manager" {
+            MessagePlugin "vc-frame:session-manager" {
                 name "message_name"
                 cwd "/tmp"
                 payload "message_payload"
@@ -85,7 +85,7 @@ keybinds clear-defaults=true {
         bind "Alt t" { Detach; }
         bind "Ctrl u" { PageScrollUp; }
         bind "Alt u" {
-            LaunchOrFocusPlugin "zellij:session-manager" {
+            LaunchOrFocusPlugin "vc-frame:session-manager" {
                 floating true
                 move_to_focused_tab true
                 skip_plugin_cache true
@@ -95,7 +95,7 @@ keybinds clear-defaults=true {
         }
         bind "Ctrl v" { PageScrollDown; }
         bind "Alt v" {
-            LaunchOrFocusPlugin "zellij:session-manager" {
+            LaunchOrFocusPlugin "vc-frame:session-manager" {
                 move_to_focused_tab true
                 in_place true
                 skip_plugin_cache true
@@ -105,7 +105,7 @@ keybinds clear-defaults=true {
         }
         bind "Ctrl w" { HalfPageScrollUp; }
         bind "Alt w" {
-            LaunchPlugin "zellij:session-manager" {
+            LaunchPlugin "vc-frame:session-manager" {
                 floating true
                 skip_plugin_cache true
                 config_key_1 "config_value_1"
@@ -114,7 +114,7 @@ keybinds clear-defaults=true {
         }
         bind "Ctrl x" { HalfPageScrollDown; }
         bind "Alt x" {
-            LaunchPlugin "zellij:session-manager" {
+            LaunchPlugin "vc-frame:session-manager" {
                 in_place true
                 skip_plugin_cache true
                 config_key_1 "config_value_1"
@@ -127,4 +127,3 @@ keybinds clear-defaults=true {
         bind "Alt z" { SearchInput 0; }
     }
 }
-

@@ -74,23 +74,141 @@ fn get_cwd() {
     );
 }
 
+#[test]
+fn failed_spawn_releases_reservation_except_command_not_found() {
+    let mut cleared_terminal_ids = Vec::new();
+
+    let ordinary_failure = resolve_reserved_terminal_spawn(
+        41,
+        Err::<(), _>(anyhow::Error::new(std::io::Error::other(
+            "injected backend spawn failure",
+        ))),
+        |terminal_id| cleared_terminal_ids.push(terminal_id),
+    )
+    .expect_err("ordinary spawn failures must remain errors");
+    assert!(
+        ordinary_failure
+            .to_string()
+            .contains("injected backend spawn failure")
+    );
+    assert_eq!(cleared_terminal_ids, vec![41]);
+
+    let command_not_found = resolve_reserved_terminal_spawn(
+        42,
+        Err::<(), _>(anyhow::Error::new(ZellijError::CommandNotFound {
+            terminal_id: 42,
+            command: "missing-command".to_owned(),
+        })),
+        |terminal_id| cleared_terminal_ids.push(terminal_id),
+    )
+    .expect_err("CommandNotFound remains an error for the pane hold path");
+    assert!(matches!(
+        command_not_found.downcast_ref::<ZellijError>(),
+        Some(ZellijError::CommandNotFound {
+            terminal_id: 42,
+            ..
+        })
+    ));
+    assert_eq!(
+        cleared_terminal_ids,
+        vec![41],
+        "CommandNotFound deliberately transfers its reserved id to the pane hold path"
+    );
+
+    let mismatched_command_not_found = resolve_reserved_terminal_spawn(
+        43,
+        Err::<(), _>(anyhow::Error::new(ZellijError::CommandNotFound {
+            terminal_id: 99,
+            command: "mismatched-command".to_owned(),
+        })),
+        |terminal_id| cleared_terminal_ids.push(terminal_id),
+    )
+    .expect_err("a mismatched CommandNotFound id remains an error");
+    assert!(
+        mismatched_command_not_found
+            .downcast_ref::<ZellijError>()
+            .is_none(),
+        "a foreign terminal id must be normalized to an ordinary protocol error"
+    );
+    assert!(
+        mismatched_command_not_found
+            .to_string()
+            .contains("reserved terminal 43"),
+        "the normalized error must identify the reservation"
+    );
+    assert_eq!(
+        cleared_terminal_ids,
+        vec![41, 43],
+        "only CommandNotFound for the exact reservation may retain ownership"
+    );
+}
+
 // --- Signal delivery tests ---
 
 #[cfg(not(windows))]
 #[test]
 fn kill_sends_sighup_to_process() {
-    let mut child = long_running_cmd()
+    let child = long_running_cmd()
         .spawn()
         .expect("failed to spawn long-running process");
     let pid = child.id();
+    let waiter = std::thread::spawn(move || child.wait_with_output());
 
     let server = make_server();
 
     server.kill(pid).expect("kill should succeed");
+    waiter
+        .join()
+        .expect("child waiter must not panic")
+        .expect("child must be reaped after SIGHUP");
+}
 
-    // Give the signal time to be delivered
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    let _ = child.wait();
+#[cfg(not(windows))]
+#[test]
+fn kill_escalates_to_sigkill_and_confirms_exit_when_child_ignores_sighup() {
+    let ready_file = tempfile::NamedTempFile::new().expect("create child readiness file");
+    let ready_path = ready_file.path().to_path_buf();
+    let child = Command::new("sh")
+        .args([
+            "-c",
+            "trap '' HUP; printf ready > \"$1\"; exec sleep 60",
+            "vc-frame-test-shell",
+        ])
+        .arg(&ready_path)
+        .spawn()
+        .expect("spawn SIGHUP-ignoring child");
+    for _ in 0..100 {
+        if std::fs::metadata(&ready_path)
+            .map(|metadata| metadata.len() > 0)
+            .unwrap_or(false)
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(
+        std::fs::metadata(&ready_path)
+            .map(|metadata| metadata.len() > 0)
+            .unwrap_or(false),
+        "child must install its SIGHUP disposition before the probe"
+    );
+
+    let pid = child.id();
+    let waiter = std::thread::spawn(move || child.wait_with_output());
+    let server = make_server();
+    server
+        .kill(pid)
+        .expect("ignored SIGHUP must escalate and confirm exact process exit");
+    let output = waiter
+        .join()
+        .expect("child waiter must not panic")
+        .expect("child waiter must reap the escalated process");
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(
+        output.status.signal(),
+        Some(libc::SIGKILL),
+        "a child ignoring SIGHUP must be terminated by the bounded SIGKILL escalation"
+    );
 }
 
 #[cfg(not(windows))]

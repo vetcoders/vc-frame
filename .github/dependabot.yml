@@ -4,6 +4,8 @@ updates:
     directory: "/"
     schedule:
       interval: "monthly"
+    cooldown:
+      default-days: 7
 
   # We want to be more sure in our e2e-test, before committing to
   # update all of our dependencies.
@@ -12,6 +14,8 @@ updates:
     directory: "/"
     schedule:
       interval: "monthly"
+    cooldown:
+      default-days: 7
     allow:
       # Allow only direct updates
       - dependency-name: "log"
@@ -19,11 +23,12 @@ updates:
     directory: "/zellij-utils/"
     schedule:
       interval: "monthly"
+    cooldown:
+      default-days: 7
     allow:
       # Allow only direct updates
       - dependency-name: "log"
       - dependency-name: "log4rs"
       - dependency-name: "clap"
       - dependency-name: "clap_complete"
-
 

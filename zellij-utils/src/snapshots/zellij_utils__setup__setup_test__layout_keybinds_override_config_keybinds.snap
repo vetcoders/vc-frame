@@ -1,5 +1,6 @@
 ---
 source: zellij-utils/src/setup.rs
+assertion_line: 909
 expression: "format!(\"{:#?}\", config)"
 ---
 Config {
@@ -105,6 +106,9 @@ Config {
         mirror_session: None,
         on_force_close: None,
         scroll_buffer_size: None,
+        auto_lock_after_seconds: Some(
+            30,
+        ),
         copy_command: None,
         copy_clipboard: None,
         copy_on_select: None,
@@ -215,6 +219,21 @@ Config {
                 ),
                 initial_cwd: None,
             },
+            "session-rail": RunPlugin {
+                _allow_exec_host_cmd: false,
+                location: Zellij(
+                    PluginTag(
+                        "session-manager",
+                    ),
+                ),
+                configuration: PluginUserConfiguration(
+                    {
+                        "pane_title": "Sessions",
+                        "rail": "true",
+                    },
+                ),
+                initial_cwd: None,
+            },
             "status-bar": RunPlugin {
                 _allow_exec_host_cmd: false,
                 location: Zellij(
@@ -251,6 +270,18 @@ Config {
                 ),
                 initial_cwd: None,
             },
+            "vc-tab-title": RunPlugin {
+                _allow_exec_host_cmd: false,
+                location: Zellij(
+                    PluginTag(
+                        "vc-tab-title",
+                    ),
+                ),
+                configuration: PluginUserConfiguration(
+                    {},
+                ),
+                initial_cwd: None,
+            },
             "welcome-screen": RunPlugin {
                 _allow_exec_host_cmd: false,
                 location: Zellij(
@@ -274,7 +305,7 @@ Config {
         },
     },
     env: {},
-    background_plugins: {
+    background_plugins: [
         RunPlugin(
             RunPlugin {
                 _allow_exec_host_cmd: false,
@@ -289,7 +320,21 @@ Config {
                 initial_cwd: None,
             },
         ),
-    },
+        RunPlugin(
+            RunPlugin {
+                _allow_exec_host_cmd: false,
+                location: Zellij(
+                    PluginTag(
+                        "vc-tab-title",
+                    ),
+                ),
+                configuration: PluginUserConfiguration(
+                    {},
+                ),
+                initial_cwd: None,
+            },
+        ),
+    ],
     web_client: WebClientConfig {
         font: "monospace",
         theme: None,

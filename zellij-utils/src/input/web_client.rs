@@ -79,7 +79,7 @@ impl WebClientTheme {
 
     pub fn to_kdl(&self) -> KdlNode {
         macro_rules! add_color_nodes {
-            ($theme_children:expr, $self:expr, $($field:ident),+ $(,)?) => {
+            ($theme_children:expr_2021, $self:expr_2021, $($field:ident),+ $(,)?) => {
                 $(
                     if let Some(color) = &$self.$field {
                         let node = PaletteColor::from_rgb_str(color).to_kdl(stringify!($field));

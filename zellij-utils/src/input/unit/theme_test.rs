@@ -7,7 +7,6 @@ fn theme_test_dir(theme: String) -> PathBuf {
     let theme_dir = root.join("src/input/unit/fixtures/themes");
     theme_dir.join(theme)
 }
-
 #[test]
 fn dracula_theme_from_file() {
     let path = theme_test_dir("dracula.kdl".into());
@@ -20,4 +19,18 @@ fn no_theme_is_err() {
     let path = theme_test_dir("nonexistent.kdl".into());
     let theme = Themes::from_path(path);
     assert!(theme.is_err());
+}
+
+#[test]
+fn default_themes_from_assets() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let assets_dir = root.join("assets/themes");
+    for entry in std::fs::read_dir(assets_dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "kdl") {
+            let theme = Themes::from_path(path);
+            assert!(theme.is_ok(), "Failed to parse theme");
+        }
+    }
 }

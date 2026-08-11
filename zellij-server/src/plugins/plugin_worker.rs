@@ -3,7 +3,7 @@ use crate::plugins::zellij_exports::wasi_write_object;
 use wasmi::{Instance, Store};
 
 use prost::Message;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use zellij_utils::errors::prelude::*;
 use zellij_utils::plugin_api::message::ProtobufMessage;
 

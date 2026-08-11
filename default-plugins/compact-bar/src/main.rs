@@ -23,10 +23,47 @@ const CONFIG_IS_TOOLTIP: &str = "is_tooltip";
 const CONFIG_TOGGLE_TOOLTIP_KEY: &str = "tooltip";
 const CONFIG_BRAND_TEXT: &str = "brand_text";
 const CONFIG_BRAND_TEXT_SHORT: &str = "brand_text_short";
+/// Columns of blank bar before the brand chip — the 🚥 zone. In the native
+/// transparent window (Alacritty preset) the macOS traffic lights float over
+/// the first row; the inset shifts the whole bar clear of them. Default
+/// layouts use 6 columns at standard monospace (~13pt); large fonts may want
+/// 9–12 via layout config.
+const CONFIG_LEFT_INSET: &str = "left_inset";
 const MSG_TOGGLE_TOOLTIP: &str = "toggle_tooltip";
+const MSG_OPEN_QUICK_CMD: &str = "vc_quick_cmd";
+// the status-bar shows up in the pane manifest as "vc-frame:status-bar" when
+// loaded by url and as "status-bar" when loaded through its config alias
+const STATUS_BAR_PLUGIN_URLS: [&str; 3] =
+    ["vc-frame:status-bar", "zellij:status-bar", "status-bar"];
+/// How long the clipboard notification ("Text copied...") stays on the bar
+/// before dismissing itself without requiring user input.
+const CLIPBOARD_HINT_TTL_SECONDS: f64 = 2.0;
+const VC_CHROME_VISIBILITY_MESSAGE: &str = "vc.status-bar-visibility.v1";
+const VC_CHROME_HEARTBEAT_MESSAGE: &str = "vc.fleet-live-count.v1";
 const MSG_TOGGLE_PERSISTED_TOOLTIP: &str = "toggle_persisted_tooltip";
 const MSG_LAUNCH_TOOLTIP: &str = "launch_tooltip_if_not_launched";
-
+/// Sentinel tab_index marking the clickable Composer chip on the tab line —
+/// a real tab can never occupy this index. Checked before tab resolution so
+/// it never reaches switch_tab_to.
+pub const COMPOSER_CLICK_SENTINEL: usize = usize::MAX;
+/// Sentinel tab_index for the Quick cmd chip — click opens a non-ephemeral
+/// mini console (interactive terminal) over the current tab. LIVE pulse
+/// lives on the bottom status-bar — no tool rides on it.
+pub const AGENTS_CLICK_SENTINEL: usize = usize::MAX - 2;
+/// Pane title for the Quick cmd mini console (matches the bar chip glyph).
+const QUICK_CMD_PANE_NAME: &str = "❯_ Quick cmd";
+/// Pane title for the Composer atelier — header carries the Paste stack affordance.
+const COMPOSER_PANE_NAME: &str = "✍ Composer · ⧉ Paste stack";
+/// Same drafting contract as Super+e (Cmd+E) in the default config — the
+/// single product key. Prefer installed paste-stack-aware `vc-composer.sh`
+/// (vim profile: number, laststatus=0, Ctrl+p paste-stack pick).
+/// The fallback speaks the same caret language as the installed script
+/// (caret-semantics.md, one contract, two roads) via a mktemp mini-vimrc:
+/// insert=beam 6 / replace=blink-underline 3 / normal=underline 4 through
+/// termcaps, DECSCUSR 0 handed back after the editor exits. Named
+/// degradation: visual/cmdline/operator-pending states live only in the
+/// installed script — the one-liner budget stops at the three termcaps.
+const COMPOSER_COMMAND: &str = r#"if [ -x "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh" ]; then "${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh"; elif [ -x "${HOME}/.config/vc-frame/vc-composer.sh" ]; then "${HOME}/.config/vc-frame/vc-composer.sh"; else f=$(mktemp "${TMPDIR:-/tmp}/vc-composer.XXXXXX") || exit 1; rc=$(mktemp "${TMPDIR:-/tmp}/vc-composer-vimrc.XXXXXX") || exit 1; printf '%s\n' 'set number laststatus=0 nowrap textwidth=0' > "$rc"; if [ "${VC_COMPOSER_CARET:-1}" != "0" ]; then printf '%s\n' 'let &t_SI = "\e[6 q"' 'let &t_SR = "\e[3 q"' 'let &t_EI = "\e[4 q"' >> "$rc"; fi; ${EDITOR:-vim} -N -u "$rc" "$f"; if [ "${VC_COMPOSER_CARET:-1}" != "0" ]; then printf '\033[0 q'; fi; if [ -s "$f" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars "$(cat "$f")"; fi; rm -f -- "$f" "$rc"; fi"#;
 #[derive(Debug, Default)]
 pub struct LinePart {
     part: String,
@@ -49,6 +86,10 @@ struct State {
     // Clipboard state
     text_copy_destination: Option<CopyDestination>,
     display_system_clipboard_failure: bool,
+    pending_clipboard_hint_timers: usize,
+    // when a status-bar is also present in the layout it owns the clipboard
+    // hint line, so we defer to it instead of showing the hint twice
+    status_bar_is_present: bool,
 
     // Plugin configuration
     config: BTreeMap<String, String>,
@@ -56,6 +97,7 @@ struct State {
     toggle_tooltip_key: Option<String>,
     brand_text: Option<String>,
     brand_text_short: Option<String>,
+    left_inset: usize,
 
     // Tooltip state
     is_tooltip: bool,
@@ -64,6 +106,13 @@ struct State {
     is_first_run: bool,
     own_tab_index: Option<usize>,
     own_client_id: u16,
+    is_visible: bool,
+    // Last (mode, coordinates) actually sent to the server. Repositioning is
+    // idempotent against this: a persistent tooltip receives ModeUpdate
+    // broadcasts that its own coordinate/rename calls trigger, and resending
+    // on every echo made a self-sustaining ~12/s reposition storm (the
+    // jumping screen of 2026-07-31).
+    last_sent_tooltip_state: Option<(InputMode, FloatingPaneCoordinates)>,
 
     // Keybinding cache
     cached_keybinds: KeybindsVec,
@@ -72,8 +121,6 @@ struct State {
 struct TabRenderData {
     tabs: Vec<LinePart>,
     active_tab_index: usize,
-    active_swap_layout_name: Option<String>,
-    is_swap_layout_dirty: bool,
 }
 
 register_plugin!(State);
@@ -117,7 +164,28 @@ impl ZellijPlugin for State {
                 self.handle_clipboard_copy(copy_destination)
             },
             Event::SystemClipboardFailure => self.handle_clipboard_failure(),
+            Event::Timer(_) => self.handle_clipboard_hint_timeout(),
             Event::InputReceived => self.handle_input_received(),
+            Event::PermissionRequestResult(_) => true,
+            Event::CustomMessage(message, payload) if message == VC_CHROME_VISIBILITY_MESSAGE => {
+                let was_visible = self.is_visible;
+                match payload.as_str() {
+                    "true" => self.is_visible = true,
+                    "false" => self.is_visible = false,
+                    _ => {},
+                }
+                self.is_visible && !was_visible
+            },
+            Event::CustomMessage(message, _) if message == VC_CHROME_HEARTBEAT_MESSAGE => {
+                let was_visible = self.is_visible;
+                self.is_visible = true;
+                !was_visible
+            },
+            Event::Visible(is_visible) => {
+                let was_visible = self.is_visible;
+                self.is_visible = is_visible;
+                is_visible && !was_visible
+            },
             _ => false,
         }
     }
@@ -125,6 +193,10 @@ impl ZellijPlugin for State {
     fn pipe(&mut self, message: PipeMessage) -> bool {
         if self.is_tooltip && message.is_private {
             self.handle_tooltip_pipe(message);
+        } else if self.quick_cmd_message_targets_active_bar(&message) {
+            // Keep keyboard and mouse on one runtime path: both end in the
+            // same runner, geometry and pane-title contract.
+            open_quick_cmd();
         } else if message.name == MSG_TOGGLE_TOOLTIP
             && message.is_private
             && self.toggle_tooltip_key.is_some()
@@ -139,6 +211,12 @@ impl ZellijPlugin for State {
     }
 
     fn render(&mut self, rows: usize, cols: usize) {
+        // Transient initial resize events arrive with rows/cols at or near
+        // zero before the real layout lands; painting those frames is what
+        // makes the chrome visibly jump at session start.
+        if dimensions_are_transient(rows, cols) {
+            return;
+        }
         if self.is_tooltip {
             self.render_tooltip(rows, cols);
         } else {
@@ -147,7 +225,25 @@ impl ZellijPlugin for State {
     }
 }
 
+// Floor for a renderable frame: anything below is a transient startup event,
+// not a legal surface. Kept far below the comfortable chrome minimum
+// (tools/repro_chrome.py MIN_COLUMNS) so legal small panes — the tooltip
+// floating pane included — always render.
+const MIN_RENDER_ROWS: usize = 1;
+const MIN_RENDER_COLS: usize = 4;
+
+fn dimensions_are_transient(rows: usize, cols: usize) -> bool {
+    rows < MIN_RENDER_ROWS || cols < MIN_RENDER_COLS
+}
+
 impl State {
+    fn quick_cmd_message_targets_active_bar(&self, message: &PipeMessage) -> bool {
+        message.name == MSG_OPEN_QUICK_CMD
+            && message.is_private
+            && message.source == PipeSource::Keybind
+            && self.own_tab_index == Some(self.active_tab_idx.saturating_sub(1))
+    }
+
     fn initialize_configuration(&mut self, configuration: BTreeMap<String, String>) {
         self.config = configuration.clone();
         self.is_tooltip = self.parse_bool_config(CONFIG_IS_TOOLTIP, false);
@@ -158,6 +254,10 @@ impl State {
             }
             self.brand_text = configuration.get(CONFIG_BRAND_TEXT).cloned();
             self.brand_text_short = configuration.get(CONFIG_BRAND_TEXT_SHORT).cloned();
+            self.left_inset = configuration
+                .get(CONFIG_LEFT_INSET)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
         }
 
         if self.is_tooltip {
@@ -184,6 +284,10 @@ impl State {
                 EventType::InputReceived,
                 EventType::SystemClipboardFailure,
                 EventType::InitialKeybinds,
+                EventType::Timer,
+                EventType::PermissionRequestResult,
+                EventType::CustomMessage,
+                EventType::Visible,
             ]
         };
 
@@ -191,13 +295,14 @@ impl State {
     }
 
     fn configure_keybinds(&self) {
-        if !self.is_tooltip && self.toggle_tooltip_key.is_some() {
-            if let Some(toggle_key) = &self.toggle_tooltip_key {
-                reconfigure(
-                    bind_toggle_key_config(toggle_key, self.own_client_id),
-                    false,
-                );
-            }
+        if !self.is_tooltip
+            && self.toggle_tooltip_key.is_some()
+            && let Some(toggle_key) = &self.toggle_tooltip_key
+        {
+            reconfigure(
+                bind_toggle_key_config(toggle_key, self.own_client_id),
+                false,
+            );
         }
     }
 
@@ -261,6 +366,7 @@ impl State {
 
             self.active_tab_idx = active_tab_idx;
             self.tabs = tabs;
+
             should_render
         } else {
             false
@@ -268,6 +374,7 @@ impl State {
     }
 
     fn handle_pane_update(&mut self, pane_manifest: PaneManifest) -> bool {
+        self.status_bar_is_present = self.detect_status_bar_presence(&pane_manifest);
         if self.toggle_tooltip_key.is_some() {
             let previous_tooltip_state = self.tooltip_is_active;
             self.tooltip_is_active = self.detect_tooltip_presence(&pane_manifest);
@@ -292,7 +399,7 @@ impl State {
     }
 
     fn handle_clipboard_copy(&mut self, copy_destination: CopyDestination) -> bool {
-        if self.is_tooltip {
+        if self.is_tooltip || self.status_bar_is_present {
             return false;
         }
 
@@ -302,16 +409,34 @@ impl State {
         };
 
         self.text_copy_destination = Some(copy_destination);
+        self.pending_clipboard_hint_timers += 1;
+        set_timeout(CLIPBOARD_HINT_TTL_SECONDS);
         should_render
     }
 
     fn handle_clipboard_failure(&mut self) -> bool {
-        if self.is_tooltip {
+        if self.is_tooltip || self.status_bar_is_present {
             return false;
         }
 
         self.display_system_clipboard_failure = true;
+        self.pending_clipboard_hint_timers += 1;
+        set_timeout(CLIPBOARD_HINT_TTL_SECONDS);
         true
+    }
+
+    fn handle_clipboard_hint_timeout(&mut self) -> bool {
+        // only the timer set by the most recent notification may dismiss it -
+        // earlier timers are stale (the TTL restarted)
+        self.pending_clipboard_hint_timers = self.pending_clipboard_hint_timers.saturating_sub(1);
+        if self.pending_clipboard_hint_timers == 0
+            && (self.text_copy_destination.is_some() || self.display_system_clipboard_failure)
+        {
+            self.clear_clipboard_state();
+            true
+        } else {
+            false
+        }
     }
 
     fn handle_input_received(&mut self) -> bool {
@@ -347,10 +472,19 @@ impl State {
         }
     }
 
+    fn detect_status_bar_presence(&self, pane_manifest: &PaneManifest) -> bool {
+        pane_manifest.panes.values().flatten().any(|pane| {
+            pane.plugin_url
+                .as_deref()
+                .is_some_and(|url| STATUS_BAR_PLUGIN_URLS.contains(&url))
+        })
+    }
+
     fn detect_tooltip_presence(&self, pane_manifest: &PaneManifest) -> bool {
         for panes in pane_manifest.panes.values() {
             for pane in panes {
-                if pane.plugin_url == Some("zellij:compact-bar".to_owned())
+                if (pane.plugin_url.as_deref() == Some("vc-frame:compact-bar")
+                    || pane.plugin_url.as_deref() == Some("zellij:compact-bar"))
                     && pane.pane_x != pane.pane_content_x
                 {
                     return true;
@@ -371,17 +505,102 @@ impl State {
         None
     }
 
-    fn handle_tab_click(&self, col: usize) {
+    fn handle_tab_click(&mut self, col: usize) {
+        if self.sentinel_clicked(col, COMPOSER_CLICK_SENTINEL) {
+            open_composer();
+            return;
+        }
+        if self.sentinel_clicked(col, AGENTS_CLICK_SENTINEL) {
+            // Quick cmd floats over the *current* tab — no Agents detour, no
+            // deferred spawn race, no "Process will run…" over the wrong pane.
+            open_quick_cmd();
+            return;
+        }
         if let Some(tab_idx) = get_tab_to_focus(&self.tab_line, self.active_tab_idx, col) {
             switch_tab_to(tab_idx.try_into().unwrap());
         }
+    }
+
+    fn sentinel_clicked(&self, col: usize, sentinel: usize) -> bool {
+        let mut offset = 0;
+        for part in &self.tab_line {
+            if part.tab_index == Some(sentinel) && col >= offset && col < offset + part.len {
+                return true;
+            }
+            offset += part.len;
+        }
+        false
     }
 
     fn scroll_tab_up(&self) {
         let next_tab = min(self.active_tab_idx + 1, self.tabs.len());
         switch_tab_to(next_tab as u32);
     }
+}
 
+/// Quick cmd mini console: shallow, wide, upper-center — non-ephemeral
+/// interactive terminal (not a command-pane "Process will run…" ticket).
+/// Commands run in-pane; the operator inspects output without the float dying.
+fn quick_cmd_coordinates() -> Option<FloatingPaneCoordinates> {
+    FloatingPaneCoordinates::new(
+        Some("18%".to_owned()),
+        Some("8%".to_owned()),
+        Some("64%".to_owned()),
+        Some("28%".to_owned()),
+        Some(false),
+        None,
+    )
+}
+
+/// The Composer atelier: large, centered writing surface — same footprint
+/// every time so the writing layer always opens where the hands remember it.
+fn composer_coordinates() -> Option<FloatingPaneCoordinates> {
+    FloatingPaneCoordinates::new(
+        Some("15%".to_owned()),
+        Some("10%".to_owned()),
+        Some("70%".to_owned()),
+        Some("72%".to_owned()),
+        Some(false),
+        None,
+    )
+}
+
+/// Quick cmd: non-ephemeral floating *terminal* at a fixed upper-center
+/// footprint (spec 1.2 §C). Interactive terminal — not a command-pane ticket —
+/// so there is no "Process will run in separated pane" chrome and the pane
+/// survives after each command. Prefer the installed `vc-quick-cmd.sh` banner
+/// wrapper when present; otherwise open a plain login shell on `.`.
+///
+/// The fallback runner is **POSIX `sh` only** (no bashisms). Debian/Ubuntu
+/// `sh` is dash — `${PWD/#$HOME/~}` is a bash-only rewrite and aborts with
+/// `sh: 1: Bad substitution` / exit 2 (the EXIT CODE strip the operator saw).
+fn open_quick_cmd() {
+    // Keep this string dash-clean: ${var:-def} and ${var#prefix} are POSIX;
+    // ${var/pat/repl} and ${var/#pat/repl} are not.
+    let quick_cmd_runner = r#"if [ -x "${HOME}/.config/vetcoders/frontier/vc-frame/vc-quick-cmd.sh" ]; then exec "${HOME}/.config/vetcoders/frontier/vc-frame/vc-quick-cmd.sh"; elif [ -x "${HOME}/.config/vc-frame/vc-quick-cmd.sh" ]; then exec "${HOME}/.config/vc-frame/vc-quick-cmd.sh"; else u="${USER:-op}"; h="$(hostname -s 2>/dev/null || echo host)"; d="$PWD"; case "${HOME:-}" in "") ;; *) case "$d" in "$HOME"|"$HOME"/*) d="~${d#"$HOME"}" ;; esac ;; esac; printf '\n  %s@%s in %s\n\n' "$u" "$h" "$d"; exec "${SHELL:-/bin/zsh}" -l; fi"#;
+    // open_command_pane_floating + exec keeps one long-lived process (the
+    // login shell). We accept command-pane chrome only when the wrapper is
+    // missing; preferred path is still a real shell via the wrapper script.
+    let command = CommandToRun::new_with_args("sh", vec!["-c", quick_cmd_runner]);
+    if let Some(PaneId::Terminal(terminal_pane_id)) =
+        open_command_pane_floating(command, quick_cmd_coordinates(), BTreeMap::new())
+    {
+        rename_terminal_pane(terminal_pane_id, QUICK_CMD_PANE_NAME);
+    }
+}
+
+/// Click path of the Composer chip — identical contract to Super+e (Cmd+E).
+/// Alt+e is deliberately free for Polish `ę` (spec 1.2 §A).
+fn open_composer() {
+    let command = CommandToRun::new_with_args("sh", vec!["-c", COMPOSER_COMMAND]);
+    if let Some(PaneId::Terminal(terminal_pane_id)) =
+        open_command_pane_floating(command, composer_coordinates(), BTreeMap::new())
+    {
+        rename_terminal_pane(terminal_pane_id, COMPOSER_PANE_NAME);
+    }
+}
+
+impl State {
     fn scroll_tab_down(&self) {
         let prev_tab = max(self.active_tab_idx.saturating_sub(1), 1);
         switch_tab_to(prev_tab as u32);
@@ -406,7 +625,9 @@ impl State {
 
     // Tooltip operations
     fn toggle_persisted_tooltip(&self, new_mode: InputMode) {
-        #[allow(unused_variables)]
+        // `message` is consumed only by the wasm-gated pipe below; native builds
+        // still type-check the construction but never send it.
+        #[cfg_attr(not(target_family = "wasm"), allow(unused_variables))]
         let message = self
             .create_tooltip_message(MSG_TOGGLE_PERSISTED_TOOLTIP, new_mode)
             .with_args(self.create_persist_args());
@@ -425,7 +646,7 @@ impl State {
         tooltip_config.insert(CONFIG_IS_TOOLTIP.to_string(), "true".to_string());
 
         MessageToPlugin::new(name)
-            .with_plugin_url("zellij:OWN_URL")
+            .with_plugin_url("vc-frame:OWN_URL")
             .with_plugin_config(tooltip_config)
             .with_floating_pane_coordinates(self.calculate_tooltip_coordinates())
             .new_plugin_instance_should_have_pane_title(format!("{:?}", mode))
@@ -437,11 +658,16 @@ impl State {
         args
     }
 
-    fn update_tooltip_for_mode_change(&self, new_mode: InputMode) {
+    fn update_tooltip_for_mode_change(&mut self, new_mode: InputMode) {
         if let Some(plugin_id) = self.own_plugin_id {
             let coordinates = self.calculate_tooltip_coordinates();
+            let next_state = (new_mode, coordinates.clone());
+            if self.last_sent_tooltip_state.as_ref() == Some(&next_state) {
+                return;
+            }
             change_floating_panes_coordinates(vec![(PaneId::Plugin(plugin_id), coordinates)]);
             rename_plugin_pane(plugin_id, format!("{:?}", new_mode));
+            self.last_sent_tooltip_state = Some(next_state);
         }
     }
 
@@ -520,15 +746,15 @@ impl State {
         }
 
         let tab_data = self.prepare_tab_data();
-        self.tab_line = tab_line(
-            &self.mode_info,
-            tab_data,
-            cols,
-            self.toggle_tooltip_key.clone(),
-            self.tooltip_is_active,
-            self.brand_text.clone(),
-            self.brand_text_short.clone(),
-        );
+        let config = crate::line::TabLineConfig {
+            mode: self.mode_info.mode,
+            toggle_tooltip_key: self.toggle_tooltip_key.clone(),
+            tooltip_is_active: self.tooltip_is_active,
+            brand_text: self.brand_text.clone(),
+            brand_text_short: self.brand_text_short.clone(),
+            left_inset: self.left_inset,
+        };
+        self.tab_line = tab_line(&self.mode_info, tab_data, cols, config);
 
         let output = self
             .tab_line
@@ -541,8 +767,6 @@ impl State {
     fn prepare_tab_data(&self) -> TabRenderData {
         let mut all_tabs = Vec::new();
         let mut active_tab_index = 0;
-        let mut active_swap_layout_name = None;
-        let mut is_swap_layout_dirty = false;
         let mut is_alternate_tab = false;
 
         for tab in &self.tabs {
@@ -550,10 +774,6 @@ impl State {
 
             if tab.active {
                 active_tab_index = tab.position;
-                if self.mode_info.mode != InputMode::RenameTab {
-                    is_swap_layout_dirty = tab.is_swap_layout_dirty;
-                    active_swap_layout_name = tab.active_swap_layout_name.clone();
-                }
             }
 
             let styled_tab = tab_style(
@@ -571,8 +791,6 @@ impl State {
         TabRenderData {
             tabs: all_tabs,
             active_tab_index,
-            active_swap_layout_name,
-            is_swap_layout_dirty,
         }
     }
 
@@ -602,4 +820,49 @@ fn bind_toggle_key_config(toggle_key: &str, client_id: u16) -> String {
     "#,
         toggle_key, toggle_key, client_id
     )
+}
+
+#[cfg(test)]
+mod transient_dimension_guard_tests {
+    use super::*;
+
+    #[test]
+    fn zero_dimensions_are_transient() {
+        assert!(dimensions_are_transient(0, 80));
+        assert!(dimensions_are_transient(1, 0));
+        assert!(dimensions_are_transient(0, 0));
+    }
+
+    #[test]
+    fn sub_minimum_columns_are_transient() {
+        assert!(dimensions_are_transient(1, 3));
+    }
+
+    #[test]
+    fn legal_small_surfaces_still_render() {
+        // The tooltip lives in a small floating pane; the guard must not
+        // eat it.
+        assert!(!dimensions_are_transient(1, 4));
+        assert!(!dimensions_are_transient(1, 8));
+        assert!(!dimensions_are_transient(10, 40));
+    }
+
+    #[test]
+    fn quick_cmd_keybind_targets_only_the_active_bar() {
+        let mut state = State {
+            active_tab_idx: 2,
+            own_tab_index: Some(1),
+            ..Default::default()
+        };
+        let message = PipeMessage::new(PipeSource::Keybind, MSG_OPEN_QUICK_CMD, &None, &None, true);
+
+        assert!(state.quick_cmd_message_targets_active_bar(&message));
+
+        state.own_tab_index = Some(0);
+        assert!(!state.quick_cmd_message_targets_active_bar(&message));
+
+        let public_message =
+            PipeMessage::new(PipeSource::Keybind, MSG_OPEN_QUICK_CMD, &None, &None, false);
+        assert!(!state.quick_cmd_message_targets_active_bar(&public_message));
+    }
 }

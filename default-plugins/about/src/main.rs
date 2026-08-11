@@ -116,23 +116,21 @@ impl ZellijPlugin for App {
     fn update(&mut self, event: Event) -> bool {
         let mut should_render = false;
         match event {
-            Event::FailedToWriteConfigToDisk(file_path) => {
-                if self.waiting_for_config_to_be_written {
-                    let error = match file_path {
-                        Some(file_path) => {
-                            format!("Failed to write config to disk at: {}", file_path)
-                        },
-                        None => "Failed to write config to disk.".to_string(),
-                    };
-                    eprintln!("{}", error);
-                    self.error = Some(error);
-                    should_render = true;
-                }
+            Event::FailedToWriteConfigToDisk(file_path)
+                if self.waiting_for_config_to_be_written =>
+            {
+                let error = match file_path {
+                    Some(file_path) => {
+                        format!("Failed to write config to disk at: {}", file_path)
+                    },
+                    None => "Failed to write config to disk.".to_string(),
+                };
+                eprintln!("{}", error);
+                self.error = Some(error);
+                should_render = true;
             },
-            Event::ConfigWasWrittenToDisk => {
-                if self.waiting_for_config_to_be_written {
-                    close_self();
-                }
+            Event::ConfigWasWrittenToDisk if self.waiting_for_config_to_be_written => {
+                close_self();
             },
             Event::TabUpdate(tab_info) => {
                 self.center_own_pane(tab_info);
@@ -189,13 +187,13 @@ impl App {
                 let pane_title = self
                     .pane_title
                     .clone()
-                    .unwrap_or_else(|| "VibeCrafted Shell Guide".to_owned());
+                    .unwrap_or_else(|| "Start here — map of this workspace".to_owned());
                 rename_plugin_pane(own_plugin_id, &pane_title);
             } else {
                 let pane_title = self
                     .pane_title
                     .clone()
-                    .unwrap_or_else(|| "About VibeCrafted Shell".to_owned());
+                    .unwrap_or_else(|| "About Vibecrafted Shell".to_owned());
                 rename_plugin_pane(own_plugin_id, &pane_title);
             }
         }
@@ -233,7 +231,12 @@ impl App {
                 }
             },
             Mouse::Hover(line, column) => {
-                should_render = self.active_page.handle_mouse_hover(column, line as usize);
+                // Server may send line < 0 as "cursor left this pane".
+                if line < 0 {
+                    should_render = self.active_page.clear_hover();
+                } else {
+                    should_render = self.active_page.handle_mouse_hover(column, line as usize);
+                }
             },
             _ => {},
         }
@@ -261,7 +264,18 @@ impl App {
             reconfigure("show_startup_tips false".to_owned(), save_configuration);
         } else if key.bare_key == BareKey::Esc && key.has_no_modifiers() {
             if self.active_page.is_main_screen {
-                close_self();
+                // Embedded Guide is not a floating about pane — Esc stays put.
+                if self.guide_mode.as_deref() != Some("mission-control") {
+                    close_self();
+                }
+            } else if self.guide_mode.as_deref() == Some("mission-control") {
+                // Sub-topics return to the first-run map, not the generic About menu.
+                self.active_page = Page::new_vibecrafted_mission_control(
+                    self.link_executable.clone(),
+                    self.zellij_version.borrow().clone(),
+                    self.base_mode.clone(),
+                );
+                should_render = true;
             } else {
                 self.active_page = Page::new_main_screen(
                     self.link_executable.clone(),

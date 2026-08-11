@@ -726,7 +726,9 @@ impl<'a> TiledPaneGrid<'a> {
         direction: &Direction,
     ) -> Result<BorderAndPaneIds> {
         let err_context = || {
-            format!("failed to find contiguous panes {direction} from pane {id:?} with {alignment} alignment")
+            format!(
+                "failed to find contiguous panes {direction} from pane {id:?} with {alignment} alignment"
+            )
         };
         let input_error =
             anyhow!("Invalid combination of alignment ({alignment}) and direction ({direction})");
@@ -882,12 +884,11 @@ impl<'a> TiledPaneGrid<'a> {
             .position(|(id, _)| *id == current_pane_id) // TODO: better
             .unwrap();
 
-        let next_active_pane_id = panes
+        panes
             .get(active_pane_position + 1)
             .or_else(|| panes.first())
             .map(|p| *p.0)
-            .unwrap();
-        next_active_pane_id
+            .unwrap()
     }
 
     pub fn previous_selectable_pane_id(&self, current_pane_id: &PaneId) -> PaneId {
@@ -907,12 +908,11 @@ impl<'a> TiledPaneGrid<'a> {
             .position(|(id, _)| *id == current_pane_id) // TODO: better
             .unwrap();
 
-        let previous_active_pane_id = if active_pane_position == 0 {
+        if active_pane_position == 0 {
             *last_pane.0
         } else {
             *panes.get(active_pane_position - 1).unwrap().0
-        };
-        previous_active_pane_id
+        }
     }
 
     pub fn next_selectable_pane_id_to_the_left(&self, current_pane_id: &PaneId) -> Option<PaneId> {
@@ -935,11 +935,8 @@ impl<'a> TiledPaneGrid<'a> {
         let next_pane_is_stacked = next_pane
             .map(|p| p.current_geom().is_stacked())
             .unwrap_or(false);
-        if next_pane_is_stacked {
-            if let Some(next_pane_id) = next_pane.map(|p| p.pid()) {
-                return StackedPanes::new(self.panes.clone())
-                    .flexible_pane_id_in_stack(&next_pane_id);
-            }
+        if next_pane_is_stacked && let Some(next_pane_id) = next_pane.map(|p| p.pid()) {
+            return StackedPanes::new(self.panes.clone()).flexible_pane_id_in_stack(&next_pane_id);
         }
         next_pane.map(|p| p.pid())
     }
@@ -952,7 +949,8 @@ impl<'a> TiledPaneGrid<'a> {
                 .filter(|(_, p)| p.selectable())
                 .map(|(p_id, p)| (*p_id, p))
                 .collect();
-            let destination_pane_id = pane_list
+
+            pane_list
                 .iter()
                 .enumerate()
                 .filter(|(_, (_, c))| {
@@ -962,8 +960,7 @@ impl<'a> TiledPaneGrid<'a> {
                 })
                 .max_by_key(|(_, (_, c))| c.active_at())
                 .map(|(_, (pid, _))| pid)
-                .copied();
-            destination_pane_id
+                .copied()
         };
 
         match destination_pane_id_in_stack {
@@ -985,7 +982,8 @@ impl<'a> TiledPaneGrid<'a> {
                 .filter(|(_, p)| p.selectable())
                 .map(|(p_id, p)| (*p_id, p))
                 .collect();
-            let destination_pane_id = pane_list
+
+            pane_list
                 .iter()
                 .enumerate()
                 .filter(|(_, (_, c))| {
@@ -995,8 +993,7 @@ impl<'a> TiledPaneGrid<'a> {
                 })
                 .max_by_key(|(_, (_, c))| c.active_at())
                 .map(|(_, (pid, _))| pid)
-                .copied();
-            destination_pane_id
+                .copied()
         };
 
         match destination_pane_id_in_stack {
@@ -1021,7 +1018,8 @@ impl<'a> TiledPaneGrid<'a> {
             .filter(|(_, p)| p.selectable())
             .map(|(p_id, p)| (*p_id, p))
             .collect();
-        let next_index = panes
+
+        panes
             .iter()
             .enumerate()
             .filter(|(_, (_, c))| {
@@ -1036,8 +1034,7 @@ impl<'a> TiledPaneGrid<'a> {
             })
             .max_by_key(|(_, (_, c))| c.active_at())
             .map(|(_, (pid, _))| pid)
-            .copied();
-        next_index
+            .copied()
     }
     pub fn pane_id_on_edge(&self, direction: Direction) -> Option<PaneId> {
         let panes = self.panes.borrow();
@@ -1046,7 +1043,8 @@ impl<'a> TiledPaneGrid<'a> {
             .filter(|(_, p)| p.selectable())
             .map(|(p_id, p)| (*p_id, p))
             .collect();
-        let next_index = panes
+
+        panes
             .iter()
             .enumerate()
             .max_by(|(_, (_, a)), (_, (_, b))| match direction {
@@ -1080,8 +1078,7 @@ impl<'a> TiledPaneGrid<'a> {
                 },
             })
             .map(|(_, (pid, _))| pid)
-            .copied();
-        next_index
+            .copied()
     }
     pub fn next_selectable_pane_id_above(
         &self,
@@ -1095,7 +1092,8 @@ impl<'a> TiledPaneGrid<'a> {
             .filter(|(_, p)| p.selectable())
             .map(|(p_id, p)| (*p_id, p))
             .collect();
-        let next_index = panes
+
+        panes
             .iter()
             .enumerate()
             .filter(|(_, (_, c))| {
@@ -1110,8 +1108,7 @@ impl<'a> TiledPaneGrid<'a> {
             })
             .max_by_key(|(_, (_, c))| c.active_at())
             .map(|(_, (pid, _))| pid)
-            .copied();
-        next_index
+            .copied()
     }
     pub fn next_selectable_pane_id_to_the_right(&self, current_pane_id: &PaneId) -> Option<PaneId> {
         let panes = self.panes.borrow();
@@ -1134,11 +1131,8 @@ impl<'a> TiledPaneGrid<'a> {
         let next_pane_is_stacked = next_pane
             .map(|p| p.current_geom().is_stacked())
             .unwrap_or(false);
-        if next_pane_is_stacked {
-            if let Some(next_pane_id) = next_pane.map(|p| p.pid()) {
-                return StackedPanes::new(self.panes.clone())
-                    .flexible_pane_id_in_stack(&next_pane_id);
-            }
+        if next_pane_is_stacked && let Some(next_pane_id) = next_pane.map(|p| p.pid()) {
+            return StackedPanes::new(self.panes.clone()).flexible_pane_id_in_stack(&next_pane_id);
         }
         next_pane.map(|p| p.pid())
     }
@@ -1714,12 +1708,12 @@ impl<'a> TiledPaneGrid<'a> {
             let pane = panes.get(p_id).with_context(err_context)?;
             hole_panes.push((p_id, pane.position_and_size()));
         }
-        panes_to_expand.sort_by(|(_a_id, a_geom), (_b_id, b_geom)| a_geom.x.cmp(&b_geom.x));
-        hole_panes.sort_by(|(_a_id, a_geom), (_b_id, b_geom)| a_geom.x.cmp(&b_geom.x));
+        panes_to_expand.sort_by_key(|(_a_id, a_geom)| a_geom.x);
+        hole_panes.sort_by_key(|(_a_id, a_geom)| a_geom.x);
         let mut uncovered_hole = None;
         for (hole_id, mut hole_geom) in hole_panes {
             let hole_x = hole_geom.x;
-            let Some((pane_id_with_closest_x, mut pane_geom_with_closest_x)) = panes_to_expand
+            let Some(&(pane_id_with_closest_x, mut pane_geom_with_closest_x)) = panes_to_expand
                 .iter()
                 .find(|(_p_id, p_geom)| p_geom.x >= hole_x)
             else {
@@ -1750,7 +1744,7 @@ impl<'a> TiledPaneGrid<'a> {
                 .set_geom(hole_geom);
         }
         if let Some((hole_id, mut hole_geom)) = uncovered_hole {
-            let (pane_id_with_closest_x, mut pane_geom_with_closest_x) =
+            let &(pane_id_with_closest_x, mut pane_geom_with_closest_x) =
                 panes_to_expand.last().with_context(err_context)?;
             pane_geom_with_closest_x
                 .cols
@@ -1798,12 +1792,12 @@ impl<'a> TiledPaneGrid<'a> {
             let pane = panes.get(p_id).with_context(err_context)?;
             hole_panes.push((p_id, pane.position_and_size()));
         }
-        panes_to_expand.sort_by(|(_a_id, a_geom), (_b_id, b_geom)| a_geom.x.cmp(&b_geom.x));
-        hole_panes.sort_by(|(_a_id, a_geom), (_b_id, b_geom)| a_geom.x.cmp(&b_geom.x));
+        panes_to_expand.sort_by_key(|(_a_id, a_geom)| a_geom.x);
+        hole_panes.sort_by_key(|(_a_id, a_geom)| a_geom.x);
         let mut uncovered_hole = None;
         for (hole_id, mut hole_geom) in hole_panes {
             let hole_x = hole_geom.x;
-            let Some((pane_id_with_closest_x, mut pane_geom_with_closest_x)) = panes_to_expand
+            let Some(&(pane_id_with_closest_x, mut pane_geom_with_closest_x)) = panes_to_expand
                 .iter()
                 .find(|(_p_id, p_geom)| p_geom.x >= hole_x)
             else {
@@ -1835,7 +1829,7 @@ impl<'a> TiledPaneGrid<'a> {
                 .set_geom(hole_geom);
         }
         if let Some((hole_id, mut hole_geom)) = uncovered_hole {
-            let (pane_id_with_closest_x, mut pane_geom_with_closest_x) =
+            let &(pane_id_with_closest_x, mut pane_geom_with_closest_x) =
                 panes_to_expand.last().with_context(err_context)?;
             pane_geom_with_closest_x
                 .cols
@@ -1884,12 +1878,12 @@ impl<'a> TiledPaneGrid<'a> {
             let pane = panes.get(p_id).with_context(err_context)?;
             hole_panes.push((p_id, pane.position_and_size()));
         }
-        panes_to_expand.sort_by(|(_a_id, a_geom), (_b_id, b_geom)| a_geom.y.cmp(&b_geom.y));
-        hole_panes.sort_by(|(_a_id, a_geom), (_b_id, b_geom)| a_geom.y.cmp(&b_geom.y));
+        panes_to_expand.sort_by_key(|(_a_id, a_geom)| a_geom.y);
+        hole_panes.sort_by_key(|(_a_id, a_geom)| a_geom.y);
         let mut uncovered_hole = None;
         for (hole_id, mut hole_geom) in hole_panes {
             let hole_y = hole_geom.y;
-            let Some((pane_id_with_closest_y, mut pane_geom_with_closest_y)) = panes_to_expand
+            let Some(&(pane_id_with_closest_y, mut pane_geom_with_closest_y)) = panes_to_expand
                 .iter()
                 .find(|(_p_id, p_geom)| p_geom.y >= hole_y)
             else {
@@ -1921,7 +1915,7 @@ impl<'a> TiledPaneGrid<'a> {
                 .set_geom(hole_geom);
         }
         if let Some((hole_id, mut hole_geom)) = uncovered_hole {
-            let (pane_id_with_closest_y, mut pane_geom_with_closest_y) =
+            let &(pane_id_with_closest_y, mut pane_geom_with_closest_y) =
                 panes_to_expand.last().with_context(err_context)?;
             pane_geom_with_closest_y
                 .rows
@@ -1969,12 +1963,12 @@ impl<'a> TiledPaneGrid<'a> {
             let pane = panes.get(p_id).with_context(err_context)?;
             hole_panes.push((p_id, pane.position_and_size()));
         }
-        panes_to_expand.sort_by(|(_a_id, a_geom), (_b_id, b_geom)| a_geom.y.cmp(&b_geom.y));
-        hole_panes.sort_by(|(_a_id, a_geom), (_b_id, b_geom)| a_geom.y.cmp(&b_geom.y));
+        panes_to_expand.sort_by_key(|(_a_id, a_geom)| a_geom.y);
+        hole_panes.sort_by_key(|(_a_id, a_geom)| a_geom.y);
         let mut uncovered_hole = None;
         for (hole_id, mut hole_geom) in hole_panes {
             let hole_y = hole_geom.y;
-            let Some((pane_id_with_closest_y, mut pane_geom_with_closest_y)) = panes_to_expand
+            let Some(&(pane_id_with_closest_y, mut pane_geom_with_closest_y)) = panes_to_expand
                 .iter()
                 .find(|(_p_id, p_geom)| p_geom.y >= hole_y)
             else {
@@ -2005,7 +1999,7 @@ impl<'a> TiledPaneGrid<'a> {
                 .set_geom(hole_geom);
         }
         if let Some((hole_id, mut hole_geom)) = uncovered_hole {
-            let (pane_id_with_closest_y, mut pane_geom_with_closest_y) =
+            let &(pane_id_with_closest_y, mut pane_geom_with_closest_y) =
                 panes_to_expand.last().with_context(err_context)?;
             pane_geom_with_closest_y
                 .rows

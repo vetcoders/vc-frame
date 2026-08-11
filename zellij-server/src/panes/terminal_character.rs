@@ -379,15 +379,15 @@ impl CharacterStyles {
         *self = new_styles.enable_styled_underlines(self.styled_underlines_enabled);
 
         if let Some(changed_colors) = changed_colors {
-            if let Some(AnsiCode::ColorIndex(color_index)) = diff.foreground {
-                if let Some(changed_color) = changed_colors[color_index as usize] {
-                    diff.foreground = Some(changed_color);
-                }
+            if let Some(AnsiCode::ColorIndex(color_index)) = diff.foreground
+                && let Some(changed_color) = changed_colors[color_index as usize]
+            {
+                diff.foreground = Some(changed_color);
             }
-            if let Some(AnsiCode::ColorIndex(color_index)) = diff.background {
-                if let Some(changed_color) = changed_colors[color_index as usize] {
-                    diff.background = Some(changed_color);
-                }
+            if let Some(AnsiCode::ColorIndex(color_index)) = diff.background
+                && let Some(changed_color) = changed_colors[color_index as usize]
+            {
+                diff.background = Some(changed_color);
             }
         }
         Some(diff)
@@ -616,22 +616,22 @@ impl Display for CharacterStyles {
                 _ => {},
             }
         }
-        if self.styled_underlines_enabled {
-            if let Some(ansi_code) = self.underline_color {
-                match ansi_code {
-                    AnsiCode::RgbCode((r, g, b)) => {
-                        write!(f, "\u{1b}[58:2::{}:{}:{}m", r, g, b)?;
-                    },
-                    AnsiCode::ColorIndex(color_index) => {
-                        write!(f, "\u{1b}[58:5:{}m", color_index)?;
-                    },
-                    AnsiCode::Reset => {
-                        write!(f, "\u{1b}[59m")?;
-                    },
-                    _ => {},
-                }
-            };
-        }
+        if self.styled_underlines_enabled
+            && let Some(ansi_code) = self.underline_color
+        {
+            match ansi_code {
+                AnsiCode::RgbCode((r, g, b)) => {
+                    write!(f, "\u{1b}[58:2::{}:{}:{}m", r, g, b)?;
+                },
+                AnsiCode::ColorIndex(color_index) => {
+                    write!(f, "\u{1b}[58:5:{}m", color_index)?;
+                },
+                AnsiCode::Reset => {
+                    write!(f, "\u{1b}[59m")?;
+                },
+                _ => {},
+            }
+        };
         if let Some(ansi_code) = self.strike {
             match ansi_code {
                 AnsiCode::On => {
@@ -703,23 +703,20 @@ impl Display for CharacterStyles {
                 AnsiCode::Underline(None) => {
                     write!(f, "\u{1b}[4m")?;
                 },
-                AnsiCode::Underline(Some(styled)) => {
-                    if self.styled_underlines_enabled {
-                        match styled {
-                            AnsiStyledUnderline::Double => {
-                                write!(f, "\u{1b}[4:2m")?;
-                            },
-                            AnsiStyledUnderline::Undercurl => {
-                                write!(f, "\u{1b}[4:3m")?;
-                            },
-                            AnsiStyledUnderline::Underdotted => {
-                                write!(f, "\u{1b}[4:4m")?;
-                            },
-                            AnsiStyledUnderline::Underdashed => {
-                                write!(f, "\u{1b}[4:5m")?;
-                            },
-                        }
-                    }
+                AnsiCode::Underline(Some(styled)) if self.styled_underlines_enabled => match styled
+                {
+                    AnsiStyledUnderline::Double => {
+                        write!(f, "\u{1b}[4:2m")?;
+                    },
+                    AnsiStyledUnderline::Undercurl => {
+                        write!(f, "\u{1b}[4:3m")?;
+                    },
+                    AnsiStyledUnderline::Underdotted => {
+                        write!(f, "\u{1b}[4:4m")?;
+                    },
+                    AnsiStyledUnderline::Underdashed => {
+                        write!(f, "\u{1b}[4:5m")?;
+                    },
                 },
                 AnsiCode::Reset => {
                     write!(f, "\u{1b}[24m")?;

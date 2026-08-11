@@ -353,8 +353,8 @@ impl State {
                 #[cfg(target_family = "wasm")]
                 close_self();
             },
-            #[allow(unused_variables)]
             // pipe_id is used inside #[cfg(target_family = "wasm")] blocks
+            #[cfg_attr(not(target_family = "wasm"), allow(unused_variables))]
             Some((PipeSource::Cli(pipe_id), _args)) => {
                 #[cfg(target_family = "wasm")]
                 cli_pipe_output(pipe_id, &host_path);

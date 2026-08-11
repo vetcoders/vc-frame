@@ -1,16 +1,25 @@
 // vc-workflow — ERi implementation workspace
 // Launch: vibecrafted dashboard vc-workflow
 //
-// VibeCrafted with AI Agents (c)2026 VetCoders
+// Vibecrafted with AI Agents (c)2026 Vetcoders
 layout {
     default_tab_template {
         pane size=1 borderless=true {
             plugin location="compact-bar" {
                 brand_text " 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. "
-                brand_text_short " VC. "
+                // 🚥 zone: clear the macOS traffic lights in the native window
+                left_inset "6"
             }
         }
-        children
+        pane split_direction="vertical" {
+            pane size=24 borderless=true {
+                plugin location="session-manager" {
+                    rail true
+                    pane_title "Sessions"
+                }
+            }
+            pane { children; }
+        }
         pane size=1 borderless=true {
             plugin location="status-bar"
         }

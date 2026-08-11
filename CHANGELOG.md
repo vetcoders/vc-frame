@@ -3,15 +3,88 @@
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
-
 ## [Unreleased]
+
+* feat(input): `Cmd+K` / `Super+k` opens the existing `❯_ Quick cmd` mini-console in every mode including LOCK; the keybind messages the active compact-bar so keyboard and click share one runner, geometry and pane-title contract, with matching Alacritty CSI-u translation and help
+
+## [0.47.3] - 2026-08-06
+
+* feat(rail): the session rail reads its allocated width and picks one of three faces — Wide (`cols >= 24`, today's full render), Normal (`14 <= cols < 24`, header drops the current-session anchor, names truncate, ◉/○ stay) and Dense (`cols < 14`, iconic strip: ordinal + state dot rows, `S N` badge header, no shredded prose); sharp thresholds, row variants built at row level, click-map stays full in every face
+* feat(composer): caret parity for the inline fallback — the chip's `COMPOSER_COMMAND` speaks the same caret language as the installed script via a mktemp mini-vimrc (insert=beam/replace=blink-underline/normal=underline + DECSCUSR 0 handed back on exit, `VC_COMPOSER_CARET=0` respected); named degradation: visual/cmdline states live only in the installed script. OSC 12/112 verdict: swallowed in `grid.rs` (`b"12"`/`b"112"` unimplemented arms) — caret color stays OFF, forwarding is a separate operator-mandated cut
+* fix(chrome): transient dimension guard at the render entry of compact-bar, status-bar and the session-manager main menu — startup `rows`/`cols` ≈ 0 frames no longer paint partial layouts (the visible chrome jump at session start); thresholds far below legal small surfaces (tooltip, rail)
+* feat(composer): semantic caret — the cursor shape names the mode in the drafting vimrc (insert=beam `│`, normal=underline `_` brand, visual=blinking block, replace/cmdline=blinking underline, operator-pending=block); nvim via `guicursor`, classic vim via `t_SI/t_SR/t_EI` + guarded `ModeChanged`/`CmdlineEnter` fallback; DECSCUSR 0 handed back to the host on exit; `VC_COMPOSER_CARET=0` opts out; brand-gold caret color (OSC 12 `#c99a3b`) prepared behind `VC_COMPOSER_CARET_COLOR` (default OFF pending the pass-through verdict)
+* feat(warden): caller-aware route telemetry, bounded action-client TTL, accepted-vs-committed SaveSession receipts, deterministic config hashes, bare-start attach/CWD naming, and explicit key/config/C2 contracts
+* fix(chrome): bottom bar mode tiles keep readable labels (LOCK/PANE not Lo/Pa); chrome key SSOT uses macOS glyphs ⌃⌥⌘⇧; session-manager help uses ⌥⌫ (not Del) + rail label sanitize against Main flicker
+* fix(host): inject Cmd→CSI Super translation into live Alacritty config so Cmd+arrows/Cmd+E work (key-contract v3)
+* fix(session-manager): kill/delete is ⌥⌫ (Alt+Backspace) on help and handlers — forward-delete Del is no longer advertised (scarce on Mac laptops, steals sequences); help uses macOS glyphs (⌃ ⌥ ⌫ ⏎)
+* fix(session-manager): rail/header labels sanitize control chars and collapse whitespace before fixed-width pad — stops row-width flicker from dirty session/tab titles
+* docs: CONFIG_OWNERSHIP.md — single owner per layer (vc-frame schema/runtime, vibecrafted package/install wire)
+* fix(chrome): floating PIN uses fisheye ○/◉ (not `[ ]`/`[+]`); Composer vim profile loads via single `-u` vimrc (fixes "Too many -c command arguments")
+* fix(composer): wrap OFF by default in the floating atelier (`set nowrap`, `textwidth=0`, sidescroll); F2 / `\w` toggles wrap; `VC_COMPOSER_WRAP=1` starts with wrap on — ends chrome bleeding into the draft buffer
+* feat(chrome): Uniform Mode Chip Separator Rule — every mode chip ends with `│` on a fixed 8-col budget (`▷ N │`, `⊝ L │`, `✎ RNT │`, …) so the bar aligns with the pane frame's `├`
+* feat(chrome): Quick cmd is a non-ephemeral mini console (`❯_ Quick cmd` + `vc-quick-cmd.sh` host@cwd banner + login shell); Composer header is `✍ Composer · ⧉ Paste stack`; Super+e is the sole Composer key (Alt+e free for Polish `ę`)
+* feat(composer): `vc-composer.sh` ships a vibecrafted vim profile (`number`, `laststatus=0`) and `Ctrl+p` paste-stack pick; `paste-stack.sh pick` uses fzf when available; Scroll mode `v` opens mouseless scrollback selection (`scrollback-select.sh`) that yanks to pbcopy + paste stack
+* feat(chrome): Fixed Character Grid Model — compact-bar zones lock to fixed column budgets (brand 14, mode 8, entry chips 12+18); mode switches and entry labels no longer shift the tab zone by even one cell; unit tests lock the EAW-aware pad contract
+* feat(chrome): status-bar metric fields use fixed widths (`CPU {:4}`, `MEM {:5.1}/{:3}`, `DISK {:3}`, `LIVE {:2}`) covering multi-core >999% and used memory >=100G (operator hardware) without right-edge jitter
+* feat(chrome): operator layouts default `left_inset` to 6 columns (was 9) at standard monospace; large fonts can still raise it via layout config
+* feat(composer): Quick cmd floats a login shell over the *current* tab (no Agents detour); Composer chip and Super+e share one paste-stack-aware drafting contract (`~/.cache/vc-frame/paste-stack.json` seed + push)
+* feat(status-bar): mode-gated status contract — the diodes (`LIVE | CPU | MEM | DISK | HEALTH`) live in the resting mode only; action modes hand every column to the shortcut hints and keep just the swap-layout chip; on narrow bars the segment sheds blocks right-to-left (DISK → MEM → CPU → swap → HEALTH, pulse last) instead of vanishing whole, and a two-cell seam always separates hints from statuses
+* feat(chrome): the Quick cmd click opens a fixed upper-center command strip (60%×30%) named `Quick cmd`, the Composer click a fixed centered atelier (70%×72%) — floating entry points land where the hands remember them instead of the session default
+* fix(status-bar): replace per-tab full-session `LIVE` fan-out with server-derived plugin/client updates; only each client's active status bar samples host resources, hidden bars stay idle, clipboard timers cannot fork samplers, and async-loader replay preserves exact lifecycle targets
+* feat(clinic): `asset-integrity` doctor section — the binary hashes its embedded plugins at runtime against its own SHA-256 receipt (`SHA256SUMS`), so a build that mixes plugin generations says so instead of "jakoś działa" (CRITICAL → `make install`)
+* feat(clinic): `host-terminal` doctor section — names the host terminal, and under Alacritty audits `option_as_alt` (absent/None = the Alt writer layer is dead on macOS, CRITICAL) plus Command/Super bindings the terminal intercepts before vc-frame (WARN, listed verbatim)
+* feat(chrome): tab chips speak the exact status-bar chip language (`color_elements()` recipe) — active ◉ on the ribbon accent, inactive ○ on ribbon ground, bold everywhere, chips separated by bar ground instead of half-block seams
+
+## [0.47.2] - 2026-07-30
+* feat(input): key-contract v3 — one modifier per owner: `Cmd/Super+←/→` tabs, `Cmd/Super+↑/↓` sessions and `Cmd+E` Composer in **every** mode including LOCK (Super never collides with anything a pane reads); `Ctrl+arrows` mirror the switcher outside LOCK and pass through inside it; `Alt` belongs entirely to the writer (diacritics layer, host-side word-jump) — the shipped Alacritty preset carries the Cmd→kitty-CSI-u translation layer
+* feat(clinic): `vc-frame doctor` — read-only diagnosis of config shadowing (frozen `clear-defaults` keybind dumps), lock stranding, install freshness, shell drift, and config parse errors; session-effective analysis (config + layout overlay), `--json` with machine-readable remedies, exit codes 0/1/2
+* feat(clinic): `vc-frame repair key-bindings` — backs up the config, retires the shadowing keybinds block behind a guard comment, and reports exactly which personal binds were lost; `--dry-run` supported (runbook: docs/DOCTOR.md)
+* fix(ipc): typed client receive path (`ClientReceiveOutcome`) distinguishes messages, disconnects, and protocol errors — ends the unknown-message flood that force-logged-out live clients
+* fix(ipc): a torn frame (EOF inside the length prefix or payload) is a `ProtocolError`, not a clean disconnect — only zero bytes between frames reads as `Disconnected`
+* fix(clinic): the doctor names its scope (`next-session config`, report line + `--json` field), an existing-but-unreadable config is an ERROR with exit 2 instead of masquerading as "no config", `repair` writes through a temp file + fsync + atomic rename and backups are collision-safe within the same second
+* fix(session): CloseTab cleanup debt paid — session verbs, cleanup cap, abandon path, and ghost-session short-circuit; closing a pane is a one-shot action again instead of a session killer
+* fix(session): killing the current session next to live f/x/n bucket sessions hops into another live session (working first, bucket as last resort) instead of taking the whole client down — buckets are invisible to navigation, not to the kill path
+* fix(chrome): the ⌬ Agents chip defers the Dispatcher spawn until the server confirms the Agents tab is active — the first click no longer floats the shell over the tab you came from
+* feat(input): idle autolock driven purely by config — `auto_lock_after_seconds 30` ships in the default config template; the code invents no number, and 0 or unset means never
+* feat(composer): `Cmd+E` (with `Alt+e` fallback for hosts without a Super channel) Command Composer honoring `$VC_COMPOSER`, with an always-visible clickable chip in the compact-bar
+* feat(chrome): compact-bar redesign in rail language — brand chip, inverted mode chip, session anchor, fisheye tab ribbons, fleet-pulse chip, and the Agents station chip opening the dispatcher
+* fix(chrome): one ink color across the tab zone — state is dim/bold plus the ○/● marker, the active tab sits on the block tint (not a full inversion), alternate shades are a close rhythm step, and chip edges are half-block seams split 50|50 on the boundary line
+* feat(chrome): `left_inset` compact-bar option so the bar clears the macOS traffic lights in a decoration-free host window
+* feat(rail): CPU/MEM resource cockpit line, launch-order session listing, one-click activation, palette ink, and tunable width; editor panes render with the accent frame color
+* feat(mouse): URL highlights open in the browser on click; Shift-modified click opens highlights outside the process
+* fix(perf): cap the runaway vectors behind the observed 6 GB / 1200% CPU incidents; stop losing frames and mouse clicks under layout gates
+* fix(permissions): permission requests from builtin plugins are granted silently instead of dead-locking in non-focusable bars
+* fix(pty): resolve the default shell from the user database via `nix` without unsafe calls
+* fix(triage): reject non-canonical receipt paths on Linux, scope the e2e timeout to triage runs only, and gate CI for pull requests targeting develop (#4, #5)
+* docs: DOCTOR.md clinic runbook, THEMES_GUIDE.md chrome semantic contract, ALACRITTY_INTEGRATION.md host requirements + shipped Alacritty preset
+
+## [0.47.1] - 2026-07-28
+* fix(runtime): truthful session shutdown — required shutdown ACK over the protocol, fenced viewer creation, recovery of fenced pending viewers, and bounded teardown
+* fix(session): reject socket path escapes; prevent random socket-path process exits
+* fix(layout): atomic pane/tab layout allocation with transactional handoffs and exact rollback ownership
+* fix(install): copy through retained file descriptors into a private stage, adopt and verify the macOS codesign inode, then atomically publish vc-frame updates with explicit durability reporting; Windows retains the existing non-atomic copy fallback
+* fix(release): require the exact signed asset set and distinguish CI matrix artifacts
+* fix(session-manager): stable name-sorted session rail order
 * feat: allow tabs to have different sizes if clients aren't focused on the same one (https://github.com/zellij-org/zellij/pull/5133)
 * feat: PWA support for the web client (manifest + icons + iOS meta tags) so the page can be installed as a standalone app (https://github.com/zellij-org/zellij/pull/5184)
+
+## [0.47.0] - 2026-07-26
+* fix(runtime): acknowledge durable settlement pipes and immediate CLI completion without conflating transport success with redraws
+* fix(safety): stop E2E through the vc-frame protocol, scope cleanup to its isolated runtime, and never signal reused process groups
+* fix(e2e): pin legacy snapshot tests to their own full-width layout instead of the product's session-rail default
+* fix(ci): make the nine required Linux, macOS, Windows, no-web, formatting, and real E2E lanes deterministic
+* fix(security): remove all reported RustSec vulnerability and unsoundness findings while documenting four remaining maintenance warnings
+* fix(release): replace the archived Node 12 asset uploader with fail-closed GitHub CLI uploads to a verified draft release
+
+## [0.46.0] - 2026-07-26
+* fix(triage): make finished-run transfer and settlement crash-durable, revision-safe, and explicit about exact tab/pane ownership
+* fix(runtime): fence resurrected session state against stale saves and preserve durable f/x/n outcome truth across restarts
+* release: require installer/version parity, committed WASM parity, real triage e2e, signed assets, attestations, and a cold install before publication
 
 ## [0.45.1] - 2026-05-13
 * fix: skip render pipeline work and reduce polling when all clients are detached
 * fix: use macOS FSEvents for file watching instead of the kqueue backend
-* feat: add VibeCrafted shell layouts, dashboard surfaces, and mission-control guidance
+* feat: add Vibecrafted shell layouts, dashboard surfaces, and mission-control guidance
 * refactor: split session-manager rendering/navigation state and pane row rendering utilities
 * refactor: split server background jobs and OS input/output APIs
 * chore: bump Zellij workspace packages to 0.45.1

@@ -1,18 +1,18 @@
 use ansi_term::{
-    unstyled_len, ANSIString, ANSIStrings,
-    Color::{Fixed, RGB},
-    Style,
+    AnsiString, AnsiStrings,
+    Color::{Fixed, Rgb},
+    Style, unstyled_len,
 };
 
-use crate::{action_key, style_key_with_modifier, LinePart};
+use crate::{LinePart, action_key, style_key_with_modifier};
 use zellij_tile::prelude::{actions::Action, *};
 use zellij_tile_utils::palette_match;
 
 macro_rules! strings {
-    ($ANSIStrings:expr) => {{
-        let strings: &[ANSIString] = $ANSIStrings;
+    ($AnsiStrings:expr) => {{
+        let strings: &[AnsiString] = $AnsiStrings;
 
-        let ansi_strings = ANSIStrings(strings);
+        let ansi_strings = AnsiStrings(strings);
 
         LinePart {
             part: format!("{}", ansi_strings),
@@ -65,7 +65,7 @@ pub fn edit_scrollbuffer_short(help: &ModeInfo) -> LinePart {
     strings!(&bits)
 }
 
-fn add_keybinds<'a>(help: &'a ModeInfo) -> Vec<ANSIString<'a>> {
+fn add_keybinds<'a>(help: &'a ModeInfo) -> Vec<AnsiString<'a>> {
     let to_pane = action_key(
         &help.get_mode_keybinds(),
         &[Action::SwitchToMode {

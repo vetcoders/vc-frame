@@ -29,6 +29,24 @@ use crate::vendored::termwiz::{
 
 pub type ClientId = u16; // TODO: merge with crate type?
 
+/// Where a newly created tab lands in the session's tab bar.
+///
+/// The default is [`TabPlacement::Append`] — historical behaviour, the new tab
+/// goes to the end of the bar. [`TabPlacement::AfterBase`] instead inserts it
+/// directly to the right of the tab at position 0, so freshly spawned tabs stay
+/// adjacent to the base card and older ones drift right. That matters once a
+/// session accumulates more tabs than fit on screen: appending buries the newest
+/// run off the right edge, which is exactly backwards for an operator watching
+/// runs land.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TabPlacement {
+    /// Append at the end of the tab bar (default, historical behaviour).
+    #[default]
+    Append,
+    /// Insert at position 1, immediately right of the base (position 0) tab.
+    AfterBase,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UnblockCondition {
     /// Unblock only when exit status is 0 (success)
@@ -277,10 +295,10 @@ impl FromStr for BareKey {
             "menu" => Ok(BareKey::Menu),
             "space" => Ok(BareKey::Char(' ')),
             _ => {
-                if key_str.chars().count() == 1 {
-                    if let Some(character) = key_str.chars().next() {
-                        return Ok(BareKey::Char(character));
-                    }
+                if key_str.chars().count() == 1
+                    && let Some(character) = key_str.chars().next()
+                {
+                    return Ok(BareKey::Char(character));
                 }
                 Err("unsupported key".into())
             },
@@ -950,7 +968,8 @@ pub enum Event {
     InputReceived,
     /// This plugin became visible or invisible
     Visible(bool),
-    /// A message from one of the plugin's workers
+    /// A namespaced message delivered to a plugin. Workers use this to message
+    /// their own plugin; the host may also send ID-targeted internal signals.
     CustomMessage(
         String, // message
         String, // payload
@@ -1074,10 +1093,10 @@ impl PermissionType {
     pub fn display_name(&self) -> String {
         match self {
             PermissionType::ReadApplicationState => {
-                "Access Zellij state (Panes, Tabs and UI)".to_owned()
+                "Access vc-frame state (Panes, Tabs and UI)".to_owned()
             },
             PermissionType::ChangeApplicationState => {
-                "Change Zellij state (Panes, Tabs and UI) and run commands".to_owned()
+                "Change vc-frame state (Panes, Tabs and UI) and run commands".to_owned()
             },
             PermissionType::OpenFiles => "Open files (eg. for editing)".to_owned(),
             PermissionType::RunCommands => "Run commands".to_owned(),
@@ -1088,10 +1107,10 @@ impl PermissionType {
             PermissionType::MessageAndLaunchOtherPlugins => {
                 "Send messages to and launch other plugins".to_owned()
             },
-            PermissionType::Reconfigure => "Change Zellij runtime configuration".to_owned(),
+            PermissionType::Reconfigure => "Change vc-frame runtime configuration".to_owned(),
             PermissionType::FullHdAccess => "Full access to the hard-drive".to_owned(),
             PermissionType::StartWebServer => {
-                "Start a local web server to serve Zellij sessions".to_owned()
+                "Start a local web server to serve vc-frame sessions".to_owned()
             },
             PermissionType::InterceptInput => "Intercept Input (keyboard & mouse)".to_owned(),
             PermissionType::ReadPaneContents => {
@@ -1411,123 +1430,164 @@ pub struct MultiplayerColors {
     pub player_10: PaletteColor,
 }
 
+/// Grayscale-first fallback palette for a fresh vc-frame start.
+///
+/// Normal chrome stays neutral: frame bars, lists, tables, ribbons, and text
+/// accents are all grayscale. Color is reserved for functional attention states
+/// such as highlights and explicit success/error markers. Opt-in color themes
+/// remain available in `assets/themes/`.
+mod grayscale {
+    pub const BG: u8 = 234; // #1c1c1c, deep background
+    pub const SURFACE: u8 = 236; // #303030, quiet raised surface
+    pub const SELECTED: u8 = 238; // #444444, selected surface
+    pub const DIM: u8 = 240; // #585858, muted detail
+    pub const MUTED: u8 = 244; // #808080, secondary text
+    pub const SOFT: u8 = 250; // #bcbcbc, soft light
+    pub const FG: u8 = 252; // #d0d0d0, primary text
+    pub const INK: u8 = 16; // near-black ink for light pills
+    pub const ATTENTION: u8 = 109; // #87afaf, restrained active highlight
+    pub const SUCCESS: u8 = 108; // #87af87, functional success
+    pub const ERROR: u8 = 131; // #af5f5f, functional alert
+}
+
 pub const DEFAULT_STYLES: Styling = Styling {
     text_unselected: StyleDeclaration {
-        base: PaletteColor::EightBit(default_colors::BRIGHT_GRAY),
-        emphasis_0: PaletteColor::EightBit(default_colors::ORANGE),
-        emphasis_1: PaletteColor::EightBit(default_colors::CYAN),
-        emphasis_2: PaletteColor::EightBit(default_colors::GREEN),
-        emphasis_3: PaletteColor::EightBit(default_colors::MAGENTA),
-        background: PaletteColor::EightBit(default_colors::GRAY),
+        base: PaletteColor::EightBit(grayscale::FG),
+        emphasis_0: PaletteColor::EightBit(grayscale::SOFT),
+        emphasis_1: PaletteColor::EightBit(grayscale::MUTED),
+        emphasis_2: PaletteColor::EightBit(grayscale::DIM),
+        emphasis_3: PaletteColor::EightBit(grayscale::SOFT),
+        background: PaletteColor::EightBit(grayscale::BG),
     },
+    // Selection is an inverse chip (ink on light), not a 2-step background
+    // nudge: in a grayscale surface FG-on-SELECTED vs FG-on-BG was barely
+    // distinguishable, so keyboard selection was effectively invisible.
     text_selected: StyleDeclaration {
-        base: PaletteColor::EightBit(default_colors::BRIGHT_GRAY),
-        emphasis_0: PaletteColor::EightBit(default_colors::ORANGE),
-        emphasis_1: PaletteColor::EightBit(default_colors::CYAN),
-        emphasis_2: PaletteColor::EightBit(default_colors::GREEN),
-        emphasis_3: PaletteColor::EightBit(default_colors::MAGENTA),
-        background: PaletteColor::EightBit(default_colors::GRAY),
+        base: PaletteColor::EightBit(grayscale::INK),
+        emphasis_0: PaletteColor::EightBit(grayscale::INK),
+        emphasis_1: PaletteColor::EightBit(grayscale::INK),
+        emphasis_2: PaletteColor::EightBit(grayscale::DIM),
+        emphasis_3: PaletteColor::EightBit(grayscale::MUTED),
+        background: PaletteColor::EightBit(grayscale::SOFT),
     },
     ribbon_unselected: StyleDeclaration {
-        base: PaletteColor::EightBit(default_colors::BLACK),
-        emphasis_0: PaletteColor::EightBit(default_colors::RED),
-        emphasis_1: PaletteColor::EightBit(default_colors::WHITE),
-        emphasis_2: PaletteColor::EightBit(default_colors::BLUE),
-        emphasis_3: PaletteColor::EightBit(default_colors::MAGENTA),
-        background: PaletteColor::EightBit(default_colors::GRAY),
+        base: PaletteColor::EightBit(grayscale::SOFT),
+        emphasis_0: PaletteColor::EightBit(grayscale::FG),
+        // emphasis_1 is the alternate-tab background in tab-bar/compact-bar.
+        // FG here produced a light pill with SOFT text (~1.1:1 contrast) that
+        // both hid the tab name and impersonated the active tab.
+        emphasis_1: PaletteColor::EightBit(grayscale::SELECTED),
+        emphasis_2: PaletteColor::EightBit(grayscale::MUTED),
+        emphasis_3: PaletteColor::EightBit(grayscale::DIM),
+        background: PaletteColor::EightBit(grayscale::SURFACE),
     },
+    // The active ribbon is the surface's single accent: ink on ATTENTION.
+    // Ink-on-SOFT made every light element (incl. alternate tabs) read as
+    // "active"; one reserved accent color makes the active tab unambiguous.
     ribbon_selected: StyleDeclaration {
-        base: PaletteColor::EightBit(default_colors::BLACK),
-        emphasis_0: PaletteColor::EightBit(default_colors::RED),
-        emphasis_1: PaletteColor::EightBit(default_colors::ORANGE),
-        emphasis_2: PaletteColor::EightBit(default_colors::MAGENTA),
-        emphasis_3: PaletteColor::EightBit(default_colors::BLUE),
-        background: PaletteColor::EightBit(default_colors::GREEN),
+        base: PaletteColor::EightBit(grayscale::INK),
+        emphasis_0: PaletteColor::EightBit(grayscale::INK),
+        emphasis_1: PaletteColor::EightBit(grayscale::INK),
+        emphasis_2: PaletteColor::EightBit(grayscale::DIM),
+        emphasis_3: PaletteColor::EightBit(grayscale::MUTED),
+        background: PaletteColor::EightBit(grayscale::ATTENTION),
     },
     exit_code_success: StyleDeclaration {
-        base: PaletteColor::EightBit(default_colors::GREEN),
-        emphasis_0: PaletteColor::EightBit(default_colors::CYAN),
-        emphasis_1: PaletteColor::EightBit(default_colors::BLACK),
-        emphasis_2: PaletteColor::EightBit(default_colors::MAGENTA),
-        emphasis_3: PaletteColor::EightBit(default_colors::BLUE),
-        background: PaletteColor::EightBit(default_colors::GRAY),
+        base: PaletteColor::EightBit(grayscale::SUCCESS),
+        emphasis_0: PaletteColor::EightBit(grayscale::SOFT),
+        emphasis_1: PaletteColor::EightBit(grayscale::INK),
+        emphasis_2: PaletteColor::EightBit(grayscale::FG),
+        emphasis_3: PaletteColor::EightBit(grayscale::DIM),
+        background: PaletteColor::EightBit(grayscale::BG),
     },
     exit_code_error: StyleDeclaration {
-        base: PaletteColor::EightBit(default_colors::RED),
-        emphasis_0: PaletteColor::EightBit(default_colors::YELLOW),
-        emphasis_1: PaletteColor::EightBit(default_colors::GOLD),
-        emphasis_2: PaletteColor::EightBit(default_colors::SILVER),
-        emphasis_3: PaletteColor::EightBit(default_colors::PURPLE),
-        background: PaletteColor::EightBit(default_colors::GRAY),
+        base: PaletteColor::EightBit(grayscale::ERROR),
+        emphasis_0: PaletteColor::EightBit(grayscale::ERROR),
+        emphasis_1: PaletteColor::EightBit(grayscale::MUTED),
+        emphasis_2: PaletteColor::EightBit(grayscale::SOFT),
+        emphasis_3: PaletteColor::EightBit(grayscale::DIM),
+        background: PaletteColor::EightBit(grayscale::BG),
     },
-    frame_unselected: None,
+    // None here made unfocused frames fall back to the terminal's default
+    // foreground (usually brighter than SOFT) — the focused pane looked
+    // DIMMER than unfocused ones. Explicit DIM baseline + FG focus restores
+    // the hierarchy: focused frame is the brightest thing on the wall.
+    frame_unselected: Some(StyleDeclaration {
+        base: PaletteColor::EightBit(grayscale::DIM),
+        emphasis_0: PaletteColor::EightBit(grayscale::MUTED),
+        emphasis_1: PaletteColor::EightBit(grayscale::DIM),
+        emphasis_2: PaletteColor::EightBit(grayscale::INK),
+        emphasis_3: PaletteColor::EightBit(grayscale::DIM),
+        background: PaletteColor::EightBit(grayscale::BG),
+    }),
     frame_selected: StyleDeclaration {
-        base: PaletteColor::EightBit(default_colors::GREEN),
-        emphasis_0: PaletteColor::EightBit(default_colors::ORANGE),
-        emphasis_1: PaletteColor::EightBit(default_colors::CYAN),
-        emphasis_2: PaletteColor::EightBit(default_colors::MAGENTA),
-        emphasis_3: PaletteColor::EightBit(default_colors::BROWN),
-        background: PaletteColor::EightBit(default_colors::GRAY),
+        base: PaletteColor::EightBit(grayscale::FG),
+        emphasis_0: PaletteColor::EightBit(grayscale::MUTED),
+        emphasis_1: PaletteColor::EightBit(grayscale::FG),
+        emphasis_2: PaletteColor::EightBit(grayscale::INK),
+        emphasis_3: PaletteColor::EightBit(grayscale::DIM),
+        background: PaletteColor::EightBit(grayscale::BG),
     },
     frame_highlight: StyleDeclaration {
-        base: PaletteColor::EightBit(default_colors::ORANGE),
-        emphasis_0: PaletteColor::EightBit(default_colors::MAGENTA),
-        emphasis_1: PaletteColor::EightBit(default_colors::PURPLE),
-        emphasis_2: PaletteColor::EightBit(default_colors::GREEN),
-        emphasis_3: PaletteColor::EightBit(default_colors::GREEN),
-        background: PaletteColor::EightBit(default_colors::GREEN),
+        base: PaletteColor::EightBit(grayscale::ATTENTION),
+        emphasis_0: PaletteColor::EightBit(grayscale::SOFT),
+        emphasis_1: PaletteColor::EightBit(grayscale::FG),
+        emphasis_2: PaletteColor::EightBit(grayscale::ATTENTION),
+        emphasis_3: PaletteColor::EightBit(grayscale::ATTENTION),
+        background: PaletteColor::EightBit(grayscale::BG),
     },
     table_title: StyleDeclaration {
-        base: PaletteColor::EightBit(default_colors::GREEN),
-        emphasis_0: PaletteColor::EightBit(default_colors::ORANGE),
-        emphasis_1: PaletteColor::EightBit(default_colors::CYAN),
-        emphasis_2: PaletteColor::EightBit(default_colors::GREEN),
-        emphasis_3: PaletteColor::EightBit(default_colors::MAGENTA),
-        background: PaletteColor::EightBit(default_colors::GRAY),
+        base: PaletteColor::EightBit(grayscale::SOFT),
+        emphasis_0: PaletteColor::EightBit(grayscale::MUTED),
+        emphasis_1: PaletteColor::EightBit(grayscale::FG),
+        emphasis_2: PaletteColor::EightBit(grayscale::SOFT),
+        emphasis_3: PaletteColor::EightBit(grayscale::MUTED),
+        background: PaletteColor::EightBit(grayscale::BG),
     },
     table_cell_unselected: StyleDeclaration {
-        base: PaletteColor::EightBit(default_colors::BRIGHT_GRAY),
-        emphasis_0: PaletteColor::EightBit(default_colors::ORANGE),
-        emphasis_1: PaletteColor::EightBit(default_colors::CYAN),
-        emphasis_2: PaletteColor::EightBit(default_colors::GREEN),
-        emphasis_3: PaletteColor::EightBit(default_colors::MAGENTA),
-        background: PaletteColor::EightBit(default_colors::GRAY),
+        base: PaletteColor::EightBit(grayscale::FG),
+        emphasis_0: PaletteColor::EightBit(grayscale::SOFT),
+        emphasis_1: PaletteColor::EightBit(grayscale::MUTED),
+        emphasis_2: PaletteColor::EightBit(grayscale::DIM),
+        emphasis_3: PaletteColor::EightBit(grayscale::SOFT),
+        background: PaletteColor::EightBit(grayscale::BG),
     },
     table_cell_selected: StyleDeclaration {
-        base: PaletteColor::EightBit(default_colors::GREEN),
-        emphasis_0: PaletteColor::EightBit(default_colors::ORANGE),
-        emphasis_1: PaletteColor::EightBit(default_colors::CYAN),
-        emphasis_2: PaletteColor::EightBit(default_colors::RED),
-        emphasis_3: PaletteColor::EightBit(default_colors::MAGENTA),
-        background: PaletteColor::EightBit(default_colors::GRAY),
+        base: PaletteColor::EightBit(grayscale::FG),
+        emphasis_0: PaletteColor::EightBit(grayscale::MUTED),
+        emphasis_1: PaletteColor::EightBit(grayscale::SOFT),
+        emphasis_2: PaletteColor::EightBit(grayscale::DIM),
+        emphasis_3: PaletteColor::EightBit(grayscale::MUTED),
+        background: PaletteColor::EightBit(grayscale::SELECTED),
     },
     list_unselected: StyleDeclaration {
-        base: PaletteColor::EightBit(default_colors::BRIGHT_GRAY),
-        emphasis_0: PaletteColor::EightBit(default_colors::ORANGE),
-        emphasis_1: PaletteColor::EightBit(default_colors::CYAN),
-        emphasis_2: PaletteColor::EightBit(default_colors::GREEN),
-        emphasis_3: PaletteColor::EightBit(default_colors::MAGENTA),
-        background: PaletteColor::EightBit(default_colors::GRAY),
+        base: PaletteColor::EightBit(grayscale::FG),
+        emphasis_0: PaletteColor::EightBit(grayscale::SOFT),
+        emphasis_1: PaletteColor::EightBit(grayscale::MUTED),
+        emphasis_2: PaletteColor::EightBit(grayscale::DIM),
+        emphasis_3: PaletteColor::EightBit(grayscale::SOFT),
+        background: PaletteColor::EightBit(grayscale::BG),
     },
+    // Inverse chip for the same reason as text_selected above.
     list_selected: StyleDeclaration {
-        base: PaletteColor::EightBit(default_colors::GREEN),
-        emphasis_0: PaletteColor::EightBit(default_colors::ORANGE),
-        emphasis_1: PaletteColor::EightBit(default_colors::CYAN),
-        emphasis_2: PaletteColor::EightBit(default_colors::RED),
-        emphasis_3: PaletteColor::EightBit(default_colors::MAGENTA),
-        background: PaletteColor::EightBit(default_colors::GRAY),
+        base: PaletteColor::EightBit(grayscale::INK),
+        emphasis_0: PaletteColor::EightBit(grayscale::INK),
+        emphasis_1: PaletteColor::EightBit(grayscale::INK),
+        emphasis_2: PaletteColor::EightBit(grayscale::DIM),
+        emphasis_3: PaletteColor::EightBit(grayscale::MUTED),
+        background: PaletteColor::EightBit(grayscale::SOFT),
     },
     multiplayer_user_colors: MultiplayerColors {
-        player_1: PaletteColor::EightBit(default_colors::MAGENTA),
-        player_2: PaletteColor::EightBit(default_colors::BLUE),
-        player_3: PaletteColor::EightBit(default_colors::PURPLE),
-        player_4: PaletteColor::EightBit(default_colors::YELLOW),
-        player_5: PaletteColor::EightBit(default_colors::CYAN),
-        player_6: PaletteColor::EightBit(default_colors::GOLD),
-        player_7: PaletteColor::EightBit(default_colors::RED),
-        player_8: PaletteColor::EightBit(default_colors::SILVER),
-        player_9: PaletteColor::EightBit(default_colors::PINK),
-        player_10: PaletteColor::EightBit(default_colors::BROWN),
+        player_1: PaletteColor::EightBit(grayscale::FG),
+        player_2: PaletteColor::EightBit(grayscale::SOFT),
+        player_3: PaletteColor::EightBit(grayscale::MUTED),
+        player_4: PaletteColor::EightBit(grayscale::DIM),
+        player_5: PaletteColor::EightBit(grayscale::SELECTED),
+        player_6: PaletteColor::EightBit(grayscale::SURFACE),
+        player_7: PaletteColor::EightBit(grayscale::FG),
+        player_8: PaletteColor::EightBit(grayscale::SOFT),
+        player_9: PaletteColor::EightBit(grayscale::MUTED),
+        player_10: PaletteColor::EightBit(grayscale::DIM),
     },
 };
 
@@ -1618,7 +1678,12 @@ impl From<Palette> for Styling {
                 emphasis_3: palette.purple,
                 background: Default::default(),
             },
-            frame_unselected: None,
+            // Palette themes get an explicit dim unfocused frame too — None
+            // would fall back to the terminal default foreground, which can
+            // outshine the focused frame. Legacy palettes carry no usable
+            // dim color (gray/silver default to 0 = black), so the neutral
+            // fork default (mid-gray DIM) is the only always-visible choice.
+            frame_unselected: DEFAULT_STYLES.frame_unselected,
             frame_selected: StyleDeclaration {
                 base: palette.green,
                 emphasis_0: palette.orange,
@@ -2064,11 +2129,11 @@ fn collect_leaf_panes(
 impl LayoutInfo {
     fn branded_builtin_label(name: &str) -> Option<&'static str> {
         match name {
-            "vibecrafted" => Some("VibeCrafted Operator Shell"),
-            "vc-dashboard" => Some("VibeCrafted Mission Control"),
-            "vc-workflow" => Some("VibeCrafted Workflow Surface"),
-            "vc-marbles" => Some("VibeCrafted Marbles Surface"),
-            "vc-research" => Some("VibeCrafted Research Surface"),
+            "vibecrafted" => Some("Vibecrafted Operator Shell"),
+            "vc-dashboard" => Some("Vibecrafted Mission Control"),
+            "vc-workflow" => Some("Vibecrafted Workflow Surface"),
+            "vc-marbles" => Some("Vibecrafted Marbles Surface"),
+            "vc-research" => Some("Vibecrafted Research Surface"),
             _ => None,
         }
     }
@@ -2231,6 +2296,10 @@ impl LayoutInfo {
         // resolution below will correctly handle this.
         // The docs promise this behavior, so we have to abide:
         // <https://zellij.dev/documentation/layouts.html#layout-default-directory>
+        // Only when NOTHING is configured and no user default.kdl exists does the
+        // implicit fallback land on the guided "vibecrafted" operator entrypoint
+        // instead of the bare "default" chrome (see the builtin fallback below).
+        let is_implicit_default = maybe_layout_path.is_none();
         let layout_path = maybe_layout_path
             .clone()
             .unwrap_or(PathBuf::from("default"));
@@ -2265,8 +2334,15 @@ impl LayoutInfo {
                     ));
                 }
             }
-            // Assume a builtin layout by default
-            Some(LayoutInfo::BuiltIn(layout_path.display().to_string()))
+            // Assume a builtin layout by default. An implicit (unconfigured)
+            // default resolves to the guided operator entrypoint; an explicit
+            // `default_layout "default"` keeps the bare chrome. A user's own
+            // layouts/default.kdl (checked above) still wins.
+            if is_implicit_default {
+                Some(LayoutInfo::BuiltIn("vibecrafted".to_owned()))
+            } else {
+                Some(LayoutInfo::BuiltIn(layout_path.display().to_string()))
+            }
         }
     }
 }
@@ -2402,7 +2478,7 @@ pub struct PaneInfo {
     /// If this is a command pane, this will show the stringified version of the command and its
     /// arguments
     pub terminal_command: Option<String>,
-    /// The URL from which this plugin was loaded (eg. `zellij:strider` for the built-in `strider`
+    /// The URL from which this plugin was loaded (eg. `vc-frame:strider` for the built-in `strider`
     /// plugin or `file:/path/to/my/plugin.wasm` for a local plugin)
     pub plugin_url: Option<String>,
     /// Unselectable panes are often used for UI elements that do not have direct user interaction
@@ -2421,6 +2497,10 @@ pub struct PaneInfo {
 pub struct PaneListEntry {
     #[serde(flatten)]
     pub pane_info: PaneInfo,
+    /// The WASM runtime serving this plugin pane. Projector panes keep their
+    /// own pane `id` while sharing this runtime identity with their authority.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugin_runtime_id: Option<u32>,
     pub tab_id: usize,
     pub tab_position: usize,
     pub tab_name: String,
@@ -2431,7 +2511,12 @@ pub struct PaneListEntry {
 }
 
 pub type ListPanesResponse = Vec<PaneListEntry>;
-pub type ListTabsResponse = Vec<TabInfo>;
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ListTabsResponse {
+    pub session_incarnation: String,
+    pub tab_instance_ids: BTreeMap<usize, String>,
+    pub tabs: Vec<TabInfo>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ClientInfo {
@@ -3707,6 +3792,90 @@ pub type OpenCommandPaneInPlaceOfPaneIdResponse = Option<PaneId>;
 pub type OpenTerminalPaneInPlaceOfPaneIdResponse = Option<PaneId>;
 pub type OpenEditPaneInPlaceOfPaneIdResponse = Option<PaneId>;
 pub type OpenPluginPaneFloatingResponse = Option<PaneId>;
+
+#[test]
+pub fn default_styles_keep_ordinary_surfaces_grayscale() {
+    for style in [
+        DEFAULT_STYLES.text_unselected,
+        DEFAULT_STYLES.text_selected,
+        DEFAULT_STYLES.ribbon_unselected,
+        DEFAULT_STYLES.frame_selected,
+        DEFAULT_STYLES.table_title,
+        DEFAULT_STYLES.table_cell_unselected,
+        DEFAULT_STYLES.table_cell_selected,
+        DEFAULT_STYLES.list_unselected,
+        DEFAULT_STYLES.list_selected,
+    ] {
+        for color in [
+            style.base,
+            style.background,
+            style.emphasis_0,
+            style.emphasis_1,
+            style.emphasis_2,
+            style.emphasis_3,
+        ] {
+            assert_default_grayscale(color);
+        }
+    }
+    // ACTIVE-state surfaces are the deliberate exception: the surface keeps
+    // exactly one accent (ATTENTION) and it is reserved for "you are here" —
+    // the active ribbon pill and the armed-mode pane frame. Everything else
+    // stays grayscale so the accent cannot be diluted.
+    assert_eq!(
+        DEFAULT_STYLES.ribbon_selected.background,
+        PaletteColor::EightBit(grayscale::ATTENTION),
+        "the active ribbon is the single accent surface"
+    );
+    for color in [
+        DEFAULT_STYLES.ribbon_selected.base,
+        DEFAULT_STYLES.ribbon_selected.emphasis_0,
+        DEFAULT_STYLES.ribbon_selected.emphasis_1,
+        DEFAULT_STYLES.ribbon_selected.emphasis_2,
+        DEFAULT_STYLES.ribbon_selected.emphasis_3,
+    ] {
+        assert_default_grayscale(color);
+    }
+    assert_eq!(
+        DEFAULT_STYLES.frame_highlight.base,
+        PaletteColor::EightBit(grayscale::ATTENTION)
+    );
+    // Unfocused frames must be explicitly styled and dimmer than the focused
+    // frame — `None` fell back to the terminal default foreground, which made
+    // focused panes look dimmer than unfocused ones.
+    let unfocused_frame = DEFAULT_STYLES
+        .frame_unselected
+        .expect("unfocused frames must not fall back to the terminal default");
+    assert_eq!(unfocused_frame.base, PaletteColor::EightBit(grayscale::DIM));
+    assert_eq!(
+        DEFAULT_STYLES.frame_selected.base,
+        PaletteColor::EightBit(grayscale::FG)
+    );
+}
+
+#[cfg(test)]
+fn assert_default_grayscale(color: PaletteColor) {
+    match color {
+        PaletteColor::EightBit(color) => assert!(
+            [
+                grayscale::BG,
+                grayscale::SURFACE,
+                grayscale::SELECTED,
+                grayscale::DIM,
+                grayscale::MUTED,
+                grayscale::SOFT,
+                grayscale::FG,
+                grayscale::INK,
+            ]
+            .contains(&color),
+            "default ordinary surfaces must stay grayscale, found xterm color {}",
+            color
+        ),
+        PaletteColor::Rgb((red, green, blue)) => {
+            assert_eq!(red, green, "red/green differ for {:?}", color);
+            assert_eq!(green, blue, "green/blue differ for {:?}", color);
+        },
+    }
+}
 
 #[test]
 pub fn can_parse_unicode_bare_keys() {

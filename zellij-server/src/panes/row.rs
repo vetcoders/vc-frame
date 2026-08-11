@@ -1,4 +1,4 @@
-use crate::panes::terminal_character::{AnsiCode, TerminalCharacter, EMPTY_TERMINAL_CHARACTER};
+use crate::panes::terminal_character::{AnsiCode, EMPTY_TERMINAL_CHARACTER, TerminalCharacter};
 use std::{
     cmp::Ordering,
     collections::VecDeque,
@@ -161,11 +161,11 @@ impl Row {
                 match character_width.cmp(&replaced_character.width()) {
                     Ordering::Greater => {
                         let position_to_remove = absolute_x_index + 1;
-                        if let Some(removed) = self.columns.remove(position_to_remove) {
-                            if removed.width() > 1 {
-                                self.columns
-                                    .insert(position_to_remove, EMPTY_TERMINAL_CHARACTER);
-                            }
+                        if let Some(removed) = self.columns.remove(position_to_remove)
+                            && removed.width() > 1
+                        {
+                            self.columns
+                                .insert(position_to_remove, EMPTY_TERMINAL_CHARACTER);
                         }
                     },
                     Ordering::Less => {
@@ -226,6 +226,32 @@ impl Row {
             self.columns.truncate(truncate_position);
         }
         self.width = None;
+    }
+    /// Keep only the newest suffix whose rendered width fits `max_width`.
+    ///
+    /// One terminal logical line can contain millions of wrapped cells. A
+    /// scrollback limit expressed only as a count of logical lines therefore
+    /// does not bound memory. Once the beginning is discarded, the retained
+    /// suffix becomes a canonical line for future reflow.
+    pub fn trim_front_to_width(&mut self, max_width: usize) {
+        let current_width = self.width();
+        if current_width <= max_width {
+            return;
+        }
+
+        let width_to_remove = current_width.saturating_sub(max_width);
+        let mut removed_width = 0;
+        let mut columns_to_remove = 0;
+        for character in &self.columns {
+            if removed_width >= width_to_remove {
+                break;
+            }
+            removed_width += character.width();
+            columns_to_remove += 1;
+        }
+        self.columns.drain(..columns_to_remove);
+        self.is_canonical = true;
+        self.width = Some(current_width.saturating_sub(removed_width));
     }
     pub fn position_accounting_for_widechars(&self, x: usize) -> usize {
         let mut position = x;
@@ -325,10 +351,11 @@ impl Row {
         if !current_part.is_empty() {
             parts.push(Row::from_columns(current_part).with_bg_color(self.bg_color))
         };
-        if !parts.is_empty() && self.is_canonical {
-            if let Some(part) = parts.get_mut(0) {
-                part.is_canonical = true;
-            }
+        if !parts.is_empty()
+            && self.is_canonical
+            && let Some(part) = parts.get_mut(0)
+        {
+            part.is_canonical = true;
         }
         if parts.is_empty() {
             parts.push(self.clone());

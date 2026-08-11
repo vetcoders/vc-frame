@@ -1,11 +1,11 @@
 use crate::os_input_output_common::{
-    AsyncSignals, SignalEvent, DISABLE_MOUSE_SUPPORT, ENABLE_MOUSE_SUPPORT,
+    AsyncSignals, DISABLE_MOUSE_SUPPORT, ENABLE_MOUSE_SUPPORT, SignalEvent,
 };
 
 use async_trait::async_trait;
 use signal_hook::consts::signal::*;
 use signal_hook::iterator::Signals;
-use tokio::signal::unix::{signal, SignalKind};
+use tokio::signal::unix::{SignalKind, signal};
 
 use anyhow::{Context, Result};
 use std::io;
@@ -42,7 +42,7 @@ impl AsyncSignals for AsyncSignalListener {
             result = self.sigterm.recv() => result.map(|_| SignalEvent::Quit),
             result = self.sigint.recv() => result.map(|_| SignalEvent::Quit),
             result = self.sigquit.recv() => result.map(|_| SignalEvent::Quit),
-            result = self.sighup.recv() => result.map(|_| SignalEvent::Quit),
+            result = self.sighup.recv() => result.map(|_| SignalEvent::Detach),
         }
     }
 }
@@ -67,7 +67,8 @@ impl Iterator for BlockingSignalIterator {
         for signal in self.signals.forever() {
             match signal {
                 SIGWINCH => return Some(SignalEvent::Resize),
-                SIGTERM | SIGINT | SIGQUIT | SIGHUP => return Some(SignalEvent::Quit),
+                SIGTERM | SIGINT | SIGQUIT => return Some(SignalEvent::Quit),
+                SIGHUP => return Some(SignalEvent::Detach),
                 _ => {},
             }
         }

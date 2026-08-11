@@ -1,39 +1,53 @@
-use super::{screen_thread_main, CopyOptions, Screen, ScreenInstruction};
+use super::{
+    ActiveLayoutTransaction, ApplyLayoutParams, CopyOptions, DurableTabLayoutGeneration,
+    LayoutPreparationCleanup, LayoutTabOwner, Screen, ScreenInstruction,
+    ScreenLayoutTransactionKind, ScreenOptions, ScreenThreadParams, TabOverrideResult,
+    VC_FLEET_LIVE_COUNT_MESSAGE, VC_STATUS_BAR_VISIBILITY_MESSAGE, fleet_live_count,
+    is_parkable_chrome_plugin_run, register_viewer_creation_post_install_test_hook,
+    reject_after_apply_prepare_for_test, reserve_durable_tab_layout_recovery,
+    reserve_new_durable_tab_layout_generation, screen_thread_main, session_update_events,
+};
 use crate::panes::PaneId;
 use crate::{
-    channels::SenderWithContext, os_input_output::ServerOsApi, route::route_action,
-    thread_bus::Bus, ClientId, ServerInstruction, SessionMetaData, ThreadSenders,
+    ClientId, ServerInstruction, SessionMetaData, ThreadSenders,
+    channels::SenderWithContext,
+    os_input_output::ServerOsApi,
+    route::{NotificationEnd, route_action},
+    thread_bus::Bus,
 };
 use insta::assert_snapshot;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use zellij_utils::cli::CliAction;
-use zellij_utils::data::{Event, EventType, Resize, Style, WebSharing};
-use zellij_utils::errors::{prelude::*, ErrorContext};
+use zellij_utils::data::{
+    Event, EventType, ListPanesResponse, ListTabsResponse, PaneInfo, PaneManifest, PermissionType,
+    PluginPermission, Resize, SessionInfo, Style, TabInfo, TabPlacement, WebSharing,
+};
+use zellij_utils::errors::{ErrorContext, prelude::*};
 use zellij_utils::input::actions::Action;
 use zellij_utils::input::command::{RunCommand, TerminalAction};
 use zellij_utils::input::config::Config;
 use zellij_utils::input::layout::{
     FloatingPaneLayout, PercentOrFixed, PluginAlias, PluginUserConfiguration, Run, RunPlugin,
-    RunPluginLocation, RunPluginOrAlias, SplitDirection, TiledPaneLayout,
+    RunPluginLocation, RunPluginOrAlias, SplitDirection, TabLayoutInfo, TiledPaneLayout,
 };
 use zellij_utils::input::mouse::MouseEvent;
 use zellij_utils::input::options::Options;
 use zellij_utils::ipc::IpcReceiverWithContext;
 use zellij_utils::pane_size::{Size, SizeInPixels};
 use zellij_utils::position::Position;
+use zellij_utils::run_triage::{BucketKind, ViewerCreationFence, ViewerCreationFenceRejection};
 
 use crate::background_jobs::BackgroundJob;
 use crate::os_input_output::AsyncReader;
 use crate::pty_writer::PtyWriteInstruction;
-use std::collections::HashSet;
-use std::env::set_var;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    plugins::PluginInstruction,
-    pty::{ClientTabIndexOrPaneId, PtyInstruction},
+    plugins::{LayoutPluginReceipt, LayoutPluginResolution, PluginInstruction},
+    pty::{ClientTabIndexOrPaneId, LayoutCommitAck, LayoutCommitOutcome, PtyInstruction},
 };
 use zellij_utils::ipc::PixelDimensions;
 
@@ -50,8 +64,719 @@ use crate::panes::sixel::SixelImageStore;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use tokio::sync::oneshot;
 use zellij_utils::data::{PaneContents, PaneRenderReport};
 use zellij_utils::ipc::ExitReason;
+
+// Positional compat shim: the arg list deliberately mirrors the pre-sweep
+// Tab::new_pane signature so 18 historical call sites stay byte-stable.
+#[allow(clippy::too_many_arguments)]
+fn new_pane_options(
+    pid: PaneId,
+    initial_pane_title: Option<String>,
+    invoked_with: Option<Run>,
+    start_suppressed: bool,
+    should_focus_pane: bool,
+    new_pane_placement: NewPanePlacement,
+    client_id: Option<ClientId>,
+    blocking_notification: Option<NotificationEnd>,
+) -> crate::tab::NewPaneOptions {
+    crate::tab::NewPaneOptions {
+        pid,
+        initial_pane_title,
+        invoked_with,
+        start_suppressed,
+        should_focus_pane,
+        new_pane_placement,
+        client_id,
+        blocking_notification,
+    }
+}
+
+fn normalize_layout_debug(output: String) -> String {
+    output
+        .lines()
+        .filter(|line| line.trim() != "tab_instance_id: None,")
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn fleet_session(name: &str, panes: &[(bool, bool, bool)]) -> SessionInfo {
+    let tabs = panes
+        .iter()
+        .enumerate()
+        .map(|(position, _)| TabInfo {
+            position,
+            ..Default::default()
+        })
+        .collect();
+    let panes = panes
+        .iter()
+        .enumerate()
+        .map(|(position, (is_plugin, exited, is_held))| {
+            (
+                position,
+                vec![PaneInfo {
+                    is_plugin: *is_plugin,
+                    exited: *exited,
+                    is_held: *is_held,
+                    ..Default::default()
+                }],
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    SessionInfo {
+        name: name.to_owned(),
+        tabs,
+        panes: PaneManifest { panes },
+        ..Default::default()
+    }
+}
+
+#[test]
+fn fleet_live_count_excludes_drawers_plugins_and_stopped_panes() {
+    let sessions = vec![
+        fleet_session(
+            "working",
+            &[
+                (false, false, false),
+                (true, false, false),
+                (false, true, false),
+                (false, false, true),
+            ],
+        ),
+        fleet_session(
+            BucketKind::Finalized.session_name(),
+            &[(false, false, false)],
+        ),
+        fleet_session(BucketKind::Failed.session_name(), &[(false, false, false)]),
+        fleet_session(
+            BucketKind::NeedsAttention.session_name(),
+            &[(false, false, false)],
+        ),
+        fleet_session("another", &[(false, false, false)]),
+    ];
+
+    assert_eq!(fleet_live_count(&sessions), 2);
+}
+
+#[test]
+fn fleet_live_count_message_targets_only_local_status_bars() {
+    let updates = session_update_events(
+        vec![
+            fleet_session("working", &[(false, false, false)]),
+            fleet_session("peer", &[(false, false, false)]),
+        ],
+        vec![],
+        vec![(42, 1)],
+        vec![(41, 1)],
+    );
+
+    assert!(matches!(
+        updates.first(),
+        Some((
+            Some(41),
+            Some(1),
+            Event::CustomMessage(message, payload),
+        )) if message == VC_STATUS_BAR_VISIBILITY_MESSAGE && payload == "false"
+    ));
+    assert_eq!(updates.len(), 3);
+    assert!(matches!(
+        updates.get(1),
+        Some((
+            Some(42),
+            Some(1),
+            Event::CustomMessage(message, payload),
+        )) if message == VC_FLEET_LIVE_COUNT_MESSAGE && payload == "2"
+    ));
+    assert!(matches!(
+        updates.get(2),
+        Some((None, None, Event::SessionUpdate(_, _)))
+    ));
+    assert!(updates.iter().all(|(plugin_id, _, event)| {
+        !matches!(event, Event::CustomMessage(_, _)) || plugin_id.is_some()
+    }));
+}
+
+#[test]
+fn parkable_chrome_plugin_run_accepts_builtin_urls_and_resolved_aliases_only() {
+    let builtin =
+        Run::Plugin(RunPluginOrAlias::from_url("vc-frame:status-bar", &None, None, None).unwrap());
+    let legacy_builtin =
+        Run::Plugin(RunPluginOrAlias::from_url("zellij:status-bar", &None, None, None).unwrap());
+    let default_alias =
+        Run::Plugin(RunPluginOrAlias::from_url("status-bar", &None, None, None).unwrap());
+    let mut renamed_alias = RunPluginOrAlias::from_url("my-status", &None, None, None).unwrap();
+    if let RunPluginOrAlias::Alias(alias) = &mut renamed_alias {
+        alias.run_plugin = RunPluginOrAlias::from_url("vc-frame:status-bar", &None, None, None)
+            .unwrap()
+            .get_run_plugin();
+    }
+    let renamed_alias = Run::Plugin(renamed_alias);
+    let mut shadowed_default_alias =
+        RunPluginOrAlias::from_url("status-bar", &None, None, None).unwrap();
+    if let RunPluginOrAlias::Alias(alias) = &mut shadowed_default_alias {
+        alias.run_plugin =
+            RunPluginOrAlias::from_url("file:///custom-status-bar.wasm", &None, None, None)
+                .unwrap()
+                .get_run_plugin();
+    }
+    let shadowed_default_alias = Run::Plugin(shadowed_default_alias);
+    let worker =
+        Run::Plugin(RunPluginOrAlias::from_url("file:///worker.wasm", &None, None, None).unwrap());
+    let compact_bar =
+        Run::Plugin(RunPluginOrAlias::from_url("vc-frame:compact-bar", &None, None, None).unwrap());
+    let session_manager = Run::Plugin(
+        RunPluginOrAlias::from_url("vc-frame:session-manager", &None, None, None).unwrap(),
+    );
+
+    assert!(is_parkable_chrome_plugin_run(Some(&builtin)));
+    assert!(is_parkable_chrome_plugin_run(Some(&legacy_builtin)));
+    assert!(is_parkable_chrome_plugin_run(Some(&default_alias)));
+    assert!(is_parkable_chrome_plugin_run(Some(&renamed_alias)));
+    assert!(is_parkable_chrome_plugin_run(Some(&compact_bar)));
+    assert!(is_parkable_chrome_plugin_run(Some(&session_manager)));
+    assert!(!is_parkable_chrome_plugin_run(Some(
+        &shadowed_default_alias
+    )));
+    assert!(!is_parkable_chrome_plugin_run(Some(&worker)));
+    assert!(!is_parkable_chrome_plugin_run(None));
+}
+
+fn new_tab_with_status_bar_and_worker(
+    screen: &mut Screen,
+    tab_id: usize,
+    terminal_id: u32,
+    status_bar_id: u32,
+    worker_id: u32,
+) {
+    let status_bar = RunPluginOrAlias::from_url("status-bar", &None, None, None).unwrap();
+    let worker = RunPluginOrAlias::from_url("file:///worker.wasm", &None, None, None).unwrap();
+    let layout = TiledPaneLayout {
+        children: vec![
+            TiledPaneLayout::default(),
+            TiledPaneLayout {
+                run: Some(Run::Plugin(status_bar.clone())),
+                ..Default::default()
+            },
+            TiledPaneLayout {
+                run: Some(Run::Plugin(worker.clone())),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let mut plugin_ids = HashMap::new();
+    plugin_ids.insert(status_bar, vec![status_bar_id]);
+    plugin_ids.insert(worker, vec![worker_id]);
+
+    screen
+        .new_tab(
+            tab_id,
+            (vec![], vec![]),
+            None,
+            Some(1),
+            TabPlacement::Append,
+        )
+        .unwrap();
+    screen
+        .apply_layout(ApplyLayoutParams {
+            layout,
+            floating_panes_layout: vec![],
+            new_terminal_ids: vec![(terminal_id, None)],
+            new_floating_terminal_ids: vec![],
+            new_plugin_ids: plugin_ids,
+            tab_id,
+            should_change_client_focus: true,
+            client_id_and_is_web_client: (1, false),
+            blocking_terminal: None,
+        })
+        .unwrap();
+}
+
+#[test]
+fn active_status_bar_targets_exclude_hidden_tabs_and_other_plugins() {
+    let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
+    let (to_plugin, _plugin_receiver): ChannelWithContext<PluginInstruction> =
+        channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    new_tab_with_status_bar_and_worker(&mut screen, 0, 1, 42, 99);
+    new_tab_with_status_bar_and_worker(&mut screen, 1, 2, 43, 100);
+
+    assert_eq!(
+        screen.active_status_bar_plugin_targets(),
+        BTreeSet::from([(43, 1)])
+    );
+    screen.active_tab_ids.insert(2, 0);
+    assert_eq!(
+        screen.active_status_bar_plugin_targets(),
+        BTreeSet::from([(42, 2), (43, 1)])
+    );
+}
+
+#[test]
+fn status_bar_target_transition_hides_only_the_client_that_switched_tabs() {
+    let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
+    let (to_plugin, _plugin_receiver): ChannelWithContext<PluginInstruction> =
+        channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    new_tab_with_status_bar_and_worker(&mut screen, 0, 1, 42, 99);
+    new_tab_with_status_bar_and_worker(&mut screen, 1, 2, 43, 100);
+    screen.active_tab_ids = BTreeMap::from([(1, 0), (2, 0)]);
+    let (initially_active, initially_hidden) = screen.status_bar_plugin_target_transition();
+    assert_eq!(initially_active, vec![(42, 1), (42, 2)]);
+    assert_eq!(initially_hidden, vec![(43, 1), (43, 2)]);
+
+    screen.active_tab_ids.insert(1, 1);
+    let (active_after_switch, hidden_after_switch) = screen.status_bar_plugin_target_transition();
+    assert_eq!(active_after_switch, vec![(42, 2), (43, 1)]);
+    assert_eq!(hidden_after_switch, vec![(42, 1), (43, 2)]);
+
+    let updates = session_update_events(
+        vec![fleet_session("working", &[(false, false, false)])],
+        vec![],
+        active_after_switch,
+        hidden_after_switch,
+    );
+    let custom_targets = updates
+        .into_iter()
+        .filter_map(|(plugin_id, client_id, event)| match event {
+            Event::CustomMessage(message, payload) => {
+                Some((plugin_id, client_id, message, payload))
+            },
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        custom_targets,
+        vec![
+            (
+                Some(42),
+                Some(1),
+                VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
+                "false".to_owned(),
+            ),
+            (
+                Some(43),
+                Some(2),
+                VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
+                "false".to_owned(),
+            ),
+            (
+                Some(42),
+                Some(2),
+                VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
+                "1".to_owned(),
+            ),
+            (
+                Some(43),
+                Some(1),
+                VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
+                "1".to_owned(),
+            ),
+        ]
+    );
+}
+
+#[test]
+fn projector_tab_keeps_shared_status_bar_runtime_active() {
+    let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
+    let (to_plugin, _plugin_receiver): ChannelWithContext<PluginInstruction> =
+        channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    new_tab_with_status_bar_and_worker(&mut screen, 0, 1, 42, 99);
+    new_tab_with_status_bar_and_worker(&mut screen, 1, 2, 43, 100);
+    screen
+        .get_tabs_mut()
+        .get_mut(&1)
+        .unwrap()
+        .bind_plugin_projectors(&HashMap::from([(43, 42)]));
+    screen.plugin_projector_bindings.insert(43, 42);
+    screen.active_tab_ids = BTreeMap::from([(1, 1)]);
+
+    let (active, hidden) = screen.status_bar_plugin_target_transition();
+
+    assert_eq!(active, vec![(42, 1)]);
+    assert!(hidden.is_empty());
+
+    let pane_runtime_ids = screen
+        .collect_pane_list(true)
+        .unwrap()
+        .into_iter()
+        .filter(|entry| matches!(entry.pane_info.id, 42 | 43))
+        .map(|entry| (entry.pane_info.id, entry.plugin_runtime_id))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        pane_runtime_ids,
+        BTreeSet::from([(42, Some(42)), (43, Some(42))])
+    );
+}
+
+#[test]
+fn permission_request_uses_projector_after_authority_tab_closes() {
+    let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
+    let (to_plugin, _plugin_receiver): ChannelWithContext<PluginInstruction> =
+        channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    new_tab_with_status_bar_and_worker(&mut screen, 0, 1, 42, 99);
+    new_tab_with_status_bar_and_worker(&mut screen, 1, 2, 43, 100);
+    screen
+        .get_tabs_mut()
+        .get_mut(&1)
+        .unwrap()
+        .bind_plugin_projectors(&HashMap::from([(43, 42)]));
+    screen.get_tabs_mut().remove(&0);
+
+    assert!(screen.request_plugin_runtime_permissions(
+        42,
+        PluginPermission::new("status-bar".to_owned(), vec![PermissionType::RunCommands]),
+    ));
+    assert_eq!(
+        screen
+            .get_tabs()
+            .get(&1)
+            .unwrap()
+            .get_pane_with_id(PaneId::Plugin(43))
+            .unwrap()
+            .plugin_runtime_id(),
+        Some(42)
+    );
+}
+
+fn assert_layout_transaction_rejected(
+    plugin_receiver: &Receiver<(PluginInstruction, ErrorContext)>,
+    pty_receiver: &Receiver<(PtyInstruction, ErrorContext)>,
+    transaction_id: u64,
+    writer_resource_ids: &[PaneId],
+) -> String {
+    let mut writer_plugin_ids = writer_resource_ids
+        .iter()
+        .filter_map(|resource_id| match resource_id {
+            PaneId::Plugin(plugin_id) => Some(*plugin_id),
+            PaneId::Terminal(_) => None,
+        })
+        .collect::<Vec<_>>();
+    writer_plugin_ids.sort_unstable();
+    writer_plugin_ids.dedup();
+    loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("Screen must resolve Plugin before rejecting a layout transaction");
+        if let PluginInstruction::ResolveLayoutPlugins {
+            transaction_id: received_transaction_id,
+            resolution,
+            expected_plugin_ids,
+            ack,
+        } = instruction
+            && received_transaction_id == transaction_id
+        {
+            assert_eq!(
+                expected_plugin_ids, writer_plugin_ids,
+                "Plugin resolution must carry the exact writer-owned plugin ids"
+            );
+            let receipt = match resolution {
+                LayoutPluginResolution::Release { .. } => LayoutPluginReceipt::Released {
+                    plugin_ids: expected_plugin_ids,
+                },
+                unexpected => panic!(
+                    "a Screen-side rejection must Release Plugin reservations before PTY rejection, got {unexpected:?}"
+                ),
+            };
+            ack.send(Ok(receipt))
+                .expect("Screen must retain the Plugin resolution ACK receiver");
+            break;
+        }
+    }
+    let writer_resource_ids = writer_resource_ids.iter().copied().collect::<HashSet<_>>();
+    loop {
+        let (instruction, _) = pty_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("Screen must resolve every rejected layout transaction");
+        match instruction {
+            PtyInstruction::LayoutCommitResolved {
+                transaction_id: received_transaction_id,
+                outcome: LayoutCommitOutcome::Rejected(message),
+                ack,
+            } if received_transaction_id == transaction_id => {
+                ack.send(Ok(LayoutCommitAck::Resolved))
+                    .expect("Screen must retain the PTY rejection ACK receiver");
+                return message;
+            },
+            PtyInstruction::LayoutCommitResolved {
+                transaction_id: received_transaction_id,
+                outcome: LayoutCommitOutcome::Committed,
+                ack,
+            } if received_transaction_id == transaction_id => {
+                ack.send(Ok(LayoutCommitAck::Resolved))
+                    .expect("Screen must retain the PTY commit ACK receiver");
+                panic!("rejected layout transaction {transaction_id} was falsely committed")
+            },
+            PtyInstruction::CloseTab(resource_ids) => {
+                assert!(
+                    resource_ids
+                        .iter()
+                        .all(|resource_id| !writer_resource_ids.contains(resource_id)),
+                    "Screen must not directly close writer-owned resources before PTY consumes the rejection ACK: {resource_ids:?}"
+                );
+            },
+            _ => {},
+        }
+    }
+}
+
+fn assert_layout_transaction_committed(
+    plugin_receiver: &Receiver<(PluginInstruction, ErrorContext)>,
+    pty_receiver: &Receiver<(PtyInstruction, ErrorContext)>,
+    transaction_id: u64,
+) {
+    loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("Screen must resolve Plugin before committing a layout transaction");
+        if let PluginInstruction::ResolveLayoutPlugins {
+            transaction_id: received_transaction_id,
+            resolution,
+            expected_plugin_ids,
+            ack,
+        } = instruction
+            && received_transaction_id == transaction_id
+        {
+            assert_eq!(resolution, LayoutPluginResolution::Activate);
+            ack.send(Ok(LayoutPluginReceipt::Activated {
+                plugin_ids: expected_plugin_ids,
+            }))
+            .expect("Screen must retain the Plugin activation ACK receiver");
+            break;
+        }
+    }
+    loop {
+        let (instruction, _) = pty_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("Screen must resolve every committed layout transaction");
+        match instruction {
+            PtyInstruction::LayoutCommitResolved {
+                transaction_id: received_transaction_id,
+                outcome: LayoutCommitOutcome::Committed,
+                ack,
+            } if received_transaction_id == transaction_id => {
+                ack.send(Ok(LayoutCommitAck::Resolved))
+                    .expect("Screen must retain the PTY commit ACK receiver");
+                return;
+            },
+            PtyInstruction::LayoutCommitResolved {
+                transaction_id: received_transaction_id,
+                outcome: LayoutCommitOutcome::Rejected(message),
+                ack,
+            } if received_transaction_id == transaction_id => {
+                ack.send(Ok(LayoutCommitAck::Resolved))
+                    .expect("Screen must retain the PTY rejection ACK receiver");
+                panic!("layout transaction {transaction_id} was falsely rejected: {message}")
+            },
+            _ => {},
+        }
+    }
+}
+
+fn await_layout_failure(
+    completion_rx: oneshot::Receiver<crate::route::ActionCompletionResult>,
+) -> String {
+    let completion = completion_rx
+        .blocking_recv()
+        .expect("rejected layout completion must resolve");
+    assert_eq!(completion.exit_status, Some(1));
+    completion
+        .error_message
+        .expect("rejected layout completion must include an error")
+}
+
+fn assert_no_baseline_pty_close(
+    pty_receiver: &Receiver<(PtyInstruction, ErrorContext)>,
+    baseline_resource_ids: &[PaneId],
+) {
+    let baseline_resource_ids = baseline_resource_ids
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    while let Ok((instruction, _)) = pty_receiver.try_recv() {
+        match instruction {
+            PtyInstruction::ClosePane(resource_id, ..) => assert!(
+                !baseline_resource_ids.contains(&resource_id),
+                "a rejected layout must not close baseline resource {resource_id:?}"
+            ),
+            PtyInstruction::CloseTab(resource_ids) => assert!(
+                resource_ids
+                    .iter()
+                    .all(|resource_id| !baseline_resource_ids.contains(resource_id)),
+                "a rejected layout must not close baseline resources: {resource_ids:?}"
+            ),
+            _ => {},
+        }
+    }
+}
+
+fn transactional_baseline_layout() -> TiledPaneLayout {
+    let baseline_plugin =
+        RunPluginOrAlias::from_url("file:/path/to/fake/plugin", &None, None, None).unwrap();
+    TiledPaneLayout {
+        children: vec![
+            TiledPaneLayout::default(),
+            TiledPaneLayout {
+                run: Some(Run::Plugin(baseline_plugin)),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    }
+}
+
+fn install_transactional_baseline_tab(
+    mock_screen: &MockScreen,
+    tab_index: usize,
+    terminal_id: u32,
+    plugin_id: u32,
+) {
+    let layout = transactional_baseline_layout();
+    let baseline_plugin =
+        RunPluginOrAlias::from_url("file:/path/to/fake/plugin", &None, None, None).unwrap();
+    let _ = mock_screen.to_screen.send(ScreenInstruction::NewTab(
+        None,
+        None,
+        Some(layout.clone()),
+        vec![],
+        Some(format!("baseline-{tab_index}")),
+        (Some(vec![]), Some(vec![])),
+        None,
+        false,
+        false,
+        TabPlacement::Append,
+        (mock_screen.main_client_id, false),
+        None,
+    ));
+    let layout_transaction_id = loop {
+        let (instruction, _) = mock_screen
+            .plugin_receiver
+            .as_ref()
+            .expect("mock Plugin receiver must exist while installing a baseline tab")
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("baseline NewTab must reach the Plugin worker");
+        if let PluginInstruction::NewTab(_, _, _, _, received_tab_id, transaction_id, ..) =
+            instruction
+            && received_tab_id == tab_index
+        {
+            break transaction_id;
+        }
+    };
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ApplyLayout(
+        layout,
+        vec![],
+        vec![(terminal_id, None)],
+        vec![],
+        HashMap::from([(baseline_plugin, vec![plugin_id])]),
+        tab_index,
+        false,
+        (mock_screen.main_client_id, false),
+        None,
+        None,
+        None,
+        layout_transaction_id,
+    ));
+    assert_layout_transaction_committed(
+        mock_screen
+            .plugin_receiver
+            .as_ref()
+            .expect("mock Plugin receiver must exist while installing a baseline tab"),
+        mock_screen
+            .pty_receiver
+            .as_ref()
+            .expect("mock PTY receiver must exist while installing a baseline tab"),
+        layout_transaction_id,
+    );
+    let _ = observable_layout_state(mock_screen);
+}
+
+fn observable_layout_state(mock_screen: &MockScreen) -> (ListPanesResponse, ListTabsResponse) {
+    let (panes_tx, panes_rx) = crossbeam::channel::bounded(1);
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ListPanes {
+        show_all: true,
+        response_channel: panes_tx,
+    });
+    let mut panes = panes_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("the pane-state barrier must answer");
+    panes.sort_by_key(|pane| {
+        (
+            pane.tab_id,
+            pane.pane_info.is_floating,
+            pane.pane_info.is_plugin,
+            pane.pane_info.id,
+        )
+    });
+
+    let (tabs_tx, tabs_rx) = crossbeam::channel::bounded(1);
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ListTabs {
+        client_id: mock_screen.main_client_id,
+        response_channel: tabs_tx,
+    });
+    let mut tabs = tabs_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("the tab-state barrier must answer");
+    tabs.tabs.sort_by_key(|tab| tab.tab_id);
+    (panes, tabs)
+}
+
+fn assert_no_baseline_unload(
+    plugin_receiver: &Receiver<(PluginInstruction, ErrorContext)>,
+    baseline_plugin_ids: &[u32],
+) {
+    for (instruction, _) in plugin_receiver.try_iter() {
+        match instruction {
+            PluginInstruction::Unload(plugin_id) => {
+                assert!(
+                    !baseline_plugin_ids.contains(&plugin_id),
+                    "a rejected layout must not unload baseline plugin {plugin_id}"
+                );
+            },
+            PluginInstruction::Resize(plugin_id, ..) => {
+                assert!(
+                    !baseline_plugin_ids.contains(&plugin_id),
+                    "a rejected layout must not resize baseline plugin {plugin_id}"
+                );
+            },
+            _ => {},
+        }
+    }
+}
+
+fn assert_no_baseline_pty_resize(
+    pty_writer_receiver: &Receiver<(PtyWriteInstruction, ErrorContext)>,
+    baseline_terminal_ids: &[u32],
+) {
+    for (instruction, _) in pty_writer_receiver.try_iter() {
+        if let PtyWriteInstruction::ResizePty(terminal_id, ..) = instruction {
+            assert!(
+                !baseline_terminal_ids.contains(&terminal_id),
+                "a rejected layout must not resize baseline terminal {terminal_id}"
+            );
+        }
+    }
+}
+
+fn assert_no_rejected_layout_render(server_receiver: &Receiver<(ServerInstruction, ErrorContext)>) {
+    for (instruction, _) in server_receiver.try_iter() {
+        assert!(
+            !matches!(instruction, ServerInstruction::Render(..)),
+            "a rejected layout must not request a render before commit"
+        );
+    }
+}
+
+fn assert_no_rejected_layout_focus_bytes(os_input: &FakeInputOutput) {
+    let writes = os_input.tty_stdin_writes.lock().unwrap();
+    assert!(
+        writes.is_empty(),
+        "a rejected layout must not emit terminal focus bytes: {writes:?}"
+    );
+}
 
 fn take_snapshot_and_cursor_coordinates(
     ansi_instructions: &str,
@@ -82,21 +807,21 @@ fn take_snapshots_and_cursor_coordinates_from_render_events<'a>(
     let styled_underlines = true;
     let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
-    let mut grid = Grid::new(
-        screen_size.rows,
-        screen_size.cols,
-        Rc::new(RefCell::new(Palette::default())),
+    let mut grid = Grid::new(crate::panes::grid::GridOptions {
+        rows: screen_size.rows,
+        columns: screen_size.cols,
+        terminal_emulator_colors: Rc::new(RefCell::new(Palette::default())),
         terminal_emulator_color_codes,
-        Rc::new(RefCell::new(LinkHandler::new())),
+        link_handler: Rc::new(RefCell::new(LinkHandler::new())),
         character_cell_size,
         sixel_image_store,
-        Style::default(),
+        style: Style::default(),
         debug,
         arrow_fonts,
         styled_underlines,
         osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
-    );
+    });
     let snapshots: Vec<(Option<(usize, usize)>, String)> = all_events
         .filter_map(|server_instruction| {
             match server_instruction {
@@ -134,25 +859,28 @@ fn send_cli_action_to_server(
         .default_mode
         .unwrap_or(InputMode::Normal);
     for action in actions {
-        route_action(
+        route_action(crate::route::RouteActionParams {
             action,
+            caller: "test",
             client_id,
-            None,
-            None,
-            senders.clone(),
-            default_shell.clone(),
-            None,
+            cli_client_id: None,
+            pane_id: None,
+            senders: senders.clone(),
+            default_shell: default_shell.clone(),
+            seen_cli_pipes: None,
             default_mode,
-            None,
-        )
+        })
         .unwrap();
     }
 }
+
+type TtyStdinWrites = Arc<Mutex<Vec<(u32, Vec<u8>)>>>;
 
 #[derive(Clone, Default)]
 struct FakeInputOutput {
     fake_filesystem: Arc<Mutex<HashMap<String, String>>>,
     server_to_client_messages: Arc<Mutex<HashMap<ClientId, Vec<ServerToClientMsg>>>>,
+    tty_stdin_writes: TtyStdinWrites,
 }
 
 impl ServerOsApi for FakeInputOutput {
@@ -175,8 +903,12 @@ impl ServerOsApi for FakeInputOutput {
     ) -> Result<(u32, Box<dyn AsyncReader>, Option<u32>)> {
         unimplemented!()
     }
-    fn write_to_tty_stdin(&self, _id: u32, _buf: &[u8]) -> Result<usize> {
-        unimplemented!()
+    fn write_to_tty_stdin(&self, id: u32, buf: &[u8]) -> Result<usize> {
+        self.tty_stdin_writes
+            .lock()
+            .unwrap()
+            .push((id, buf.to_vec()));
+        Ok(buf.len())
     }
     fn tcdrain(&self, _id: u32) -> Result<()> {
         unimplemented!()
@@ -225,6 +957,9 @@ impl ServerOsApi for FakeInputOutput {
     }
     fn write_to_file(&mut self, contents: String, filename: Option<String>) -> Result<()> {
         if let Some(filename) = filename {
+            if filename == "__vc_frame_injected_write_failure__" {
+                return Err(anyhow!("injected dump write failure"));
+            }
             self.fake_filesystem
                 .lock()
                 .unwrap()
@@ -288,9 +1023,9 @@ fn create_new_screen(
     let web_server_port = 8080;
     let visual_bell = true;
 
-    Screen::new(
+    Screen::new(ScreenOptions {
         bus,
-        &client_attributes,
+        client_attributes: &client_attributes,
         max_panes,
         mode_info,
         draw_pane_frames,
@@ -310,18 +1045,156 @@ fn create_new_screen(
         layout_dir,
         explicitly_disable_kitty_keyboard_protocol,
         stacked_resize,
-        None,
-        false,
+        default_editor: None,
+        web_clients_allowed: false,
         web_sharing,
         advanced_mouse_actions,
         mouse_hover_effects,
         visual_bell,
-        false, // focus_follows_mouse
-        false, // mouse_click_through
+        focus_follows_mouse: false,
+        mouse_click_through: false,
         web_server_ip,
         web_server_port,
-        Arc::new(AtomicBool::new(false)),
-    )
+        has_clients_flag: Arc::new(AtomicBool::new(false)),
+    })
+}
+
+#[test]
+fn stable_tab_ids_are_monotonic_after_the_latest_tab_is_removed() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, false, false);
+    let swap_layouts = (vec![], vec![]);
+
+    // Explicit IDs can arrive while restoring/applying a session. They must
+    // advance the allocator too.
+    screen
+        .new_tab(
+            41,
+            swap_layouts.clone(),
+            Some("restored".to_owned()),
+            None,
+            TabPlacement::Append,
+        )
+        .unwrap();
+    let newest_id = screen.get_new_tab_id();
+    assert_eq!(newest_id, 42);
+    screen
+        .new_tab(
+            newest_id,
+            swap_layouts,
+            Some("latest".to_owned()),
+            None,
+            TabPlacement::Append,
+        )
+        .unwrap();
+
+    // Removing the current maximum used to make max+1 return the same ID.
+    screen.tabs.remove(&newest_id);
+    assert_eq!(screen.get_new_tab_id(), 43);
+}
+
+#[test]
+fn override_layout_positions_resolve_to_live_or_fresh_stable_tab_ids() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, false, false);
+    let swap_layouts = (vec![], vec![]);
+
+    screen
+        .new_tab(
+            41,
+            swap_layouts.clone(),
+            Some("retired".to_owned()),
+            None,
+            TabPlacement::Append,
+        )
+        .unwrap();
+    screen
+        .new_tab(
+            42,
+            swap_layouts,
+            Some("survivor".to_owned()),
+            None,
+            TabPlacement::Append,
+        )
+        .unwrap();
+    screen.tabs.remove(&41);
+    screen.get_tab_by_id_mut(42).unwrap().position = 0;
+
+    let make_layout = |tab_index| TabLayoutInfo {
+        tab_index,
+        tab_name: None,
+        tiled_layout: TiledPaneLayout::default(),
+        floating_layouts: vec![],
+        swap_tiled_layouts: None,
+        swap_floating_layouts: None,
+    };
+    let mut layouts = vec![make_layout(0), make_layout(1)];
+
+    screen
+        .assign_stable_tab_ids_to_layout(&mut layouts)
+        .unwrap();
+
+    assert_eq!(layouts[0].tab_index, 42);
+    assert_eq!(layouts[1].tab_index, 43);
+    assert_ne!(layouts[1].tab_index, 41, "retired IDs must not be reused");
+    assert_eq!(screen.get_new_tab_id(), 44);
+}
+
+#[test]
+fn explicit_pane_dump_reports_missing_targets_and_write_failures() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, false, false);
+    new_tab(&mut screen, 7, 0);
+    let tab = screen.get_tab_by_id_mut(0).unwrap();
+
+    let missing = tab.dump_terminal_screen(
+        Some("/tmp/should-not-exist".to_owned()),
+        PaneId::Terminal(999),
+        true,
+    );
+    assert!(missing.is_err(), "a missing explicit pane must fail");
+
+    let write_failure = tab.dump_terminal_screen(
+        Some("__vc_frame_injected_write_failure__".to_owned()),
+        PaneId::Terminal(7),
+        true,
+    );
+    assert!(
+        write_failure.is_err(),
+        "an explicit-pane write error must reach the action boundary"
+    );
+}
+
+#[test]
+fn missing_tab_name_preserves_focus_and_reports_absence() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, false, false);
+    new_tab(&mut screen, 7, 0);
+    new_tab(&mut screen, 8, 1);
+    let active_before = screen.active_tab_ids.get(&1).copied();
+
+    let found = screen
+        .go_to_tab_name("definitely-missing".to_owned(), 1)
+        .unwrap();
+
+    assert!(!found);
+    assert_eq!(
+        screen.active_tab_ids.get(&1).copied(),
+        active_before,
+        "missing tab selection must not move focus to another tab"
+    );
 }
 
 struct MockScreen {
@@ -347,6 +1220,8 @@ struct MockScreen {
     pub config: Config,
     advanced_mouse_actions: bool,
     last_opened_tab_index: Option<usize>,
+    session_name: String,
+    screen_thread_id: Option<std::thread::ThreadId>,
 }
 
 impl MockScreen {
@@ -374,22 +1249,32 @@ impl MockScreen {
         )
         .should_silently_fail();
         let debug = false;
+        let session_name = self.session_name.clone();
+        let (thread_id_tx, thread_id_rx) = std::sync::mpsc::sync_channel(1);
         let screen_thread = std::thread::Builder::new()
             .name("screen_thread".to_string())
             .spawn(move || {
-                set_var("ZELLIJ_SESSION_NAME", "zellij-test");
-                screen_thread_main(
-                    screen_bus,
-                    None,
+                thread_id_tx
+                    .send(std::thread::current().id())
+                    .expect("test must retain the screen thread-id receiver");
+                screen_thread_main(ScreenThreadParams {
+                    bus: screen_bus,
+                    max_panes: None,
                     client_attributes,
                     config,
                     debug,
-                    Box::default(),
-                    Arc::new(AtomicBool::new(false)),
-                )
+                    default_layout: Box::default(),
+                    has_clients_flag: Arc::new(AtomicBool::new(false)),
+                    session_name_override: Some(session_name),
+                })
                 .expect("TEST")
             })
             .unwrap();
+        self.screen_thread_id = Some(
+            thread_id_rx
+                .recv()
+                .expect("screen thread must publish its test identity"),
+        );
         let pane_layout = initial_layout.unwrap_or_default();
         let pane_count = pane_layout.extract_run_instructions().len();
         let floating_pane_count = initial_floating_panes_layout.len();
@@ -404,14 +1289,14 @@ impl MockScreen {
             pane_ids.push((i as u32, None));
         }
         for i in 0..floating_pane_count {
-            floating_pane_ids.push((i as u32, None));
+            floating_pane_ids.push(((pane_count + i) as u32, None));
         }
         let default_shell = None;
         let tab_name = None;
         let tab_index = self.last_opened_tab_index.map(|l| l + 1).unwrap_or(0);
         let should_change_focus_to_new_tab = true;
         std::thread::sleep(std::time::Duration::from_millis(100)); // give time for the async
-                                                                   // render
+        // render
         let _ = self.to_screen.send(ScreenInstruction::NewTab(
             None,
             default_shell,
@@ -422,9 +1307,15 @@ impl MockScreen {
             None,                         // initial_panes
             false,
             should_change_focus_to_new_tab,
+            TabPlacement::Append,
             (self.main_client_id, false),
             None,
         ));
+        let _ = self
+            .to_screen
+            .send(ScreenInstruction::RetireLayoutTransactionsForTabForTest(
+                tab_index,
+            ));
         let _ = self.to_screen.send(ScreenInstruction::ApplyLayout(
             pane_layout,
             initial_floating_panes_layout,
@@ -436,6 +1327,8 @@ impl MockScreen {
             (self.main_client_id, false),
             None,
             None,
+            None,
+            0,
         ));
         self.last_opened_tab_index = Some(tab_index);
         std::thread::sleep(std::time::Duration::from_millis(100)); // give time for the async render
@@ -467,16 +1360,16 @@ impl MockScreen {
         let screen_thread = std::thread::Builder::new()
             .name("screen_thread".to_string())
             .spawn(move || {
-                set_var("ZELLIJ_SESSION_NAME", "zellij-test");
-                screen_thread_main(
-                    screen_bus,
-                    None,
+                screen_thread_main(ScreenThreadParams {
+                    bus: screen_bus,
+                    max_panes: None,
                     client_attributes,
                     config,
                     debug,
-                    Box::default(),
-                    Arc::new(AtomicBool::new(false)),
-                )
+                    default_layout: Box::default(),
+                    has_clients_flag: Arc::new(AtomicBool::new(false)),
+                    session_name_override: Some("zellij-test".to_owned()),
+                })
                 .expect("TEST")
             })
             .unwrap();
@@ -503,7 +1396,7 @@ impl MockScreen {
             pane_ids.push((i as u32, None));
         }
         for i in 0..floating_pane_count {
-            floating_pane_ids.push((i as u32, None));
+            floating_pane_ids.push(((pane_count + i) as u32, None));
         }
         let default_shell = None;
         let tab_name = None;
@@ -519,9 +1412,15 @@ impl MockScreen {
             None,                         // initial_panes
             false,
             should_change_focus_to_new_tab,
+            TabPlacement::Append,
             (self.main_client_id, false),
             None,
         ));
+        let _ = self
+            .to_screen
+            .send(ScreenInstruction::RetireLayoutTransactionsForTabForTest(
+                tab_index,
+            ));
         let _ = self.to_screen.send(ScreenInstruction::ApplyLayout(
             pane_layout,
             initial_floating_panes_layout,
@@ -533,6 +1432,8 @@ impl MockScreen {
             (self.main_client_id, false),
             None,
             None,
+            None,
+            0,
         ));
         self.last_opened_tab_index = Some(tab_index);
         screen_thread
@@ -558,9 +1459,15 @@ impl MockScreen {
             None,                         // initial_panes
             false,
             should_change_focus_to_new_tab,
+            TabPlacement::Append,
             (self.main_client_id, false),
             None,
         ));
+        let _ = self
+            .to_screen
+            .send(ScreenInstruction::RetireLayoutTransactionsForTabForTest(
+                tab_index,
+            ));
         let _ = self.to_screen.send(ScreenInstruction::ApplyLayout(
             tab_layout,
             vec![], // floating_panes_layout
@@ -572,6 +1479,8 @@ impl MockScreen {
             (self.main_client_id, false),
             None,
             None,
+            None,
+            0,
         ));
         self.last_opened_tab_index = Some(tab_index);
     }
@@ -607,9 +1516,15 @@ impl MockScreen {
             None,                         // initial_panes
             false,
             should_change_focus_to_new_tab,
+            TabPlacement::Append,
             (self.main_client_id, false),
             None,
         ));
+        let _ = self
+            .to_screen
+            .send(ScreenInstruction::RetireLayoutTransactionsForTabForTest(
+                tab_index,
+            ));
         let _ = self.to_screen.send(ScreenInstruction::ApplyLayout(
             tab_layout,
             vec![], // floating_panes_layout
@@ -621,6 +1536,8 @@ impl MockScreen {
             (self.main_client_id, false),
             None,
             None,
+            None,
+            0,
         ));
         self.last_opened_tab_index = Some(tab_index);
     }
@@ -749,6 +1666,8 @@ impl MockScreen {
             last_opened_tab_index: None,
             config: Config::default(),
             advanced_mouse_actions: true,
+            session_name: "zellij-test".to_owned(),
+            screen_thread_id: None,
         }
     }
     pub fn set_advanced_hover_effects(&mut self, advanced_mouse_actions: bool) {
@@ -812,20 +1731,26 @@ fn new_tab(screen: &mut Screen, pid: u32, tab_index: usize) {
     let new_terminal_ids = vec![(pid, None)];
     let new_plugin_ids = HashMap::new();
     screen
-        .new_tab(tab_index, (vec![], vec![]), None, Some(client_id))
+        .new_tab(
+            tab_index,
+            (vec![], vec![]),
+            None,
+            Some(client_id),
+            TabPlacement::Append,
+        )
         .expect("TEST");
     screen
-        .apply_layout(
-            TiledPaneLayout::default(),
-            vec![], // floating panes layout
+        .apply_layout(ApplyLayoutParams {
+            layout: TiledPaneLayout::default(),
+            floating_panes_layout: vec![],
             new_terminal_ids,
-            vec![], // new floating terminal ids
+            new_floating_terminal_ids: vec![],
             new_plugin_ids,
-            tab_index,
-            true,
-            (client_id, false),
-            None,
-        )
+            tab_id: tab_index,
+            should_change_client_focus: true,
+            client_id_and_is_web_client: (client_id, false),
+            blocking_terminal: None,
+        })
         .expect("TEST");
 }
 
@@ -845,6 +1770,215 @@ fn open_new_tab() {
         screen.get_active_tab(1).unwrap().position,
         1,
         "Active tab switched to new tab"
+    );
+}
+
+/// Creates a named tab with an explicit placement, mirroring `new_tab` above.
+fn new_named_tab_with_placement(
+    screen: &mut Screen,
+    pid: u32,
+    tab_index: usize,
+    name: &str,
+    placement: TabPlacement,
+) {
+    new_named_tab_with_placement_and_focus(screen, pid, tab_index, name, placement, true);
+}
+
+/// Same as `new_named_tab_with_placement`, but `should_change_focus` mirrors
+/// the CLI `--no-focus` axis: false leaves the operator on the tab they had.
+fn new_named_tab_with_placement_and_focus(
+    screen: &mut Screen,
+    pid: u32,
+    tab_index: usize,
+    name: &str,
+    placement: TabPlacement,
+    should_change_focus: bool,
+) {
+    let client_id = 1;
+    // Match ScreenInstruction::NewTab: only pass the client into `new_tab`
+    // when focus should move, so the silent path never re-homes the client.
+    let client_for_new_tab = if should_change_focus {
+        Some(client_id)
+    } else {
+        None
+    };
+    screen
+        .new_tab(
+            tab_index,
+            (vec![], vec![]),
+            Some(name.to_string()),
+            client_for_new_tab,
+            placement,
+        )
+        .expect("TEST");
+    screen
+        .apply_layout(ApplyLayoutParams {
+            layout: TiledPaneLayout::default(),
+            floating_panes_layout: vec![],
+            new_terminal_ids: vec![(pid, None)],
+            new_floating_terminal_ids: vec![],
+            new_plugin_ids: HashMap::new(),
+            tab_id: tab_index,
+            should_change_client_focus: should_change_focus,
+            client_id_and_is_web_client: (client_id, false),
+            blocking_terminal: None,
+        })
+        .expect("TEST");
+}
+
+/// Tab names in the order the tab bar renders them (by `position`, not by id).
+fn tab_names_in_display_order(screen: &Screen) -> Vec<String> {
+    let mut tabs: Vec<_> = screen
+        .tabs
+        .values()
+        .map(|t| (t.position, t.name.clone()))
+        .collect();
+    tabs.sort_by_key(|(position, _)| *position);
+    tabs.into_iter().map(|(_, name)| name).collect()
+}
+
+#[test]
+fn new_tab_appends_by_default() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, true, true);
+
+    for (i, name) in ["base", "run-1", "run-2", "run-3"].iter().enumerate() {
+        new_named_tab_with_placement(&mut screen, i as u32 + 1, i, name, TabPlacement::Append);
+    }
+
+    assert_eq!(
+        tab_names_in_display_order(&screen),
+        vec!["base", "run-1", "run-2", "run-3"],
+        "without the flag, tabs append at the end of the bar"
+    );
+}
+
+#[test]
+fn new_tab_after_base_grows_from_the_base_card() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, true, true);
+
+    new_named_tab_with_placement(&mut screen, 1, 0, "base", TabPlacement::Append);
+    for (i, name) in ["run-1", "run-2", "run-3"].iter().enumerate() {
+        let tab_index = i + 1;
+        new_named_tab_with_placement(
+            &mut screen,
+            tab_index as u32 + 1,
+            tab_index,
+            name,
+            TabPlacement::AfterBase,
+        );
+    }
+
+    assert_eq!(
+        tab_names_in_display_order(&screen),
+        vec!["base", "run-3", "run-2", "run-1"],
+        "each new run lands right of the base card, pushing older runs right"
+    );
+}
+
+#[test]
+fn new_tab_after_base_degrades_to_append_when_there_is_no_room() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, true, true);
+
+    // Nothing exists yet: the "new" tab IS the base tab, position 0.
+    new_named_tab_with_placement(&mut screen, 1, 0, "base", TabPlacement::AfterBase);
+    assert_eq!(
+        screen.tabs.values().next().map(|t| t.position),
+        Some(0),
+        "the first tab of a session takes position 0 even with --after-base"
+    );
+
+    // Only the base exists: position 1 is both "after base" and "the end".
+    new_named_tab_with_placement(&mut screen, 2, 1, "run-1", TabPlacement::AfterBase);
+    assert_eq!(
+        tab_names_in_display_order(&screen),
+        vec!["base", "run-1"],
+        "with a single existing tab, after-base and append agree"
+    );
+}
+
+#[test]
+fn new_tab_without_focus_leaves_the_active_tab_alone() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, true, true);
+
+    new_named_tab_with_placement_and_focus(&mut screen, 1, 0, "base", TabPlacement::Append, true);
+    assert_eq!(
+        screen.get_active_tab(1).unwrap().name,
+        "base",
+        "operator starts on the base card"
+    );
+
+    new_named_tab_with_placement_and_focus(
+        &mut screen,
+        2,
+        1,
+        "worker-run",
+        TabPlacement::Append,
+        false,
+    );
+
+    assert_eq!(
+        tab_names_in_display_order(&screen),
+        vec!["base", "worker-run"],
+        "the silent tab still lands in the bar"
+    );
+    assert_eq!(
+        screen.get_active_tab(1).unwrap().name,
+        "base",
+        "--no-focus must leave the operator on the tab they had"
+    );
+}
+
+#[test]
+fn new_tab_no_focus_with_after_base_places_quietly() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, true, true);
+
+    new_named_tab_with_placement_and_focus(&mut screen, 1, 0, "base", TabPlacement::Append, true);
+    new_named_tab_with_placement_and_focus(
+        &mut screen,
+        2,
+        1,
+        "older-run",
+        TabPlacement::AfterBase,
+        false,
+    );
+    new_named_tab_with_placement_and_focus(
+        &mut screen,
+        3,
+        2,
+        "newest-run",
+        TabPlacement::AfterBase,
+        false,
+    );
+
+    assert_eq!(
+        tab_names_in_display_order(&screen),
+        vec!["base", "newest-run", "older-run"],
+        "placement still grows from the base card under --no-focus"
+    );
+    assert_eq!(
+        screen.get_active_tab(1).unwrap().name,
+        "base",
+        "two silent after-base spawns must not steal focus"
     );
 }
 
@@ -1421,7 +2555,7 @@ fn switch_to_tab_with_fullscreen() {
     {
         let active_tab = screen.get_active_tab_mut(1).unwrap();
         active_tab
-            .new_pane(
+            .new_pane(new_pane_options(
                 PaneId::Terminal(2),
                 None,
                 None,
@@ -1430,7 +2564,7 @@ fn switch_to_tab_with_fullscreen() {
                 NewPanePlacement::default(),
                 Some(1),
                 None,
-            )
+            ))
             .unwrap();
         active_tab.toggle_active_pane_fullscreen(1);
     }
@@ -1545,7 +2679,7 @@ fn attach_after_first_tab_closed() {
     {
         let active_tab = screen.get_active_tab_mut(1).unwrap();
         active_tab
-            .new_pane(
+            .new_pane(new_pane_options(
                 PaneId::Terminal(2),
                 None,
                 None,
@@ -1554,7 +2688,7 @@ fn attach_after_first_tab_closed() {
                 NewPanePlacement::default(),
                 Some(1),
                 None,
-            )
+            ))
             .unwrap();
         active_tab.toggle_active_pane_fullscreen(1);
     }
@@ -1576,7 +2710,7 @@ fn open_new_floating_pane_with_custom_coordinates() {
     new_tab(&mut screen, 1, 0);
     let active_tab = screen.get_active_tab_mut(1).unwrap();
     active_tab
-        .new_pane(
+        .new_pane(new_pane_options(
             PaneId::Terminal(2),
             None,
             None,
@@ -1592,7 +2726,7 @@ fn open_new_floating_pane_with_custom_coordinates() {
             })),
             Some(1),
             None,
-        )
+        ))
         .unwrap();
     let active_pane = active_tab.get_active_pane(1).unwrap();
     assert_eq!(active_pane.x(), 12, "x coordinates set properly");
@@ -1612,7 +2746,7 @@ fn open_new_floating_pane_with_custom_coordinates_exceeding_viewport() {
     new_tab(&mut screen, 1, 0);
     let active_tab = screen.get_active_tab_mut(1).unwrap();
     active_tab
-        .new_pane(
+        .new_pane(new_pane_options(
             PaneId::Terminal(2),
             None,
             None,
@@ -1628,7 +2762,7 @@ fn open_new_floating_pane_with_custom_coordinates_exceeding_viewport() {
             })),
             Some(1),
             None,
-        )
+        ))
         .unwrap();
     let active_pane = active_tab.get_active_pane(1).unwrap();
     assert_eq!(active_pane.x(), 111, "x coordinates set properly");
@@ -1648,7 +2782,7 @@ fn floating_pane_auto_centers_horizontally_with_only_width() {
     new_tab(&mut screen, 1, 0);
     let active_tab = screen.get_active_tab_mut(1).unwrap();
     active_tab
-        .new_pane(
+        .new_pane(new_pane_options(
             PaneId::Terminal(2),
             None,
             None,
@@ -1664,7 +2798,7 @@ fn floating_pane_auto_centers_horizontally_with_only_width() {
             })),
             Some(1),
             None,
-        )
+        ))
         .unwrap();
     let active_pane = active_tab.get_active_pane(1).unwrap();
     assert_eq!(active_pane.x(), 30, "x centered: (120-60)/2 = 30");
@@ -1684,7 +2818,7 @@ fn floating_pane_auto_centers_vertically_with_only_height() {
     new_tab(&mut screen, 1, 0);
     let active_tab = screen.get_active_tab_mut(1).unwrap();
     active_tab
-        .new_pane(
+        .new_pane(new_pane_options(
             PaneId::Terminal(2),
             None,
             None,
@@ -1700,7 +2834,7 @@ fn floating_pane_auto_centers_vertically_with_only_height() {
             })),
             Some(1),
             None,
-        )
+        ))
         .unwrap();
     let active_pane = active_tab.get_active_pane(1).unwrap();
     assert_eq!(active_pane.x(), 10, "x explicitly set");
@@ -1720,7 +2854,7 @@ fn floating_pane_auto_centers_both_axes_with_only_size() {
     new_tab(&mut screen, 1, 0);
     let active_tab = screen.get_active_tab_mut(1).unwrap();
     active_tab
-        .new_pane(
+        .new_pane(new_pane_options(
             PaneId::Terminal(2),
             None,
             None,
@@ -1736,7 +2870,7 @@ fn floating_pane_auto_centers_both_axes_with_only_size() {
             })),
             Some(1),
             None,
-        )
+        ))
         .unwrap();
     let active_pane = active_tab.get_active_pane(1).unwrap();
     assert_eq!(active_pane.x(), 20, "x centered: (120-80)/2 = 20");
@@ -1756,7 +2890,7 @@ fn floating_pane_respects_explicit_coordinates_with_size() {
     new_tab(&mut screen, 1, 0);
     let active_tab = screen.get_active_tab_mut(1).unwrap();
     active_tab
-        .new_pane(
+        .new_pane(new_pane_options(
             PaneId::Terminal(2),
             None,
             None,
@@ -1772,7 +2906,7 @@ fn floating_pane_respects_explicit_coordinates_with_size() {
             })),
             Some(1),
             None,
-        )
+        ))
         .unwrap();
     let active_pane = active_tab.get_active_pane(1).unwrap();
     assert_eq!(active_pane.x(), 15, "x explicitly set, not centered");
@@ -1792,7 +2926,7 @@ fn floating_pane_centers_with_percentage_width() {
     new_tab(&mut screen, 1, 0);
     let active_tab = screen.get_active_tab_mut(1).unwrap();
     active_tab
-        .new_pane(
+        .new_pane(new_pane_options(
             PaneId::Terminal(2),
             None,
             None,
@@ -1808,7 +2942,7 @@ fn floating_pane_centers_with_percentage_width() {
             })),
             Some(1),
             None,
-        )
+        ))
         .unwrap();
     let active_pane = active_tab.get_active_pane(1).unwrap();
     let expected_width = ((50.0_f64 / 100.0) * 120.0).floor() as usize;
@@ -1833,7 +2967,7 @@ fn floating_pane_centers_large_pane_safely() {
     new_tab(&mut screen, 1, 0);
     let active_tab = screen.get_active_tab_mut(1).unwrap();
     active_tab
-        .new_pane(
+        .new_pane(new_pane_options(
             PaneId::Terminal(2),
             None,
             None,
@@ -1849,7 +2983,7 @@ fn floating_pane_centers_large_pane_safely() {
             })),
             Some(1),
             None,
-        )
+        ))
         .unwrap();
     let active_pane = active_tab.get_active_pane(1).unwrap();
     assert_eq!(
@@ -1902,9 +3036,10 @@ pub fn mouse_hover_effect() {
         received_server_instructions.lock().unwrap().iter(),
         size,
     );
-    for (_cursor_coordinates, snapshot) in snapshots {
-        assert_snapshot!(format!("{}", snapshot));
-    }
+    let (_cursor_coordinates, snapshot) = snapshots
+        .last()
+        .expect("mouse hover must render at least once");
+    assert_snapshot!(format!("{}", snapshot));
 }
 
 #[test]
@@ -1942,9 +3077,10 @@ pub fn disabled_mouse_hover_effect() {
         received_server_instructions.lock().unwrap().iter(),
         size,
     );
-    for (_cursor_coordinates, snapshot) in snapshots {
-        assert_snapshot!(format!("{}", snapshot));
-    }
+    let (_cursor_coordinates, snapshot) = snapshots
+        .last()
+        .expect("disabled hover must render at least once");
+    assert_snapshot!(format!("{}", snapshot));
 }
 
 #[test]
@@ -2099,7 +3235,7 @@ fn group_panes_following_focus() {
         let active_tab = screen.get_active_tab_mut(client_id).unwrap();
         for i in 2..5 {
             active_tab
-                .new_pane(
+                .new_pane(new_pane_options(
                     PaneId::Terminal(i),
                     None,
                     None,
@@ -2111,7 +3247,7 @@ fn group_panes_following_focus() {
                     },
                     Some(client_id),
                     None,
-                )
+                ))
                 .unwrap();
         }
     }
@@ -2141,7 +3277,15 @@ fn group_panes_following_focus() {
             .move_focus_up(client_id)
             .unwrap();
         screen.add_active_pane_to_group_if_marking(&client_id);
-        assert_eq!(screen.current_pane_group.borrow().clone_inner().get(&client_id), Some(&vec![PaneId::Terminal(4), PaneId::Terminal(3)]), "Pane Id of newly focused pane not added to group after the group marking was toggled off");
+        assert_eq!(
+            screen
+                .current_pane_group
+                .borrow()
+                .clone_inner()
+                .get(&client_id),
+            Some(&vec![PaneId::Terminal(4), PaneId::Terminal(3)]),
+            "Pane Id of newly focused pane not added to group after the group marking was toggled off"
+        );
     }
 }
 
@@ -2160,7 +3304,7 @@ fn break_group_with_mouse() {
         let active_tab = screen.get_active_tab_mut(client_id).unwrap();
         for i in 2..5 {
             active_tab
-                .new_pane(
+                .new_pane(new_pane_options(
                     PaneId::Terminal(i),
                     None,
                     None,
@@ -2172,7 +3316,7 @@ fn break_group_with_mouse() {
                     },
                     Some(client_id),
                     None,
-                )
+                ))
                 .unwrap();
         }
     }
@@ -2636,6 +3780,10 @@ pub fn send_cli_dump_screen_action() {
         full: true,
         pane_id: None,
         ansi: false,
+        expected_tab_id: None,
+        expected_tab_name: None,
+        expected_session_incarnation: None,
+        expected_tab_instance_id: None,
     };
     let _ = mock_screen.to_screen.send(ScreenInstruction::PtyBytes(
         0,
@@ -2737,22 +3885,45 @@ pub fn send_cli_scroll_up_action() {
         0,
         pane_contents.as_bytes().to_vec(),
     ));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    // Rendering the freshly ingested PTY bytes establishes the bottom-of-pane
+    // viewport that ScrollUp operates on. Follow it with a same-channel query
+    // so the test waits for that render without depending on scheduler timing.
+    let (pane_info_tx, pane_info_rx) = crossbeam::channel::bounded(1);
+    let _ = mock_screen
+        .to_screen
+        .send(ScreenInstruction::RenderToClients);
+    let _ = mock_screen.to_screen.send(ScreenInstruction::GetPaneInfo {
+        pane_id: PaneId::Terminal(0),
+        response_channel: pane_info_tx,
+    });
+    let pane_info = pane_info_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("screen render barrier must answer");
+    assert!(pane_info.is_some(), "the target pane must exist");
     // we send two actions here because only the last line in the pane is empty, so one action
     // won't show in a render
     send_cli_action_to_server(&session_metadata, cli_action.clone(), client_id);
     send_cli_action_to_server(&session_metadata, cli_action.clone(), client_id);
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    let (final_pane_info_tx, final_pane_info_rx) = crossbeam::channel::bounded(1);
+    let _ = mock_screen
+        .to_screen
+        .send(ScreenInstruction::RenderToClients);
+    let _ = mock_screen.to_screen.send(ScreenInstruction::GetPaneInfo {
+        pane_id: PaneId::Terminal(0),
+        response_channel: final_pane_info_tx,
+    });
+    final_pane_info_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("final screen render barrier must answer");
     mock_screen.teardown(vec![server_instruction, screen_thread]);
     let snapshots = take_snapshots_and_cursor_coordinates_from_render_events(
         received_server_instructions.lock().unwrap().iter(),
         size,
     );
-    let snapshot_count = snapshots.len();
-    for (_cursor_coordinates, snapshot) in snapshots {
-        assert_snapshot!(format!("{}", snapshot));
-    }
-    assert_snapshot!(format!("{}", snapshot_count));
+    let (_, final_snapshot) = snapshots
+        .last()
+        .expect("the completed scroll actions must produce a final render");
+    assert_snapshot!(format!("{}", final_snapshot));
 }
 
 #[test]
@@ -3681,10 +4852,10 @@ pub fn send_cli_toggle_pane_embed_or_float() {
     );
     let _snapshot_count = snapshots.len();
     let last_three_snapshots = snapshots.clone().into_iter().rev().take(3).rev(); // we do this to
-                                                                                  // prevent extra
-                                                                                  // renders from
-                                                                                  // throwing us
-                                                                                  // off
+    // prevent extra
+    // renders from
+    // throwing us
+    // off
     for (_cursor_coordinates, snapshot) in last_three_snapshots.clone() {
         eprintln!("{}", snapshot);
     }
@@ -3798,6 +4969,8 @@ pub fn send_cli_new_tab_action_default_params() {
         layout_string: None,
         layout_dir: None,
         cwd: None,
+        after_base: false,
+        no_focus: false,
         initial_command: vec![],
         initial_plugin: None,
         close_on_exit: Default::default(),
@@ -3812,8 +4985,9 @@ pub fn send_cli_new_tab_action_default_params() {
     let received_plugin_instructions = received_plugin_instructions.lock().unwrap();
     let new_tab_action = received_plugin_instructions
         .iter()
+        .rev()
         .find(|instruction| matches!(instruction, PluginInstruction::NewTab(..)));
-    assert_snapshot!(format!("{:#?}", new_tab_action));
+    assert_snapshot!(normalize_layout_debug(format!("{:#?}", new_tab_action)));
 }
 
 #[test]
@@ -3845,6 +5019,8 @@ pub fn send_cli_new_tab_action_with_name_and_layout() {
         layout_string: None,
         layout_dir: None,
         cwd: None,
+        after_base: false,
+        no_focus: false,
         initial_command: vec![],
         initial_plugin: None,
         close_on_exit: Default::default(),
@@ -3866,7 +5042,7 @@ pub fn send_cli_new_tab_action_with_name_and_layout() {
         .clone();
     let output = format!("{:#?}", new_tab_instruction);
     // Normalize Windows path separators for cross-platform snapshot consistency
-    let output = output.replace("\\\\", "/");
+    let output = normalize_layout_debug(output.replace("\\\\", "/"));
     assert_snapshot!(output);
 }
 
@@ -4025,7 +5201,13 @@ pub fn send_cli_close_tab_action() {
         ServerInstruction::KillSession,
         server_receiver
     );
-    let close_tab = CliAction::CloseTab { tab_id: None };
+    let close_tab = CliAction::CloseTab {
+        tab_id: None,
+        expected_name: None,
+        expected_session_incarnation: None,
+        expected_tab_instance_id: None,
+        gc_if_quiescent: false,
+    };
     send_cli_action_to_server(&session_metadata, close_tab, client_id);
     std::thread::sleep(std::time::Duration::from_millis(100));
     mock_screen.teardown(vec![server_thread, screen_thread]);
@@ -4362,7 +5544,7 @@ pub fn send_cli_launch_or_focus_plugin_action_when_plugin_is_already_loaded_for_
     );
     let snapshot_count = snapshots.len();
     assert_eq!(
-        snapshot_count, 3,
+        snapshot_count, 2,
         "Another render was sent for focusing the already loaded plugin"
     );
     for (cursor_coordinates, _snapshot) in snapshots.iter().skip(1) {
@@ -4430,6 +5612,7 @@ pub fn screen_can_break_pane_to_a_new_tab() {
     std::thread::sleep(std::time::Duration::from_millis(100)); // give time for the async render
     let screen_thread = mock_screen.run(Some(initial_layout), vec![]);
     std::thread::sleep(std::time::Duration::from_millis(100)); // give time for the async render
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
     let received_server_instructions = Arc::new(Mutex::new(vec![]));
     let server_receiver = mock_screen.server_receiver.take().unwrap();
     let server_thread = log_actions_in_thread!(
@@ -4441,7 +5624,7 @@ pub fn screen_can_break_pane_to_a_new_tab() {
     let _ = mock_screen
         .to_screen
         .send(ScreenInstruction::BreakPane(Default::default(), 1, None));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    let layout_transaction_id = await_new_tab_layout_transaction(&plugin_receiver, 1);
     // we send ApplyLayout, because in prod this is eventually received after the message traverses
     // through the plugin and pty threads (to open extra stuff we need in the layout, eg. the
     // default plugins)
@@ -4456,7 +5639,17 @@ pub fn screen_can_break_pane_to_a_new_tab() {
         (1, false),
         None,
         None,
+        None,
+        layout_transaction_id,
     ));
+    assert_layout_transaction_committed(
+        &plugin_receiver,
+        mock_screen.pty_receiver.as_ref().unwrap(),
+        layout_transaction_id,
+    );
+    // Render delivery is intentionally debounced. Wait for the committed
+    // destination to become observable before issuing the next focus change,
+    // otherwise the debounce may legitimately coalesce both states.
     std::thread::sleep(std::time::Duration::from_millis(100));
     // move back to make sure the other pane is in the previous tab
     let _ = mock_screen
@@ -4537,7 +5730,8 @@ pub fn screen_can_break_floating_pane_to_a_new_tab() {
     let mut mock_screen = MockScreen::new(size);
     std::thread::sleep(std::time::Duration::from_millis(100)); // give time for the async render
     let screen_thread = mock_screen.run(Some(initial_layout), floating_panes_layout.clone());
-    std::thread::sleep(std::time::Duration::from_millis(100)); // give time for the async render
+    let _ = observable_layout_state(&mock_screen);
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
     let received_server_instructions = Arc::new(Mutex::new(vec![]));
     let server_receiver = mock_screen.server_receiver.take().unwrap();
     let server_thread = log_actions_in_thread!(
@@ -4549,7 +5743,7 @@ pub fn screen_can_break_floating_pane_to_a_new_tab() {
     let _ = mock_screen
         .to_screen
         .send(ScreenInstruction::BreakPane(Default::default(), 1, None));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    let layout_transaction_id = await_new_tab_layout_transaction(&plugin_receiver, 1);
     // we send ApplyLayout, because in prod this is eventually received after the message traverses
     // through the plugin and pty threads (to open extra stuff we need in the layout, eg. the
     // default plugins)
@@ -4565,8 +5759,21 @@ pub fn screen_can_break_floating_pane_to_a_new_tab() {
         (1, false),
         None,
         None,
+        None,
+        layout_transaction_id,
     ));
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert_layout_transaction_committed(
+        &plugin_receiver,
+        mock_screen.pty_receiver.as_ref().unwrap(),
+        layout_transaction_id,
+    );
+    let (panes, _) = observable_layout_state(&mock_screen);
+    assert!(
+        panes
+            .iter()
+            .any(|pane| pane.tab_id == 1 && pane.pane_info.is_focused),
+        "the committed break destination must focus its moved pane"
+    );
     // move back to make sure the other pane is in the previous tab
     let _ = mock_screen
         .to_screen
@@ -4622,6 +5829,7 @@ pub fn screen_can_break_multiple_stacked_panes_to_a_new_tab() {
     std::thread::sleep(std::time::Duration::from_millis(100)); // give time for the async render
     let screen_thread = mock_screen.run(Some(initial_layout), vec![]);
     std::thread::sleep(std::time::Duration::from_millis(100)); // give time for the async render
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
 
     let received_server_instructions = Arc::new(Mutex::new(vec![]));
     let server_receiver = mock_screen.server_receiver.take().unwrap();
@@ -4641,7 +5849,7 @@ pub fn screen_can_break_multiple_stacked_panes_to_a_new_tab() {
             client_id: 1,
             completion_tx: None,
         });
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    let layout_transaction_id = await_new_tab_layout_transaction(&plugin_receiver, 1);
     // we send ApplyLayout, because in prod this is eventually received after the message traverses
     // through the plugin and pty threads (to open extra stuff we need in the layout, eg. the
     // default plugins)
@@ -4656,7 +5864,14 @@ pub fn screen_can_break_multiple_stacked_panes_to_a_new_tab() {
         (1, false),
         None,
         None,
+        None,
+        layout_transaction_id,
     ));
+    assert_layout_transaction_committed(
+        &plugin_receiver,
+        mock_screen.pty_receiver.as_ref().unwrap(),
+        layout_transaction_id,
+    );
     std::thread::sleep(std::time::Duration::from_millis(100));
     // move back to make sure the other pane is in the previous tab
     let _ = mock_screen
@@ -4700,6 +5915,7 @@ pub fn screen_can_break_plugin_pane_to_a_new_tab() {
             configuration: Default::default(),
             ..Default::default()
         }))),
+        focus: Some(true),
         ..Default::default()
     };
 
@@ -4713,6 +5929,7 @@ pub fn screen_can_break_plugin_pane_to_a_new_tab() {
     std::thread::sleep(std::time::Duration::from_millis(100)); // give time for the async render
     let screen_thread = mock_screen.run(Some(initial_layout), vec![]);
     std::thread::sleep(std::time::Duration::from_millis(100)); // give time for the async render
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
     let received_server_instructions = Arc::new(Mutex::new(vec![]));
     let server_receiver = mock_screen.server_receiver.take().unwrap();
     let server_thread = log_actions_in_thread!(
@@ -4724,7 +5941,43 @@ pub fn screen_can_break_plugin_pane_to_a_new_tab() {
     let _ = mock_screen
         .to_screen
         .send(ScreenInstruction::BreakPane(Default::default(), 1, None));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    let layout_transaction_id = await_new_tab_layout_transaction(&plugin_receiver, 1);
+    let (state_tx, state_rx) = channels::bounded(1);
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::QueryLayoutTransactionStateForTest {
+            transaction_id: layout_transaction_id,
+            response_channel: state_tx,
+        })
+        .unwrap();
+    assert_eq!(
+        state_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap(),
+        (true, false, true),
+        "BreakPane must hide its destination behind the pending layout gate"
+    );
+    // Plugin renders can be blocked for 100ms. Cross that boundary before
+    // activating the destination so the source extraction is observable.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (break_panes, break_tabs) = observable_layout_state(&mock_screen);
+    assert!(
+        break_panes.iter().any(|pane| {
+            pane.tab_id == 0 && pane.pane_info.id == 0 && !pane.pane_info.is_plugin
+        })
+    );
+    assert!(
+        break_panes
+            .iter()
+            .any(|pane| { pane.tab_id == 1 && pane.pane_info.id == 1 && pane.pane_info.is_plugin })
+    );
+    assert!(
+        break_tabs
+            .tabs
+            .iter()
+            .any(|tab| tab.tab_id == 0 && tab.active),
+        "the source tab must remain active until BreakPane commits"
+    );
     // we send ApplyLayout, because in prod this is eventually received after the message traverses
     // through the plugin and pty threads (to open extra stuff we need in the layout, eg. the
     // default plugins)
@@ -4739,18 +5992,40 @@ pub fn screen_can_break_plugin_pane_to_a_new_tab() {
         (1, false),
         None,
         None,
+        None,
+        layout_transaction_id,
     ));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_layout_transaction_committed(
+        &plugin_receiver,
+        mock_screen.pty_receiver.as_ref().unwrap(),
+        layout_transaction_id,
+    );
+    std::thread::sleep(std::time::Duration::from_millis(200));
     // move back to make sure the other pane is in the previous tab
     let _ = mock_screen
         .to_screen
         .send(ScreenInstruction::MoveFocusLeftOrPreviousTab(1, None));
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    // move forward to make sure the broken pane is in the previous tab
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (_, tabs_after_return) = observable_layout_state(&mock_screen);
+    assert!(
+        tabs_after_return
+            .tabs
+            .iter()
+            .any(|tab| tab.tab_id == 0 && tab.active),
+        "moving left from the committed plugin destination must return to the source tab"
+    );
     let _ = mock_screen
         .to_screen
         .send(ScreenInstruction::MoveFocusRightOrNextTab(1, None));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (_, tabs_after_forward) = observable_layout_state(&mock_screen);
+    assert!(
+        tabs_after_forward
+            .tabs
+            .iter()
+            .any(|tab| tab.tab_id == 1 && tab.active),
+        "moving right from the source must return to the committed plugin destination"
+    );
 
     mock_screen.teardown(vec![server_thread, screen_thread]);
 
@@ -4758,11 +6033,22 @@ pub fn screen_can_break_plugin_pane_to_a_new_tab() {
         received_server_instructions.lock().unwrap().iter(),
         size,
     );
-    let snapshot_count = snapshots.len();
-    for (_cursor_coordinates, snapshot) in snapshots {
-        assert_snapshot!(format!("{}", snapshot));
-    }
-    assert_snapshot!(format!("{}", snapshot_count));
+    let rendered_frames = snapshots
+        .into_iter()
+        .map(|(_, snapshot)| snapshot.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        rendered_frames.iter().any(|frame| {
+            frame.contains("pane_to_stay") && !frame.contains("plugin_pane_to_break_free")
+        }),
+        "the render stream must expose the committed source pane without the pending destination"
+    );
+    assert!(
+        rendered_frames.iter().any(|frame| {
+            frame.contains("plugin_pane_to_break_free") && !frame.contains("pane_to_stay")
+        }),
+        "the render stream must expose the committed plugin destination after activation"
+    );
 }
 
 #[test]
@@ -4785,6 +6071,7 @@ pub fn screen_can_break_floating_plugin_pane_to_a_new_tab() {
             configuration: Default::default(),
             ..Default::default()
         }))),
+        focus: Some(true),
         ..Default::default()
     };
 
@@ -4794,7 +6081,8 @@ pub fn screen_can_break_floating_plugin_pane_to_a_new_tab() {
     let mut mock_screen = MockScreen::new(size);
     std::thread::sleep(std::time::Duration::from_millis(100)); // give time for the async render
     let screen_thread = mock_screen.run(Some(initial_layout), floating_panes_layout.clone());
-    std::thread::sleep(std::time::Duration::from_millis(100)); // give time for the async render
+    let _ = observable_layout_state(&mock_screen);
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
     let received_server_instructions = Arc::new(Mutex::new(vec![]));
     let server_receiver = mock_screen.server_receiver.take().unwrap();
     let server_thread = log_actions_in_thread!(
@@ -4806,7 +6094,54 @@ pub fn screen_can_break_floating_plugin_pane_to_a_new_tab() {
     let _ = mock_screen
         .to_screen
         .send(ScreenInstruction::BreakPane(Default::default(), 1, None));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    let layout_transaction_id = await_new_tab_layout_transaction(&plugin_receiver, 1);
+    let (state_tx, state_rx) = channels::bounded(1);
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::QueryLayoutTransactionStateForTest {
+            transaction_id: layout_transaction_id,
+            response_channel: state_tx,
+        })
+        .unwrap();
+    assert_eq!(
+        state_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap(),
+        (true, false, true),
+        "floating BreakPane must hide its destination behind the pending layout gate"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (break_panes, break_tabs) = observable_layout_state(&mock_screen);
+    assert!(
+        break_panes.iter().any(|pane| {
+            pane.tab_id == 0 && pane.pane_info.id == 0 && !pane.pane_info.is_plugin
+        })
+    );
+    assert!(
+        break_panes
+            .iter()
+            .any(|pane| { pane.tab_id == 1 && pane.pane_info.id == 1 && pane.pane_info.is_plugin })
+    );
+    assert!(
+        break_tabs
+            .tabs
+            .iter()
+            .any(|tab| tab.tab_id == 0 && tab.active),
+        "the source tab must remain active until floating BreakPane commits"
+    );
+    let precommit_frames = take_snapshots_and_cursor_coordinates_from_render_events(
+        received_server_instructions.lock().unwrap().iter(),
+        size,
+    )
+    .into_iter()
+    .map(|(_, snapshot)| snapshot.to_string())
+    .collect::<Vec<_>>();
+    assert!(
+        !precommit_frames.iter().any(|frame| {
+            frame.contains("floating_plugin_pane_to_eject") && !frame.contains("tiled_pane")
+        }),
+        "the pending floating plugin destination must never render before commit"
+    );
     // we send ApplyLayout, because in prod this is eventually received after the message traverses
     // through the plugin and pty threads (to open extra stuff we need in the layout, eg. the
     // default plugins)
@@ -4822,18 +6157,55 @@ pub fn screen_can_break_floating_plugin_pane_to_a_new_tab() {
         (1, false),
         None,
         None,
+        None,
+        layout_transaction_id,
     ));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_layout_transaction_committed(
+        &plugin_receiver,
+        mock_screen.pty_receiver.as_ref().unwrap(),
+        layout_transaction_id,
+    );
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (panes, tabs_after_commit) = observable_layout_state(&mock_screen);
+    assert!(
+        panes
+            .iter()
+            .any(|pane| pane.tab_id == 1 && pane.pane_info.is_focused),
+        "the committed break destination must focus its moved plugin pane"
+    );
+    assert!(
+        tabs_after_commit
+            .tabs
+            .iter()
+            .any(|tab| tab.tab_id == 1 && tab.active),
+        "floating BreakPane must activate its destination only after commit"
+    );
     // move back to make sure the other pane is in the previous tab
     let _ = mock_screen
         .to_screen
         .send(ScreenInstruction::MoveFocusLeftOrPreviousTab(1, None));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (_, tabs_after_return) = observable_layout_state(&mock_screen);
+    assert!(
+        tabs_after_return
+            .tabs
+            .iter()
+            .any(|tab| tab.tab_id == 0 && tab.active),
+        "moving left from the floating plugin destination must return to the source tab"
+    );
     // move forward to make sure the broken pane is in the previous tab
     let _ = mock_screen
         .to_screen
         .send(ScreenInstruction::MoveFocusRightOrNextTab(1, None));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (_, tabs_after_forward) = observable_layout_state(&mock_screen);
+    assert!(
+        tabs_after_forward
+            .tabs
+            .iter()
+            .any(|tab| tab.tab_id == 1 && tab.active),
+        "moving right from the source must return to the floating plugin destination"
+    );
 
     mock_screen.teardown(vec![server_thread, screen_thread]);
 
@@ -4841,11 +6213,22 @@ pub fn screen_can_break_floating_plugin_pane_to_a_new_tab() {
         received_server_instructions.lock().unwrap().iter(),
         size,
     );
-    let snapshot_count = snapshots.len();
-    for (_cursor_coordinates, snapshot) in snapshots {
-        assert_snapshot!(format!("{}", snapshot));
-    }
-    assert_snapshot!(format!("{}", snapshot_count));
+    let rendered_frames = snapshots
+        .into_iter()
+        .map(|(_, snapshot)| snapshot.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        rendered_frames.iter().any(|frame| {
+            frame.contains("tiled_pane") && !frame.contains("floating_plugin_pane_to_eject")
+        }),
+        "the render stream must expose the committed source without the moved floating plugin"
+    );
+    assert!(
+        rendered_frames.iter().any(|frame| {
+            frame.contains("floating_plugin_pane_to_eject") && !frame.contains("tiled_pane")
+        }),
+        "the render stream must expose the committed floating plugin destination"
+    );
 }
 
 #[test]
@@ -4868,6 +6251,7 @@ pub fn screen_can_move_pane_to_a_new_tab_right() {
     initial_layout.children = vec![pane_to_break_free, pane_to_stay];
     let mut mock_screen = MockScreen::new(size);
     let screen_thread = mock_screen.run(Some(initial_layout), vec![]);
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
     let received_server_instructions = Arc::new(Mutex::new(vec![]));
     let server_receiver = mock_screen.server_receiver.take().unwrap();
     let server_thread = log_actions_in_thread!(
@@ -4880,7 +6264,7 @@ pub fn screen_can_move_pane_to_a_new_tab_right() {
         .to_screen
         .send(ScreenInstruction::BreakPane(Default::default(), 1, None));
 
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    let layout_transaction_id = await_new_tab_layout_transaction(&plugin_receiver, 1);
     let _ = mock_screen.to_screen.send(ScreenInstruction::ApplyLayout(
         TiledPaneLayout::default(),
         Default::default(),
@@ -4892,16 +6276,65 @@ pub fn screen_can_move_pane_to_a_new_tab_right() {
         (1, false),
         None,
         None,
+        None,
+        layout_transaction_id,
     ));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_layout_transaction_committed(
+        &plugin_receiver,
+        mock_screen.pty_receiver.as_ref().unwrap(),
+        layout_transaction_id,
+    );
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (panes_after_commit, tabs_after_commit) = observable_layout_state(&mock_screen);
+    assert!(
+        panes_after_commit
+            .iter()
+            .any(|pane| pane.tab_id == 0 && pane.pane_info.id == 1)
+    );
+    assert!(
+        panes_after_commit
+            .iter()
+            .any(|pane| pane.tab_id == 1 && pane.pane_info.id == 0)
+    );
+    assert!(
+        tabs_after_commit
+            .tabs
+            .iter()
+            .any(|tab| tab.tab_id == 1 && tab.active),
+        "the initial transactional break must activate its committed destination"
+    );
     let _ = mock_screen
         .to_screen
         .send(ScreenInstruction::MoveFocusLeftOrPreviousTab(1, None));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (_, tabs_before_move) = observable_layout_state(&mock_screen);
+    assert!(
+        tabs_before_move
+            .tabs
+            .iter()
+            .any(|tab| tab.tab_id == 0 && tab.active),
+        "the source tab must be active before moving its pane right"
+    );
     let _ = mock_screen
         .to_screen
         .send(ScreenInstruction::BreakPaneRight(1, None));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (panes_after_move, tabs_after_move) = observable_layout_state(&mock_screen);
+    assert!(
+        [0, 1].into_iter().all(|pane_id| {
+            panes_after_move
+                .iter()
+                .any(|pane| pane.tab_id == 1 && pane.pane_info.id == pane_id)
+        }),
+        "moving right must place both panes in the adjacent committed tab"
+    );
+    assert!(
+        tabs_after_move
+            .tabs
+            .iter()
+            .any(|tab| tab.tab_id == 1 && tab.active),
+        "moving right must leave the adjacent destination active"
+    );
 
     mock_screen.teardown(vec![server_thread, screen_thread]);
 
@@ -4909,11 +6342,16 @@ pub fn screen_can_move_pane_to_a_new_tab_right() {
         received_server_instructions.lock().unwrap().iter(),
         size,
     );
-    let snapshot_count = snapshots.len();
-    for (_cursor_coordinates, snapshot) in snapshots {
-        assert_snapshot!(format!("{}", snapshot));
-    }
-    assert_snapshot!(format!("{}", snapshot_count));
+    let rendered_frames = snapshots
+        .into_iter()
+        .map(|(_, snapshot)| snapshot.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        rendered_frames.iter().any(|frame| {
+            frame.contains("pane_to_break_free") && frame.contains("pane_to_stay")
+        }),
+        "the render stream must expose both panes in the destination after moving right"
+    );
 }
 
 #[test]
@@ -4936,6 +6374,7 @@ pub fn screen_can_move_pane_to_a_new_tab_left() {
     initial_layout.children = vec![pane_to_break_free, pane_to_stay];
     let mut mock_screen = MockScreen::new(size);
     let screen_thread = mock_screen.run(Some(initial_layout), vec![]);
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
     let received_server_instructions = Arc::new(Mutex::new(vec![]));
     let server_receiver = mock_screen.server_receiver.take().unwrap();
     let server_thread = log_actions_in_thread!(
@@ -4947,6 +6386,7 @@ pub fn screen_can_move_pane_to_a_new_tab_left() {
     let _ = mock_screen
         .to_screen
         .send(ScreenInstruction::BreakPane(Default::default(), 1, None));
+    let layout_transaction_id = await_new_tab_layout_transaction(&plugin_receiver, 1);
     let _ = mock_screen.to_screen.send(ScreenInstruction::ApplyLayout(
         TiledPaneLayout::default(),
         Default::default(),
@@ -4958,16 +6398,65 @@ pub fn screen_can_move_pane_to_a_new_tab_left() {
         (1, false),
         None,
         None,
+        None,
+        layout_transaction_id,
     ));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_layout_transaction_committed(
+        &plugin_receiver,
+        mock_screen.pty_receiver.as_ref().unwrap(),
+        layout_transaction_id,
+    );
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (panes_after_commit, tabs_after_commit) = observable_layout_state(&mock_screen);
+    assert!(
+        panes_after_commit
+            .iter()
+            .any(|pane| pane.tab_id == 0 && pane.pane_info.id == 1)
+    );
+    assert!(
+        panes_after_commit
+            .iter()
+            .any(|pane| pane.tab_id == 1 && pane.pane_info.id == 0)
+    );
+    assert!(
+        tabs_after_commit
+            .tabs
+            .iter()
+            .any(|tab| tab.tab_id == 1 && tab.active),
+        "the initial transactional break must activate its committed destination"
+    );
     let _ = mock_screen
         .to_screen
         .send(ScreenInstruction::MoveFocusLeftOrPreviousTab(1, None));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (_, tabs_before_move) = observable_layout_state(&mock_screen);
+    assert!(
+        tabs_before_move
+            .tabs
+            .iter()
+            .any(|tab| tab.tab_id == 0 && tab.active),
+        "the source tab must be active before moving its pane left"
+    );
     let _ = mock_screen
         .to_screen
         .send(ScreenInstruction::BreakPaneLeft(1, None));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (panes_after_move, tabs_after_move) = observable_layout_state(&mock_screen);
+    assert!(
+        [0, 1].into_iter().all(|pane_id| {
+            panes_after_move
+                .iter()
+                .any(|pane| pane.tab_id == 1 && pane.pane_info.id == pane_id)
+        }),
+        "moving left must place both panes in the adjacent committed tab"
+    );
+    assert!(
+        tabs_after_move
+            .tabs
+            .iter()
+            .any(|tab| tab.tab_id == 1 && tab.active),
+        "moving left must leave the adjacent destination active"
+    );
 
     mock_screen.teardown(vec![server_thread, screen_thread]);
 
@@ -4975,11 +6464,16 @@ pub fn screen_can_move_pane_to_a_new_tab_left() {
         received_server_instructions.lock().unwrap().iter(),
         size,
     );
-    let snapshot_count = snapshots.len();
-    for (_cursor_coordinates, snapshot) in snapshots {
-        assert_snapshot!(format!("{}", snapshot));
-    }
-    assert_snapshot!(format!("{}", snapshot_count));
+    let rendered_frames = snapshots
+        .into_iter()
+        .map(|(_, snapshot)| snapshot.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        rendered_frames.iter().any(|frame| {
+            frame.contains("pane_to_break_free") && frame.contains("pane_to_stay")
+        }),
+        "the render stream must expose both panes in the destination after moving left"
+    );
 }
 
 #[test]
@@ -5043,7 +6537,7 @@ pub fn send_cli_change_floating_pane_coordinates_action() {
         server_receiver
     );
     let change_floating_pane_coordinates_action = CliAction::ChangeFloatingPaneCoordinates {
-        pane_id: "0".to_owned(),
+        pane_id: "1".to_owned(),
         x: Some("0".to_owned()),
         y: Some("0".to_owned()),
         width: Some("10".to_owned()),
@@ -5289,6 +6783,3911 @@ pub fn close_tab_by_id_verifies_screen_state() {
 }
 
 #[test]
+pub fn close_tab_by_id_if_name_fails_closed_on_identity_mismatch() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, true, true);
+
+    new_tab(&mut screen, 1, 0);
+    new_tab(&mut screen, 2, 1);
+    screen.get_tab_by_id_mut(1).unwrap().name = "work-123".to_owned();
+    let incarnation = screen.session_incarnation.clone();
+    let tab_instance_id = screen.get_tab_by_id(1).unwrap().instance_id.clone();
+
+    let mismatch = screen.close_tab_by_id_if_name(1, "work-456", &incarnation, &tab_instance_id);
+    assert!(mismatch.is_err());
+    assert!(
+        screen.get_tab_by_id(1).is_some(),
+        "a name mismatch must preserve the target tab"
+    );
+    assert!(
+        screen.get_tab_by_id(0).is_some(),
+        "a name mismatch must not touch another tab"
+    );
+
+    let incarnation_mismatch =
+        screen.close_tab_by_id_if_name(1, "work-123", "another-server-lifetime", &tab_instance_id);
+    assert!(incarnation_mismatch.is_err());
+    assert!(screen.get_tab_by_id(1).is_some());
+
+    let successor_instance_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned();
+    screen.get_tab_by_id_mut(1).unwrap().instance_id = successor_instance_id.clone();
+    let aba_mismatch =
+        screen.close_tab_by_id_if_name(1, "work-123", &incarnation, &tab_instance_id);
+    assert!(aba_mismatch.is_err());
+    assert!(
+        screen.get_tab_by_id(1).is_some(),
+        "a foreign successor reusing the tab ID and name must survive"
+    );
+
+    screen
+        .close_tab_by_id_if_name(1, "work-123", &incarnation, &successor_instance_id)
+        .expect("matching tab identity should close");
+    assert!(screen.get_tab_by_id(1).is_none());
+    assert!(screen.get_tab_by_id(0).is_some());
+
+    assert!(
+        screen
+            .close_tab_by_id_if_name(99, "work-123", &incarnation, &successor_instance_id)
+            .is_err()
+    );
+}
+
+#[test]
+pub fn durable_tab_instance_reuse_requires_one_same_named_owner() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, true, true);
+    new_tab(&mut screen, 1, 0);
+    new_tab(&mut screen, 2, 1);
+    let instance_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    screen.get_tab_by_id_mut(1).unwrap().instance_id = instance_id.to_ascii_uppercase();
+    screen.get_tab_by_id_mut(1).unwrap().name = "Finalized runs".to_owned();
+    assert_eq!(
+        screen
+            .reusable_tab_id_for_instance(instance_id, "Finalized runs")
+            .unwrap(),
+        Some(1)
+    );
+    assert!(
+        screen
+            .reusable_tab_id_for_instance(instance_id, "Needs attention")
+            .unwrap_err()
+            .contains("already belongs")
+    );
+    assert_eq!(
+        screen
+            .reusable_tab_id_for_instance("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "Finalized runs")
+            .unwrap(),
+        None
+    );
+
+    screen.get_tab_by_id_mut(0).unwrap().instance_id = instance_id.to_owned();
+    assert!(
+        screen
+            .reusable_tab_id_for_instance(instance_id, "Finalized runs")
+            .unwrap_err()
+            .contains("ambiguous across tabs"),
+        "a corrupted duplicate must fail closed"
+    );
+}
+
+#[test]
+pub fn durable_tab_layout_generation_rejects_name_and_id_aba() {
+    let token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let mut generations = HashMap::new();
+    let original = reserve_new_durable_tab_layout_generation(
+        &mut generations,
+        7,
+        "Finalized runs",
+        token,
+        None,
+    );
+    let original_state = generations.clone();
+
+    let wrong_id =
+        reserve_durable_tab_layout_recovery(&mut generations, 8, "Finalized runs", token, None)
+            .expect_err("a reused token must not move to another numeric tab ID");
+    assert!(wrong_id.contains("ABA replacement"));
+    assert_eq!(
+        generations, original_state,
+        "a rejected ID replacement must not advance or replace the reservation"
+    );
+
+    let wrong_name =
+        reserve_durable_tab_layout_recovery(&mut generations, 7, "Needs attention", token, None)
+            .expect_err("a reused token must not move to another exact tab name");
+    assert!(wrong_name.contains("ABA replacement"));
+    assert_eq!(
+        generations, original_state,
+        "a rejected name replacement must not advance or replace the reservation"
+    );
+    assert_eq!(generations.get(token), Some(&original));
+}
+
+fn persist_test_viewer_receipt(
+    receipt_path: &std::path::Path,
+    run_id: &str,
+    bucket: BucketKind,
+    generation: u64,
+    viewer_token: &str,
+) -> ViewerCreationFence {
+    let receipt = serde_json::json!({
+        "version": 4,
+        "run": run_id,
+        "bucket": bucket,
+        "exit_code": 0,
+        "settlement_revision": generation,
+        "capture": null,
+        "capture_committed": true,
+        "metadata_committed": true,
+        "viewer_confirmed": false,
+        "viewer_creation_pending": true,
+        "viewer_creation_generation": generation,
+        "viewer_token": viewer_token,
+        "superseded_viewers": [],
+        "origin_tab_state": "preserved",
+        "fault": null,
+        "updated_at": generation,
+    });
+    std::fs::write(receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+    ViewerCreationFence {
+        receipt_path: std::fs::canonicalize(receipt_path).unwrap(),
+        run_id: run_id.to_owned(),
+        generation,
+        viewer_token: viewer_token.to_owned(),
+        bucket,
+    }
+}
+
+fn fenced_viewer_layout(fence: &ViewerCreationFence) -> TiledPaneLayout {
+    TiledPaneLayout {
+        tab_instance_id: Some(fence.wire_tab_instance_id().unwrap()),
+        ..Default::default()
+    }
+}
+
+fn await_new_tab_layout_transaction(
+    plugin_receiver: &Receiver<(PluginInstruction, ErrorContext)>,
+    expected_tab_id: usize,
+) -> u64 {
+    loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("NewTab layout handoff must reach Plugin");
+        if let PluginInstruction::NewTab(_, _, _, _, tab_id, transaction_id, ..) = instruction
+            && tab_id == expected_tab_id
+        {
+            return transaction_id;
+        }
+    }
+}
+
+fn await_layout_plugin_resolution(
+    plugin_receiver: &Receiver<(PluginInstruction, ErrorContext)>,
+    expected_transaction_id: u64,
+) -> (
+    LayoutPluginResolution,
+    Vec<u32>,
+    channels::Sender<std::result::Result<LayoutPluginReceipt, String>>,
+) {
+    loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .expect("layout Plugin resolution must arrive");
+        if let PluginInstruction::ResolveLayoutPlugins {
+            transaction_id,
+            resolution,
+            expected_plugin_ids,
+            ack,
+        } = instruction
+            && transaction_id == expected_transaction_id
+        {
+            return (resolution, expected_plugin_ids, ack);
+        }
+    }
+}
+
+fn await_layout_plugin_by_owner_release(
+    plugin_receiver: &Receiver<(PluginInstruction, ErrorContext)>,
+    expected_transaction_id: u64,
+) -> (
+    String,
+    channels::Sender<std::result::Result<LayoutPluginReceipt, String>>,
+) {
+    loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .expect("layout Plugin by-owner release must arrive");
+        if let PluginInstruction::ReleaseLayoutPluginsByTransaction {
+            transaction_id,
+            reason,
+            ack,
+        } = instruction
+            && transaction_id == expected_transaction_id
+        {
+            return (reason, ack);
+        }
+    }
+}
+
+fn await_layout_pty_resolution(
+    pty_receiver: &Receiver<(PtyInstruction, ErrorContext)>,
+    expected_transaction_id: u64,
+) -> (
+    LayoutCommitOutcome,
+    channels::Sender<std::result::Result<LayoutCommitAck, String>>,
+) {
+    loop {
+        let (instruction, _) = pty_receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("layout PTY resolution must arrive");
+        if let PtyInstruction::LayoutCommitResolved {
+            transaction_id,
+            outcome,
+            ack,
+        } = instruction
+            && transaction_id == expected_transaction_id
+        {
+            return (outcome, ack);
+        }
+    }
+}
+
+fn dispatch_transactional_new_tab(
+    mock_screen: &MockScreen,
+    plugin_receiver: &Receiver<(PluginInstruction, ErrorContext)>,
+) -> (usize, TiledPaneLayout, u64) {
+    let layout = transactional_baseline_layout();
+    let _ = mock_screen.to_screen.send(ScreenInstruction::NewTab(
+        None,
+        None,
+        Some(layout),
+        vec![],
+        Some("dual-ack-test".to_owned()),
+        (Some(vec![]), Some(vec![])),
+        None,
+        false,
+        false,
+        TabPlacement::Append,
+        (mock_screen.main_client_id, false),
+        None,
+    ));
+    loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("transactional NewTab must reach Plugin");
+        if let PluginInstruction::NewTab(_, _, Some(layout), _, tab_id, transaction_id, ..) =
+            instruction
+        {
+            return (tab_id, layout, transaction_id);
+        }
+    }
+}
+
+// Positional test-harness helper: mirrors the transactional apply pipeline
+// arg-for-arg; collapsing it into a struct would just duplicate ApplyLayoutParams.
+#[allow(clippy::too_many_arguments)]
+fn send_transactional_apply(
+    mock_screen: &MockScreen,
+    tab_id: usize,
+    layout: TiledPaneLayout,
+    transaction_id: u64,
+    terminal_id: u32,
+    plugin_id: u32,
+    completion: Option<NotificationEnd>,
+    blocking_completion: Option<NotificationEnd>,
+) {
+    let plugin =
+        RunPluginOrAlias::from_url("file:/path/to/fake/plugin", &None, None, None).unwrap();
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ApplyLayout(
+        layout,
+        vec![],
+        vec![(terminal_id, None)],
+        vec![],
+        HashMap::from([(plugin, vec![plugin_id])]),
+        tab_id,
+        false,
+        (mock_screen.main_client_id, false),
+        completion,
+        blocking_completion.map(|completion| (terminal_id, completion)),
+        None,
+        transaction_id,
+    ));
+}
+
+fn dispatch_test_fenced_new_tab(
+    mock_screen: &MockScreen,
+    plugin_receiver: &Receiver<(PluginInstruction, ErrorContext)>,
+    fence: &ViewerCreationFence,
+    tab_name: &str,
+) -> (usize, TiledPaneLayout, Box<DurableTabLayoutGeneration>, u64) {
+    let _ = mock_screen.to_screen.send(ScreenInstruction::NewTab(
+        None,
+        None,
+        Some(fenced_viewer_layout(fence)),
+        vec![],
+        Some(tab_name.to_owned()),
+        (Some(vec![]), Some(vec![])),
+        None,
+        false,
+        false,
+        TabPlacement::Append,
+        (1, false),
+        None,
+    ));
+    loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("fenced new tab must dispatch");
+        if let PluginInstruction::NewTab(
+            _,
+            _,
+            Some(layout),
+            _,
+            tab_id,
+            transaction_id,
+            _,
+            _,
+            _,
+            _,
+            _,
+            Some(generation),
+        ) = instruction
+        {
+            return (tab_id, layout, generation, transaction_id);
+        }
+    }
+}
+
+fn dispatch_test_fenced_recovery(
+    mock_screen: &MockScreen,
+    plugin_receiver: &Receiver<(PluginInstruction, ErrorContext)>,
+    fence: &ViewerCreationFence,
+    tab_name: &str,
+) -> (usize, TiledPaneLayout, Box<DurableTabLayoutGeneration>, u64) {
+    let _ = mock_screen.to_screen.send(ScreenInstruction::NewTab(
+        None,
+        None,
+        Some(fenced_viewer_layout(fence)),
+        vec![],
+        Some(tab_name.to_owned()),
+        (Some(vec![]), Some(vec![])),
+        None,
+        false,
+        false,
+        TabPlacement::Append,
+        (1, false),
+        None,
+    ));
+    loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("fenced empty-tab recovery must dispatch");
+        if let PluginInstruction::OverrideLayout(
+            _,
+            _,
+            layouts,
+            transaction_id,
+            _,
+            _,
+            _,
+            _,
+            Some(generation),
+        ) = instruction
+            && let [layout] = layouts.as_slice()
+        {
+            return (
+                layout.tab_index,
+                layout.tiled_layout.clone(),
+                generation,
+                transaction_id,
+            );
+        }
+    }
+}
+
+#[test]
+fn layout_commit_waits_for_plugin_and_retries_the_same_transaction() {
+    let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 20 });
+    let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    let pty_receiver = mock_screen.pty_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+    while pty_receiver.try_recv().is_ok() {}
+
+    let (tab_id, layout, transaction_id) =
+        dispatch_transactional_new_tab(&mock_screen, &plugin_receiver);
+    let (completion_tx, completion_rx) = oneshot::channel();
+    send_transactional_apply(
+        &mock_screen,
+        tab_id,
+        layout,
+        transaction_id,
+        901,
+        902,
+        Some(NotificationEnd::new(completion_tx)),
+        None,
+    );
+
+    let (first_resolution, first_ids, first_ack) =
+        await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+    assert_eq!(first_resolution, LayoutPluginResolution::Activate);
+    assert_eq!(first_ids, vec![902]);
+    if let Ok((
+        PtyInstruction::LayoutCommitResolved {
+            transaction_id: premature_transaction_id,
+            ..
+        },
+        _,
+    )) = pty_receiver.recv_timeout(std::time::Duration::from_millis(100))
+    {
+        assert_ne!(
+            premature_transaction_id, transaction_id,
+            "Screen must not ask PTY to commit before Plugin activation is acknowledged"
+        );
+    }
+
+    drop(first_ack);
+    let (retry_resolution, retry_ids, retry_ack) =
+        await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+    assert_eq!(retry_resolution, first_resolution);
+    assert_eq!(retry_ids, first_ids);
+    retry_ack
+        .send(Ok(LayoutPluginReceipt::Activated {
+            plugin_ids: retry_ids,
+        }))
+        .unwrap();
+
+    let (outcome, pty_ack) = await_layout_pty_resolution(&pty_receiver, transaction_id);
+    assert_eq!(outcome, LayoutCommitOutcome::Committed);
+    pty_ack.send(Ok(LayoutCommitAck::Resolved)).unwrap();
+    let completion = completion_rx
+        .blocking_recv()
+        .expect("dual-ACK commit completion must resolve");
+    assert_eq!(completion.exit_status, None);
+    assert_eq!(completion.error_message, None);
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+fn exact_apply_replay_uses_screen_receipt_without_reactivating_workers() {
+    let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 20 });
+    let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    let pty_receiver = mock_screen.pty_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+    while pty_receiver.try_recv().is_ok() {}
+
+    let (tab_id, layout, transaction_id) =
+        dispatch_transactional_new_tab(&mock_screen, &plugin_receiver);
+    let (completion_tx, completion_rx) = oneshot::channel();
+    send_transactional_apply(
+        &mock_screen,
+        tab_id,
+        layout.clone(),
+        transaction_id,
+        911,
+        912,
+        Some(NotificationEnd::new(completion_tx)),
+        None,
+    );
+    let (resolution, plugin_ids, plugin_ack) =
+        await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+    assert_eq!(resolution, LayoutPluginResolution::Activate);
+    plugin_ack
+        .send(Ok(LayoutPluginReceipt::Activated { plugin_ids }))
+        .unwrap();
+    let (outcome, pty_ack) = await_layout_pty_resolution(&pty_receiver, transaction_id);
+    assert_eq!(outcome, LayoutCommitOutcome::Committed);
+    pty_ack.send(Ok(LayoutCommitAck::Resolved)).unwrap();
+    let first_completion = completion_rx
+        .blocking_recv()
+        .expect("initial completion must resolve");
+    assert_eq!(first_completion.exit_status, None);
+    let committed_state = observable_layout_state(&mock_screen);
+
+    let (replay_tx, replay_rx) = oneshot::channel();
+    send_transactional_apply(
+        &mock_screen,
+        tab_id,
+        layout,
+        transaction_id,
+        911,
+        912,
+        Some(NotificationEnd::new(replay_tx)),
+        None,
+    );
+    let replay_completion = replay_rx
+        .blocking_recv()
+        .expect("exact Screen receipt replay must resolve");
+    assert_eq!(replay_completion.exit_status, None);
+    assert_eq!(replay_completion.affected_tab_id, Some(tab_id));
+    assert_eq!(observable_layout_state(&mock_screen), committed_state);
+
+    let (conflict_tx, conflict_rx) = oneshot::channel();
+    send_transactional_apply(
+        &mock_screen,
+        tab_id,
+        transactional_baseline_layout(),
+        transaction_id,
+        913,
+        912,
+        Some(NotificationEnd::new(conflict_tx)),
+        None,
+    );
+    let conflict = conflict_rx
+        .blocking_recv()
+        .expect("conflicting replay must resolve as failure");
+    assert_eq!(conflict.exit_status, Some(1));
+    assert!(
+        conflict
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("conflicting replay"))
+    );
+    assert_eq!(observable_layout_state(&mock_screen), committed_state);
+
+    while let Ok((instruction, _)) =
+        plugin_receiver.recv_timeout(std::time::Duration::from_millis(100))
+    {
+        assert!(
+            !matches!(
+                instruction,
+                PluginInstruction::ResolveLayoutPlugins {
+                    transaction_id: replayed_transaction_id,
+                    ..
+                } if replayed_transaction_id == transaction_id
+            ),
+            "exact Screen receipt replay must not reactivate Plugin"
+        );
+    }
+    while let Ok((instruction, _)) =
+        pty_receiver.recv_timeout(std::time::Duration::from_millis(100))
+    {
+        assert!(
+            !matches!(
+                instruction,
+                PtyInstruction::LayoutCommitResolved {
+                    transaction_id: replayed_transaction_id,
+                    ..
+                } if replayed_transaction_id == transaction_id
+            ),
+            "exact Screen receipt replay must not re-resolve PTY"
+        );
+    }
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+fn unknown_pty_commit_ack_reconciles_exactly_and_releases_screen_owner() {
+    let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 20 });
+    let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    let pty_receiver = mock_screen.pty_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+    while pty_receiver.try_recv().is_ok() {}
+
+    let (tab_id, layout, transaction_id) =
+        dispatch_transactional_new_tab(&mock_screen, &plugin_receiver);
+    let (completion_tx, completion_rx) = oneshot::channel();
+    let (blocking_tx, blocking_rx) = oneshot::channel();
+    send_transactional_apply(
+        &mock_screen,
+        tab_id,
+        layout.clone(),
+        transaction_id,
+        911,
+        912,
+        Some(NotificationEnd::new(completion_tx)),
+        Some(NotificationEnd::new(blocking_tx)),
+    );
+
+    let (resolution, plugin_ids, plugin_ack) =
+        await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+    assert_eq!(resolution, LayoutPluginResolution::Activate);
+    assert_eq!(plugin_ids, vec![912]);
+    plugin_ack
+        .send(Ok(LayoutPluginReceipt::Activated {
+            plugin_ids: plugin_ids.clone(),
+        }))
+        .unwrap();
+
+    let (first_outcome, first_pty_ack) = await_layout_pty_resolution(&pty_receiver, transaction_id);
+    assert_eq!(first_outcome, LayoutCommitOutcome::Committed);
+    drop(first_pty_ack);
+    let (retry_outcome, retry_pty_ack) = await_layout_pty_resolution(&pty_receiver, transaction_id);
+    assert_eq!(retry_outcome, first_outcome);
+    drop(retry_pty_ack);
+
+    let direct_failure = await_layout_failure(completion_rx);
+    assert!(direct_failure.contains("PTY commit remained unknown"));
+    let blocking_failure = await_layout_failure(blocking_rx);
+    assert!(blocking_failure.contains("PTY commit remained unknown"));
+
+    let (state_tx, state_rx) = channels::bounded(1);
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::QueryLayoutTransactionStateForTest {
+            transaction_id,
+            response_channel: state_tx,
+        })
+        .unwrap();
+    assert_eq!(
+        state_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap(),
+        (true, true, false),
+        "an unknown external commit must retain both owners without wedging the pending gate"
+    );
+
+    let (panes, tabs) = observable_layout_state(&mock_screen);
+    assert!(
+        panes.iter().any(|pane| {
+            pane.tab_id == tab_id && pane.pane_info.id == 911 && !pane.pane_info.is_plugin
+        }),
+        "unknown PTY outcome must not fake-rollback the prepared terminal"
+    );
+    assert!(
+        panes.iter().any(|pane| {
+            pane.tab_id == tab_id && pane.pane_info.id == 912 && pane.pane_info.is_plugin
+        }),
+        "unknown PTY outcome must preserve the activated plugin resource"
+    );
+    assert!(
+        tabs.tabs.iter().any(|tab| tab.tab_id == tab_id),
+        "unknown PTY outcome must preserve the exact owned tab topology"
+    );
+
+    let (replay_resolution, replay_plugin_ids, replay_plugin_ack) =
+        await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+    assert_eq!(replay_resolution, LayoutPluginResolution::Activate);
+    assert_eq!(replay_plugin_ids, plugin_ids);
+    replay_plugin_ack
+        .send(Ok(LayoutPluginReceipt::Activated {
+            plugin_ids: replay_plugin_ids,
+        }))
+        .unwrap();
+    let (replayed_outcome, replayed_pty_ack) =
+        await_layout_pty_resolution(&pty_receiver, transaction_id);
+    assert_eq!(replayed_outcome, LayoutCommitOutcome::Committed);
+    replayed_pty_ack
+        .send(Ok(LayoutCommitAck::Resolved))
+        .unwrap();
+
+    let reconciliation_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let (state_tx, state_rx) = channels::bounded(1);
+        mock_screen
+            .to_screen
+            .send(ScreenInstruction::QueryLayoutTransactionStateForTest {
+                transaction_id,
+                response_channel: state_tx,
+            })
+            .unwrap();
+        let state = state_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        if state == (false, false, false) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < reconciliation_deadline,
+            "exact background receipts must retire both the active owner and indeterminate prepared topology, got {state:?}"
+        );
+    }
+
+    let (replay_completion_tx, replay_completion_rx) = oneshot::channel();
+    send_transactional_apply(
+        &mock_screen,
+        tab_id,
+        layout,
+        transaction_id,
+        911,
+        912,
+        Some(NotificationEnd::new(replay_completion_tx)),
+        None,
+    );
+    let replay_completion = replay_completion_rx
+        .blocking_recv()
+        .expect("resolved Screen receipt replay must complete");
+    assert_eq!(replay_completion.exit_status, None);
+    assert_eq!(replay_completion.error_message, None);
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+fn unknown_preprepare_rejection_reconciles_without_losing_resolution_owner() {
+    let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 20 });
+    let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
+    let baseline = observable_layout_state(&mock_screen);
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    let pty_receiver = mock_screen.pty_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+    while pty_receiver.try_recv().is_ok() {}
+
+    let (tab_id, layout, transaction_id) =
+        dispatch_transactional_new_tab(&mock_screen, &plugin_receiver);
+    let (deferred_move_tx, deferred_move_rx) = oneshot::channel();
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::MoveTabWithTabId(
+            tab_id,
+            Direction::Left,
+            Some(NotificationEnd::new(deferred_move_tx)),
+        ))
+        .unwrap();
+    let duplicate_terminal_id = 919;
+    let (completion_tx, completion_rx) = oneshot::channel();
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::ApplyLayout(
+            layout,
+            vec![],
+            vec![(duplicate_terminal_id, None), (duplicate_terminal_id, None)],
+            vec![],
+            HashMap::new(),
+            tab_id,
+            false,
+            (1, false),
+            Some(NotificationEnd::new(completion_tx)),
+            None,
+            None,
+            transaction_id,
+        ))
+        .unwrap();
+
+    for _ in 0..2 {
+        let (resolution, plugin_ids, ack) =
+            await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+        assert!(matches!(resolution, LayoutPluginResolution::Release { .. }));
+        assert!(plugin_ids.is_empty());
+        drop(ack);
+    }
+    let direct_failure = await_layout_failure(completion_rx);
+    assert!(direct_failure.contains("duplicate Apply resource ids"));
+    assert!(direct_failure.contains("Plugin release remained unknown"));
+    let deferred_move_completion = deferred_move_rx
+        .blocking_recv()
+        .expect("retiring the pending gate must replay and complete queued tab events");
+    assert_eq!(deferred_move_completion.exit_status, None);
+    assert_eq!(deferred_move_completion.error_message, None);
+
+    let (state_tx, state_rx) = channels::bounded(1);
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::QueryLayoutTransactionStateForTest {
+            transaction_id,
+            response_channel: state_tx,
+        })
+        .unwrap();
+    assert_eq!(
+        state_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap(),
+        (true, true, false),
+        "a rejection that loses ACK before local prepare must retain a resolution-only owner without wedging the pending gate"
+    );
+
+    let (resolution, plugin_ids, plugin_ack) =
+        await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+    assert!(matches!(resolution, LayoutPluginResolution::Release { .. }));
+    assert!(plugin_ids.is_empty());
+    plugin_ack
+        .send(Ok(LayoutPluginReceipt::Released { plugin_ids }))
+        .unwrap();
+    let (outcome, pty_ack) = await_layout_pty_resolution(&pty_receiver, transaction_id);
+    assert!(matches!(
+        outcome,
+        LayoutCommitOutcome::Rejected(ref message)
+            if message.contains("duplicate Apply resource ids")
+    ));
+    pty_ack.send(Ok(LayoutCommitAck::Resolved)).unwrap();
+
+    let reconciliation_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let (state_tx, state_rx) = channels::bounded(1);
+        mock_screen
+            .to_screen
+            .send(ScreenInstruction::QueryLayoutTransactionStateForTest {
+                transaction_id,
+                response_channel: state_tx,
+            })
+            .unwrap();
+        let state = state_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        if state == (false, false, false) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < reconciliation_deadline,
+            "background rejection receipts must retire the resolution-only owner, got {state:?}"
+        );
+    }
+    assert_eq!(
+        observable_layout_state(&mock_screen),
+        baseline,
+        "reconciled preprepare rejection must discard the pending tab without mutating baseline topology"
+    );
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+fn pty_activation_rollback_compensates_plugins_before_screen_rollback() {
+    let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 20 });
+    let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
+    let baseline = observable_layout_state(&mock_screen);
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    let pty_receiver = mock_screen.pty_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+    while pty_receiver.try_recv().is_ok() {}
+
+    let (tab_id, layout, transaction_id) =
+        dispatch_transactional_new_tab(&mock_screen, &plugin_receiver);
+    let (completion_tx, completion_rx) = oneshot::channel();
+    send_transactional_apply(
+        &mock_screen,
+        tab_id,
+        layout,
+        transaction_id,
+        921,
+        922,
+        Some(NotificationEnd::new(completion_tx)),
+        None,
+    );
+
+    let (resolution, plugin_ids, plugin_ack) =
+        await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+    assert_eq!(resolution, LayoutPluginResolution::Activate);
+    assert_eq!(plugin_ids, vec![922]);
+    plugin_ack
+        .send(Ok(LayoutPluginReceipt::Activated {
+            plugin_ids: plugin_ids.clone(),
+        }))
+        .unwrap();
+    let (outcome, pty_ack) = await_layout_pty_resolution(&pty_receiver, transaction_id);
+    assert_eq!(outcome, LayoutCommitOutcome::Committed);
+    pty_ack
+        .send(Ok(LayoutCommitAck::ActivationRolledBack(
+            "injected PTY activation failure".to_owned(),
+        )))
+        .unwrap();
+
+    let (compensation, compensation_ids, compensation_ack) =
+        await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+    assert!(matches!(
+        compensation,
+        LayoutPluginResolution::Compensate { .. }
+    ));
+    assert_eq!(compensation_ids, plugin_ids);
+    compensation_ack
+        .send(Ok(LayoutPluginReceipt::Compensated {
+            plugin_ids: compensation_ids,
+        }))
+        .unwrap();
+
+    let failure = await_layout_failure(completion_rx);
+    assert!(failure.contains("PTY activation rolled back"));
+    assert_eq!(
+        observable_layout_state(&mock_screen),
+        baseline,
+        "Screen may rollback only after exact Plugin compensation is certified"
+    );
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+fn plugin_activation_rollback_rejects_pty_before_screen_rollback() {
+    let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 20 });
+    let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
+    let baseline = observable_layout_state(&mock_screen);
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    let pty_receiver = mock_screen.pty_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+    while pty_receiver.try_recv().is_ok() {}
+
+    let (tab_id, layout, transaction_id) =
+        dispatch_transactional_new_tab(&mock_screen, &plugin_receiver);
+    let (completion_tx, completion_rx) = oneshot::channel();
+    send_transactional_apply(
+        &mock_screen,
+        tab_id,
+        layout,
+        transaction_id,
+        931,
+        932,
+        Some(NotificationEnd::new(completion_tx)),
+        None,
+    );
+
+    let (resolution, plugin_ids, plugin_ack) =
+        await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+    assert_eq!(resolution, LayoutPluginResolution::Activate);
+    assert_eq!(plugin_ids, vec![932]);
+    plugin_ack
+        .send(Ok(LayoutPluginReceipt::ActivationRolledBack {
+            plugin_ids,
+            message: "injected Plugin activation failure".to_owned(),
+        }))
+        .unwrap();
+
+    let (outcome, pty_ack) = await_layout_pty_resolution(&pty_receiver, transaction_id);
+    assert!(
+        matches!(
+            outcome,
+            LayoutCommitOutcome::Rejected(ref message)
+                if message.contains("Plugin activation rolled back")
+        ),
+        "Plugin rollback must be durably mirrored as a PTY rejection: {outcome:?}"
+    );
+    pty_ack.send(Ok(LayoutCommitAck::Resolved)).unwrap();
+    let failure = await_layout_failure(completion_rx);
+    assert!(failure.contains("Plugin activation rolled back"));
+    assert_eq!(
+        observable_layout_state(&mock_screen),
+        baseline,
+        "Screen may rollback only after Plugin rollback and PTY rejection are both certified"
+    );
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+fn multi_tab_override_activates_the_exact_plugin_union() {
+    let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 20 });
+    let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
+    install_transactional_baseline_tab(&mock_screen, 1, 10, 11);
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    let pty_receiver = mock_screen.pty_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+    while pty_receiver.try_recv().is_ok() {}
+
+    let first_plugin =
+        RunPluginOrAlias::from_url("file:/override-union-first.wasm", &None, None, None).unwrap();
+    let second_plugin =
+        RunPluginOrAlias::from_url("file:/override-union-second.wasm", &None, None, None).unwrap();
+    let make_layout = |tab_index, plugin: RunPluginOrAlias| TabLayoutInfo {
+        tab_index,
+        tab_name: None,
+        tiled_layout: TiledPaneLayout {
+            run: Some(Run::Plugin(plugin)),
+            ..Default::default()
+        },
+        floating_layouts: vec![],
+        swap_tiled_layouts: Some(vec![]),
+        swap_floating_layouts: Some(vec![]),
+    };
+    let (completion_tx, completion_rx) = oneshot::channel();
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::OverrideLayout(
+            None,
+            None,
+            vec![
+                make_layout(0, first_plugin.clone()),
+                make_layout(1, second_plugin.clone()),
+            ],
+            true,
+            true,
+            false,
+            mock_screen.main_client_id,
+            Some(NotificationEnd::new(completion_tx)),
+        ))
+        .unwrap();
+    let (
+        processed_layouts,
+        transaction_id,
+        retain_terminals,
+        retain_plugins,
+        client_id,
+        completion,
+    ) = loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("Override must reach Plugin");
+        if let PluginInstruction::OverrideLayout(
+            _,
+            _,
+            processed_layouts,
+            transaction_id,
+            retain_terminals,
+            retain_plugins,
+            client_id,
+            completion,
+            None,
+        ) = instruction
+        {
+            break (
+                processed_layouts,
+                transaction_id,
+                retain_terminals,
+                retain_plugins,
+                client_id,
+                completion,
+            );
+        }
+    };
+    let override_results = processed_layouts
+        .into_iter()
+        .map(|layout| {
+            let (plugin, plugin_id) = if layout.tab_index == 0 {
+                (first_plugin.clone(), 952)
+            } else {
+                (second_plugin.clone(), 951)
+            };
+            TabOverrideResult {
+                tab_index: layout.tab_index,
+                tab_name: layout.tab_name,
+                tiled_layout: layout.tiled_layout,
+                floating_layouts: layout.floating_layouts,
+                swap_tiled_layouts: layout.swap_tiled_layouts,
+                swap_floating_layouts: layout.swap_floating_layouts,
+                new_terminal_pids: vec![],
+                new_floating_pane_pids: vec![],
+                plugin_ids: HashMap::from([(plugin, vec![plugin_id])]),
+            }
+        })
+        .collect();
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::OverrideLayoutComplete(
+            override_results,
+            retain_terminals,
+            retain_plugins,
+            client_id,
+            completion,
+            None,
+            transaction_id,
+        ))
+        .unwrap();
+
+    let (resolution, plugin_ids, plugin_ack) =
+        await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+    assert_eq!(resolution, LayoutPluginResolution::Activate);
+    assert_eq!(
+        plugin_ids,
+        vec![951, 952],
+        "Override must activate the sorted exact union across every target tab"
+    );
+    plugin_ack
+        .send(Ok(LayoutPluginReceipt::Activated {
+            plugin_ids: plugin_ids.clone(),
+        }))
+        .unwrap();
+    let (outcome, pty_ack) = await_layout_pty_resolution(&pty_receiver, transaction_id);
+    assert_eq!(outcome, LayoutCommitOutcome::Committed);
+    pty_ack.send(Ok(LayoutCommitAck::Resolved)).unwrap();
+    let completion = completion_rx
+        .blocking_recv()
+        .expect("Override dual-ACK completion must resolve");
+    assert_eq!(completion.exit_status, None);
+    assert_eq!(completion.error_message, None);
+
+    let (panes, _) = observable_layout_state(&mock_screen);
+    assert!(
+        panes
+            .iter()
+            .any(|pane| pane.pane_info.is_plugin && pane.pane_info.id == 951)
+    );
+    assert!(
+        panes
+            .iter()
+            .any(|pane| pane.pane_info.is_plugin && pane.pane_info.id == 952)
+    );
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+fn override_lost_ack_keeps_existing_tab_render_fenced_and_name_deferred() {
+    let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 20 });
+    let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
+    let (_, baseline_tabs) = observable_layout_state(&mock_screen);
+    let baseline_name = baseline_tabs.tabs[0].name.clone();
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    let pty_receiver = mock_screen.pty_receiver.take().unwrap();
+    let server_receiver = mock_screen.server_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+    while pty_receiver.try_recv().is_ok() {}
+    while server_receiver.try_recv().is_ok() {}
+
+    let deferred_name = "visible-only-after-dual-ack".to_owned();
+    let (completion_tx, completion_rx) = oneshot::channel();
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::OverrideLayout(
+            None,
+            None,
+            vec![TabLayoutInfo {
+                tab_index: 0,
+                tab_name: Some(deferred_name.clone()),
+                tiled_layout: TiledPaneLayout::default(),
+                floating_layouts: vec![],
+                swap_tiled_layouts: Some(vec![]),
+                swap_floating_layouts: Some(vec![]),
+            }],
+            true,
+            true,
+            false,
+            mock_screen.main_client_id,
+            Some(NotificationEnd::new(completion_tx)),
+        ))
+        .unwrap();
+    let (
+        mut processed_layouts,
+        transaction_id,
+        retain_terminals,
+        retain_plugins,
+        client_id,
+        completion,
+    ) = loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("Override must reach Plugin");
+        if let PluginInstruction::OverrideLayout(
+            _,
+            _,
+            processed_layouts,
+            transaction_id,
+            retain_terminals,
+            retain_plugins,
+            client_id,
+            completion,
+            None,
+        ) = instruction
+        {
+            break (
+                processed_layouts,
+                transaction_id,
+                retain_terminals,
+                retain_plugins,
+                client_id,
+                completion,
+            );
+        }
+    };
+    let processed = processed_layouts.pop().unwrap();
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::OverrideLayoutComplete(
+            vec![TabOverrideResult {
+                tab_index: processed.tab_index,
+                tab_name: processed.tab_name,
+                tiled_layout: processed.tiled_layout,
+                floating_layouts: processed.floating_layouts,
+                swap_tiled_layouts: processed.swap_tiled_layouts,
+                swap_floating_layouts: processed.swap_floating_layouts,
+                new_terminal_pids: vec![],
+                new_floating_pane_pids: vec![],
+                plugin_ids: HashMap::new(),
+            }],
+            retain_terminals,
+            retain_plugins,
+            client_id,
+            completion,
+            None,
+            transaction_id,
+        ))
+        .unwrap();
+
+    for _ in 0..2 {
+        let (resolution, plugin_ids, ack) =
+            await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+        assert_eq!(resolution, LayoutPluginResolution::Activate);
+        assert!(plugin_ids.is_empty());
+        drop(ack);
+    }
+    assert!(
+        await_layout_failure(completion_rx).contains("remained unknown"),
+        "the direct completion must report the lost Plugin ACK"
+    );
+
+    let (state_tx, state_rx) = channels::bounded(1);
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::QueryLayoutTransactionStateForTest {
+            transaction_id,
+            response_channel: state_tx,
+        })
+        .unwrap();
+    assert_eq!(
+        state_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap(),
+        (true, true, true),
+        "indeterminate Override must retain its active owner, prepared state and render fence"
+    );
+    let (_, fenced_tabs) = observable_layout_state(&mock_screen);
+    assert_eq!(
+        fenced_tabs.tabs[0].name, baseline_name,
+        "the new tab name must remain invisible before Plugin and PTY ACK"
+    );
+    while server_receiver.try_recv().is_ok() {}
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::RenderToClients)
+        .unwrap();
+    let (render_barrier_tx, render_barrier_rx) = channels::bounded(1);
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::QueryLayoutTransactionStateForTest {
+            transaction_id,
+            response_channel: render_barrier_tx,
+        })
+        .unwrap();
+    render_barrier_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .unwrap();
+    assert_no_rejected_layout_render(&server_receiver);
+
+    let (resolution, plugin_ids, plugin_ack) =
+        await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+    assert_eq!(resolution, LayoutPluginResolution::Activate);
+    assert!(plugin_ids.is_empty());
+    plugin_ack
+        .send(Ok(LayoutPluginReceipt::Activated { plugin_ids }))
+        .unwrap();
+    let (outcome, pty_ack) = await_layout_pty_resolution(&pty_receiver, transaction_id);
+    assert_eq!(outcome, LayoutCommitOutcome::Committed);
+    pty_ack.send(Ok(LayoutCommitAck::Resolved)).unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let (state_tx, state_rx) = channels::bounded(1);
+        mock_screen
+            .to_screen
+            .send(ScreenInstruction::QueryLayoutTransactionStateForTest {
+                transaction_id,
+                response_channel: state_tx,
+            })
+            .unwrap();
+        let state = state_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        if state == (false, false, false) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "dual ACK replay must retire Override owner and fence, got {state:?}"
+        );
+    }
+    let (_, committed_tabs) = observable_layout_state(&mock_screen);
+    assert_eq!(
+        committed_tabs.tabs[0].name, deferred_name,
+        "the deferred tab name must become visible only after exact commit"
+    );
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+pub fn newer_receipt_generation_rejects_an_old_request_before_allocation() {
+    let directory = tempfile::tempdir().unwrap();
+    let receipt_path = directory.path().join("transfer.json");
+    let run_id = "impl-260727-120000-01000";
+    let old_token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let new_token = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let new_fence =
+        persist_test_viewer_receipt(&receipt_path, run_id, BucketKind::Finalized, 2, new_token);
+    let old_fence = ViewerCreationFence {
+        receipt_path: new_fence.receipt_path.clone(),
+        run_id: run_id.to_owned(),
+        generation: 1,
+        viewer_token: old_token.to_owned(),
+        bucket: BucketKind::Finalized,
+    };
+    let old_name = format!("{} [vc:{}]", run_id, old_token);
+    let new_name = format!("{} [vc:{}]", run_id, new_token);
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut mock_screen = MockScreen::new(size);
+    mock_screen.session_name = "Finalized runs".to_owned();
+    let screen_thread = mock_screen.run(None, vec![]);
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+
+    for (name, encoded) in [
+        ("unknown-fence", "vcf2:{}".to_owned()),
+        ("malformed-fence", "vcf1:not-json".to_owned()),
+        (
+            "oversized-fence",
+            format!("vcf1:{}", "x".repeat(16 * 1024 + 1)),
+        ),
+    ] {
+        let _ = mock_screen.to_screen.send(ScreenInstruction::NewTab(
+            None,
+            None,
+            Some(TiledPaneLayout {
+                tab_instance_id: Some(encoded),
+                ..Default::default()
+            }),
+            vec![],
+            Some(name.to_owned()),
+            (Some(vec![]), Some(vec![])),
+            None,
+            false,
+            false,
+            TabPlacement::Append,
+            (1, false),
+            None,
+        ));
+    }
+    let _ = mock_screen.to_screen.send(ScreenInstruction::NewTab(
+        None,
+        None,
+        Some(fenced_viewer_layout(&old_fence)),
+        vec![],
+        Some(old_name.clone()),
+        (Some(vec![]), Some(vec![])),
+        None,
+        false,
+        false,
+        TabPlacement::Append,
+        (1, false),
+        None,
+    ));
+    let (tabs_tx, tabs_rx) = crossbeam::channel::bounded(1);
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ListTabs {
+        client_id: 1,
+        response_channel: tabs_tx,
+    });
+    let tabs = tabs_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("old-request rejection barrier must answer");
+    assert!(
+        tabs.tabs.iter().all(|tab| tab.name != old_name
+            && tab.name != "unknown-fence"
+            && tab.name != "malformed-fence"
+            && tab.name != "oversized-fence"),
+        "malformed or tombstoned fences must not allocate even an empty tab"
+    );
+    while let Ok((instruction, _)) = plugin_receiver.try_recv() {
+        assert!(
+            !matches!(
+                instruction,
+                PluginInstruction::NewTab(..) | PluginInstruction::OverrideLayout(..)
+            ),
+            "a stale receipt fence must fail before plugin or PTY allocation"
+        );
+    }
+
+    let _ = mock_screen.to_screen.send(ScreenInstruction::NewTab(
+        None,
+        None,
+        Some(fenced_viewer_layout(&new_fence)),
+        vec![],
+        Some(new_name.clone()),
+        (Some(vec![]), Some(vec![])),
+        None,
+        false,
+        false,
+        TabPlacement::Append,
+        (1, false),
+        None,
+    ));
+    let generation = loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("the current generation must dispatch");
+        if let PluginInstruction::NewTab(
+            _,
+            _,
+            Some(layout),
+            _,
+            _,
+            _,
+            _,
+            _,
+            _,
+            _,
+            _,
+            Some(generation),
+        ) = instruction
+        {
+            assert_eq!(layout.tab_instance_id.as_deref(), Some(new_token));
+            break generation;
+        }
+    };
+    assert_eq!(generation.viewer_creation_fence.as_ref(), Some(&new_fence));
+    assert!(
+        !format!("{:?}", generation).contains(&receipt_path.display().to_string()),
+        "receipt paths must not leak into generation logs"
+    );
+
+    let (final_tabs_tx, final_tabs_rx) = crossbeam::channel::bounded(1);
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ListTabs {
+        client_id: 1,
+        response_channel: final_tabs_tx,
+    });
+    let final_tabs = final_tabs_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("current-generation tab barrier must answer");
+    let viewer = final_tabs
+        .tabs
+        .iter()
+        .find(|tab| tab.name == new_name)
+        .expect("the current generation must own one tab");
+    assert_eq!(
+        final_tabs
+            .tab_instance_ids
+            .get(&viewer.tab_id)
+            .map(String::as_str),
+        Some(new_token),
+        "public identity must expose only the bare token"
+    );
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+pub fn missing_apply_target_rejects_transaction_without_direct_writer_cleanup() {
+    let size = Size { cols: 80, rows: 20 };
+    let mut mock_screen = MockScreen::new(size);
+    let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
+    let pty_receiver = mock_screen.pty_receiver.take().unwrap();
+    while pty_receiver.try_recv().is_ok() {}
+    let plugin =
+        RunPluginOrAlias::from_url("file:/missing-apply-target.wasm", &None, None, None).unwrap();
+    let (completion_tx, completion_rx) = oneshot::channel();
+
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ApplyLayout(
+        TiledPaneLayout::default(),
+        vec![],
+        vec![(901, None)],
+        vec![],
+        HashMap::from([(plugin, vec![902])]),
+        999,
+        false,
+        (1, false),
+        Some(NotificationEnd::new(completion_tx)),
+        None,
+        None,
+        0,
+    ));
+    let rejection = await_layout_failure(completion_rx);
+    assert!(rejection.contains("Tab with index 999 not found"));
+
+    let (panes_tx, panes_rx) = crossbeam::channel::bounded(1);
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ListPanes {
+        show_all: true,
+        response_channel: panes_tx,
+    });
+    let panes = panes_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("screen must remain alive after rejecting the layout");
+    assert!(
+        panes
+            .iter()
+            .all(|pane| pane.pane_info.id != 901 && pane.pane_info.id != 902)
+    );
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+pub fn mismatched_preparation_failure_reconciles_exact_worker_owners() {
+    let size = Size { cols: 80, rows: 20 };
+    let mut mock_screen = MockScreen::new(size);
+    let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
+    let pty_receiver = mock_screen.pty_receiver.take().unwrap();
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    while pty_receiver.try_recv().is_ok() {}
+    while plugin_receiver.try_recv().is_ok() {}
+
+    let _ = mock_screen.to_screen.send(ScreenInstruction::NewTab(
+        None,
+        None,
+        Some(TiledPaneLayout::default()),
+        vec![],
+        Some("quarantined-mismatch".to_owned()),
+        (Some(vec![]), Some(vec![])),
+        None,
+        false,
+        false,
+        TabPlacement::Append,
+        (1, false),
+        None,
+    ));
+    let (quarantined_tab_id, mismatched_transaction_id) = loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("first NewTab must reach Plugin");
+        if let PluginInstruction::NewTab(_, _, _, _, tab_id, transaction_id, ..) = instruction {
+            break (tab_id, transaction_id);
+        }
+    };
+    let (failure_tx, failure_rx) = oneshot::channel();
+    let _ = mock_screen
+        .to_screen
+        .send(ScreenInstruction::LayoutPreparationFailed {
+            transaction_id: mismatched_transaction_id,
+            tab_id: Some(quarantined_tab_id + 1000),
+            completion_tx: Some(NotificationEnd::new(failure_tx)),
+            layout_generation: None,
+            message: "injected mismatched preparation failure".to_owned(),
+            cleanup: LayoutPreparationCleanup::ReleasePluginReservation {
+                plugin_ids: vec![991],
+                pty_cleanup_succeeded: true,
+            },
+        });
+    assert!(
+        await_layout_failure(failure_rx).contains("mismatched preparation failure"),
+        "mismatched terminal result must fail its direct completion"
+    );
+
+    let (state_tx, state_rx) = channels::bounded(1);
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::QueryLayoutTransactionStateForTest {
+            transaction_id: mismatched_transaction_id,
+            response_channel: state_tx,
+        })
+        .unwrap();
+    assert_eq!(
+        state_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap(),
+        (true, true, true),
+        "mismatched metadata must retain ownership and its visibility fence until exact workers reject it"
+    );
+
+    let (release_reason, plugin_ack) =
+        await_layout_plugin_by_owner_release(&plugin_receiver, mismatched_transaction_id);
+    assert!(release_reason.contains("mismatched preparation failure"));
+    plugin_ack
+        .send(Ok(LayoutPluginReceipt::Released {
+            plugin_ids: vec![741, 742],
+        }))
+        .unwrap();
+    let (outcome, pty_ack) = await_layout_pty_resolution(&pty_receiver, mismatched_transaction_id);
+    assert!(
+        matches!(outcome, LayoutCommitOutcome::Rejected(ref reason) if reason.contains("mismatched preparation failure"))
+    );
+    pty_ack.send(Ok(LayoutCommitAck::Resolved)).unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let (state_tx, state_rx) = channels::bounded(1);
+        mock_screen
+            .to_screen
+            .send(ScreenInstruction::QueryLayoutTransactionStateForTest {
+                transaction_id: mismatched_transaction_id,
+                response_channel: state_tx,
+            })
+            .unwrap();
+        let state = state_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        if state == (false, false, false) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "exact Plugin and PTY rejection must retire every Screen owner and gate, got {state:?}"
+        );
+    }
+    let (_, tabs) = observable_layout_state(&mock_screen);
+    assert!(
+        tabs.tabs.iter().all(|tab| tab.tab_id != quarantined_tab_id),
+        "the rejected pending tab must be discarded after exact worker ACKs"
+    );
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+pub fn new_tab_pty_preparation_failure_releases_exact_plugins_before_retiring_owner() {
+    let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 20 });
+    let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+
+    let (completion_tx, completion_rx) = oneshot::channel();
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::NewTab(
+            None,
+            None,
+            Some(TiledPaneLayout::default()),
+            vec![],
+            Some("pty-preparation-failure".to_owned()),
+            (Some(vec![]), Some(vec![])),
+            None,
+            false,
+            false,
+            TabPlacement::Append,
+            (1, false),
+            Some(NotificationEnd::new(completion_tx)),
+        ))
+        .unwrap();
+    let (tab_id, transaction_id, forwarded_completion) = loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("NewTab must reach Plugin");
+        if let PluginInstruction::NewTab(
+            _,
+            _,
+            _,
+            _,
+            tab_id,
+            transaction_id,
+            _,
+            _,
+            _,
+            _,
+            completion,
+            _,
+        ) = instruction
+        {
+            break (tab_id, transaction_id, completion);
+        }
+    };
+
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::LayoutPreparationFailed {
+            transaction_id,
+            tab_id: Some(tab_id),
+            completion_tx: forwarded_completion,
+            layout_generation: None,
+            message: "injected PTY preparation failure".to_owned(),
+            cleanup: LayoutPreparationCleanup::ReleasePluginReservation {
+                plugin_ids: vec![801, 802],
+                pty_cleanup_succeeded: true,
+            },
+        })
+        .unwrap();
+    let (resolution, plugin_ids, cleanup_ack) =
+        await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+    assert!(matches!(resolution, LayoutPluginResolution::Release { .. }));
+    assert_eq!(plugin_ids, vec![801, 802]);
+    cleanup_ack
+        .send(Ok(LayoutPluginReceipt::Released {
+            plugin_ids: plugin_ids.clone(),
+        }))
+        .unwrap();
+    assert!(
+        await_layout_failure(completion_rx).contains("PTY preparation failure"),
+        "the original caller must receive the preparation failure"
+    );
+
+    let (state_tx, state_rx) = channels::bounded(1);
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::QueryLayoutTransactionStateForTest {
+            transaction_id,
+            response_channel: state_tx,
+        })
+        .unwrap();
+    assert_eq!(
+        state_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap(),
+        (false, false, false),
+        "Screen may retire the owner only after exact Plugin release"
+    );
+    let (_, tabs) = observable_layout_state(&mock_screen);
+    assert!(
+        tabs.tabs.iter().all(|tab| tab.tab_id != tab_id),
+        "the released failed NewTab must not remain pending"
+    );
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+pub fn lost_preparation_release_ack_reconciles_exactly_without_wedging_gate() {
+    let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 20 });
+    let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+
+    let (completion_tx, completion_rx) = oneshot::channel();
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::NewTab(
+            None,
+            None,
+            Some(TiledPaneLayout::default()),
+            vec![],
+            Some("lost-preparation-release-ack".to_owned()),
+            (Some(vec![]), Some(vec![])),
+            None,
+            false,
+            false,
+            TabPlacement::Append,
+            (1, false),
+            Some(NotificationEnd::new(completion_tx)),
+        ))
+        .unwrap();
+    let (tab_id, transaction_id, forwarded_completion) = loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("NewTab must reach Plugin");
+        if let PluginInstruction::NewTab(
+            _,
+            _,
+            _,
+            _,
+            tab_id,
+            transaction_id,
+            _,
+            _,
+            _,
+            _,
+            completion,
+            _,
+        ) = instruction
+        {
+            break (tab_id, transaction_id, completion);
+        }
+    };
+
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::LayoutPreparationFailed {
+            transaction_id,
+            tab_id: Some(tab_id),
+            completion_tx: forwarded_completion,
+            layout_generation: None,
+            message: "injected preparation failure with lost Plugin ACK".to_owned(),
+            cleanup: LayoutPreparationCleanup::ReleasePluginReservation {
+                plugin_ids: vec![821, 822],
+                pty_cleanup_succeeded: true,
+            },
+        })
+        .unwrap();
+
+    for _ in 0..2 {
+        let (resolution, plugin_ids, ack) =
+            await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+        assert!(matches!(resolution, LayoutPluginResolution::Release { .. }));
+        assert_eq!(plugin_ids, vec![821, 822]);
+        drop(ack);
+    }
+    assert!(
+        await_layout_failure(completion_rx).contains("lost Plugin ACK"),
+        "the original completion must fail even while cleanup is being reconciled"
+    );
+
+    let (state_tx, state_rx) = channels::bounded(1);
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::QueryLayoutTransactionStateForTest {
+            transaction_id,
+            response_channel: state_tx,
+        })
+        .unwrap();
+    assert_eq!(
+        state_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap(),
+        (true, true, false),
+        "lost cleanup ACK must retain exact reconciliation ownership without wedging the pending gate"
+    );
+
+    let (resolution, plugin_ids, ack) =
+        await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+    assert!(matches!(resolution, LayoutPluginResolution::Release { .. }));
+    assert_eq!(plugin_ids, vec![821, 822]);
+    ack.send(Ok(LayoutPluginReceipt::Released {
+        plugin_ids: plugin_ids.clone(),
+    }))
+    .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let (state_tx, state_rx) = channels::bounded(1);
+        mock_screen
+            .to_screen
+            .send(ScreenInstruction::QueryLayoutTransactionStateForTest {
+                transaction_id,
+                response_channel: state_tx,
+            })
+            .unwrap();
+        let state = state_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        if state == (false, false, false) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "certified background release must retire all Screen ownership, got {state:?}"
+        );
+    }
+    let (_, tabs) = observable_layout_state(&mock_screen);
+    assert!(
+        tabs.tabs.iter().all(|tab| tab.tab_id != tab_id),
+        "the failed pending tab must be discarded after exact release is certified"
+    );
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+pub fn override_pty_preparation_failure_releases_exact_plugin_union() {
+    let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 20 });
+    let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
+    let baseline = observable_layout_state(&mock_screen);
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+
+    let (completion_tx, completion_rx) = oneshot::channel();
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::OverrideLayout(
+            None,
+            None,
+            vec![TabLayoutInfo {
+                tab_index: 0,
+                tab_name: None,
+                tiled_layout: TiledPaneLayout::default(),
+                floating_layouts: vec![],
+                swap_tiled_layouts: Some(vec![]),
+                swap_floating_layouts: Some(vec![]),
+            }],
+            true,
+            true,
+            false,
+            1,
+            Some(NotificationEnd::new(completion_tx)),
+        ))
+        .unwrap();
+    let (transaction_id, forwarded_completion) = loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("Override must reach Plugin");
+        if let PluginInstruction::OverrideLayout(_, _, _, transaction_id, _, _, _, completion, _) =
+            instruction
+        {
+            break (transaction_id, completion);
+        }
+    };
+
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::LayoutPreparationFailed {
+            transaction_id,
+            tab_id: None,
+            completion_tx: forwarded_completion,
+            layout_generation: None,
+            message: "injected Override PTY preparation failure".to_owned(),
+            cleanup: LayoutPreparationCleanup::ReleasePluginReservation {
+                plugin_ids: vec![811, 812],
+                pty_cleanup_succeeded: true,
+            },
+        })
+        .unwrap();
+    let (resolution, plugin_ids, cleanup_ack) =
+        await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+    assert!(matches!(resolution, LayoutPluginResolution::Release { .. }));
+    assert_eq!(plugin_ids, vec![811, 812]);
+    cleanup_ack
+        .send(Ok(LayoutPluginReceipt::Released {
+            plugin_ids: plugin_ids.clone(),
+        }))
+        .unwrap();
+    assert!(
+        await_layout_failure(completion_rx).contains("Override PTY preparation failure"),
+        "the original Override caller must receive the preparation failure"
+    );
+
+    let (state_tx, state_rx) = channels::bounded(1);
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::QueryLayoutTransactionStateForTest {
+            transaction_id,
+            response_channel: state_tx,
+        })
+        .unwrap();
+    assert_eq!(
+        state_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap(),
+        (false, false, false)
+    );
+    assert_eq!(
+        observable_layout_state(&mock_screen),
+        baseline,
+        "failed Override preparation must preserve the exact baseline"
+    );
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+pub fn go_to_existing_tab_name_with_create_true_keeps_legacy_success_completion() {
+    let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 20 });
+    let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
+    let (_, baseline_tabs) = observable_layout_state(&mock_screen);
+    let existing_tab = baseline_tabs
+        .tabs
+        .first()
+        .expect("initial tab must exist")
+        .clone();
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+
+    let (completion_tx, completion_rx) = oneshot::channel();
+    let _ = mock_screen.to_screen.send(ScreenInstruction::GoToTabName(
+        existing_tab.name,
+        None,
+        true,
+        Some(1),
+        Some(NotificationEnd::new(completion_tx)),
+    ));
+    let completion = completion_rx
+        .blocking_recv()
+        .expect("existing-tab navigation must complete");
+    assert_ne!(
+        completion.exit_status,
+        Some(1),
+        "create=true must not opt an already-existing tab into NewTab failure semantics"
+    );
+    assert_eq!(completion.error_message, None);
+    assert_eq!(completion.affected_tab_id, Some(existing_tab.tab_id));
+    while let Ok((instruction, _)) =
+        plugin_receiver.recv_timeout(std::time::Duration::from_millis(100))
+    {
+        assert!(
+            !matches!(instruction, PluginInstruction::NewTab(..)),
+            "existing tab navigation must not launch a new layout transaction"
+        );
+    }
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+pub fn break_pane_preparation_failure_preserves_live_pane_as_degraded_tab() {
+    let size = Size { cols: 80, rows: 20 };
+    let initial_layout = TiledPaneLayout {
+        children: vec![TiledPaneLayout::default(), TiledPaneLayout::default()],
+        ..Default::default()
+    };
+    let mut mock_screen = MockScreen::new(size);
+    let screen_thread = mock_screen.run(Some(initial_layout), vec![]);
+    let (baseline_panes, baseline_tabs) = observable_layout_state(&mock_screen);
+    let baseline_ids = baseline_panes
+        .iter()
+        .map(|pane| {
+            if pane.pane_info.is_plugin {
+                PaneId::Plugin(pane.pane_info.id)
+            } else {
+                PaneId::Terminal(pane.pane_info.id)
+            }
+        })
+        .collect::<Vec<_>>();
+    let pty_receiver = mock_screen.pty_receiver.take().unwrap();
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    while pty_receiver.try_recv().is_ok() {}
+    while plugin_receiver.try_recv().is_ok() {}
+
+    let (completion_tx, completion_rx) = oneshot::channel();
+    let _ = mock_screen.to_screen.send(ScreenInstruction::BreakPane(
+        None,
+        1,
+        Some(NotificationEnd::new(completion_tx)),
+    ));
+    let (destination_tab_id, transaction_id, forwarded_completion) = loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("BreakPane must reach Plugin");
+        if let PluginInstruction::NewTab(
+            _,
+            _,
+            _,
+            _,
+            tab_id,
+            transaction_id,
+            _,
+            _,
+            _,
+            _,
+            completion,
+            _,
+        ) = instruction
+        {
+            break (tab_id, transaction_id, completion);
+        }
+    };
+    let _ = mock_screen
+        .to_screen
+        .send(ScreenInstruction::LayoutPreparationFailed {
+            transaction_id,
+            tab_id: Some(destination_tab_id),
+            completion_tx: forwarded_completion,
+            layout_generation: None,
+            message: "injected break-pane preparation failure".to_owned(),
+            cleanup: LayoutPreparationCleanup::ReleasePluginReservation {
+                plugin_ids: vec![],
+                pty_cleanup_succeeded: true,
+            },
+        });
+    let (resolution, plugin_ids, cleanup_ack) =
+        await_layout_plugin_resolution(&plugin_receiver, transaction_id);
+    assert!(matches!(resolution, LayoutPluginResolution::Release { .. }));
+    assert!(plugin_ids.is_empty());
+    cleanup_ack
+        .send(Ok(LayoutPluginReceipt::Released { plugin_ids }))
+        .unwrap();
+    assert!(
+        await_layout_failure(completion_rx).contains("preparation failure"),
+        "the caller must receive the preparation failure"
+    );
+
+    let (after_panes, after_tabs) = observable_layout_state(&mock_screen);
+    let mut baseline_id_set = baseline_panes
+        .iter()
+        .map(|pane| (pane.pane_info.is_plugin, pane.pane_info.id))
+        .collect::<Vec<_>>();
+    let mut after_id_set = after_panes
+        .iter()
+        .map(|pane| (pane.pane_info.is_plugin, pane.pane_info.id))
+        .collect::<Vec<_>>();
+    baseline_id_set.sort_unstable();
+    after_id_set.sort_unstable();
+    assert_eq!(
+        after_id_set, baseline_id_set,
+        "preparation failure must neither drop nor duplicate any live pane"
+    );
+    assert_eq!(
+        after_tabs.tabs.len(),
+        baseline_tabs.tabs.len() + 1,
+        "the moved pane must remain reachable in one degraded destination tab"
+    );
+    assert!(
+        after_tabs
+            .tabs
+            .iter()
+            .any(|tab| tab.tab_id == destination_tab_id),
+        "degraded destination must be visible rather than stuck pending"
+    );
+    assert_no_baseline_pty_close(&pty_receiver, &baseline_ids);
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+pub fn break_pane_apply_rejection_preserves_live_pane_after_cleanup_ack() {
+    let size = Size { cols: 80, rows: 20 };
+    let initial_layout = TiledPaneLayout {
+        children: vec![TiledPaneLayout::default(), TiledPaneLayout::default()],
+        ..Default::default()
+    };
+    let mut mock_screen = MockScreen::new(size);
+    let screen_thread = mock_screen.run(Some(initial_layout), vec![]);
+    let (baseline_panes, baseline_tabs) = observable_layout_state(&mock_screen);
+    let baseline_ids = baseline_panes
+        .iter()
+        .map(|pane| {
+            if pane.pane_info.is_plugin {
+                PaneId::Plugin(pane.pane_info.id)
+            } else {
+                PaneId::Terminal(pane.pane_info.id)
+            }
+        })
+        .collect::<Vec<_>>();
+    let pty_receiver = mock_screen.pty_receiver.take().unwrap();
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    while pty_receiver.try_recv().is_ok() {}
+    while plugin_receiver.try_recv().is_ok() {}
+
+    let (completion_tx, completion_rx) = oneshot::channel();
+    let _ = mock_screen.to_screen.send(ScreenInstruction::BreakPane(
+        None,
+        1,
+        Some(NotificationEnd::new(completion_tx)),
+    ));
+    let (
+        tiled_layout,
+        floating_layout,
+        destination_tab_id,
+        transaction_id,
+        should_change_focus,
+        client,
+        forwarded_completion,
+    ) = loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("BreakPane must reach Plugin");
+        if let PluginInstruction::NewTab(
+            _,
+            _,
+            tiled_layout,
+            floating_layout,
+            tab_id,
+            transaction_id,
+            _,
+            _,
+            should_change_focus,
+            client,
+            completion,
+            _,
+        ) = instruction
+        {
+            break (
+                tiled_layout.expect("break layout must be explicit"),
+                floating_layout,
+                tab_id,
+                transaction_id,
+                should_change_focus,
+                client,
+                completion,
+            );
+        }
+    };
+    reject_after_apply_prepare_for_test(
+        mock_screen
+            .screen_thread_id
+            .expect("running MockScreen must publish its thread identity"),
+        transaction_id,
+    );
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ApplyLayout(
+        tiled_layout,
+        floating_layout,
+        vec![],
+        vec![],
+        HashMap::new(),
+        destination_tab_id,
+        should_change_focus,
+        client,
+        forwarded_completion,
+        None,
+        None,
+        transaction_id,
+    ));
+    let rejection =
+        assert_layout_transaction_rejected(&plugin_receiver, &pty_receiver, transaction_id, &[]);
+    assert!(rejection.contains("injected rejection"));
+    assert!(await_layout_failure(completion_rx).contains("injected rejection"));
+
+    let (after_panes, after_tabs) = observable_layout_state(&mock_screen);
+    let mut baseline_id_set = baseline_panes
+        .iter()
+        .map(|pane| (pane.pane_info.is_plugin, pane.pane_info.id))
+        .collect::<Vec<_>>();
+    let mut after_id_set = after_panes
+        .iter()
+        .map(|pane| (pane.pane_info.is_plugin, pane.pane_info.id))
+        .collect::<Vec<_>>();
+    baseline_id_set.sort_unstable();
+    after_id_set.sort_unstable();
+    assert_eq!(after_id_set, baseline_id_set);
+    assert_eq!(after_tabs.tabs.len(), baseline_tabs.tabs.len() + 1);
+    assert!(
+        after_tabs
+            .tabs
+            .iter()
+            .any(|tab| tab.tab_id == destination_tab_id),
+        "ACKed rejection must activate the moved pane's degraded baseline"
+    );
+    assert_no_baseline_pty_close(&pty_receiver, &baseline_ids);
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+pub fn late_apply_rejection_fails_blocking_completion_and_removes_pending_tab() {
+    let size = Size { cols: 80, rows: 20 };
+    let mut mock_screen = MockScreen::new(size);
+    let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
+    let baseline_state = observable_layout_state(&mock_screen);
+    let pty_receiver = mock_screen.pty_receiver.take().unwrap();
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    while pty_receiver.try_recv().is_ok() {}
+    while plugin_receiver.try_recv().is_ok() {}
+
+    let _ = mock_screen.to_screen.send(ScreenInstruction::NewTab(
+        None,
+        None,
+        Some(TiledPaneLayout::default()),
+        vec![],
+        Some("late-rejection".to_owned()),
+        (Some(vec![]), Some(vec![])),
+        None,
+        true,
+        false,
+        TabPlacement::AfterBase,
+        (1, false),
+        None,
+    ));
+    let (pending_tab_id, transaction_id) = loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("NewTab must hand the pending tab to the plugin thread");
+        if let PluginInstruction::NewTab(_, _, _, _, tab_id, transaction_id, ..) = instruction {
+            break (tab_id, transaction_id);
+        }
+    };
+
+    let terminal_id = 980;
+    let (completion_tx, completion_rx) = oneshot::channel();
+    let blocking_completion = NotificationEnd::new(completion_tx);
+    reject_after_apply_prepare_for_test(
+        mock_screen
+            .screen_thread_id
+            .expect("running MockScreen must publish its thread identity"),
+        transaction_id,
+    );
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ApplyLayout(
+        TiledPaneLayout::default(),
+        vec![],
+        vec![(terminal_id, None)],
+        vec![],
+        HashMap::new(),
+        pending_tab_id,
+        false,
+        (1, false),
+        None,
+        Some((terminal_id, blocking_completion)),
+        None,
+        transaction_id,
+    ));
+    let rejection = assert_layout_transaction_rejected(
+        &plugin_receiver,
+        &pty_receiver,
+        transaction_id,
+        &[PaneId::Terminal(terminal_id)],
+    );
+    assert!(rejection.contains("injected rejection after Apply prepare"));
+
+    let completion = completion_rx
+        .blocking_recv()
+        .expect("blocking completion must resolve on precommit rejection");
+    assert_eq!(completion.exit_status, Some(1));
+    assert!(
+        completion
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("injected rejection after Apply prepare"))
+    );
+
+    let rejected_state = observable_layout_state(&mock_screen);
+    assert_eq!(
+        rejected_state, baseline_state,
+        "ordinary late NewTab rejection must remove the exact pending tab and restore positions"
+    );
+    assert!(
+        rejected_state
+            .1
+            .tabs
+            .iter()
+            .all(|tab| tab.tab_id != pending_tab_id),
+        "the rejected pending tab must not survive as an uncollectable orphan"
+    );
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+pub fn rejected_apply_restores_exact_baseline_before_focus_transfer() {
+    let size = Size { cols: 80, rows: 20 };
+    let mut mock_screen = MockScreen::new(size);
+    let screen_thread = mock_screen.run(Some(transactional_baseline_layout()), vec![]);
+    install_transactional_baseline_tab(&mock_screen, 1, 10, 11);
+    let pty_receiver = mock_screen.pty_receiver.take().unwrap();
+    let pty_writer_receiver = mock_screen.pty_writer_receiver.take().unwrap();
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    let server_receiver = mock_screen.server_receiver.take().unwrap();
+    let _ = mock_screen
+        .to_screen
+        .send(ScreenInstruction::PtyBytes(10, b"\x1b[?1004h".to_vec()));
+    let baseline_state = observable_layout_state(&mock_screen);
+    while pty_receiver.try_recv().is_ok() {}
+    while pty_writer_receiver.try_recv().is_ok() {}
+    while plugin_receiver.try_recv().is_ok() {}
+    while server_receiver.try_recv().is_ok() {}
+    mock_screen
+        .os_input
+        .tty_stdin_writes
+        .lock()
+        .unwrap()
+        .clear();
+
+    let missing_plugin =
+        RunPluginOrAlias::from_url("file:/missing-partial-apply.wasm", &None, None, None).unwrap();
+    let provided_plugin =
+        RunPluginOrAlias::from_url("file:/provided-partial-apply.wasm", &None, None, None).unwrap();
+    let baseline_resource_ids = [
+        PaneId::Terminal(0),
+        PaneId::Plugin(1),
+        PaneId::Terminal(10),
+        PaneId::Plugin(11),
+    ];
+    let (completion_tx, completion_rx) = oneshot::channel();
+
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ApplyLayout(
+        TiledPaneLayout {
+            focus: Some(true),
+            ..Default::default()
+        },
+        vec![FloatingPaneLayout {
+            run: Some(Run::Plugin(missing_plugin)),
+            ..Default::default()
+        }],
+        vec![(920, None)],
+        vec![],
+        HashMap::from([(provided_plugin, vec![921])]),
+        1,
+        true,
+        (1, false),
+        Some(NotificationEnd::new(completion_tx)),
+        None,
+        None,
+        0,
+    ));
+    let rejection = await_layout_failure(completion_rx);
+    assert!(
+        rejection.contains("Failed to create new floating plugin pane"),
+        "the partial floating-phase failure must reach the transaction ACK: {rejection}"
+    );
+    assert_no_baseline_unload(&plugin_receiver, &[1, 11]);
+    assert_no_baseline_pty_resize(&pty_writer_receiver, &[0, 10]);
+    assert_no_baseline_pty_close(&pty_receiver, &baseline_resource_ids);
+    assert_no_rejected_layout_render(&server_receiver);
+    assert_no_rejected_layout_focus_bytes(&mock_screen.os_input);
+
+    let rejected_state = observable_layout_state(&mock_screen);
+    assert_eq!(
+        rejected_state, baseline_state,
+        "rejected Apply must restore panes, focus, visibility, viewport and swap metadata exactly"
+    );
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+pub fn rejected_override_with_default_retain_restores_exact_baseline() {
+    let size = Size { cols: 80, rows: 20 };
+    let mut mock_screen = MockScreen::new(size);
+    let screen_thread = mock_screen.run(Some(transactional_baseline_layout()), vec![]);
+    let pty_receiver = mock_screen.pty_receiver.take().unwrap();
+    let pty_writer_receiver = mock_screen.pty_writer_receiver.take().unwrap();
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    let server_receiver = mock_screen.server_receiver.take().unwrap();
+    let _ = mock_screen
+        .to_screen
+        .send(ScreenInstruction::PtyBytes(0, b"\x1b[?1004h".to_vec()));
+    let baseline_state = observable_layout_state(&mock_screen);
+    while pty_receiver.try_recv().is_ok() {}
+    while pty_writer_receiver.try_recv().is_ok() {}
+    while plugin_receiver.try_recv().is_ok() {}
+    while server_receiver.try_recv().is_ok() {}
+    mock_screen
+        .os_input
+        .tty_stdin_writes
+        .lock()
+        .unwrap()
+        .clear();
+    let missing_plugin =
+        RunPluginOrAlias::from_url("file:/missing-partial-override.wasm", &None, None, None)
+            .unwrap();
+    let provided_plugin =
+        RunPluginOrAlias::from_url("file:/provided-partial-override.wasm", &None, None, None)
+            .unwrap();
+    let replacement_layout = TiledPaneLayout {
+        run: Some(Run::Command(RunCommand {
+            command: PathBuf::from("partial-override-writer"),
+            ..Default::default()
+        })),
+        focus: Some(true),
+        ..Default::default()
+    };
+    let baseline_resource_ids = [PaneId::Terminal(0), PaneId::Plugin(1)];
+    let (completion_tx, completion_rx) = oneshot::channel();
+
+    let _ = mock_screen
+        .to_screen
+        .send(ScreenInstruction::OverrideLayoutComplete(
+            vec![TabOverrideResult {
+                tab_index: 0,
+                tab_name: None,
+                tiled_layout: replacement_layout,
+                floating_layouts: vec![FloatingPaneLayout {
+                    run: Some(Run::Plugin(missing_plugin)),
+                    ..Default::default()
+                }],
+                swap_tiled_layouts: Some(vec![]),
+                swap_floating_layouts: Some(vec![]),
+                new_terminal_pids: vec![(930, None)],
+                new_floating_pane_pids: vec![],
+                plugin_ids: HashMap::from([(provided_plugin, vec![931])]),
+            }],
+            false,
+            false,
+            1,
+            Some(NotificationEnd::new(completion_tx)),
+            None,
+            0,
+        ));
+    let rejection = await_layout_failure(completion_rx);
+    assert!(
+        rejection.contains("Failed to create new floating plugin pane"),
+        "the partial floating-phase failure must reach the transaction ACK: {rejection}"
+    );
+    assert_no_baseline_unload(&plugin_receiver, &[1]);
+    assert_no_baseline_pty_resize(&pty_writer_receiver, &[0]);
+    assert_no_baseline_pty_close(&pty_receiver, &baseline_resource_ids);
+    assert_no_rejected_layout_render(&server_receiver);
+    assert_no_rejected_layout_focus_bytes(&mock_screen.os_input);
+
+    let rejected_state = observable_layout_state(&mock_screen);
+    assert_eq!(
+        rejected_state, baseline_state,
+        "rejected Override must restore panes, focus, visibility, viewport and swap metadata exactly"
+    );
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+fn override_rejects_duplicate_tab_results_before_mutating_topology() {
+    let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 20 });
+    let screen_thread = mock_screen.run(Some(transactional_baseline_layout()), vec![]);
+    let baseline_state = observable_layout_state(&mock_screen);
+    let result = |terminal_id| TabOverrideResult {
+        tab_index: 0,
+        tab_name: None,
+        tiled_layout: TiledPaneLayout::default(),
+        floating_layouts: vec![],
+        swap_tiled_layouts: Some(vec![]),
+        swap_floating_layouts: Some(vec![]),
+        new_terminal_pids: vec![(terminal_id, None)],
+        new_floating_pane_pids: vec![],
+        plugin_ids: HashMap::new(),
+    };
+    let (completion_tx, completion_rx) = oneshot::channel();
+
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::OverrideLayoutComplete(
+            vec![result(930), result(931)],
+            false,
+            false,
+            1,
+            Some(NotificationEnd::new(completion_tx)),
+            None,
+            0,
+        ))
+        .unwrap();
+
+    let rejection = await_layout_failure(completion_rx);
+    assert!(
+        rejection.contains("duplicate Override tab results"),
+        "duplicate target cardinality must be rejected explicitly: {rejection}"
+    );
+    assert_eq!(observable_layout_state(&mock_screen), baseline_state);
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+fn override_rejects_duplicate_resource_ids_across_distinct_tabs() {
+    let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 20 });
+    let screen_thread = mock_screen.run(Some(transactional_baseline_layout()), vec![]);
+    install_transactional_baseline_tab(&mock_screen, 1, 10, 11);
+    let baseline_state = observable_layout_state(&mock_screen);
+    let result = |tab_index| TabOverrideResult {
+        tab_index,
+        tab_name: None,
+        tiled_layout: TiledPaneLayout::default(),
+        floating_layouts: vec![],
+        swap_tiled_layouts: Some(vec![]),
+        swap_floating_layouts: Some(vec![]),
+        new_terminal_pids: vec![(930, None)],
+        new_floating_pane_pids: vec![],
+        plugin_ids: HashMap::new(),
+    };
+    let (completion_tx, completion_rx) = oneshot::channel();
+
+    mock_screen
+        .to_screen
+        .send(ScreenInstruction::OverrideLayoutComplete(
+            vec![result(0), result(1)],
+            false,
+            false,
+            1,
+            Some(NotificationEnd::new(completion_tx)),
+            None,
+            0,
+        ))
+        .unwrap();
+
+    let rejection = await_layout_failure(completion_rx);
+    assert!(
+        rejection.contains("duplicate Override resource ids"),
+        "duplicate resource ownership must be rejected explicitly: {rejection}"
+    );
+    assert_eq!(observable_layout_state(&mock_screen), baseline_state);
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+pub fn rejected_multi_tab_override_rolls_back_prior_tabs_in_reverse() {
+    let size = Size { cols: 80, rows: 20 };
+    let mut mock_screen = MockScreen::new(size);
+    let screen_thread = mock_screen.run(Some(transactional_baseline_layout()), vec![]);
+    install_transactional_baseline_tab(&mock_screen, 1, 10, 11);
+    let pty_receiver = mock_screen.pty_receiver.take().unwrap();
+    let pty_writer_receiver = mock_screen.pty_writer_receiver.take().unwrap();
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    let server_receiver = mock_screen.server_receiver.take().unwrap();
+    let _ = mock_screen
+        .to_screen
+        .send(ScreenInstruction::PtyBytes(0, b"\x1b[?1004h".to_vec()));
+    let _ = mock_screen
+        .to_screen
+        .send(ScreenInstruction::PtyBytes(10, b"\x1b[?1004h".to_vec()));
+    let baseline_state = observable_layout_state(&mock_screen);
+    while pty_receiver.try_recv().is_ok() {}
+    while pty_writer_receiver.try_recv().is_ok() {}
+    while plugin_receiver.try_recv().is_ok() {}
+    while server_receiver.try_recv().is_ok() {}
+    mock_screen
+        .os_input
+        .tty_stdin_writes
+        .lock()
+        .unwrap()
+        .clear();
+
+    let first_writer_layout = TiledPaneLayout {
+        run: Some(Run::Command(RunCommand {
+            command: PathBuf::from("first-override-writer"),
+            ..Default::default()
+        })),
+        focus: Some(true),
+        ..Default::default()
+    };
+    let second_writer_layout = TiledPaneLayout {
+        run: Some(Run::Command(RunCommand {
+            command: PathBuf::from("second-override-writer"),
+            ..Default::default()
+        })),
+        focus: Some(true),
+        ..Default::default()
+    };
+    let missing_plugin =
+        RunPluginOrAlias::from_url("file:/missing-second-override.wasm", &None, None, None)
+            .unwrap();
+    let provided_plugin =
+        RunPluginOrAlias::from_url("file:/provided-second-override.wasm", &None, None, None)
+            .unwrap();
+    let baseline_resource_ids = [
+        PaneId::Terminal(0),
+        PaneId::Plugin(1),
+        PaneId::Terminal(10),
+        PaneId::Plugin(11),
+    ];
+    let (completion_tx, completion_rx) = oneshot::channel();
+
+    let _ = mock_screen
+        .to_screen
+        .send(ScreenInstruction::OverrideLayoutComplete(
+            vec![
+                TabOverrideResult {
+                    tab_index: 0,
+                    tab_name: None,
+                    tiled_layout: first_writer_layout,
+                    floating_layouts: vec![],
+                    swap_tiled_layouts: Some(vec![]),
+                    swap_floating_layouts: Some(vec![]),
+                    new_terminal_pids: vec![(930, None)],
+                    new_floating_pane_pids: vec![],
+                    plugin_ids: HashMap::new(),
+                },
+                TabOverrideResult {
+                    tab_index: 1,
+                    tab_name: None,
+                    tiled_layout: second_writer_layout,
+                    floating_layouts: vec![FloatingPaneLayout {
+                        run: Some(Run::Plugin(missing_plugin)),
+                        ..Default::default()
+                    }],
+                    swap_tiled_layouts: Some(vec![]),
+                    swap_floating_layouts: Some(vec![]),
+                    new_terminal_pids: vec![(940, None)],
+                    new_floating_pane_pids: vec![],
+                    plugin_ids: HashMap::from([(provided_plugin, vec![941])]),
+                },
+            ],
+            false,
+            false,
+            1,
+            Some(NotificationEnd::new(completion_tx)),
+            None,
+            0,
+        ));
+    let rejection = await_layout_failure(completion_rx);
+    assert!(
+        rejection.contains("Failed to create new floating plugin pane"),
+        "the second-tab failure must reject the complete writer: {rejection}"
+    );
+    assert_no_baseline_unload(&plugin_receiver, &[1, 11]);
+    assert_no_baseline_pty_resize(&pty_writer_receiver, &[0, 10]);
+    assert_no_baseline_pty_close(&pty_receiver, &baseline_resource_ids);
+    assert_no_rejected_layout_render(&server_receiver);
+    assert_no_rejected_layout_focus_bytes(&mock_screen.os_input);
+
+    let rejected_state = observable_layout_state(&mock_screen);
+    assert_eq!(
+        rejected_state, baseline_state,
+        "a second-tab failure must roll every previously mutated tab back exactly"
+    );
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+pub fn rejected_layout_preserves_terminal_grid_selection_and_scrollback() {
+    let size = Size { cols: 80, rows: 20 };
+    let client_id = 1;
+    let terminal_id = 0;
+    let mut screen = create_new_screen(size, false, false);
+    new_tab(&mut screen, terminal_id, 0);
+    let tab = screen.tabs.get_mut(&0).unwrap();
+
+    let content = (0..80)
+        .map(|line| format!("transaction-line-{line:02}\r\n"))
+        .collect::<String>();
+    tab.handle_pty_bytes(terminal_id, content.into_bytes())
+        .unwrap();
+    tab.handle_mouse_event(
+        &MouseEvent::new_left_press_event(Position::new(10, 5)),
+        client_id,
+    )
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(15));
+    tab.handle_mouse_event(
+        &MouseEvent::new_left_motion_event(Position::new(0, 25)),
+        client_id,
+    )
+    .unwrap();
+
+    let pane_id = PaneId::Terminal(terminal_id);
+    let baseline_contents =
+        tab.get_pane_with_id(pane_id)
+            .unwrap()
+            .pane_contents(Some(client_id), true, None);
+    let baseline_cursor = tab
+        .get_pane_with_id(pane_id)
+        .unwrap()
+        .cursor_coordinates(Some(client_id));
+    let baseline_selected_text = tab
+        .get_pane_with_id(pane_id)
+        .unwrap()
+        .get_selected_text(client_id);
+    let baseline_is_scrolled = tab.get_pane_with_id(pane_id).unwrap().is_scrolled();
+    assert!(baseline_is_scrolled);
+    assert!(baseline_selected_text.is_some());
+
+    let missing_plugin =
+        RunPluginOrAlias::from_url("file:/missing-grid-rollback.wasm", &None, None, None).unwrap();
+    let provided_plugin =
+        RunPluginOrAlias::from_url("file:/provided-grid-rollback.wasm", &None, None, None).unwrap();
+    let result = tab.begin_override_layout(crate::tab::OverrideLayoutOptions {
+        layout: TiledPaneLayout {
+            run: Some(Run::Command(RunCommand {
+                command: PathBuf::from("grid-rollback-writer"),
+                ..Default::default()
+            })),
+            focus: Some(true),
+            ..Default::default()
+        },
+        floating_panes_layout: vec![FloatingPaneLayout {
+            run: Some(Run::Plugin(missing_plugin)),
+            ..Default::default()
+        }],
+        new_swap_tiled_layouts: Some(vec![]),
+        new_swap_floating_layouts: Some(vec![]),
+        new_terminal_ids: vec![(970, None)],
+        new_floating_terminal_ids: vec![],
+        new_plugin_ids: HashMap::from([(provided_plugin, vec![971])]),
+        retain_existing_terminal_panes: false,
+        retain_existing_plugin_panes: false,
+        client_id,
+        blocking_terminal: None,
+    });
+    assert!(
+        result.is_err(),
+        "the injected floating-pane gap must reject"
+    );
+
+    let pane = tab.get_pane_with_id(pane_id).unwrap();
+    assert_eq!(
+        pane.pane_contents(Some(client_id), true, None),
+        baseline_contents,
+        "rollback must preserve the complete viewport, scrollback and selection payload"
+    );
+    assert_eq!(pane.cursor_coordinates(Some(client_id)), baseline_cursor);
+    assert_eq!(pane.get_selected_text(client_id), baseline_selected_text);
+    assert_eq!(pane.is_scrolled(), baseline_is_scrolled);
+}
+
+#[test]
+pub fn old_request_that_finishes_after_reclassification_self_cleans_exact_resources() {
+    let directory = tempfile::tempdir().unwrap();
+    let receipt_path = directory.path().join("transfer.json");
+    let run_id = "impl-260727-130000-01000";
+    let old_token = "cccccccccccccccccccccccccccccccc";
+    let new_token = "dddddddddddddddddddddddddddddddd";
+    let old_fence =
+        persist_test_viewer_receipt(&receipt_path, run_id, BucketKind::Finalized, 1, old_token);
+    let old_name = format!("{} [vc:{}]", run_id, old_token);
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut old_drawer = MockScreen::new(size);
+    old_drawer.session_name = "Finalized runs".to_owned();
+    let old_screen_thread = old_drawer.run(None, vec![]);
+    let plugin_receiver = old_drawer.plugin_receiver.take().unwrap();
+    let pty_receiver = old_drawer.pty_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+    while pty_receiver.try_recv().is_ok() {}
+
+    let _ = old_drawer.to_screen.send(ScreenInstruction::NewTab(
+        None,
+        None,
+        Some(fenced_viewer_layout(&old_fence)),
+        vec![],
+        Some(old_name.clone()),
+        (Some(vec![]), Some(vec![])),
+        None,
+        false,
+        false,
+        TabPlacement::Append,
+        (1, false),
+        None,
+    ));
+    let (old_tab_id, old_layout, old_generation, old_transaction_id) = loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("old generation must dispatch before reclassification");
+        if let PluginInstruction::NewTab(
+            _,
+            _,
+            Some(layout),
+            _,
+            tab_id,
+            transaction_id,
+            _,
+            _,
+            _,
+            _,
+            _,
+            Some(generation),
+        ) = instruction
+        {
+            break (tab_id, layout, generation, transaction_id);
+        }
+    };
+
+    let new_fence =
+        persist_test_viewer_receipt(&receipt_path, run_id, BucketKind::Failed, 2, new_token);
+    let stale_plugin =
+        RunPluginOrAlias::from_url("file:/late-old-viewer.wasm", &None, None, None).unwrap();
+    let _ = old_drawer.to_screen.send(ScreenInstruction::ApplyLayout(
+        old_layout,
+        vec![],
+        vec![(410, None)],
+        vec![],
+        HashMap::from([(stale_plugin, vec![411])]),
+        old_tab_id,
+        false,
+        (1, false),
+        None,
+        None,
+        Some(old_generation),
+        old_transaction_id,
+    ));
+    assert_layout_transaction_rejected(
+        &plugin_receiver,
+        &pty_receiver,
+        old_transaction_id,
+        &[PaneId::Terminal(410), PaneId::Plugin(411)],
+    );
+    let (tabs_tx, tabs_rx) = crossbeam::channel::bounded(1);
+    let _ = old_drawer.to_screen.send(ScreenInstruction::ListTabs {
+        client_id: 1,
+        response_channel: tabs_tx,
+    });
+    let tabs = tabs_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("old completion cleanup barrier must answer");
+    assert!(
+        tabs.tabs.iter().all(|tab| tab.name != old_name),
+        "a globally stale cross-drawer writer must close only its exact placeholder"
+    );
+    old_drawer.teardown(vec![old_screen_thread]);
+
+    let new_name = format!("{} [vc:{}]", run_id, new_token);
+    let mut new_drawer = MockScreen::new(size);
+    new_drawer.session_name = "Failed runs".to_owned();
+    let new_screen_thread = new_drawer.run(None, vec![]);
+    let new_plugin_receiver = new_drawer.plugin_receiver.take().unwrap();
+    while new_plugin_receiver.try_recv().is_ok() {}
+    let _ = new_drawer.to_screen.send(ScreenInstruction::NewTab(
+        None,
+        None,
+        Some(fenced_viewer_layout(&new_fence)),
+        vec![],
+        Some(new_name),
+        (Some(vec![]), Some(vec![])),
+        None,
+        false,
+        false,
+        TabPlacement::Append,
+        (1, false),
+        None,
+    ));
+    loop {
+        let (instruction, _) = new_plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("new drawer owner must dispatch after old self-cleanup");
+        if let PluginInstruction::NewTab(_, _, Some(layout), _, _, _, _, _, _, _, _, Some(_)) =
+            instruction
+        {
+            assert_eq!(layout.tab_instance_id.as_deref(), Some(new_token));
+            break;
+        }
+    }
+    new_drawer.teardown(vec![new_screen_thread]);
+}
+
+#[test]
+pub fn newer_same_viewer_generation_discards_apply_writer_without_closing_stable_tab() {
+    let directory = tempfile::tempdir().unwrap();
+    let receipt_path = directory.path().join("transfer.json");
+    let run_id = "impl-260727-133000-01000";
+    let token = "abababababababababababababababab";
+    let fence = persist_test_viewer_receipt(&receipt_path, run_id, BucketKind::Finalized, 1, token);
+    let tab_name = format!("{} [vc:{}]", run_id, token);
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut drawer = MockScreen::new(size);
+    drawer.session_name = "Finalized runs".to_owned();
+    let screen_thread = drawer.run(None, vec![]);
+    let plugin_receiver = drawer.plugin_receiver.take().unwrap();
+    let pty_receiver = drawer.pty_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+    while pty_receiver.try_recv().is_ok() {}
+
+    let (tab_id, layout, generation, transaction_id) =
+        dispatch_test_fenced_new_tab(&drawer, &plugin_receiver, &fence, &tab_name);
+    persist_test_viewer_receipt(&receipt_path, run_id, BucketKind::Finalized, 2, token);
+    let plugin =
+        RunPluginOrAlias::from_url("file:/same-viewer-pre-install.wasm", &None, None, None)
+            .unwrap();
+    let _ = drawer.to_screen.send(ScreenInstruction::ApplyLayout(
+        layout,
+        vec![],
+        vec![(420, None)],
+        vec![],
+        HashMap::from([(plugin, vec![421])]),
+        tab_id,
+        false,
+        (1, false),
+        None,
+        None,
+        Some(generation),
+        transaction_id,
+    ));
+    assert_layout_transaction_rejected(
+        &plugin_receiver,
+        &pty_receiver,
+        transaction_id,
+        &[PaneId::Terminal(420), PaneId::Plugin(421)],
+    );
+    let _ = drawer.to_screen.send(ScreenInstruction::RenderToClients);
+
+    let (tabs_tx, tabs_rx) = crossbeam::channel::bounded(1);
+    let _ = drawer.to_screen.send(ScreenInstruction::ListTabs {
+        client_id: 1,
+        response_channel: tabs_tx,
+    });
+    let tabs = tabs_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("same-viewer pre-install cleanup barrier must answer");
+    let stable_tab = tabs
+        .tabs
+        .iter()
+        .find(|tab| tab.name == tab_name)
+        .expect("a newer generation of the same viewer must retain the stable tab");
+    assert_eq!(stable_tab.tab_id, tab_id);
+    assert_eq!(
+        tabs.tab_instance_ids.get(&tab_id).map(String::as_str),
+        Some(token)
+    );
+    assert_eq!(
+        stable_tab.selectable_tiled_panes_count, 0,
+        "the superseded writer must not install resources"
+    );
+
+    drawer.teardown(vec![screen_thread]);
+}
+
+#[test]
+pub fn receipt_change_after_install_is_caught_by_the_final_fence() {
+    let directory = tempfile::tempdir().unwrap();
+    let receipt_path = directory.path().join("transfer.json");
+    let run_id = "impl-260727-140000-01000";
+    let old_token = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    let new_token = "ffffffffffffffffffffffffffffffff";
+    let old_fence =
+        persist_test_viewer_receipt(&receipt_path, run_id, BucketKind::Finalized, 1, old_token);
+    let old_name = format!("{} [vc:{}]", run_id, old_token);
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut drawer = MockScreen::new(size);
+    drawer.session_name = "Finalized runs".to_owned();
+    let screen_thread = drawer.run(None, vec![]);
+    let plugin_receiver = drawer.plugin_receiver.take().unwrap();
+    let pty_receiver = drawer.pty_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+    while pty_receiver.try_recv().is_ok() {}
+    let plugin =
+        RunPluginOrAlias::from_url("file:/post-install-old-viewer.wasm", &None, None, None)
+            .unwrap();
+    let mut old_layout = fenced_viewer_layout(&old_fence);
+    old_layout.children = vec![
+        TiledPaneLayout::default(),
+        TiledPaneLayout {
+            run: Some(Run::Plugin(plugin.clone())),
+            ..Default::default()
+        },
+    ];
+
+    let _ = drawer.to_screen.send(ScreenInstruction::NewTab(
+        None,
+        None,
+        Some(old_layout),
+        vec![],
+        Some(old_name.clone()),
+        (Some(vec![]), Some(vec![])),
+        None,
+        false,
+        false,
+        TabPlacement::Append,
+        (1, false),
+        None,
+    ));
+    let (tab_id, layout, generation, transaction_id) = loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("generation one must pass pre-dispatch verification");
+        if let PluginInstruction::NewTab(
+            _,
+            _,
+            Some(layout),
+            _,
+            tab_id,
+            transaction_id,
+            _,
+            _,
+            _,
+            _,
+            _,
+            Some(generation),
+        ) = instruction
+        {
+            break (tab_id, layout, generation, transaction_id);
+        }
+    };
+
+    let (installed_rx, resume_tx) = register_viewer_creation_post_install_test_hook(run_id);
+    let _ = drawer.to_screen.send(ScreenInstruction::ApplyLayout(
+        layout,
+        vec![],
+        vec![(510, None)],
+        vec![],
+        HashMap::from([(plugin, vec![511])]),
+        tab_id,
+        false,
+        (1, false),
+        None,
+        None,
+        Some(generation),
+        transaction_id,
+    ));
+    installed_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("the test barrier must observe resources installed before final verification");
+
+    // This is the decisive ordering: the old writer passed pre-install
+    // verification and mutated the tab, while the owner's earlier query could
+    // have observed no tab. The durable tombstone lands before final verify.
+    persist_test_viewer_receipt(&receipt_path, run_id, BucketKind::Failed, 2, new_token);
+    resume_tx.send(()).unwrap();
+    assert_layout_transaction_rejected(
+        &plugin_receiver,
+        &pty_receiver,
+        transaction_id,
+        &[PaneId::Terminal(510), PaneId::Plugin(511)],
+    );
+
+    let (tabs_tx, tabs_rx) = crossbeam::channel::bounded(1);
+    let _ = drawer.to_screen.send(ScreenInstruction::ListTabs {
+        client_id: 1,
+        response_channel: tabs_tx,
+    });
+    let tabs = tabs_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("post-install verification barrier must answer");
+    assert!(
+        tabs.tabs.iter().all(|tab| tab.name != old_name),
+        "final verification must exact-close a writer invalidated after install"
+    );
+    drawer.teardown(vec![screen_thread]);
+}
+
+#[test]
+pub fn same_viewer_reclassification_after_apply_install_removes_only_writer_resources() {
+    let directory = tempfile::tempdir().unwrap();
+    let receipt_path = directory.path().join("transfer.json");
+    let run_id = "impl-260727-143000-01000";
+    let token = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
+    let fence = persist_test_viewer_receipt(&receipt_path, run_id, BucketKind::Finalized, 1, token);
+    let tab_name = format!("{} [vc:{}]", run_id, token);
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut drawer = MockScreen::new(size);
+    drawer.session_name = "Finalized runs".to_owned();
+    let screen_thread = drawer.run(None, vec![]);
+    let plugin_receiver = drawer.plugin_receiver.take().unwrap();
+    let pty_receiver = drawer.pty_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+    while pty_receiver.try_recv().is_ok() {}
+
+    let (tab_id, layout, generation, transaction_id) =
+        dispatch_test_fenced_new_tab(&drawer, &plugin_receiver, &fence, &tab_name);
+    let plugin =
+        RunPluginOrAlias::from_url("file:/same-viewer-post-install.wasm", &None, None, None)
+            .unwrap();
+    let (installed_rx, resume_tx) = register_viewer_creation_post_install_test_hook(run_id);
+    let _ = drawer.to_screen.send(ScreenInstruction::ApplyLayout(
+        layout,
+        vec![],
+        vec![(520, None)],
+        vec![],
+        HashMap::from([(plugin, vec![521])]),
+        tab_id,
+        false,
+        (1, false),
+        None,
+        None,
+        Some(generation),
+        transaction_id,
+    ));
+    installed_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("same-viewer test must pause after resource install");
+
+    persist_test_viewer_receipt(&receipt_path, run_id, BucketKind::Finalized, 2, token);
+    assert_eq!(
+        fence.verify_for_install("Finalized runs", &tab_name),
+        Err(ViewerCreationFenceRejection::SupersededSameViewer)
+    );
+    resume_tx.send(()).unwrap();
+    let _ = drawer.to_screen.send(ScreenInstruction::RenderToClients);
+    let rejection = assert_layout_transaction_rejected(
+        &plugin_receiver,
+        &pty_receiver,
+        transaction_id,
+        &[PaneId::Terminal(520), PaneId::Plugin(521)],
+    );
+    assert!(
+        rejection.contains("superseded for the same viewer"),
+        "same-viewer rejection must not be promoted to ownership loss: {rejection}"
+    );
+
+    let (tabs_tx, tabs_rx) = crossbeam::channel::bounded(1);
+    let _ = drawer.to_screen.send(ScreenInstruction::ListTabs {
+        client_id: 1,
+        response_channel: tabs_tx,
+    });
+    let tabs = tabs_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("same-viewer post-install cleanup barrier must answer");
+    let stable_tab = tabs
+        .tabs
+        .iter()
+        .find(|tab| tab.tab_id == tab_id)
+        .unwrap_or_else(|| {
+            panic!(
+                "post-install supersession must preserve tab {tab_id}; observed tabs: {:?}",
+                tabs.tabs
+            )
+        });
+    assert_eq!(stable_tab.tab_id, tab_id);
+    assert_eq!(stable_tab.name, tab_name);
+    assert_eq!(
+        tabs.tab_instance_ids.get(&tab_id).map(String::as_str),
+        Some(token)
+    );
+    assert_eq!(
+        stable_tab.selectable_tiled_panes_count, 0,
+        "only the superseded writer's installed panes must be removed"
+    );
+
+    drawer.teardown(vec![screen_thread]);
+}
+
+fn assert_override_preinstall_rejection_cleanup(same_viewer: bool) {
+    let directory = tempfile::tempdir().unwrap();
+    let receipt_path = directory.path().join("transfer.json");
+    let run_id = if same_viewer {
+        "impl-260727-150000-01000"
+    } else {
+        "impl-260727-151000-01000"
+    };
+    let old_token = "12121212121212121212121212121212";
+    let replacement_token = if same_viewer {
+        old_token
+    } else {
+        "34343434343434343434343434343434"
+    };
+    let replacement_bucket = if same_viewer {
+        BucketKind::Finalized
+    } else {
+        BucketKind::Failed
+    };
+    let fence =
+        persist_test_viewer_receipt(&receipt_path, run_id, BucketKind::Finalized, 1, old_token);
+    let tab_name = format!("{} [vc:{}]", run_id, old_token);
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut drawer = MockScreen::new(size);
+    drawer.session_name = "Finalized runs".to_owned();
+    let screen_thread = drawer.run(None, vec![]);
+    let plugin_receiver = drawer.plugin_receiver.take().unwrap();
+    let pty_receiver = drawer.pty_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+    while pty_receiver.try_recv().is_ok() {}
+
+    let (tab_id, _, _, _) =
+        dispatch_test_fenced_new_tab(&drawer, &plugin_receiver, &fence, &tab_name);
+    let (recovery_tab_id, recovery_layout, recovery_generation, recovery_transaction_id) =
+        dispatch_test_fenced_recovery(&drawer, &plugin_receiver, &fence, &tab_name);
+    assert_eq!(recovery_tab_id, tab_id);
+    persist_test_viewer_receipt(
+        &receipt_path,
+        run_id,
+        replacement_bucket,
+        2,
+        replacement_token,
+    );
+
+    let plugin = RunPluginOrAlias::from_url(
+        "file:/override-pre-install-rejection.wasm",
+        &None,
+        None,
+        None,
+    )
+    .unwrap();
+    let _ = drawer
+        .to_screen
+        .send(ScreenInstruction::OverrideLayoutComplete(
+            vec![TabOverrideResult {
+                tab_index: tab_id,
+                tab_name: None,
+                tiled_layout: recovery_layout,
+                floating_layouts: vec![],
+                swap_tiled_layouts: Some(vec![]),
+                swap_floating_layouts: Some(vec![]),
+                new_terminal_pids: vec![(610, None)],
+                new_floating_pane_pids: vec![],
+                plugin_ids: HashMap::from([(plugin, vec![611])]),
+            }],
+            true,
+            true,
+            1,
+            None,
+            Some(recovery_generation),
+            recovery_transaction_id,
+        ));
+    assert_layout_transaction_rejected(
+        &plugin_receiver,
+        &pty_receiver,
+        recovery_transaction_id,
+        &[PaneId::Terminal(610), PaneId::Plugin(611)],
+    );
+    let _ = drawer.to_screen.send(ScreenInstruction::RenderToClients);
+
+    let (tabs_tx, tabs_rx) = crossbeam::channel::bounded(1);
+    let _ = drawer.to_screen.send(ScreenInstruction::ListTabs {
+        client_id: 1,
+        response_channel: tabs_tx,
+    });
+    let tabs = tabs_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("override pre-install cleanup barrier must answer");
+    let stable_tab = tabs.tabs.iter().find(|tab| tab.name == tab_name);
+    if same_viewer {
+        let stable_tab =
+            stable_tab.expect("same-viewer supersession must preserve the recovered tab");
+        assert_eq!(stable_tab.tab_id, tab_id);
+        assert_eq!(stable_tab.selectable_tiled_panes_count, 0);
+        assert_eq!(
+            tabs.tab_instance_ids.get(&tab_id).map(String::as_str),
+            Some(old_token)
+        );
+    } else {
+        assert!(
+            stable_tab.is_none(),
+            "cross-token/bucket ownership loss must exact-close the stale tab"
+        );
+    }
+
+    drawer.teardown(vec![screen_thread]);
+}
+
+#[test]
+pub fn newer_same_viewer_generation_rejects_override_before_install_without_closing_tab() {
+    assert_override_preinstall_rejection_cleanup(true);
+}
+
+#[test]
+pub fn cross_viewer_tombstone_rejects_override_before_install_and_exact_closes_tab() {
+    assert_override_preinstall_rejection_cleanup(false);
+}
+
+fn assert_override_postinstall_rejection_cleanup(same_viewer: bool) {
+    let directory = tempfile::tempdir().unwrap();
+    let receipt_path = directory.path().join("transfer.json");
+    let run_id = if same_viewer {
+        "impl-260727-152000-01000"
+    } else {
+        "impl-260727-153000-01000"
+    };
+    let old_token = "56565656565656565656565656565656";
+    let replacement_token = if same_viewer {
+        old_token
+    } else {
+        "78787878787878787878787878787878"
+    };
+    let replacement_bucket = if same_viewer {
+        BucketKind::Finalized
+    } else {
+        BucketKind::NeedsAttention
+    };
+    let fence =
+        persist_test_viewer_receipt(&receipt_path, run_id, BucketKind::Finalized, 1, old_token);
+    let tab_name = format!("{} [vc:{}]", run_id, old_token);
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut drawer = MockScreen::new(size);
+    drawer.session_name = "Finalized runs".to_owned();
+    let screen_thread = drawer.run(None, vec![]);
+    let plugin_receiver = drawer.plugin_receiver.take().unwrap();
+    let pty_receiver = drawer.pty_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+    while pty_receiver.try_recv().is_ok() {}
+
+    let (tab_id, _, _, _) =
+        dispatch_test_fenced_new_tab(&drawer, &plugin_receiver, &fence, &tab_name);
+    let (recovery_tab_id, recovery_layout, recovery_generation, recovery_transaction_id) =
+        dispatch_test_fenced_recovery(&drawer, &plugin_receiver, &fence, &tab_name);
+    assert_eq!(recovery_tab_id, tab_id);
+    let plugin = RunPluginOrAlias::from_url(
+        "file:/override-post-install-rejection.wasm",
+        &None,
+        None,
+        None,
+    )
+    .unwrap();
+    let (installed_rx, resume_tx) = register_viewer_creation_post_install_test_hook(run_id);
+    let _ = drawer
+        .to_screen
+        .send(ScreenInstruction::OverrideLayoutComplete(
+            vec![TabOverrideResult {
+                tab_index: tab_id,
+                tab_name: None,
+                tiled_layout: recovery_layout,
+                floating_layouts: vec![],
+                swap_tiled_layouts: Some(vec![]),
+                swap_floating_layouts: Some(vec![]),
+                new_terminal_pids: vec![(710, None)],
+                new_floating_pane_pids: vec![],
+                plugin_ids: HashMap::from([(plugin, vec![711])]),
+            }],
+            true,
+            true,
+            1,
+            None,
+            Some(recovery_generation),
+            recovery_transaction_id,
+        ));
+    installed_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("override test must pause after resources are installed");
+
+    persist_test_viewer_receipt(
+        &receipt_path,
+        run_id,
+        replacement_bucket,
+        2,
+        replacement_token,
+    );
+    resume_tx.send(()).unwrap();
+    let _ = drawer.to_screen.send(ScreenInstruction::RenderToClients);
+    let rejection = assert_layout_transaction_rejected(
+        &plugin_receiver,
+        &pty_receiver,
+        recovery_transaction_id,
+        &[PaneId::Terminal(710), PaneId::Plugin(711)],
+    );
+    if same_viewer {
+        assert!(
+            rejection.contains("superseded for the same viewer"),
+            "same-viewer rejection must not be promoted to ownership loss: {rejection}"
+        );
+    } else {
+        assert!(
+            rejection.contains("lost ownership"),
+            "cross-viewer rejection must remain ownership loss: {rejection}"
+        );
+    }
+
+    let (tabs_tx, tabs_rx) = crossbeam::channel::bounded(1);
+    let _ = drawer.to_screen.send(ScreenInstruction::ListTabs {
+        client_id: 1,
+        response_channel: tabs_tx,
+    });
+    let tabs = tabs_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("override post-install cleanup barrier must answer");
+    let stable_tab = tabs.tabs.iter().find(|tab| tab.name == tab_name);
+    if same_viewer {
+        let stable_tab = stable_tab
+            .expect("same-viewer post-install supersession must preserve the recovered tab");
+        assert_eq!(stable_tab.tab_id, tab_id);
+        assert_eq!(stable_tab.selectable_tiled_panes_count, 0);
+        assert_eq!(
+            tabs.tab_instance_ids.get(&tab_id).map(String::as_str),
+            Some(old_token)
+        );
+    } else {
+        assert!(
+            stable_tab.is_none(),
+            "cross-token/bucket post-install ownership loss must exact-close the stale tab"
+        );
+    }
+
+    drawer.teardown(vec![screen_thread]);
+}
+
+#[test]
+pub fn newer_same_viewer_generation_after_override_install_removes_only_writer_resources() {
+    assert_override_postinstall_rejection_cleanup(true);
+}
+
+#[test]
+pub fn cross_viewer_tombstone_after_override_install_exact_closes_tab_and_resources() {
+    assert_override_postinstall_rejection_cleanup(false);
+}
+
+#[test]
+pub fn durable_empty_tab_retry_is_generation_fenced_and_does_not_duplicate_resources() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 1;
+    let viewer_name = "Finalized runs";
+    let token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let durable_layout = || TiledPaneLayout {
+        tab_instance_id: Some(token.to_owned()),
+        ..Default::default()
+    };
+
+    let mut mock_screen = MockScreen::new(size);
+    let screen_thread = mock_screen.run(None, vec![]);
+    let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+    let pty_receiver = mock_screen.pty_receiver.take().unwrap();
+    while plugin_receiver.try_recv().is_ok() {}
+    while pty_receiver.try_recv().is_ok() {}
+
+    let _ = mock_screen.to_screen.send(ScreenInstruction::NewTab(
+        None,
+        None,
+        Some(durable_layout()),
+        vec![],
+        Some(viewer_name.to_owned()),
+        (Some(vec![]), Some(vec![])),
+        None,
+        false,
+        false,
+        TabPlacement::Append,
+        (client_id, false),
+        None,
+    ));
+    let (viewer_tab_id, generation_one, transaction_one) = loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("first durable layout dispatch must reach the plugin worker");
+        if let PluginInstruction::NewTab(
+            _,
+            _,
+            Some(layout),
+            _,
+            tab_id,
+            transaction_id,
+            _,
+            _,
+            _,
+            _,
+            _,
+            Some(generation),
+        ) = instruction
+            && layout
+                .tab_instance_id
+                .as_deref()
+                .is_some_and(|instance_id| instance_id.eq_ignore_ascii_case(token))
+        {
+            break (tab_id, generation, transaction_id);
+        }
+    };
+    assert_eq!(generation_one.generation, 1);
+
+    // The first asynchronous writer is deliberately left unfinished. The
+    // retry must target this exact empty reservation instead of allocating a
+    // second tab.
+    let _ = mock_screen.to_screen.send(ScreenInstruction::NewTab(
+        None,
+        None,
+        Some(durable_layout()),
+        vec![],
+        Some(viewer_name.to_owned()),
+        (Some(vec![]), Some(vec![])),
+        None,
+        false,
+        false,
+        TabPlacement::Append,
+        (client_id, false),
+        None,
+    ));
+    let (retry_tab_id, retry_layout, generation_two, transaction_two) = loop {
+        let (instruction, _) = plugin_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("durable retry must reach the plugin worker");
+        if let PluginInstruction::OverrideLayout(
+            _,
+            _,
+            layouts,
+            transaction_id,
+            retain_terminals,
+            retain_plugins,
+            _,
+            _,
+            Some(generation),
+        ) = instruction
+            && layouts.len() == 1
+            && layouts[0]
+                .tiled_layout
+                .tab_instance_id
+                .as_deref()
+                .is_some_and(|instance_id| instance_id.eq_ignore_ascii_case(token))
+        {
+            assert!(retain_terminals);
+            assert!(retain_plugins);
+            break (
+                layouts[0].tab_index,
+                layouts[0].tiled_layout.clone(),
+                generation,
+                transaction_id,
+            );
+        }
+    };
+    assert_eq!(retry_tab_id, viewer_tab_id);
+    assert_eq!(generation_two.tab_id, viewer_tab_id);
+    assert_eq!(generation_two.generation, 2);
+
+    let (tabs_tx, tabs_rx) = crossbeam::channel::bounded(1);
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ListTabs {
+        client_id,
+        response_channel: tabs_tx,
+    });
+    let tabs = tabs_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("tab-list barrier must answer");
+    let viewer_tabs = tabs
+        .tabs
+        .iter()
+        .filter(|tab| tab.name == viewer_name)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        viewer_tabs.len(),
+        1,
+        "retry must retain exactly one viewer tab"
+    );
+    assert_eq!(viewer_tabs[0].tab_id, viewer_tab_id);
+    assert_eq!(
+        viewer_tabs[0].selectable_tiled_panes_count, 0,
+        "the retry must be able to heal the exact empty preallocated tab"
+    );
+    assert_eq!(
+        tabs.tab_instance_ids
+            .get(&viewer_tab_id)
+            .map(String::as_str),
+        Some(token)
+    );
+
+    let _ = mock_screen
+        .to_screen
+        .send(ScreenInstruction::OverrideLayoutComplete(
+            vec![TabOverrideResult {
+                tab_index: viewer_tab_id,
+                tab_name: None,
+                tiled_layout: retry_layout,
+                floating_layouts: vec![],
+                swap_tiled_layouts: Some(vec![]),
+                swap_floating_layouts: Some(vec![]),
+                new_terminal_pids: vec![(200, None)],
+                new_floating_pane_pids: vec![],
+                plugin_ids: HashMap::new(),
+            }],
+            true,
+            true,
+            client_id,
+            None,
+            Some(generation_two.clone()),
+            transaction_two,
+        ));
+    assert_layout_transaction_committed(&plugin_receiver, &pty_receiver, transaction_two);
+
+    let (ready_panes_tx, ready_panes_rx) = crossbeam::channel::bounded(1);
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ListPanes {
+        show_all: true,
+        response_channel: ready_panes_tx,
+    });
+    let ready_panes = ready_panes_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("pane-list barrier after recovery must answer");
+    assert!(
+        ready_panes.iter().any(|pane| {
+            pane.tab_id == viewer_tab_id && pane.pane_info.id == 200 && !pane.pane_info.is_plugin
+        }),
+        "the current generation must make the recovered terminal visible"
+    );
+    let stale_plugin =
+        RunPluginOrAlias::from_url("file:/path/to/stale/plugin", &None, None, None).unwrap();
+    let mut stale_plugin_ids = HashMap::new();
+    stale_plugin_ids.insert(stale_plugin, vec![300]);
+    while pty_receiver.try_recv().is_ok() {}
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ApplyLayout(
+        durable_layout(),
+        vec![],
+        vec![(100, None)],
+        vec![],
+        stale_plugin_ids,
+        viewer_tab_id,
+        false,
+        (client_id, false),
+        None,
+        None,
+        Some(generation_one),
+        transaction_one,
+    ));
+    assert_layout_transaction_rejected(
+        &plugin_receiver,
+        &pty_receiver,
+        transaction_one,
+        &[PaneId::Terminal(100), PaneId::Plugin(300)],
+    );
+
+    let (final_panes_tx, final_panes_rx) = crossbeam::channel::bounded(1);
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ListPanes {
+        show_all: true,
+        response_channel: final_panes_tx,
+    });
+    let final_panes = final_panes_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("pane-list barrier after stale completion must answer");
+    assert!(
+        final_panes
+            .iter()
+            .all(|pane| { pane.pane_info.id != 100 || pane.pane_info.is_plugin })
+            && final_panes
+                .iter()
+                .all(|pane| { pane.pane_info.id != 300 || !pane.pane_info.is_plugin }),
+        "a late generation must not enter the recovered tab"
+    );
+    let viewer_panes = final_panes
+        .iter()
+        .filter(|pane| pane.tab_id == viewer_tab_id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        viewer_panes.len(),
+        1,
+        "generation two followed by late generation one must leave one viewer pane"
+    );
+    assert_eq!(viewer_panes[0].pane_info.id, 200);
+
+    // The public token/name guard is the first ABA fence. It must fail before
+    // either asynchronous layout worker receives a replacement dispatch.
+    while plugin_receiver.try_recv().is_ok() {}
+    let _ = mock_screen.to_screen.send(ScreenInstruction::NewTab(
+        None,
+        None,
+        Some(durable_layout()),
+        vec![],
+        Some("Needs attention".to_owned()),
+        (Some(vec![]), Some(vec![])),
+        None,
+        false,
+        false,
+        TabPlacement::Append,
+        (client_id, false),
+        None,
+    ));
+    let (final_tabs_tx, final_tabs_rx) = crossbeam::channel::bounded(1);
+    let _ = mock_screen.to_screen.send(ScreenInstruction::ListTabs {
+        client_id,
+        response_channel: final_tabs_tx,
+    });
+    let final_tabs = final_tabs_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("final tab-list barrier must answer");
+    while let Ok((instruction, _)) = plugin_receiver.try_recv() {
+        assert!(
+            !matches!(
+                instruction,
+                PluginInstruction::NewTab(..) | PluginInstruction::OverrideLayout(..)
+            ),
+            "an ABA name mismatch must fail before async dispatch"
+        );
+    }
+    assert_eq!(
+        final_tabs
+            .tabs
+            .iter()
+            .filter(|tab| tab.name == viewer_name)
+            .count(),
+        1
+    );
+    assert_eq!(final_tabs.tabs.len(), 2, "ABA retry must not add a tab");
+
+    mock_screen.teardown(vec![screen_thread]);
+}
+
+#[test]
+pub fn gc_safe_close_accepts_an_inactive_start_suspended_terminal() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, true, true);
+    new_tab(&mut screen, 1, 0);
+    new_tab(&mut screen, 2, 1);
+    screen.get_tab_by_id_mut(1).unwrap().name = "viewer".to_owned();
+    screen.get_tab_by_id_mut(1).unwrap().hold_pane(
+        PaneId::Terminal(2),
+        None,
+        true,
+        RunCommand::default(),
+    );
+    screen
+        .go_to_tab(1, 1)
+        .expect("client should leave the viewer tab");
+    let incarnation = screen.session_incarnation.clone();
+    let tab_instance_id = screen.get_tab_by_id(1).unwrap().instance_id.clone();
+
+    screen
+        .close_tab_by_id_if_name_if_quiescent(1, "viewer", &incarnation, &tab_instance_id)
+        .expect("inactive start_suspended viewer should be GC-safe");
+    assert!(screen.get_tab_by_id(1).is_none());
+    assert!(screen.get_tab_by_id(0).is_some());
+}
+
+#[test]
+pub fn gc_safe_close_accepts_all_runtime_viewer_plugin_locations() {
+    for plugin_name in ["compact-bar", "session-manager", "status-bar"] {
+        for location in [plugin_name.to_owned(), format!("vc-frame:{plugin_name}")] {
+            let size = Size {
+                cols: 121,
+                rows: 20,
+            };
+            let mut screen = create_new_screen(size, true, true);
+            let (to_plugin, _plugin_receiver): ChannelWithContext<PluginInstruction> =
+                channels::unbounded();
+            screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+            new_tab(&mut screen, 1, 0);
+            new_tab(&mut screen, 2, 1);
+            let plugin = RunPluginOrAlias::from_url(&location, &None, None, None)
+                .expect("valid viewer plugin location");
+            assert_eq!(
+                plugin.location_string(),
+                location,
+                "fixture must preserve the exact runtime location checked by viewer GC"
+            );
+            screen
+                .get_tab_by_id_mut(1)
+                .unwrap()
+                .new_tiled_pane(crate::tab::NewTiledPaneOptions {
+                    pid: PaneId::Plugin(90),
+                    initial_pane_title: Some(plugin.location_string()),
+                    invoked_with: Some(Run::Plugin(plugin)),
+                    start_suppressed: false,
+                    should_focus_pane: false,
+                    client_id: None,
+                    blocking_notification: None,
+                    borderless: Some(false),
+                })
+                .expect("viewer plugin pane should use the runtime creation path");
+            screen.get_tab_by_id_mut(1).unwrap().name = "viewer".to_owned();
+            screen.get_tab_by_id_mut(1).unwrap().hold_pane(
+                PaneId::Terminal(2),
+                None,
+                true,
+                RunCommand::default(),
+            );
+            screen
+                .go_to_tab(1, 1)
+                .expect("client should leave the viewer tab");
+            let incarnation = screen.session_incarnation.clone();
+            let tab_instance_id = screen.get_tab_by_id(1).unwrap().instance_id.clone();
+
+            screen
+                .close_tab_by_id_if_name_if_quiescent(1, "viewer", &incarnation, &tab_instance_id)
+                .unwrap_or_else(|error| {
+                    panic!("viewer plugin location {location:?} should be GC-safe: {error}")
+                });
+            assert!(screen.get_tab_by_id(1).is_none());
+        }
+    }
+}
+
+#[test]
+pub fn gc_safe_close_refuses_a_started_rerun() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, true, true);
+    new_tab(&mut screen, 1, 0);
+    new_tab(&mut screen, 2, 1);
+    screen.get_tab_by_id_mut(1).unwrap().name = "viewer".to_owned();
+    screen.get_tab_by_id_mut(1).unwrap().hold_pane(
+        PaneId::Terminal(2),
+        None,
+        true,
+        RunCommand::default(),
+    );
+    screen
+        .go_to_tab(1, 1)
+        .expect("client should leave the viewer tab");
+    let incarnation = screen.session_incarnation.clone();
+    let tab_instance_id = screen.get_tab_by_id(1).unwrap().instance_id.clone();
+    screen
+        .get_tab_by_id_mut(1)
+        .unwrap()
+        .rerun_terminal_pane_with_id(2, None);
+
+    let error = screen
+        .close_tab_by_id_if_name_if_quiescent(1, "viewer", &incarnation, &tab_instance_id)
+        .expect_err("a rerun that left held state must survive viewer GC");
+    assert!(error.to_string().contains("is running (not held)"));
+    assert!(screen.get_tab_by_id(1).is_some());
+}
+
+#[test]
+pub fn gc_safe_close_refuses_focus_changed_after_identity_inventory() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, true, true);
+    new_tab(&mut screen, 1, 0);
+    new_tab(&mut screen, 2, 1);
+    screen.get_tab_by_id_mut(1).unwrap().name = "viewer".to_owned();
+    screen.get_tab_by_id_mut(1).unwrap().hold_pane(
+        PaneId::Terminal(2),
+        None,
+        true,
+        RunCommand::default(),
+    );
+    screen
+        .go_to_tab(1, 1)
+        .expect("client should initially leave the viewer tab");
+
+    // This is the stale inventory snapshot. Focus changes before the atomic
+    // server mutation, so the server must decide from current state instead.
+    let incarnation = screen.session_incarnation.clone();
+    let tab_instance_id = screen.get_tab_by_id(1).unwrap().instance_id.clone();
+    screen
+        .go_to_tab(2, 1)
+        .expect("client should focus the inventoried viewer tab");
+
+    let error = screen
+        .close_tab_by_id_if_name_if_quiescent(1, "viewer", &incarnation, &tab_instance_id)
+        .expect_err("a newly focused viewer must survive stale GC inventory");
+    assert!(error.to_string().contains("tab is active for client 1"));
+    assert!(screen.get_tab_by_id(1).is_some());
+}
+
+#[test]
+pub fn gc_safe_close_refuses_an_unexpected_plugin_surface() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, true, true);
+    let (to_plugin, _plugin_receiver): ChannelWithContext<PluginInstruction> =
+        channels::unbounded();
+    screen.bus.senders.to_plugin = Some(SenderWithContext::new(to_plugin));
+    new_tab(&mut screen, 1, 0);
+    let plugin = RunPluginOrAlias::from_url("file:/unexpected/plugin.wasm", &None, None, None)
+        .expect("valid fixture plugin URL");
+    new_tab(&mut screen, 2, 1);
+    screen
+        .get_tab_by_id_mut(1)
+        .unwrap()
+        .new_tiled_pane(crate::tab::NewTiledPaneOptions {
+            pid: PaneId::Plugin(90),
+            initial_pane_title: Some(plugin.location_string()),
+            invoked_with: Some(Run::Plugin(plugin)),
+            start_suppressed: false,
+            should_focus_pane: false,
+            client_id: None,
+            blocking_notification: None,
+            borderless: Some(false),
+        })
+        .expect("fixture plugin pane should use the runtime creation path");
+    screen.get_tab_by_id_mut(1).unwrap().name = "viewer".to_owned();
+    screen.get_tab_by_id_mut(1).unwrap().hold_pane(
+        PaneId::Terminal(2),
+        None,
+        true,
+        RunCommand::default(),
+    );
+    assert!(
+        screen.get_tab_by_id(1).unwrap().has_plugin(90),
+        "fixture must install the unexpected plugin surface; panes: {:?}",
+        screen.get_tab_by_id(1).unwrap().get_all_pane_ids()
+    );
+    screen
+        .go_to_tab(1, 1)
+        .expect("client should leave the viewer tab");
+    let incarnation = screen.session_incarnation.clone();
+    let tab_instance_id = screen.get_tab_by_id(1).unwrap().instance_id.clone();
+
+    let error = screen
+        .close_tab_by_id_if_name_if_quiescent(1, "viewer", &incarnation, &tab_instance_id)
+        .expect_err("unexpected plugin work must survive viewer GC");
+    assert!(
+        error
+            .to_string()
+            .contains("unexpected plugin surface \"file:/unexpected/plugin.wasm\"")
+    );
+    assert!(screen.get_tab_by_id(1).is_some());
+}
+
+#[test]
 pub fn send_cli_close_tab_by_id_action() {
     let size = Size {
         cols: 121,
@@ -5517,9 +10916,9 @@ fn create_new_screen_with_message_capture(size: Size) -> ScreenWithMessageCaptur
     let web_server_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
     let web_server_port = 8080;
     let visual_bell = true;
-    let screen = Screen::new(
+    let screen = Screen::new(crate::screen::ScreenOptions {
         bus,
-        &client_attributes,
+        client_attributes: &client_attributes,
         max_panes,
         mode_info,
         draw_pane_frames,
@@ -5539,18 +10938,18 @@ fn create_new_screen_with_message_capture(size: Size) -> ScreenWithMessageCaptur
         layout_dir,
         explicitly_disable_kitty_keyboard_protocol,
         stacked_resize,
-        None,
-        false,
+        default_editor: None,
+        web_clients_allowed: false,
         web_sharing,
-        true,
-        true,
+        advanced_mouse_actions: true,
+        mouse_hover_effects: true,
         visual_bell,
-        false, // focus_follows_mouse
-        false, // mouse_click_through
+        focus_follows_mouse: false,
+        mouse_click_through: false,
         web_server_ip,
         web_server_port,
-        Arc::new(AtomicBool::new(false)),
-    );
+        has_clients_flag: Arc::new(AtomicBool::new(false)),
+    });
     (screen, messages)
 }
 
@@ -5742,12 +11141,14 @@ fn subscriber_state_registered_for_multiple_panes() {
 
     let sub = screen.pane_render_subscribers.get(&100).unwrap();
     assert_eq!(sub.pane_ids.len(), 2);
-    assert!(sub
-        .pane_ids
-        .contains(&zellij_utils::data::PaneId::Terminal(1)));
-    assert!(sub
-        .pane_ids
-        .contains(&zellij_utils::data::PaneId::Terminal(2)));
+    assert!(
+        sub.pane_ids
+            .contains(&zellij_utils::data::PaneId::Terminal(1))
+    );
+    assert!(
+        sub.pane_ids
+            .contains(&zellij_utils::data::PaneId::Terminal(2))
+    );
 }
 
 #[test]
@@ -7049,7 +12450,13 @@ pub fn send_cli_close_tab_with_tab_id() {
     std::thread::sleep(std::time::Duration::from_millis(100));
     mock_screen.new_tab(TiledPaneLayout::default());
     std::thread::sleep(std::time::Duration::from_millis(100));
-    let cli_action = CliAction::CloseTab { tab_id: Some(1) };
+    let cli_action = CliAction::CloseTab {
+        tab_id: Some(1),
+        expected_name: None,
+        expected_session_incarnation: None,
+        expected_tab_instance_id: None,
+        gc_if_quiescent: false,
+    };
     send_cli_action_to_server(&session_metadata, cli_action, client_id);
     std::thread::sleep(std::time::Duration::from_millis(100));
     mock_screen.teardown(vec![server_thread, screen_thread]);
@@ -7293,6 +12700,10 @@ pub fn send_cli_dump_screen_action_with_ansi() {
         full: true,
         pane_id: None,
         ansi: true,
+        expected_tab_id: None,
+        expected_tab_name: None,
+        expected_session_incarnation: None,
+        expected_tab_instance_id: None,
     };
     let _ = mock_screen.to_screen.send(ScreenInstruction::PtyBytes(
         0,
@@ -7336,6 +12747,10 @@ pub fn send_cli_dump_screen_action_without_ansi_strips_codes() {
         full: true,
         pane_id: None,
         ansi: false,
+        expected_tab_id: None,
+        expected_tab_name: None,
+        expected_session_incarnation: None,
+        expected_tab_instance_id: None,
     };
     let _ = mock_screen.to_screen.send(ScreenInstruction::PtyBytes(
         0,
@@ -7351,6 +12766,111 @@ pub fn send_cli_dump_screen_action_without_ansi_strips_codes() {
         !dumped_content.contains("\x1b["),
         "Dumped file should NOT contain ANSI escape codes when ansi flag is false. Content: {:?}",
         dumped_content
+    );
+}
+
+#[test]
+pub fn copy_pane_scrollback_action_pipes_focused_pane_full_scrollback_to_copy_command() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let copied_text_path = temp_dir.path().join("copied-pane.txt");
+    #[cfg(not(windows))]
+    let copy_command = {
+        let copy_script_path = temp_dir.path().join("copy-current-pane.sh");
+        std::fs::write(&copy_script_path, "cat > \"$1\"\n").unwrap();
+        format!(
+            "/bin/sh {} {}",
+            copy_script_path.display(),
+            copied_text_path.display()
+        )
+    };
+    #[cfg(windows)]
+    let copy_command = {
+        let output_path = copied_text_path.to_string_lossy().replace('\'', "''");
+        let script = format!(
+            "[System.IO.File]::WriteAllText('{}', [Console]::In.ReadToEnd(), \
+             [System.Text.UTF8Encoding]::new($false))",
+            output_path
+        );
+        let encoded_script = script
+            .encode_utf16()
+            .flat_map(|code_unit| code_unit.to_le_bytes())
+            .collect::<Vec<_>>();
+        format!(
+            "powershell.exe -NoProfile -NonInteractive -EncodedCommand {}",
+            base64::encode(encoded_script)
+        )
+    };
+
+    let size = Size { cols: 80, rows: 5 };
+    let client_id = 10;
+    let initial_layout = TiledPaneLayout {
+        children_split_direction: SplitDirection::Vertical,
+        children: vec![TiledPaneLayout::default(), TiledPaneLayout::default()],
+        ..Default::default()
+    };
+
+    let mut mock_screen = MockScreen::new(size);
+    mock_screen.config.options.copy_command = Some(copy_command);
+    let session_metadata = mock_screen.clone_session_metadata();
+    let screen_thread = mock_screen.run(Some(initial_layout), vec![]);
+    let received_server_instructions = Arc::new(Mutex::new(vec![]));
+    let server_receiver = mock_screen.server_receiver.take().unwrap();
+    let server_thread = log_actions_in_thread!(
+        received_server_instructions,
+        ServerInstruction::KillSession,
+        server_receiver
+    );
+
+    let pane_text = (0..10)
+        .map(|line| format!("copy-current-pane-line-{line}\r\n"))
+        .collect::<String>();
+    let _ = mock_screen
+        .to_screen
+        .send(ScreenInstruction::PtyBytes(0, pane_text.into_bytes()));
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    route_action(crate::route::RouteActionParams {
+        action: Action::CopyPaneScrollback,
+        caller: "test",
+        client_id,
+        cli_client_id: None,
+        pane_id: None,
+        senders: session_metadata.senders.clone(),
+        default_shell: None,
+        seen_cli_pipes: None,
+        default_mode: InputMode::Normal,
+    })
+    .unwrap();
+    // The copy command is a separate process; on a cold hosted CI runner
+    // powershell.exe alone can take seconds to start. Poll for the fully
+    // written file (the last line is the completion marker — `cat > file`
+    // creates the file long before it is complete) instead of a fixed sleep.
+    // Keep the deadline above CopyCommand's internal reaper timeout so a slow
+    // but successful child is still observed.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
+    while std::time::Instant::now() < deadline {
+        match std::fs::read_to_string(&copied_text_path) {
+            Ok(copied) if copied.contains("copy-current-pane-line-9") => break,
+            _ => std::thread::sleep(std::time::Duration::from_millis(100)),
+        }
+    }
+
+    mock_screen.teardown(vec![server_thread, screen_thread]);
+    let copied_text = std::fs::read_to_string(&copied_text_path).unwrap_or_else(|error| {
+        panic!(
+            "copy command never produced {}: {error} (path exists={}, is_file={})",
+            copied_text_path.display(),
+            copied_text_path.exists(),
+            copied_text_path.is_file(),
+        )
+    });
+    assert!(
+        copied_text.contains("copy-current-pane-line-0"),
+        "copy must include full scrollback, not only the viewport: {copied_text:?}"
+    );
+    assert!(
+        copied_text.contains("copy-current-pane-line-9"),
+        "copy must include the visible tail of the current pane: {copied_text:?}"
     );
 }
 
@@ -7888,6 +13408,8 @@ pub fn send_cli_new_tab_action_with_layout_string() {
         layout_string: Some("layout {\n    pane\n    pane\n    pane\n}\n".into()),
         layout_dir: None,
         cwd: None,
+        after_base: false,
+        no_focus: false,
         initial_command: vec![],
         initial_plugin: None,
         close_on_exit: Default::default(),
@@ -7909,7 +13431,7 @@ pub fn send_cli_new_tab_action_with_layout_string() {
         .clone();
     let output = format!("{:#?}", new_tab_instruction);
     // Normalize Windows path separators for cross-platform snapshot consistency
-    let output = output.replace("\\\\", "/");
+    let output = normalize_layout_debug(output.replace("\\\\", "/"));
     assert_snapshot!(output);
 }
 
@@ -7939,6 +13461,8 @@ pub fn send_cli_new_tab_action_with_layout_string_and_name() {
         layout_string: Some("layout {\n    pane\n    pane\n    pane\n}\n".into()),
         layout_dir: None,
         cwd: None,
+        after_base: false,
+        no_focus: false,
         initial_command: vec![],
         initial_plugin: None,
         close_on_exit: Default::default(),
@@ -7960,7 +13484,7 @@ pub fn send_cli_new_tab_action_with_layout_string_and_name() {
         .clone();
     let output = format!("{:#?}", new_tab_instruction);
     // Normalize Windows path separators for cross-platform snapshot consistency
-    let output = output.replace("\\\\", "/");
+    let output = normalize_layout_debug(output.replace("\\\\", "/"));
     assert_snapshot!(output);
 }
 
@@ -8425,6 +13949,10 @@ pub fn pty_bytes_and_hold_pane_buffered_before_new_pane() {
         full: true,
         pane_id: None,
         ansi: false,
+        expected_tab_id: None,
+        expected_tab_name: None,
+        expected_session_incarnation: None,
+        expected_tab_instance_id: None,
     };
     send_cli_action_to_server(&session_metadata, cli_action, client_id);
     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -8526,9 +14054,9 @@ fn create_new_screen_with_forward_capture(size: Size) -> (Screen, ForwardCapture
     let web_server_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
     let web_server_port = 8080;
     let visual_bell = true;
-    let screen = Screen::new(
+    let screen = Screen::new(crate::screen::ScreenOptions {
         bus,
-        &client_attributes,
+        client_attributes: &client_attributes,
         max_panes,
         mode_info,
         draw_pane_frames,
@@ -8548,18 +14076,18 @@ fn create_new_screen_with_forward_capture(size: Size) -> (Screen, ForwardCapture
         layout_dir,
         explicitly_disable_kitty_keyboard_protocol,
         stacked_resize,
-        None,
-        false,
+        default_editor: None,
+        web_clients_allowed: false,
         web_sharing,
-        true,
-        true,
+        advanced_mouse_actions: true,
+        mouse_hover_effects: true,
         visual_bell,
-        false, // focus_follows_mouse
-        false, // mouse_click_through
+        focus_follows_mouse: false,
+        mouse_click_through: false,
         web_server_ip,
         web_server_port,
-        Arc::new(AtomicBool::new(true)),
-    );
+        has_clients_flag: Arc::new(AtomicBool::new(true)),
+    });
     (
         screen,
         ForwardCapture {
@@ -9112,40 +14640,40 @@ fn create_new_screen_with_theme_capture(size: Size) -> (Screen, ThemeCapture) {
     let web_sharing = WebSharing::Off;
     let web_server_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
     let web_server_port = 8080;
-    let screen = Screen::new(
+    let screen = Screen::new(crate::screen::ScreenOptions {
         bus,
-        &client_attributes,
-        None,
+        client_attributes: &client_attributes,
+        max_panes: None,
         mode_info,
-        false,
-        true,
-        true,
+        draw_pane_frames: false,
+        auto_layout: true,
+        session_is_mirrored: true,
         copy_options,
-        false,
+        debug: false,
         default_layout,
-        None,
+        default_layout_name: None,
         default_shell,
-        true,
-        false,
-        None,
-        true,
-        true,
-        true,
-        None,
-        false,
-        true,
-        None,
-        false,
+        session_serialization: true,
+        serialize_pane_viewport: false,
+        scrollback_lines_to_serialize: None,
+        styled_underlines: true,
+        osc8_hyperlinks: true,
+        arrow_fonts: true,
+        layout_dir: None,
+        explicitly_disable_kitty_keyboard_protocol: false,
+        stacked_resize: true,
+        default_editor: None,
+        web_clients_allowed: false,
         web_sharing,
-        true,
-        true,
-        true,
-        false,
-        false,
+        advanced_mouse_actions: true,
+        mouse_hover_effects: true,
+        visual_bell: true,
+        focus_follows_mouse: false,
+        mouse_click_through: false,
         web_server_ip,
         web_server_port,
-        Arc::new(AtomicBool::new(true)),
-    );
+        has_clients_flag: Arc::new(AtomicBool::new(true)),
+    });
     (
         screen,
         ThemeCapture {
@@ -9347,29 +14875,29 @@ fn new_terminal_pane_for_pause_test(pid: u32) -> TerminalPane {
     let mut geom = PaneGeom::default();
     geom.cols.set_inner(20);
     geom.rows.set_inner(10);
-    TerminalPane::new(
+    TerminalPane::new(crate::panes::terminal_pane::TerminalPaneOptions {
         pid,
-        geom,
-        Style::default(),
-        0,
-        String::new(),
-        Rc::new(RefCell::new(LinkHandler::new())),
-        Rc::new(RefCell::new(Some(SizeInPixels {
+        position_and_size: geom,
+        style: Style::default(),
+        pane_index: 0,
+        pane_name: String::new(),
+        link_handler: Rc::new(RefCell::new(LinkHandler::new())),
+        character_cell_size: Rc::new(RefCell::new(Some(SizeInPixels {
             width: 8,
             height: 16,
         }))),
-        Rc::new(RefCell::new(SixelImageStore::default())),
-        Rc::new(RefCell::new(Palette::default())),
-        Rc::new(RefCell::new(HashMap::new())),
-        None,
-        None,
-        false,
-        true,
-        true,
-        true,
-        false,
-        None,
-    )
+        sixel_image_store: Rc::new(RefCell::new(SixelImageStore::default())),
+        terminal_emulator_colors: Rc::new(RefCell::new(Palette::default())),
+        terminal_emulator_color_codes: Rc::new(RefCell::new(HashMap::new())),
+        initial_pane_title: None,
+        invoked_with: None,
+        debug: false,
+        arrow_fonts: true,
+        styled_underlines: true,
+        osc8_hyperlinks: true,
+        explicitly_disable_keyboard_protocol: false,
+        notification_end: None,
+    })
 }
 
 #[test]
@@ -9605,40 +15133,40 @@ fn create_non_mirrored_screen(size: Size) -> Screen {
         session_name: Some("zellij-test".into()),
         ..Default::default()
     };
-    Screen::new(
+    Screen::new(crate::screen::ScreenOptions {
         bus,
-        &client_attributes,
-        None, // max_panes
+        client_attributes: &client_attributes,
+        max_panes: None,
         mode_info,
-        false, // draw_pane_frames
-        true,  // auto_layout
-        false, // session_is_mirrored
-        CopyOptions::default(),
-        false, // debug
-        Box::default(),
-        None, // default_layout_name
-        PathBuf::from("my_default_shell"),
-        true,  // session_serialization
-        false, // serialize_pane_viewport
-        None,  // scrollback_lines_to_serialize
-        true,  // styled_underlines
-        true,  // osc8_hyperlinks
-        true,  // arrow_fonts
-        None,  // layout_dir
-        false, // explicitly_disable_kitty_keyboard_protocol
-        true,  // stacked_resize
-        None,
-        false,
-        WebSharing::Off,
-        true,  // advanced_mouse_actions
-        true,  // mouse_hover_effects
-        true,  // visual_bell
-        false, // focus_follows_mouse
-        false, // mouse_click_through
-        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-        8080,
-        Arc::new(AtomicBool::new(false)),
-    )
+        draw_pane_frames: false,
+        auto_layout: true,
+        session_is_mirrored: false,
+        copy_options: CopyOptions::default(),
+        debug: false,
+        default_layout: Box::default(),
+        default_layout_name: None,
+        default_shell: PathBuf::from("my_default_shell"),
+        session_serialization: true,
+        serialize_pane_viewport: false,
+        scrollback_lines_to_serialize: None,
+        styled_underlines: true,
+        osc8_hyperlinks: true,
+        arrow_fonts: true,
+        layout_dir: None,
+        explicitly_disable_kitty_keyboard_protocol: false,
+        stacked_resize: true,
+        default_editor: None,
+        web_clients_allowed: false,
+        web_sharing: WebSharing::Off,
+        advanced_mouse_actions: true,
+        mouse_hover_effects: true,
+        visual_bell: true,
+        focus_follows_mouse: false,
+        mouse_click_through: false,
+        web_server_ip: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+        web_server_port: 8080,
+        has_clients_flag: Arc::new(AtomicBool::new(false)),
+    })
 }
 
 #[test]
@@ -9825,7 +15353,7 @@ fn break_pane_to_new_tab_recomputes_source_and_destination() {
     {
         let active_tab = screen.get_active_tab_mut(1).unwrap();
         active_tab
-            .new_pane(
+            .new_pane(new_pane_options(
                 PaneId::Terminal(99),
                 None,
                 None,
@@ -9834,7 +15362,7 @@ fn break_pane_to_new_tab_recomputes_source_and_destination() {
                 NewPanePlacement::default(),
                 Some(1),
                 None,
-            )
+            ))
             .unwrap();
     }
 
@@ -9856,6 +15384,322 @@ fn break_pane_to_new_tab_recomputes_source_and_destination() {
         Size { cols: 80, rows: 24 },
         "Source tab is empty — recompute is a no-op, last viewer-derived size is preserved"
     );
+}
+
+#[test]
+fn break_pane_plugin_handoff_failure_keeps_moved_process_in_degraded_tab() {
+    let mut screen = create_non_mirrored_screen(Size {
+        cols: 120,
+        rows: 30,
+    });
+    new_tab(&mut screen, 1, 0);
+    let moved_pane_id = PaneId::Terminal(99);
+    screen
+        .get_active_tab_mut(1)
+        .unwrap()
+        .new_pane(new_pane_options(
+            moved_pane_id,
+            None,
+            None,
+            false,
+            true,
+            NewPanePlacement::default(),
+            Some(1),
+            None,
+        ))
+        .unwrap();
+
+    let result = screen.break_pane(None, screen.default_layout.clone(), 1, None);
+    assert!(
+        result.is_err(),
+        "Bus::empty must expose the failed Screen -> Plugin handoff"
+    );
+    assert!(
+        screen.active_layout_transactions.is_empty(),
+        "failed handoff must retire the Screen transaction owner"
+    );
+    let owners = screen
+        .tabs
+        .values()
+        .filter(|tab| tab.has_pane_with_pid(&moved_pane_id))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        owners.len(),
+        1,
+        "the moved live pane must have exactly one owner after failed handoff"
+    );
+    assert!(
+        !owners[0].is_pending(),
+        "the destination must become a usable degraded tab, not a hidden pending orphan"
+    );
+    assert!(
+        screen
+            .tabs
+            .get(&0)
+            .is_some_and(|tab| tab.has_pane_with_pid(&PaneId::Terminal(1))),
+        "the source tab's other live pane must remain intact"
+    );
+}
+
+#[test]
+fn break_multiple_plugin_handoff_failure_keeps_all_extracted_processes() {
+    let mut screen = create_non_mirrored_screen(Size {
+        cols: 120,
+        rows: 30,
+    });
+    new_tab(&mut screen, 1, 0);
+    for terminal_id in [98, 99] {
+        screen
+            .get_active_tab_mut(1)
+            .unwrap()
+            .new_pane(new_pane_options(
+                PaneId::Terminal(terminal_id),
+                None,
+                None,
+                false,
+                true,
+                NewPanePlacement::default(),
+                Some(1),
+                None,
+            ))
+            .unwrap();
+    }
+
+    let result = screen.break_multiple_panes_to_new_tab(
+        vec![PaneId::Terminal(98), PaneId::Terminal(99)],
+        None,
+        false,
+        Some("degraded-break".to_owned()),
+        1,
+        None,
+    );
+    assert!(
+        result.is_err(),
+        "Bus::empty must expose the failed Screen -> Plugin handoff"
+    );
+    assert!(screen.active_layout_transactions.is_empty());
+    let destination = screen
+        .tabs
+        .values()
+        .find(|tab| tab.name == "degraded-break")
+        .expect("the extracted panes must remain in their degraded destination");
+    assert!(!destination.is_pending());
+    for pane_id in [PaneId::Terminal(98), PaneId::Terminal(99)] {
+        assert!(
+            destination.has_pane_with_pid(&pane_id),
+            "degraded destination lost moved pane {pane_id:?}"
+        );
+        assert_eq!(
+            screen
+                .tabs
+                .values()
+                .filter(|tab| tab.has_pane_with_pid(&pane_id))
+                .count(),
+            1,
+            "moved pane {pane_id:?} must have exactly one owner"
+        );
+    }
+}
+
+#[test]
+fn break_pane_preflight_conflict_leaves_exact_source_untouched() {
+    let mut screen = create_non_mirrored_screen(Size {
+        cols: 120,
+        rows: 30,
+    });
+    new_tab(&mut screen, 1, 0);
+    let moved_pane_id = PaneId::Terminal(99);
+    screen
+        .get_active_tab_mut(1)
+        .unwrap()
+        .new_pane(new_pane_options(
+            moved_pane_id,
+            None,
+            None,
+            false,
+            true,
+            NewPanePlacement::default(),
+            Some(1),
+            None,
+        ))
+        .unwrap();
+    let baseline_active = screen.tabs.get(&0).unwrap().get_active_pane_id(1);
+    let baseline_geoms = [PaneId::Terminal(1), moved_pane_id]
+        .map(|pane_id| {
+            (
+                pane_id,
+                screen
+                    .tabs
+                    .get(&0)
+                    .unwrap()
+                    .get_pane_with_id(pane_id)
+                    .unwrap()
+                    .position_and_size(),
+            )
+        })
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+    let blocker_id = screen.reserve_layout_transaction_id();
+    let source_owner = LayoutTabOwner::capture(&screen, 0);
+    screen
+        .register_layout_transaction(
+            blocker_id,
+            ActiveLayoutTransaction {
+                kind: ScreenLayoutTransactionKind::Override,
+                targets: vec![source_owner],
+                created_pending_tabs: vec![],
+                render_fenced_tabs: vec![],
+                tabs_to_close_after_commit: vec![],
+                moved_original_panes: vec![],
+                generation: None,
+            },
+        )
+        .unwrap();
+
+    let error = screen
+        .break_pane(None, screen.default_layout.clone(), 1, None)
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("cannot start break-pane transaction"));
+    assert_eq!(
+        screen.tabs.len(),
+        1,
+        "failed registration must discard the unowned pending destination"
+    );
+    assert!(
+        screen
+            .tabs
+            .get(&0)
+            .is_some_and(|tab| tab.has_pane_with_pid(&moved_pane_id)),
+        "failed registration must restore the moved pane to its exact source"
+    );
+    assert_eq!(
+        screen.tabs.get(&0).unwrap().get_active_pane_id(1),
+        baseline_active,
+        "preflight rejection must not perturb source focus"
+    );
+    for (pane_id, baseline_geom) in baseline_geoms {
+        assert_eq!(
+            screen
+                .tabs
+                .get(&0)
+                .unwrap()
+                .get_pane_with_id(pane_id)
+                .unwrap()
+                .position_and_size(),
+            baseline_geom,
+            "preflight rejection changed source geometry for {pane_id:?}"
+        );
+    }
+    assert_eq!(
+        screen.active_layout_transactions.len(),
+        1,
+        "only the pre-existing blocker may retain transaction ownership"
+    );
+}
+
+#[test]
+fn break_multiple_preflight_conflict_leaves_every_source_owner_untouched() {
+    let mut screen = create_non_mirrored_screen(Size {
+        cols: 120,
+        rows: 30,
+    });
+    new_tab(&mut screen, 1, 0);
+    for terminal_id in [98, 99] {
+        screen
+            .get_active_tab_mut(1)
+            .unwrap()
+            .new_pane(new_pane_options(
+                PaneId::Terminal(terminal_id),
+                None,
+                None,
+                false,
+                true,
+                NewPanePlacement::default(),
+                Some(1),
+                None,
+            ))
+            .unwrap();
+    }
+    let baseline_active = screen.tabs.get(&0).unwrap().get_active_pane_id(1);
+    let baseline_geoms = [
+        PaneId::Terminal(1),
+        PaneId::Terminal(98),
+        PaneId::Terminal(99),
+    ]
+    .map(|pane_id| {
+        (
+            pane_id,
+            screen
+                .tabs
+                .get(&0)
+                .unwrap()
+                .get_pane_with_id(pane_id)
+                .unwrap()
+                .position_and_size(),
+        )
+    })
+    .into_iter()
+    .collect::<BTreeMap<_, _>>();
+    let blocker_id = screen.reserve_layout_transaction_id();
+    let source_owner = LayoutTabOwner::capture(&screen, 0);
+    screen
+        .register_layout_transaction(
+            blocker_id,
+            ActiveLayoutTransaction {
+                kind: ScreenLayoutTransactionKind::Override,
+                targets: vec![source_owner],
+                created_pending_tabs: vec![],
+                render_fenced_tabs: vec![],
+                tabs_to_close_after_commit: vec![],
+                moved_original_panes: vec![],
+                generation: None,
+            },
+        )
+        .unwrap();
+
+    let error = screen
+        .break_multiple_panes_to_new_tab(
+            vec![PaneId::Terminal(98), PaneId::Terminal(99)],
+            None,
+            false,
+            Some("must-not-survive".to_owned()),
+            1,
+            None,
+        )
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("cannot start break-multiple transaction"));
+    assert_eq!(
+        screen.tabs.len(),
+        1,
+        "failed registration must discard the unowned pending destination"
+    );
+    for pane_id in [PaneId::Terminal(98), PaneId::Terminal(99)] {
+        assert!(
+            screen
+                .tabs
+                .get(&0)
+                .is_some_and(|tab| tab.has_pane_with_pid(&pane_id)),
+            "failed registration lost exact source owner for {pane_id:?}"
+        );
+    }
+    assert_eq!(
+        screen.tabs.get(&0).unwrap().get_active_pane_id(1),
+        baseline_active
+    );
+    for (pane_id, baseline_geom) in baseline_geoms {
+        assert_eq!(
+            screen
+                .tabs
+                .get(&0)
+                .unwrap()
+                .get_pane_with_id(pane_id)
+                .unwrap()
+                .position_and_size(),
+            baseline_geom,
+            "preflight rejection changed source geometry for {pane_id:?}"
+        );
+    }
+    assert_eq!(screen.active_layout_transactions.len(), 1);
 }
 
 #[test]
@@ -9902,7 +15746,7 @@ fn moving_panes_between_tabs_with_focus_change_recomputes_both() {
     {
         let active_tab = screen.get_active_tab_mut(1).unwrap();
         active_tab
-            .new_pane(
+            .new_pane(new_pane_options(
                 pane_to_move,
                 None,
                 None,
@@ -9911,7 +15755,7 @@ fn moving_panes_between_tabs_with_focus_change_recomputes_both() {
                 NewPanePlacement::default(),
                 Some(1),
                 None,
-            )
+            ))
             .unwrap();
     }
 

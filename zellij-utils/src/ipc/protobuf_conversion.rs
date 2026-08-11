@@ -1,9 +1,9 @@
 use crate::{
     client_server_contract::client_server_contract::{
-        client_to_server_msg, server_to_client_msg, ActionMsg, AttachClientMsg,
-        AttachWatcherClientMsg, BackgroundColorMsg, CliPipeOutputMsg, ClientExitedMsg,
-        ClientToServerMsg as ProtoClientToServerMsg, ColorRegistersMsg, ConfigFileUpdatedMsg,
-        ConnStatusMsg, ConnectedMsg, DesktopNotificationResponseMsg, DetachSessionMsg, ExitMsg,
+        ActionMsg, AttachClientMsg, AttachWatcherClientMsg, BackgroundColorMsg, CliPipeOutputMsg,
+        ClientExitedMsg, ClientToServerMsg as ProtoClientToServerMsg, ColorRegistersMsg,
+        ConfigFileUpdatedMsg, ConnStatusMsg, ConnectedMsg, DeclareCallerMsg,
+        DesktopNotificationResponseMsg, DetachSessionMsg, DoctorRoutesMsg, ExitMsg,
         ExitReason as ProtoExitReason, FailedToStartWebServerMsg, FirstClientConnectedMsg,
         ForegroundColorMsg, ForwardQueryToHostMsg, ForwardedReplyFromHostMsg,
         HostTerminalThemeChangedMsg,
@@ -14,7 +14,7 @@ use crate::{
         ServerToClientMsg as ProtoServerToClientMsg, StartWebServerMsg, SubscribeToPaneRendersMsg,
         SubscribedPaneClosedMsg, SwitchSessionMsg, TabMetadata as ProtoTabMetadata,
         TerminalPixelDimensionsMsg, TerminalResizeMsg, UnblockCliPipeInputMsg,
-        UnblockInputThreadMsg, WebServerStartedMsg,
+        UnblockInputThreadMsg, WebServerStartedMsg, client_to_server_msg, server_to_client_msg,
     },
     data::{HostTerminalThemeMode, InputMode, PaneId},
     errors::prelude::*,
@@ -92,6 +92,12 @@ impl From<ClientToServerMsg> for ProtoClientToServerMsg {
                 client_id: client_id.map(|id| id as u32),
                 is_cli_client,
             }),
+            ClientToServerMsg::DeclareCaller { caller } => {
+                client_to_server_msg::Message::DeclareCaller(DeclareCallerMsg { caller })
+            },
+            ClientToServerMsg::DoctorRoutes { json } => {
+                client_to_server_msg::Message::DoctorRoutes(DoctorRoutesMsg { json })
+            },
             ClientToServerMsg::Key {
                 key,
                 raw_bytes,
@@ -238,6 +244,14 @@ impl TryFrom<ProtoClientToServerMsg> for ClientToServerMsg {
                 client_id: action.client_id.map(|id| id as u16),
                 is_cli_client: action.is_cli_client,
             }),
+            Some(client_to_server_msg::Message::DeclareCaller(declaration)) => {
+                Ok(ClientToServerMsg::DeclareCaller {
+                    caller: declaration.caller,
+                })
+            },
+            Some(client_to_server_msg::Message::DoctorRoutes(request)) => {
+                Ok(ClientToServerMsg::DoctorRoutes { json: request.json })
+            },
             Some(client_to_server_msg::Message::Key(key)) => Ok(ClientToServerMsg::Key {
                 key: key.key.ok_or_else(|| anyhow!("Missing key"))?.try_into()?,
                 raw_bytes: key.raw_bytes.into_iter().map(|b| b as u8).collect(),
@@ -687,6 +701,7 @@ impl From<crate::input::options::Options>
                 crate::input::options::OnForceClose::Detach => ProtoOnForceClose::Detach as i32,
             }),
             scroll_buffer_size: options.scroll_buffer_size.map(|s| s as u32),
+            auto_lock_after_seconds: options.auto_lock_after_seconds,
             copy_command: options.copy_command,
             copy_clipboard: options.copy_clipboard.map(|c| match c {
                 crate::input::options::Clipboard::System => ProtoClipboard::System as i32,
@@ -776,6 +791,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Options>
                 })
                 .transpose()?,
             scroll_buffer_size: options.scroll_buffer_size.map(|s| s as usize),
+            auto_lock_after_seconds: options.auto_lock_after_seconds,
             copy_command: options.copy_command,
             copy_clipboard: options
                 .copy_clipboard
@@ -833,13 +849,12 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Options>
     }
 }
 
-// Complete Action conversion implementation - all 91 variants
+// Complete Action conversion implementation
 impl From<crate::input::actions::Action>
     for crate::client_server_contract::client_server_contract::Action
 {
     fn from(action: crate::input::actions::Action) -> Self {
         use crate::client_server_contract::client_server_contract::{
-            action::ActionType,
             AreFloatingPanesVisibleAction,
             BreakPaneAction,
             BreakPaneLeftAction,
@@ -853,9 +868,12 @@ impl From<crate::input::actions::Action>
             ClosePluginPaneAction,
             CloseTabAction,
             CloseTabByIdAction,
+            CloseTabByIdIfNameAction,
+            CloseTabByIdIfNameIfQuiescentAction,
             CloseTerminalPaneAction,
             ConfirmAction,
             CopyAction,
+            CopyPaneScrollbackAction,
             CurrentTabInfoAction,
             DenyAction,
             DetachAction,
@@ -982,6 +1000,7 @@ impl From<crate::input::actions::Action>
             WriteCharsAction,
             WriteCharsToPaneIdAction,
             WriteToPaneIdAction,
+            action::ActionType,
         };
         use std::collections::HashMap;
 
@@ -1068,6 +1087,10 @@ impl From<crate::input::actions::Action>
                 include_scrollback,
                 pane_id,
                 ansi,
+                expected_tab_id,
+                expected_tab_name,
+                expected_session_incarnation,
+                expected_tab_instance_id,
             } => {
                 let dump_to_stdout = file_path.is_none();
                 ActionType::DumpScreen(DumpScreenAction {
@@ -1076,7 +1099,14 @@ impl From<crate::input::actions::Action>
                     pane_id: pane_id.map(|p| p.into()),
                     dump_to_stdout,
                     ansi,
+                    expected_tab_id,
+                    expected_tab_name,
+                    expected_session_incarnation,
+                    expected_tab_instance_id,
                 })
+            },
+            crate::input::actions::Action::CopyPaneScrollback => {
+                ActionType::CopyPaneScrollback(CopyPaneScrollbackAction {})
             },
             crate::input::actions::Action::DumpLayout => {
                 ActionType::DumpLayout(DumpLayoutAction {})
@@ -1273,6 +1303,7 @@ impl From<crate::input::actions::Action>
                 cwd,
                 initial_panes,
                 first_pane_unblock_condition,
+                placement,
             } => ActionType::NewTab(Box::new(NewTabAction {
                 tiled_layout: tiled_layout.map(|l| l.into()),
                 floating_layouts: floating_layouts.into_iter().map(|l| l.into()).collect(),
@@ -1290,6 +1321,7 @@ impl From<crate::input::actions::Action>
                     .unwrap_or_default(),
                 first_pane_unblock_condition: first_pane_unblock_condition
                     .map(unblock_condition_to_proto_i32),
+                placement: tab_placement_to_proto_i32(placement),
             })),
             crate::input::actions::Action::NoOp => ActionType::NoOp(NoOpAction {}),
             crate::input::actions::Action::GoToNextTab => {
@@ -1536,6 +1568,28 @@ impl From<crate::input::actions::Action>
             crate::input::actions::Action::CloseTabById { id } => {
                 ActionType::CloseTabById(CloseTabByIdAction { id })
             },
+            crate::input::actions::Action::CloseTabByIdIfName {
+                id,
+                expected_name,
+                expected_session_incarnation,
+                expected_tab_instance_id,
+            } => ActionType::CloseTabByIdIfName(CloseTabByIdIfNameAction {
+                id,
+                expected_name,
+                expected_session_incarnation,
+                expected_tab_instance_id,
+            }),
+            crate::input::actions::Action::CloseTabByIdIfNameIfQuiescent {
+                id,
+                expected_name,
+                expected_session_incarnation,
+                expected_tab_instance_id,
+            } => ActionType::CloseTabByIdIfNameIfQuiescent(CloseTabByIdIfNameIfQuiescentAction {
+                id,
+                expected_name,
+                expected_session_incarnation,
+                expected_tab_instance_id,
+            }),
             crate::input::actions::Action::RenameTabById { id, name } => {
                 ActionType::RenameTabById(RenameTabByIdAction { id, name })
             },
@@ -1939,7 +1993,14 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                     include_scrollback: dump_screen_action.include_scrollback,
                     pane_id: dump_screen_action.pane_id.and_then(|p| p.try_into().ok()),
                     ansi: dump_screen_action.ansi,
+                    expected_tab_id: dump_screen_action.expected_tab_id,
+                    expected_tab_name: dump_screen_action.expected_tab_name,
+                    expected_session_incarnation: dump_screen_action.expected_session_incarnation,
+                    expected_tab_instance_id: dump_screen_action.expected_tab_instance_id,
                 })
+            },
+            ActionType::CopyPaneScrollback(_) => {
+                Ok(crate::input::actions::Action::CopyPaneScrollback)
             },
             ActionType::DumpLayout(_) => Ok(crate::input::actions::Action::DumpLayout),
             ActionType::SaveSession(_) => Ok(crate::input::actions::Action::SaveSession),
@@ -2167,6 +2228,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                         .first_pane_unblock_condition
                         .map(proto_i32_to_unblock_condition)
                         .transpose()?,
+                    placement: proto_i32_to_tab_placement(new_tab_action.placement),
                 })
             },
             ActionType::NoOp(_) => Ok(crate::input::actions::Action::NoOp),
@@ -2418,6 +2480,24 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                     id: close_tab_by_id_action.id,
                 })
             },
+            ActionType::CloseTabByIdIfName(close_tab_by_id_if_name_action) => {
+                Ok(crate::input::actions::Action::CloseTabByIdIfName {
+                    id: close_tab_by_id_if_name_action.id,
+                    expected_name: close_tab_by_id_if_name_action.expected_name,
+                    expected_session_incarnation: close_tab_by_id_if_name_action
+                        .expected_session_incarnation,
+                    expected_tab_instance_id: close_tab_by_id_if_name_action
+                        .expected_tab_instance_id,
+                })
+            },
+            ActionType::CloseTabByIdIfNameIfQuiescent(close_action) => Ok(
+                crate::input::actions::Action::CloseTabByIdIfNameIfQuiescent {
+                    id: close_action.id,
+                    expected_name: close_action.expected_name,
+                    expected_session_incarnation: close_action.expected_session_incarnation,
+                    expected_tab_instance_id: close_action.expected_tab_instance_id,
+                },
+            ),
             ActionType::RenameTabById(rename_tab_by_id_action) => {
                 Ok(crate::input::actions::Action::RenameTabById {
                     id: rename_tab_by_id_action.id,
@@ -3118,6 +3198,26 @@ fn unblock_condition_to_proto_i32(condition: crate::data::UnblockCondition) -> i
         crate::data::UnblockCondition::OnExitSuccess => ProtoUnblockCondition::OnExitSuccess as i32,
         crate::data::UnblockCondition::OnExitFailure => ProtoUnblockCondition::OnExitFailure as i32,
         crate::data::UnblockCondition::OnAnyExit => ProtoUnblockCondition::OnAnyExit as i32,
+    }
+}
+
+fn tab_placement_to_proto_i32(placement: crate::data::TabPlacement) -> i32 {
+    use crate::client_server_contract::client_server_contract::TabPlacement as ProtoTabPlacement;
+    match placement {
+        crate::data::TabPlacement::Append => ProtoTabPlacement::Append as i32,
+        crate::data::TabPlacement::AfterBase => ProtoTabPlacement::AfterBase as i32,
+    }
+}
+
+/// Unspecified (tag absent, or a client that predates the field) means append —
+/// the historical behaviour. An unknown value is also treated as append rather
+/// than erroring: tab placement is cosmetic, and refusing to create the tab at
+/// all would be a far worse failure than putting it in the old place.
+fn proto_i32_to_tab_placement(placement: i32) -> crate::data::TabPlacement {
+    use crate::client_server_contract::client_server_contract::TabPlacement as ProtoTabPlacement;
+    match ProtoTabPlacement::from_i32(placement) {
+        Some(ProtoTabPlacement::AfterBase) => crate::data::TabPlacement::AfterBase,
+        _ => crate::data::TabPlacement::Append,
     }
 }
 
@@ -3825,6 +3925,7 @@ impl From<crate::input::layout::TiledPaneLayout>
             pane_initial_contents: layout.pane_initial_contents,
             default_fg: layout.default_fg,
             default_bg: layout.default_bg,
+            tab_instance_id: layout.tab_instance_id,
         }
     }
 }
@@ -3970,7 +4071,7 @@ impl From<crate::input::layout::RunPluginLocation>
 {
     fn from(location: crate::input::layout::RunPluginLocation) -> Self {
         use crate::client_server_contract::client_server_contract::{
-            run_plugin_location_data::LocationData, RunPluginLocation as ProtoRunPluginLocation,
+            RunPluginLocation as ProtoRunPluginLocation, run_plugin_location_data::LocationData,
         };
         match location {
             crate::input::layout::RunPluginLocation::File(path) => Self {
@@ -4015,8 +4116,8 @@ impl From<crate::data::CommandOrPlugin>
     for crate::client_server_contract::client_server_contract::CommandOrPlugin
 {
     fn from(cmd_or_plugin: crate::data::CommandOrPlugin) -> Self {
-        use crate::client_server_contract::client_server_contract::command_or_plugin::CommandOrPluginType;
         use crate::client_server_contract::client_server_contract::CommandOrPluginFile;
+        use crate::client_server_contract::client_server_contract::command_or_plugin::CommandOrPluginType;
         match cmd_or_plugin {
             crate::data::CommandOrPlugin::Command(cmd) => Self {
                 command_or_plugin_type: Some(CommandOrPluginType::Command(cmd.into())),
@@ -4258,6 +4359,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::TiledPaneLay
             pane_initial_contents: layout.pane_initial_contents,
             default_fg: layout.default_fg,
             default_bg: layout.default_bg,
+            tab_instance_id: layout.tab_instance_id,
         })
     }
 }
@@ -4469,7 +4571,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::RunPluginLoc
         location: crate::client_server_contract::client_server_contract::RunPluginLocationData,
     ) -> Result<Self> {
         use crate::client_server_contract::client_server_contract::{
-            run_plugin_location_data::LocationData, RunPluginLocation as ProtoRunPluginLocation,
+            RunPluginLocation as ProtoRunPluginLocation, run_plugin_location_data::LocationData,
         };
 
         let location_data = location

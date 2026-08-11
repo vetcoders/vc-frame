@@ -1,10 +1,10 @@
+use crate::plugins::PluginId;
 use crate::plugins::plugin_map::{
     PluginEnv, PluginMap, RunningPlugin, VecDequeInputStream, WriteOutputStream,
 };
-use crate::plugins::plugin_worker::{plugin_worker, RunningWorker};
+use crate::plugins::plugin_worker::{RunningWorker, plugin_worker};
 use crate::plugins::wasm_bridge::{LoadingContext, PluginCache};
 use crate::plugins::zellij_exports::{wasi_write_object, zellij_exports};
-use crate::plugins::PluginId;
 use prost::Message;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -13,14 +13,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 use wasmi::{Engine, Instance, Linker, Module, Store, StoreLimits};
-use wasmi_wasi::sync::WasiCtxBuilder;
-use wasmi_wasi::wasi_common::pipe::{ReadPipe, WritePipe};
 use wasmi_wasi::Dir;
 use wasmi_wasi::WasiCtx;
+use wasmi_wasi::sync::WasiCtxBuilder;
+use wasmi_wasi::wasi_common::pipe::{ReadPipe, WritePipe};
 
 use crate::{
-    logging_pipe::LoggingPipe, thread_bus::ThreadSenders,
-    ui::loading_indication::LoadingIndication, ClientId,
+    ClientId, logging_pipe::LoggingPipe, thread_bus::ThreadSenders,
+    ui::loading_indication::LoadingIndication,
 };
 
 use zellij_utils::plugin_api::action::ProtobufPluginConfiguration;
@@ -246,16 +246,16 @@ impl<'a> PluginLoader<'a> {
         let stdin_pipe = Arc::new(Mutex::new(VecDeque::new()));
         let stdout_pipe = Arc::new(Mutex::new(VecDeque::new()));
 
-        let wasi_ctx = PluginLoader::create_wasi_ctx(
-            &self.plugin_cwd,
-            &self.plugin_own_data_dir,
-            &self.plugin_own_cache_dir,
-            &ZELLIJ_TMP_DIR,
-            &self.plugin_config.location.to_string(),
-            self.plugin_id,
-            stdin_pipe.clone(),
-            stdout_pipe.clone(),
-        )?;
+        let wasi_ctx = PluginLoader::create_wasi_ctx(WasiCtxParams {
+            host_dir: &self.plugin_cwd,
+            data_dir: &self.plugin_own_data_dir,
+            cache_dir: &self.plugin_own_cache_dir,
+            tmp_dir: &ZELLIJ_TMP_DIR,
+            plugin_url: &self.plugin_config.location.to_string(),
+            plugin_id: self.plugin_id,
+            stdin_pipe: stdin_pipe.clone(),
+            stdout_pipe: stdout_pipe.clone(),
+        })?;
         let plugin_path = self.plugin_config.path.clone();
         let plugin_env = PluginEnv {
             plugin_id: self.plugin_id,
@@ -297,10 +297,10 @@ impl<'a> PluginLoader<'a> {
             .instantiate_and_start(&mut store, &module)
             .with_context(err_context)?;
 
-        if let Some(func) = instance.get_func(&mut store, "_initialize") {
-            if let Ok(typed_func) = func.typed::<(), ()>(&store) {
-                let _ = typed_func.call(&mut store, ());
-            }
+        if let Some(func) = instance.get_func(&mut store, "_initialize")
+            && let Ok(typed_func) = func.typed::<(), ()>(&store)
+        {
+            let _ = typed_func.call(&mut store, ());
         }
 
         self.plugin_cache
@@ -358,16 +358,16 @@ impl<'a> PluginLoader<'a> {
         let stdin_pipe = Arc::new(Mutex::new(VecDeque::new()));
         let stdout_pipe = Arc::new(Mutex::new(VecDeque::new()));
 
-        let wasi_ctx = PluginLoader::create_wasi_ctx(
-            &self.plugin_cwd,
-            &self.plugin_own_data_dir,
-            &self.plugin_own_cache_dir,
-            &ZELLIJ_TMP_DIR,
-            &self.plugin_config.location.to_string(),
-            self.plugin_id,
-            stdin_pipe.clone(),
-            stdout_pipe.clone(),
-        )?;
+        let wasi_ctx = PluginLoader::create_wasi_ctx(WasiCtxParams {
+            host_dir: &self.plugin_cwd,
+            data_dir: &self.plugin_own_data_dir,
+            cache_dir: &self.plugin_own_cache_dir,
+            tmp_dir: &ZELLIJ_TMP_DIR,
+            plugin_url: &self.plugin_config.location.to_string(),
+            plugin_id: self.plugin_id,
+            stdin_pipe: stdin_pipe.clone(),
+            stdout_pipe: stdout_pipe.clone(),
+        })?;
         let plugin_config = self.plugin_config.clone();
         let plugin_env = PluginEnv {
             plugin_id: self.plugin_id,
@@ -409,24 +409,39 @@ impl<'a> PluginLoader<'a> {
             .instantiate_and_start(&mut store, module)
             .with_context(err_context)?;
 
-        if let Some(func) = instance.get_func(&mut store, "_initialize") {
-            if let Ok(typed_func) = func.typed::<(), ()>(&store) {
-                let _ = typed_func.call(&mut store, ());
-            }
+        if let Some(func) = instance.get_func(&mut store, "_initialize")
+            && let Ok(typed_func) = func.typed::<(), ()>(&store)
+        {
+            let _ = typed_func.call(&mut store, ());
         }
 
         Ok((store, instance))
     }
-    pub fn create_wasi_ctx(
-        host_dir: &Path,
-        data_dir: &Path,
-        cache_dir: &Path,
-        tmp_dir: &Path,
-        plugin_url: &str,
-        plugin_id: PluginId,
-        stdin_pipe: Arc<Mutex<VecDeque<u8>>>,
-        stdout_pipe: Arc<Mutex<VecDeque<u8>>>,
-    ) -> Result<WasiCtx> {
+}
+
+pub struct WasiCtxParams<'a> {
+    pub host_dir: &'a Path,
+    pub data_dir: &'a Path,
+    pub cache_dir: &'a Path,
+    pub tmp_dir: &'a Path,
+    pub plugin_url: &'a str,
+    pub plugin_id: PluginId,
+    pub stdin_pipe: Arc<Mutex<VecDeque<u8>>>,
+    pub stdout_pipe: Arc<Mutex<VecDeque<u8>>>,
+}
+
+impl PluginLoader<'_> {
+    pub fn create_wasi_ctx(params: WasiCtxParams<'_>) -> Result<WasiCtx> {
+        let WasiCtxParams {
+            host_dir,
+            data_dir,
+            cache_dir,
+            tmp_dir,
+            plugin_url,
+            plugin_id,
+            stdin_pipe,
+            stdout_pipe,
+        } = params;
         let _err_context = || "Failed to create wasi_ctx".to_string();
         let dirs = vec![
             ("/host".to_owned(), host_dir.to_path_buf()),

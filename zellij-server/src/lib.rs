@@ -20,24 +20,29 @@ mod plugins;
 mod pty;
 mod pty_writer;
 mod route;
+mod route_telemetry;
 mod screen;
 mod session_layout_metadata;
 mod terminal_bytes;
 mod thread_bus;
 mod ui;
+mod vc_live_runs;
 
-use background_jobs::{background_jobs_main, BackgroundJob};
+use crate::plugins::PluginThreadParams;
+use background_jobs::{BackgroundJob, background_jobs_main};
 use log::info;
-use pty_writer::{pty_writer_main, PtyWriteInstruction};
+use pty_writer::{PtyWriteInstruction, pty_writer_main};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::{
     net::{IpAddr, Ipv4Addr},
     path::PathBuf,
-    sync::{atomic::AtomicBool, Arc, RwLock},
+    sync::{Arc, RwLock, atomic::AtomicBool},
     thread,
+    time::{Duration, Instant},
 };
 use zellij_utils::envs;
 use zellij_utils::pane_size::Size;
+use zellij_utils::run_triage;
 
 use zellij_utils::input::cli_assets::CliAssets;
 
@@ -45,12 +50,12 @@ use wasmi::Engine;
 
 use crate::{
     os_input_output::ServerOsApi,
-    plugins::{plugin_thread_main, PluginInstruction},
-    pty::{get_default_shell, pty_thread_main, Pty, PtyInstruction},
-    screen::{screen_thread_main, ScreenInstruction},
+    plugins::{PluginInstruction, plugin_thread_main},
+    pty::{Pty, PtyInstruction, get_default_shell, pty_thread_main},
+    screen::{ScreenInstruction, ScreenThreadParams, screen_thread_main},
     thread_bus::{Bus, ThreadSenders},
 };
-use route::{route_thread_main, NotificationEnd};
+use route::{NotificationEnd, route_thread_main};
 use zellij_utils::{
     channels::{self, ChannelWithContext, SenderWithContext},
     consts::{
@@ -58,14 +63,14 @@ use zellij_utils::{
     },
     data::{
         ConnectToSession, InputMode, KeyWithModifier, LayoutInfo, LayoutWithError, Style,
-        WebSharing,
+        TabPlacement, WebSharing,
     },
-    errors::{prelude::*, ContextType, ErrorInstruction, FatalError, ServerContext},
+    errors::{ContextType, ErrorInstruction, FatalError, ServerContext, prelude::*},
     home::{default_layout_dir, get_default_data_dir},
     input::{
         actions::Action,
         command::{RunCommand, TerminalAction},
-        config::{watch_config_file_changes, watch_layout_dir_changes, Config},
+        config::{Config, watch_config_file_changes, watch_layout_dir_changes},
         keybinds::Keybinds,
         layout::{FloatingPaneLayout, Layout, PluginAlias, Run, RunPluginOrAlias},
         options::Options,
@@ -337,6 +342,31 @@ pub(crate) struct SessionMetaData {
     config_file_path: Option<PathBuf>,
 }
 
+const SESSION_THREAD_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn join_session_thread_until(
+    name: &str,
+    handle: Option<thread::JoinHandle<()>>,
+    deadline: Instant,
+) -> bool {
+    let Some(handle) = handle else {
+        return true;
+    };
+    while !handle.is_finished() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    if !handle.is_finished() {
+        log::error!(
+            "session shutdown timed out waiting for {name}; detaching the thread so the server process can exit"
+        );
+        return false;
+    }
+    if handle.join().is_err() {
+        log::error!("session shutdown thread '{name}' panicked");
+    }
+    true
+}
+
 impl SessionMetaData {
     pub fn get_client_keybinds_and_mode(
         &self,
@@ -464,12 +494,10 @@ impl SessionMetaData {
         }
 
         // Detect and notify plugins of configuration changes
-        if config_was_written_to_disk {
-            if let Some(new_plugins) = new_plugin_config {
-                self.senders
-                    .send_to_plugin(PluginInstruction::DetectPluginConfigChanges(new_plugins))
-                    .unwrap();
-            }
+        if config_was_written_to_disk && let Some(new_plugins) = new_plugin_config {
+            self.senders
+                .send_to_plugin(PluginInstruction::DetectPluginConfigChanges(new_plugins))
+                .unwrap();
         }
     }
 }
@@ -481,21 +509,16 @@ impl Drop for SessionMetaData {
         let _ = self.senders.send_to_plugin(PluginInstruction::Exit);
         let _ = self.senders.send_to_pty_writer(PtyWriteInstruction::Exit);
         let _ = self.senders.send_to_background_jobs(BackgroundJob::Exit);
-        if let Some(screen_thread) = self.screen_thread.take() {
-            let _ = screen_thread.join();
-        }
-        if let Some(pty_thread) = self.pty_thread.take() {
-            let _ = pty_thread.join();
-        }
-        if let Some(plugin_thread) = self.plugin_thread.take() {
-            let _ = plugin_thread.join();
-        }
-        if let Some(pty_writer_thread) = self.pty_writer_thread.take() {
-            let _ = pty_writer_thread.join();
-        }
-        if let Some(background_jobs_thread) = self.background_jobs_thread.take() {
-            let _ = background_jobs_thread.join();
-        }
+        let deadline = Instant::now() + SESSION_THREAD_JOIN_TIMEOUT;
+        join_session_thread_until("screen", self.screen_thread.take(), deadline);
+        join_session_thread_until("pty", self.pty_thread.take(), deadline);
+        join_session_thread_until("plugin", self.plugin_thread.take(), deadline);
+        join_session_thread_until("pty-writer", self.pty_writer_thread.take(), deadline);
+        join_session_thread_until(
+            "background-jobs",
+            self.background_jobs_thread.take(),
+            deadline,
+        );
     }
 }
 
@@ -665,11 +688,7 @@ impl SessionState {
             .iter()
             .filter_map(
                 |(&c_id, &is_web_client)| {
-                    if is_web_client {
-                        Some(c_id)
-                    } else {
-                        None
-                    }
+                    if is_web_client { Some(c_id) } else { None }
                 },
             )
             .collect()
@@ -720,29 +739,31 @@ impl SessionState {
     /// to any currently-connected non-watcher client. Returns `None`
     /// only when no regular client is connected.
     pub fn pick_forward_target(&self) -> Option<ClientId> {
-        if let Some(candidate) = self.last_active_client {
-            if self.clients.contains_key(&candidate) {
-                return Some(candidate);
-            }
+        if let Some(candidate) = self.last_active_client
+            && self.clients.contains_key(&candidate)
+        {
+            return Some(candidate);
         }
         self.clients.keys().copied().next()
     }
 }
 
 pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
-    info!("Starting Zellij server!");
+    info!("Starting vc-frame server!");
 
     #[cfg(unix)]
     {
-        use nix::sys::stat::{umask, Mode};
+        use nix::sys::stat::{Mode, umask};
         // preserve the current umask: read current value by setting to another mode, and then restoring it
         let current_umask = umask(Mode::all());
         umask(current_umask);
-        daemonize::Daemonize::new()
-            .working_directory(std::env::current_dir().unwrap())
-            .umask(current_umask.bits() as u32)
-            .start()
-            .expect("could not daemonize the server process");
+        if !zellij_utils::envs::server_foreground_requested() {
+            daemonize::Daemonize::new()
+                .working_directory(std::env::current_dir().unwrap())
+                .umask(current_umask.bits() as u32)
+                .start()
+                .expect("could not daemonize the server process");
+        }
     }
 
     #[cfg(windows)]
@@ -802,6 +823,10 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                 #[cfg(windows)]
                 let reply_listener = zellij_utils::consts::ipc_bind_reply(&socket_path).unwrap();
 
+                // Counts consecutive accept/registration failures so a sustained
+                // error storm (eg. EMFILE during accept or stream cloning) backs
+                // off instead of spinning and flooding the log.
+                let mut consecutive_connection_errors: u64 = 0;
                 for stream in listener.incoming() {
                     match stream {
                         Ok(stream) => {
@@ -814,16 +839,45 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                                 .expect("failed to accept reply connection");
 
                             #[cfg(windows)]
-                            let receiver = os_input
-                                .new_client_with_reply(client_id, stream, reply_stream)
-                                .unwrap();
+                            let receiver =
+                                os_input.new_client_with_reply(client_id, stream, reply_stream);
                             #[cfg(not(windows))]
-                            let receiver = os_input.new_client(client_id, stream).unwrap();
+                            let receiver = os_input.new_client(client_id, stream);
+
+                            let receiver = match receiver {
+                                Ok(receiver) => receiver,
+                                Err(err) => {
+                                    if consecutive_connection_errors == 0 {
+                                        log::error!(
+                                            "failed to register client {client_id}: {:?} \
+                                             (recoverable; backing off, further identical \
+                                             errors rate-limited)",
+                                            err
+                                        );
+                                    } else if consecutive_connection_errors.is_multiple_of(50) {
+                                        log::error!(
+                                            "still failing to register clients after {} \
+                                             consecutive connection errors: {:?}",
+                                            consecutive_connection_errors + 1,
+                                            err
+                                        );
+                                    }
+                                    consecutive_connection_errors =
+                                        consecutive_connection_errors.saturating_add(1);
+                                    let _ = session_state.write().map(|mut state| {
+                                        state.remove_client(client_id);
+                                    });
+                                    thread::sleep(std::time::Duration::from_millis(100));
+                                    continue;
+                                },
+                            };
+
+                            consecutive_connection_errors = 0;
 
                             let session_data = session_data.clone();
                             let session_state = session_state.clone();
                             let to_server = to_server.clone();
-                            thread::Builder::new()
+                            if let Err(err) = thread::Builder::new()
                                 .name("server_router".to_string())
                                 .spawn(move || {
                                     route_thread_main(
@@ -836,15 +890,63 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                                     )
                                     .fatal()
                                 })
-                                .unwrap();
+                            {
+                                log::error!(
+                                    "failed to spawn route thread for client {client_id}: {:?} \
+                                     (recoverable; dropping client)",
+                                    err
+                                );
+                            }
                         },
                         Err(err) => {
-                            panic!("err {:?}", err);
+                            // A failed accept() — most often EMFILE ("too many open
+                            // files") from an fd spike — used to panic!() here and take
+                            // the whole session down. accept() errors are transient and
+                            // recoverable: log, back off briefly so we don't busy-spin
+                            // re-hitting the same condition, and keep serving. The
+                            // listener stays open and the session survives the spike.
+                            //
+                            // Rate-limit the log: emit the first failure, then only
+                            // every 50th (~once per 5s at the 100ms backoff) so a
+                            // sustained storm doesn't drown the very log that helps
+                            // diagnose the underlying fd leak.
+                            if consecutive_connection_errors == 0 {
+                                log::error!(
+                                    "failed to accept client connection: {:?} \
+                                     (recoverable; backing off, further identical \
+                                     errors rate-limited)",
+                                    err
+                                );
+                            } else if consecutive_connection_errors.is_multiple_of(50) {
+                                log::error!(
+                                    "still failing to accept client connections after \
+                                     {} consecutive errors: {:?}",
+                                    consecutive_connection_errors + 1,
+                                    err
+                                );
+                            }
+                            consecutive_connection_errors =
+                                consecutive_connection_errors.saturating_add(1);
+                            thread::sleep(std::time::Duration::from_millis(100));
+                            continue;
                         },
                     }
                 }
             }
         });
+
+    // Field 2026-07-22 (Monika / dragon): abandoned `--server` processes can
+    // spin at high CPU for many hours with zero clients. After daemonize, PPID
+    // is always 1 (launchd) — PPID alone is NOT an orphan detector. Arm:
+    // (1) SIGTERM/SIGINT → KillSession so plain kill works without SIGKILL
+    // (2) optional idle-exit after N seconds with zero connected clients, armed
+    //     only by an explicit positive VC_FRAME_SERVER_IDLE_EXIT_SECS value.
+    // Triage drawers are exempt from (2) — see `run_triage::idle_exit_may_reap`.
+    install_server_lifecycle_watchdogs(
+        to_server.clone(),
+        session_state.clone(),
+        envs::get_session_name().ok(),
+    );
 
     loop {
         let (instruction, mut err_ctx) = server_receiver.recv().unwrap();
@@ -950,6 +1052,7 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                             None,  // initial_panes
                             false, // block_on_first_terminal
                             should_focus_tab,
+                            TabPlacement::Append, // startup layout tabs keep source order
                             (client_id, is_web_client),
                             None,
                         ))
@@ -1341,9 +1444,9 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                     remove_client!(*client_id, os_input, session_state, session_data);
                 }
                 drop(completion_tx); // we do this here explicitly to signal that the clients have
-                                     // already disconnected and to prevent a deadlock below caused
-                                     // by us having to wait for session_data to send cleanup
-                                     // signals to the various threads
+                // already disconnected and to prevent a deadlock below caused
+                // by us having to wait for session_data to send cleanup
+                // signals to the various threads
                 for client_id in client_ids {
                     session_data
                         .write()
@@ -1619,7 +1722,9 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                     );
                 } else {
                     // TODO: test this
-                    log::error!("Cannot start web server: this instance of Zellij was compiled without web_server_capability");
+                    log::error!(
+                        "Cannot start web server: this instance of vc-frame was compiled without web_server_capability"
+                    );
                 }
             },
             ServerInstruction::ShareCurrentSession(_client_id) => {
@@ -1640,7 +1745,9 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                             .unwrap();
                     }
                 } else {
-                    log::error!("Cannot share session: this instance of Zellij was compiled without web_server_capability");
+                    log::error!(
+                        "Cannot share session: this instance of vc-frame was compiled without web_server_capability"
+                    );
                 }
             },
             ServerInstruction::StopSharingCurrentSession(_client_id) => {
@@ -1689,7 +1796,9 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                     }
                 } else {
                     // TODO: test this
-                    log::error!("Cannot start web server: this instance of Zellij was compiled without web_server_capability");
+                    log::error!(
+                        "Cannot start web server: this instance of vc-frame was compiled without web_server_capability"
+                    );
                 }
             },
             ServerInstruction::WebServerStarted(base_url) => {
@@ -1770,10 +1879,105 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
         }
     }
 
-    // Drop cached session data before exit.
-    *session_data.write().unwrap() = None;
+    // Release the metadata lock before Drop joins subsystem threads. Holding
+    // the write guard across teardown can deadlock any late route that needs
+    // session metadata while the server is already committed to exiting.
+    let cached_session = session_data.write().unwrap().take();
+    drop(cached_session);
 
     drop(std::fs::remove_file(&socket_path));
+}
+
+/// Parse an explicit idle-exit opt-in from `VC_FRAME_SERVER_IDLE_EXIT_SECS`.
+///
+/// Unset, empty, zero, and invalid values disable idle reaping. A server with
+/// zero UI clients is not necessarily idle: detached panes may still be doing
+/// useful work.
+pub fn server_idle_exit_secs_from_env(raw: Option<&str>) -> Option<u64> {
+    let idle_secs = raw?.trim().parse::<u64>().ok()?;
+    (idle_secs > 0).then_some(idle_secs)
+}
+
+fn install_server_lifecycle_watchdogs(
+    to_server: SenderWithContext<ServerInstruction>,
+    session_state: Arc<RwLock<SessionState>>,
+    session_name: Option<String>,
+) {
+    #[cfg(unix)]
+    {
+        let to_server_signals = to_server.clone();
+        let _ = thread::Builder::new()
+            .name("server_signal_watch".to_string())
+            .spawn(move || {
+                use signal_hook::consts::{SIGINT, SIGTERM};
+                use signal_hook::iterator::Signals;
+                let Ok(mut signals) = Signals::new([SIGINT, SIGTERM]) else {
+                    log::error!("server_signal_watch: failed to register SIGINT/SIGTERM");
+                    return;
+                };
+                for signal in signals.forever() {
+                    log::warn!(
+                        "server received signal {} — requesting KillSession (graceful exit)",
+                        signal
+                    );
+                    let _ = to_server_signals.send(ServerInstruction::KillSession);
+                    // One shot is enough; further signals are best-effort.
+                }
+            });
+    }
+
+    let idle_secs = idle_exit_plan(
+        session_name.as_deref(),
+        std::env::var("VC_FRAME_SERVER_IDLE_EXIT_SECS")
+            .ok()
+            .as_deref(),
+    );
+    if let Some(idle_secs) = idle_secs {
+        let to_server_idle = to_server;
+        let session_state_idle = session_state;
+        let _ = thread::Builder::new()
+            .name("server_idle_watch".to_string())
+            .spawn(move || {
+                let idle_limit = Duration::from_secs(idle_secs);
+                let poll = Duration::from_secs(5);
+                let mut empty_since: Option<Instant> = None;
+                loop {
+                    thread::sleep(poll);
+                    let client_count = session_state_idle
+                        .read()
+                        .map(|s| s.client_ids().len() + s.watcher_client_ids().len())
+                        .unwrap_or(0);
+                    if client_count == 0 {
+                        let since = empty_since.get_or_insert_with(Instant::now);
+                        if since.elapsed() >= idle_limit {
+                            log::warn!(
+                                "server idle: zero clients for ≥{}s under explicit VC_FRAME_SERVER_IDLE_EXIT_SECS policy — requesting KillSession",
+                                idle_secs
+                            );
+                            let _ = to_server_idle.send(ServerInstruction::KillSession);
+                            return;
+                        }
+                    } else {
+                        empty_since = None;
+                    }
+                }
+            });
+    } else {
+        log::info!("server idle-exit disabled (default, invalid/zero opt-in, or triage drawer)");
+    }
+}
+
+/// How long this server may sit client-less before it reaps itself, or `None`
+/// when the idle watchdog must not be armed at all.
+///
+/// The watchdog is disabled by default and requires an explicit positive env
+/// value. Triage drawers additionally reject even that opt-in because they hold
+/// zero clients for their entire life by construction.
+fn idle_exit_plan(session_name: Option<&str>, raw_env: Option<&str>) -> Option<u64> {
+    if !run_triage::idle_exit_may_reap(session_name) {
+        return None;
+    }
+    server_idle_exit_secs_from_env(raw_env)
 }
 
 struct SessionInitParams {
@@ -1908,15 +2112,16 @@ fn init_session(params: SessionInitParams) -> SessionMetaData {
             let config = config.clone();
             let has_clients_flag = has_clients_flag.clone();
             move || {
-                screen_thread_main(
-                    screen_bus,
+                screen_thread_main(ScreenThreadParams {
+                    bus: screen_bus,
                     max_panes,
-                    client_attributes_clone,
+                    client_attributes: client_attributes_clone,
                     config,
                     debug,
-                    layout,
+                    default_layout: layout,
                     has_clients_flag,
-                )
+                    session_name_override: None,
+                })
                 .fatal();
             }
         })
@@ -1933,7 +2138,12 @@ fn init_session(params: SessionInitParams) -> SessionMetaData {
             let plugin_bus = Bus::new(
                 vec![plugin_receiver],
                 ThreadSenders {
-                    to_screen: Some(to_screen_bounded.clone()),
+                    // Unbounded on purpose: Screen blocks inside the layout
+                    // transaction ACK wait, and a bounded wasm→screen channel
+                    // deadlocks the two threads until every ACK times out
+                    // (plugin thread stuck on send, Screen stuck on recv).
+                    // Backpressure stays on the pty sender, the real firehose.
+                    to_screen: Some(to_screen.clone()),
                     to_pty: Some(to_pty.clone()),
                     to_plugin: Some(to_plugin.clone()),
                     to_server: Some(to_server.clone()),
@@ -1954,8 +2164,8 @@ fn init_session(params: SessionInitParams) -> SessionMetaData {
             let background_plugins = config.background_plugins.clone();
             let session_env_vars = session_env_vars.clone();
             move || {
-                plugin_thread_main(
-                    plugin_bus,
+                plugin_thread_main(PluginThreadParams {
+                    bus: plugin_bus,
                     engine,
                     data_dir,
                     layout,
@@ -1970,8 +2180,8 @@ fn init_session(params: SessionInitParams) -> SessionMetaData {
                     default_mode,
                     default_keybinds,
                     background_plugins,
-                    client_id,
-                )
+                    initiating_client_id: client_id,
+                })
                 .fatal()
             }
         })
@@ -2007,6 +2217,11 @@ fn init_session(params: SessionInitParams) -> SessionMetaData {
                     to_plugin: Some(to_plugin.clone()),
                     to_server: Some(to_server.clone()),
                     to_pty_writer: Some(to_pty_writer.clone()),
+                    // Self-sender: background_jobs_main bootstraps its own
+                    // session-metadata job via send_to_background_jobs; a
+                    // None here silently drops that event and session_info
+                    // metadata (triage f/x/n) is never written.
+                    to_background_jobs: Some(to_background_jobs.clone()),
                     ..Default::default()
                 },
                 Some(os_input.clone()),
@@ -2117,13 +2332,13 @@ fn should_show_release_notes(
     if layout_is_welcome_screen {
         return false;
     }
-    if let Some(should_show_release_notes_config) = should_show_release_notes_config {
-        if !should_show_release_notes_config {
-            // if we were explicitly told not to show release notes, we don't show them,
-            // otherwise we make sure we only show them if they were not seen AND we know
-            // we are able to write to the cache
-            return false;
-        }
+    if let Some(should_show_release_notes_config) = should_show_release_notes_config
+        && !should_show_release_notes_config
+    {
+        // if we were explicitly told not to show release notes, we don't show them,
+        // otherwise we make sure we only show them if they were not seen AND we know
+        // we are able to write to the cache
+        return false;
     }
     if ZELLIJ_SEEN_RELEASE_NOTES_CACHE_FILE.exists() {
         false
@@ -2373,5 +2588,90 @@ mod session_state_tests {
         s.clear_forward_in_flight(42);
         // After clear, removing the client yields no stuck tokens.
         assert!(s.remove_client(1).is_empty());
+    }
+
+    #[test]
+    fn server_idle_exit_is_disabled_without_an_explicit_positive_opt_in() {
+        assert_eq!(server_idle_exit_secs_from_env(None), None);
+        assert_eq!(server_idle_exit_secs_from_env(Some("")), None);
+        assert_eq!(server_idle_exit_secs_from_env(Some("not-a-number")), None);
+    }
+
+    #[test]
+    fn server_idle_exit_secs_zero_disables() {
+        assert_eq!(server_idle_exit_secs_from_env(Some("0")), None);
+        assert_eq!(server_idle_exit_secs_from_env(Some(" 0 ")), None);
+    }
+
+    #[test]
+    fn server_idle_exit_secs_custom() {
+        assert_eq!(server_idle_exit_secs_from_env(Some("60")), Some(60));
+        assert_eq!(server_idle_exit_secs_from_env(Some("900")), Some(900));
+        assert_eq!(server_idle_exit_secs_from_env(Some(" 60 ")), Some(60));
+    }
+
+    /// Regression, 2026-07-25 — the rail's f/x/n settlement counters went blind.
+    ///
+    /// The counters are the non-chrome tab counts of the three triage drawer
+    /// sessions. Drawers are materialized by the reaper with
+    /// `attach --create-background` and nothing ever attaches to them, so the
+    /// idle watchdog saw "zero clients for 900s" and killed each drawer a
+    /// quarter of an hour after its last transfer. The runs stayed durably
+    /// captured under `finished_runs/`, but the drawer left the live session
+    /// list and the rail rendered 0 — a blind cockpit over healthy data.
+    ///
+    /// This asserts the arming decision now depends on *which* session it is.
+    /// Before the fix `idle_exit_plan` did not exist and the watchdog was armed
+    /// unconditionally, so every case below returned `Some(900)`.
+    #[test]
+    fn the_idle_watchdog_is_never_armed_for_a_triage_drawer() {
+        for drawer in ["Finalized runs", "Failed runs", "Needs attention"] {
+            assert_eq!(
+                idle_exit_plan(Some(drawer), Some("60")),
+                None,
+                "drawer '{drawer}' must reject even an explicit idle-reaping opt-in"
+            );
+        }
+    }
+
+    #[test]
+    fn idle_watchdog_is_disabled_by_default_for_ordinary_sessions() {
+        assert_eq!(idle_exit_plan(Some("Operator"), None), None);
+        assert_eq!(idle_exit_plan(Some("vc-frame"), None), None);
+        assert_eq!(idle_exit_plan(None, None), None);
+    }
+
+    #[test]
+    fn ordinary_sessions_can_explicitly_opt_in_to_idle_reaping() {
+        assert_eq!(idle_exit_plan(Some("vc-frame"), Some("60")), Some(60));
+        assert_eq!(idle_exit_plan(None, Some("900")), Some(900));
+        assert_eq!(idle_exit_plan(Some("Operator"), Some("0")), None);
+    }
+
+    #[test]
+    fn session_thread_join_returns_before_a_stalled_subsystem() {
+        let handle = thread::spawn(|| thread::sleep(Duration::from_secs(2)));
+        let started = Instant::now();
+
+        assert!(!join_session_thread_until(
+            "stalled-test",
+            Some(handle),
+            Instant::now() + Duration::from_millis(20),
+        ));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "a stalled subsystem must not trap server shutdown"
+        );
+    }
+
+    #[test]
+    fn session_thread_join_reaps_a_completed_subsystem() {
+        let handle = thread::spawn(|| {});
+
+        assert!(join_session_thread_until(
+            "completed-test",
+            Some(handle),
+            Instant::now() + Duration::from_secs(1),
+        ));
     }
 }

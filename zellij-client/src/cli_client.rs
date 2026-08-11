@@ -4,6 +4,11 @@ use std::collections::{BTreeMap, HashSet};
 use std::io::{self, BufRead, Write};
 use std::process;
 use std::str::FromStr;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::Duration;
 use std::{fs, path::PathBuf};
 
 use crate::os_input_output::ClientOsApi;
@@ -11,6 +16,7 @@ use uuid::Uuid;
 use zellij_utils::{
     cli::{SubscribeCli, SubscribeFormat},
     data::PaneId,
+    envs::{PANE_ID_ENV_KEY, VC_FRAME_PANE_ID_ENV_KEY},
     errors::prelude::*,
     input::actions::Action,
     ipc::{ClientToServerMsg, ExitReason, ServerToClientMsg},
@@ -21,6 +27,7 @@ pub fn start_cli_client(
     session_name: &str,
     actions: Vec<Action>,
 ) {
+    let deadline = ActionDeadline::arm(&*os_input);
     let zellij_ipc_pipe: PathBuf = {
         let mut sock_dir = zellij_utils::consts::ZELLIJ_SOCK_DIR.clone();
         fs::create_dir_all(&sock_dir).unwrap();
@@ -30,8 +37,14 @@ pub fn start_cli_client(
     };
     crate::check_ipc_pipe_length(&zellij_ipc_pipe);
     os_input.connect_to_server(&zellij_ipc_pipe);
+    let caller = os_input
+        .env_variable("VC_FRAME_CALLER")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "anonymous".to_string());
+    os_input.send_to_server(ClientToServerMsg::DeclareCaller { caller });
     let pane_id = os_input
-        .env_variable("ZELLIJ_PANE_ID")
+        .env_variable(VC_FRAME_PANE_ID_ENV_KEY)
+        .or_else(|| os_input.env_variable(PANE_ID_ENV_KEY))
         .and_then(|e| e.trim().parse().ok());
 
     for action in actions {
@@ -75,6 +88,76 @@ pub fn start_cli_client(
         }
     }
     os_input.send_to_server(ClientToServerMsg::ClientExited);
+    deadline.complete();
+}
+
+struct ActionDeadline {
+    completed: Arc<AtomicBool>,
+}
+
+impl ActionDeadline {
+    fn arm(os_input: &dyn ClientOsApi) -> Self {
+        let seconds = os_input
+            .env_variable("VC_FRAME_ACTION_TTL_SECONDS")
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(60)
+            .clamp(1, 3600);
+        let completed = Arc::new(AtomicBool::new(false));
+        let watchdog = completed.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(seconds));
+            if !watchdog.load(Ordering::Acquire) {
+                eprintln!(
+                    "warden.expired_client caller={} ttl_seconds={} result=client_self_retired",
+                    std::env::var("VC_FRAME_CALLER").unwrap_or_else(|_| "anonymous".to_string()),
+                    seconds
+                );
+                process::exit(124);
+            }
+        });
+        Self { completed }
+    }
+
+    fn complete(&self) {
+        self.completed.store(true, Ordering::Release);
+    }
+}
+
+pub fn doctor_routes_client(os_input: Box<dyn ClientOsApi>, session_name: &str, json: bool) -> i32 {
+    let deadline = ActionDeadline::arm(&*os_input);
+    let mut socket = zellij_utils::consts::ZELLIJ_SOCK_DIR.clone();
+    socket.push(session_name);
+    os_input.connect_to_server(&socket);
+    let caller = os_input
+        .env_variable("VC_FRAME_CALLER")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "operator".to_string());
+    os_input.send_to_server(ClientToServerMsg::DeclareCaller { caller });
+    os_input.send_to_server(ClientToServerMsg::DoctorRoutes { json });
+    let exit_code = loop {
+        match os_input.recv_from_server().map(|(message, _)| message) {
+            Some(ServerToClientMsg::Log { lines }) => {
+                for line in lines {
+                    println!("{line}");
+                }
+                break 0;
+            },
+            Some(ServerToClientMsg::LogError { lines }) => {
+                for line in lines {
+                    eprintln!("{line}");
+                }
+                break 1;
+            },
+            Some(ServerToClientMsg::Connected | ServerToClientMsg::UnblockInputThread) => {},
+            None => {
+                eprintln!("route telemetry request ended without a receipt");
+                break 1;
+            },
+            Some(_) => {},
+        }
+    };
+    deadline.complete();
+    exit_code
 }
 
 struct PipeClientParams {
@@ -227,13 +310,6 @@ fn individual_messages_client(
     action: Action,
     pane_id: Option<u32>,
 ) {
-    let is_blocking = matches!(
-        &action,
-        Action::NewBlockingPane {
-            unblock_condition: Some(_),
-            ..
-        }
-    );
     let msg = ClientToServerMsg::Action {
         action,
         terminal_id: pane_id,
@@ -242,19 +318,18 @@ fn individual_messages_client(
     };
     os_input.send_to_server(msg);
     loop {
-        match os_input.recv_from_server() {
-            Some((ServerToClientMsg::UnblockInputThread, _)) if !is_blocking => {
-                break;
-            },
-            Some((ServerToClientMsg::Log { lines: log_lines }, _)) => {
+        let message = os_input.recv_from_server().map(|(message, _)| message);
+        match classify_cli_action_response(message) {
+            CliActionResponse::Wait => {},
+            CliActionResponse::Success(log_lines) => {
                 log_lines.iter().for_each(|line| println!("{line}"));
                 break;
             },
-            Some((ServerToClientMsg::LogError { lines: log_lines }, _)) => {
+            CliActionResponse::Error(log_lines) => {
                 log_lines.iter().for_each(|line| eprintln!("{line}"));
                 process::exit(2);
             },
-            Some((ServerToClientMsg::Exit { exit_reason }, _)) => match exit_reason {
+            CliActionResponse::Exit(exit_reason) => match exit_reason {
                 ExitReason::Error(e) => {
                     eprintln!("{}", e);
                     process::exit(2);
@@ -266,8 +341,34 @@ fn individual_messages_client(
                     break;
                 },
             },
-            _ => {},
+            CliActionResponse::Disconnected => {
+                eprintln!("server disconnected before acknowledging the CLI action");
+                process::exit(2);
+            },
         }
+    }
+}
+
+#[derive(Debug)]
+enum CliActionResponse {
+    Wait,
+    Success(Vec<String>),
+    Error(Vec<String>),
+    Exit(ExitReason),
+    Disconnected,
+}
+
+fn classify_cli_action_response(message: Option<ServerToClientMsg>) -> CliActionResponse {
+    match message {
+        // This signal is intentionally session-wide and can belong to an
+        // unrelated interactive client. CLI actions finish only on their
+        // targeted Log/LogError/Exit acknowledgement.
+        Some(ServerToClientMsg::UnblockInputThread) => CliActionResponse::Wait,
+        Some(ServerToClientMsg::Log { lines }) => CliActionResponse::Success(lines),
+        Some(ServerToClientMsg::LogError { lines }) => CliActionResponse::Error(lines),
+        Some(ServerToClientMsg::Exit { exit_reason }) => CliActionResponse::Exit(exit_reason),
+        Some(_) => CliActionResponse::Wait,
+        None => CliActionResponse::Disconnected,
     }
 }
 
@@ -301,7 +402,7 @@ pub fn start_subscribe_client(
     // Send subscribe message
     os_input.send_to_server(ClientToServerMsg::SubscribeToPaneRenders {
         pane_ids: pane_ids.clone(),
-        scrollback: subscribe_cli.scrollback,
+        scrollback: subscribe_cli.scrollback_lines(),
         ansi: subscribe_cli.ansi,
     });
 
@@ -376,4 +477,33 @@ pub fn start_subscribe_client(
     }
 
     os_input.send_to_server(ClientToServerMsg::ClientExited);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generic_unblock_does_not_complete_a_cli_action() {
+        assert!(matches!(
+            classify_cli_action_response(Some(ServerToClientMsg::UnblockInputThread)),
+            CliActionResponse::Wait
+        ));
+    }
+
+    #[test]
+    fn targeted_empty_log_is_an_explicit_success_ack() {
+        assert!(matches!(
+            classify_cli_action_response(Some(ServerToClientMsg::Log { lines: vec![] })),
+            CliActionResponse::Success(lines) if lines.is_empty()
+        ));
+    }
+
+    #[test]
+    fn disconnect_before_acknowledgement_fails_closed() {
+        assert!(matches!(
+            classify_cli_action_response(None),
+            CliActionResponse::Disconnected
+        ));
+    }
 }

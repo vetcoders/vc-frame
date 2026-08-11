@@ -1,7 +1,7 @@
 use crate::{
     consts::{
-        is_ipc_socket, session_info_folder_for_session, session_layout_cache_file_name,
-        ZELLIJ_SESSION_INFO_CACHE_DIR, ZELLIJ_SOCK_DIR,
+        ZELLIJ_SESSION_INFO_CACHE_DIR, ZELLIJ_SOCK_DIR, is_ipc_socket,
+        session_info_folder_for_session, session_layout_cache_file_name,
     },
     envs,
     input::layout::Layout,
@@ -9,10 +9,10 @@ use crate::{
 };
 use anyhow;
 use humantime::format_duration;
+use lev_distance::find_best_match_for_name;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 use std::{fs, io, process};
-use suggest::Suggest;
 
 pub fn get_sessions() -> Result<Vec<(String, Duration)>, io::ErrorKind> {
     match fs::read_dir(&*ZELLIJ_SOCK_DIR) {
@@ -143,20 +143,49 @@ pub fn get_sessions_sorted_by_mtime() -> anyhow::Result<Vec<String>> {
 /// On Unix, connects and sends a `ConnStatus` message to verify the server responds.
 /// On Windows, reads the server PID from the marker file and checks process liveness.
 #[cfg(unix)]
+const SESSION_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
+const KILL_SESSION_ACK_TIMEOUT: Duration = Duration::from_secs(6);
+
+async fn await_kill_session_ack(
+    path: &std::path::Path,
+) -> Result<io::Result<()>, tokio::time::error::Elapsed> {
+    tokio::time::timeout(
+        KILL_SESSION_ACK_TIMEOUT,
+        crate::ipc::async_send_kill_and_await(path),
+    )
+    .await
+}
+
+#[cfg(unix)]
+fn probe_socket_stream(stream: interprocess::local_socket::Stream, timeout: Duration) -> bool {
+    use interprocess::local_socket::traits::Stream as _;
+
+    if stream.set_recv_timeout(Some(timeout)).is_err()
+        || stream.set_send_timeout(Some(timeout)).is_err()
+    {
+        return false;
+    }
+
+    let mut sender: IpcSenderWithContext<ClientToServerMsg> = IpcSenderWithContext::new(stream);
+    if sender
+        .send_client_msg(ClientToServerMsg::ConnStatus)
+        .is_err()
+    {
+        return false;
+    }
+    let mut receiver: IpcReceiverWithContext<ServerToClientMsg> = sender.get_receiver();
+    matches!(
+        receiver.recv_server_msg(),
+        Some((ServerToClientMsg::Connected, _))
+    )
+}
+
+#[cfg(unix)]
 fn assert_socket(name: &str) -> bool {
-    use crate::consts::ipc_connect;
+    use crate::consts::ipc_connect_timeout;
     let path = &*ZELLIJ_SOCK_DIR.join(name);
-    match ipc_connect(path) {
-        Ok(stream) => {
-            let mut sender: IpcSenderWithContext<ClientToServerMsg> =
-                IpcSenderWithContext::new(stream);
-            let _ = sender.send_client_msg(ClientToServerMsg::ConnStatus);
-            let mut receiver: IpcReceiverWithContext<ServerToClientMsg> = sender.get_receiver();
-            match receiver.recv_server_msg() {
-                Some((ServerToClientMsg::Connected, _)) => true,
-                None | Some((_, _)) => false,
-            }
-        },
+    match ipc_connect_timeout(path, SESSION_PROBE_TIMEOUT) {
+        Ok(stream) => probe_socket_stream(stream, SESSION_PROBE_TIMEOUT),
         Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {
             drop(fs::remove_file(path));
             false
@@ -207,6 +236,65 @@ fn assert_socket(name: &str) -> bool {
 #[cfg(not(any(unix, windows)))]
 fn assert_socket(_name: &str) -> bool {
     true
+}
+
+#[cfg(all(test, unix))]
+mod session_probe_timeout_tests {
+    use super::*;
+    use interprocess::local_socket::{GenericFilePath, ListenerOptions, prelude::*};
+    use std::time::Instant;
+
+    #[test]
+    fn silent_session_socket_is_rejected_within_the_probe_deadline() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let socket = dir.path().join("silent-session.sock");
+        let listener = ListenerOptions::new()
+            .name(socket.as_path().to_fs_name::<GenericFilePath>().unwrap())
+            .create_sync()
+            .expect("bind silent socket");
+
+        let server = std::thread::spawn(move || {
+            let _stream = listener
+                .incoming()
+                .next()
+                .expect("incoming connection")
+                .expect("accept silent client");
+            std::thread::sleep(Duration::from_secs(2));
+        });
+
+        let stream = crate::consts::ipc_connect_timeout(&socket, Duration::from_millis(75))
+            .expect("connect silent socket");
+        let started = Instant::now();
+        let alive = probe_socket_stream(stream, Duration::from_millis(75));
+
+        assert!(
+            !alive,
+            "a server that never answers ConnStatus is not healthy"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "session discovery must not block on a silent socket"
+        );
+        server.join().expect("silent server thread");
+    }
+
+    #[test]
+    fn kill_ack_timer_is_entered_inside_its_runtime() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let missing_socket = dir.path().join("missing-session.sock");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .expect("shutdown runtime");
+
+        let result = runtime.block_on(await_kill_session_ack(&missing_socket));
+
+        assert!(
+            matches!(result, Ok(Err(_))),
+            "a missing socket should return its transport error without panicking outside Tokio"
+        );
+    }
 }
 
 pub fn print_sessions(
@@ -290,40 +378,55 @@ pub fn get_active_session() -> ActiveSession {
     }
 }
 
-pub fn kill_session(name: &str) {
-    use crate::consts::ipc_connect;
+pub fn kill_session(name: &str, force: bool) {
+    if let Err(error) = validate_session_name(name) {
+        eprintln!("{error}");
+        process::exit(1);
+    }
     let path = &*ZELLIJ_SOCK_DIR.join(name);
-    match ipc_connect(path) {
-        Ok(stream) => {
-            // On Windows, the server uses a dual-pipe architecture: the main pipe
-            // for client→server and a reply pipe for server→client. We must:
-            // 1. Connect to the reply pipe (so the server unblocks from
-            //    reply_listener.accept() and spawns the route thread)
-            // 2. Send KillSession on the main pipe
-            // 3. Wait for the Exit response on the reply pipe (so we don't
-            //    disconnect before the server processes the message)
-            #[cfg(windows)]
-            {
-                let reply = crate::consts::ipc_connect_reply(path);
-                let _ = IpcSenderWithContext::<ClientToServerMsg>::new(stream)
-                    .send_client_msg(ClientToServerMsg::KillSession);
-                if let Ok(reply_stream) = reply {
-                    let mut receiver: IpcReceiverWithContext<ServerToClientMsg> =
-                        IpcReceiverWithContext::new(reply_stream);
-                    let _ = receiver.recv_server_msg();
-                }
-            }
-            #[cfg(not(windows))]
-            {
-                let _ = IpcSenderWithContext::<ClientToServerMsg>::new(stream)
-                    .send_client_msg(ClientToServerMsg::KillSession);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .unwrap_or_else(|error| {
+            eprintln!("Cannot create shutdown runtime: {error}");
+            process::exit(1);
+        });
+    // Poll the async helper from inside the runtime. Constructing
+    // `tokio::time::timeout` before `block_on` panics because no reactor is
+    // entered yet.
+    let shutdown_result = runtime.block_on(await_kill_session_ack(path));
+    match shutdown_result {
+        Ok(Ok(())) => {},
+        Ok(Err(error)) => {
+            // Dead transport: the server is already gone and only its socket
+            // remains. With --force the kill is idempotent — report success
+            // and clean the stale socket so the name stops resolving.
+            let already_dead = matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            );
+            if force && already_dead {
+                let _ = std::fs::remove_file(path);
+                eprintln!("Session {name} was already dead — cleaned up its stale socket.");
+            } else {
+                eprintln!("Failed to kill session {name}: {error}");
+                process::exit(1);
             }
         },
-        Err(e) => {
-            eprintln!("Error occurred: {:?}", e);
+        Err(_) => {
+            eprintln!(
+                "Session {name} did not acknowledge shutdown within {:.1}s",
+                KILL_SESSION_ACK_TIMEOUT.as_secs_f64()
+            );
+            if force {
+                eprintln!(
+                    "--force cannot reach an unresponsive server; find it with: ps aux | grep 'vc-frame --server' | grep '{name}'"
+                );
+            }
             process::exit(1);
         },
-    };
+    }
 }
 
 pub fn delete_session(name: &str, force: bool) {
@@ -374,7 +477,7 @@ pub fn list_sessions(no_formatting: bool, short: bool, reverse: bool) {
                 all_sessions.insert(session_name.clone(), (duration, false));
             }
             if all_sessions.is_empty() {
-                eprintln!("No active zellij sessions found.");
+                eprintln!("No active vc-frame sessions found.");
                 1
             } else {
                 print_sessions(
@@ -474,13 +577,12 @@ pub fn assert_session(name: &str) {
                 return;
             } else {
                 println!("No session named {:?} found.", name);
-                if let Some(sugg) = get_sessions()
+                let session_names = get_sessions()
                     .unwrap()
-                    .iter()
-                    .map(|s| s.0.clone())
-                    .collect::<Vec<_>>()
-                    .suggest(name)
-                {
+                    .into_iter()
+                    .map(|session| session.0)
+                    .collect::<Vec<_>>();
+                if let Some(sugg) = find_best_match_for_name(session_names.iter(), name, None) {
                     println!("  help: Did you mean `{}`?", sugg);
                 }
             }
@@ -501,7 +603,10 @@ pub fn assert_dead_session(name: &str, force: bool) {
                     name
                 )
             } else if exists && force {
-                println!("A session by the name {:?} exists and is active, but will be force killed and deleted.", name);
+                println!(
+                    "A session by the name {:?} exists and is active, but will be force killed and deleted.",
+                    name
+                );
                 return;
             } else {
                 return;
@@ -523,10 +628,45 @@ pub fn validate_session_name(name: &str) -> Result<(), String> {
     if name == "." || name == ".." {
         return Err(format!("Invalid session name: \"{}\".", name));
     }
-    if name.contains('/') {
-        return Err("Session name cannot contain '/'.".to_string());
+    if name.contains(['/', '\\']) {
+        return Err("Session name cannot contain path separators.".to_string());
+    }
+    let bytes = name.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return Err("Session name cannot contain a Windows drive prefix.".to_string());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod session_name_validation_tests {
+    use super::validate_session_name;
+
+    #[test]
+    fn session_name_cannot_escape_socket_root() {
+        for valid in ["work", "work.tree", "work-night", "work:night"] {
+            assert_eq!(validate_session_name(valid), Ok(()), "{valid}");
+        }
+
+        for invalid in [
+            "",
+            " ",
+            ".",
+            "..",
+            "../other",
+            "/tmp/other",
+            r"..\other",
+            r"\other",
+            r"C:\other",
+            "C:other",
+            r"\\server\share",
+        ] {
+            assert!(
+                validate_session_name(invalid).is_err(),
+                "{invalid:?} must not escape the session socket root"
+            );
+        }
+    }
 }
 
 pub fn assert_session_ne(name: &str) {
@@ -539,12 +679,18 @@ pub fn assert_session_ne(name: &str) {
         Ok(result) if !result => {
             let resurrectable_sessions = get_resurrectable_session_names();
             if resurrectable_sessions.iter().any(|s| s == name) {
-                println!("Session with name {:?} already exists, but is dead. Use the attach command to resurrect it or, the delete-session command to kill it or specify a different name.", name);
+                println!(
+                    "Session with name {:?} already exists, but is dead. Use the attach command to resurrect it or, the delete-session command to kill it or specify a different name.",
+                    name
+                );
             } else {
-                return
+                return;
             }
-        }
-        Ok(_) => println!("Session with name {:?} already exists. Use attach command to connect to it or specify a different name.", name),
+        },
+        Ok(_) => println!(
+            "Session with name {:?} already exists. Use attach command to connect to it or specify a different name.",
+            name
+        ),
         Err(e) => eprintln!("Error occurred: {:?}", e),
     };
     process::exit(1);
@@ -563,9 +709,48 @@ pub fn generate_unique_session_name() -> Option<String> {
         return None;
     };
 
-    get_name_generator()
-        .take(1000)
-        .find(|name| !sessions.contains(name) && !dead_sessions.contains(name))
+    get_name_generator().take(1000).find(|name| {
+        session_name_fits_socket_path(name)
+            && !sessions.contains(name)
+            && !dead_sessions.contains(name)
+    })
+}
+
+#[cfg(unix)]
+fn session_name_fits_socket_path(session_name: &str) -> bool {
+    socket_path_fits_limit(
+        &ZELLIJ_SOCK_DIR,
+        session_name,
+        crate::consts::ZELLIJ_SOCK_MAX_LENGTH,
+    )
+}
+
+#[cfg(unix)]
+fn socket_path_fits_limit(
+    socket_dir: &std::path::Path,
+    session_name: &str,
+    max_length: usize,
+) -> bool {
+    socket_dir.join(session_name).as_os_str().len() < max_length
+}
+
+#[cfg(not(unix))]
+fn session_name_fits_socket_path(_session_name: &str) -> bool {
+    true
+}
+
+#[cfg(all(test, unix))]
+mod generated_session_name_tests {
+    use super::socket_path_fits_limit;
+    use std::path::PathBuf;
+
+    #[test]
+    fn socket_path_limit_is_exclusive() {
+        let socket_dir = PathBuf::from("x".repeat(80));
+
+        assert!(socket_path_fits_limit(&socket_dir, &"y".repeat(22), 104));
+        assert!(!socket_path_fits_limit(&socket_dir, &"y".repeat(23), 104));
+    }
 }
 
 /// Create a new random name generator

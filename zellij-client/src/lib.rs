@@ -12,7 +12,6 @@ pub mod cli_client;
 mod command_is_executing;
 mod input_handler;
 mod keyboard_parser;
-pub mod old_config_converter;
 #[cfg(feature = "web_server_capability")]
 pub mod remote_attach;
 mod stdin_ansi_parser;
@@ -56,6 +55,12 @@ const RESET_STYLE: &str = "\u{1b}[m";
 const SHOW_CURSOR: &str = "\u{1b}[?25h";
 const ENTER_KITTY_KEYBOARD_MODE: &str = "\u{1b}[>1u";
 const EXIT_KITTY_KEYBOARD_MODE: &str = "\u{1b}[<1u";
+/// Minimal terminal restore emitted from the panic hook so a hard crash never
+/// leaves the host terminal poisoned for the next session: exit kitty keyboard
+/// mode, cancel host-theme notify, leave the alternate screen, reset styling
+/// and show the cursor. Literal of EXIT_KITTY_KEYBOARD_MODE + DISABLE_HOST_THEME_NOTIFY
+/// + EXIT_ALTERNATE_SCREEN + RESET_STYLE + SHOW_CURSOR (consts can't concat at const time).
+const PANIC_TERMINAL_RESTORE: &str = "\u{1b}[<1u\u{1b}[?2031l\u{1b}[?1049l\u{1b}[m\u{1b}[?25h";
 const CLEAR_CLIENT_TERMINAL_ATTRIBUTES: &str = "\u{1b}[?1l\u{1b}=\u{1b}[r\u{1b}[?1000l\u{1b}[?1002l\u{1b}[?1003l\u{1b}[?1005l\u{1b}[?1006l\u{1b}[?12l";
 /// Subscribe to host color-palette theme notifications (CSI 2031). Hosts
 /// that support it begin emitting unsolicited DSR 997 reports on theme
@@ -155,11 +160,11 @@ use crate::{
 use zellij_utils::cli::CliArgs;
 use zellij_utils::{
     channels::{self, ChannelWithContext, SenderWithContext},
-    consts::{set_permissions, ZELLIJ_SOCK_DIR},
+    consts::{ZELLIJ_SOCK_DIR, set_permissions},
     data::{ClientId, ConnectToSession, KeyWithModifier, LayoutInfo, LayoutMetadata},
     envs,
     errors::{ClientContext, ContextType, ErrorInstruction},
-    input::{cli_assets::CliAssets, config::Config, options::Options},
+    input::{actions::Action, cli_assets::CliAssets, config::Config, options::Options},
     ipc::{ClientToServerMsg, ExitReason, ServerToClientMsg},
     pane_size::Size,
     vendored::termwiz::input::InputEvent,
@@ -327,7 +332,7 @@ fn spawn_web_server(cli_args: &CliArgs) -> Result<String, String> {
 #[cfg(not(feature = "web_server_capability"))]
 fn spawn_web_server(_cli_args: &CliArgs) -> Result<String, String> {
     log::error!(
-        "This version of Zellij was compiled without web server support, cannot run web server!"
+        "This version of vc-frame was compiled without web server support, cannot run web server!"
     );
     Ok("".to_owned())
 }
@@ -351,14 +356,23 @@ fn check_ipc_pipe_length(ipc_pipe: &Path) {
 
 /// Spawn the Zellij server process.
 ///
-/// On Unix the server daemonizes (double-fork) inside start_server(), so
-/// the intermediate child exits immediately and `cmd.status()` returns.
+/// On Unix the server normally daemonizes (double-fork) inside start_server(),
+/// so the intermediate child exits immediately and `cmd.status()` returns.
+/// Isolated supervisors can request a directly-owned foreground server; in
+/// that mode the child handle is deliberately detached without waiting.
 #[cfg(not(windows))]
 pub fn spawn_server(socket_path: &Path, debug: bool) -> io::Result<()> {
     let mut cmd = Command::new(current_exe()?);
     cmd.arg("--server").arg(socket_path);
     if debug {
         cmd.arg("--debug");
+    }
+    if zellij_utils::envs::server_foreground_requested() {
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        cmd.spawn()?;
+        return Ok(());
     }
     let status = cmd.status()?;
     if status.success() {
@@ -406,10 +420,10 @@ pub enum ClientInfo {
 impl ClientInfo {
     pub fn get_session_name(&self) -> &str {
         match self {
-            Self::Attach(ref name, _) => name,
-            Self::New(ref name, _layout_info, _layout_cwd) => name,
-            Self::Resurrect(ref name, _, _, _) => name,
-            Self::Watch(ref name, _) => name,
+            Self::Attach(name, _) => name,
+            Self::New(name, _layout_info, _layout_cwd) => name,
+            Self::Resurrect(name, _, _, _) => name,
+            Self::Watch(name, _) => name,
         }
     }
     pub fn set_layout_info(&mut self, new_layout_info: LayoutInfo) {
@@ -514,6 +528,9 @@ pub async fn run_remote_client_terminal_loop(
                         }
                     }
                     crate::os_input_output::SignalEvent::Quit => {
+                        break;
+                    }
+                    crate::os_input_output::SignalEvent::Detach => {
                         break;
                     }
                 }
@@ -624,35 +641,50 @@ pub async fn run_remote_client_terminal_loop(
 }
 
 #[cfg(feature = "web_server_capability")]
+pub struct StartRemoteClientOptions<'a> {
+    pub os_input: Box<dyn ClientOsApi>,
+    pub remote_session_url: &'a str,
+    pub token: Option<String>,
+    pub remember: bool,
+    pub forget: bool,
+    pub ca_cert: Option<std::path::PathBuf>,
+    pub insecure: bool,
+    pub async_worker_tasks: Option<usize>,
+}
+
+#[cfg(feature = "web_server_capability")]
 pub fn start_remote_client(
-    mut os_input: Box<dyn ClientOsApi>,
-    remote_session_url: &str,
-    token: Option<String>,
-    remember: bool,
-    forget: bool,
-    ca_cert: Option<std::path::PathBuf>,
-    insecure: bool,
-    async_worker_tasks: Option<usize>,
+    opts: StartRemoteClientOptions<'_>,
 ) -> Result<Option<ConnectToSession>, RemoteClientError> {
-    info!("Starting Zellij client!");
+    info!("Starting vc-frame client!");
 
-    let runtime = crate::async_runtime(async_worker_tasks);
+    // See start_client(): an interactive (remote) client needs a real TTY for
+    // raw mode; fail fast instead of panicking in set_raw_mode() without one.
+    if !opts.os_input.stdin_is_terminal() {
+        eprintln!(
+            "vc-frame: stdin is not a terminal (TTY); cannot start an interactive session. Run vc-frame from a real terminal."
+        );
+        std::process::exit(1);
+    }
 
-    let connections = remote_attach::attach_to_remote_session(
-        runtime.clone(),
-        os_input.clone(),
-        remote_session_url,
-        token,
-        remember,
-        forget,
-        ca_cert.as_deref(),
-        insecure,
-    )?;
+    let runtime = crate::async_runtime(opts.async_worker_tasks);
+
+    let connections =
+        remote_attach::attach_to_remote_session(remote_attach::AttachRemoteSessionOptions {
+            runtime: runtime.clone(),
+            _os_input: opts.os_input.clone(),
+            remote_session_url: opts.remote_session_url,
+            token: opts.token,
+            remember: opts.remember,
+            forget: opts.forget,
+            ca_cert: opts.ca_cert.as_deref(),
+            insecure: opts.insecure,
+        })?;
 
     let reconnect_to_session = None;
-    os_input.unset_raw_mode().unwrap();
+    opts.os_input.unset_raw_mode().unwrap();
 
-    let mut stdout = os_input.get_stdout_writer();
+    let mut stdout = opts.os_input.get_stdout_writer();
     stdout.write_all(ENTER_ALTERNATE_SCREEN.as_bytes()).unwrap();
     stdout
         .write_all(CLEAR_CLIENT_TERMINAL_ATTRIBUTES.as_bytes())
@@ -667,6 +699,7 @@ pub fn start_remote_client(
 
     envs::set_zellij("0".to_string());
 
+    let mut os_input = opts.os_input;
     let full_screen_ws = os_input.get_terminal_size();
 
     os_input.set_raw_mode();
@@ -676,6 +709,12 @@ pub fn start_remote_client(
         use zellij_utils::errors::handle_panic;
         let os_input = os_input.clone();
         Box::new(move |info| {
+            // Bulletproof teardown: emit the terminal restore unconditionally —
+            // before anything that can early-return — so a panic never leaves the
+            // host in the alternate screen with a hidden cursor for the next session.
+            let mut stdout = os_input.get_stdout_writer();
+            let _ = stdout.write_all(PANIC_TERMINAL_RESTORE.as_bytes());
+            let _ = stdout.flush();
             os_input.disable_mouse().non_fatal();
             os_input.restore_console_mode();
             if let Ok(()) = os_input.unset_raw_mode() {
@@ -705,7 +744,7 @@ pub fn start_remote_client(
         connections,
     ))?;
 
-    let exit_msg = String::from("Bye from Zellij!");
+    let exit_msg = String::from("Bye from 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍.");
 
     if reconnect_to_session.is_none() {
         reset_controlling_terminal_state(exit_msg, 0);
@@ -745,7 +784,18 @@ pub fn start_client(
         start_server_detached(os_input, cli_args, config, config_options, info);
         return None;
     }
-    info!("Starting Zellij client!");
+    // An interactive client needs a real terminal to enter raw mode. Without a
+    // TTY (e.g. spawned from a non-interactive shell or a headless agent),
+    // crossterm's enable_raw_mode() fails with ENXIO and would otherwise panic
+    // deep in set_raw_mode(). Fail fast with a clear message and a non-zero exit
+    // so launchers (vibecrafted operator session) can detect it cleanly.
+    if !os_input.stdin_is_terminal() {
+        eprintln!(
+            "vc-frame: stdin is not a terminal (TTY); cannot start an interactive session. Run vc-frame from a real terminal."
+        );
+        std::process::exit(1);
+    }
+    info!("Starting vc-frame client!");
 
     let explicitly_disable_kitty_keyboard_protocol = config_options
         .support_kitty_keyboard_protocol
@@ -889,10 +939,8 @@ pub fn start_client(
             let ipc_pipe = create_ipc_pipe();
 
             spawn_server(&ipc_pipe, cli_args.debug).unwrap();
-            if should_start_web_server {
-                if let Err(e) = spawn_web_server(&cli_args) {
-                    log::error!("Failed to start web server: {}", e);
-                }
+            if should_start_web_server && let Err(e) = spawn_web_server(&cli_args) {
+                log::error!("Failed to start web server: {}", e);
             }
 
             let is_web_client = false;
@@ -943,10 +991,8 @@ pub fn start_client(
             let ipc_pipe = create_ipc_pipe();
 
             spawn_server(&ipc_pipe, cli_args.debug).unwrap();
-            if should_start_web_server {
-                if let Err(e) = spawn_web_server(&cli_args) {
-                    log::error!("Failed to start web server: {}", e);
-                }
+            if should_start_web_server && let Err(e) = spawn_web_server(&cli_args) {
+                log::error!("Failed to start web server: {}", e);
             }
 
             let is_web_client = false;
@@ -985,6 +1031,12 @@ pub fn start_client(
         let send_client_instructions = send_client_instructions.clone();
         let os_input = os_input.clone();
         Box::new(move |info| {
+            // Bulletproof teardown: emit the terminal restore unconditionally —
+            // before anything that can early-return — so a panic never leaves the
+            // host in the alternate screen with a hidden cursor for the next session.
+            let mut stdout = os_input.get_stdout_writer();
+            let _ = stdout.write_all(PANIC_TERMINAL_RESTORE.as_bytes());
+            let _ = stdout.flush();
             os_input.disable_mouse().non_fatal();
             os_input.restore_console_mode();
             if let Ok(()) = os_input.unset_raw_mode() {
@@ -1072,6 +1124,17 @@ pub fn start_client(
                         move || {
                             os_api.send_to_server(ClientToServerMsg::Action {
                                 action: on_force_close.into(),
+                                terminal_id: None,
+                                client_id: None,
+                                is_cli_client: false,
+                            });
+                        }
+                    }),
+                    Box::new({
+                        let os_api = os_input.clone();
+                        move || {
+                            os_api.send_to_server(ClientToServerMsg::Action {
+                                action: Action::Detach,
                                 terminal_id: None,
                                 client_id: None,
                                 is_cli_client: false,
@@ -1341,10 +1404,8 @@ pub fn start_server_detached(
             let ipc_pipe = create_ipc_pipe();
 
             spawn_server(&ipc_pipe, cli_args.debug).unwrap();
-            if should_start_web_server {
-                if let Err(e) = spawn_web_server(&cli_args) {
-                    log::error!("Failed to start web server: {}", e);
-                }
+            if should_start_web_server && let Err(e) = spawn_web_server(&cli_args) {
+                log::error!("Failed to start web server: {}", e);
             }
 
             let is_web_client = false;
@@ -1396,10 +1457,8 @@ pub fn start_server_detached(
             let ipc_pipe = create_ipc_pipe();
 
             spawn_server(&ipc_pipe, cli_args.debug).unwrap();
-            if should_start_web_server {
-                if let Err(e) = spawn_web_server(&cli_args) {
-                    log::error!("Failed to start web server: {}", e);
-                }
+            if should_start_web_server && let Err(e) = spawn_web_server(&cli_args) {
+                log::error!("Failed to start web server: {}", e);
             }
             let is_web_client = false;
 

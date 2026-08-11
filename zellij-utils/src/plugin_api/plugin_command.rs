@@ -7,14 +7,6 @@ pub use super::generated_api::api::{
     },
     input_mode::InputMode as ProtobufInputMode,
     plugin_command::{
-        break_panes_to_new_tab_response, break_panes_to_tab_with_id_response,
-        break_panes_to_tab_with_index_response, delete_layout_response, dump_layout_response,
-        dump_session_layout_response, edit_layout_response, focus_or_create_tab_response,
-        get_focused_pane_info_response, get_pane_cwd_response, get_pane_pid_response,
-        get_pane_running_command_response, get_session_list_response, hide_floating_panes_response,
-        highlight_style::Style as ProtobufHighlightStyleVariant, new_tab_response,
-        parse_layout_response, plugin_command::Payload, rename_layout_response,
-        save_layout_response, save_session_response, show_floating_panes_response,
         BreakPanesToNewTabPayload,
         BreakPanesToNewTabResponse as ProtobufBreakPanesToNewTabResponse,
         BreakPanesToTabWithIdPayload,
@@ -125,7 +117,15 @@ pub use super::generated_api::api::{
         StackPanesPayload, SubscribePayload, SwitchSessionPayload, SwitchTabToIdPayload,
         SwitchTabToPayload, TogglePaneBorderlessPayload, TogglePaneEmbedOrEjectForPaneIdPayload,
         TogglePaneIdFullscreenPayload, UnsubscribePayload, WebRequestPayload,
-        WriteCharsToPaneIdPayload, WriteToPaneIdPayload,
+        WriteCharsToPaneIdPayload, WriteToPaneIdPayload, break_panes_to_new_tab_response,
+        break_panes_to_tab_with_id_response, break_panes_to_tab_with_index_response,
+        delete_layout_response, dump_layout_response, dump_session_layout_response,
+        edit_layout_response, focus_or_create_tab_response, get_focused_pane_info_response,
+        get_pane_cwd_response, get_pane_pid_response, get_pane_running_command_response,
+        get_session_list_response, hide_floating_panes_response,
+        highlight_style::Style as ProtobufHighlightStyleVariant, new_tab_response,
+        parse_layout_response, plugin_command::Payload, rename_layout_response,
+        save_layout_response, save_session_response, show_floating_panes_response,
     },
     plugin_permission::PermissionType as ProtobufPermissionType,
     resize::ResizeAction as ProtobufResizeAction,
@@ -1216,8 +1216,10 @@ impl TryFrom<ProtobufPluginCommand> for PluginCommand {
                         (Some(pane_id), Some(is_plugin)) => Some((pane_id, is_plugin)),
                         (None, None) => None,
                         _ => {
-                            return Err("Malformed payload for SwitchSession, 'pane_id' and 'is_plugin' must be included together or not at all")
-                        }
+                            return Err(
+                                "Malformed payload for SwitchSession, 'pane_id' and 'is_plugin' must be included together or not at all",
+                            );
+                        },
                     };
                     Ok(PluginCommand::SwitchSession(ConnectToSession {
                         name: payload.name,

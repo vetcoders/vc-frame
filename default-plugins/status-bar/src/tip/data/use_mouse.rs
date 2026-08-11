@@ -1,7 +1,7 @@
 use ansi_term::{
-    unstyled_len, ANSIString, ANSIStrings,
-    Color::{Fixed, RGB},
-    Style,
+    AnsiString, AnsiStrings,
+    Color::{Fixed, Rgb},
+    Style, unstyled_len,
 };
 
 use crate::LinePart;
@@ -9,10 +9,10 @@ use zellij_tile::prelude::*;
 use zellij_tile_utils::palette_match;
 
 macro_rules! strings {
-    ($ANSIStrings:expr) => {{
-        let strings: &[ANSIString] = $ANSIStrings;
+    ($AnsiStrings:expr) => {{
+        let strings: &[AnsiString] = $AnsiStrings;
 
-        let ansi_strings = ANSIStrings(strings);
+        let ansi_strings = AnsiStrings(strings);
 
         LinePart {
             part: format!("{}", ansi_strings),

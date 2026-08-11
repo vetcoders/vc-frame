@@ -1,6 +1,54 @@
-use super::super::TerminalPane;
-use crate::panes::sixel::SixelImageStore;
+use super::super::{TerminalPane as TerminalPaneImpl, TerminalPaneOptions};
+
+struct TerminalPane;
+impl TerminalPane {
+    // Positional compat shim: `new` deliberately returns the real (aliased)
+    // type, not the unit-struct namespace it hangs off.
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new(
+        pid: u32,
+        position_and_size: PaneGeom,
+        style: Style,
+        pane_index: usize,
+        pane_name: String,
+        link_handler: Rc<RefCell<LinkHandler>>,
+        character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
+        sixel_image_store: Rc<RefCell<SixelImageStore>>,
+        terminal_emulator_colors: Rc<RefCell<Palette>>,
+        terminal_emulator_color_codes: Rc<RefCell<HashMap<usize, String>>>,
+        initial_pane_title: Option<String>,
+        invoked_with: Option<zellij_utils::input::layout::Run>,
+        debug: bool,
+        arrow_fonts: bool,
+        styled_underlines: bool,
+        osc8_hyperlinks: bool,
+        explicitly_disable_keyboard_protocol: bool,
+        notification_end: Option<crate::route::NotificationEnd>,
+    ) -> TerminalPaneImpl {
+        TerminalPaneImpl::new(TerminalPaneOptions {
+            pid,
+            position_and_size,
+            style,
+            pane_index,
+            pane_name,
+            link_handler,
+            character_cell_size,
+            sixel_image_store,
+            terminal_emulator_colors,
+            terminal_emulator_color_codes,
+            initial_pane_title,
+            invoked_with,
+            debug,
+            arrow_fonts,
+            styled_underlines,
+            osc8_hyperlinks,
+            explicitly_disable_keyboard_protocol,
+            notification_end,
+        })
+    }
+}
 use crate::panes::LinkHandler;
+use crate::panes::sixel::SixelImageStore;
 use crate::tab::Pane;
 use insta::assert_snapshot;
 use std::cell::RefCell;
@@ -704,7 +752,7 @@ pub fn pane_with_bottom_and_right_borders_position_is_on_frame() {
     assert!(!terminal_pane.position_is_on_frame(&Position::new(30, 131)));
 }
 
-fn make_terminal_pane_for_bell() -> TerminalPane {
+fn make_terminal_pane_for_bell() -> TerminalPaneImpl {
     let mut fake_win_size = PaneGeom::default();
     fake_win_size.cols.set_inner(121);
     fake_win_size.rows.set_inner(20);

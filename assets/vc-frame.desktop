@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Name=vc-frame
+Type=Application
+Comment=vc-frame vibecrafted terminal runtime
+Terminal=true
+Exec=vc-frame
+Icon=vc-frame
+Categories=ConsoleOnly;System;
+GenericName=Terminal Multiplexer

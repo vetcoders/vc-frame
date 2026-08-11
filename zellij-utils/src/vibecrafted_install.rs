@@ -1,8 +1,8 @@
 //! Vibecrafted layout installer.
 //!
-//! Manages symlinks under `~/.config/zellij/layouts/` so that the canonical
+//! Manages symlinks under the vc-frame layout directory so that the canonical
 //! Vibecrafted layouts shipped in `<vibecrafted-root>/config/zellij/layouts/*.kdl`
-//! are picked up by stock `zellij --layout <name>` invocations.
+//! are picked up by `vc-frame --layout <name>` invocations.
 //!
 //! The installer is intentionally narrow:
 //!
@@ -16,7 +16,7 @@
 //! 3. Legacy compatibility redirects come from an optional data file at
 //!    `<root>/config/zellij/layouts/aliases.txt` (`old=new`, one per line).
 //!    No rebuild required to add a rename redirect.
-//! 4. Every run cleans up symlinks under `~/.config/zellij/layouts/` whose
+//! 4. Every run cleans up symlinks under the vc-frame layout directory whose
 //!    target either no longer exists or has drifted to a stale copy of the
 //!    vibecrafted tree. Hand-written files and symlinks pointing at unrelated
 //!    frameworks are preserved.
@@ -269,11 +269,11 @@ fn resolve_user_layouts_dir() -> Result<PathBuf, InstallError> {
     Ok(config.join("layouts"))
 }
 
-/// Install / refresh vibecrafted layouts under the user's zellij config dir.
+/// Install / refresh Vibecrafted layouts under the user's vc-frame config dir.
 ///
 /// `root_override` is the value of the `--vibecrafted-root` CLI flag, if any.
 /// `target_override` lets tests redirect the install dir; production callers
-/// pass `None` and the standard `~/.config/zellij/layouts/` is used.
+/// pass `None` and the standard vc-frame layout directory is used.
 pub fn install(
     root_override: Option<PathBuf>,
     target_override: Option<PathBuf>,
@@ -468,12 +468,12 @@ fn record_preserved(target_dir: &Path, summary: &mut InstallSummary) -> Result<(
         if meta.file_type().is_symlink() {
             continue;
         }
-        if meta.file_type().is_file() {
-            if let Some(name) = path.file_name() {
-                summary
-                    .preserved_files
-                    .push(name.to_string_lossy().into_owned());
-            }
+        if meta.file_type().is_file()
+            && let Some(name) = path.file_name()
+        {
+            summary
+                .preserved_files
+                .push(name.to_string_lossy().into_owned());
         }
     }
     summary.preserved_files.sort();
@@ -649,14 +649,18 @@ vibecraft.kdl=operator.kdl
         assert!(target_dir.path().join("vc-dashboard.kdl").is_symlink());
         assert!(target_dir.path().join("implement-dual.kdl").is_symlink());
         assert!(!target_dir.path().join("vibecraft.kdl").exists());
-        assert!(summary
-            .aliases_installed
-            .iter()
-            .any(|(o, n)| o == "vc-dashboard.kdl" && n == "dashboard.kdl"));
-        assert!(summary
-            .aliases_dropped
-            .iter()
-            .any(|(o, n)| o == "vibecraft.kdl" && n == "operator.kdl"));
+        assert!(
+            summary
+                .aliases_installed
+                .iter()
+                .any(|(o, n)| o == "vc-dashboard.kdl" && n == "dashboard.kdl")
+        );
+        assert!(
+            summary
+                .aliases_dropped
+                .iter()
+                .any(|(o, n)| o == "vibecraft.kdl" && n == "operator.kdl")
+        );
     }
 
     #[test]
@@ -740,9 +744,11 @@ vibecraft.kdl=operator.kdl
         )
         .unwrap();
         assert!(target_dir.path().join("my-custom.kdl").is_file());
-        assert!(summary
-            .preserved_files
-            .contains(&"my-custom.kdl".to_string()));
+        assert!(
+            summary
+                .preserved_files
+                .contains(&"my-custom.kdl".to_string())
+        );
     }
 
     #[test]
@@ -841,9 +847,10 @@ vibecraft.kdl=operator.kdl
         let resolved_canon = dunce::canonicalize(&resolved).unwrap_or(resolved);
         let canonical_layouts_dir = dunce::canonicalize(&layouts_dir).unwrap();
         assert_eq!(resolved_canon, canonical_layouts_dir.join("dashboard.kdl"));
-        assert!(s2
-            .aliases_installed
-            .iter()
-            .any(|(o, _)| o == "vc-dashboard.kdl"));
+        assert!(
+            s2.aliases_installed
+                .iter()
+                .any(|(o, _)| o == "vc-dashboard.kdl")
+        );
     }
 }

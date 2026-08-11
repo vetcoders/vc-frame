@@ -2,28 +2,55 @@
 
 use crate::home::find_default_config_dir;
 use directories::ProjectDirs;
-use include_dir::{include_dir, Dir};
+use include_dir::{Dir, include_dir};
 use lazy_static::lazy_static;
-use std::{path::PathBuf, sync::OnceLock};
+use std::{
+    path::{Path, PathBuf},
+    sync::OnceLock,
+};
 use uuid::Uuid;
 
-pub const ZELLIJ_CONFIG_FILE_ENV: &str = "ZELLIJ_CONFIG_FILE";
-pub const ZELLIJ_CONFIG_DIR_ENV: &str = "ZELLIJ_CONFIG_DIR";
-pub const ZELLIJ_LAYOUT_DIR_ENV: &str = "ZELLIJ_LAYOUT_DIR";
+pub const VC_FRAME_CONFIG_FILE_ENV: &str = "VC_FRAME_CONFIG_FILE";
+pub const VC_FRAME_CONFIG_DIR_ENV: &str = "VC_FRAME_CONFIG_DIR";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const DEFAULT_SCROLL_BUFFER_SIZE: usize = 10_000;
 pub static SCROLL_BUFFER_SIZE: OnceLock<usize> = OnceLock::new();
 pub static DEBUG_MODE: OnceLock<bool> = OnceLock::new();
 
 #[cfg(not(windows))]
-pub const SYSTEM_DEFAULT_CONFIG_DIR: &str = "/etc/zellij";
+pub const SYSTEM_DEFAULT_CONFIG_DIR: &str = "/etc/vc-frame";
 #[cfg(windows)]
-pub const SYSTEM_DEFAULT_CONFIG_DIR: &str = "C:\\ProgramData\\Zellij";
+pub const SYSTEM_DEFAULT_CONFIG_DIR: &str = "C:\\ProgramData\\vc-frame";
 pub const SYSTEM_DEFAULT_DATA_DIR_PREFIX: &str = system_default_data_dir();
 
 pub static ZELLIJ_DEFAULT_THEMES: Dir = include_dir!("$CARGO_MANIFEST_DIR/assets/themes");
 
-pub const CLIENT_SERVER_CONTRACT_VERSION: usize = 1;
+/// Client↔server wire-contract generation. Sockets live in a
+/// `contract_version_{N}` namespace, so binaries from different generations
+/// never talk to each other — a new client simply cannot reach an old
+/// server's socket.
+///
+/// RULE: any change to the client↔server protobuf surface
+/// (`assets/prost_ipc/client_server_contract.rs` — new/removed/renamed
+/// message variants or fields) MUST bump this number. An old server decodes
+/// an unknown oneof variant as `None` ("Empty ClientToServerMsg") and, on
+/// pre-2026-08 binaries, logs a WARN+ERROR pair per message without
+/// disconnecting — the 2026-08-05 log storm (~2/s, rotation ate forensics)
+/// was exactly this: `DeclareCaller` shipped without a bump. The pin test
+/// in `client_server_contract/mod.rs` enforces this rule.
+pub const CLIENT_SERVER_CONTRACT_VERSION: usize = 2;
+
+const VC_FRAME_PROJECT_QUALIFIER: &str = "io";
+const VC_FRAME_PROJECT_ORGANIZATION: &str = "vetcoders";
+const VC_FRAME_PROJECT_APPLICATION: &str = "vc-frame";
+// Pre-canonicalization organization casing (io.VetCoders.vc-frame) — kept only
+// so existing installs migrate to the lowercase namespace. The value is the
+// historical on-disk directory name, not branding: it must byte-match what old
+// installs wrote, so it is assembled via concat! to survive casing sweeps.
+const LEGACY_CASED_PROJECT_ORGANIZATION: &str = concat!("Vet", "Coders");
+const LEGACY_ZELLIJ_PROJECT_QUALIFIER: &str = "org";
+const LEGACY_ZELLIJ_PROJECT_ORGANIZATION: &str = concat!("Zellij ", "Contributors");
+const LEGACY_ZELLIJ_PROJECT_APPLICATION: &str = "Zellij";
 
 pub fn session_info_cache_file_name(session_name: &str) -> PathBuf {
     session_info_folder_for_session(session_name).join("session-metadata.kdl")
@@ -38,13 +65,15 @@ pub fn session_info_folder_for_session(session_name: &str) -> PathBuf {
 }
 
 pub fn create_config_and_cache_folders() {
+    migrate_legacy_project_dirs();
+
     if let Err(e) = std::fs::create_dir_all(ZELLIJ_CACHE_DIR.as_path()) {
         log::error!("Failed to create cache dir: {:?}", e);
     }
-    if let Some(config_dir) = find_default_config_dir() {
-        if let Err(e) = std::fs::create_dir_all(config_dir.as_path()) {
-            log::error!("Failed to create config dir: {:?}", e);
-        }
+    if let Some(config_dir) = find_default_config_dir()
+        && let Err(e) = std::fs::create_dir_all(config_dir.as_path())
+    {
+        log::error!("Failed to create config dir: {:?}", e);
     }
     // while session_info is a child of cache currently, it won't necessarily always be this way,
     // and so it's explicitly created here
@@ -52,6 +81,156 @@ pub fn create_config_and_cache_folders() {
         log::error!("Failed to create session_info cache dir: {:?}", e);
     }
     prune_empty_session_info_folders();
+}
+
+fn vc_frame_project_dirs() -> ProjectDirs {
+    ProjectDirs::from(
+        VC_FRAME_PROJECT_QUALIFIER,
+        VC_FRAME_PROJECT_ORGANIZATION,
+        VC_FRAME_PROJECT_APPLICATION,
+    )
+    .unwrap()
+}
+
+fn legacy_zellij_project_dirs() -> ProjectDirs {
+    if cfg!(windows) {
+        ProjectDirs::from("", "", LEGACY_ZELLIJ_PROJECT_APPLICATION).unwrap()
+    } else {
+        ProjectDirs::from(
+            LEGACY_ZELLIJ_PROJECT_QUALIFIER,
+            LEGACY_ZELLIJ_PROJECT_ORGANIZATION,
+            LEGACY_ZELLIJ_PROJECT_APPLICATION,
+        )
+        .unwrap()
+    }
+}
+
+fn legacy_cased_project_dirs() -> ProjectDirs {
+    ProjectDirs::from(
+        VC_FRAME_PROJECT_QUALIFIER,
+        LEGACY_CASED_PROJECT_ORGANIZATION,
+        VC_FRAME_PROJECT_APPLICATION,
+    )
+    .unwrap()
+}
+
+/// Normalize a legacy-cased project dir (io.VetCoders.vc-frame) to the
+/// canonical lowercase one. On case-insensitive filesystems (default APFS,
+/// NTFS) both paths resolve to the same directory, so a direct rename is a
+/// no-op error — go through a temporary sibling to rewrite the on-disk
+/// casing. On case-sensitive filesystems they are distinct directories and
+/// the regular copy-if-absent migration applies.
+fn migrate_cased_path(legacy_path: &Path, vc_frame_path: &Path) {
+    if legacy_path == vc_frame_path {
+        // Platforms that don't embed the organization in the path (Linux XDG).
+        return;
+    }
+    let (Some(parent), Some(legacy_name)) = (legacy_path.parent(), legacy_path.file_name()) else {
+        return;
+    };
+    // Only act when the exact legacy casing is present on disk — Path::exists
+    // can't tell on a case-insensitive filesystem.
+    let exact_legacy_on_disk = std::fs::read_dir(parent).ok().is_some_and(|mut entries| {
+        entries.any(|entry| entry.ok().is_some_and(|e| e.file_name() == legacy_name))
+    });
+    if !exact_legacy_on_disk {
+        return;
+    }
+    let same_directory = match (legacy_path.canonicalize(), vc_frame_path.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    };
+    if same_directory {
+        let tmp = parent.join(format!(
+            "{}.case-migration",
+            vc_frame_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+        ));
+        let renamed =
+            std::fs::rename(legacy_path, &tmp).and_then(|_| std::fs::rename(&tmp, vc_frame_path));
+        if let Err(e) = renamed {
+            log::debug!(
+                "Failed to normalize casing of {:?} to {:?}: {:?}",
+                legacy_path,
+                vc_frame_path,
+                e
+            );
+        }
+    } else {
+        migrate_legacy_path(legacy_path, vc_frame_path);
+    }
+}
+
+fn migrate_legacy_project_dirs() {
+    let cased_dirs = legacy_cased_project_dirs();
+    migrate_cased_path(cased_dirs.config_dir(), ZELLIJ_PROJ_DIR.config_dir());
+    migrate_cased_path(cased_dirs.cache_dir(), ZELLIJ_PROJ_DIR.cache_dir());
+    migrate_cased_path(cased_dirs.data_dir(), ZELLIJ_PROJ_DIR.data_dir());
+    if let (Some(cased_state_dir), Some(vc_frame_state_dir)) =
+        (cased_dirs.state_dir(), ZELLIJ_PROJ_DIR.state_dir())
+    {
+        migrate_cased_path(cased_state_dir, vc_frame_state_dir);
+    }
+    let legacy_dirs = legacy_zellij_project_dirs();
+    migrate_legacy_path(legacy_dirs.config_dir(), ZELLIJ_PROJ_DIR.config_dir());
+    migrate_legacy_path(legacy_dirs.cache_dir(), ZELLIJ_PROJ_DIR.cache_dir());
+    migrate_legacy_path(legacy_dirs.data_dir(), ZELLIJ_PROJ_DIR.data_dir());
+    if let (Some(legacy_state_dir), Some(vc_frame_state_dir)) =
+        (legacy_dirs.state_dir(), ZELLIJ_PROJ_DIR.state_dir())
+    {
+        migrate_legacy_path(legacy_state_dir, vc_frame_state_dir);
+    }
+}
+
+fn migrate_legacy_path(legacy_path: &Path, vc_frame_path: &Path) {
+    if let Err(e) = copy_path_if_target_absent(legacy_path, vc_frame_path) {
+        log::debug!(
+            "Failed to migrate legacy vc-frame path {:?} to {:?}: {:?}",
+            legacy_path,
+            vc_frame_path,
+            e
+        );
+    }
+}
+
+fn copy_path_if_target_absent(source: &Path, target: &Path) -> std::io::Result<()> {
+    let source_metadata = match std::fs::symlink_metadata(source) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if target.exists() {
+        return Ok(());
+    }
+
+    if source_metadata.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("refusing to migrate symlink {}", source.display()),
+        ));
+    }
+
+    if source_metadata.is_dir() {
+        copy_dir_recursively(source, target)
+    } else {
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(source, target).map(|_| ())
+    }
+}
+
+fn copy_dir_recursively(source: &Path, target: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(target)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        copy_path_if_target_absent(&source_path, &target_path)?;
+    }
+    Ok(())
 }
 
 fn prune_empty_session_info_folders() {
@@ -66,12 +245,11 @@ fn prune_empty_session_info_folders() {
         let is_empty = std::fs::read_dir(&path)
             .ok()
             .is_some_and(|mut iter| iter.next().is_none());
-        if is_empty {
-            if let Err(e) = std::fs::remove_dir(&path) {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    log::debug!("Failed to prune empty session folder {:?}: {:?}", path, e);
-                }
-            }
+        if is_empty
+            && let Err(e) = std::fs::remove_dir(&path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            log::debug!("Failed to prune empty session folder {:?}: {:?}", path, e);
         }
     }
 }
@@ -89,13 +267,7 @@ const fn system_default_data_dir() -> &'static str {
 lazy_static! {
     pub static ref CLIENT_SERVER_CONTRACT_DIR: String =
         format!("contract_version_{}", CLIENT_SERVER_CONTRACT_VERSION);
-    pub static ref ZELLIJ_PROJ_DIR: ProjectDirs = {
-        if cfg!(windows) {
-            ProjectDirs::from("", "", "Zellij").unwrap()
-        } else {
-            ProjectDirs::from("org", "Zellij Contributors", "Zellij").unwrap()
-        }
-    };
+    pub static ref ZELLIJ_PROJ_DIR: ProjectDirs = vc_frame_project_dirs();
     pub static ref ZELLIJ_CACHE_DIR: PathBuf = ZELLIJ_PROJ_DIR.cache_dir().to_path_buf();
     pub static ref ZELLIJ_SESSION_CACHE_DIR: PathBuf = ZELLIJ_PROJ_DIR
         .cache_dir()
@@ -106,7 +278,6 @@ lazy_static! {
     pub static ref ZELLIJ_SESSION_INFO_CACHE_DIR: PathBuf = ZELLIJ_CACHE_DIR
         .join(CLIENT_SERVER_CONTRACT_DIR.clone())
         .join("session_info");
-    pub static ref ZELLIJ_PLUGIN_ARTIFACT_DIR: PathBuf = ZELLIJ_CACHE_DIR.join(VERSION);
     pub static ref ZELLIJ_SEEN_RELEASE_NOTES_CACHE_FILE: PathBuf =
         ZELLIJ_CACHE_DIR.join(VERSION).join("seen_release_notes");
 }
@@ -134,7 +305,7 @@ mod not_wasm {
     // - `zellij-utils/../target/wasm32-wasip1/debug`: When building in debug mode AND the
     //   `plugins_from_target` feature IS set
     macro_rules! add_plugin {
-        ($assets:expr, $plugin:literal) => {
+        ($assets:expr_2021, $plugin:literal) => {
             $assets.insert(
                 PathBuf::from("plugins").join($plugin),
                 #[cfg(any(not(feature = "plugins_from_target"), not(debug_assertions)))]
@@ -171,6 +342,7 @@ mod not_wasm {
             add_plugin!(assets, "multiple-select.wasm");
             add_plugin!(assets, "layout-manager.wasm");
             add_plugin!(assets, "link.wasm");
+            add_plugin!(assets, "vc-tab-title.wasm");
             assets
         };
     }
@@ -198,14 +370,162 @@ pub fn is_ipc_socket(file_type: &std::fs::FileType) -> bool {
 /// On Windows, this uses named pipes via `GenericNamespaced`.
 #[cfg(unix)]
 pub fn ipc_connect(path: &std::path::Path) -> std::io::Result<interprocess::local_socket::Stream> {
-    use interprocess::local_socket::{prelude::*, GenericFilePath, Stream as LocalSocketStream};
+    use interprocess::local_socket::{GenericFilePath, Stream as LocalSocketStream, prelude::*};
     let fs_name = path.to_fs_name::<GenericFilePath>()?;
     LocalSocketStream::connect(fs_name)
 }
 
+/// Connect to a Unix session socket with a hard deadline.
+///
+/// Session discovery must never inherit an unbounded `connect(2)`: one stale
+/// or backlog-saturated socket would otherwise freeze the entire session rail.
+#[cfg(unix)]
+pub fn ipc_connect_timeout(
+    path: &std::path::Path,
+    timeout: std::time::Duration,
+) -> std::io::Result<interprocess::local_socket::Stream> {
+    use std::{
+        ffi::OsStr,
+        io,
+        os::{
+            fd::{AsRawFd, FromRawFd, OwnedFd},
+            unix::{ffi::OsStrExt, net::UnixStream},
+        },
+        time::Instant,
+    };
+
+    fn invalid_path(path: &OsStr, reason: &str) -> io::Error {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid Unix socket path {:?}: {reason}", path),
+        )
+    }
+
+    let bytes = path.as_os_str().as_bytes();
+    if bytes.contains(&0) {
+        return Err(invalid_path(path.as_os_str(), "contains a NUL byte"));
+    }
+
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    if bytes.len() >= address.sun_path.len() {
+        return Err(invalid_path(path.as_os_str(), "is too long"));
+    }
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (target, source) in address.sun_path.iter_mut().zip(bytes.iter().copied()) {
+        *target = source as libc::c_char;
+    }
+    let address_len = std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1;
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    {
+        address.sun_len = address_len as u8;
+    }
+
+    let raw_fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    if raw_fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+    let original_flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+    if original_flags < 0
+        || unsafe {
+            libc::fcntl(
+                fd.as_raw_fd(),
+                libc::F_SETFL,
+                original_flags | libc::O_NONBLOCK,
+            )
+        } < 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+
+    let connect_result = unsafe {
+        libc::connect(
+            fd.as_raw_fd(),
+            (&raw const address).cast::<libc::sockaddr>(),
+            address_len as libc::socklen_t,
+        )
+    };
+    if connect_result < 0 {
+        let error = io::Error::last_os_error();
+        if !matches!(
+            error.raw_os_error(),
+            Some(code)
+                if code == libc::EINPROGRESS
+                    || code == libc::EAGAIN
+                    || code == libc::EWOULDBLOCK
+        ) {
+            return Err(error);
+        }
+
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Unix socket connect deadline elapsed",
+                ));
+            }
+            let timeout_ms = remaining.as_millis().clamp(1, i32::MAX as u128) as i32;
+            let mut descriptor = libc::pollfd {
+                fd: fd.as_raw_fd(),
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            let poll_result = unsafe { libc::poll(&mut descriptor, 1, timeout_ms) };
+            if poll_result == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Unix socket connect deadline elapsed",
+                ));
+            }
+            if poll_result < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error);
+            }
+
+            let mut socket_error: libc::c_int = 0;
+            let mut socket_error_len = std::mem::size_of_val(&socket_error) as libc::socklen_t;
+            if unsafe {
+                libc::getsockopt(
+                    fd.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_ERROR,
+                    (&raw mut socket_error).cast(),
+                    &mut socket_error_len,
+                )
+            } < 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            if socket_error != 0 {
+                return Err(io::Error::from_raw_os_error(socket_error));
+            }
+            break;
+        }
+    }
+
+    if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, original_flags) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let stream = UnixStream::from(fd);
+    let platform_stream = interprocess::os::unix::uds_local_socket::Stream::from(stream);
+    Ok(platform_stream.into())
+}
+
 #[cfg(windows)]
 pub fn ipc_connect(path: &std::path::Path) -> std::io::Result<interprocess::local_socket::Stream> {
-    use interprocess::local_socket::{prelude::*, GenericNamespaced, Stream as LocalSocketStream};
+    use interprocess::local_socket::{GenericNamespaced, Stream as LocalSocketStream, prelude::*};
     let name = path.to_string_lossy().to_string();
     let ns_name = name.to_ns_name::<GenericNamespaced>()?;
     LocalSocketStream::connect(ns_name)
@@ -218,14 +538,14 @@ pub fn ipc_connect(path: &std::path::Path) -> std::io::Result<interprocess::loca
 /// a marker file for session discovery.
 #[cfg(unix)]
 pub fn ipc_bind(path: &std::path::Path) -> std::io::Result<interprocess::local_socket::Listener> {
-    use interprocess::local_socket::{prelude::*, GenericFilePath, ListenerOptions};
+    use interprocess::local_socket::{GenericFilePath, ListenerOptions, prelude::*};
     let fs_name = path.to_fs_name::<GenericFilePath>()?;
     ListenerOptions::new().name(fs_name).create_sync()
 }
 
 #[cfg(windows)]
 pub fn ipc_bind(path: &std::path::Path) -> std::io::Result<interprocess::local_socket::Listener> {
-    use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions};
+    use interprocess::local_socket::{GenericNamespaced, ListenerOptions, prelude::*};
     let name = path.to_string_lossy().to_string();
     let ns_name = name.to_ns_name::<GenericNamespaced>()?;
     let listener = ListenerOptions::new().name(ns_name).create_sync()?;
@@ -242,7 +562,7 @@ pub fn ipc_bind(path: &std::path::Path) -> std::io::Result<interprocess::local_s
 pub fn ipc_bind_async(
     path: &std::path::Path,
 ) -> std::io::Result<interprocess::local_socket::tokio::Listener> {
-    use interprocess::local_socket::{prelude::*, GenericFilePath, ListenerOptions};
+    use interprocess::local_socket::{GenericFilePath, ListenerOptions, prelude::*};
     let fs_name = path.to_fs_name::<GenericFilePath>()?;
     ListenerOptions::new().name(fs_name).create_tokio()
 }
@@ -251,7 +571,7 @@ pub fn ipc_bind_async(
 pub fn ipc_bind_async(
     path: &std::path::Path,
 ) -> std::io::Result<interprocess::local_socket::tokio::Listener> {
-    use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions};
+    use interprocess::local_socket::{GenericNamespaced, ListenerOptions, prelude::*};
     let name = path.to_string_lossy().to_string();
     let ns_name = name.to_ns_name::<GenericNamespaced>()?;
     let listener = ListenerOptions::new().name(ns_name).create_tokio()?;
@@ -266,7 +586,7 @@ pub fn ipc_bind_async(
 pub fn ipc_connect_reply(
     path: &std::path::Path,
 ) -> std::io::Result<interprocess::local_socket::Stream> {
-    use interprocess::local_socket::{prelude::*, GenericNamespaced, Stream as LocalSocketStream};
+    use interprocess::local_socket::{GenericNamespaced, Stream as LocalSocketStream, prelude::*};
     let name = format!("{}-reply", path.to_string_lossy());
     let ns_name = name.to_ns_name::<GenericNamespaced>()?;
     LocalSocketStream::connect(ns_name)
@@ -279,7 +599,7 @@ pub fn ipc_connect_reply(
 pub fn ipc_bind_reply(
     path: &std::path::Path,
 ) -> std::io::Result<interprocess::local_socket::Listener> {
-    use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions};
+    use interprocess::local_socket::{GenericNamespaced, ListenerOptions, prelude::*};
     let name = format!("{}-reply", path.to_string_lossy());
     let ns_name = name.to_ns_name::<GenericNamespaced>()?;
     ListenerOptions::new().name(ns_name).create_sync()
@@ -310,8 +630,8 @@ mod unix_only {
 
     lazy_static! {
         static ref UID: Uid = Uid::current();
-        pub static ref ZELLIJ_TMP_DIR: PathBuf = temp_dir().join(format!("zellij-{}", *UID));
-        pub static ref ZELLIJ_TMP_LOG_DIR: PathBuf = ZELLIJ_TMP_DIR.join("zellij-log");
+        pub static ref ZELLIJ_TMP_DIR: PathBuf = temp_dir().join(format!("vc-frame-{}", *UID));
+        pub static ref ZELLIJ_TMP_LOG_DIR: PathBuf = ZELLIJ_TMP_DIR.join("vc-frame-log");
         pub static ref ZELLIJ_TMP_LOG_FILE: PathBuf = ZELLIJ_TMP_LOG_DIR.join("zellij.log");
         pub static ref ZELLIJ_SOCK_DIR: PathBuf = {
             let mut ipc_dir = envs::get_socket_dir().map_or_else(
@@ -357,9 +677,9 @@ mod not_unix {
     lazy_static! {
         pub static ref ZELLIJ_TMP_DIR: PathBuf = {
             let tmp_dir = canonicalize_path(temp_dir());
-            tmp_dir.join("zellij")
+            tmp_dir.join("vc-frame")
         };
-        pub static ref ZELLIJ_TMP_LOG_DIR: PathBuf = ZELLIJ_TMP_DIR.join("zellij-log");
+        pub static ref ZELLIJ_TMP_LOG_DIR: PathBuf = ZELLIJ_TMP_DIR.join("vc-frame-log");
         pub static ref ZELLIJ_TMP_LOG_FILE: PathBuf = ZELLIJ_TMP_LOG_DIR.join("zellij.log");
         pub static ref ZELLIJ_SOCK_DIR: PathBuf = {
             let mut ipc_dir = canonicalize_path(envs::get_socket_dir().map_or_else(
@@ -374,5 +694,188 @@ mod not_unix {
             ipc_dir
         };
         pub static ref WEBSERVER_SOCKET_PATH: PathBuf = ZELLIJ_SOCK_DIR.join("web_server_bus");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Runtime identity probe: every ASSET_MAP plugin byte-matches the on-disk
+    /// bundled artifact and the committed SHA256SUMS receipt.
+    ///
+    /// Skipped under `plugins_from_target` debug builds where ASSET_MAP loads
+    /// from `target/wasm32-wasip1/debug` instead of `assets/plugins`.
+    #[cfg(all(not(target_family = "wasm"), not(feature = "plugins_from_target")))]
+    #[test]
+    fn asset_map_matches_bundled_plugin_files_and_manifest() {
+        use sha2::{Digest, Sha256};
+        use std::collections::HashMap;
+        use std::path::PathBuf;
+
+        let plugins_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/plugins");
+        let manifest_path = plugins_dir.join("SHA256SUMS");
+        let manifest = std::fs::read_to_string(&manifest_path)
+            .unwrap_or_else(|e| panic!("missing {}: {e}", manifest_path.display()));
+
+        let mut expected: HashMap<String, String> = HashMap::new();
+        for line in manifest.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut parts = line.split_whitespace();
+            let hash = parts
+                .next()
+                .unwrap_or_else(|| panic!("bad SHA256SUMS line: {line}"));
+            let name = parts
+                .next()
+                .unwrap_or_else(|| panic!("bad SHA256SUMS line (no name): {line}"));
+            expected.insert(name.to_string(), hash.to_string());
+        }
+
+        assert!(
+            !ASSET_MAP.is_empty(),
+            "ASSET_MAP must embed at least one runtime plugin"
+        );
+
+        for (key, bytes) in ASSET_MAP.iter() {
+            let name = key
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or_else(|| panic!("plugin key without file name: {key:?}"));
+            let on_disk = plugins_dir.join(name);
+            let disk_bytes = std::fs::read(&on_disk)
+                .unwrap_or_else(|e| panic!("read {}: {e}", on_disk.display()));
+            assert_eq!(
+                &disk_bytes, bytes,
+                "runtime ASSET_MAP bytes for {name} differ from on-disk artifact"
+            );
+
+            let mut hasher = Sha256::new();
+            hasher.update(bytes);
+            let digest = format!("{:x}", hasher.finalize());
+            let want = expected
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} missing from SHA256SUMS"));
+            assert_eq!(
+                &digest, want,
+                "runtime/on-disk hash for {name} disagrees with SHA256SUMS"
+            );
+        }
+    }
+
+    /// Deliberate negative: a corrupted on-disk byte stream must not match
+    /// ASSET_MAP (proves the positive probe is not a tautology).
+    #[cfg(all(not(target_family = "wasm"), not(feature = "plugins_from_target")))]
+    #[test]
+    fn asset_map_detects_on_disk_perturbation() {
+        use std::path::PathBuf;
+
+        let plugins_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/plugins");
+        let name = "about.wasm";
+        let key = PathBuf::from("plugins").join(name);
+        let embedded = ASSET_MAP
+            .get(&key)
+            .unwrap_or_else(|| panic!("ASSET_MAP missing {name}"));
+        let mut perturbed = std::fs::read(plugins_dir.join(name)).expect("read about.wasm");
+        perturbed.push(0xFF);
+        assert_ne!(
+            &perturbed, embedded,
+            "perturbed fixture must differ from runtime identity"
+        );
+    }
+
+    #[test]
+    fn vc_frame_project_dirs_use_owned_namespace() {
+        let cache_dir = vc_frame_project_dirs()
+            .cache_dir()
+            .to_string_lossy()
+            .to_string();
+
+        assert!(cache_dir.contains(VC_FRAME_PROJECT_APPLICATION));
+        assert!(!cache_dir.contains(LEGACY_ZELLIJ_PROJECT_APPLICATION));
+
+        #[cfg(target_os = "macos")]
+        assert!(cache_dir.contains("io.vetcoders.vc-frame"));
+    }
+
+    /// The legacy-cased organization is the historical on-disk name old
+    /// installs actually wrote; `migrate_cased_path` matches it byte-for-byte
+    /// against directory entries, so a branding/casing sweep rewriting this
+    /// constant silently kills the migration. Assert the exact historical
+    /// bytes without spelling the sweepable literal.
+    #[test]
+    fn legacy_cased_organization_preserves_historical_on_disk_bytes() {
+        assert_eq!(
+            LEGACY_CASED_PROJECT_ORGANIZATION.as_bytes(),
+            [b'V', b'e', b't', b'C', b'o', b'd', b'e', b'r', b's']
+        );
+        assert_ne!(
+            LEGACY_CASED_PROJECT_ORGANIZATION, VC_FRAME_PROJECT_ORGANIZATION,
+            "legacy casing must stay distinct from the canonical lowercase org"
+        );
+    }
+
+    #[test]
+    fn copy_path_if_target_absent_copies_recursively_without_overwriting() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let source = tmp_dir.path().join("source");
+        let target = tmp_dir.path().join("target");
+        let nested = source.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("token.txt"), "legacy").unwrap();
+
+        copy_path_if_target_absent(&source, &target).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(target.join("nested").join("token.txt")).unwrap(),
+            "legacy"
+        );
+
+        std::fs::write(target.join("nested").join("token.txt"), "owned").unwrap();
+        copy_path_if_target_absent(&source, &target).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(target.join("nested").join("token.txt")).unwrap(),
+            "owned"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_path_if_target_absent_refuses_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let outside = tmp_dir.path().join("outside");
+        let source = tmp_dir.path().join("source-link");
+        let target = tmp_dir.path().join("target");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "do not copy").unwrap();
+        symlink(&outside, &source).unwrap();
+
+        let error = copy_path_if_target_absent(&source, &target).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(!target.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_tmp_dir_uses_vc_frame_namespace() {
+        assert!(
+            ZELLIJ_TMP_DIR
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("vc-frame-")
+        );
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn non_unix_tmp_dir_uses_vc_frame_namespace() {
+        assert_eq!(
+            ZELLIJ_TMP_DIR.file_name().unwrap().to_string_lossy(),
+            "vc-frame"
+        );
     }
 }

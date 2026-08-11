@@ -4,13 +4,15 @@ mod second_line;
 mod tip;
 
 use ansi_term::{
-    ANSIString,
-    Colour::{Fixed, RGB},
+    AnsiString,
+    Color::{Fixed, Rgb},
     Style,
 };
 
 use std::collections::BTreeMap;
 use std::fmt::{Display, Error, Formatter};
+use std::time::{Duration, Instant};
+use unicode_width::UnicodeWidthStr;
 use zellij_tile::prelude::actions::Action;
 use zellij_tile::prelude::*;
 use zellij_tile_utils::{palette_match, style};
@@ -27,10 +29,47 @@ use tip::utils::get_cached_tip_name;
 // for more of these, copy paste from: https://en.wikipedia.org/wiki/Box-drawing_character
 static ARROW_SEPARATOR: &str = "";
 static MORE_MSG: &str = " ... ";
+/// How long the clipboard notification ("Text copied...") stays on the bar
+/// before dismissing itself without requiring user input.
+const CLIPBOARD_HINT_TTL_SECONDS: f64 = 2.0;
+/// Host resource cockpit (moved here from the session rail): context key of
+/// the sampling run_command and the seconds between samples.
+const RESOURCE_SAMPLE_CONTEXT_KEY: &str = "vc_status_resources";
+const RESOURCE_SAMPLE_SECONDS: f64 = 5.0;
+/// Lightweight server-to-plugin signal carrying the fleet's live terminal-tab
+/// count. Keep this wire name in sync with `zellij-server/src/screen.rs`.
+const VC_FLEET_LIVE_COUNT_MESSAGE: &str = "vc.fleet-live-count.v1";
+/// Exact per-plugin/client lifecycle signal emitted by Screen. Generic
+/// `Visible` is tab-global and cannot distinguish clients viewing different
+/// tabs in a non-mirrored session.
+const VC_STATUS_BAR_VISIBILITY_MESSAGE: &str = "vc.status-bar-visibility.v1";
+// Portable host sample: total CPU% (per-core percentages summed, like top),
+// used RSS KiB and total RAM KiB — Linux via /proc/meminfo, macOS via sysctl —
+// plus available KiB on the root filesystem (df POSIX output, field 4).
+const RESOURCE_SAMPLE_COMMAND: &str = r#"cpu=$(ps -A -o %cpu= | awk '{s+=$1} END {printf "%.0f", s}'); used=$(ps -A -o rss= | awk '{s+=$1} END {print s}'); if [ -r /proc/meminfo ]; then total=$(awk '/^MemTotal:/{print $2}' /proc/meminfo); else total=$(( $(sysctl -n hw.memsize) / 1024 )); fi; disk=$(df -P -k / | awk 'NR==2 {print $4}'); printf '%s %s %s %s' "$cpu" "$used" "$total" "$disk""#;
 /// Shorthand for `Action::SwitchToMode{input_mode: InputMode::Normal}`.
 const TO_NORMAL: Action = Action::SwitchToMode {
     input_mode: InputMode::Normal,
 };
+/// Minimum breathing room between the hint line and the right status
+/// segment — hints may never touch the diodes.
+const STATUS_SEAM_CELLS: usize = 2;
+/// Columns the resting-mode hint ("Ctrl g LOCK") keeps for itself before
+/// the status segment may claim the rest of the bar.
+const RESTING_HINT_RESERVE: usize = 16;
+/// Unlocked modes hand the width to the shortcut cheat-sheet; the
+/// swap-layout chip may claim at most 1/N of the row.
+const SWAP_CHIP_MAX_BAR_FRACTION: usize = 4;
+
+// Floor for a renderable frame: anything below is a transient startup event,
+// not a legal surface. Kept far below the comfortable chrome minimum
+// (tools/repro_chrome.py MIN_COLUMNS) so legal small panes always render.
+const MIN_RENDER_ROWS: usize = 1;
+const MIN_RENDER_COLS: usize = 4;
+
+fn dimensions_are_transient(rows: usize, cols: usize) -> bool {
+    rows < MIN_RENDER_ROWS || cols < MIN_RENDER_COLS
+}
 
 #[derive(Default)]
 struct State {
@@ -39,14 +78,26 @@ struct State {
     mode_info: ModeInfo,
     text_copy_destination: Option<CopyDestination>,
     display_system_clipboard_failure: bool,
+    clipboard_hint_deadline: Option<Instant>,
     classic_ui: bool,
     base_mode_is_locked: bool,
     cached_keybinds: KeybindsVec,
+    // Host resource cockpit ("CPU … | MEM … | DISK …"), sampled via
+    // run_command. None until the first valid sample; a failed or malformed
+    // sample clears so HEALTH cannot claim "ok" on stale numbers. HEALTH
+    // reads metrics (CPU/MEM/DISK pressure), not mere sample presence.
+    resource_sample: Option<ResourceSample>,
+    resource_sample_in_flight: bool,
+    resource_sample_due: Option<Instant>,
+    is_visible: bool,
+    // Fleet pulse: the server computes this once from its existing session
+    // snapshot and sends only a scalar custom message to per-tab chrome.
+    live_count: usize,
 }
 
 register_plugin!(State);
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct LinePart {
     part: String,
     len: usize,
@@ -107,7 +158,7 @@ fn color_elements(palette: Styling, different_color_alternates: bool) -> Colored
             )
             .bold(),
             char_shortcut: style!(
-                palette.ribbon_selected.emphasis_0,
+                palette.ribbon_selected.emphasis_1,
                 palette.ribbon_selected.background
             )
             .bold(),
@@ -131,7 +182,7 @@ fn color_elements(palette: Styling, different_color_alternates: bool) -> Colored
             )
             .bold(),
             char_shortcut: style!(
-                palette.ribbon_unselected.emphasis_0,
+                palette.ribbon_unselected.emphasis_1,
                 palette.ribbon_unselected.background
             )
             .bold(),
@@ -151,7 +202,7 @@ fn color_elements(palette: Styling, different_color_alternates: bool) -> Colored
             prefix_separator: style!(background, alternate_background_color),
             char_left_separator: style!(background, alternate_background_color).bold(),
             char_shortcut: style!(
-                palette.ribbon_unselected.emphasis_0,
+                palette.ribbon_unselected.emphasis_1,
                 alternate_background_color
             )
             .bold(),
@@ -201,15 +252,11 @@ impl ZellijPlugin for State {
             .map(|c| c == "true")
             .unwrap_or(false);
         set_selectable(false);
-        subscribe(&[
-            EventType::ModeUpdate,
-            EventType::TabUpdate,
-            EventType::PaneUpdate,
-            EventType::CopyToClipboard,
-            EventType::InputReceived,
-            EventType::SystemClipboardFailure,
-            EventType::InitialKeybinds,
-        ]);
+        request_permission(&status_bar_permissions());
+        subscribe(&status_bar_subscriptions());
+        // Attach loads a client instance for plugins in every tab, including
+        // hidden tabs. Stay idle until Screen targets this active status-bar
+        // with the fleet heartbeat or its exact lifecycle signal.
     }
 
     fn update(&mut self, event: Event) -> bool {
@@ -241,6 +288,9 @@ impl ZellijPlugin for State {
                 self.tabs = tabs;
             },
             Event::CopyToClipboard(copy_destination) => {
+                if !self.is_visible {
+                    return false;
+                }
                 match self.text_copy_destination {
                     Some(text_copy_destination) => {
                         if text_copy_destination != copy_destination {
@@ -252,10 +302,87 @@ impl ZellijPlugin for State {
                     },
                 }
                 self.text_copy_destination = Some(copy_destination);
+                self.clipboard_hint_deadline =
+                    Some(Instant::now() + Duration::from_secs_f64(CLIPBOARD_HINT_TTL_SECONDS));
+                set_timeout(CLIPBOARD_HINT_TTL_SECONDS);
             },
             Event::SystemClipboardFailure => {
+                if !self.is_visible {
+                    return false;
+                }
                 should_render = true;
                 self.display_system_clipboard_failure = true;
+                self.clipboard_hint_deadline =
+                    Some(Instant::now() + Duration::from_secs_f64(CLIPBOARD_HINT_TTL_SECONDS));
+                set_timeout(CLIPBOARD_HINT_TTL_SECONDS);
+            },
+            Event::Timer(_) => {
+                let now = Instant::now();
+                if self
+                    .clipboard_hint_deadline
+                    .is_some_and(|deadline| now >= deadline)
+                {
+                    self.clipboard_hint_deadline = None;
+                    self.text_copy_destination = None;
+                    self.display_system_clipboard_failure = false;
+                    should_render = true;
+                }
+                if self.is_visible
+                    && self
+                        .resource_sample_due
+                        .is_some_and(|deadline| now >= deadline)
+                {
+                    self.resource_sample_due = None;
+                    self.start_resource_sample();
+                }
+            },
+            Event::RunCommandResult(exit_code, stdout, _stderr, context)
+                if context.contains_key(RESOURCE_SAMPLE_CONTEXT_KEY) =>
+            {
+                self.resource_sample_in_flight = false;
+                if self.is_visible {
+                    self.schedule_resource_sample();
+                } else {
+                    self.resource_sample_due = None;
+                }
+                // A failed or malformed sample must not freeze the last good
+                // reading forever under "HEALTH ok". Clear to unknown so the
+                // bar is honest until the next successful sample.
+                if exit_code == Some(0) {
+                    if let Some(sample) = parse_resource_sample(&stdout) {
+                        let changed = self.resource_sample.as_ref() != Some(&sample);
+                        if changed {
+                            self.resource_sample = Some(sample);
+                            should_render = true;
+                        }
+                    } else if self.resource_sample.take().is_some() {
+                        should_render = true;
+                    }
+                } else if self.resource_sample.take().is_some() {
+                    should_render = true;
+                }
+            },
+            Event::CustomMessage(message, payload) if message == VC_FLEET_LIVE_COUNT_MESSAGE => {
+                // Screen targets this message only at status-bars on active
+                // tabs. Treat it as a positive visibility heartbeat as well.
+                let became_visible = self.set_visibility(true);
+                let live_count_changed = self.apply_fleet_live_count(&payload);
+                should_render = became_visible || live_count_changed;
+            },
+            Event::CustomMessage(message, payload)
+                if message == VC_STATUS_BAR_VISIBILITY_MESSAGE =>
+            {
+                match payload.as_str() {
+                    "true" => should_render = self.set_visibility(true),
+                    "false" => should_render = self.set_visibility(false),
+                    _ => {},
+                }
+            },
+            Event::PermissionRequestResult(_) => {
+                if self.is_visible {
+                    self.start_resource_sample();
+                }
+                should_render = true;
             },
             Event::InputReceived => {
                 if self.text_copy_destination.is_some() || self.display_system_clipboard_failure {
@@ -263,6 +390,7 @@ impl ZellijPlugin for State {
                 }
                 self.text_copy_destination = None;
                 self.display_system_clipboard_failure = false;
+                self.clipboard_hint_deadline = None;
             },
             _ => {},
         };
@@ -270,6 +398,12 @@ impl ZellijPlugin for State {
     }
 
     fn render(&mut self, rows: usize, cols: usize) {
+        // Transient initial resize events arrive with rows/cols at or near
+        // zero before the real layout lands; painting those frames is what
+        // makes the chrome visibly jump at session start.
+        if dimensions_are_transient(rows, cols) {
+            return;
+        }
         let supports_arrow_fonts = !self.mode_info.capabilities.arrow_fonts;
         let separator = if supports_arrow_fonts {
             ARROW_SEPARATOR
@@ -285,19 +419,48 @@ impl ZellijPlugin for State {
                 PaletteColor::EightBit(color) => format!("\u{1b}[48;5;{}m\u{1b}[0K", color),
             };
             let active_tab = self.tabs.iter().find(|t| t.active);
-            print!(
-                "{}{}",
-                one_line_ui(
-                    &self.mode_info,
-                    active_tab,
-                    cols,
-                    separator,
-                    self.base_mode_is_locked,
-                    self.text_copy_destination,
-                    self.display_system_clipboard_failure,
-                ),
-                fill_bg,
+            // The bar keeps one contract: LOCK is the presentation mode —
+            // the whole bar belongs to the status diodes (LIVE, cockpit,
+            // HEALTH) regardless of which base mode the config declares.
+            // Every unlocked mode hands the width to the shortcut
+            // cheat-sheet; only the swap-layout chip stays, because it is
+            // arrangement context, not telemetry. (Operator regression
+            // 2026-08-05: gating on a derived "resting mode" hid the
+            // cockpit in LOCK whenever the base mode was Normal.)
+            let right = if self.mode_info.mode == InputMode::Locked {
+                self.right_status_segment(active_tab, cols.saturating_sub(RESTING_HINT_RESERVE))
+            } else {
+                // Unlocked modes: the width belongs to the full shortcut
+                // cheat-sheet — no telemetry. Only the swap-layout chip
+                // ("BASE") keeps the right edge: manipulation modes are
+                // exactly when the operator is arranging.
+                self.swap_chip_segment(active_tab, cols / SWAP_CHIP_MAX_BAR_FRACTION)
+            };
+            let seam = if right.len > 0 { STATUS_SEAM_CELLS } else { 0 };
+            let ui_cols = cols.saturating_sub(right.len + seam);
+            let line = one_line_ui(
+                &self.mode_info,
+                active_tab,
+                ui_cols,
+                separator,
+                self.base_mode_is_locked,
+                self.text_copy_destination,
+                self.display_system_clipboard_failure,
             );
+            if right.len > 0 && cols > line.len + right.len {
+                // Right-align the status segment by PRINTING FORWARD only:
+                // hints, a background-styled spacer, the segment, then EL
+                // for the final column. The previous shape (EL, then CHA
+                // back, then text) corrupted the composed frame on every
+                // render — the climbing/ghosting chrome of 2026-07-31,
+                // bisected to exactly that print. No cursor motion, no
+                // write into the last cell: nothing left to go wrong.
+                let pad = cols.saturating_sub(line.len + right.len + 1);
+                let spacer = style!(background, background).paint(" ".repeat(pad));
+                print!("{}{}{}{}", line, spacer, right.part, fill_bg);
+            } else {
+                print!("{}{}", line, fill_bg);
+            }
             return;
         }
 
@@ -336,6 +499,202 @@ impl ZellijPlugin for State {
 }
 
 impl State {
+    fn start_resource_sample(&mut self) {
+        if !self.is_visible || self.resource_sample_in_flight {
+            return;
+        }
+        self.resource_sample_due = None;
+        self.resource_sample_in_flight = true;
+        let mut context = BTreeMap::new();
+        context.insert(RESOURCE_SAMPLE_CONTEXT_KEY.to_owned(), "true".to_owned());
+        run_command(&["sh", "-c", RESOURCE_SAMPLE_COMMAND], context);
+    }
+
+    fn set_visibility(&mut self, is_visible: bool) -> bool {
+        if self.is_visible == is_visible {
+            return false;
+        }
+        self.is_visible = is_visible;
+        if is_visible {
+            self.start_resource_sample();
+        } else {
+            self.resource_sample_due = None;
+            self.clipboard_hint_deadline = None;
+            self.text_copy_destination = None;
+            self.display_system_clipboard_failure = false;
+        }
+        true
+    }
+
+    fn schedule_resource_sample(&mut self) {
+        self.resource_sample_due =
+            Some(Instant::now() + Duration::from_secs_f64(RESOURCE_SAMPLE_SECONDS));
+        set_timeout(RESOURCE_SAMPLE_SECONDS);
+    }
+
+    fn apply_fleet_live_count(&mut self, payload: &str) -> bool {
+        let Ok(live_count) = payload.parse::<usize>() else {
+            return false;
+        };
+        if self.live_count == live_count {
+            return false;
+        }
+        self.live_count = live_count;
+        true
+    }
+
+    /// The bar's right edge — pure statuses, zero tools (operator call
+    /// 2026-07-31 / close-out Fork IV): fleet LIVE, host cockpit, and a
+    /// HEALTH chip. All glyphs are single-cell ASCII/emoji-safe tokens so we
+    /// never re-introduce the ䷅ (U+4DC5, width 2) jumping-screen class.
+    ///
+    /// Degradation ladder: instead of dropping the whole segment when the
+    /// bar narrows, shed blocks right-to-left — DISK, then MEM, then CPU,
+    /// then the swap chip, then HEALTH; the fleet pulse goes last. The
+    /// returned segment always fits `max_len` (or is empty).
+    fn right_status_segment(&self, active_tab: Option<&TabInfo>, max_len: usize) -> LinePart {
+        let cockpit: Vec<&str> = self
+            .resource_sample
+            .as_ref()
+            .map(|sample| sample.line.split(" | ").collect())
+            .unwrap_or_default();
+        let swap_chip = self.swap_layout_status(active_tab);
+
+        let mut ladder: Vec<(usize, bool, bool)> = (0..=cockpit.len())
+            .rev()
+            .map(|kept| (kept, true, true))
+            .collect();
+        ladder.push((0, false, true));
+        ladder.push((0, false, false));
+
+        for (fields_kept, with_swap, with_health) in ladder {
+            let chip = if with_swap { swap_chip.as_ref() } else { None };
+            let segment = self.compose_status_segment(&cockpit[..fields_kept], chip, with_health);
+            if segment.len <= max_len {
+                return segment;
+            }
+        }
+        LinePart::default()
+    }
+
+    /// One rung of the status ladder: LIVE + the kept cockpit fields +
+    /// optional HEALTH + optional swap-layout chip, in bar order.
+    fn compose_status_segment(
+        &self,
+        cockpit_fields: &[&str],
+        swap_chip: Option<&LinePart>,
+        with_health: bool,
+    ) -> LinePart {
+        let mut segment = LinePart::default();
+        let palette = self.mode_info.style.colors;
+        let dim = style!(
+            palette.text_unselected.emphasis_2,
+            palette.text_unselected.background
+        );
+        let hot = style!(
+            palette.text_unselected.emphasis_1,
+            palette.text_unselected.background
+        )
+        .bold();
+        let scream = style!(
+            palette.text_unselected.emphasis_0,
+            palette.text_unselected.background
+        )
+        .bold();
+
+        // LIVE = fleet pulse (agent process tabs across sessions).
+        // Two-digit field so LIVE 9 → LIVE 12 never shifts the cockpit.
+        let live_shown = self.live_count.min(99);
+        let live_text = format!("LIVE {:2}", live_shown);
+        let live_part = if self.live_count > 0 {
+            hot.paint(live_text.clone()).to_string()
+        } else {
+            dim.paint(live_text.clone()).to_string()
+        };
+        segment.append(&LinePart {
+            len: live_text.width(),
+            part: live_part,
+        });
+
+        for field in cockpit_fields {
+            let text = format!(" | {}", field);
+            segment.append(&LinePart {
+                len: text.width(),
+                part: dim.paint(text).to_string(),
+            });
+        }
+
+        // HEALTH reads metrics (CPU/MEM/DISK pressure), not mere sample presence.
+        // A narrow bar never changes the diagnosis.
+        if with_health {
+            let verdict = health_verdict(self.resource_sample.as_ref());
+            let label = verdict.label();
+            let text = format!(" | {}", label);
+            let painted = match verdict {
+                HealthVerdict::Ok => hot.paint(text.clone()).to_string(),
+                HealthVerdict::Warn | HealthVerdict::Bad => scream.paint(text.clone()).to_string(),
+                HealthVerdict::Unknown => dim.paint(text.clone()).to_string(),
+            };
+            segment.append(&LinePart {
+                len: text.width(),
+                part: painted,
+            });
+        }
+
+        if let Some(swap_chip) = swap_chip {
+            let sep = LinePart {
+                len: 1,
+                part: dim.paint(" ").to_string(),
+            };
+            segment.append(&sep);
+            segment.append(swap_chip);
+        }
+
+        segment
+    }
+
+    /// Unlocked-mode right edge: the swap-layout chip alone. Manipulation
+    /// modes are exactly when the operator is arranging — but the chip
+    /// yields once the bar gets tight.
+    fn swap_chip_segment(&self, active_tab: Option<&TabInfo>, max_len: usize) -> LinePart {
+        match self.swap_layout_status(active_tab) {
+            Some(chip) if chip.len <= max_len => chip,
+            _ => LinePart::default(),
+        }
+    }
+
+    fn swap_layout_status(&self, active_tab: Option<&TabInfo>) -> Option<LinePart> {
+        let tab = active_tab?;
+        let name = tab.active_swap_layout_name.as_ref()?;
+        let mut label = format!(" {} ", name);
+        label.make_ascii_uppercase();
+        let len = label.chars().count();
+        let palette = self.mode_info.style.colors;
+
+        let styled = match self.mode_info.mode {
+            InputMode::Locked => style!(
+                palette.text_unselected.background,
+                palette.ribbon_unselected.background
+            )
+            .italic(),
+            _ if tab.is_swap_layout_dirty => style!(
+                palette.text_unselected.background,
+                palette.ribbon_unselected.background
+            )
+            .bold(),
+            _ => style!(
+                palette.text_unselected.background,
+                palette.ribbon_selected.background
+            )
+            .bold(),
+        };
+
+        Some(LinePart {
+            part: styled.paint(label).to_string(),
+            len,
+        })
+    }
+
     fn second_line(&self, cols: usize) -> LinePart {
         let active_tab = self.tabs.iter().find(|t| t.active);
 
@@ -371,6 +730,105 @@ impl State {
             LinePart::default()
         }
     }
+}
+
+/// Parsed host resource sample — line for the bar + metrics for HEALTH.
+#[derive(Clone, Debug, PartialEq)]
+struct ResourceSample {
+    line: String,
+    cpu_pct: f64,
+    mem_ratio: f64,
+    disk_avail_gib: f64,
+}
+
+/// HEALTH verdict from metrics — never "ok" merely because a sample exists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HealthVerdict {
+    Ok,
+    Warn,
+    Bad,
+    Unknown,
+}
+
+impl HealthVerdict {
+    fn label(self) -> &'static str {
+        match self {
+            HealthVerdict::Ok => "HEALTH ok",
+            HealthVerdict::Warn => "HEALTH !",
+            HealthVerdict::Bad => "HEALTH !!",
+            HealthVerdict::Unknown => "HEALTH ?",
+        }
+    }
+}
+
+/// Thresholds for multi-core Mac hosts: 768% CPU with plenty of RAM is not "ok".
+fn health_verdict(sample: Option<&ResourceSample>) -> HealthVerdict {
+    let Some(s) = sample else {
+        return HealthVerdict::Unknown;
+    };
+    // Bad: near-OOM, disk nearly gone, or absurd sustained load.
+    if s.mem_ratio >= 0.92 || s.disk_avail_gib < 2.0 || s.cpu_pct >= 800.0 {
+        return HealthVerdict::Bad;
+    }
+    // Warn: pressure worth screaming about without claiming catastrophe.
+    if s.mem_ratio >= 0.80 || s.disk_avail_gib < 8.0 || s.cpu_pct >= 400.0 {
+        return HealthVerdict::Warn;
+    }
+    HealthVerdict::Ok
+}
+
+/// Format the four-number sample ("cpu used_kib total_kib disk_avail_kib")
+/// into cockpit metrics. Returns None on any malformed field so a bad
+/// sample never freezes a previously valid reading under a false HEALTH ok.
+fn parse_resource_sample(stdout: &[u8]) -> Option<ResourceSample> {
+    let text = String::from_utf8_lossy(stdout);
+    let mut parts = text.split_whitespace();
+    let cpu: f64 = parts.next()?.parse().ok()?;
+    let used_kib: f64 = parts.next()?.parse().ok()?;
+    let total_kib: f64 = parts.next()?.parse().ok()?;
+    let disk_avail_kib: f64 = parts.next()?.parse().ok()?;
+    if total_kib <= 0.0 || cpu < 0.0 || used_kib < 0.0 || disk_avail_kib < 0.0 {
+        return None;
+    }
+    const KIB_PER_GIB: f64 = 1024.0 * 1024.0;
+    let mem_ratio = (used_kib / total_kib).clamp(0.0, 1.0);
+    let disk_avail_gib = disk_avail_kib / KIB_PER_GIB;
+    // Fixed-width fields so the right-edge segment never jitters when a
+    // reading rolls from 9 → 100, 8.0G → 264.3G, or multi-core CPU past
+    // 999% (Pensieve Fixed Character Grid Model + live operator hardware).
+    let line = format!(
+        "CPU {:4.0}% | MEM {:5.1}/{:3.0}G | DISK {:3.0}G",
+        cpu.min(9999.0),
+        (used_kib / KIB_PER_GIB).min(999.9),
+        (total_kib / KIB_PER_GIB).min(999.0),
+        disk_avail_gib.min(999.0),
+    );
+    Some(ResourceSample {
+        line,
+        cpu_pct: cpu,
+        mem_ratio,
+        disk_avail_gib,
+    })
+}
+
+fn status_bar_permissions() -> Vec<PermissionType> {
+    vec![PermissionType::RunCommands]
+}
+
+fn status_bar_subscriptions() -> Vec<EventType> {
+    vec![
+        EventType::ModeUpdate,
+        EventType::TabUpdate,
+        EventType::PaneUpdate,
+        EventType::CopyToClipboard,
+        EventType::InputReceived,
+        EventType::SystemClipboardFailure,
+        EventType::InitialKeybinds,
+        EventType::Timer,
+        EventType::RunCommandResult,
+        EventType::CustomMessage,
+        EventType::PermissionRequestResult,
+    ]
 }
 
 pub fn get_common_modifiers(mut keyvec: Vec<&KeyWithModifier>) -> Vec<KeyModifier> {
@@ -446,30 +904,27 @@ pub fn action_key_group(
 /// - "←→"
 /// - "↓↑"
 ///
-/// The returned Vector of [`ANSIString`] is suitable for transformation into an [`ANSIStrings`]
+/// The returned Vector of [`AnsiString`] is suitable for transformation into an [`AnsiStrings`]
 /// type.
 pub fn style_key_with_modifier(
     keyvec: &[KeyWithModifier],
     palette: &Styling,
     background: Option<PaletteColor>,
-) -> Vec<ANSIString<'static>> {
+) -> Vec<AnsiString<'static>> {
     if keyvec.is_empty() {
         return vec![];
     }
 
     let text_color = palette_match!(palette.text_unselected.base);
     let green_color = palette_match!(palette.text_unselected.emphasis_2);
-    let orange_color = palette_match!(palette.text_unselected.emphasis_0);
+    let orange_color = palette_match!(palette.text_unselected.emphasis_1);
     let mut ret = vec![];
 
     let common_modifiers = get_common_modifiers(keyvec.iter().collect());
 
     let no_common_modifier = common_modifiers.is_empty();
-    let modifier_str = common_modifiers
-        .iter()
-        .map(|m| m.to_string())
-        .collect::<Vec<_>>()
-        .join("-");
+    // macOS product glyphs (⌃ not "Ctrl") — chrome help SSOT.
+    let modifier_str = first_line::format_modifiers(&common_modifiers);
     let painted_modifier = if modifier_str.is_empty() {
         Style::new().paint("")
     } else if let Some(background) = background {
@@ -498,24 +953,27 @@ pub fn style_key_with_modifier(
         ret.push(Style::new().fg(text_color).paint(group_start_str));
     }
 
-    // Prints the keys
+    // Prints the keys — macOS glyphs for any remaining modifiers.
     let key = keyvec
         .iter()
         .map(|key| {
             if no_common_modifier {
-                format!("{}", key)
+                first_line::chrome_key_label(key)
             } else {
-                let key_modifier_for_key = key
+                let leftover: Vec<KeyModifier> = key
                     .key_modifiers
                     .iter()
                     .filter(|m| !common_modifiers.contains(m))
-                    .map(|m| m.to_string())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                if key_modifier_for_key.is_empty() {
+                    .copied()
+                    .collect();
+                if leftover.is_empty() {
                     format!("{}", key.bare_key)
                 } else {
-                    format!("{} {}", key_modifier_for_key, key.bare_key)
+                    format!(
+                        "{}{}",
+                        first_line::format_modifiers(&leftover),
+                        key.bare_key
+                    )
                 }
             }
         })
@@ -580,8 +1038,8 @@ pub fn style_key_with_modifier(
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    use ansi_term::AnsiStrings;
     use ansi_term::unstyle;
-    use ansi_term::ANSIStrings;
 
     fn big_keymap() -> Vec<(KeyWithModifier, Vec<Action>)> {
         vec![
@@ -613,6 +1071,320 @@ pub mod tests {
                 ],
             ),
         ]
+    }
+
+    #[test]
+    fn resource_sample_formats_cpu_memory_and_disk() {
+        // Fixed-width fields (CPU 4, MEM used 5.1, total 3, DISK 3).
+        // Mid-range laptop sample: 342% CPU, 8 GiB / 64 GiB, 13 GiB free.
+        let mid = parse_resource_sample(b"342 8388608 67108864 13631488").unwrap();
+        assert_eq!(mid.line.as_str(), "CPU  342% | MEM   8.0/ 64G | DISK  13G");
+        // Single-digit path still occupies the full budget.
+        let small = parse_resource_sample(b"9 1048576 2097152 1048576").unwrap();
+        assert_eq!(
+            small.line.as_str(),
+            "CPU    9% | MEM   1.0/  2G | DISK   1G"
+        );
+        // Operator hardware from Pensieve screenshots: multi-core CPU past
+        // 999% and used memory past 100G (264.3/512G, DISK 173G).
+        let used_kib = (264.3_f64 * 1024.0 * 1024.0).round() as u64;
+        let total_kib = 512u64 * 1024 * 1024;
+        let disk_kib = 173u64 * 1024 * 1024;
+        let hardware = parse_resource_sample(
+            format!("1949 {} {} {}", used_kib, total_kib, disk_kib).as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            hardware.line.as_str(),
+            "CPU 1949% | MEM 264.3/512G | DISK 173G"
+        );
+        let used_kib_hi = (371.8_f64 * 1024.0 * 1024.0).round() as u64;
+        let heavy = parse_resource_sample(
+            format!("469 {} {} {}", used_kib_hi, total_kib, 348u64 * 1024 * 1024).as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            heavy.line.as_str(),
+            "CPU  469% | MEM 371.8/512G | DISK 348G"
+        );
+
+        let widths = [
+            mid.line.width(),
+            small.line.width(),
+            hardware.line.width(),
+            heavy.line.width(),
+        ];
+        assert!(
+            widths.windows(2).all(|w| w[0] == w[1]),
+            "metric line width must be stable across single-digit, mid, and >=100G used: {widths:?}"
+        );
+    }
+
+    #[test]
+    fn status_ladder_sheds_cockpit_fields_before_the_pulse() {
+        // 768% is the live operator screenshot class — Warn, not "ok".
+        // MEM 31.5/48G ≈ 33M/50M KiB; DISK 22G free.
+        let sample = parse_resource_sample(b"768 33030144 50331648 23068672").unwrap();
+        assert!(sample.line.contains("CPU  768%"));
+        let state = State {
+            live_count: 3,
+            resource_sample: Some(sample.clone()),
+            ..Default::default()
+        };
+        assert_eq!(health_verdict(Some(&sample)), HealthVerdict::Warn);
+
+        let full = state.right_status_segment(None, 200);
+        assert!(full.part.contains("HEALTH !"));
+        assert!(!full.part.contains("HEALTH ok"));
+        // Narrow: DISK is shed first...
+        let no_disk = state.right_status_segment(None, 55);
+        assert!(no_disk.part.contains("HEALTH !") || no_disk.part.contains("CPU"));
+        // ...down to the bare pulse...
+        let bare = state.right_status_segment(None, 8);
+        assert_eq!(bare.len, "LIVE  3".width());
+        // ...and an impossible budget yields empty, never an overflow.
+        assert_eq!(state.right_status_segment(None, 3).len, 0);
+    }
+
+    #[test]
+    fn status_ladder_health_verdict_survives_field_shedding() {
+        // Calm host: low CPU, modest mem, plenty of disk → HEALTH ok.
+        let calm = parse_resource_sample(b"10 8388608 67108864 20971520").unwrap();
+        let mut state = State {
+            live_count: 0,
+            resource_sample: Some(calm),
+            ..Default::default()
+        };
+        let narrow = state.right_status_segment(None, "LIVE  0 | HEALTH ok".width());
+        assert_eq!(narrow.len, "LIVE  0 | HEALTH ok".width());
+        assert!(narrow.part.contains("HEALTH ok"));
+
+        // Sample present + finger in the eye (768% CPU) must not say ok.
+        let hot = parse_resource_sample(b"768 33030144 50331648 23068672").unwrap();
+        assert_eq!(health_verdict(Some(&hot)), HealthVerdict::Warn);
+        state.resource_sample = Some(hot);
+        let warned = state.right_status_segment(None, 200);
+        assert!(warned.part.contains("HEALTH !"));
+        assert!(!warned.part.contains("HEALTH ok"));
+
+        // Near-OOM / tiny disk screams.
+        let bad = parse_resource_sample(b"100 48000000 50331648 1048576").unwrap();
+        assert_eq!(health_verdict(Some(&bad)), HealthVerdict::Bad);
+
+        // No sample at all: the verdict is an honest unknown.
+        state.resource_sample = None;
+        let unknown = state.right_status_segment(None, 200);
+        assert!(unknown.part.contains("HEALTH ?"));
+        assert_eq!(health_verdict(None), HealthVerdict::Unknown);
+    }
+
+    #[test]
+    fn live_pulse_width_is_stable_across_counts() {
+        let low = State {
+            live_count: 3,
+            ..Default::default()
+        };
+        let high = State {
+            live_count: 12,
+            ..Default::default()
+        };
+        assert_eq!(
+            low.right_status_segment(None, 200).len,
+            high.right_status_segment(None, 200).len,
+            "LIVE field must not shift cockpit on count roll"
+        );
+    }
+
+    #[test]
+    fn resource_sample_rejects_malformed_input() {
+        assert_eq!(parse_resource_sample(b""), None, "empty");
+        assert_eq!(parse_resource_sample(b"only two"), None, "non-numeric");
+        assert_eq!(parse_resource_sample(b"12 34"), None, "missing total");
+        assert_eq!(parse_resource_sample(b"12 34 100"), None, "missing disk");
+        assert_eq!(parse_resource_sample(b"12 34 0 55"), None, "zero total");
+        assert_eq!(parse_resource_sample(b"-5 34 100 55"), None, "negative cpu");
+        assert_eq!(
+            parse_resource_sample(b"12 34 100 -1"),
+            None,
+            "negative disk"
+        );
+    }
+
+    #[test]
+    fn resource_sample_success_then_failure_clears_stale_health_line() {
+        // Mirror the RunCommandResult branch: a good sample sets the sample;
+        // a later non-zero exit or unparseable body must clear it so HEALTH
+        // flips back to unknown instead of freezing "ok".
+        let mut sample = parse_resource_sample(b"10 1024 2048 512");
+        assert!(sample.is_some());
+        if parse_resource_sample(b"not-a-sample").is_none() {
+            sample = None;
+        }
+        assert_eq!(sample, None);
+        sample = parse_resource_sample(b"10 1024 2048 512");
+        assert!(sample.is_some());
+        let exit_code = Some(1);
+        if exit_code != Some(0) {
+            sample = None;
+        }
+        assert_eq!(sample, None);
+    }
+
+    #[test]
+    fn status_bar_never_subscribes_to_full_session_snapshots() {
+        assert!(
+            !status_bar_subscriptions().contains(&EventType::SessionUpdate),
+            "per-tab status bars must never receive full cross-session snapshots"
+        );
+        assert!(status_bar_subscriptions().contains(&EventType::CustomMessage));
+        assert!(
+            !status_bar_subscriptions().contains(&EventType::Visible),
+            "tab-global visibility must not control a per-client sampler"
+        );
+        assert!(
+            !status_bar_permissions().contains(&PermissionType::ReadApplicationState),
+            "the scalar fleet message must not require cross-session read access"
+        );
+    }
+
+    #[test]
+    fn fleet_live_count_accepts_only_valid_changed_scalars() {
+        let mut state = State {
+            is_visible: true,
+            live_count: 3,
+            ..Default::default()
+        };
+
+        assert!(state.update(Event::CustomMessage(
+            VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
+            "4".to_owned(),
+        )));
+        assert_eq!(state.live_count, 4);
+
+        assert!(!state.update(Event::CustomMessage(
+            VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
+            "4".to_owned(),
+        )));
+        assert!(!state.update(Event::CustomMessage(
+            VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
+            "not-a-number".to_owned(),
+        )));
+        assert_eq!(
+            state.live_count, 4,
+            "invalid input must keep last good value"
+        );
+    }
+
+    #[test]
+    fn clipboard_timer_does_not_start_or_rearm_resource_sampling() {
+        let resource_due = Instant::now() + Duration::from_secs(60);
+        let mut state = State {
+            is_visible: true,
+            text_copy_destination: Some(CopyDestination::Command),
+            clipboard_hint_deadline: Some(Instant::now() - Duration::from_secs(1)),
+            resource_sample_due: Some(resource_due),
+            ..Default::default()
+        };
+
+        assert!(state.update(Event::Timer(CLIPBOARD_HINT_TTL_SECONDS)));
+        assert_eq!(state.text_copy_destination, None);
+        assert_eq!(state.resource_sample_due, Some(resource_due));
+        assert!(!state.resource_sample_in_flight);
+    }
+
+    #[test]
+    fn stale_timer_is_a_noop_before_either_deadline() {
+        let clipboard_deadline = Instant::now() + Duration::from_secs(30);
+        let resource_due = Instant::now() + Duration::from_secs(60);
+        let mut state = State {
+            is_visible: true,
+            text_copy_destination: Some(CopyDestination::Command),
+            clipboard_hint_deadline: Some(clipboard_deadline),
+            resource_sample_due: Some(resource_due),
+            ..Default::default()
+        };
+
+        assert!(!state.update(Event::Timer(0.1)));
+        assert_eq!(state.clipboard_hint_deadline, Some(clipboard_deadline));
+        assert_eq!(state.resource_sample_due, Some(resource_due));
+        assert!(!state.resource_sample_in_flight);
+    }
+
+    #[test]
+    fn hidden_status_bar_never_starts_or_rearms_resource_sampling() {
+        let mut state = State {
+            is_visible: false,
+            resource_sample_in_flight: true,
+            ..Default::default()
+        };
+        let mut context = BTreeMap::new();
+        context.insert(RESOURCE_SAMPLE_CONTEXT_KEY.to_owned(), "true".to_owned());
+
+        assert!(state.update(Event::RunCommandResult(
+            Some(0),
+            b"10 1048576 8388608 2097152".to_vec(),
+            vec![],
+            context,
+        )));
+        assert!(!state.resource_sample_in_flight);
+        assert_eq!(state.resource_sample_due, None);
+
+        state.start_resource_sample();
+        assert!(!state.resource_sample_in_flight);
+        assert_eq!(state.resource_sample_due, None);
+    }
+
+    #[test]
+    fn fresh_status_bar_is_idle_until_a_visibility_signal() {
+        let mut state = State::default();
+
+        assert!(!state.is_visible);
+        state.start_resource_sample();
+        assert!(!state.resource_sample_in_flight);
+        assert_eq!(state.resource_sample_due, None);
+    }
+
+    #[test]
+    fn targeted_fleet_message_resumes_status_bar_after_reattach() {
+        let mut state = State {
+            is_visible: false,
+            live_count: 1,
+            ..Default::default()
+        };
+
+        assert!(state.update(Event::CustomMessage(
+            VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
+            "2".to_owned(),
+        )));
+        assert!(state.is_visible);
+        assert!(state.resource_sample_in_flight);
+        assert_eq!(state.live_count, 2);
+    }
+
+    #[test]
+    fn targeted_visibility_message_stops_only_that_status_bar_instance() {
+        let mut state = State {
+            is_visible: true,
+            resource_sample_due: Some(Instant::now() + Duration::from_secs(5)),
+            text_copy_destination: Some(CopyDestination::Command),
+            clipboard_hint_deadline: Some(Instant::now() + Duration::from_secs(2)),
+            ..Default::default()
+        };
+
+        assert!(state.update(Event::CustomMessage(
+            VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
+            "false".to_owned(),
+        )));
+        assert!(!state.is_visible);
+        assert_eq!(state.resource_sample_due, None);
+        assert_eq!(state.clipboard_hint_deadline, None);
+        assert_eq!(state.text_copy_destination, None);
+
+        assert!(!state.update(Event::CustomMessage(
+            VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
+            "invalid".to_owned(),
+        )));
+        assert!(!state.is_visible);
     }
 
     #[test]
@@ -728,7 +1500,7 @@ pub mod tests {
         let palette = Styling::default();
 
         let ret = style_key_with_modifier(&keyvec, &palette, None);
-        let ret = unstyle(&ANSIStrings(&ret));
+        let ret = unstyle(&AnsiStrings(&ret));
 
         assert_eq!(ret, "<a|b|c>".to_string())
     }
@@ -744,7 +1516,7 @@ pub mod tests {
         let palette = Styling::default();
 
         let ret = style_key_with_modifier(&keyvec, &palette, None);
-        let ret = unstyle(&ANSIStrings(&ret));
+        let ret = unstyle(&AnsiStrings(&ret));
 
         assert_eq!(ret, "<hjkl>".to_string())
     }
@@ -760,7 +1532,7 @@ pub mod tests {
         let palette = Styling::default();
 
         let ret = style_key_with_modifier(&keyvec, &palette, None);
-        let ret = unstyle(&ANSIStrings(&ret));
+        let ret = unstyle(&AnsiStrings(&ret));
 
         assert_eq!(ret, "<←↓↑→>".to_string())
     }
@@ -774,7 +1546,7 @@ pub mod tests {
         let palette = Styling::default();
 
         let ret = style_key_with_modifier(&keyvec, &palette, None);
-        let ret = unstyle(&ANSIStrings(&ret));
+        let ret = unstyle(&AnsiStrings(&ret));
 
         assert_eq!(ret, "<←→>".to_string())
     }
@@ -788,7 +1560,7 @@ pub mod tests {
         let palette = Styling::default();
 
         let ret = style_key_with_modifier(&keyvec, &palette, None);
-        let ret = unstyle(&ANSIStrings(&ret));
+        let ret = unstyle(&AnsiStrings(&ret));
 
         assert_eq!(ret, "<↓↑>".to_string())
     }
@@ -804,9 +1576,9 @@ pub mod tests {
         let palette = Styling::default();
 
         let ret = style_key_with_modifier(&keyvec, &palette, None);
-        let ret = unstyle(&ANSIStrings(&ret));
+        let ret = unstyle(&AnsiStrings(&ret));
 
-        assert_eq!(ret, "Ctrl + <a|b|c|d>".to_string())
+        assert_eq!(ret, "⌃ + <a|b|c|d>".to_string())
     }
 
     #[test]
@@ -820,9 +1592,9 @@ pub mod tests {
         let palette = Styling::default();
 
         let ret = style_key_with_modifier(&keyvec, &palette, None);
-        let ret = unstyle(&ANSIStrings(&ret));
+        let ret = unstyle(&AnsiStrings(&ret));
 
-        assert_eq!(ret, "Alt + <a|b|c|d>".to_string())
+        assert_eq!(ret, "⌥ + <a|b|c|d>".to_string())
     }
 
     #[test]
@@ -836,9 +1608,9 @@ pub mod tests {
         let palette = Styling::default();
 
         let ret = style_key_with_modifier(&keyvec, &palette, None);
-        let ret = unstyle(&ANSIStrings(&ret));
+        let ret = unstyle(&AnsiStrings(&ret));
 
-        assert_eq!(ret, "Alt + <←↓↑→>".to_string())
+        assert_eq!(ret, "⌥ + <←↓↑→>".to_string())
     }
 
     #[test]
@@ -851,9 +1623,9 @@ pub mod tests {
         let palette = Styling::default();
 
         let ret = style_key_with_modifier(&keyvec, &palette, None);
-        let ret = unstyle(&ANSIStrings(&ret));
+        let ret = unstyle(&AnsiStrings(&ret));
 
-        assert_eq!(ret, "<Alt a|Ctrl b|c>".to_string())
+        assert_eq!(ret, "<⌥a|⌃b|c>".to_string())
     }
 
     #[test]
@@ -874,7 +1646,7 @@ pub mod tests {
         let palette = Styling::default();
 
         let ret = style_key_with_modifier(&keyvec, &palette, None);
-        let ret = unstyle(&ANSIStrings(&ret));
+        let ret = unstyle(&AnsiStrings(&ret));
 
         assert_eq!(
             ret,
@@ -892,9 +1664,9 @@ pub mod tests {
         let palette = Styling::default();
 
         let ret = style_key_with_modifier(&keyvec, &palette, None);
-        let ret = unstyle(&ANSIStrings(&ret));
+        let ret = unstyle(&AnsiStrings(&ret));
 
-        assert_eq!(ret, "Ctrl + <ENTER|SPACE|TAB>".to_string())
+        assert_eq!(ret, "⌃ + <ENTER|SPACE|TAB>".to_string())
     }
 
     #[test]
@@ -907,8 +1679,21 @@ pub mod tests {
         let palette = Styling::default();
 
         let ret = style_key_with_modifier(&keyvec, &palette, None);
-        let ret = unstyle(&ANSIStrings(&ret));
+        let ret = unstyle(&AnsiStrings(&ret));
 
-        assert_eq!(ret, "Alt + <ENTER|SPACE|TAB>".to_string())
+        assert_eq!(ret, "⌥ + <ENTER|SPACE|TAB>".to_string())
+    }
+
+    #[test]
+    fn transient_dimensions_are_guarded() {
+        assert!(dimensions_are_transient(0, 80));
+        assert!(dimensions_are_transient(1, 0));
+        assert!(dimensions_are_transient(1, 3));
+    }
+
+    #[test]
+    fn legal_dimensions_are_not_transient() {
+        assert!(!dimensions_are_transient(1, 4));
+        assert!(!dimensions_are_transient(2, 24));
     }
 }

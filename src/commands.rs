@@ -1,24 +1,21 @@
 use dialoguer::Confirm;
 use std::net::IpAddr;
-use std::{fs::File, io::prelude::*, path::PathBuf, process, time::Duration};
+use std::{path::PathBuf, process, time::Duration};
 
 #[cfg(feature = "web_server_capability")]
-use isahc::{config::RedirectPolicy, prelude::*, HttpClient, Request};
+use isahc::{HttpClient, Request, config::RedirectPolicy, prelude::*};
 
 use zellij_client::{
-    old_config_converter::{
-        config_yaml_to_config_kdl, convert_old_yaml_files, layout_yaml_to_layout_kdl,
-    },
-    os_input_output::get_client_os_input,
-    start_client as start_client_impl, ClientInfo, StartClientOptions,
+    ClientInfo, StartClientOptions, os_input_output::get_client_os_input,
+    start_client as start_client_impl,
 };
 
 use zellij_utils::sessions::{
-    assert_dead_session, assert_session, assert_session_ne, delete_session as delete_session_impl,
-    generate_unique_session_name, get_active_session, get_resurrectable_sessions, get_sessions,
-    get_sessions_sorted_by_mtime, kill_session as kill_session_impl, match_session_name,
-    print_sessions, print_sessions_with_index, resurrection_layout, session_exists,
-    validate_session_name, ActiveSession, SessionNameMatch,
+    ActiveSession, SessionNameMatch, assert_dead_session, assert_session_ne,
+    delete_session as delete_session_impl, generate_unique_session_name, get_active_session,
+    get_resurrectable_sessions, get_sessions, get_sessions_sorted_by_mtime,
+    kill_session as kill_session_impl, match_session_name, print_sessions,
+    print_sessions_with_index, resurrection_layout, session_exists, validate_session_name,
 };
 
 use zellij_utils::consts::session_layout_cache_file_name;
@@ -53,7 +50,7 @@ pub(crate) use zellij_utils::sessions::list_sessions;
 pub(crate) fn kill_all_sessions(yes: bool) {
     match get_sessions() {
         Ok(sessions) if sessions.is_empty() => {
-            eprintln!("No active zellij sessions found.");
+            eprintln!("No active vc-frame sessions found.");
             process::exit(1);
         },
         Ok(sessions) => {
@@ -69,7 +66,9 @@ pub(crate) fn kill_all_sessions(yes: bool) {
                 }
             }
             for session in &sessions {
-                kill_session_impl(&session.0);
+                // The sweep must not abort because one session died between
+                // the inventory probe and its shutdown call — idempotent kill.
+                kill_session_impl(&session.0, true);
             }
             process::exit(0);
         },
@@ -125,11 +124,16 @@ pub(crate) fn delete_all_sessions(yes: bool, force: bool) {
     process::exit(0);
 }
 
-pub(crate) fn kill_session(target_session: &Option<String>) {
+pub(crate) fn kill_session(target_session: &Option<String>, force: bool) {
     match target_session {
         Some(target_session) => {
-            assert_session(target_session);
-            kill_session_impl(target_session);
+            if let Err(e) = validate_session_name(target_session) {
+                eprintln!("{}", e);
+                process::exit(1);
+            }
+            // A live server can miss the short inventory probe while busy.
+            // Let the exact socket transport decide whether shutdown can land.
+            kill_session_impl(target_session, force);
             process::exit(0);
         },
         None => {
@@ -200,17 +204,17 @@ pub(crate) fn start_web_server(
                 process::exit(1);
             },
         };
-    start_web_client_impl(
+    start_web_client_impl(zellij_client::web_client::StartWebClientParams {
         config,
         config_options,
-        opts.config,
+        config_file_path: opts.config,
         run_daemonized,
-        ip,
-        port,
-        cert,
-        key,
+        custom_ip: ip,
+        custom_port: port,
+        custom_server_cert: cert,
+        custom_server_key: key,
         startup_timeout,
-    );
+    });
 }
 
 #[cfg(not(feature = "web_server_capability"))]
@@ -224,10 +228,10 @@ pub(crate) fn start_web_server(
     _startup_timeout: Option<u64>,
 ) {
     log::error!(
-        "This version of Zellij was compiled without web server support, cannot run web server!"
+        "This version of vc-frame was compiled without web server support, cannot run web server!"
     );
     eprintln!(
-        "This version of Zellij was compiled without web server support, cannot run web server!"
+        "This version of vc-frame was compiled without web server support, cannot run web server!"
     );
     std::process::exit(2);
 }
@@ -245,10 +249,10 @@ pub(crate) fn stop_web_server() -> Result<(), String> {
 #[cfg(not(feature = "web_server_capability"))]
 pub(crate) fn stop_web_server() -> Result<(), String> {
     log::error!(
-        "This version of Zellij was compiled without web server support, cannot stop web server!"
+        "This version of vc-frame was compiled without web server support, cannot stop web server!"
     );
     eprintln!(
-        "This version of Zellij was compiled without web server support, cannot stop web server!"
+        "This version of vc-frame was compiled without web server support, cannot stop web server!"
     );
     std::process::exit(2);
 }
@@ -267,10 +271,10 @@ pub(crate) fn create_auth_token(name: Option<String>, read_only: bool) -> Result
 #[cfg(not(feature = "web_server_capability"))]
 pub(crate) fn create_auth_token(_name: Option<String>, _read_only: bool) -> Result<String, String> {
     log::error!(
-        "This version of Zellij was compiled without web server support, cannot create auth token!"
+        "This version of vc-frame was compiled without web server support, cannot create auth token!"
     );
     eprintln!(
-        "This version of Zellij was compiled without web server support, cannot create auth token!"
+        "This version of vc-frame was compiled without web server support, cannot create auth token!"
     );
     std::process::exit(2);
 }
@@ -283,10 +287,10 @@ pub(crate) fn revoke_auth_token(token_name: &str) -> Result<bool, String> {
 #[cfg(not(feature = "web_server_capability"))]
 pub(crate) fn revoke_auth_token(_token_name: &str) -> Result<bool, String> {
     log::error!(
-        "This version of Zellij was compiled without web server support, cannot revoke auth token!"
+        "This version of vc-frame was compiled without web server support, cannot revoke auth token!"
     );
     eprintln!(
-        "This version of Zellij was compiled without web server support, cannot revoke auth token!"
+        "This version of vc-frame was compiled without web server support, cannot revoke auth token!"
     );
     std::process::exit(2);
 }
@@ -300,10 +304,10 @@ pub(crate) fn revoke_all_auth_tokens() -> Result<usize, String> {
 #[cfg(not(feature = "web_server_capability"))]
 pub(crate) fn revoke_all_auth_tokens() -> Result<usize, String> {
     log::error!(
-        "This version of Zellij was compiled without web server support, cannot revoke all tokens!"
+        "This version of vc-frame was compiled without web server support, cannot revoke all tokens!"
     );
     eprintln!(
-        "This version of Zellij was compiled without web server support, cannot revoke all tokens!"
+        "This version of vc-frame was compiled without web server support, cannot revoke all tokens!"
     );
     std::process::exit(2);
 }
@@ -329,10 +333,10 @@ pub(crate) fn list_auth_tokens() -> Result<Vec<String>, String> {
 #[cfg(not(feature = "web_server_capability"))]
 pub(crate) fn list_auth_tokens() -> Result<Vec<String>, String> {
     log::error!(
-        "This version of Zellij was compiled without web server support, cannot list tokens!"
+        "This version of vc-frame was compiled without web server support, cannot list tokens!"
     );
     eprintln!(
-        "This version of Zellij was compiled without web server support, cannot list tokens!"
+        "This version of vc-frame was compiled without web server support, cannot list tokens!"
     );
     std::process::exit(2);
 }
@@ -373,10 +377,10 @@ pub(crate) fn web_server_status(
     _timeout_secs: Option<u64>,
 ) -> Result<String, String> {
     log::error!(
-        "This version of Zellij was compiled without web server support, cannot get web server status!"
+        "This version of vc-frame was compiled without web server support, cannot get web server status!"
     );
     eprintln!(
-        "This version of Zellij was compiled without web server support, cannot get web server status!"
+        "This version of vc-frame was compiled without web server support, cannot get web server status!"
     );
     std::process::exit(2);
 }
@@ -415,15 +419,15 @@ pub(crate) fn send_action_to_session(
             std::process::exit(1);
         },
         ActiveSession::One(session_name) => {
-            if let Some(requested_session_name) = requested_session_name {
-                if requested_session_name != session_name {
-                    eprintln!(
-                        "Session '{}' not found. The following sessions are active:",
-                        requested_session_name
-                    );
-                    eprintln!("{}", session_name);
-                    std::process::exit(1);
-                }
+            if let Some(requested_session_name) = requested_session_name
+                && requested_session_name != session_name
+            {
+                eprintln!(
+                    "Session '{}' not found. The following sessions are active:",
+                    requested_session_name
+                );
+                eprintln!("{}", session_name);
+                std::process::exit(1);
             }
             attach_with_cli_client(cli_action, &session_name, config);
         },
@@ -441,18 +445,60 @@ pub(crate) fn send_action_to_session(
                         "Session '{}' not found. The following sessions are active:",
                         session_name
                     );
-                    list_sessions(false, false, true);
+                    for existing_session in &existing_sessions {
+                        eprintln!("{}", existing_session);
+                    }
                     std::process::exit(1);
                 }
             } else if let Ok(session_name) = envs::get_session_name() {
                 attach_with_cli_client(cli_action, &session_name, config);
             } else {
-                eprintln!("Please specify the session name to send actions to. The following sessions are active:");
-                list_sessions(false, false, true);
+                eprintln!(
+                    "Please specify the session name to send actions to. The following sessions are active:"
+                );
+                for existing_session in &existing_sessions {
+                    eprintln!("{}", existing_session);
+                }
                 std::process::exit(1);
             }
         },
     };
+}
+
+pub(crate) fn doctor_routes(requested_session_name: Option<String>, json: bool) -> i32 {
+    let session_name = match get_active_session() {
+        ActiveSession::None => {
+            eprintln!("There is no active session!");
+            return 1;
+        },
+        ActiveSession::One(session_name) => match requested_session_name {
+            Some(requested) if requested != session_name => {
+                eprintln!("Session '{requested}' not found; active session is '{session_name}'");
+                return 1;
+            },
+            _ => session_name,
+        },
+        ActiveSession::Many => {
+            let sessions = get_sessions()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>();
+            match requested_session_name.or_else(|| envs::get_session_name().ok()) {
+                Some(requested) if sessions.contains(&requested) => requested,
+                Some(requested) => {
+                    eprintln!("Session '{requested}' not found");
+                    return 1;
+                },
+                None => {
+                    eprintln!("Please specify --session; multiple sessions are active");
+                    return 1;
+                },
+            }
+        },
+    };
+    let os_input = get_os_input(zellij_client::os_input_output::get_cli_client_os_input);
+    zellij_client::cli_client::doctor_routes_client(Box::new(os_input), &session_name, json)
 }
 pub(crate) fn subscribe_to_session(
     subscribe_cli: zellij_utils::cli::SubscribeCli,
@@ -465,15 +511,15 @@ pub(crate) fn subscribe_to_session(
             std::process::exit(1);
         },
         ActiveSession::One(session_name) => {
-            if let Some(ref requested) = requested_session_name {
-                if *requested != session_name {
-                    eprintln!(
-                        "Session '{}' not found. The following sessions are active:",
-                        requested
-                    );
-                    eprintln!("{}", session_name);
-                    std::process::exit(1);
-                }
+            if let Some(ref requested) = requested_session_name
+                && *requested != session_name
+            {
+                eprintln!(
+                    "Session '{}' not found. The following sessions are active:",
+                    requested
+                );
+                eprintln!("{}", session_name);
+                std::process::exit(1);
             }
             session_name
         },
@@ -491,14 +537,20 @@ pub(crate) fn subscribe_to_session(
                         "Session '{}' not found. The following sessions are active:",
                         session_name
                     );
-                    list_sessions(false, false, true);
+                    for existing_session in &existing_sessions {
+                        eprintln!("{}", existing_session);
+                    }
                     std::process::exit(1);
                 }
             } else if let Ok(session_name) = envs::get_session_name() {
                 session_name
             } else {
-                eprintln!("Please specify the session name to subscribe to. The following sessions are active:");
-                list_sessions(false, false, true);
+                eprintln!(
+                    "Please specify the session name to subscribe to. The following sessions are active:"
+                );
+                for existing_session in &existing_sessions {
+                    eprintln!("{}", existing_session);
+                }
                 std::process::exit(1);
             }
         },
@@ -509,75 +561,6 @@ pub(crate) fn subscribe_to_session(
         &session_name,
         subscribe_cli,
     );
-}
-
-pub(crate) fn convert_old_config_file(old_config_file: PathBuf) {
-    match File::open(&old_config_file) {
-        Ok(mut handle) => {
-            let mut raw_config_file = String::new();
-            let _ = handle.read_to_string(&mut raw_config_file);
-            match config_yaml_to_config_kdl(&raw_config_file, false) {
-                Ok(kdl_config) => {
-                    println!("{}", kdl_config);
-                    process::exit(0);
-                },
-                Err(e) => {
-                    eprintln!("Failed to convert config: {}", e);
-                    process::exit(1);
-                },
-            }
-        },
-        Err(e) => {
-            eprintln!("Failed to open file: {}", e);
-            process::exit(1);
-        },
-    }
-}
-
-pub(crate) fn convert_old_layout_file(old_layout_file: PathBuf) {
-    match File::open(&old_layout_file) {
-        Ok(mut handle) => {
-            let mut raw_layout_file = String::new();
-            let _ = handle.read_to_string(&mut raw_layout_file);
-            match layout_yaml_to_layout_kdl(&raw_layout_file) {
-                Ok(kdl_layout) => {
-                    println!("{}", kdl_layout);
-                    process::exit(0);
-                },
-                Err(e) => {
-                    eprintln!("Failed to convert layout: {}", e);
-                    process::exit(1);
-                },
-            }
-        },
-        Err(e) => {
-            eprintln!("Failed to open file: {}", e);
-            process::exit(1);
-        },
-    }
-}
-
-pub(crate) fn convert_old_theme_file(old_theme_file: PathBuf) {
-    match File::open(&old_theme_file) {
-        Ok(mut handle) => {
-            let mut raw_config_file = String::new();
-            let _ = handle.read_to_string(&mut raw_config_file);
-            match config_yaml_to_config_kdl(&raw_config_file, true) {
-                Ok(kdl_config) => {
-                    println!("{}", kdl_config);
-                    process::exit(0);
-                },
-                Err(e) => {
-                    eprintln!("Failed to convert config: {}", e);
-                    process::exit(1);
-                },
-            }
-        },
-        Err(e) => {
-            eprintln!("Failed to open file: {}", e);
-            process::exit(1);
-        },
-    }
 }
 
 fn attach_with_cli_client(
@@ -607,7 +590,7 @@ fn attach_with_session_index(config_options: Options, index: usize, create: bool
             if create {
                 create_new_client()
             } else {
-                eprintln!("No active zellij sessions found.");
+                eprintln!("No active vc-frame sessions found.");
                 process::exit(1);
             }
         },
@@ -660,12 +643,14 @@ fn attach_with_session_name(
         None => match get_active_session() {
             ActiveSession::None if create => create_new_client(),
             ActiveSession::None => {
-                eprintln!("No active zellij sessions found.");
+                eprintln!("No active vc-frame sessions found.");
                 process::exit(1);
             },
             ActiveSession::One(session_name) => ClientInfo::Attach(session_name, config_options),
             ActiveSession::Many => {
-                println!("Please specify the session to attach to, either by using the full name or a unique prefix.\nThe following sessions are active:");
+                println!(
+                    "Please specify the session to attach to, either by using the full name or a unique prefix.\nThe following sessions are active:"
+                );
                 list_sessions(false, false, true);
                 process::exit(1);
             },
@@ -674,8 +659,6 @@ fn attach_with_session_name(
 }
 
 pub(crate) fn start_client(opts: CliArgs) {
-    // look for old YAML config/layout/theme files and convert them to KDL
-    convert_old_yaml_files(&opts);
     let (
         config,
         client_layout_info,
@@ -774,7 +757,9 @@ pub(crate) fn start_client(opts: CliArgs) {
                 }
             }) {
                 if !cfg!(feature = "web_server_capability") {
-                    eprintln!("This version of Zellij was compiled without web/remote-attach capabilities.");
+                    eprintln!(
+                        "This version of vc-frame was compiled without web/remote-attach capabilities."
+                    );
                     std::process::exit(2);
                 }
 
@@ -784,16 +769,18 @@ pub(crate) fn start_client(opts: CliArgs) {
                 }
 
                 #[cfg(feature = "web_server_capability")]
-                if let Err(e) = zellij_client::start_remote_client(
-                    Box::new(os_input.clone()),
-                    remote_session_url,
-                    token,
-                    remember,
-                    forget,
-                    ca_cert,
-                    insecure,
-                    config_options.client_async_worker_tasks,
-                ) {
+                if let Err(e) =
+                    zellij_client::start_remote_client(zellij_client::StartRemoteClientOptions {
+                        os_input: Box::new(os_input.clone()),
+                        remote_session_url,
+                        token,
+                        remember,
+                        forget,
+                        ca_cert,
+                        insecure,
+                        async_worker_tasks: config_options.client_async_worker_tasks,
+                    })
+                {
                     eprintln!("{}", e);
                     std::process::exit(2);
                 }
@@ -851,10 +838,13 @@ pub(crate) fn start_client(opts: CliArgs) {
                     }
                 };
 
-                if let Ok(val) = std::env::var(envs::SESSION_NAME_ENV_KEY) {
-                    if val == *client.get_session_name() {
-                        panic!("You are trying to attach to the current session (\"{}\"). This is not supported.", val);
-                    }
+                if let Ok(val) = std::env::var(envs::SESSION_NAME_ENV_KEY)
+                    && val == *client.get_session_name()
+                {
+                    panic!(
+                        "You are trying to attach to the current session (\"{}\"). This is not supported.",
+                        val
+                    );
                 }
 
                 if let Some(layout_info) = layout_info {
@@ -903,12 +893,15 @@ pub(crate) fn start_client(opts: CliArgs) {
                     // This prevents the same type of recursion as above, only that here we
                     // don't get the command to "attach", but to start a new session instead.
                     // This occurs for example when declaring the session name inside a layout
-                    // file and then, from within this session, trying to open a new zellij
+                    // file and then, from within this session, trying to open a new vc-frame
                     // session with the same layout. This causes an infinite recursion in the
                     // `zellij_server::terminal_bytes::listen` task, flooding the server and
                     // clients with infinite `Render` requests.
                     if *session_name == val {
-                        eprintln!("You are trying to attach to the current session (\"{}\"). Zellij does not support nesting a session in itself.", session_name);
+                        eprintln!(
+                            "You are trying to attach to the current session (\"{}\"). vc-frame does not support nesting a session in itself.",
+                            session_name
+                        );
                         process::exit(1);
                     }
                 }
@@ -958,14 +951,30 @@ pub(crate) fn start_client(opts: CliArgs) {
                 process::exit(0);
             }
 
-            let session_name = generate_unique_session_name_or_exit();
-            start_client_plan(session_name.clone());
+            let client = match get_active_session() {
+                ActiveSession::None => {
+                    let session_name =
+                        cwd_session_name().unwrap_or_else(generate_unique_session_name_or_exit);
+                    start_client_plan(session_name.clone());
+                    ClientInfo::New(session_name, layout_info, new_session_cwd)
+                },
+                ActiveSession::One(session_name) => {
+                    ClientInfo::Attach(session_name, config_options.clone())
+                },
+                ActiveSession::Many => {
+                    eprintln!(
+                        "Multiple vc-frame sessions are active. Choose one with `vc-frame attach <name>`:"
+                    );
+                    list_sessions(false, false, true);
+                    process::exit(1);
+                },
+            };
             reconnect_to_session = start_client_impl(
                 Box::new(os_input),
                 opts,
                 config,
                 config_options,
-                ClientInfo::New(session_name, layout_info, new_session_cwd),
+                client,
                 StartClientOptions {
                     tab_position_to_focus: None,
                     pane_id_to_focus: None,
@@ -978,6 +987,49 @@ pub(crate) fn start_client(opts: CliArgs) {
             break;
         }
     }
+}
+
+fn cwd_session_name() -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    let raw = cwd.file_name()?.to_string_lossy();
+    let base = cwd_session_name_base(&raw)?;
+    let resurrectable_names = get_resurrectable_sessions()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect::<std::collections::HashSet<_>>();
+    for suffix in 1..=1000 {
+        let candidate = if suffix == 1 {
+            base.clone()
+        } else {
+            format!("{base}-{suffix}")
+        };
+        if validate_session_name(&candidate).is_ok()
+            && !session_exists(&candidate).unwrap_or(true)
+            && !resurrectable_names.contains(&candidate)
+        {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn cwd_session_name_base(raw: &str) -> Option<String> {
+    let base = raw
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches(['-', '.'])
+        .to_string();
+    if validate_session_name(&base).is_err() {
+        return None;
+    }
+    Some(base)
 }
 
 fn generate_unique_session_name_or_exit() -> String {
@@ -1051,7 +1103,7 @@ pub(crate) fn watch_session(session_name: Option<String>, opts: CliArgs) {
         },
         None => match get_active_session() {
             ActiveSession::None => {
-                eprintln!("No active zellij sessions found.");
+                eprintln!("No active vc-frame sessions found.");
                 process::exit(1);
             },
             ActiveSession::One(name) => ClientInfo::Watch(name, config_options.clone()),
@@ -1103,4 +1155,19 @@ pub fn get_config_options_from_cli_args(opts: &CliArgs) -> Result<Options, Strin
     Setup::from_cli_args(opts)
         .map(|(_, _, config_options, _, _)| config_options)
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod bare_start_tests {
+    use super::cwd_session_name_base;
+
+    #[test]
+    fn cwd_name_is_stable_and_socket_safe() {
+        assert_eq!(
+            cwd_session_name_base("Vet Clinic – Frontier"),
+            Some("Vet-Clinic---Frontier".to_string())
+        );
+        assert_eq!(cwd_session_name_base(".."), None);
+        assert_eq!(cwd_session_name_base(""), None);
+    }
 }

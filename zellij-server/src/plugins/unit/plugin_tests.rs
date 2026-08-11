@@ -1,9 +1,48 @@
-use super::plugin_thread_main;
-use crate::screen::ScreenInstruction;
+use super::{PluginThreadParams, plugin_thread_main as plugin_thread_main_impl};
+
+fn plugin_thread_main(
+    bus: Bus<PluginInstruction>,
+    engine: Engine,
+    data_dir: PathBuf,
+    layout: Box<Layout>,
+    layout_dir: Option<PathBuf>,
+    available_layouts: Vec<LayoutInfo>,
+    available_layout_errors: Vec<LayoutWithError>,
+    path_to_default_shell: PathBuf,
+    zellij_cwd: PathBuf,
+    session_env_vars: std::collections::BTreeMap<String, String>,
+    default_shell: Option<TerminalAction>,
+    plugin_aliases: PluginAliases,
+    default_mode: InputMode,
+    default_keybinds: Keybinds,
+    background_plugins: Vec<RunPluginOrAlias>,
+    initiating_client_id: ClientId,
+) -> Result<()> {
+    plugin_thread_main_impl(PluginThreadParams {
+        bus,
+        engine,
+        data_dir,
+        layout,
+        layout_dir,
+        available_layouts,
+        available_layout_errors,
+        path_to_default_shell,
+        zellij_cwd,
+        session_env_vars,
+        default_shell,
+        plugin_aliases,
+        default_mode,
+        default_keybinds,
+        background_plugins,
+        initiating_client_id,
+    })
+}
+use crate::route::NotificationEnd;
+use crate::screen::{LayoutPreparationCleanup, ScreenInstruction};
 use crate::{
+    ClientId, ServerInstruction,
     channels::SenderWithContext,
     thread_bus::{Bus, ThreadSenders},
-    ServerInstruction,
 };
 use insta::assert_snapshot;
 use lazy_static::lazy_static;
@@ -12,13 +51,17 @@ use std::path::PathBuf;
 use tempfile::tempdir;
 use wasmi::Engine;
 use zellij_utils::data::{
-    BareKey, Event, InputMode, KeyWithModifier, ModeInfo, PermissionStatus, PermissionType,
+    BareKey, Event, InputMode, KeyWithModifier, LayoutInfo, LayoutWithError, ModeInfo,
+    PermissionStatus, PermissionType,
 };
 use zellij_utils::errors::ErrorContext;
+use zellij_utils::errors::prelude::*;
 use zellij_utils::input::actions::Action;
+use zellij_utils::input::command::TerminalAction;
 use zellij_utils::input::keybinds::Keybinds;
 use zellij_utils::input::layout::{
-    PluginAlias, PluginUserConfiguration, RunPlugin, RunPluginLocation, RunPluginOrAlias,
+    Layout, PluginAlias, PluginUserConfiguration, Run, RunPlugin, RunPluginLocation,
+    RunPluginOrAlias, TiledPaneLayout,
 };
 use zellij_utils::input::permission::PermissionCache;
 use zellij_utils::input::plugins::PluginAliases;
@@ -28,8 +71,12 @@ use crate::background_jobs::BackgroundJob;
 use crate::pty_writer::PtyWriteInstruction;
 use std::env::set_var;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use crate::{plugins::PluginInstruction, pty::PtyInstruction};
+use crate::{
+    plugins::{LayoutPluginReceipt, LayoutPluginResolution, PluginInstruction},
+    pty::PtyInstruction,
+};
 
 use zellij_utils::channels::{self, ChannelWithContext, Receiver};
 
@@ -62,8 +109,8 @@ macro_rules! log_actions_in_thread {
                 let mut exit_event_count = 0;
                 move || loop {
                     let (event, _err_ctx) = $receiver
-                        .recv()
-                        .expect("failed to receive event on channel");
+                        .recv_timeout(std::time::Duration::from_secs(60))
+                        .expect("timed out or disconnected waiting for event on channel");
                     match event {
                         $exit_event(..) => {
                             exit_event_count += 1;
@@ -91,8 +138,8 @@ macro_rules! log_actions_in_thread_struct {
                 let mut exit_event_count = 0;
                 move || loop {
                     let (event, _err_ctx) = $receiver
-                        .recv()
-                        .expect("failed to receive event on channel");
+                        .recv_timeout(std::time::Duration::from_secs(60))
+                        .expect("timed out or disconnected waiting for event on channel");
                     match event {
                         $exit_event { .. } => {
                             exit_event_count += 1;
@@ -122,8 +169,8 @@ macro_rules! grant_permissions_and_log_actions_in_thread {
                 let plugin_thread_sender = $plugin_thread_sender.clone();
                 move || loop {
                     let (event, _err_ctx) = $receiver
-                        .recv()
-                        .expect("failed to receive event on channel");
+                        .recv_timeout(std::time::Duration::from_secs(60))
+                        .expect("timed out or disconnected waiting for event on channel");
                     match event {
                         $exit_event(..) => {
                             exit_event_count += 1;
@@ -176,8 +223,8 @@ macro_rules! deny_permissions_and_log_actions_in_thread {
                 let plugin_thread_sender = $plugin_thread_sender.clone();
                 move || loop {
                     let (event, _err_ctx) = $receiver
-                        .recv()
-                        .expect("failed to receive event on channel");
+                        .recv_timeout(std::time::Duration::from_secs(60))
+                        .expect("timed out or disconnected waiting for event on channel");
                     match event {
                         $exit_event(..) => {
                             exit_event_count += 1;
@@ -219,8 +266,8 @@ macro_rules! grant_permissions_and_log_actions_in_thread_naked_variant {
                 let plugin_thread_sender = $plugin_thread_sender.clone();
                 move || loop {
                     let (event, _err_ctx) = $receiver
-                        .recv()
-                        .expect("failed to receive event on channel");
+                        .recv_timeout(std::time::Duration::from_secs(60))
+                        .expect("timed out or disconnected waiting for event on channel");
                     match event {
                         $exit_event => {
                             exit_event_count += 1;
@@ -273,8 +320,8 @@ macro_rules! grant_permissions_and_log_actions_in_thread_struct_variant {
                 let plugin_thread_sender = $plugin_thread_sender.clone();
                 move || loop {
                     let (event, _err_ctx) = $receiver
-                        .recv()
-                        .expect("failed to receive event on channel");
+                        .recv_timeout(std::time::Duration::from_secs(60))
+                        .expect("timed out or disconnected waiting for event on channel");
                     match event {
                         $exit_event { .. } => {
                             exit_event_count += 1;
@@ -379,7 +426,9 @@ fn create_plugin_thread(
     let plugin_thread = std::thread::Builder::new()
         .name("plugin_thread".to_string())
         .spawn(move || {
-            set_var("ZELLIJ_SESSION_NAME", "zellij-test");
+            // SAFETY: test threads set this process-wide env var before reading it; no
+            // concurrent unsynchronized env access in these single-purpose test harnesses.
+            unsafe { set_var("ZELLIJ_SESSION_NAME", "zellij-test") };
             plugin_thread_main(
                 plugin_bus,
                 engine,
@@ -465,7 +514,9 @@ fn create_plugin_thread_with_server_receiver(
     let plugin_thread = std::thread::Builder::new()
         .name("plugin_thread".to_string())
         .spawn(move || {
-            set_var("ZELLIJ_SESSION_NAME", "zellij-test");
+            // SAFETY: test threads set this process-wide env var before reading it; no
+            // concurrent unsynchronized env access in these single-purpose test harnesses.
+            unsafe { set_var("ZELLIJ_SESSION_NAME", "zellij-test") };
             plugin_thread_main(
                 plugin_bus,
                 engine,
@@ -559,7 +610,9 @@ fn create_plugin_thread_with_pty_receiver(
     let plugin_thread = std::thread::Builder::new()
         .name("plugin_thread".to_string())
         .spawn(move || {
-            set_var("ZELLIJ_SESSION_NAME", "zellij-test");
+            // SAFETY: test threads set this process-wide env var before reading it; no
+            // concurrent unsynchronized env access in these single-purpose test harnesses.
+            unsafe { set_var("ZELLIJ_SESSION_NAME", "zellij-test") };
             plugin_thread_main(
                 plugin_bus,
                 engine,
@@ -653,7 +706,9 @@ fn create_plugin_thread_with_background_jobs_receiver(
     let plugin_thread = std::thread::Builder::new()
         .name("plugin_thread".to_string())
         .spawn(move || {
-            set_var("ZELLIJ_SESSION_NAME", "zellij-test");
+            // SAFETY: test threads set this process-wide env var before reading it; no
+            // concurrent unsynchronized env access in these single-purpose test harnesses.
+            unsafe { set_var("ZELLIJ_SESSION_NAME", "zellij-test") };
             plugin_thread_main(
                 plugin_bus,
                 engine,
@@ -707,7 +762,244 @@ lazy_static! {
 }
 
 #[test]
-#[ignore]
+fn new_tab_pty_handoff_failure_preserves_completion_and_rejects_once() {
+    let (plugin_sender, pty_receiver, screen_receiver, teardown) =
+        create_plugin_thread_with_pty_receiver(None, None, None);
+    drop(pty_receiver);
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    let mut completion = NotificationEnd::new(completion_tx);
+    completion.require_explicit_resolution();
+
+    plugin_sender
+        .send(PluginInstruction::NewTab(
+            None,
+            None,
+            Some(TiledPaneLayout::default()),
+            vec![],
+            7,
+            701,
+            None,
+            false,
+            true,
+            (1, false),
+            Some(completion),
+            None,
+        ))
+        .unwrap();
+
+    let (instruction, _) = screen_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the failed Plugin to PTY handoff must reject through Screen");
+    let recovered_completion = match instruction {
+        ScreenInstruction::LayoutPreparationFailed {
+            transaction_id,
+            tab_id,
+            completion_tx,
+            message,
+            cleanup,
+            ..
+        } => {
+            assert_eq!(transaction_id, 701);
+            assert_eq!(tab_id, Some(7));
+            assert!(message.contains("failed Plugin -> PTY handoff"));
+            assert_eq!(cleanup, LayoutPreparationCleanup::Resolved);
+            completion_tx
+        },
+        other => panic!("expected LayoutPreparationFailed, got {other:?}"),
+    };
+    assert!(
+        screen_receiver.try_recv().is_err(),
+        "one failed handoff must emit exactly one terminal rejection"
+    );
+    drop(recovered_completion);
+    let completion = completion_rx
+        .blocking_recv()
+        .expect("the original action completion must remain owned");
+    assert_eq!(completion.exit_status, Some(1));
+    assert!(
+        completion
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("failed Plugin -> PTY handoff"))
+    );
+
+    teardown();
+}
+
+#[test]
+fn failed_local_plugin_release_is_reported_as_retryable_cleanup_debt() {
+    let (plugin_sender, pty_receiver, screen_receiver, teardown) =
+        create_plugin_thread_with_pty_receiver(None, None, None);
+    let transaction_id = 703;
+    plugin_sender
+        .send(PluginInstruction::RejectNextLayoutPluginReleaseForTest(
+            transaction_id,
+        ))
+        .unwrap();
+    drop(pty_receiver);
+    let run_plugin = RunPlugin::from_url(&format!(
+        "file:{}/vc-frame-release-debt-layout-plugin.wasm",
+        std::env::temp_dir().display()
+    ))
+    .unwrap();
+    let tiled_layout = TiledPaneLayout {
+        run: Some(Run::Plugin(RunPluginOrAlias::RunPlugin(run_plugin))),
+        ..Default::default()
+    };
+
+    plugin_sender
+        .send(PluginInstruction::NewTab(
+            None,
+            None,
+            Some(tiled_layout),
+            vec![],
+            9,
+            transaction_id,
+            None,
+            false,
+            true,
+            (1, false),
+            None,
+            None,
+        ))
+        .unwrap();
+
+    let (instruction, _) = screen_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("failed local release must report retryable cleanup debt");
+    let plugin_ids = match instruction {
+        ScreenInstruction::LayoutPreparationFailed {
+            transaction_id: reported_transaction_id,
+            message,
+            cleanup:
+                LayoutPreparationCleanup::ReleasePluginReservation {
+                    plugin_ids,
+                    pty_cleanup_succeeded,
+                },
+            ..
+        } => {
+            assert_eq!(reported_transaction_id, transaction_id);
+            assert!(message.contains("injected layout plugin release failure"));
+            assert!(pty_cleanup_succeeded);
+            plugin_ids
+        },
+        other => panic!("expected retryable LayoutPreparationFailed debt, got {other:?}"),
+    };
+    assert_eq!(plugin_ids, vec![0]);
+
+    let (ack, ack_rx) = channels::bounded(1);
+    plugin_sender
+        .send(PluginInstruction::ResolveLayoutPlugins {
+            transaction_id,
+            resolution: LayoutPluginResolution::Release {
+                reason: "Screen retry after local release failure".to_owned(),
+            },
+            expected_plugin_ids: plugin_ids.clone(),
+            ack,
+        })
+        .unwrap();
+    assert_eq!(
+        ack_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        Ok(LayoutPluginReceipt::Released { plugin_ids })
+    );
+
+    teardown();
+}
+
+#[test]
+fn layout_plugins_remain_suspended_until_resolution_and_release_replays() {
+    let (plugin_sender, pty_receiver, screen_receiver, teardown) =
+        create_plugin_thread_with_pty_receiver(None, None, None);
+    let run_plugin = RunPlugin::from_url(&format!(
+        "file:{}/vc-frame-suspended-layout-plugin.wasm",
+        std::env::temp_dir().display()
+    ))
+    .unwrap();
+    let run_plugin_or_alias = RunPluginOrAlias::RunPlugin(run_plugin);
+    let tiled_layout = TiledPaneLayout {
+        run: Some(Run::Plugin(run_plugin_or_alias.clone())),
+        ..Default::default()
+    };
+
+    plugin_sender
+        .send(PluginInstruction::NewTab(
+            None,
+            None,
+            Some(tiled_layout),
+            vec![],
+            8,
+            702,
+            None,
+            false,
+            true,
+            (1, false),
+            None,
+            None,
+        ))
+        .unwrap();
+
+    let (instruction, _) = pty_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("suspended plugin ids must be handed to PTY");
+    let plugin_ids = match instruction {
+        PtyInstruction::NewTab(_, _, _, _, _, transaction_id, plugin_ids, ..) => {
+            assert_eq!(transaction_id, 702);
+            plugin_ids
+                .get(&run_plugin_or_alias)
+                .cloned()
+                .expect("layout plugin must receive an exact reserved id")
+        },
+        other => panic!("expected NewTab, got {other:?}"),
+    };
+    assert_eq!(plugin_ids, vec![0]);
+    assert!(
+        screen_receiver.try_recv().is_err(),
+        "reservation must not start loading indication or publish plugin state"
+    );
+
+    let release = LayoutPluginResolution::Release {
+        reason: "PTY prepare rejected".to_owned(),
+    };
+    for _ in 0..2 {
+        let (ack, ack_rx) = channels::bounded(1);
+        plugin_sender
+            .send(PluginInstruction::ResolveLayoutPlugins {
+                transaction_id: 702,
+                resolution: release.clone(),
+                expected_plugin_ids: plugin_ids.clone(),
+                ack,
+            })
+            .unwrap();
+        assert_eq!(
+            ack_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Ok(LayoutPluginReceipt::Released {
+                plugin_ids: plugin_ids.clone()
+            })
+        );
+    }
+
+    let (ack, ack_rx) = channels::bounded(1);
+    plugin_sender
+        .send(PluginInstruction::ResolveLayoutPlugins {
+            transaction_id: 702,
+            resolution: LayoutPluginResolution::Activate,
+            expected_plugin_ids: plugin_ids,
+            ack,
+        })
+        .unwrap();
+    assert!(
+        ack_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap_err()
+            .contains("resolution conflict")
+    );
+
+    teardown();
+}
+
+#[test]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn load_new_plugin_from_hd() {
     // here we load our fixture plugin into the plugin thread, and then send it an update message
     // expecting tha thte plugin will log the received event and render it later after the update
@@ -792,7 +1084,7 @@ pub fn load_new_plugin_from_hd() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn load_new_plugin_with_plugin_alias() {
     // here we load our fixture plugin into the plugin thread, and then send it an update message
     // expecting tha thte plugin will log the received event and render it later after the update
@@ -877,10 +1169,10 @@ pub fn load_new_plugin_with_plugin_alias() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn plugin_workers() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let (plugin_thread_sender, screen_receiver, teardown) = create_plugin_thread(None, None);
     let plugin_should_float = Some(false);
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -962,10 +1254,10 @@ pub fn plugin_workers() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn plugin_workers_persist_state() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let (plugin_thread_sender, screen_receiver, teardown) = create_plugin_thread(None, None);
     let plugin_should_float = Some(false);
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -1056,10 +1348,10 @@ pub fn plugin_workers_persist_state() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn can_subscribe_to_hd_events() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -1140,10 +1432,10 @@ pub fn can_subscribe_to_hd_events() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn switch_to_mode_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -1217,10 +1509,10 @@ pub fn switch_to_mode_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn switch_to_mode_plugin_command_permission_denied() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -1294,10 +1586,10 @@ pub fn switch_to_mode_plugin_command_permission_denied() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn new_tabs_with_layout_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -1385,10 +1677,10 @@ pub fn new_tabs_with_layout_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn new_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -1462,10 +1754,10 @@ pub fn new_tab_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn go_to_next_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -1538,10 +1830,10 @@ pub fn go_to_next_tab_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn go_to_previous_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -1614,10 +1906,10 @@ pub fn go_to_previous_tab_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn resize_focused_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -1690,10 +1982,10 @@ pub fn resize_focused_pane_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn resize_focused_pane_with_direction_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -1766,10 +2058,10 @@ pub fn resize_focused_pane_with_direction_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn focus_next_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -1842,10 +2134,10 @@ pub fn focus_next_pane_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn focus_previous_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -1918,10 +2210,10 @@ pub fn focus_previous_pane_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn move_focus_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -1994,10 +2286,10 @@ pub fn move_focus_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn move_focus_or_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -2070,10 +2362,10 @@ pub fn move_focus_or_tab_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn edit_scrollback_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -2146,10 +2438,10 @@ pub fn edit_scrollback_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn write_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -2222,10 +2514,10 @@ pub fn write_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn write_chars_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -2298,10 +2590,10 @@ pub fn write_chars_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn toggle_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -2374,10 +2666,10 @@ pub fn toggle_tab_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn move_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -2450,10 +2742,10 @@ pub fn move_pane_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn move_pane_with_direction_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -2526,10 +2818,10 @@ pub fn move_pane_with_direction_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn clear_screen_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -2603,10 +2895,10 @@ pub fn clear_screen_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn scroll_up_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -2680,10 +2972,10 @@ pub fn scroll_up_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn scroll_down_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -2756,10 +3048,10 @@ pub fn scroll_down_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn scroll_to_top_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -2832,10 +3124,10 @@ pub fn scroll_to_top_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn scroll_to_bottom_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -2908,10 +3200,10 @@ pub fn scroll_to_bottom_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn page_scroll_up_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -2984,10 +3276,10 @@ pub fn page_scroll_up_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn page_scroll_down_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -3060,10 +3352,10 @@ pub fn page_scroll_down_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn toggle_focus_fullscreen_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -3136,10 +3428,10 @@ pub fn toggle_focus_fullscreen_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn toggle_pane_frames_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -3212,10 +3504,10 @@ pub fn toggle_pane_frames_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn toggle_pane_embed_or_eject_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -3288,10 +3580,10 @@ pub fn toggle_pane_embed_or_eject_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn undo_rename_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -3364,10 +3656,10 @@ pub fn undo_rename_pane_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn close_focus_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -3440,10 +3732,10 @@ pub fn close_focus_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn toggle_active_tab_sync_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -3516,10 +3808,10 @@ pub fn toggle_active_tab_sync_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn close_focused_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -3592,10 +3884,10 @@ pub fn close_focused_tab_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn undo_rename_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -3668,10 +3960,10 @@ pub fn undo_rename_tab_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn previous_swap_layout_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -3744,10 +4036,10 @@ pub fn previous_swap_layout_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn next_swap_layout_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -3820,10 +4112,10 @@ pub fn next_swap_layout_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn go_to_tab_name_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -3896,10 +4188,10 @@ pub fn go_to_tab_name_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn focus_or_create_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -3972,10 +4264,10 @@ pub fn focus_or_create_tab_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn go_to_tab() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -4048,10 +4340,10 @@ pub fn go_to_tab() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn start_or_reload_plugin() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -4124,10 +4416,10 @@ pub fn start_or_reload_plugin() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn quit_zellij_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, server_receiver, screen_receiver, teardown) =
@@ -4207,10 +4499,10 @@ pub fn quit_zellij_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn detach_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, server_receiver, screen_receiver, teardown) =
@@ -4290,10 +4582,10 @@ pub fn detach_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn open_file_floating_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, pty_receiver, screen_receiver, teardown) =
@@ -4377,10 +4669,10 @@ pub fn open_file_floating_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn open_file_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, pty_receiver, screen_receiver, teardown) =
@@ -4464,10 +4756,10 @@ pub fn open_file_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn open_file_with_line_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, pty_receiver, screen_receiver, teardown) =
@@ -4552,10 +4844,10 @@ pub fn open_file_with_line_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn open_file_with_line_floating_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, pty_receiver, screen_receiver, teardown) =
@@ -4639,10 +4931,10 @@ pub fn open_file_with_line_floating_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn open_terminal_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, pty_receiver, screen_receiver, teardown) =
@@ -4722,10 +5014,10 @@ pub fn open_terminal_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn open_terminal_floating_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, pty_receiver, screen_receiver, teardown) =
@@ -4805,10 +5097,10 @@ pub fn open_terminal_floating_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn open_command_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, pty_receiver, screen_receiver, teardown) =
@@ -4888,10 +5180,10 @@ pub fn open_command_pane_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn open_command_pane_floating_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, pty_receiver, screen_receiver, teardown) =
@@ -4971,10 +5263,10 @@ pub fn open_command_pane_floating_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn switch_to_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -5047,10 +5339,10 @@ pub fn switch_to_tab_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn hide_self_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -5123,10 +5415,10 @@ pub fn hide_self_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn show_self_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -5198,10 +5490,10 @@ pub fn show_self_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn close_terminal_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -5274,10 +5566,10 @@ pub fn close_terminal_pane_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn close_plugin_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -5350,10 +5642,10 @@ pub fn close_plugin_pane_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn focus_terminal_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -5426,10 +5718,10 @@ pub fn focus_terminal_pane_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn focus_plugin_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -5502,10 +5794,10 @@ pub fn focus_plugin_pane_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn rename_terminal_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -5578,10 +5870,10 @@ pub fn rename_terminal_pane_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn rename_plugin_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -5654,10 +5946,10 @@ pub fn rename_plugin_pane_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn rename_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -5730,10 +6022,10 @@ pub fn rename_tab_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn send_configuration_to_plugins() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -5818,7 +6110,7 @@ pub fn send_configuration_to_plugins() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn request_plugin_permissions() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -5888,7 +6180,7 @@ pub fn request_plugin_permissions() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn granted_permission_request_result() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -5920,8 +6212,8 @@ pub fn granted_permission_request_result() {
             let plugin_thread_sender = plugin_thread_sender.clone();
             move || loop {
                 let (event, _err_ctx) = screen_receiver
-                    .recv()
-                    .expect("failed to receive event on channel");
+                    .recv_timeout(std::time::Duration::from_secs(60))
+                    .expect("timed out or disconnected waiting for event on channel");
                 match event {
                     ScreenInstruction::RequestPluginPermissions(_, plugin_permission) => {
                         let _ =
@@ -5983,7 +6275,7 @@ pub fn granted_permission_request_result() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn denied_permission_request_result() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -6015,8 +6307,8 @@ pub fn denied_permission_request_result() {
             let plugin_thread_sender = plugin_thread_sender.clone();
             move || loop {
                 let (event, _err_ctx) = screen_receiver
-                    .recv()
-                    .expect("failed to receive event on channel");
+                    .recv_timeout(std::time::Duration::from_secs(60))
+                    .expect("timed out or disconnected waiting for event on channel");
                 match event {
                     ScreenInstruction::RequestPluginPermissions(_, plugin_permission) => {
                         let _ =
@@ -6073,10 +6365,10 @@ pub fn denied_permission_request_result() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn run_command_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, background_jobs_receiver, screen_receiver, teardown) =
@@ -6156,10 +6448,10 @@ pub fn run_command_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn run_command_with_env_vars_and_cwd_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, background_jobs_receiver, screen_receiver, teardown) =
@@ -6239,10 +6531,10 @@ pub fn run_command_with_env_vars_and_cwd_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn web_request_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, background_jobs_receiver, screen_receiver, teardown) =
@@ -6322,10 +6614,10 @@ pub fn web_request_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn unblock_input_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -6409,10 +6701,10 @@ pub fn unblock_input_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn block_input_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -6497,10 +6789,10 @@ pub fn block_input_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn pipe_output_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, server_receiver, screen_receiver, teardown) =
@@ -6592,10 +6884,10 @@ pub fn pipe_output_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn pipe_message_to_plugin_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -6684,10 +6976,10 @@ pub fn pipe_message_to_plugin_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn switch_session_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, server_receiver, screen_receiver, teardown) =
@@ -6768,15 +7060,17 @@ pub fn switch_session_plugin_command() {
         .clone();
     // we do the replace below to avoid the randomness of the temporary folder in the snapshot
     // while still testing it
-    assert_snapshot!(format!("{:#?}", switch_session_event)
-        .replace(&format!("{:?}", temp_folder.path()), "\"CWD\""));
+    assert_snapshot!(
+        format!("{:#?}", switch_session_event)
+            .replace(&format!("{:?}", temp_folder.path()), "\"CWD\"")
+    );
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn switch_session_with_layout_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, server_receiver, screen_receiver, teardown) =
@@ -6857,15 +7151,17 @@ pub fn switch_session_with_layout_plugin_command() {
         .clone();
     // we do the replace below to avoid the randomness of the temporary folder in the snapshot
     // while still testing it
-    assert_snapshot!(format!("{:#?}", switch_session_event)
-        .replace(&format!("{:?}", temp_folder.path()), "\"CWD\""));
+    assert_snapshot!(
+        format!("{:#?}", switch_session_event)
+            .replace(&format!("{:?}", temp_folder.path()), "\"CWD\"")
+    );
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn switch_session_with_layout_and_cwd_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, server_receiver, screen_receiver, teardown) =
@@ -6948,10 +7244,10 @@ pub fn switch_session_with_layout_and_cwd_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn disconnect_other_clients_plugins_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, server_receiver, screen_receiver, teardown) =
@@ -7034,10 +7330,10 @@ pub fn disconnect_other_clients_plugins_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn reconfigure_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, server_receiver, screen_receiver, teardown) =
@@ -7120,12 +7416,12 @@ pub fn reconfigure_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn run_plugin_in_specific_cwd() {
     // note that this test might sometimes fail when run alone without the rest of the suite due to
     // timing issues
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, server_receiver, screen_receiver, teardown) =
@@ -7210,10 +7506,10 @@ pub fn run_plugin_in_specific_cwd() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn hide_pane_with_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -7286,10 +7582,10 @@ pub fn hide_pane_with_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn show_pane_with_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -7362,10 +7658,10 @@ pub fn show_pane_with_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn open_command_pane_background_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, pty_receiver, screen_receiver, teardown) =
@@ -7449,10 +7745,10 @@ pub fn open_command_pane_background_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn rerun_command_pane_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -7525,10 +7821,10 @@ pub fn rerun_command_pane_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn resize_pane_with_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -7601,10 +7897,10 @@ pub fn resize_pane_with_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn edit_scrollback_for_pane_with_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -7677,10 +7973,10 @@ pub fn edit_scrollback_for_pane_with_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn write_to_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -7753,10 +8049,10 @@ pub fn write_to_pane_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn write_chars_to_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -7829,10 +8125,10 @@ pub fn write_chars_to_pane_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn move_pane_with_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -7905,10 +8201,10 @@ pub fn move_pane_with_pane_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn move_pane_with_pane_id_in_direction_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -7981,10 +8277,10 @@ pub fn move_pane_with_pane_id_in_direction_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn clear_screen_for_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -8057,10 +8353,10 @@ pub fn clear_screen_for_pane_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn scroll_up_in_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -8133,10 +8429,10 @@ pub fn scroll_up_in_pane_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn scroll_down_in_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -8209,10 +8505,10 @@ pub fn scroll_down_in_pane_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn scroll_to_top_in_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -8285,10 +8581,10 @@ pub fn scroll_to_top_in_pane_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn scroll_to_bottom_in_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -8361,10 +8657,10 @@ pub fn scroll_to_bottom_in_pane_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn page_scroll_up_in_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -8437,10 +8733,10 @@ pub fn page_scroll_up_in_pane_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn page_scroll_down_in_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -8513,10 +8809,10 @@ pub fn page_scroll_down_in_pane_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn toggle_pane_id_fullscreen_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -8589,10 +8885,10 @@ pub fn toggle_pane_id_fullscreen_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn toggle_pane_embed_or_eject_for_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -8665,10 +8961,10 @@ pub fn toggle_pane_embed_or_eject_for_pane_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn close_tab_with_index_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -8741,10 +9037,10 @@ pub fn close_tab_with_index_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn break_panes_to_new_tab_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -8817,10 +9113,10 @@ pub fn break_panes_to_new_tab_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn break_panes_to_tab_with_index_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -8893,10 +9189,10 @@ pub fn break_panes_to_tab_with_index_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn reload_plugin_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -8963,10 +9259,10 @@ pub fn reload_plugin_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn load_new_plugin_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -9033,10 +9329,10 @@ pub fn load_new_plugin_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn rebind_keys_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, server_receiver, screen_receiver, teardown) =
@@ -9119,10 +9415,10 @@ pub fn rebind_keys_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn list_clients_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -9195,10 +9491,10 @@ pub fn list_clients_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn before_close_plugin_event() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -9271,10 +9567,10 @@ pub fn before_close_plugin_event() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn show_cursor_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -9351,10 +9647,10 @@ pub fn show_cursor_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn hide_cursor_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -9432,10 +9728,10 @@ pub fn hide_cursor_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn copy_to_clipboard_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -9512,10 +9808,10 @@ pub fn copy_to_clipboard_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn run_action_plugin_command() {
     let temp_folder = tempdir().unwrap(); // placed explicitly in the test scope because its
-                                          // destructor removes the directory
+    // destructor removes the directory
     let plugin_host_folder = PathBuf::from(temp_folder.path());
     let cache_path = plugin_host_folder.join("permissions_test.kdl");
     let (plugin_thread_sender, screen_receiver, teardown) =
@@ -9592,7 +9888,7 @@ pub fn run_action_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn send_sigint_to_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -9682,7 +9978,7 @@ pub fn send_sigint_to_pane_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn send_sigkill_to_pane_id_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -9772,7 +10068,7 @@ pub fn send_sigkill_to_pane_id_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn copy_to_clipboard_without_permission() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -9860,7 +10156,7 @@ pub fn copy_to_clipboard_without_permission() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn run_action_without_permission() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -9946,7 +10242,7 @@ pub fn run_action_without_permission() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn generate_random_name_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -10036,7 +10332,7 @@ pub fn generate_random_name_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn dump_layout_success_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -10126,7 +10422,7 @@ pub fn dump_layout_success_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn dump_layout_not_found_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -10216,7 +10512,7 @@ pub fn dump_layout_not_found_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn get_layout_dir_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -10306,7 +10602,7 @@ pub fn get_layout_dir_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn get_focused_pane_info_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -10391,7 +10687,7 @@ pub fn get_focused_pane_info_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn dump_session_layout_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -10475,7 +10771,7 @@ pub fn dump_session_layout_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn dump_session_layout_for_tab_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -10559,7 +10855,7 @@ pub fn dump_session_layout_for_tab_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn parse_layout_success_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -10649,7 +10945,7 @@ pub fn parse_layout_success_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn parse_layout_error_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -10739,7 +11035,7 @@ pub fn parse_layout_error_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn save_layout_success_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -10829,7 +11125,7 @@ pub fn save_layout_success_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn save_layout_already_exists_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -10933,7 +11229,7 @@ pub fn save_layout_already_exists_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn save_layout_with_overwrite_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -11023,7 +11319,7 @@ pub fn save_layout_with_overwrite_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn save_layout_invalid_kdl_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -11113,7 +11409,7 @@ pub fn save_layout_invalid_kdl_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn rename_layout_success_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -11217,7 +11513,7 @@ pub fn rename_layout_success_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn rename_layout_not_found_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -11307,7 +11603,7 @@ pub fn rename_layout_not_found_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn delete_layout_success_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -11424,7 +11720,7 @@ pub fn delete_layout_success_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn delete_layout_not_found_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -11514,7 +11810,7 @@ pub fn delete_layout_not_found_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn save_layout_path_traversal_blocked_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -11604,7 +11900,7 @@ pub fn save_layout_path_traversal_blocked_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn edit_layout_plugin_command() {
     let temp_host_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_host_folder.path());
@@ -11708,7 +12004,7 @@ pub fn edit_layout_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn override_layout_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -11793,7 +12089,7 @@ pub fn override_layout_plugin_command() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn generate_random_name_permission_denied() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -11890,7 +12186,7 @@ pub fn generate_random_name_permission_denied() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn save_layout_permission_denied() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -11987,7 +12283,7 @@ pub fn save_layout_permission_denied() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn plugin_receives_config_change_event() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -12072,13 +12368,12 @@ pub fn plugin_receives_config_change_event() {
         .unwrap()
         .iter()
         .filter_map(|i| {
-            if let ScreenInstruction::PluginBytes(plugin_render_assets) = i {
-                if let Some(plugin_render_asset) = plugin_render_assets.first() {
-                    let plugin_bytes = plugin_render_asset.bytes.clone();
-                    let plugin_output =
-                        String::from_utf8_lossy(plugin_bytes.as_slice()).to_string();
-                    return Some(plugin_output);
-                }
+            if let ScreenInstruction::PluginBytes(plugin_render_assets) = i
+                && let Some(plugin_render_asset) = plugin_render_assets.first()
+            {
+                let plugin_bytes = plugin_render_asset.bytes.clone();
+                let plugin_output = String::from_utf8_lossy(plugin_bytes.as_slice()).to_string();
+                return Some(plugin_output);
             }
             None
         })
@@ -12107,7 +12402,7 @@ pub fn plugin_receives_config_change_event() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn plugin_does_not_receive_event_when_config_unchanged() {
     // Test that plugin does NOT receive event when config hasn't changed
     let temp_folder = tempdir().unwrap();
@@ -12199,13 +12494,12 @@ pub fn plugin_does_not_receive_event_when_config_unchanged() {
         .unwrap()
         .iter()
         .filter_map(|i| {
-            if let ScreenInstruction::PluginBytes(plugin_render_assets) = i {
-                if let Some(plugin_render_asset) = plugin_render_assets.first() {
-                    let plugin_bytes = plugin_render_asset.bytes.clone();
-                    let plugin_output =
-                        String::from_utf8_lossy(plugin_bytes.as_slice()).to_string();
-                    return Some(plugin_output);
-                }
+            if let ScreenInstruction::PluginBytes(plugin_render_assets) = i
+                && let Some(plugin_render_asset) = plugin_render_assets.first()
+            {
+                let plugin_bytes = plugin_render_asset.bytes.clone();
+                let plugin_output = String::from_utf8_lossy(plugin_bytes.as_slice()).to_string();
+                return Some(plugin_output);
             }
             None
         })
@@ -12220,7 +12514,7 @@ pub fn plugin_does_not_receive_event_when_config_unchanged() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn get_session_environment_variables_plugin_command() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -12326,7 +12620,7 @@ pub fn get_session_environment_variables_plugin_command() {
 use crate::panes::PaneId;
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn set_pane_regex_highlights_via_plugin() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -12418,7 +12712,7 @@ pub fn set_pane_regex_highlights_via_plugin() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn clear_pane_highlights_via_plugin() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -12501,7 +12795,7 @@ pub fn clear_pane_highlights_via_plugin() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn highlight_clicked_event_delivered_to_plugin() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -12590,7 +12884,7 @@ pub fn highlight_clicked_event_delivered_to_plugin() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn mode_update_payload_is_lightweight_for_opted_in_plugins() {
     // Plugin A subscribes to ModeUpdate only (legacy behavior — receives full keybinds)
     // Plugin B subscribes to InitialKeybinds + ModeUpdate (receives stripped keybinds)
@@ -12637,8 +12931,8 @@ pub fn mode_update_payload_is_lightweight_for_opted_in_plugins() {
             let plugin_thread_sender = plugin_thread_sender.clone();
             move || loop {
                 let (event, _err_ctx) = screen_receiver
-                    .recv()
-                    .expect("failed to receive event on channel");
+                    .recv_timeout(std::time::Duration::from_secs(60))
+                    .expect("timed out or disconnected waiting for event on channel");
                 match event {
                     ScreenInstruction::RequestPluginPermissions(plugin_id, plugin_permission) => {
                         let _ =
@@ -12767,7 +13061,7 @@ pub fn mode_update_payload_is_lightweight_for_opted_in_plugins() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "upstream-inherited plugin-thread integration test; hangs in this fork (Bus::recv, fixtures present) - rewiring cut: artifacts/vetcoders/vc-frame/2026_0809 test-theater plan"]
 pub fn reconfiguration_resends_keybinds_to_opted_in_plugins() {
     let temp_folder = tempdir().unwrap();
     let plugin_host_folder = PathBuf::from(temp_folder.path());
@@ -12802,8 +13096,8 @@ pub fn reconfiguration_resends_keybinds_to_opted_in_plugins() {
             let plugin_thread_sender = plugin_thread_sender.clone();
             move || loop {
                 let (event, _err_ctx) = screen_receiver
-                    .recv()
-                    .expect("failed to receive event on channel");
+                    .recv_timeout(std::time::Duration::from_secs(60))
+                    .expect("timed out or disconnected waiting for event on channel");
                 match event {
                     ScreenInstruction::RequestPluginPermissions(plugin_id, plugin_permission) => {
                         let _ =

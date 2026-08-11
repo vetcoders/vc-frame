@@ -66,19 +66,22 @@ impl TextInput {
     }
 
     /// Get a shorthand for cursor_position
-    #[allow(unused)]
+    // FORGOTTEN GEM (sweep 2026-08-09): parked text-input API surface
+    // (cursor/undo/redo/drain) — no caller yet; operator decides revive/delete.
+    #[allow(dead_code)]
     pub fn cursor_position(&self) -> usize {
         self.cursor_position
     }
 
     /// Get mutable access to the underlying buffer for direct manipulation
-    #[allow(unused)]
+    // FORGOTTEN GEM (sweep 2026-08-09): parked text-input API surface
+    // (cursor/undo/redo/drain) — no caller yet; operator decides revive/delete.
+    #[allow(dead_code)]
     pub fn get_text_mut(&mut self) -> &mut String {
         &mut self.buffer
     }
 
     /// Set the text and move cursor to the end
-    #[allow(unused)]
     pub fn set_text(&mut self, text: String) {
         self.break_coalescing();
         self.save_undo_state();
@@ -87,7 +90,9 @@ impl TextInput {
     }
 
     /// Set cursor position (clamped to text length)
-    #[allow(unused)]
+    // FORGOTTEN GEM (sweep 2026-08-09): parked text-input API surface
+    // (cursor/undo/redo/drain) — no caller yet; operator decides revive/delete.
+    #[allow(dead_code)]
     pub fn set_cursor_position(&mut self, pos: usize) {
         let text_len = self.buffer.chars().count();
         self.cursor_position = pos.min(text_len);
@@ -310,12 +315,12 @@ impl TextInput {
         }
 
         // Check for Ctrl+Shift modifiers (alternative redo: Ctrl+Shift+Z)
-        if key.has_modifiers(&[KeyModifier::Ctrl, KeyModifier::Shift]) {
-            if let BareKey::Char('Z') = key.bare_key {
-                // Ctrl-Shift-Z: Redo (alternative)
-                self.redo();
-                return InputAction::Continue;
-            }
+        if key.has_modifiers(&[KeyModifier::Ctrl, KeyModifier::Shift])
+            && let BareKey::Char('Z') = key.bare_key
+        {
+            // Ctrl-Shift-Z: Redo (alternative)
+            self.redo();
+            return InputAction::Continue;
         }
 
         // Check for Alt modifiers
@@ -439,18 +444,24 @@ impl TextInput {
     }
 
     /// Check if undo is available
-    #[allow(unused)]
+    // FORGOTTEN GEM (sweep 2026-08-09): parked text-input API surface
+    // (cursor/undo/redo/drain) — no caller yet; operator decides revive/delete.
+    #[allow(dead_code)]
     pub fn can_undo(&self) -> bool {
         !self.undo_stack.is_empty()
     }
 
     /// Check if redo is available
-    #[allow(unused)]
+    // FORGOTTEN GEM (sweep 2026-08-09): parked text-input API surface
+    // (cursor/undo/redo/drain) — no caller yet; operator decides revive/delete.
+    #[allow(dead_code)]
     pub fn can_redo(&self) -> bool {
         !self.redo_stack.is_empty()
     }
 
-    #[allow(unused)]
+    // FORGOTTEN GEM (sweep 2026-08-09): parked text-input API surface
+    // (cursor/undo/redo/drain) — no caller yet; operator decides revive/delete.
+    #[allow(dead_code)]
     pub fn drain_text(&mut self) -> String {
         self.cursor_position = 0;
         self.buffer.drain(..).collect()

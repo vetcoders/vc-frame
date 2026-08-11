@@ -1,7 +1,7 @@
-use ansi_term::ANSIStrings;
+use ansi_term::AnsiStrings;
 use unicode_width::UnicodeWidthStr;
 
-use crate::{LinePart, ARROW_SEPARATOR};
+use crate::{ARROW_SEPARATOR, LinePart};
 use zellij_tile::prelude::actions::Action;
 use zellij_tile::prelude::*;
 use zellij_tile_utils::style;
@@ -134,7 +134,7 @@ fn left_more_message(
         .paint(more_text);
     let right_separator = style!(palette.ribbon_unselected.background, sep_color).paint(separator);
     let more_styled_text =
-        ANSIStrings(&[left_separator, more_styled_text, right_separator]).to_string();
+        AnsiStrings(&[left_separator, more_styled_text, right_separator]).to_string();
     LinePart {
         part: more_styled_text,
         len: more_text_len,
@@ -168,7 +168,7 @@ fn right_more_message(
         .paint(more_text);
     let right_separator = style!(palette.ribbon_unselected.background, sep_color).paint(separator);
     let more_styled_text =
-        ANSIStrings(&[left_separator, more_styled_text, right_separator]).to_string();
+        AnsiStrings(&[left_separator, more_styled_text, right_separator]).to_string();
     LinePart {
         part: more_styled_text,
         len: more_text_len,
@@ -229,6 +229,7 @@ pub struct TabLineParams<'a> {
     pub mode_info: &'a ModeInfo,
     pub hide_swap_layout_indicator: bool,
     pub background: &'a PaletteColor,
+    pub left_inset: usize,
 }
 
 pub fn tab_line(params: TabLineParams) -> Vec<LinePart> {
@@ -244,6 +245,7 @@ pub fn tab_line(params: TabLineParams) -> Vec<LinePart> {
         mode_info,
         hide_swap_layout_indicator,
         background,
+        left_inset,
     } = params;
     let mut tabs_after_active = all_tabs.split_off(active_tab_index);
     let mut tabs_before_active = all_tabs;
@@ -256,6 +258,22 @@ pub fn tab_line(params: TabLineParams) -> Vec<LinePart> {
         true => tab_line_prefix(None, palette, cols),
         false => tab_line_prefix(session_name, palette, cols),
     };
+    // The 🚥 zone: blank columns before the prefix so the bar clears the
+    // macOS traffic lights — mirrors compact-bar's TabLineBuilder::build.
+    let left_inset = left_inset.min(cols / 2);
+    if left_inset > 0 {
+        let colors = palette.text_unselected;
+        prefix.insert(
+            0,
+            LinePart {
+                part: style!(colors.base, colors.background)
+                    .paint(" ".repeat(left_inset))
+                    .to_string(),
+                len: left_inset,
+                tab_index: None,
+            },
+        );
+    }
 
     let mut swap_layout_indicator = if hide_swap_layout_indicator {
         None

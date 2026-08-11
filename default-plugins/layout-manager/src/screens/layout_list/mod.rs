@@ -1,9 +1,9 @@
 mod search;
 
 use super::{KeyResponse, OptimisticUpdate, Screen};
+use crate::DisplayLayout;
 use crate::text_input::InputAction;
 use crate::ui::{Controls, LayoutDetail, LayoutsTable};
-use crate::DisplayLayout;
 use search::SearchState;
 use zellij_tile::prelude::*;
 
@@ -395,11 +395,11 @@ impl LayoutListScreen {
         let selected = display_layouts.get(self.selected_layout_index);
         if let Some(DisplayLayout::Valid(chosen_layout)) = selected {
             let tab_ids = new_tabs_with_layout_info(chosen_layout);
-            if self.should_default_to_current_tab(display_layouts) {
-                if let Some(&tab_id) = tab_ids.first() {
-                    let layout_name = selected.unwrap().name();
-                    rename_tab_with_id(tab_id as u64, layout_name);
-                }
+            if self.should_default_to_current_tab(display_layouts)
+                && let Some(&tab_id) = tab_ids.first()
+            {
+                let layout_name = selected.unwrap().name();
+                rename_tab_with_id(tab_id as u64, layout_name);
             }
             close_self();
         }

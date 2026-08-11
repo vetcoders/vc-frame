@@ -1,9 +1,9 @@
 mod kdl_layout_parser;
 use crate::data::{
-    BareKey, Direction, FloatingPaneCoordinates, InputMode, KeyWithModifier, LayoutInfo,
-    LayoutMetadata, MultiplayerColors, Palette, PaletteColor, PaneId, PaneInfo, PaneManifest,
-    PermissionType, Resize, SessionInfo, StyleDeclaration, Styling, TabInfo, WebSharing,
-    DEFAULT_STYLES,
+    BareKey, DEFAULT_STYLES, Direction, FloatingPaneCoordinates, InputMode, KeyWithModifier,
+    LayoutInfo, LayoutMetadata, MultiplayerColors, Palette, PaletteColor, PaneId, PaneInfo,
+    PaneManifest, PermissionType, Resize, SessionInfo, StyleDeclaration, Styling, TabInfo,
+    TabPlacement, WebSharing,
 };
 use crate::envs::EnvironmentVariables;
 use crate::home::{find_default_config_dir, get_layout_dir};
@@ -36,7 +36,7 @@ use crate::input::command::RunCommandAction;
 
 #[macro_export]
 macro_rules! parse_kdl_action_arguments {
-    ( $action_name:expr, $action_arguments:expr, $action_node:expr ) => {{
+    ( $action_name:expr_2021, $action_arguments:expr_2021, $action_node:expr_2021 ) => {{
         if !$action_arguments.is_empty() {
             Err(ConfigError::new_kdl_error(
                 format!("Action '{}' must have arguments", $action_name),
@@ -78,6 +78,7 @@ macro_rules! parse_kdl_action_arguments {
                 "SetLightTheme" => Ok(Action::SetLightTheme),
                 "ToggleTheme" => Ok(Action::ToggleTheme),
                 "Copy" => Ok(Action::Copy),
+                "CopyPaneScrollback" => Ok(Action::CopyPaneScrollback),
                 "Confirm" => Ok(Action::Confirm),
                 "Deny" => Ok(Action::Deny),
                 "ToggleMouseMode" => Ok(Action::ToggleMouseMode),
@@ -96,7 +97,7 @@ macro_rules! parse_kdl_action_arguments {
 
 #[macro_export]
 macro_rules! parse_kdl_action_u8_arguments {
-    ( $action_name:expr, $action_arguments:expr, $action_node:expr ) => {{
+    ( $action_name:expr_2021, $action_arguments:expr_2021, $action_node:expr_2021 ) => {{
         let mut bytes = vec![];
         for kdl_entry in $action_arguments.iter() {
             match kdl_entry.value().as_i64() {
@@ -116,14 +117,14 @@ macro_rules! parse_kdl_action_u8_arguments {
 
 #[macro_export]
 macro_rules! kdl_parsing_error {
-    ( $message:expr, $entry:expr ) => {
+    ( $message:expr_2021, $entry:expr_2021 ) => {
         ConfigError::new_kdl_error($message, $entry.span().offset(), $entry.span().len())
     };
 }
 
 #[macro_export]
 macro_rules! kdl_entries_as_i64 {
-    ( $node:expr ) => {
+    ( $node:expr_2021 ) => {
         $node
             .entries()
             .iter()
@@ -133,7 +134,7 @@ macro_rules! kdl_entries_as_i64 {
 
 #[macro_export]
 macro_rules! kdl_first_entry_as_string {
-    ( $node:expr ) => {
+    ( $node:expr_2021 ) => {
         $node
             .entries()
             .iter()
@@ -144,7 +145,7 @@ macro_rules! kdl_first_entry_as_string {
 
 #[macro_export]
 macro_rules! kdl_first_entry_as_i64 {
-    ( $node:expr ) => {
+    ( $node:expr_2021 ) => {
         $node
             .entries()
             .iter()
@@ -155,7 +156,7 @@ macro_rules! kdl_first_entry_as_i64 {
 
 #[macro_export]
 macro_rules! kdl_first_entry_as_bool {
-    ( $node:expr ) => {
+    ( $node:expr_2021 ) => {
         $node
             .entries()
             .iter()
@@ -166,14 +167,12 @@ macro_rules! kdl_first_entry_as_bool {
 
 #[macro_export]
 macro_rules! entry_count {
-    ( $node:expr ) => {{
-        $node.entries().iter().len()
-    }};
+    ( $node:expr_2021 ) => {{ $node.entries().iter().len() }};
 }
 
 #[macro_export]
 macro_rules! parse_kdl_action_char_or_string_arguments {
-    ( $action_name:expr, $action_arguments:expr, $action_node:expr ) => {{
+    ( $action_name:expr_2021, $action_arguments:expr_2021, $action_node:expr_2021 ) => {{
         let mut chars_to_write = String::new();
         for kdl_entry in $action_arguments.iter() {
             match kdl_entry.value().as_string() {
@@ -183,7 +182,7 @@ macro_rules! parse_kdl_action_char_or_string_arguments {
                         format!("All entries for action '{}' must be strings", $action_name),
                         kdl_entry.span().offset(),
                         kdl_entry.span().len(),
-                    ))
+                    ));
                 },
             }
         }
@@ -193,7 +192,7 @@ macro_rules! parse_kdl_action_char_or_string_arguments {
 
 #[macro_export]
 macro_rules! kdl_arg_is_truthy {
-    ( $kdl_node:expr, $arg_name:expr ) => {
+    ( $kdl_node:expr_2021, $arg_name:expr_2021 ) => {
         match $kdl_node.get($arg_name) {
             Some(arg) => match arg.value().as_bool() {
                 Some(value) => value,
@@ -212,7 +211,7 @@ macro_rules! kdl_arg_is_truthy {
 
 #[macro_export]
 macro_rules! kdl_children_nodes_or_error {
-    ( $kdl_node:expr, $error:expr ) => {
+    ( $kdl_node:expr_2021, $error:expr_2021 ) => {
         $kdl_node
             .children()
             .ok_or(ConfigError::new_kdl_error(
@@ -226,14 +225,14 @@ macro_rules! kdl_children_nodes_or_error {
 
 #[macro_export]
 macro_rules! kdl_children_nodes {
-    ( $kdl_node:expr ) => {
+    ( $kdl_node:expr_2021 ) => {
         $kdl_node.children().map(|c| c.nodes())
     };
 }
 
 #[macro_export]
 macro_rules! kdl_property_nodes {
-    ( $kdl_node:expr ) => {{
+    ( $kdl_node:expr_2021 ) => {{
         $kdl_node
             .entries()
             .iter()
@@ -244,7 +243,7 @@ macro_rules! kdl_property_nodes {
 
 #[macro_export]
 macro_rules! kdl_children_or_error {
-    ( $kdl_node:expr, $error:expr ) => {
+    ( $kdl_node:expr_2021, $error:expr_2021 ) => {
         $kdl_node.children().ok_or(ConfigError::new_kdl_error(
             $error.into(),
             $kdl_node.span().offset(),
@@ -255,14 +254,14 @@ macro_rules! kdl_children_or_error {
 
 #[macro_export]
 macro_rules! kdl_children {
-    ( $kdl_node:expr ) => {
+    ( $kdl_node:expr_2021 ) => {
         $kdl_node.children().iter().copied().collect()
     };
 }
 
 #[macro_export]
 macro_rules! kdl_get_string_property_or_child_value {
-    ( $kdl_node:expr, $name:expr ) => {
+    ( $kdl_node:expr_2021, $name:expr_2021 ) => {
         $kdl_node
             .get($name)
             .and_then(|e| e.value().as_string())
@@ -278,7 +277,7 @@ macro_rules! kdl_get_string_property_or_child_value {
 
 #[macro_export]
 macro_rules! kdl_string_arguments {
-    ( $kdl_node:expr ) => {{
+    ( $kdl_node:expr_2021 ) => {{
         let res: Result<Vec<_>, _> = $kdl_node
             .entries()
             .iter()
@@ -296,7 +295,7 @@ macro_rules! kdl_string_arguments {
 
 #[macro_export]
 macro_rules! kdl_property_names {
-    ( $kdl_node:expr ) => {{
+    ( $kdl_node:expr_2021 ) => {{
         $kdl_node
             .entries()
             .iter()
@@ -307,28 +306,28 @@ macro_rules! kdl_property_names {
 
 #[macro_export]
 macro_rules! kdl_argument_values {
-    ( $kdl_node:expr ) => {
+    ( $kdl_node:expr_2021 ) => {
         $kdl_node.entries().iter().collect()
     };
 }
 
 #[macro_export]
 macro_rules! kdl_name {
-    ( $kdl_node:expr ) => {
+    ( $kdl_node:expr_2021 ) => {
         $kdl_node.name().value()
     };
 }
 
 #[macro_export]
 macro_rules! kdl_document_name {
-    ( $kdl_node:expr ) => {
+    ( $kdl_node:expr_2021 ) => {
         $kdl_node.node().name().value()
     };
 }
 
 #[macro_export]
 macro_rules! keys_from_kdl {
-    ( $kdl_node:expr ) => {
+    ( $kdl_node:expr_2021 ) => {
         kdl_string_arguments!($kdl_node)
             .iter()
             .map(|k| {
@@ -346,7 +345,7 @@ macro_rules! keys_from_kdl {
 
 #[macro_export]
 macro_rules! actions_from_kdl {
-    ( $kdl_node:expr, $config_options:expr ) => {
+    ( $kdl_node:expr_2021, $config_options:expr_2021 ) => {
         kdl_children_nodes_or_error!($kdl_node, "no actions found for key_block")
             .iter()
             .map(|kdl_action| Action::try_from((kdl_action, $config_options)))
@@ -472,12 +471,12 @@ impl Action {
                             Err(_) => {
                                 return Err(ConfigError::new_kdl_error(
                                     format!(
-                                    "failed to read either of resize type or direction from '{}'",
-                                    word
-                                ),
+                                        "failed to read either of resize type or direction from '{}'",
+                                        word
+                                    ),
                                     action_node.span().offset(),
                                     action_node.span().len(),
-                                ))
+                                ));
                             },
                         },
                     }
@@ -545,7 +544,12 @@ impl Action {
                 include_scrollback: false,
                 pane_id: None,
                 ansi: false,
+                expected_tab_id: None,
+                expected_tab_name: None,
+                expected_session_incarnation: None,
+                expected_tab_instance_id: None,
             }),
+            "CopyPaneScrollback" => Ok(Action::CopyPaneScrollback),
             "DumpLayout" => Ok(Action::DumpLayout),
             "NewPane" => {
                 if string.is_empty() {
@@ -699,6 +703,7 @@ impl Action {
                 include_scrollback: _,
                 pane_id: _,
                 ansi: _,
+                ..
             } => {
                 let mut node = KdlNode::new("DumpScreen");
                 node.push(file.clone());
@@ -707,6 +712,7 @@ impl Action {
             Action::DumpScreen {
                 file_path: None, ..
             } => None,
+            Action::CopyPaneScrollback => Some(KdlNode::new("CopyPaneScrollback")),
             Action::DumpLayout => Some(KdlNode::new("DumpLayout")),
             Action::EditScrollback { ansi } => {
                 let mut node = KdlNode::new("EditScrollback");
@@ -782,6 +788,9 @@ impl Action {
                 cwd,
                 initial_panes: _,
                 first_pane_unblock_condition: _,
+                // KDL keybindings always parse to the default placement, so
+                // there is nothing to round-trip here.
+                placement: _,
             } => {
                 let mut node = KdlNode::new("NewTab");
                 let mut children = KdlDocument::new();
@@ -856,14 +865,17 @@ impl Action {
                         cwd_node.push(cwd.display().to_string());
                         node_children.nodes_mut().push(cwd_node);
                     }
+                    // Emit the parser's vocabulary (start_suspended /
+                    // close_on_exit) — the hold_on_* spellings serialize but
+                    // never re-parse, silently losing both flags on roundtrip.
                     if run_command_action.hold_on_start {
-                        let mut hos_node = KdlNode::new("hold_on_start");
+                        let mut hos_node = KdlNode::new("start_suspended");
                         hos_node.push(KdlValue::Bool(true));
                         node_children.nodes_mut().push(hos_node);
                     }
                     if !run_command_action.hold_on_close {
-                        let mut hoc_node = KdlNode::new("hold_on_close");
-                        hoc_node.push(KdlValue::Bool(false));
+                        let mut hoc_node = KdlNode::new("close_on_exit");
+                        hoc_node.push(KdlValue::Bool(true));
                         node_children.nodes_mut().push(hoc_node);
                     }
                 }
@@ -910,14 +922,17 @@ impl Action {
                         cwd_node.push(cwd.display().to_string());
                         node_children.nodes_mut().push(cwd_node);
                     }
+                    // Emit the parser's vocabulary (start_suspended /
+                    // close_on_exit) — the hold_on_* spellings serialize but
+                    // never re-parse, silently losing both flags on roundtrip.
                     if run_command_action.hold_on_start {
-                        let mut hos_node = KdlNode::new("hold_on_start");
+                        let mut hos_node = KdlNode::new("start_suspended");
                         hos_node.push(KdlValue::Bool(true));
                         node_children.nodes_mut().push(hos_node);
                     }
                     if !run_command_action.hold_on_close {
-                        let mut hoc_node = KdlNode::new("hold_on_close");
-                        hoc_node.push(KdlValue::Bool(false));
+                        let mut hoc_node = KdlNode::new("close_on_exit");
+                        hoc_node.push(KdlValue::Bool(true));
                         node_children.nodes_mut().push(hoc_node);
                     }
                 }
@@ -1004,14 +1019,17 @@ impl Action {
                         cwd_node.push(cwd.display().to_string());
                         node_children.nodes_mut().push(cwd_node);
                     }
+                    // Emit the parser's vocabulary (start_suspended /
+                    // close_on_exit) — the hold_on_* spellings serialize but
+                    // never re-parse, silently losing both flags on roundtrip.
                     if run_command_action.hold_on_start {
-                        let mut hos_node = KdlNode::new("hold_on_start");
+                        let mut hos_node = KdlNode::new("start_suspended");
                         hos_node.push(KdlValue::Bool(true));
                         node_children.nodes_mut().push(hos_node);
                     }
                     if !run_command_action.hold_on_close {
-                        let mut hoc_node = KdlNode::new("hold_on_close");
-                        hoc_node.push(KdlValue::Bool(false));
+                        let mut hoc_node = KdlNode::new("close_on_exit");
+                        hoc_node.push(KdlValue::Bool(true));
                         node_children.nodes_mut().push(hoc_node);
                     }
                 }
@@ -1051,14 +1069,17 @@ impl Action {
                         cwd_node.push(cwd.display().to_string());
                         node_children.nodes_mut().push(cwd_node);
                     }
+                    // Emit the parser's vocabulary (start_suspended /
+                    // close_on_exit) — the hold_on_* spellings serialize but
+                    // never re-parse, silently losing both flags on roundtrip.
                     if run_command_action.hold_on_start {
-                        let mut hos_node = KdlNode::new("hold_on_start");
+                        let mut hos_node = KdlNode::new("start_suspended");
                         hos_node.push(KdlValue::Bool(true));
                         node_children.nodes_mut().push(hos_node);
                     }
                     if !run_command_action.hold_on_close {
-                        let mut hoc_node = KdlNode::new("hold_on_close");
-                        hoc_node.push(KdlValue::Bool(false));
+                        let mut hoc_node = KdlNode::new("close_on_exit");
+                        hoc_node.push(KdlValue::Bool(true));
                         node_children.nodes_mut().push(hoc_node);
                     }
                     if let Some(name) = name {
@@ -1581,6 +1602,9 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                 parse_kdl_action_arguments!(action_name, action_arguments, kdl_action)
             },
             "Detach" => parse_kdl_action_arguments!(action_name, action_arguments, kdl_action),
+            "CopyPaneScrollback" => {
+                parse_kdl_action_arguments!(action_name, action_arguments, kdl_action)
+            },
             "SwitchSession" => {
                 let name = kdl_get_string_property_or_child_value!(kdl_action, "name")
                     .map(|s| s.to_string())
@@ -1711,6 +1735,7 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                         cwd: None,
                         initial_panes: None,
                         first_pane_unblock_condition: None,
+                        placement: TabPlacement::default(),
                     });
                 }
 
@@ -1782,6 +1807,7 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                         cwd,
                         initial_panes: None,
                         first_pane_unblock_condition: None,
+                        placement: TabPlacement::default(),
                     })
                 } else {
                     let (layout, floating_panes_layout) = layout.new_tab();
@@ -1797,6 +1823,7 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                         cwd,
                         initial_panes: None,
                         first_pane_unblock_condition: None,
+                        placement: TabPlacement::default(),
                     })
                 }
             },
@@ -2259,7 +2286,7 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
 
 #[macro_export]
 macro_rules! kdl_property_first_arg_as_string {
-    ( $kdl_node:expr, $property_name:expr ) => {
+    ( $kdl_node:expr_2021, $property_name:expr_2021 ) => {
         $kdl_node
             .get($property_name)
             .and_then(|p| p.entries().iter().next())
@@ -2269,7 +2296,7 @@ macro_rules! kdl_property_first_arg_as_string {
 
 #[macro_export]
 macro_rules! kdl_property_first_arg_as_string_or_error {
-    ( $kdl_node:expr, $property_name:expr ) => {{
+    ( $kdl_node:expr_2021, $property_name:expr_2021 ) => {{
         match $kdl_node.get($property_name) {
             Some(property) => match property.entries().iter().next() {
                 Some(first_entry) => match first_entry.value().as_string() {
@@ -2301,7 +2328,7 @@ macro_rules! kdl_property_first_arg_as_string_or_error {
 
 #[macro_export]
 macro_rules! kdl_property_first_arg_as_bool_or_error {
-    ( $kdl_node:expr, $property_name:expr ) => {{
+    ( $kdl_node:expr_2021, $property_name:expr_2021 ) => {{
         match $kdl_node.get($property_name) {
             Some(property) => match property.entries().iter().next() {
                 Some(first_entry) => match first_entry.value().as_bool() {
@@ -2333,7 +2360,7 @@ macro_rules! kdl_property_first_arg_as_bool_or_error {
 
 #[macro_export]
 macro_rules! kdl_property_first_arg_as_i64_or_error {
-    ( $kdl_node:expr, $property_name:expr ) => {{
+    ( $kdl_node:expr_2021, $property_name:expr_2021 ) => {{
         match $kdl_node.get($property_name) {
             Some(property) => match property.entries().iter().next() {
                 Some(first_entry) => match first_entry.value().as_i64() {
@@ -2365,7 +2392,7 @@ macro_rules! kdl_property_first_arg_as_i64_or_error {
 
 #[macro_export]
 macro_rules! kdl_has_string_argument {
-    ( $kdl_node:expr, $string_argument:expr ) => {
+    ( $kdl_node:expr_2021, $string_argument:expr_2021 ) => {
         $kdl_node
             .entries()
             .iter()
@@ -2376,7 +2403,7 @@ macro_rules! kdl_has_string_argument {
 
 #[macro_export]
 macro_rules! kdl_children_property_first_arg_as_string {
-    ( $kdl_node:expr, $property_name:expr ) => {
+    ( $kdl_node:expr_2021, $property_name:expr_2021 ) => {
         $kdl_node
             .children()
             .and_then(|c| c.get($property_name))
@@ -2387,7 +2414,7 @@ macro_rules! kdl_children_property_first_arg_as_string {
 
 #[macro_export]
 macro_rules! kdl_property_first_arg_as_bool {
-    ( $kdl_node:expr, $property_name:expr ) => {
+    ( $kdl_node:expr_2021, $property_name:expr_2021 ) => {
         $kdl_node
             .get($property_name)
             .and_then(|p| p.entries().iter().next())
@@ -2397,7 +2424,7 @@ macro_rules! kdl_property_first_arg_as_bool {
 
 #[macro_export]
 macro_rules! kdl_children_property_first_arg_as_bool {
-    ( $kdl_node:expr, $property_name:expr ) => {
+    ( $kdl_node:expr_2021, $property_name:expr_2021 ) => {
         $kdl_node
             .children()
             .and_then(|c| c.get($property_name))
@@ -2408,7 +2435,7 @@ macro_rules! kdl_children_property_first_arg_as_bool {
 
 #[macro_export]
 macro_rules! kdl_property_first_arg_as_i64 {
-    ( $kdl_node:expr, $property_name:expr ) => {
+    ( $kdl_node:expr_2021, $property_name:expr_2021 ) => {
         $kdl_node
             .get($property_name)
             .and_then(|p| p.entries().iter().next())
@@ -2418,14 +2445,14 @@ macro_rules! kdl_property_first_arg_as_i64 {
 
 #[macro_export]
 macro_rules! kdl_get_child {
-    ( $kdl_node:expr, $child_name:expr ) => {
+    ( $kdl_node:expr_2021, $child_name:expr_2021 ) => {
         $kdl_node.children().and_then(|c| c.get($child_name))
     };
 }
 
 #[macro_export]
 macro_rules! kdl_get_child_entry_bool_value {
-    ( $kdl_node:expr, $child_name:expr ) => {
+    ( $kdl_node:expr_2021, $child_name:expr_2021 ) => {
         $kdl_node
             .children()
             .and_then(|c| c.get($child_name))
@@ -2436,7 +2463,7 @@ macro_rules! kdl_get_child_entry_bool_value {
 
 #[macro_export]
 macro_rules! kdl_get_child_entry_string_value {
-    ( $kdl_node:expr, $child_name:expr ) => {
+    ( $kdl_node:expr_2021, $child_name:expr_2021 ) => {
         $kdl_node
             .children()
             .and_then(|c| c.get($child_name))
@@ -2447,7 +2474,7 @@ macro_rules! kdl_get_child_entry_string_value {
 
 #[macro_export]
 macro_rules! kdl_get_bool_property_or_child_value {
-    ( $kdl_node:expr, $name:expr ) => {
+    ( $kdl_node:expr_2021, $name:expr_2021 ) => {
         $kdl_node
             .get($name)
             .and_then(|e| e.value().as_bool())
@@ -2463,7 +2490,7 @@ macro_rules! kdl_get_bool_property_or_child_value {
 
 #[macro_export]
 macro_rules! kdl_get_bool_property_or_child_value_with_error {
-    ( $kdl_node:expr, $name:expr ) => {
+    ( $kdl_node:expr_2021, $name:expr_2021 ) => {
         match $kdl_node.get($name) {
             Some(e) => match e.value().as_bool() {
                 Some(bool_value) => Some(bool_value),
@@ -2494,7 +2521,7 @@ macro_rules! kdl_get_bool_property_or_child_value_with_error {
                                     e.value()
                                 ),
                                 e
-                            ))
+                            ));
                         },
                     },
                     None => {
@@ -2518,7 +2545,7 @@ macro_rules! kdl_get_bool_property_or_child_value_with_error {
 
 #[macro_export]
 macro_rules! kdl_property_or_child_value_node {
-    ( $kdl_node:expr, $name:expr ) => {
+    ( $kdl_node:expr_2021, $name:expr_2021 ) => {
         $kdl_node.get($name).or_else(|| {
             $kdl_node
                 .children()
@@ -2530,7 +2557,7 @@ macro_rules! kdl_property_or_child_value_node {
 
 #[macro_export]
 macro_rules! kdl_child_with_name {
-    ( $kdl_node:expr, $name:expr ) => {{
+    ( $kdl_node:expr_2021, $name:expr_2021 ) => {{
         $kdl_node
             .children()
             .and_then(|children| children.nodes().iter().find(|c| c.name().value() == $name))
@@ -2539,7 +2566,7 @@ macro_rules! kdl_child_with_name {
 
 #[macro_export]
 macro_rules! kdl_child_with_name_or_error {
-    ( $kdl_node:expr, $name:expr) => {{
+    ( $kdl_node:expr_2021, $name:expr_2021) => {{
         $kdl_node
             .children()
             .and_then(|children| children.nodes().iter().find(|c| c.name().value() == $name))
@@ -2553,7 +2580,7 @@ macro_rules! kdl_child_with_name_or_error {
 
 #[macro_export]
 macro_rules! kdl_get_string_property_or_child_value_with_error {
-    ( $kdl_node:expr, $name:expr ) => {
+    ( $kdl_node:expr_2021, $name:expr_2021 ) => {
         match $kdl_node.get($name) {
             Some(e) => match e.value().as_string() {
                 Some(string_value) => Some(string_value),
@@ -2584,7 +2611,7 @@ macro_rules! kdl_get_string_property_or_child_value_with_error {
                                     e.value()
                                 ),
                                 e
-                            ))
+                            ));
                         },
                     },
                     None => {
@@ -2608,7 +2635,7 @@ macro_rules! kdl_get_string_property_or_child_value_with_error {
 
 #[macro_export]
 macro_rules! kdl_get_property_or_child {
-    ( $kdl_node:expr, $name:expr ) => {
+    ( $kdl_node:expr_2021, $name:expr_2021 ) => {
         $kdl_node.get($name).or_else(|| {
             $kdl_node
                 .children()
@@ -2620,7 +2647,7 @@ macro_rules! kdl_get_property_or_child {
 
 #[macro_export]
 macro_rules! kdl_get_int_property_or_child_value {
-    ( $kdl_node:expr, $name:expr ) => {
+    ( $kdl_node:expr_2021, $name:expr_2021 ) => {
         $kdl_node
             .get($name)
             .and_then(|e| e.value().as_i64())
@@ -2636,7 +2663,7 @@ macro_rules! kdl_get_int_property_or_child_value {
 
 #[macro_export]
 macro_rules! kdl_get_string_entry {
-    ( $kdl_node:expr, $entry_name:expr ) => {
+    ( $kdl_node:expr_2021, $entry_name:expr_2021 ) => {
         $kdl_node
             .get($entry_name)
             .and_then(|e| e.value().as_string())
@@ -2645,7 +2672,7 @@ macro_rules! kdl_get_string_entry {
 
 #[macro_export]
 macro_rules! kdl_get_int_entry {
-    ( $kdl_node:expr, $entry_name:expr ) => {
+    ( $kdl_node:expr_2021, $entry_name:expr_2021 ) => {
         $kdl_node.get($entry_name).and_then(|e| e.value().as_i64())
     };
 }
@@ -2698,6 +2725,9 @@ impl Options {
         let scroll_buffer_size =
             kdl_property_first_arg_as_i64_or_error!(kdl_options, "scroll_buffer_size")
                 .map(|(scroll_buffer_size, _entry)| scroll_buffer_size as usize);
+        let auto_lock_after_seconds =
+            kdl_property_first_arg_as_i64_or_error!(kdl_options, "auto_lock_after_seconds")
+                .map(|(auto_lock_after_seconds, _entry)| auto_lock_after_seconds as u64);
         let copy_command = kdl_property_first_arg_as_string_or_error!(kdl_options, "copy_command")
             .map(|(copy_command, _entry)| copy_command.to_string());
         let copy_clipboard =
@@ -2799,21 +2829,22 @@ impl Options {
         let post_command_discovery_hook =
             kdl_property_first_arg_as_string_or_error!(kdl_options, "post_command_discovery_hook")
                 .map(|(hook, _entry)| hook.to_string());
-        let client_async_worker_tasks =
-            match kdl_property_first_arg_as_i64_or_error!(kdl_options, "client_async_worker_tasks")
-            {
-                Some((value, _)) if value >= 0 => Some(value as usize),
-                Some((value, entry)) => {
-                    return Err(kdl_parsing_error!(
-                        format!(
+        let client_async_worker_tasks = match kdl_property_first_arg_as_i64_or_error!(
+            kdl_options,
+            "client_async_worker_tasks"
+        ) {
+            Some((value, _)) if value >= 0 => Some(value as usize),
+            Some((value, entry)) => {
+                return Err(kdl_parsing_error!(
+                    format!(
                         "Number of client async worker tasks must be greater than 0, found '{}'",
                         value
                     ),
-                        entry
-                    ));
-                },
-                None => None,
-            };
+                    entry
+                ));
+            },
+            None => None,
+        };
         let visual_bell =
             kdl_property_first_arg_as_bool_or_error!(kdl_options, "visual_bell").map(|(v, _)| v);
         let focus_follows_mouse =
@@ -2839,6 +2870,7 @@ impl Options {
             mirror_session,
             on_force_close,
             scroll_buffer_size,
+            auto_lock_after_seconds,
             copy_command,
             copy_clipboard,
             copy_on_select,
@@ -3047,8 +3079,8 @@ impl Options {
         }
     }
     fn default_shell_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
-        let comment_text =
-            format!("{}\n{}\n{}\n{}",
+        let comment_text = format!(
+            "{}\n{}\n{}\n{}",
             " ",
             "// Choose the path to the default shell that zellij will use for opening new panes",
             "// Default: $SHELL",
@@ -3133,7 +3165,7 @@ impl Options {
         let comment_text = format!(
             "{}\n{}\n{}\n{}",
             " ",
-            "// The folder in which Zellij will look for layouts",
+            "// The folder in which vc-frame will look for layouts",
             "// (Requires restart)",
             "// ",
         );
@@ -3161,7 +3193,7 @@ impl Options {
         let comment_text = format!(
             "{}\n{}\n{}\n{}",
             " ",
-            "// The folder in which Zellij will look for themes",
+            "// The folder in which vc-frame will look for themes",
             "// (Requires restart)",
             "// ",
         );
@@ -3345,6 +3377,36 @@ impl Options {
             None
         }
     }
+    fn auto_lock_after_seconds_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
+        let comment_text = format!(
+            "{}\n{}\n{}\n{}\n{}\n{}",
+            " ",
+            "// Automatically switch this client to Locked mode after this many",
+            "// seconds without keyboard or mouse input",
+            "// Valid values: positive integers (0 or unset = never)",
+            "// Default value in the shipped config template: 30",
+            "// ",
+        );
+
+        let create_node = |node_value: u64| -> KdlNode {
+            let mut node = KdlNode::new("auto_lock_after_seconds");
+            node.push(KdlValue::Base10(node_value as i64));
+            node
+        };
+        if let Some(auto_lock_after_seconds) = self.auto_lock_after_seconds {
+            let mut node = create_node(auto_lock_after_seconds);
+            if add_comments {
+                node.set_leading(format!("{}\n", comment_text));
+            }
+            Some(node)
+        } else if add_comments {
+            let mut node = create_node(5);
+            node.set_leading(format!("{}\n// ", comment_text));
+            Some(node)
+        } else {
+            None
+        }
+    }
     fn copy_command_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
         let comment_text = format!(
             "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
@@ -3381,7 +3443,8 @@ impl Options {
         }
     }
     fn copy_clipboard_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
-        let comment_text = format!("{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        let comment_text = format!(
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
             " ",
             "// Choose the destination for copied text",
             "// Allows using the primary selection buffer (on x11/wayland) instead of the system clipboard.",
@@ -3473,7 +3536,7 @@ impl Options {
         let comment_text = format!(
             "{}\n{}\n{}\n{}\n{}\n{}",
             " ",
-            "// A fixed name to always give the Zellij session.",
+            "// A fixed name to always give the vc-frame session.",
             "// Consider also setting `attach_to_session true,`",
             "// otherwise this will error if such a session exists.",
             "// Default: <RANDOM>",
@@ -3529,9 +3592,10 @@ impl Options {
         }
     }
     fn auto_layout_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
-        let comment_text = format!("{}\n{}\n{}\n{}\n{}\n{}",
+        let comment_text = format!(
+            "{}\n{}\n{}\n{}\n{}\n{}",
             " ",
-            "// Toggle between having Zellij lay out panes according to a predefined set of layouts whenever possible",
+            "// Toggle between having vc-frame lay out panes according to a predefined set of layouts whenever possible",
             "// Options:",
             "//   - true (default)",
             "//   - false",
@@ -3558,7 +3622,8 @@ impl Options {
         }
     }
     fn session_serialization_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
-        let comment_text = format!("{}\n{}\n{}\n{}\n{}\n{}",
+        let comment_text = format!(
+            "{}\n{}\n{}\n{}\n{}\n{}",
             " ",
             "// Whether sessions should be serialized to the cache folder (including their tabs/panes, cwds and running commands) so that they can later be resurrected",
             "// Options:",
@@ -3617,7 +3682,8 @@ impl Options {
         }
     }
     fn scrollback_lines_to_serialize_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
-        let comment_text = format!("{}\n{}\n{}\n{}\n{}",
+        let comment_text = format!(
+            "{}\n{}\n{}\n{}\n{}",
             " ",
             "// Scrollback lines to serialize along with the pane viewport when serializing sessions, 0",
             "// defaults to the scrollback size. If this number is higher than the scrollback size, it will",
@@ -3700,7 +3766,8 @@ impl Options {
         }
     }
     fn disable_session_metadata_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
-        let comment_text = format!("{}\n{}\n{}\n{}\n{}\n{}",
+        let comment_text = format!(
+            "{}\n{}\n{}\n{}\n{}\n{}",
             " ",
             "// Enable or disable writing of session metadata to disk (if disabled, other sessions might not know",
             "// metadata info on this session)",
@@ -3729,7 +3796,8 @@ impl Options {
         }
     }
     fn support_kitty_keyboard_protocol_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
-        let comment_text = format!("{}\n{}\n{}\n{}\n{}",
+        let comment_text = format!(
+            "{}\n{}\n{}\n{}\n{}",
             " ",
             "// Enable or disable support for the enhanced Kitty Keyboard Protocol (the host terminal must also support it)",
             "// (Requires restart)",
@@ -3759,14 +3827,14 @@ impl Options {
     fn web_server_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
         let comment_text = format!(
             "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
-            "// Whether to make sure a local web server is running when a new Zellij session starts.",
+            "// Whether to make sure a local web server is running when a new vc-frame session starts.",
             "// This web server will allow creating new sessions and attaching to existing ones that have",
             "// opted in to being shared in the browser.",
             "// When enabled, navigate to http://127.0.0.1:8082",
             "// (Requires restart)",
             "// ",
-            "// Note: a local web server can still be manually started from within a Zellij session or from the CLI.",
-            "// If this is not desired, one can use a version of Zellij compiled without",
+            "// Note: a local web server can still be manually started from within a vc-frame session or from the CLI.",
+            "// If this is not desired, one can use a version of vc-frame compiled without",
             "// `web_server_capability`",
             "// ",
             "// Possible values:",
@@ -4191,7 +4259,7 @@ impl Options {
             "{}\n{}\n{}\n{}\n{}\n{}",
             " ",
             "// A command to run (will be wrapped with sh -c and provided the RESURRECT_COMMAND env variable) ",
-            "// after Zellij attempts to discover a command inside a pane when resurrecting sessions, the STDOUT",
+            "// after vc-frame attempts to discover a command inside a pane when resurrecting sessions, the STDOUT",
             "// of this command will be used instead of the discovered RESURRECT_COMMAND",
             "// can be useful for removing wrappers around commands",
             "// Note: be sure to escape backslashes and similar characters properly",
@@ -4291,6 +4359,9 @@ impl Options {
         }
         if let Some(scroll_buffer_size) = self.scroll_buffer_size_to_kdl(add_comments) {
             nodes.push(scroll_buffer_size);
+        }
+        if let Some(auto_lock_after_seconds) = self.auto_lock_after_seconds_to_kdl(add_comments) {
+            nodes.push(auto_lock_after_seconds);
         }
         if let Some(copy_command) = self.copy_command_to_kdl(add_comments) {
             nodes.push(copy_command);
@@ -4447,11 +4518,13 @@ impl Layout {
 fn kdl_layout_error(kdl_error: kdl::KdlError, file_name: String, raw_layout: &str) -> ConfigError {
     let error_message = match kdl_error.kind {
         kdl::KdlErrorKind::Context("valid node terminator") => {
-            format!("Failed to deserialize KDL node. \nPossible reasons:\n{}\n{}\n{}\n{}",
-            "- Missing `;` after a node name, eg. { node; another_node; }",
-            "- Missing quotations (\") around an argument node eg. { first_node \"argument_node\"; }",
-            "- Missing an equal sign (=) between node arguments on a title line. eg. argument=\"value\"",
-            "- Found an extraneous equal sign (=) between node child arguments and their values. eg. { argument=\"value\" }")
+            format!(
+                "Failed to deserialize KDL node. \nPossible reasons:\n{}\n{}\n{}\n{}",
+                "- Missing `;` after a node name, eg. { node; another_node; }",
+                "- Missing quotations (\") around an argument node eg. { first_node \"argument_node\"; }",
+                "- Missing an equal sign (=) between node arguments on a title line. eg. argument=\"value\"",
+                "- Found an extraneous equal sign (=) between node child arguments and their values. eg. { argument=\"value\" }"
+            )
         },
         _ => String::from(kdl_error.help.unwrap_or("Kdl Deserialization Error")),
     };
@@ -4987,7 +5060,7 @@ impl PluginAliases {
         if add_comments {
             plugins.set_leading(format!(
                 "\n{}\n{}\n",
-                "// Plugin aliases - can be used to change the implementation of Zellij",
+                "// Plugin aliases - can be used to change the implementation of vc-frame",
                 "// changing these requires a restart to take effect",
             ));
         }
@@ -4995,10 +5068,7 @@ impl PluginAliases {
     }
 }
 
-pub fn load_plugins_to_kdl(
-    background_plugins: &HashSet<RunPluginOrAlias>,
-    add_comments: bool,
-) -> KdlNode {
+pub fn load_plugins_to_kdl(background_plugins: &[RunPluginOrAlias], add_comments: bool) -> KdlNode {
     let mut load_plugins = KdlNode::new("load_plugins");
     let mut load_plugins_children = KdlDocument::new();
     for run_plugin_or_alias in background_plugins.iter() {
@@ -5025,20 +5095,20 @@ pub fn load_plugins_to_kdl(
                 .as_ref()
                 .map(|c| c.inner().clone()),
         };
-        if let Some(configuration) = configuration {
-            if !configuration.is_empty() {
-                has_children = true;
-                for (config_key, config_value) in configuration {
-                    let mut node = KdlNode::new(config_key.to_owned());
-                    if config_value == "true" {
-                        node.push(KdlValue::Bool(true));
-                    } else if config_value == "false" {
-                        node.push(KdlValue::Bool(false));
-                    } else {
-                        node.push(config_value.to_string());
-                    }
-                    background_plugin_children.nodes_mut().push(node);
+        if let Some(configuration) = configuration
+            && !configuration.is_empty()
+        {
+            has_children = true;
+            for (config_key, config_value) in configuration {
+                let mut node = KdlNode::new(config_key.to_owned());
+                if config_value == "true" {
+                    node.push(KdlValue::Bool(true));
+                } else if config_value == "false" {
+                    node.push(KdlValue::Bool(false));
+                } else {
+                    node.push(config_value.to_string());
                 }
+                background_plugin_children.nodes_mut().push(node);
             }
         }
         if has_children {
@@ -5061,10 +5131,8 @@ pub fn load_plugins_to_kdl(
     load_plugins
 }
 
-fn load_plugins_from_kdl(
-    kdl_load_plugins: &KdlNode,
-) -> Result<HashSet<RunPluginOrAlias>, ConfigError> {
-    let mut load_plugins: HashSet<RunPluginOrAlias> = HashSet::new();
+fn load_plugins_from_kdl(kdl_load_plugins: &KdlNode) -> Result<Vec<RunPluginOrAlias>, ConfigError> {
+    let mut load_plugins: Vec<RunPluginOrAlias> = Vec::new();
     if let Some(kdl_load_plugins) = kdl_children_nodes!(kdl_load_plugins) {
         for plugin_block in kdl_load_plugins {
             let url_node = plugin_block.name();
@@ -5086,7 +5154,9 @@ fn load_plugins_from_kdl(
                 )
             })?
             .with_initial_cwd(cwd);
-            load_plugins.insert(run_plugin_or_alias);
+            if !load_plugins.contains(&run_plugin_or_alias) {
+                load_plugins.push(run_plugin_or_alias);
+            }
         }
     }
     Ok(load_plugins)
@@ -5284,10 +5354,15 @@ impl Themes {
                         "list_selected",
                     )
                     .map(|maybe_style| maybe_style.unwrap_or(DEFAULT_STYLES.list_selected))?,
+                    // Like every other surface, an omitted frame_unselected
+                    // falls back to the fork default (explicit DIM baseline) —
+                    // leaving it None would hand unfocused frames to the
+                    // terminal's default foreground.
                     frame_unselected: Themes::style_declaration_from_node(
                         theme_config,
                         "frame_unselected",
-                    )?,
+                    )
+                    .map(|maybe_style| maybe_style.or(DEFAULT_STYLES.frame_unselected))?,
                     frame_selected: Themes::style_declaration_from_node(
                         theme_config,
                         "frame_selected",
@@ -5357,10 +5432,10 @@ impl Themes {
         {
             let entry = entry.map_err(|e| ConfigError::IoPath(e, path_to_theme_dir.clone()))?;
             let path = entry.path();
-            if let Some(extension) = path.extension() {
-                if extension == "kdl" {
-                    themes = themes.merge(Themes::from_path(path)?);
-                }
+            if let Some(extension) = path.extension()
+                && extension == "kdl"
+            {
+                themes = themes.merge(Themes::from_path(path)?);
             }
         }
         Ok(themes)
@@ -5604,30 +5679,29 @@ impl SessionInfo {
                     let mut history = vec![];
                     if let Some(history_node) =
                         client_node.children().and_then(|c| c.get("history"))
+                        && let Some(history_children) = history_node.children()
                     {
-                        if let Some(history_children) = history_node.children() {
-                            for pane_id_node in history_children.nodes() {
-                                if pane_id_node.name().value() == "pane_id" {
-                                    let pane_type = pane_id_node
-                                        .entries()
-                                        .iter()
-                                        .find(|e| e.name().map(|n| n.value()) == Some("type"))
-                                        .and_then(|e| e.value().as_string());
-                                    let id = pane_id_node
-                                        .entries()
-                                        .iter()
-                                        .find(|e| e.name().is_none())
-                                        .and_then(|e| e.value().as_i64())
-                                        .map(|i| i as u32);
-                                    if let (Some(pane_type), Some(id)) = (pane_type, id) {
-                                        let pane_id = match pane_type {
-                                            "terminal" => Some(PaneId::Terminal(id)),
-                                            "plugin" => Some(PaneId::Plugin(id)),
-                                            _ => None,
-                                        };
-                                        if let Some(pane_id) = pane_id {
-                                            history.push(pane_id);
-                                        }
+                        for pane_id_node in history_children.nodes() {
+                            if pane_id_node.name().value() == "pane_id" {
+                                let pane_type = pane_id_node
+                                    .entries()
+                                    .iter()
+                                    .find(|e| e.name().map(|n| n.value()) == Some("type"))
+                                    .and_then(|e| e.value().as_string());
+                                let id = pane_id_node
+                                    .entries()
+                                    .iter()
+                                    .find(|e| e.name().is_none())
+                                    .and_then(|e| e.value().as_i64())
+                                    .map(|i| i as u32);
+                                if let (Some(pane_type), Some(id)) = (pane_type, id) {
+                                    let pane_id = match pane_type {
+                                        "terminal" => Some(PaneId::Terminal(id)),
+                                        "plugin" => Some(PaneId::Plugin(id)),
+                                        _ => None,
+                                    };
+                                    if let Some(pane_id) = pane_id {
+                                        history.push(pane_id);
                                     }
                                 }
                             }
@@ -5777,7 +5851,7 @@ impl std::fmt::Display for SessionInfo {
 impl TabInfo {
     pub fn decode_from_kdl(kdl_document: &KdlDocument) -> Result<Self, String> {
         macro_rules! int_node {
-            ($name:expr, $type:ident) => {{
+            ($name:expr_2021, $type:ident) => {{
                 kdl_document
                     .get($name)
                     .and_then(|n| n.entries().iter().next())
@@ -5787,7 +5861,7 @@ impl TabInfo {
             }};
         }
         macro_rules! string_node {
-            ($name:expr) => {{
+            ($name:expr_2021) => {{
                 kdl_document
                     .get($name)
                     .and_then(|n| n.entries().iter().next())
@@ -5797,7 +5871,7 @@ impl TabInfo {
             }};
         }
         macro_rules! optional_string_node {
-            ($name:expr) => {{
+            ($name:expr_2021) => {{
                 kdl_document
                     .get($name)
                     .and_then(|n| n.entries().iter().next())
@@ -5806,7 +5880,7 @@ impl TabInfo {
             }};
         }
         macro_rules! optional_int_node {
-            ($name:expr, $type:ident) => {{
+            ($name:expr_2021, $type:ident) => {{
                 kdl_document
                     .get($name)
                     .and_then(|n| n.entries().iter().next())
@@ -5815,7 +5889,7 @@ impl TabInfo {
             }};
         }
         macro_rules! bool_node {
-            ($name:expr) => {{
+            ($name:expr_2021) => {{
                 kdl_document
                     .get($name)
                     .and_then(|n| n.entries().iter().next())
@@ -5962,14 +6036,12 @@ impl PaneManifest {
     pub fn decode_from_kdl(kdl_doucment: &KdlDocument) -> Self {
         let mut panes: HashMap<usize, Vec<PaneInfo>> = HashMap::new();
         for node in kdl_doucment.nodes() {
-            if node.name().to_string() == "pane" {
-                if let Some(pane_document) = node.children() {
-                    if let Ok((tab_position, pane_info)) = PaneInfo::decode_from_kdl(pane_document)
-                    {
-                        let panes_in_tab_position = panes.entry(tab_position).or_default();
-                        panes_in_tab_position.push(pane_info);
-                    }
-                }
+            if node.name().to_string() == "pane"
+                && let Some(pane_document) = node.children()
+                && let Ok((tab_position, pane_info)) = PaneInfo::decode_from_kdl(pane_document)
+            {
+                let panes_in_tab_position = panes.entry(tab_position).or_default();
+                panes_in_tab_position.push(pane_info);
             }
         }
         PaneManifest { panes }
@@ -5997,7 +6069,7 @@ impl PaneInfo {
     pub fn decode_from_kdl(kdl_document: &KdlDocument) -> Result<(usize, Self), String> {
         // usize is the tab position
         macro_rules! int_node {
-            ($name:expr, $type:ident) => {{
+            ($name:expr_2021, $type:ident) => {{
                 kdl_document
                     .get($name)
                     .and_then(|n| n.entries().iter().next())
@@ -6007,7 +6079,7 @@ impl PaneInfo {
             }};
         }
         macro_rules! optional_int_node {
-            ($name:expr, $type:ident) => {{
+            ($name:expr_2021, $type:ident) => {{
                 kdl_document
                     .get($name)
                     .and_then(|n| n.entries().iter().next())
@@ -6016,7 +6088,7 @@ impl PaneInfo {
             }};
         }
         macro_rules! bool_node {
-            ($name:expr) => {{
+            ($name:expr_2021) => {{
                 kdl_document
                     .get($name)
                     .and_then(|n| n.entries().iter().next())
@@ -6025,7 +6097,7 @@ impl PaneInfo {
             }};
         }
         macro_rules! string_node {
-            ($name:expr) => {{
+            ($name:expr_2021) => {{
                 kdl_document
                     .get($name)
                     .and_then(|n| n.entries().iter().next())
@@ -6035,7 +6107,7 @@ impl PaneInfo {
             }};
         }
         macro_rules! optional_string_node {
-            ($name:expr) => {{
+            ($name:expr_2021) => {{
                 kdl_document
                     .get($name)
                     .and_then(|n| n.entries().iter().next())
@@ -6113,21 +6185,21 @@ impl PaneInfo {
     pub fn encode_to_kdl(&self) -> KdlDocument {
         let mut kdl_doucment = KdlDocument::new();
         macro_rules! int_node {
-            ($name:expr, $val:expr) => {{
+            ($name:expr_2021, $val:expr_2021) => {{
                 let mut att = KdlNode::new($name);
                 att.push($val as i64);
                 kdl_doucment.nodes_mut().push(att);
             }};
         }
         macro_rules! bool_node {
-            ($name:expr, $val:expr) => {{
+            ($name:expr_2021, $val:expr_2021) => {{
                 let mut att = KdlNode::new($name);
                 att.push($val);
                 kdl_doucment.nodes_mut().push(att);
             }};
         }
         macro_rules! string_node {
-            ($name:expr, $val:expr) => {{
+            ($name:expr_2021, $val:expr_2021) => {{
                 let mut att = KdlNode::new($name);
                 att.push($val);
                 kdl_doucment.nodes_mut().push(att);
@@ -6461,6 +6533,30 @@ fn keybinds_to_string_with_multiple_actions() {
 }
 
 #[test]
+fn keybind_copy_pane_scrollback_is_bindable_and_serializable() {
+    let fake_config = r#"
+        keybinds {
+            pane {
+                bind "y" { CopyPaneScrollback; }
+            }
+        }"#;
+    let document: KdlDocument = fake_config.parse().unwrap();
+    let deserialized = Keybinds::from_kdl(
+        document.get("keybinds").unwrap(),
+        Default::default(),
+        &Default::default(),
+    )
+    .unwrap();
+    let clear_defaults = true;
+    let serialized = Keybinds::to_kdl(&deserialized, clear_defaults).to_string();
+
+    assert!(
+        serialized.contains("CopyPaneScrollback"),
+        "copy-current-pane keybind action must survive KDL roundtrip: {serialized}"
+    );
+}
+
+#[test]
 fn keybinds_to_string_with_all_actions() {
     let fake_config = r#"
         keybinds {
@@ -6535,7 +6631,7 @@ fn keybinds_to_string_with_all_actions() {
                 }
                 bind "Alt t" { Detach; }
                 bind "Alt u" {
-                    LaunchOrFocusPlugin "zellij:session-manager"{
+                    LaunchOrFocusPlugin "vc-frame:session-manager"{
                         floating true;
                         move_to_focused_tab true;
                         skip_plugin_cache true;
@@ -6544,7 +6640,7 @@ fn keybinds_to_string_with_all_actions() {
                     };
                 }
                 bind "Alt v" {
-                    LaunchOrFocusPlugin "zellij:session-manager"{
+                    LaunchOrFocusPlugin "vc-frame:session-manager"{
                         in_place true;
                         move_to_focused_tab true;
                         skip_plugin_cache true;
@@ -6553,7 +6649,7 @@ fn keybinds_to_string_with_all_actions() {
                     };
                 }
                 bind "Alt w" {
-                    LaunchPlugin "zellij:session-manager" {
+                    LaunchPlugin "vc-frame:session-manager" {
                         floating true;
                         skip_plugin_cache true;
                         config_key_1 "config_value_1";
@@ -6561,7 +6657,7 @@ fn keybinds_to_string_with_all_actions() {
                     };
                 }
                 bind "Alt x" {
-                    LaunchPlugin "zellij:session-manager"{
+                    LaunchPlugin "vc-frame:session-manager"{
                         in_place true;
                         skip_plugin_cache true;
                         config_key_1 "config_value_1";
@@ -6580,7 +6676,7 @@ fn keybinds_to_string_with_all_actions() {
                 bind "Ctrl Alt i" { BreakPaneLeft; }
                 bind "Ctrl Alt i" { BreakPaneLeft; }
                 bind "Ctrl Alt j" {
-                    MessagePlugin "zellij:session-manager"{
+                    MessagePlugin "vc-frame:session-manager"{
                         name "message_name";
                         payload "message_payload";
                         cwd "/tmp";
@@ -6685,7 +6781,7 @@ fn keybinds_to_string_with_multiple_multiline_actions() {
                 bind "Ctrl n" {
                     NewPane
                     SwitchToMode "Locked"
-                    MessagePlugin "zellij:session-manager"{
+                    MessagePlugin "vc-frame:session-manager"{
                         name "message_name";
                         payload "message_payload";
                         cwd "/tmp";
@@ -6943,15 +7039,15 @@ fn themes_to_string_with_multiple_theme_definitions() {
 fn plugins_to_string() {
     let fake_config = r##"
         plugins {
-            tab-bar location="zellij:tab-bar"
-            status-bar location="zellij:status-bar"
-            strider location="zellij:strider"
-            compact-bar location="zellij:compact-bar"
-            session-manager location="zellij:session-manager"
-            welcome-screen location="zellij:session-manager" {
+            tab-bar location="vc-frame:tab-bar"
+            status-bar location="vc-frame:status-bar"
+            strider location="vc-frame:strider"
+            compact-bar location="vc-frame:compact-bar"
+            session-manager location="vc-frame:session-manager"
+            welcome-screen location="vc-frame:session-manager" {
                 welcome_screen true
             }
-            filepicker location="zellij:strider" {
+            filepicker location="vc-frame:strider" {
                 cwd "/"
             }
         }"##;

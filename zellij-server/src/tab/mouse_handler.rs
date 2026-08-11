@@ -5,18 +5,60 @@ use zellij_utils::input::mouse::{MouseEvent, MouseEventType};
 use zellij_utils::pane_size::PaneGeom;
 use zellij_utils::position::Position;
 
+use crate::ClientId;
 use crate::background_jobs::BackgroundJob;
 use crate::panes::PaneId;
 use crate::plugins::PluginInstruction;
-use crate::ClientId;
 
 use super::{Pane, Tab};
+
+/// Leave signal for plugins: out-of-bounds Hover so they can drop row
+/// highlights (session-manager rail, strider ignores line < 0, etc.).
+fn plugin_hover_leave_event() -> MouseEvent {
+    MouseEvent::new_buttonless_motion(Position::new(-1, 0))
+}
+
+/// Pure UpdateHover policy — no Tab, no focus steal.
+///
+/// `focus_follows_mouse` is intentionally out of this path: hover highlights
+/// on unfocused plugins (SESSIONS rail) must not re-focus panes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HoverUpdatePolicy {
+    /// Drop chrome/plugin hover on the previous unfocused target.
+    clear_previous_unfocused: bool,
+    /// Drop hover on the focused pane when the cursor left it.
+    clear_active_on_leave: bool,
+    /// Deliver Motion hover to the pane under the cursor when it is not active.
+    deliver_unfocused_hover: bool,
+}
+
+fn hover_update_policy(
+    pane_under_cursor: Option<PaneId>,
+    previous_unfocused_hover: Option<PaneId>,
+    active_pane: Option<PaneId>,
+    has_position: bool,
+) -> HoverUpdatePolicy {
+    HoverUpdatePolicy {
+        clear_previous_unfocused: previous_unfocused_hover.is_some()
+            && previous_unfocused_hover != pane_under_cursor,
+        clear_active_on_leave: active_pane.is_some()
+            && active_pane != pane_under_cursor
+            && previous_unfocused_hover != active_pane,
+        deliver_unfocused_hover: has_position
+            && pane_under_cursor.is_some()
+            && pane_under_cursor != active_pane,
+    }
+}
 
 /// Remove the hover pane tracking for `client_id` and clear the hover position
 /// on the previously hovered pane (if any).  Returns `true` if a pane was
 /// cleared.
 fn clear_hover_for_client(tab: &mut Tab, client_id: ClientId) -> bool {
     if let Some(prev_pid) = tab.mouse_hover_pane_id.remove(&client_id) {
+        // Plugin panes only see hover via mouse_event — notify leave first.
+        if let Some(pane) = tab.get_pane_with_id(prev_pid) {
+            let _ = pane.mouse_event(&plugin_hover_leave_event(), client_id);
+        }
         if let Some(pane) = tab.get_pane_with_id_mut(prev_pid) {
             pane.set_hover_position(None);
         }
@@ -97,6 +139,10 @@ enum MouseAction {
     GroupToggle(PaneId),
     GroupAdd(PaneId),
     Ungroup,
+    /// Shift-modified click on a plugin highlight: open the target outside
+    /// the process (system editor / browser). Miss is a quiet no-op — the
+    /// Shift gesture never falls through to grouping or resize.
+    HighlightOpenExternal(PaneId),
     StartResize {
         pane_id: PaneId,
         edge: PaneEdge,
@@ -685,6 +731,28 @@ impl MouseHandler {
                 // No highlight hit — fall through to pane grouping
                 Ok(MouseEffect::group_toggle(pane_id))
             },
+            MouseAction::HighlightOpenExternal(pane_id) => {
+                if let Some(pane) = tab.get_pane_with_id_mut(pane_id) {
+                    let relative_position = pane.relative_position(&event.position);
+                    if let Some((hit_plugin_id, pattern, matched_string, mut context)) =
+                        pane.plugin_highlight_at(&relative_position)
+                    {
+                        context.insert("vc_open_external".to_owned(), "true".to_owned());
+                        let _ = tab
+                            .senders
+                            .send_to_plugin(PluginInstruction::HighlightClicked {
+                                plugin_id: hit_plugin_id,
+                                client_id,
+                                pane_id,
+                                pattern,
+                                matched_string,
+                                context,
+                            });
+                        return Ok(MouseEffect::state_changed());
+                    }
+                }
+                Ok(MouseEffect::default())
+            },
             MouseAction::GroupAdd(pane_id) => Ok(MouseEffect::group_add(pane_id)),
             MouseAction::Ungroup => Ok(MouseEffect::ungroup()),
             MouseAction::StartResize {
@@ -745,13 +813,25 @@ impl MouseHandler {
                 }
             },
             MouseAction::UpdateSelection { position } => {
-                if let Some(pane_id_with_selection) = tab.selecting_with_mouse_in_pane {
-                    if let Some(pane_with_selection) =
+                let last_screen_row = tab.display_area.borrow().rows.saturating_sub(1) as isize;
+                if let Some(pane_id_with_selection) = tab.selecting_with_mouse_in_pane
+                    && let Some(pane_with_selection) =
                         tab.get_pane_with_id_mut(pane_id_with_selection)
+                {
+                    let mut relative_position = pane_with_selection.relative_position(&position);
+                    // when the pane touches the screen edge the cursor can never
+                    // report a position past the pane's content, so dragging
+                    // against the first/last screen row must count as crossing
+                    // the pane edge for selection autoscroll to engage
+                    let content_rows = pane_with_selection.get_content_rows() as isize;
+                    if position.line() <= 0 && relative_position.line.0 == 0 {
+                        relative_position.change_line(-1);
+                    } else if position.line() >= last_screen_row
+                        && relative_position.line.0 == content_rows.saturating_sub(1)
                     {
-                        let relative_position = pane_with_selection.relative_position(&position);
-                        pane_with_selection.update_selection(&relative_position, client_id);
+                        relative_position.change_line(content_rows);
                     }
+                    pane_with_selection.update_selection(&relative_position, client_id);
                 }
                 Ok(MouseEffect::default())
             },
@@ -813,10 +893,10 @@ impl MouseHandler {
             let active_pane_id = tab
                 .get_active_pane_id(client_id)
                 .ok_or_else(|| anyhow!("Failed to find active pane"))?;
-            if let Some(pane_id) = pane_id_at_position {
-                if pane_id != active_pane_id {
-                    Self::focus_pane_at(tab, &position, client_id).with_context(err_context)?;
-                }
+            if let Some(pane_id) = pane_id_at_position
+                && pane_id != active_pane_id
+            {
+                Self::focus_pane_at(tab, &position, client_id).with_context(err_context)?;
             }
         }
         Ok(MouseEffect::state_changed())
@@ -838,6 +918,16 @@ impl MouseHandler {
         if let Some(pane_at_position) = Self::unselectable_pane_at_position(tab, &position) {
             let relative_position = pane_at_position.relative_position(&position);
             pane_at_position.start_selection(&relative_position, client_id);
+        } else if let Some(active_pane) = tab.get_active_pane_mut(client_id)
+            && matches!(active_pane.pid(), PaneId::Plugin(_))
+            && active_pane.contains(&position)
+        {
+            // A selectable plugin pane (e.g. the session rail) must receive
+            // the press that focused it. Without this, the first click only
+            // moves focus and is swallowed — the user has to click twice,
+            // while hover highlighting already promised the click would land.
+            let relative_position = active_pane.relative_position(&position);
+            active_pane.start_selection(&relative_position, client_id);
         }
 
         if tab.floating_panes.panes_are_visible() {
@@ -905,11 +995,11 @@ impl MouseHandler {
             let relative_position = pane.relative_position(&click_event.position);
             let mut event_for_pane = click_event;
             event_for_pane.position = relative_position;
-            if let Some(mouse_event) = pane.mouse_event(&event_for_pane, client_id) {
-                if !pane.position_is_on_frame(&click_event.position) {
-                    tab.write_to_active_terminal(&None, mouse_event.into_bytes(), false, client_id)
-                        .with_context(err_context)?;
-                }
+            if let Some(mouse_event) = pane.mouse_event(&event_for_pane, client_id)
+                && !pane.position_is_on_frame(&click_event.position)
+            {
+                tab.write_to_active_terminal(&None, mouse_event.into_bytes(), false, client_id)
+                    .with_context(err_context)?;
             }
         } else {
             // Terminal does not want mouse — start text selection
@@ -941,9 +1031,7 @@ impl MouseHandler {
             let mut relative_position = pane_with_selection.relative_position(&position);
 
             relative_position.change_column(
-                (relative_position.column())
-                    .max(0)
-                    .min(pane_with_selection.get_content_columns()),
+                (relative_position.column()).min(pane_with_selection.get_content_columns()),
             );
 
             relative_position.change_line(
@@ -968,9 +1056,15 @@ impl MouseHandler {
                             .with_context(err_context)?;
                     }
                 }
-                tab.selecting_with_mouse_in_pane = None;
             }
         }
+        // Clear the selection latch on every release path — not only when the
+        // selection ended in-pane. If the pane's application enabled mouse
+        // tracking between press and release, the release is forwarded to the
+        // terminal above; if the selecting pane closed, the lookup misses.
+        // Leaving the latch set makes determine_mouse_action swallow every
+        // subsequent press in this tab.
+        tab.selecting_with_mouse_in_pane = None;
 
         if leave_clipboard_message {
             Ok(MouseEffect::leave_clipboard_message())
@@ -1072,11 +1166,18 @@ impl MouseHandler {
     fn execute_update_hover(
         tab: &mut Tab,
         pane_id: Option<PaneId>,
-        _position: Option<Position>,
+        position: Option<Position>,
         client_id: ClientId,
     ) -> Result<MouseEffect> {
         let mut should_render = false;
         let previous_hover_pane_id = tab.mouse_hover_pane_id.get(&client_id).copied();
+        let active_pane_id = tab.get_active_pane_id(client_id);
+        let policy = hover_update_policy(
+            pane_id,
+            previous_hover_pane_id,
+            active_pane_id,
+            position.is_some(),
+        );
         match pane_id {
             Some(pid) => {
                 if let Some(pane) = tab.get_pane_with_id(pid) {
@@ -1097,16 +1198,47 @@ impl MouseHandler {
             },
         }
 
-        // Clear hover position on previously hovered pane when the hovered
-        // pane has changed (or cursor left all panes).  Hover position is
-        // intentionally not set on unfocused panes so that hover-only plugin
-        // highlights only activate on the focused pane.
-        if let Some(prev_pane_id) = previous_hover_pane_id {
-            if Some(prev_pane_id) != pane_id {
-                if let Some(pane) = tab.get_pane_with_id_mut(prev_pane_id) {
-                    pane.set_hover_position(None);
-                }
+        // Clear previous unfocused hover target (terminal chrome + plugin leave).
+        if policy.clear_previous_unfocused
+            && let Some(prev_pane_id) = previous_hover_pane_id
+        {
+            if let Some(pane) = tab.get_pane_with_id(prev_pane_id) {
+                let _ = pane.mouse_event(&plugin_hover_leave_event(), client_id);
             }
+            if let Some(pane) = tab.get_pane_with_id_mut(prev_pane_id)
+                && pane.set_hover_position(None)
+            {
+                should_render = true;
+            }
+        }
+
+        // Focused path never stores mouse_hover_pane_id (SendToTerminal clears
+        // it). Without an explicit leave, plugin highlights (session rail)
+        // stick after the cursor exits the focused pane.
+        if policy.clear_active_on_leave
+            && let Some(active) = active_pane_id
+        {
+            if let Some(pane) = tab.get_pane_with_id(active) {
+                let _ = pane.mouse_event(&plugin_hover_leave_event(), client_id);
+            }
+            if let Some(pane) = tab.get_pane_with_id_mut(active)
+                && pane.set_hover_position(None)
+            {
+                should_render = true;
+            }
+        }
+
+        // Deliver hover to *unfocused* panes so plugins can highlight without
+        // a prior click-to-focus (Session Canvas SESSIONS rail). Does not
+        // change focus. Terminal apps do not receive these bytes — we only
+        // invoke mouse_event for the plugin instruction path / ignore return.
+        if policy.deliver_unfocused_hover
+            && let (Some(pid), Some(pos)) = (pane_id, position)
+            && let Some(pane) = tab.get_pane_with_id(pid)
+        {
+            let relative = pane.relative_position(&pos);
+            let motion = MouseEvent::new_buttonless_motion(relative);
+            let _ = pane.mouse_event(&motion, client_id);
         }
 
         if tab.mouse_help_text_visible.remove(&client_id).is_some() {
@@ -1140,11 +1272,11 @@ impl MouseHandler {
             let relative_position = pane.relative_position(&event.position);
             let mut event_for_pane = event;
             event_for_pane.position = relative_position;
-            if let Some(mouse_event) = pane.mouse_event(&event_for_pane, client_id) {
-                if !pane.position_is_on_frame(&event.position) {
-                    tab.write_to_active_terminal(&None, mouse_event.into_bytes(), false, client_id)
-                        .with_context(err_context)?;
-                }
+            if let Some(mouse_event) = pane.mouse_event(&event_for_pane, client_id)
+                && !pane.position_is_on_frame(&event.position)
+            {
+                tab.write_to_active_terminal(&None, mouse_event.into_bytes(), false, client_id)
+                    .with_context(err_context)?;
             }
             if clear_hover_for_client(tab, client_id) {
                 should_render = true;
@@ -1154,14 +1286,13 @@ impl MouseHandler {
             // Skip when the terminal application has mouse tracking enabled,
             // because hover highlights are suppressed in that case and the
             // update would only trigger unnecessary re-renders.
-            if event.event_type == MouseEventType::Motion {
-                if let Some(pane) = tab.get_pane_with_id_mut(pane_id) {
-                    if !pane.terminal_emulator_wants_mouse() {
-                        let relative = pane.relative_position(&event.position);
-                        if pane.set_hover_position(Some(relative)) {
-                            should_render = true;
-                        }
-                    }
+            if event.event_type == MouseEventType::Motion
+                && let Some(pane) = tab.get_pane_with_id_mut(pane_id)
+                && !pane.terminal_emulator_wants_mouse()
+            {
+                let relative = pane.relative_position(&event.position);
+                if pane.set_hover_position(Some(relative)) {
+                    should_render = true;
                 }
             }
 
@@ -1232,15 +1363,14 @@ impl MouseHandler {
             let is_left_press = event.left && event.event_type == MouseEventType::Press;
             let is_left_motion = event.left && event.event_type == MouseEventType::Motion;
 
-            if is_left_press {
-                if let Some(pane_id) = ctx.pane_id_at_position {
-                    return Ok(MouseAction::GroupToggle(pane_id));
+            if is_left_press && let Some(pane_id) = ctx.pane_id_at_position {
+                if event.shift {
+                    return Ok(MouseAction::HighlightOpenExternal(pane_id));
                 }
+                return Ok(MouseAction::GroupToggle(pane_id));
             }
-            if is_left_motion {
-                if let Some(pane_id) = ctx.pane_id_at_position {
-                    return Ok(MouseAction::GroupAdd(pane_id));
-                }
+            if is_left_motion && let Some(pane_id) = ctx.pane_id_at_position {
+                return Ok(MouseAction::GroupAdd(pane_id));
             }
             if event.right {
                 return Ok(MouseAction::Ungroup);
@@ -1264,6 +1394,18 @@ impl MouseHandler {
                 if event.wheel_down {
                     return Ok(MouseAction::ScrollDown { pane_id, lines: 3 });
                 }
+            }
+            return Ok(MouseAction::NoAction);
+        }
+
+        // Ctrl+Shift+click mirrors Alt+Shift+click as the external-open
+        // gesture: some host terminals swallow one combo but forward the
+        // other, so both must resolve to the same action.
+        let is_ctrl_shift_left_press =
+            event.ctrl && event.shift && event.left && event.event_type == MouseEventType::Press;
+        if is_ctrl_shift_left_press {
+            if let Some(pane_id) = ctx.pane_id_at_position {
+                return Ok(MouseAction::HighlightOpenExternal(pane_id));
             }
             return Ok(MouseAction::NoAction);
         }
@@ -1352,7 +1494,12 @@ impl MouseHandler {
                 }
             }
 
-            if ctx.mouse_click_through && !ctx.focus_follows_mouse {
+            // Plugin panes are UI surfaces: a click on a list row must land
+            // in one click, never "first click focuses, second click acts" —
+            // that two-step lottery is exactly what made the session rail
+            // feel random depending on hover-focus timing.
+            let is_plugin_pane = matches!(details.pane_id, PaneId::Plugin(_));
+            if is_plugin_pane || (ctx.mouse_click_through && !ctx.focus_follows_mouse) {
                 return Ok(MouseAction::FocusPaneAndClickThrough {
                     pane_id: details.pane_id,
                     position: event.position,
@@ -1452,24 +1599,22 @@ impl MouseHandler {
         let floating_panes_are_visible = tab.floating_panes.panes_are_visible();
         if floating_panes_are_visible {
             if let Ok(Some(clicked_pane_id)) = tab.floating_panes.get_pane_id_at(point, true) {
-                if let Some(pane) = tab.floating_panes.get_pane_mut(clicked_pane_id) {
-                    if !pane.selectable() {
-                        return Some(pane);
-                    }
-                }
-            } else if let Ok(Some(clicked_pane_id)) = tab.get_pane_id_at(point, false) {
-                if let Some(pane) = tab.tiled_panes.get_pane_mut(clicked_pane_id) {
-                    if !pane.selectable() {
-                        return Some(pane);
-                    }
-                }
-            }
-        } else if let Ok(Some(clicked_pane_id)) = tab.get_pane_id_at(point, false) {
-            if let Some(pane) = tab.tiled_panes.get_pane_mut(clicked_pane_id) {
-                if !pane.selectable() {
+                if let Some(pane) = tab.floating_panes.get_pane_mut(clicked_pane_id)
+                    && !pane.selectable()
+                {
                     return Some(pane);
                 }
+            } else if let Ok(Some(clicked_pane_id)) = tab.get_pane_id_at(point, false)
+                && let Some(pane) = tab.tiled_panes.get_pane_mut(clicked_pane_id)
+                && !pane.selectable()
+            {
+                return Some(pane);
             }
+        } else if let Ok(Some(clicked_pane_id)) = tab.get_pane_id_at(point, false)
+            && let Some(pane) = tab.tiled_panes.get_pane_mut(clicked_pane_id)
+            && !pane.selectable()
+        {
+            return Some(pane);
         }
         None
     }
@@ -1478,16 +1623,15 @@ impl MouseHandler {
         let err_context =
             || format!("failed to focus pane at position {point:?} for client {client_id}");
 
-        if tab.floating_panes.panes_are_visible() {
-            if let Some(clicked_pane) = tab
+        if tab.floating_panes.panes_are_visible()
+            && let Some(clicked_pane) = tab
                 .floating_panes
                 .get_pane_id_at(point, true)
                 .with_context(err_context)?
-            {
-                tab.floating_panes.focus_pane(clicked_pane, client_id);
-                tab.set_pane_active_at(clicked_pane);
-                return Ok(());
-            }
+        {
+            tab.floating_panes.focus_pane(clicked_pane, client_id);
+            tab.set_pane_active_at(clicked_pane);
+            return Ok(());
         }
         if tab.floating_panes.has_pinned_panes() {
             let search_selectable = false;
@@ -1568,11 +1712,11 @@ impl MouseHandler {
                 }
             } else {
                 pane.scroll_down(lines, client_id);
-                if !pane.is_scrolled() {
-                    if let PaneId::Terminal(pid) = pane.pid() {
-                        tab.process_pending_vte_events(pid)
-                            .with_context(err_context)?;
-                    }
+                if !pane.is_scrolled()
+                    && let PaneId::Terminal(pid) = pane.pid()
+                {
+                    tab.process_pending_vte_events(pid)
+                        .with_context(err_context)?;
                 }
             }
         }
@@ -1662,14 +1806,13 @@ impl MouseHandler {
             {
                 return Ok(tab.floating_panes.get_pane_mut(pane_id));
             }
-        } else if tab.floating_panes.has_pinned_panes() {
-            if let Some(pane_id) = tab
+        } else if tab.floating_panes.has_pinned_panes()
+            && let Some(pane_id) = tab
                 .floating_panes
                 .get_pinned_pane_id_at(point, search_selectable)
                 .with_context(err_context)?
-            {
-                return Ok(tab.floating_panes.get_pane_mut(pane_id));
-            }
+        {
+            return Ok(tab.floating_panes.get_pane_mut(pane_id));
         }
         if let Some(pane_id) = tab
             .get_pane_id_at(point, search_selectable)
@@ -1689,5 +1832,76 @@ impl MouseHandler {
         if let Some(pane) = tab.get_pane_with_id_mut(pane_id) {
             pane.set_mouse_selection_support(selection_support);
         }
+    }
+}
+
+#[cfg(test)]
+mod hover_policy_tests {
+    use super::*;
+
+    const RAIL: PaneId = PaneId::Plugin(1);
+    const SHELL: PaneId = PaneId::Terminal(2);
+    const OTHER: PaneId = PaneId::Plugin(3);
+
+    #[test]
+    fn unfocused_rail_gets_hover_without_stealing_focus() {
+        // Cursor over rail while shell is focused → deliver hover, clear nothing on shell
+        // only if we also left shell... clear_active_on_leave is true when leaving shell.
+        let p = hover_update_policy(Some(RAIL), None, Some(SHELL), true);
+        assert!(
+            p.deliver_unfocused_hover,
+            "rail must receive hover while unfocused"
+        );
+        assert!(
+            p.clear_active_on_leave,
+            "leaving shell clears shell plugin hover if any"
+        );
+        assert!(!p.clear_previous_unfocused);
+        // Policy never mentions focus_follows_mouse — focus stays on SHELL.
+    }
+
+    #[test]
+    fn leave_rail_clears_previous_unfocused_highlight() {
+        let p = hover_update_policy(Some(SHELL), Some(RAIL), Some(SHELL), true);
+        assert!(p.clear_previous_unfocused);
+        assert!(
+            !p.deliver_unfocused_hover,
+            "shell is active — no unfocused path"
+        );
+        assert!(!p.clear_active_on_leave);
+    }
+
+    #[test]
+    fn leave_all_panes_clears_active_and_previous() {
+        let p = hover_update_policy(None, Some(RAIL), Some(SHELL), false);
+        assert!(p.clear_previous_unfocused);
+        assert!(p.clear_active_on_leave);
+        assert!(!p.deliver_unfocused_hover);
+    }
+
+    #[test]
+    fn focused_rail_does_not_use_unfocused_delivery() {
+        // Focused path is SendToTerminal, not UpdateHover delivery.
+        let p = hover_update_policy(Some(RAIL), None, Some(RAIL), true);
+        assert!(!p.deliver_unfocused_hover);
+        assert!(!p.clear_active_on_leave);
+        assert!(!p.clear_previous_unfocused);
+    }
+
+    #[test]
+    fn plugin_leave_event_is_out_of_bounds_motion() {
+        let ev = plugin_hover_leave_event();
+        assert_eq!(ev.event_type, MouseEventType::Motion);
+        assert!(!ev.left && !ev.right && !ev.middle);
+        assert_eq!(ev.position.line(), -1);
+        assert_eq!(ev.position.column(), 0);
+    }
+
+    #[test]
+    fn switching_unfocused_targets_clears_old_delivers_new() {
+        let p = hover_update_policy(Some(OTHER), Some(RAIL), Some(SHELL), true);
+        assert!(p.clear_previous_unfocused);
+        assert!(p.deliver_unfocused_hover);
+        assert!(p.clear_active_on_leave);
     }
 }

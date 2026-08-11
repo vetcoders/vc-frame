@@ -104,7 +104,6 @@ pub struct SearchResult {
 impl SearchResult {
     /// This is only used for Debug formatting Grid, which itself is only used
     /// for tests.
-    #[allow(clippy::ptr_arg)]
     pub(crate) fn mark_search_results_in_row(&self, row: &mut Cow<Row>, ridx: usize) {
         for s in &self.selections {
             if s.contains_row(ridx) {
@@ -308,10 +307,10 @@ impl SearchResult {
     }
 
     pub(crate) fn unset_active_selection_if_nonexistent(&mut self) {
-        if let Some(active_idx) = self.active {
-            if !self.selections.contains(&active_idx) {
-                self.active = None;
-            }
+        if let Some(active_idx) = self.active
+            && !self.selections.contains(&active_idx)
+        {
+            self.active = None;
         }
     }
 
@@ -331,22 +330,22 @@ impl SearchResult {
         self.adjust_selections_to_moved_viewport(grid_height);
 
         // Search the new line for our needle
-        if !self.needle.is_empty() {
-            if let Some(row) = viewport.front() {
-                let mut tail = Vec::new();
-                loop {
-                    let tail_idx = 1 + tail.len();
-                    if tail_idx < viewport.len() && !viewport[tail_idx].is_canonical {
-                        tail.push(&viewport[tail_idx]);
-                    } else {
-                        break;
-                    }
+        if !self.needle.is_empty()
+            && let Some(row) = viewport.front()
+        {
+            let mut tail = Vec::new();
+            loop {
+                let tail_idx = 1 + tail.len();
+                if tail_idx < viewport.len() && !viewport[tail_idx].is_canonical {
+                    tail.push(&viewport[tail_idx]);
+                } else {
+                    break;
                 }
-                let selections = self.search_row(0, row, &tail);
-                for selection in selections.iter().rev() {
-                    self.selections.insert(0, *selection);
-                    found_something = true;
-                }
+            }
+            let selections = self.search_row(0, row, &tail);
+            for selection in selections.iter().rev() {
+                self.selections.insert(0, *selection);
+                found_something = true;
             }
         }
         found_something
@@ -368,16 +367,16 @@ impl SearchResult {
         self.adjust_selections_to_moved_viewport(grid_height);
 
         // Search the new line for our needle
-        if !self.needle.is_empty() {
-            if let Some(row) = viewport.back() {
-                let tail: Vec<&Row> = lines_below.iter().take_while(|r| !r.is_canonical).collect();
-                let selections = self.search_row(viewport.len() - 1, row, &tail);
-                for selection in selections {
-                    // We are only interested in results that start in the this new row
-                    if selection.start.line() as usize == viewport.len() - 1 {
-                        self.selections.push(selection);
-                        found_something = true;
-                    }
+        if !self.needle.is_empty()
+            && let Some(row) = viewport.back()
+        {
+            let tail: Vec<&Row> = lines_below.iter().take_while(|r| !r.is_canonical).collect();
+            let selections = self.search_row(viewport.len() - 1, row, &tail);
+            for selection in selections {
+                // We are only interested in results that start in the this new row
+                if selection.start.line() as usize == viewport.len() - 1 {
+                    self.selections.push(selection);
+                    found_something = true;
                 }
             }
         }

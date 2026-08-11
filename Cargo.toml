@@ -1,9 +1,10 @@
 [package]
-name = "zellij"
+name = "vc-frame"
+autobins = false
 build = "src/build.rs"
 authors = ["Aram Drevekenin <aram@poor.dev>"]
-description = "A terminal workspace with batteries included"
-homepage = "https://zellij.dev"
+description = "VC Frame - vibecrafted terminal runtime"
+homepage = "https://github.com/vetcoders/vc-frame"
 include = ["src/**/*", "assets/layouts/*", "assets/config/*", "LICENSE.md", "README.md", "!**/*_test.*", "!**/tests/**/*"]
 # See 'workspace.package' for concrete values
 license.workspace = true
@@ -12,21 +13,29 @@ edition.workspace = true
 version.workspace = true
 rust-version.workspace = true
 
+[[bin]]
+name = "vc-frame"
+path = "src/main.rs"
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-zellij-client = { path = "zellij-client/", version = "0.45.2" }
-zellij-server = { path = "zellij-server/", version = "0.45.2" }
+zellij-client = { path = "zellij-client/", version = "0.47.3" }
+zellij-server = { path = "zellij-server/", version = "0.47.3" }
 zellij-utils = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 dialoguer = { workspace = true }
 humantime = { workspace = true }
 interprocess = { workspace = true }
+kdl = { workspace = true }
 log = { workspace = true }
 miette = { workspace = true }
 names = { workspace = true }
-suggest = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+serde = { workspace = true }
+tempfile = { workspace = true }
 thiserror = { workspace = true }
 isahc = { workspace = true }
 
@@ -37,7 +46,7 @@ nix = { workspace = true }
 embed-resource = "3"
 
 [dev-dependencies]
-insta = { version = "1.6.0", features = ["backtrace"] }
+insta = "1.48.0"
 ssh2 = "0.9.1"
 rand = "0.8.0"
 regex = "1.8.1"
@@ -58,6 +67,7 @@ members = [
     "default-plugins/multiple-select",
     "default-plugins/layout-manager",
     "default-plugins/link",
+    "default-plugins/vc-tab-title",
     "zellij-client",
     "zellij-server",
     "zellij-utils",
@@ -68,24 +78,24 @@ members = [
 ]
 
 [workspace.package]
-edition = "2021"
+edition = "2024"
 license = "MIT"
 repository = "https://github.com/zellij-org/zellij"
-version = "0.45.2"
+version = "0.47.3"
 # NOTE: When updating this, modify `channel` in `rust-toolchain.toml` accordingly
-rust-version = "1.92"
+rust-version = "1.95"
 
 [workspace.dependencies]
-ansi_term = { version = "0.12.1", default-features = false }
+ansi_term = { package = "nu-ansi-term", version = "0.50.3", default-features = false }
 anyhow = { version = "1.0.70", default-features = false, features = ["backtrace", "std"] }
 async-trait = { version = "0.1", default-features = false }
-clap = { version = "3.2.2", default-features = false, features = ["env", "derive", "color", "std", "suggestions"] }
+clap = { version = "3.2.2", default-features = false, features = ["env", "derive", "std", "suggestions"] }
 crossterm = { version = "0.28", default-features = false, features = ["windows"] }
 daemonize = { version = "0.5", default-features = false }
 dialoguer = { version = "0.10.4", default-features = false, features = ["password", "completion"] }
 humantime = { version = "2.1.0", default-features = false }
 interprocess = { version = "2.2", default-features = false, features = ["tokio"] }
-isahc = { version = "1.7.2", default-features = false, features = ["http2", "text-decoding"] }
+isahc = { version = "2.0.1", default-features = false, features = ["http2", "text-decoding", "native-tls", "tls-insecure"] }
 kdl = { version = "4.5.0", default-features = false, features = ["span"] }
 lazy_static = { version = "1.4.0", default-features = false }
 libc = { version = "0.2", default-features = false, features = ["std"] }
@@ -100,9 +110,9 @@ regex = { version = "1.5.5", default-features = false, features = ["perf", "std"
 serde = { version = "1.0", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1.0", default-features = false, features = ["std"] }
 signal-hook = { version = "0.3", default-features = false, features = ["iterator"] }
+lev_distance = "0.1.1"
 strum = { version = "0.27.2", default-features = false, features = ["std"] }
 strum_macros = { version = "0.27.2", default-features = false }
-suggest = { version = "0.4.0", default-features = false }
 tempfile = { version = "3.2.0", default-features = false }
 tokio = { version = "1.40", default-features = false, features = ["fs", "rt-multi-thread", "macros", "time", "process", "signal", "io-util", "io-std", "net"] }
 thiserror = { version = "1.0.40", default-features = false }
@@ -115,7 +125,7 @@ windows-sys = { version = "0.59", default-features = false }
 names = { version = "0.14.0", default-features = false }
 include_dir = { version = "0.7.3", default-features = false }
 sha2 = { version = "0.10", default-features = false }
-zellij-utils = { path = "zellij-utils/", version = "0.45.1" }
+zellij-utils = { path = "zellij-utils/", version = "0.47.3" }
 
 [profile.dev-opt]
 inherits = "dev"
@@ -132,10 +142,10 @@ codegen-units = 1
 depends = "$auto"
 license-file = ["LICENSE.md", "4"]
 assets = [
-  ["assets/man/zellij.1", "usr/share/man/man1/zellij.1", "644"],
-  ["target/release/zellij", "usr/bin/zellij", "755"],
-  ["GOVERNANCE.md", "usr/share/doc/zellij/GOVERNANCE.md", "644"],
-  ["README.md", "usr/share/doc/zellij/README.md", "644"],
+  ["assets/man/vc-frame.1", "usr/share/man/man1/vc-frame.1", "644"],
+  ["target/release/vc-frame", "usr/bin/vc-frame", "755"],
+  ["GOVERNANCE.md", "usr/share/doc/vc-frame/GOVERNANCE.md", "644"],
+  ["README.md", "usr/share/doc/vc-frame/README.md", "644"],
   ["assets/layouts/*", "usr/share/zellij/layouts/", "644"],
   ["assets/plugins/*", "usr/share/zellij/plugins/", "644"],
   ["assets/completions/zellij.bash", "usr/share/bash-completion/completions/zellij.bash", "644"],

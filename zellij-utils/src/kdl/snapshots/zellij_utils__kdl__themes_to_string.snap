@@ -1,5 +1,6 @@
 ---
 source: zellij-utils/src/kdl/mod.rs
+assertion_line: 6813
 expression: serialized.to_string()
 ---
 themes {
@@ -83,6 +84,14 @@ themes {
             emphasis_1 139 233 253
             emphasis_2 255 121 198
             emphasis_3 0
+        }
+        frame_unselected {
+            base 240
+            background 234
+            emphasis_0 244
+            emphasis_1 240
+            emphasis_2 16
+            emphasis_3 240
         }
         frame_highlight {
             base 255 184 108

@@ -2,7 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 use zellij_utils::channels;
-use zellij_utils::errors::{prelude::*, ContextType, PtyWriteContext};
+use zellij_utils::errors::{ContextType, PtyWriteContext, prelude::*};
 
 use crate::route::NotificationEnd;
 use crate::thread_bus::Bus;

@@ -1,10 +1,13 @@
 #[cfg(not(target_family = "wasm"))]
 use crate::consts::ASSET_MAP;
+// Feeds get_default_themes, which is cfg(not(test)) — test builds would
+// otherwise flag the import as dead.
+#[cfg(not(test))]
+use crate::consts::ZELLIJ_DEFAULT_THEMES;
 use crate::input::theme::Themes;
-#[allow(unused_imports)]
 use crate::{
-    cli::{CliArgs, CliOptions, Command, SessionCommand, Sessions},
-    consts::{FEATURES, VERSION, ZELLIJ_CACHE_DIR, ZELLIJ_DEFAULT_THEMES},
+    cli::{CliArgs, Command, SessionCommand, Sessions},
+    consts::{FEATURES, ZELLIJ_CACHE_DIR},
     data::LayoutInfo,
     errors::prelude::*,
     home::*,
@@ -286,11 +289,11 @@ pub struct Setup {
     pub dump_config: bool,
 
     /// Disables loading of configuration file at default location,
-    /// loads the defaults that zellij ships with
+    /// loads the defaults that vc-frame ships with
     #[clap(long, value_parser)]
     pub clean: bool,
 
-    /// Checks the configuration of zellij and displays
+    /// Checks the configuration of vc-frame and displays
     /// currently used directories
     #[clap(long, value_parser)]
     pub check: bool,
@@ -322,8 +325,8 @@ pub struct Setup {
     #[clap(long, value_name = "SHELL", value_parser)]
     pub generate_auto_start: Option<String>,
 
-    /// Install / refresh the Vibecrafted zellij layouts into the user's
-    /// `~/.config/zellij/layouts/` directory. Resolution order for the
+    /// Install / refresh the Vibecrafted layouts into the user's vc-frame
+    /// layout directory. Resolution order for the
     /// framework root: `--vibecrafted-root` flag → `$VIBECRAFTED_HOME` env →
     /// `which vibecrafted` walk-up. Idempotent.
     #[clap(long, value_parser)]
@@ -341,9 +344,9 @@ impl Setup {
     /// Merges options from the config file and the command line options
     /// into `[Options]`, the command line options superceeding the layout
     /// file options, superceeding the config file options:
-    /// 1. command line options (`zellij options`)
+    /// 1. command line options (`vc-frame options`)
     /// 2. layout options
-    ///    (`layout.kdl` / `zellij --layout`)
+    ///    (`layout.kdl` / `vc-frame --layout`)
     /// 3. config options (`config.kdl`)
     pub fn from_cli_args(
         cli_args: &CliArgs,
@@ -392,7 +395,7 @@ impl Setup {
             Ok(config_options)
         }
 
-        if let Some(Command::Setup(ref setup)) = &cli_args.command {
+        if let Some(Command::Setup(setup)) = &cli_args.command {
             setup
                 .from_cli_with_options(cli_args, &config_options)
                 .map_or_else(
@@ -506,7 +509,30 @@ impl Setup {
 
         let mut message = String::new();
 
-        writeln!(&mut message, "[Version]: {:?}", VERSION).unwrap();
+        // One provenance owner: the same identity `--version` and `--build-info`
+        // report, so a diagnostics dump can never disagree with the binary.
+        writeln!(
+            &mut message,
+            "[Version]: {}",
+            crate::build_info::build_info().diagnostic_line()
+        )
+        .unwrap();
+        // A fix that is in the source but not in the installed binary looks
+        // exactly like a fix that does not work. Say so here rather than let
+        // the operator debug a build that never contained it. Host-only: a wasm
+        // plugin has no checkout to compare itself against.
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let freshness = crate::install_freshness::current(
+                &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            );
+            writeln!(
+                &mut message,
+                "[INSTALL FRESHNESS]: {}",
+                freshness.diagnostic_line()
+            )
+            .unwrap();
+        }
         if let Some(config_dir) = config_dir {
             writeln!(&mut message, "[CONFIG DIR]: \"{}\"", config_dir.display()).unwrap();
         } else {
@@ -517,7 +543,7 @@ impl Setup {
                 .collect::<Vec<PathBuf>>();
             default_config_dirs.dedup();
             message.push_str(
-                " On your system zellij looks in the following config directories by default:\n",
+                " On your system vc-frame looks in the following config directories by default:\n",
             );
             for dir in default_config_dirs {
                 writeln!(&mut message, " \"{}\"", dir.display()).unwrap();
@@ -534,7 +560,7 @@ impl Setup {
                 Ok(_) => message.push_str("[CONFIG FILE]: Well defined.\n"),
                 Err(e) => writeln!(
                     &mut message,
-                    "[CONFIG ERROR]: {}. \n By default, zellij loads default configuration",
+                    "[CONFIG ERROR]: {}. \n By default, vc-frame loads default configuration",
                     e
                 )
                 .unwrap(),
@@ -543,7 +569,7 @@ impl Setup {
             message.push_str("[CONFIG FILE]: Not Found\n");
             writeln!(
                 &mut message,
-                " By default zellij looks for a file called [{}] in the configuration directory",
+                " By default vc-frame looks for a file called [{}] in the configuration directory",
                 CONFIG_NAME
             )
             .unwrap();
@@ -577,12 +603,12 @@ impl Setup {
 
         writeln!(&mut message, "[ARROW SEPARATOR]: {}", ARROW_SEPARATOR).unwrap();
         message.push_str(" Is the [ARROW_SEPARATOR] displayed correctly?\n");
-        message.push_str(" If not you may want to either start zellij with a compatible mode: 'zellij options --simplified-ui true'\n");
+        message.push_str(" If not you may want to either start vc-frame with a compatible mode: 'vc-frame options --simplified-ui true'\n");
         let mut hyperlink_compat = String::new();
         hyperlink_compat.push_str(hyperlink_start);
         hyperlink_compat.push_str("https://zellij.dev/documentation/compatibility.html#the-status-bar-fonts-dont-render-correctly");
         hyperlink_compat.push_str(hyperlink_mid);
-        hyperlink_compat.push_str("https://zellij.dev/documentation/compatibility.html#the-status-bar-fonts-dont-render-correctly");
+        hyperlink_compat.push_str("upstream compatibility notes");
         hyperlink_compat.push_str(hyperlink_end);
         write!(
             &mut message,
@@ -592,7 +618,7 @@ impl Setup {
         .unwrap();
         message.push_str("[MOUSE INTERACTION]: \n");
         message.push_str(" Can be temporarily disabled through pressing the [SHIFT] key.\n");
-        message.push_str(" If that doesn't fix any issues consider to disable the mouse handling of zellij: 'zellij options --disable-mouse-mode'\n");
+        message.push_str(" If that doesn't fix any issues consider disabling mouse handling in vc-frame: 'vc-frame options --disable-mouse-mode'\n");
 
         let default_editor = std::env::var("EDITOR")
             .or_else(|_| std::env::var("VISUAL"))
@@ -603,7 +629,7 @@ impl Setup {
         hyperlink.push_str(hyperlink_start);
         hyperlink.push_str("https://www.zellij.dev/documentation/");
         hyperlink.push_str(hyperlink_mid);
-        hyperlink.push_str("zellij.dev/documentation");
+        hyperlink.push_str("upstream documentation");
         hyperlink.push_str(hyperlink_end);
         writeln!(&mut message, "[DOCUMENTATION]: {}", hyperlink).unwrap();
         //printf '\e]8;;http://example.com\e\\This is a link\e]8;;\e\\\n'
@@ -621,7 +647,7 @@ impl Setup {
             },
         };
         let mut out = std::io::stdout();
-        clap_complete::generate(shell, &mut CliArgs::command(), "zellij", &mut out);
+        clap_complete::generate(shell, &mut CliArgs::command(), "vc-frame", &mut out);
         // add shell dependent extra completion
         match shell {
             Shell::Bash => {
@@ -709,7 +735,7 @@ impl Setup {
         }
     }
     fn handle_setup_commands(cli_args: &CliArgs) {
-        if let Some(Command::Setup(ref setup)) = &cli_args.command {
+        if let Some(Command::Setup(setup)) = &cli_args.command {
             setup.from_cli().map_or_else(
                 |e| {
                     eprintln!("{:?}", e);
@@ -725,9 +751,7 @@ fn merge_attach_command_options(
     cli_config_options: Option<Options>,
     cli_args: &CliArgs,
 ) -> Option<Options> {
-    let cli_config_options = if let Some(Command::Sessions(Sessions::Attach { options, .. })) =
-        cli_args.command.clone()
-    {
+    if let Some(Command::Sessions(Sessions::Attach { options, .. })) = cli_args.command.clone() {
         match options.clone().as_deref() {
             Some(SessionCommand::Options(options)) => match cli_config_options {
                 Some(cli_config_options) => {
@@ -739,8 +763,7 @@ fn merge_attach_command_options(
         }
     } else {
         cli_config_options
-    };
-    cli_config_options
+    }
 }
 
 #[cfg(test)]

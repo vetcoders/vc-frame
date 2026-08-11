@@ -205,11 +205,7 @@ impl RunPluginOrAlias {
                             // caller_cwd is a special attribute given to alias and should not be
                             // considered when weighing configuration equivalency
                             to_compare.remove("caller_cwd");
-                            if to_compare.is_empty() {
-                                None
-                            } else {
-                                Some(c)
-                            }
+                            if to_compare.is_empty() { None } else { Some(c) }
                         })
             },
             (
@@ -236,10 +232,10 @@ impl RunPluginOrAlias {
     }
     pub fn add_initial_cwd(&mut self, initial_cwd: &Path) {
         match self {
-            RunPluginOrAlias::RunPlugin(ref mut run_plugin) => {
+            RunPluginOrAlias::RunPlugin(run_plugin) => {
                 run_plugin.initial_cwd = Some(initial_cwd.to_path_buf());
             },
-            RunPluginOrAlias::Alias(ref mut alias) => {
+            RunPluginOrAlias::Alias(alias) => {
                 alias.initial_cwd = Some(initial_cwd.to_path_buf());
             },
         }
@@ -351,30 +347,29 @@ impl Run {
     pub fn add_args(&mut self, args: Option<Vec<String>>) {
         // overrides the args of a Run::Command if they are Some
         // and not empty
-        if let Some(args) = args {
-            if let Run::Command(run_command) = self {
-                if !args.is_empty() {
-                    run_command.args = args.clone();
-                }
-            }
+        if let Some(args) = args
+            && let Run::Command(run_command) = self
+            && !args.is_empty()
+        {
+            run_command.args = args.clone();
         }
     }
     pub fn add_close_on_exit(&mut self, close_on_exit: Option<bool>) {
         // overrides the hold_on_close of a Run::Command if it is Some
         // and not empty
-        if let Some(close_on_exit) = close_on_exit {
-            if let Run::Command(run_command) = self {
-                run_command.hold_on_close = !close_on_exit;
-            }
+        if let Some(close_on_exit) = close_on_exit
+            && let Run::Command(run_command) = self
+        {
+            run_command.hold_on_close = !close_on_exit;
         }
     }
     pub fn add_start_suspended(&mut self, start_suspended: Option<bool>) {
         // overrides the hold_on_start of a Run::Command if they are Some
         // and not empty
-        if let Some(start_suspended) = start_suspended {
-            if let Run::Command(run_command) = self {
-                run_command.hold_on_start = start_suspended;
-            }
+        if let Some(start_suspended) = start_suspended
+            && let Run::Command(run_command) = self
+        {
+            run_command.hold_on_start = start_suspended;
         }
     }
     pub fn is_same_category(first: &Option<Run>, second: &Option<Run>) -> bool {
@@ -492,18 +487,17 @@ impl PluginAlias {
         // want to pass the "caller" cwd for the plugin the alias resolves into (eg. a
         // filepicker that has access to the whole filesystem but wants to start in a specific
         // folder)
-        if let Some(caller_cwd) = caller_cwd {
-            if self
+        if let Some(caller_cwd) = caller_cwd
+            && self
                 .configuration
                 .as_ref()
                 .map(|c| c.inner().get("caller_cwd").is_none())
                 .unwrap_or(true)
-            {
-                let configuration = self
-                    .configuration
-                    .get_or_insert_with(|| PluginUserConfiguration::new(BTreeMap::new()));
-                configuration.insert("caller_cwd", caller_cwd.display().to_string());
-            }
+        {
+            let configuration = self
+                .configuration
+                .get_or_insert_with(|| PluginUserConfiguration::new(BTreeMap::new()));
+            configuration.insert("caller_cwd", caller_cwd.display().to_string());
         }
     }
 }
@@ -589,6 +583,12 @@ impl Default for RunPluginLocation {
     }
 }
 
+/// Canonical URL scheme for built-in plugins in UI and serialization.
+/// Legacy `zellij:` is still accepted on parse for older layouts/configs.
+pub const BUILTIN_PLUGIN_SCHEME: &str = "vc-frame";
+/// Upstream/legacy scheme — parse-only compatibility.
+pub const LEGACY_BUILTIN_PLUGIN_SCHEME: &str = "zellij";
+
 impl RunPluginLocation {
     pub fn parse(location: &str, cwd: Option<PathBuf>) -> Result<Self, PluginsConfigError> {
         let url = Url::parse(location)?;
@@ -596,7 +596,10 @@ impl RunPluginLocation {
         let decoded_path = percent_encoding::percent_decode_str(url.path()).decode_utf8_lossy();
 
         match url.scheme() {
-            "zellij" => Ok(Self::Zellij(PluginTag::new(decoded_path))),
+            // Built-in plugins: vc-frame:about (canonical) or zellij:about (legacy).
+            s if s == BUILTIN_PLUGIN_SCHEME || s == LEGACY_BUILTIN_PLUGIN_SCHEME => {
+                Ok(Self::Zellij(PluginTag::new(decoded_path)))
+            },
             "file" => {
                 let path = if location.starts_with("file:/") {
                     // Path is absolute, its safe to use URL path.
@@ -633,7 +636,9 @@ impl RunPluginLocation {
     pub fn display(&self) -> String {
         match self {
             RunPluginLocation::File(pathbuf) => format!("file:{}", pathbuf.display()),
-            RunPluginLocation::Zellij(plugin_tag) => format!("zellij:{}", plugin_tag),
+            RunPluginLocation::Zellij(plugin_tag) => {
+                format!("{}:{}", BUILTIN_PLUGIN_SCHEME, plugin_tag)
+            },
             RunPluginLocation::Remote(url) => String::from(url),
         }
     }
@@ -646,7 +651,9 @@ impl From<&RunPluginLocation> for Url {
                 "file:{}",
                 path.clone().into_os_string().into_string().unwrap()
             ),
-            RunPluginLocation::Zellij(tag) => format!("zellij:{}", tag),
+            RunPluginLocation::Zellij(tag) => {
+                format!("{}:{}", BUILTIN_PLUGIN_SCHEME, tag)
+            },
             RunPluginLocation::Remote(url) => String::from(url),
         };
         Self::parse(&url).unwrap()
@@ -697,6 +704,11 @@ type StringifiedLayout = (String, String, Option<(String, String)>);
 pub struct Layout {
     pub tabs: Vec<(Option<String>, TiledPaneLayout, Vec<FloatingPaneLayout>)>,
     pub focused_tab_index: Option<usize>,
+    /// Session-owned chrome wrapped around every tab content layout. Parsers
+    /// materialize this template into tabs and swap layouts while retaining the
+    /// source template here so Screen remains the runtime owner for new tabs.
+    #[serde(default)]
+    pub session_layer: Option<(TiledPaneLayout, Vec<FloatingPaneLayout>)>,
     pub template: Option<(TiledPaneLayout, Vec<FloatingPaneLayout>)>,
     pub swap_layouts: Vec<(TiledPaneLayout, Vec<FloatingPaneLayout>)>,
     pub swap_tiled_layouts: Vec<SwapTiledLayout>,
@@ -846,6 +858,10 @@ impl From<&TiledPaneLayout> for FloatingPaneLayout {
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
 pub struct TiledPaneLayout {
+    /// Internal durable tab identity carried by serialized resurrection
+    /// layouts. Fresh tabs leave this unset and receive a new UUID server-side.
+    #[serde(default)]
+    pub tab_instance_id: Option<String>,
     pub children_split_direction: SplitDirection,
     pub name: Option<String>,
     pub children: Vec<TiledPaneLayout>,
@@ -950,10 +966,11 @@ impl TiledPaneLayout {
                     // because we really should support that
                     let children_count = (max_panes - pane_count_in_layout) + 1;
                     let mut extra_children = vec![TiledPaneLayout::default(); children_count];
-                    if !layout_to_split.has_focused_node() && focus_layout_if_not_focused {
-                        if let Some(last_child) = extra_children.last_mut() {
-                            last_child.focus = Some(true);
-                        }
+                    if !layout_to_split.has_focused_node()
+                        && focus_layout_if_not_focused
+                        && let Some(last_child) = extra_children.last_mut()
+                    {
+                        last_child.focus = Some(true);
                     }
                     let _ = layout_to_split.insert_children_nodes(&mut extra_children);
                 } else {
@@ -1234,20 +1251,45 @@ impl Default for LayoutParts {
     }
 }
 
+/// Product surface layouts offered in the picker. Every entry MUST keep the
+/// left Sessions rail (session-manager + `rail true`) — enforced by
+/// `product_layouts_always_include_sessions_rail` in layout_test.
+///
+/// Legacy Zellij layouts (strider / compact / classic / welcome /
+/// disable-status-bar) remain loadable by name via
+/// `stringified_from_default_assets` for dump/tests, but are not product.
 const BUILTIN_LAYOUT_NAMES: &[&str] = &[
     "default",
-    "strider",
-    "disable-status-bar",
-    "compact",
-    "classic",
-    "vc-dashboard",
     "vibecrafted",
+    "vc-dashboard",
     "vc-workflow",
     "vc-marbles",
     "vc-research",
 ];
 
 impl Layout {
+    fn mount_session_layer(
+        &self,
+        mut content: TiledPaneLayout,
+        mut floating_panes: Vec<FloatingPaneLayout>,
+    ) -> (TiledPaneLayout, Vec<FloatingPaneLayout>) {
+        let Some((session_layer, session_floating_panes)) = &self.session_layer else {
+            return (content, floating_panes);
+        };
+        let original_content = content.clone();
+        let tab_instance_id = content.tab_instance_id.take();
+        let hide_floating_panes = content.hide_floating_panes;
+        content.hide_floating_panes = false;
+        let mut canvas = session_layer.clone();
+        if !canvas.insert_children_layout(&mut content).unwrap_or(false) {
+            return (original_content, floating_panes);
+        }
+        canvas.tab_instance_id = tab_instance_id;
+        canvas.hide_floating_panes = hide_floating_panes;
+        floating_panes.extend(session_floating_panes.iter().cloned());
+        (canvas, floating_panes)
+    }
+
     pub fn list_available_layouts(
         layout_dir: Option<PathBuf>,
         default_layout_name: &Option<String>,
@@ -1279,9 +1321,9 @@ impl Layout {
                         ) {
                             Ok(_layout) => {
                                 let file_path = layout_dir.join(file.path()); // TODO: do we
-                                                                              // need
-                                                                              // file_stem()
-                                                                              // here too?
+                                // need
+                                // file_stem()
+                                // here too?
                                 available_layouts.push(LayoutInfo::File(
                                     layout_name,
                                     LayoutMetadata::from(&file_path),
@@ -1367,10 +1409,8 @@ impl Layout {
                 .map(|(r, f)| (r.as_str(), f.as_str())),
             None,
         );
-        if should_start_layout_commands_suspended {
-            if let Some(l) = layout.iter_mut().next() {
-                l.recursively_add_start_suspended_including_template(Some(true))
-            }
+        if should_start_layout_commands_suspended && let Some(l) = layout.iter_mut().next() {
+            l.recursively_add_start_suspended_including_template(Some(true))
         }
         layout
     }
@@ -1409,10 +1449,8 @@ impl Layout {
                 .map(|(r, f)| (r.as_str(), f.as_str())),
             None,
         );
-        if should_start_layout_commands_suspended {
-            if let Some(l) = layout.iter_mut().next() {
-                l.recursively_add_start_suspended_including_template(Some(true))
-            }
+        if should_start_layout_commands_suspended && let Some(l) = layout.iter_mut().next() {
+            l.recursively_add_start_suspended_including_template(Some(true))
         }
         let config = Config::from_kdl(&raw_layout, config)?; // this merges the two config, with
         layout.map(|l| (l, config))
@@ -1435,10 +1473,25 @@ impl Layout {
                     Layout::stringified_from_dir(layout_path, layout_dir.as_ref())
                 }
             },
-            None => Layout::stringified_from_dir(
-                &std::path::PathBuf::from("default"),
-                layout_dir.as_ref(),
-            ),
+            None => {
+                // Nothing configured anywhere. A user file layouts/default.kdl
+                // still wins (docs contract); only without one does the implicit
+                // fallback land on the guided "vibecrafted" operator entrypoint
+                // instead of the bare "default" chrome. Mirrors
+                // LayoutInfo::from_config — keep the two in step.
+                let implicit = std::path::PathBuf::from("default");
+                let has_user_default = layout_dir
+                    .as_ref()
+                    .map(|dir| dir.join(&implicit).with_extension("kdl").exists())
+                    .unwrap_or(false);
+                if has_user_default {
+                    Layout::stringified_from_dir(&implicit, layout_dir.as_ref())
+                } else {
+                    Layout::stringified_from_default_assets(&std::path::PathBuf::from(
+                        "vibecrafted",
+                    ))
+                }
+            },
         }
     }
     #[cfg(not(target_family = "wasm"))]
@@ -1502,9 +1555,9 @@ impl Layout {
     }
     #[cfg(target_family = "wasm")]
     pub fn from_url(_url: &str, _config: Config) -> Result<(Layout, Config), ConfigError> {
-        Err(ConfigError::DownloadError(format!(
-            "Unsupported platform, cannot download layout from the web"
-        )))
+        Err(ConfigError::DownloadError(
+            "Unsupported platform, cannot download layout from the web".to_string(),
+        ))
     }
     pub fn from_path_or_default_without_config(
         layout_path: Option<&PathBuf>,
@@ -1654,27 +1707,27 @@ impl Layout {
                 None,
             )),
             Some("vc-dashboard") => Ok((
-                "VibeCrafted mission control layout".into(),
+                "Vibecrafted mission control layout".into(),
                 Self::stringified_vc_dashboard_from_assets()?,
                 None,
             )),
             Some("vibecrafted") => Ok((
-                "VibeCrafted operator layout".into(),
+                "Vibecrafted operator layout".into(),
                 Self::stringified_vibecrafted_from_assets()?,
                 None,
             )),
             Some("vc-workflow") => Ok((
-                "VibeCrafted workflow layout".into(),
+                "Vibecrafted workflow layout".into(),
                 Self::stringified_vc_workflow_from_assets()?,
                 None,
             )),
             Some("vc-marbles") => Ok((
-                "VibeCrafted marbles layout".into(),
+                "Vibecrafted marbles layout".into(),
                 Self::stringified_vc_marbles_from_assets()?,
                 None,
             )),
             Some("vc-research") => Ok((
-                "VibeCrafted research layout".into(),
+                "Vibecrafted research layout".into(),
                 Self::stringified_vc_research_from_assets()?,
                 None,
             )),
@@ -1737,7 +1790,8 @@ impl Layout {
     }
 
     pub fn new_tab(&self) -> (TiledPaneLayout, Vec<FloatingPaneLayout>) {
-        self.template.clone().unwrap_or_default()
+        let (tiled, floating) = self.template.clone().unwrap_or_default();
+        self.mount_session_layer(tiled, floating)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1750,7 +1804,14 @@ impl Layout {
 
     pub fn tabs(&self) -> Vec<(Option<String>, TiledPaneLayout, Vec<FloatingPaneLayout>)> {
         // String is the tab name
-        self.tabs.clone()
+        self.tabs
+            .iter()
+            .cloned()
+            .map(|(name, tiled, floating)| {
+                let (tiled, floating) = self.mount_session_layer(tiled, floating);
+                (name, tiled, floating)
+            })
+            .collect()
     }
 
     pub fn focused_tab_index(&self) -> Option<usize> {

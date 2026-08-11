@@ -28,6 +28,8 @@ use zellij_utils::data::{Event, PipeMessage};
 /// This trait should be implemented - once per plugin - on a struct (normally representing the
 /// plugin state). This struct should then be registered with the
 /// [`register_plugin!`](register_plugin) macro.
+// Default trait methods keep named (non-underscore) parameters: they are the
+// documented public plugin API and rustdoc renders these names verbatim.
 #[allow(unused_variables)]
 pub trait ZellijPlugin: Default {
     /// Will be called when the plugin is loaded, this is a good place to [`subscribe`](shim::subscribe) to events that are interesting for this plugin.
@@ -62,6 +64,7 @@ pub trait ZellijPlugin: Default {
 /// [`post_message_to_plugin`](shim::post_message_to_plugin) method (but be sure the plugin has
 /// [`subscribe`](shim::subscribe)d to the [`CustomMessage`](prelude::Event::CustomMessage)) event
 /// first!
+// Same contract as ZellijPlugin above: named params are rustdoc-visible API.
 #[allow(unused_variables)]
 pub trait ZellijWorker<'de>: Default + Serialize + Deserialize<'de> {
     /// Triggered whenever the plugin sends the worker a message using the
@@ -84,7 +87,7 @@ Please refer to the documentation for further information:
 /// Used to register a plugin implementing the [`ZellijPlugin`] trait.
 ///
 /// eg.
-/// ```rust
+/// ```rust,no_run
 /// use zellij_tile::prelude::*;
 ///
 /// #[derive(Default)]
@@ -110,7 +113,7 @@ macro_rules! register_plugin {
             }));
         }
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         fn load() {
             STATE.with(|state| {
                 use std::collections::BTreeMap;
@@ -127,7 +130,7 @@ macro_rules! register_plugin {
             });
         }
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub fn update() -> bool {
             let err_context = "Failed to deserialize event";
             use std::convert::TryInto;
@@ -142,7 +145,7 @@ macro_rules! register_plugin {
             })
         }
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub fn pipe() -> bool {
             let err_context = "Failed to deserialize pipe message";
             use std::convert::TryInto;
@@ -157,14 +160,14 @@ macro_rules! register_plugin {
             })
         }
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub fn render(rows: i32, cols: i32) {
             STATE.with(|state| {
                 state.borrow_mut().render(rows as usize, cols as usize);
             });
         }
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub fn plugin_version() {
             println!("{}", $crate::prelude::VERSION);
         }
@@ -174,7 +177,7 @@ macro_rules! register_plugin {
 /// Used to register a plugin worker implementing the [`ZellijWorker`] trait.
 ///
 /// eg.
-/// ```rust
+/// ```rust,no_run
 /// use zellij_tile::prelude::*;
 /// use serde::{Deserialize, Serialize};
 ///
@@ -200,7 +203,7 @@ macro_rules! register_worker {
         thread_local! {
             static $worker_static_name: std::cell::RefCell<$worker> = std::cell::RefCell::new(Default::default());
         }
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub fn $worker_name() {
             use zellij_tile::shim::plugin_api::message::ProtobufMessage;
             use zellij_tile::shim::prost::Message;

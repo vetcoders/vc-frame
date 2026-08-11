@@ -1,26 +1,155 @@
 use zellij_utils::errors::prelude::*;
 
-use crate::resize_pty;
-use crate::tab::{get_next_terminal_position, HoldForCommand, Pane};
+use crate::tab::{HoldForCommand, Pane, get_next_terminal_position};
 
 use crate::{
+    ClientId, NotificationEnd,
     os_input_output::ServerOsApi,
     panes::sixel::SixelImageStore,
     panes::{FloatingPanes, TiledPanes},
     panes::{LinkHandler, PaneId, PluginPane, TerminalPane},
     plugins::PluginInstruction,
     pty::PtyInstruction,
+    pty_writer::PtyWriteInstruction,
     thread_bus::ThreadSenders,
-    ClientId, NotificationEnd,
 };
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 use zellij_utils::{
     data::{Palette, Style},
     input::layout::{FloatingPaneLayout, Run, RunPluginOrAlias, TiledPaneLayout},
     pane_size::{PaneGeom, Size, SizeInPixels, Viewport},
 };
+
+#[derive(Default)]
+pub(crate) struct LayoutSideEffects {
+    immediate_senders: Option<ThreadSenders>,
+    plugin: Vec<PluginInstruction>,
+    pty_writer: Vec<PtyWriteInstruction>,
+    cleanup_panes: BTreeSet<PaneId>,
+}
+
+impl LayoutSideEffects {
+    fn immediate(senders: &ThreadSenders) -> Self {
+        LayoutSideEffects {
+            immediate_senders: Some(senders.clone()),
+            ..Default::default()
+        }
+    }
+
+    fn defer(&mut self) {
+        self.immediate_senders = None;
+    }
+
+    fn is_deferred(&self) -> bool {
+        self.immediate_senders.is_none()
+    }
+
+    fn push_plugin(&mut self, instruction: PluginInstruction) {
+        if let Some(senders) = &self.immediate_senders {
+            senders.send_to_plugin(instruction).non_fatal();
+        } else {
+            self.plugin.push(instruction);
+        }
+    }
+
+    fn push_pty_writer(&mut self, instruction: PtyWriteInstruction) {
+        if let Some(senders) = &self.immediate_senders {
+            senders.send_to_pty_writer(instruction).non_fatal();
+        } else {
+            self.pty_writer.push(instruction);
+        }
+    }
+
+    pub(crate) fn resize_pane(
+        &mut self,
+        pane: &dyn Pane,
+        character_cell_size: &Rc<RefCell<Option<SizeInPixels>>>,
+    ) {
+        let (width_in_pixels, height_in_pixels) = {
+            let character_cell_size = character_cell_size.borrow();
+            match *character_cell_size {
+                Some(size_in_pixels) => (
+                    Some((size_in_pixels.width * pane.get_content_columns()) as u16),
+                    Some((size_in_pixels.height * pane.get_content_rows()) as u16),
+                ),
+                None => (None, None),
+            }
+        };
+        match pane.pid() {
+            PaneId::Terminal(pid) => {
+                self.push_pty_writer(PtyWriteInstruction::ResizePty(
+                    pid,
+                    pane.get_content_columns() as u16,
+                    pane.get_content_rows() as u16,
+                    width_in_pixels,
+                    height_in_pixels,
+                ));
+            },
+            PaneId::Plugin(pid) => {
+                self.push_plugin(PluginInstruction::Resize(
+                    pid,
+                    pane.get_content_columns(),
+                    pane.get_content_rows(),
+                ));
+            },
+        }
+    }
+
+    pub(crate) fn clear_resize_effects(&mut self) {
+        self.pty_writer
+            .retain(|instruction| !matches!(instruction, PtyWriteInstruction::ResizePty(..)));
+        self.plugin
+            .retain(|instruction| !matches!(instruction, PluginInstruction::Resize(..)));
+    }
+
+    fn close_pane(&mut self, pane_id: PaneId) {
+        if let Some(senders) = &self.immediate_senders {
+            match pane_id {
+                PaneId::Terminal(_) => senders
+                    .send_to_pty(PtyInstruction::ClosePane(pane_id, None))
+                    .non_fatal(),
+                PaneId::Plugin(plugin_id) => senders
+                    .send_to_plugin(PluginInstruction::Unload(plugin_id))
+                    .non_fatal(),
+            }
+        } else {
+            self.cleanup_panes.insert(pane_id);
+        }
+    }
+
+    pub(crate) fn take_cleanup_panes(&mut self) -> BTreeSet<PaneId> {
+        std::mem::take(&mut self.cleanup_panes)
+    }
+
+    pub(crate) fn emit_best_effort(self, senders: &ThreadSenders) {
+        for instruction in self.pty_writer {
+            if let Err(error) = senders.send_to_pty_writer(instruction) {
+                log::error!("failed to emit committed layout resize to PTY writer: {error:#}");
+            }
+        }
+        for instruction in self.plugin {
+            if let Err(error) = senders.send_to_plugin(instruction) {
+                log::error!("failed to emit committed layout resize to Plugin: {error:#}");
+            }
+        }
+        if !self.cleanup_panes.is_empty() {
+            log::error!(
+                "committed layout cleanup panes {:?} were not transferred into the Screen cleanup outbox",
+                self.cleanup_panes
+            );
+        }
+    }
+}
+
+pub(crate) struct LayoutTransactionParts {
+    pub(crate) side_effects: LayoutSideEffects,
+    pub(crate) deferred_closed_panes: BTreeMap<PaneId, Box<dyn Pane>>,
+    pub(crate) rollback_panes: BTreeMap<PaneId, Box<dyn Pane>>,
+    pub(crate) blocking_terminal: Option<(u32, NotificationEnd)>,
+    pub(crate) deferred_pane_initial_bytes: Vec<(PaneId, Vec<u8>)>,
+}
 
 pub struct LayoutApplier<'a> {
     viewport: Rc<RefCell<Viewport>>, // includes all non-UI panes
@@ -37,39 +166,67 @@ pub struct LayoutApplier<'a> {
     floating_panes: &'a mut FloatingPanes,
     draw_pane_frames: bool,
     focus_pane_id: &'a mut Option<PaneId>,
-    os_api: Box<dyn ServerOsApi>,
     debug: bool,
     arrow_fonts: bool,
     styled_underlines: bool,
     osc8_hyperlinks: bool,
     explicitly_disable_kitty_keyboard_protocol: bool,
     blocking_terminal: Option<(u32, NotificationEnd)>,
+    side_effects: LayoutSideEffects,
+    deferred_closed_panes: BTreeMap<PaneId, Box<dyn Pane>>,
+    rollback_panes: BTreeMap<PaneId, Box<dyn Pane>>,
+    deferred_pane_initial_bytes: Vec<(PaneId, Vec<u8>)>,
+}
+
+pub struct LayoutApplierOptions<'a> {
+    pub viewport: &'a Rc<RefCell<Viewport>>,
+    pub senders: &'a ThreadSenders,
+    pub sixel_image_store: &'a Rc<RefCell<SixelImageStore>>,
+    pub link_handler: &'a Rc<RefCell<LinkHandler>>,
+    pub terminal_emulator_colors: &'a Rc<RefCell<Palette>>,
+    pub terminal_emulator_color_codes: &'a Rc<RefCell<HashMap<usize, String>>>,
+    pub character_cell_size: &'a Rc<RefCell<Option<SizeInPixels>>>,
+    pub connected_clients: &'a Rc<RefCell<HashMap<ClientId, bool>>>,
+    pub style: &'a Style,
+    pub display_area: &'a Rc<RefCell<Size>>,
+    pub tiled_panes: &'a mut TiledPanes,
+    pub floating_panes: &'a mut FloatingPanes,
+    pub draw_pane_frames: bool,
+    pub focus_pane_id: &'a mut Option<PaneId>,
+    pub _os_api: &'a dyn ServerOsApi,
+    pub debug: bool,
+    pub arrow_fonts: bool,
+    pub styled_underlines: bool,
+    pub osc8_hyperlinks: bool,
+    pub explicitly_disable_kitty_keyboard_protocol: bool,
+    pub blocking_terminal: Option<(u32, NotificationEnd)>,
 }
 
 impl<'a> LayoutApplier<'a> {
-    pub fn new(
-        viewport: &Rc<RefCell<Viewport>>,
-        senders: &ThreadSenders,
-        sixel_image_store: &Rc<RefCell<SixelImageStore>>,
-        link_handler: &Rc<RefCell<LinkHandler>>,
-        terminal_emulator_colors: &Rc<RefCell<Palette>>,
-        terminal_emulator_color_codes: &Rc<RefCell<HashMap<usize, String>>>,
-        character_cell_size: &Rc<RefCell<Option<SizeInPixels>>>,
-        connected_clients: &Rc<RefCell<HashMap<ClientId, bool>>>,
-        style: &Style,
-        display_area: &Rc<RefCell<Size>>, // includes all panes (including eg. the status bar and tab bar in the default layout)
-        tiled_panes: &'a mut TiledPanes,
-        floating_panes: &'a mut FloatingPanes,
-        draw_pane_frames: bool,
-        focus_pane_id: &'a mut Option<PaneId>,
-        os_api: &dyn ServerOsApi,
-        debug: bool,
-        arrow_fonts: bool,
-        styled_underlines: bool,
-        osc8_hyperlinks: bool,
-        explicitly_disable_kitty_keyboard_protocol: bool,
-        blocking_terminal: Option<(u32, NotificationEnd)>,
-    ) -> Self {
+    pub fn new(opts: LayoutApplierOptions<'a>) -> Self {
+        let LayoutApplierOptions {
+            viewport,
+            senders,
+            sixel_image_store,
+            link_handler,
+            terminal_emulator_colors,
+            terminal_emulator_color_codes,
+            character_cell_size,
+            connected_clients,
+            style,
+            display_area,
+            tiled_panes,
+            floating_panes,
+            draw_pane_frames,
+            focus_pane_id,
+            _os_api,
+            debug,
+            arrow_fonts,
+            styled_underlines,
+            osc8_hyperlinks,
+            explicitly_disable_kitty_keyboard_protocol,
+            blocking_terminal,
+        } = opts;
         let viewport = viewport.clone();
         let senders = senders.clone();
         let sixel_image_store = sixel_image_store.clone();
@@ -80,7 +237,10 @@ impl<'a> LayoutApplier<'a> {
         let connected_clients = connected_clients.clone();
         let style = *style;
         let display_area = display_area.clone();
-        let os_api = os_api.box_clone();
+        let mut side_effects = LayoutSideEffects::immediate(&senders);
+        if !tiled_panes.layout_io_enabled() || !floating_panes.layout_io_enabled() {
+            side_effects.defer();
+        }
         LayoutApplier {
             viewport,
             senders,
@@ -96,13 +256,45 @@ impl<'a> LayoutApplier<'a> {
             floating_panes,
             draw_pane_frames,
             focus_pane_id,
-            os_api,
             debug,
             arrow_fonts,
             styled_underlines,
             osc8_hyperlinks,
             explicitly_disable_kitty_keyboard_protocol,
             blocking_terminal,
+            side_effects,
+            deferred_closed_panes: BTreeMap::new(),
+            rollback_panes: BTreeMap::new(),
+            deferred_pane_initial_bytes: vec![],
+        }
+    }
+
+    pub(crate) fn defer_side_effects(mut self) -> Self {
+        self.side_effects.defer();
+        self
+    }
+
+    pub(crate) fn take_transaction_parts(&mut self) -> LayoutTransactionParts {
+        LayoutTransactionParts {
+            side_effects: std::mem::take(&mut self.side_effects),
+            deferred_closed_panes: std::mem::take(&mut self.deferred_closed_panes),
+            rollback_panes: std::mem::take(&mut self.rollback_panes),
+            blocking_terminal: self.blocking_terminal.take(),
+            deferred_pane_initial_bytes: std::mem::take(&mut self.deferred_pane_initial_bytes),
+        }
+    }
+
+    fn apply_or_defer_pane_initial_contents(
+        &mut self,
+        pane: &mut dyn Pane,
+        pane_initial_contents: &str,
+    ) {
+        let mut bytes = pane_initial_contents.as_bytes().to_vec();
+        bytes.extend_from_slice(b"\n\r");
+        if self.side_effects.is_deferred() {
+            self.deferred_pane_initial_bytes.push((pane.pid(), bytes));
+        } else {
+            pane.handle_pty_bytes(bytes);
         }
     }
     pub fn apply_layout(
@@ -125,17 +317,31 @@ impl<'a> LayoutApplier<'a> {
         let should_show_floating_panes = layout_has_floating_panes && !hide_floating_panes;
         Ok(should_show_floating_panes)
     }
-    pub fn override_layout(
-        &mut self,
-        tiled_panes_layout: TiledPaneLayout,
-        floating_panes_layout: Vec<FloatingPaneLayout>,
-        new_terminal_ids: Vec<(u32, HoldForCommand)>,
-        new_floating_terminal_ids: Vec<(u32, HoldForCommand)>,
-        mut new_plugin_ids: HashMap<RunPluginOrAlias, Vec<u32>>,
-        retain_existing_terminal_panes: bool,
-        retain_existing_plugin_panes: bool,
-        client_id: ClientId,
-    ) -> Result<bool> {
+}
+
+pub struct LayoutApplierOverrideOptions {
+    pub tiled_panes_layout: TiledPaneLayout,
+    pub floating_panes_layout: Vec<FloatingPaneLayout>,
+    pub new_terminal_ids: Vec<(u32, HoldForCommand)>,
+    pub new_floating_terminal_ids: Vec<(u32, HoldForCommand)>,
+    pub new_plugin_ids: HashMap<RunPluginOrAlias, Vec<u32>>,
+    pub retain_existing_terminal_panes: bool,
+    pub retain_existing_plugin_panes: bool,
+    pub client_id: ClientId,
+}
+
+impl<'a> LayoutApplier<'a> {
+    pub fn override_layout(&mut self, opts: LayoutApplierOverrideOptions) -> Result<bool> {
+        let LayoutApplierOverrideOptions {
+            tiled_panes_layout,
+            floating_panes_layout,
+            new_terminal_ids,
+            new_floating_terminal_ids,
+            mut new_plugin_ids,
+            retain_existing_terminal_panes,
+            retain_existing_plugin_panes,
+            client_id,
+        } = opts;
         // true => should_show_floating_panes
         let hide_floating_panes = tiled_panes_layout.hide_floating_panes;
         self.override_tiled_panes_layout_for_existing_panes(
@@ -168,7 +374,7 @@ impl<'a> LayoutApplier<'a> {
         let mut pane_applier = PaneApplier::new(
             self.tiled_panes,
             self.floating_panes,
-            &self.senders,
+            &mut self.side_effects,
             &self.character_cell_size,
         );
         let mut positions_left_without_exact_matches = vec![];
@@ -248,7 +454,7 @@ impl<'a> LayoutApplier<'a> {
         let mut pane_applier = PaneApplier::new(
             self.tiled_panes,
             self.floating_panes,
-            &self.senders,
+            &mut self.side_effects,
             &self.character_cell_size,
         );
         let mut positions_left_without_exact_matches = vec![];
@@ -280,18 +486,25 @@ impl<'a> LayoutApplier<'a> {
             retain_existing_plugin_panes,
         );
 
-        let (focus_pane_id, pane_ids_expanded_in_stack) = self.position_new_panes(
+        let (focus_pane_id, pane_ids_expanded_in_stack) = match self.position_new_panes(
             &mut new_terminal_ids,
             new_plugin_ids,
             &mut positions_left_without_exact_matches,
-        )?;
+        ) {
+            Ok(positioned_panes) => positioned_panes,
+            Err(error) => {
+                self.rollback_panes
+                    .append(&mut existing_tab_state.take_panes());
+                return Err(error);
+            },
+        };
 
         // we do this because we have to add the remaining tiled pane ids ONLY AFTER positioning
         // the new panes, otherwise the layout might get borked
         let mut pane_applier = PaneApplier::new(
             self.tiled_panes,
             self.floating_panes,
-            &self.senders,
+            &mut self.side_effects,
             &self.character_cell_size,
         );
         if retain_existing_terminal_panes || retain_existing_plugin_panes {
@@ -326,7 +539,7 @@ impl<'a> LayoutApplier<'a> {
         Ok(())
     }
     fn close_non_retained_panes(
-        &self,
+        &mut self,
         existing_tab_state: &mut ExistingTabState,
         remaining_pane_ids: &[PaneId],
         retain_existing_terminal_panes: bool,
@@ -339,18 +552,9 @@ impl<'a> LayoutApplier<'a> {
             if retain_existing_plugin_panes && matches!(pane_id, PaneId::Plugin(_)) {
                 continue;
             }
-            existing_tab_state.remove_pane(pane_id);
-            match pane_id {
-                PaneId::Terminal(_) => {
-                    let _ = self
-                        .senders
-                        .send_to_pty(PtyInstruction::ClosePane(*pane_id, None));
-                },
-                PaneId::Plugin(plugin_id) => {
-                    let _ = self
-                        .senders
-                        .send_to_plugin(PluginInstruction::Unload(*plugin_id));
-                },
+            if let Some(pane) = existing_tab_state.remove_pane(pane_id) {
+                self.deferred_closed_panes.insert(*pane_id, pane);
+                self.side_effects.close_pane(*pane_id);
             }
         }
     }
@@ -400,7 +604,6 @@ impl<'a> LayoutApplier<'a> {
         new_plugin_ids: &mut HashMap<RunPluginOrAlias, Vec<u32>>,
         client_id: ClientId,
     ) -> Result<()> {
-        let err_context = || "failed to apply tiled panes layout".to_string();
         let mut positions_in_layout = self.flatten_layout(&layout, false)?;
         let run_instructions_without_a_location = self.position_run_instructions_to_ignore(
             &layout.run_instructions_to_ignore,
@@ -420,13 +623,13 @@ impl<'a> LayoutApplier<'a> {
             self.tiled_panes.expand_pane_in_stack(*pane_id);
         }
 
-        self.adjust_viewport().with_context(err_context)?;
+        self.adjust_viewport();
         self.set_focused_tiled_pane(focus_pane_id, client_id);
         Ok(())
     }
     fn position_run_instructions_to_ignore(
         &mut self,
-        run_instructions_to_ignore: &Vec<Option<Run>>,
+        run_instructions_to_ignore: &[Option<Run>],
         positions_in_layout: &mut Vec<(TiledPaneLayout, PaneGeom)>,
     ) -> Vec<Option<Run>> {
         // here we try to find rooms for the panes that are already running (represented by
@@ -435,7 +638,7 @@ impl<'a> LayoutApplier<'a> {
         // (the new layout has a pane with None as its run instruction, eg. just `pane` in the
         // layout)
         let mut run_instructions_without_a_location = vec![];
-        for run_instruction in run_instructions_to_ignore.clone().drain(..) {
+        for run_instruction in run_instructions_to_ignore.iter().cloned() {
             if self
                 .place_running_pane_in_exact_match_location(&run_instruction, positions_in_layout)
             {
@@ -498,10 +701,7 @@ impl<'a> LayoutApplier<'a> {
                 .assign_geom_for_pane_with_run(run_instruction);
         }
         for (unused_pid, _) in new_terminal_ids {
-            let _ = self.senders.send_to_pty(PtyInstruction::ClosePane(
-                PaneId::Terminal(*unused_pid),
-                None,
-            ));
+            self.side_effects.close_pane(PaneId::Terminal(*unused_pid));
         }
     }
     fn new_tiled_plugin_pane(
@@ -517,31 +717,31 @@ impl<'a> LayoutApplier<'a> {
             .get_mut(&run)
             .and_then(|ids| ids.pop())
             .with_context(err_context)?;
-        let mut new_plugin = PluginPane::new(
+        let mut new_plugin = PluginPane::new(crate::panes::PluginPaneOptions {
             pid,
-            *position_and_size,
-            self.senders
+            position_and_size: *position_and_size,
+            send_plugin_instructions: self
+                .senders
                 .to_plugin
                 .as_ref()
                 .with_context(err_context)?
                 .clone(),
-            pane_title,
-            layout.name.clone().unwrap_or_default(),
-            self.sixel_image_store.clone(),
-            self.terminal_emulator_colors.clone(),
-            self.terminal_emulator_color_codes.clone(),
-            self.link_handler.clone(),
-            self.character_cell_size.clone(),
-            self.connected_clients.borrow().keys().copied().collect(),
-            self.style,
-            layout.run.clone(),
-            self.debug,
-            self.arrow_fonts,
-            self.styled_underlines,
-        );
+            title: pane_title,
+            pane_name: layout.name.clone().unwrap_or_default(),
+            sixel_image_store: self.sixel_image_store.clone(),
+            terminal_emulator_colors: self.terminal_emulator_colors.clone(),
+            terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
+            link_handler: self.link_handler.clone(),
+            character_cell_size: self.character_cell_size.clone(),
+            currently_connected_clients: self.connected_clients.borrow().keys().copied().collect(),
+            style: self.style,
+            invoked_with: layout.run.clone(),
+            debug: self.debug,
+            arrow_fonts: self.arrow_fonts,
+            styled_underlines: self.styled_underlines,
+        });
         if let Some(pane_initial_contents) = &layout.pane_initial_contents {
-            new_plugin.handle_pty_bytes(pane_initial_contents.as_bytes().into());
-            new_plugin.handle_pty_bytes("\n\r".as_bytes().into());
+            self.apply_or_defer_pane_initial_contents(&mut new_plugin, pane_initial_contents);
         }
 
         new_plugin.set_borderless(layout.borderless.unwrap_or(false));
@@ -566,43 +766,39 @@ impl<'a> LayoutApplier<'a> {
             .get_mut(&run)
             .and_then(|ids| ids.pop())
             .with_context(err_context)?;
-        let mut new_pane = PluginPane::new(
+        let mut new_pane = PluginPane::new(crate::panes::PluginPaneOptions {
             pid,
             position_and_size,
-            self.senders
+            send_plugin_instructions: self
+                .senders
                 .to_plugin
                 .as_ref()
                 .with_context(err_context)?
                 .clone(),
-            pane_title,
-            floating_pane_layout.name.clone().unwrap_or_default(),
-            self.sixel_image_store.clone(),
-            self.terminal_emulator_colors.clone(),
-            self.terminal_emulator_color_codes.clone(),
-            self.link_handler.clone(),
-            self.character_cell_size.clone(),
-            self.connected_clients.borrow().keys().copied().collect(),
-            self.style,
-            floating_pane_layout.run.clone(),
-            self.debug,
-            self.arrow_fonts,
-            self.styled_underlines,
-        );
+            title: pane_title,
+            pane_name: floating_pane_layout.name.clone().unwrap_or_default(),
+            sixel_image_store: self.sixel_image_store.clone(),
+            terminal_emulator_colors: self.terminal_emulator_colors.clone(),
+            terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
+            link_handler: self.link_handler.clone(),
+            character_cell_size: self.character_cell_size.clone(),
+            currently_connected_clients: self.connected_clients.borrow().keys().copied().collect(),
+            style: self.style,
+            invoked_with: floating_pane_layout.run.clone(),
+            debug: self.debug,
+            arrow_fonts: self.arrow_fonts,
+            styled_underlines: self.styled_underlines,
+        });
         if let Some(pane_initial_contents) = &floating_pane_layout.pane_initial_contents {
-            new_pane.handle_pty_bytes(pane_initial_contents.as_bytes().into());
-            new_pane.handle_pty_bytes("\n\r".as_bytes().into());
+            self.apply_or_defer_pane_initial_contents(&mut new_pane, pane_initial_contents);
         }
         if floating_pane_layout.borderless.unwrap_or(false) {
             new_pane.set_borderless(true);
         } else {
             new_pane.set_borderless(false);
         }
-        resize_pty!(
-            new_pane,
-            self.os_api,
-            self.senders,
-            self.character_cell_size
-        )?;
+        self.side_effects
+            .resize_pane(&new_pane, &self.character_cell_size);
         self.floating_panes
             .add_pane(PaneId::Plugin(pid), Box::new(new_pane));
         if floating_pane_layout.focus.unwrap_or(false) {
@@ -624,29 +820,28 @@ impl<'a> LayoutApplier<'a> {
             Some(Run::Command(run_command)) => Some(run_command.to_string()),
             _ => None,
         };
-        let mut new_pane = TerminalPane::new(
-            *pid,
+        let mut new_pane = TerminalPane::new(crate::panes::terminal_pane::TerminalPaneOptions {
+            pid: *pid,
             position_and_size,
-            self.style,
-            next_terminal_position,
-            floating_pane_layout.name.clone().unwrap_or_default(),
-            self.link_handler.clone(),
-            self.character_cell_size.clone(),
-            self.sixel_image_store.clone(),
-            self.terminal_emulator_colors.clone(),
-            self.terminal_emulator_color_codes.clone(),
-            initial_title,
-            floating_pane_layout.run.clone(),
-            self.debug,
-            self.arrow_fonts,
-            self.styled_underlines,
-            self.osc8_hyperlinks,
-            self.explicitly_disable_kitty_keyboard_protocol,
-            None,
-        );
+            style: self.style,
+            pane_index: next_terminal_position,
+            pane_name: floating_pane_layout.name.clone().unwrap_or_default(),
+            link_handler: self.link_handler.clone(),
+            character_cell_size: self.character_cell_size.clone(),
+            sixel_image_store: self.sixel_image_store.clone(),
+            terminal_emulator_colors: self.terminal_emulator_colors.clone(),
+            terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
+            initial_pane_title: initial_title,
+            invoked_with: floating_pane_layout.run.clone(),
+            debug: self.debug,
+            arrow_fonts: self.arrow_fonts,
+            styled_underlines: self.styled_underlines,
+            osc8_hyperlinks: self.osc8_hyperlinks,
+            explicitly_disable_keyboard_protocol: self.explicitly_disable_kitty_keyboard_protocol,
+            notification_end: None,
+        });
         if let Some(pane_initial_contents) = &floating_pane_layout.pane_initial_contents {
-            new_pane.handle_pty_bytes(pane_initial_contents.as_bytes().into());
-            new_pane.handle_pty_bytes("\n\r".as_bytes().into());
+            self.apply_or_defer_pane_initial_contents(&mut new_pane, pane_initial_contents);
         }
         if floating_pane_layout.borderless.unwrap_or(false) {
             new_pane.set_borderless(true);
@@ -662,12 +857,8 @@ impl<'a> LayoutApplier<'a> {
         if let Some(held_command) = hold_for_command {
             new_pane.hold(None, true, held_command.clone());
         }
-        resize_pty!(
-            new_pane,
-            self.os_api,
-            self.senders,
-            self.character_cell_size
-        )?;
+        self.side_effects
+            .resize_pane(&new_pane, &self.character_cell_size);
         self.floating_panes
             .add_pane(PaneId::Terminal(*pid), Box::new(new_pane));
         if floating_pane_layout.focus.unwrap_or(false) {
@@ -690,7 +881,9 @@ impl<'a> LayoutApplier<'a> {
         };
 
         // Check if this terminal should receive the blocking completion_tx
-        let notification_end = if let Some((blocking_pid, _)) = &self.blocking_terminal {
+        let notification_end = if !self.side_effects.is_deferred()
+            && let Some((blocking_pid, _)) = &self.blocking_terminal
+        {
             if *blocking_pid == pid {
                 self.blocking_terminal.take().map(|(_, tx)| tx)
             } else {
@@ -700,29 +893,28 @@ impl<'a> LayoutApplier<'a> {
             None
         };
 
-        let mut new_pane = TerminalPane::new(
+        let mut new_pane = TerminalPane::new(crate::panes::terminal_pane::TerminalPaneOptions {
             pid,
-            *position_and_size,
-            self.style,
-            next_terminal_position,
-            layout.name.clone().unwrap_or_default(),
-            self.link_handler.clone(),
-            self.character_cell_size.clone(),
-            self.sixel_image_store.clone(),
-            self.terminal_emulator_colors.clone(),
-            self.terminal_emulator_color_codes.clone(),
-            initial_title,
-            layout.run.clone(),
-            self.debug,
-            self.arrow_fonts,
-            self.styled_underlines,
-            self.osc8_hyperlinks,
-            self.explicitly_disable_kitty_keyboard_protocol,
+            position_and_size: *position_and_size,
+            style: self.style,
+            pane_index: next_terminal_position,
+            pane_name: layout.name.clone().unwrap_or_default(),
+            link_handler: self.link_handler.clone(),
+            character_cell_size: self.character_cell_size.clone(),
+            sixel_image_store: self.sixel_image_store.clone(),
+            terminal_emulator_colors: self.terminal_emulator_colors.clone(),
+            terminal_emulator_color_codes: self.terminal_emulator_color_codes.clone(),
+            initial_pane_title: initial_title,
+            invoked_with: layout.run.clone(),
+            debug: self.debug,
+            arrow_fonts: self.arrow_fonts,
+            styled_underlines: self.styled_underlines,
+            osc8_hyperlinks: self.osc8_hyperlinks,
+            explicitly_disable_keyboard_protocol: self.explicitly_disable_kitty_keyboard_protocol,
             notification_end,
-        );
+        });
         if let Some(pane_initial_contents) = &layout.pane_initial_contents {
-            new_pane.handle_pty_bytes(pane_initial_contents.as_bytes().into());
-            new_pane.handle_pty_bytes("\n\r".as_bytes().into());
+            self.apply_or_defer_pane_initial_contents(&mut new_pane, pane_initial_contents);
         }
         new_pane.set_borderless(layout.borderless.unwrap_or(false));
         if let Some(exclude_from_sync) = layout.exclude_from_sync {
@@ -838,10 +1030,10 @@ impl<'a> LayoutApplier<'a> {
     }
     pub fn apply_floating_panes_layout_to_existing_panes(
         &mut self,
-        floating_panes_layout: &Vec<FloatingPaneLayout>,
+        floating_panes_layout: &[FloatingPaneLayout],
     ) -> Result<bool> {
         let layout_has_floating_panes = self.floating_panes.has_panes();
-        let mut positions_in_layout = floating_panes_layout.clone();
+        let mut positions_in_layout = floating_panes_layout.to_vec();
         let mut logical_position = 0;
         for floating_pane_layout in positions_in_layout.iter_mut() {
             floating_pane_layout.logical_position = Some(logical_position);
@@ -851,7 +1043,7 @@ impl<'a> LayoutApplier<'a> {
         let mut pane_applier = PaneApplier::new(
             self.tiled_panes,
             self.floating_panes,
-            &self.senders,
+            &mut self.side_effects,
             &self.character_cell_size,
         );
         let mut panes_to_apply = vec![];
@@ -909,14 +1101,14 @@ impl<'a> LayoutApplier<'a> {
     }
     pub fn override_floating_panes_layout_for_existing_panes(
         &mut self,
-        floating_panes_layout: &Vec<FloatingPaneLayout>,
+        floating_panes_layout: &[FloatingPaneLayout],
         new_terminal_ids: Vec<(u32, HoldForCommand)>,
         new_plugin_ids: &mut HashMap<RunPluginOrAlias, Vec<u32>>,
         retain_existing_terminal_panes: bool,
         retain_existing_plugin_panes: bool,
     ) -> Result<bool> {
         let layout_has_floating_panes = !floating_panes_layout.is_empty();
-        let mut positions_in_layout = floating_panes_layout.clone();
+        let mut positions_in_layout = floating_panes_layout.to_vec();
         let mut logical_position = 0;
         for floating_pane_layout in positions_in_layout.iter_mut() {
             floating_pane_layout.logical_position = Some(logical_position);
@@ -925,26 +1117,47 @@ impl<'a> LayoutApplier<'a> {
         let mut existing_tab_state = ExistingTabState::new(self.floating_panes.drain());
         let mut positions_left = vec![];
 
-        let mut pane_applier = PaneApplier::new(
-            self.tiled_panes,
-            self.floating_panes,
-            &self.senders,
-            &self.character_cell_size,
-        );
-
         // find already running exact matches
-        for floating_pane_layout in positions_in_layout {
-            match existing_tab_state
-                .find_and_extract_exact_pane_with_same_run(&floating_pane_layout.run)
-            {
-                Some(pane) => {
-                    pane_applier
-                        .apply_floating_panes_layout_to_floating_pane(pane, floating_pane_layout)?;
-                },
-                None => {
-                    positions_left.push(floating_pane_layout);
-                },
+        let exact_match_result = {
+            let mut pane_applier = PaneApplier::new(
+                self.tiled_panes,
+                self.floating_panes,
+                &mut self.side_effects,
+                &self.character_cell_size,
+            );
+            let mut exact_match_result = Ok(());
+            for floating_pane_layout in positions_in_layout {
+                match existing_tab_state.find_exact_pane_id_with_same_run(&floating_pane_layout.run)
+                {
+                    Some(pane_id) => {
+                        let position_and_size = match pane_applier
+                            .position_floating_pane_layout(&floating_pane_layout)
+                        {
+                            Ok(position_and_size) => position_and_size,
+                            Err(error) => {
+                                exact_match_result = Err(error);
+                                break;
+                            },
+                        };
+                        if let Some(pane) = existing_tab_state.remove_pane(&pane_id) {
+                            pane_applier.apply_floating_panes_layout_at_position(
+                                pane,
+                                floating_pane_layout,
+                                position_and_size,
+                            );
+                        }
+                    },
+                    None => {
+                        positions_left.push(floating_pane_layout);
+                    },
+                }
             }
+            exact_match_result
+        };
+        if let Err(error) = exact_match_result {
+            self.rollback_panes
+                .append(&mut existing_tab_state.take_panes());
+            return Err(error);
         }
 
         let remaining_pane_ids: Vec<PaneId> = existing_tab_state.pane_ids();
@@ -959,23 +1172,45 @@ impl<'a> LayoutApplier<'a> {
         let mut focused_floating_pane = None;
         let mut new_floating_terminal_ids = new_terminal_ids.iter();
         for floating_pane_layout in positions_left {
-            let position_and_size = self
+            let position_and_size = match self
                 .floating_panes
-                .position_floating_pane_layout(&floating_pane_layout)?;
+                .position_floating_pane_layout(&floating_pane_layout)
+            {
+                Ok(position_and_size) => position_and_size,
+                Err(error) => {
+                    self.rollback_panes
+                        .append(&mut existing_tab_state.take_panes());
+                    return Err(error);
+                },
+            };
             let pid_to_focus = if let Some(Run::Plugin(run)) = floating_pane_layout.run.clone() {
-                self.new_floating_plugin_pane(
+                match self.new_floating_plugin_pane(
                     run,
                     new_plugin_ids,
                     position_and_size,
                     &floating_pane_layout,
-                )?
+                ) {
+                    Ok(pid_to_focus) => pid_to_focus,
+                    Err(error) => {
+                        self.rollback_panes
+                            .append(&mut existing_tab_state.take_panes());
+                        return Err(error);
+                    },
+                }
             } else if let Some((pid, hold_for_command)) = new_floating_terminal_ids.next() {
-                self.new_floating_terminal_pane(
+                match self.new_floating_terminal_pane(
                     pid,
                     hold_for_command,
                     position_and_size,
                     &floating_pane_layout,
-                )?
+                ) {
+                    Ok(pid_to_focus) => pid_to_focus,
+                    Err(error) => {
+                        self.rollback_panes
+                            .append(&mut existing_tab_state.take_panes());
+                        return Err(error);
+                    },
+                }
             } else {
                 None
             };
@@ -989,7 +1224,7 @@ impl<'a> LayoutApplier<'a> {
         let mut pane_applier = PaneApplier::new(
             self.tiled_panes,
             self.floating_panes,
-            &self.senders,
+            &mut self.side_effects,
             &self.character_cell_size,
         );
         pane_applier.handle_remaining_floating_pane_ids(existing_tab_state, logical_position);
@@ -1013,20 +1248,13 @@ impl<'a> LayoutApplier<'a> {
             Ok(false)
         }
     }
-    fn resize_whole_tab(&mut self, new_screen_size: Size) -> Result<()> {
-        let err_context = || {
-            format!(
-                "failed to resize whole tab to new screen size {:?}",
-                new_screen_size
-            )
-        };
+    fn resize_whole_tab(&mut self, new_screen_size: Size) {
         self.floating_panes.resize(new_screen_size);
-        // we need to do this explicitly because floating_panes.resize does not do this
-        self.floating_panes
-            .resize_pty_all_panes(&mut self.os_api)
-            .with_context(err_context)?;
         self.tiled_panes.resize(new_screen_size);
-        Ok(())
+        for (_, pane) in self.floating_panes.get_panes() {
+            self.side_effects
+                .resize_pane(&**pane, &self.character_cell_size);
+        }
     }
     pub fn offset_viewport(
         viewport: Rc<RefCell<Viewport>>,
@@ -1072,27 +1300,24 @@ impl<'a> LayoutApplier<'a> {
         }
         tiled_panes.set_pane_frames(draw_pane_frames);
     }
-    fn adjust_viewport(&mut self) -> Result<()> {
+    fn adjust_viewport(&mut self) {
         // here we offset the viewport after applying a tiled panes layout
         // from borderless panes that are on the edges of the
         // screen, this is so that when we don't have pane boundaries (eg. when they were
         // disabled by the user) boundaries won't be drawn around these panes
         // geometrically, we can only do this with panes that are on the edges of the
         // screen - so it's mostly a best-effort thing
-        let err_context = "failed to adjust viewport";
-
         let display_area = {
             let display_area = self.display_area.borrow();
             *display_area
         };
-        self.resize_whole_tab(display_area).context(err_context)?;
+        self.resize_whole_tab(display_area);
         LayoutApplier::offset_viewport(
             self.viewport.clone(),
             self.display_area.clone(),
             self.tiled_panes,
             self.draw_pane_frames,
         );
-        Ok(())
     }
     fn set_focused_tiled_pane(&mut self, focus_pane_id: Option<PaneId>, client_id: ClientId) {
         if let Some(pane_id) = focus_pane_id {
@@ -1152,15 +1377,17 @@ impl ExistingTabState {
         &mut self,
         run: &Option<Run>,
     ) -> Option<Box<dyn Pane>> {
-        let candidates = self.pane_candidates();
-        let pane_id = candidates.iter().find_map(|(_pid, p)| {
-            if p.invoked_with() == run {
-                Some(p.pid())
+        let pane_id = self.find_exact_pane_id_with_same_run(run);
+        pane_id.and_then(|p| self.existing_panes.remove(&p))
+    }
+    pub fn find_exact_pane_id_with_same_run(&self, run: &Option<Run>) -> Option<PaneId> {
+        self.pane_candidates().iter().find_map(|(_pid, pane)| {
+            if pane.invoked_with() == run {
+                Some(pane.pid())
             } else {
                 None
             }
-        });
-        pane_id.and_then(|p| self.existing_panes.remove(&p))
+        })
     }
     pub fn find_and_extract_pane_with_same_logical_position(
         &mut self,
@@ -1199,8 +1426,15 @@ impl ExistingTabState {
     pub fn remove_pane(&mut self, pane_id: &PaneId) -> Option<Box<dyn Pane>> {
         self.existing_panes.remove(pane_id)
     }
-    fn pane_candidates(&self) -> Vec<(&PaneId, &Box<dyn Pane>)> {
-        let mut candidates: Vec<_> = self.existing_panes.iter().collect();
+    pub fn take_panes(&mut self) -> BTreeMap<PaneId, Box<dyn Pane>> {
+        std::mem::take(&mut self.existing_panes)
+    }
+    fn pane_candidates(&self) -> Vec<(&PaneId, &dyn Pane)> {
+        let mut candidates: Vec<_> = self
+            .existing_panes
+            .iter()
+            .map(|(pane_id, pane)| (pane_id, pane.as_ref()))
+            .collect();
         candidates.sort_by(|(a_id, a), (b_id, b)| {
             let a_logical_position = a.position_and_size().logical_position;
             let b_logical_position = b.position_and_size().logical_position;
@@ -1214,7 +1448,7 @@ impl ExistingTabState {
     }
     fn find_pane_id_with_same_contents(
         &self,
-        candidates: &Vec<(&PaneId, &Box<dyn Pane>)>,
+        candidates: &[(&PaneId, &dyn Pane)],
         run: &Option<Run>,
         pane_logical_position: Option<usize>,
     ) -> Option<PaneId> {
@@ -1246,7 +1480,7 @@ impl ExistingTabState {
     }
     fn find_pane_id_with_same_logical_position(
         &self,
-        candidates: &Vec<(&PaneId, &Box<dyn Pane>)>,
+        candidates: &[(&PaneId, &dyn Pane)],
         logical_position: Option<usize>,
     ) -> Option<PaneId> {
         candidates
@@ -1262,7 +1496,7 @@ struct PaneApplier<'a> {
     pane_ids_expanded_in_stack: Vec<PaneId>,
     tiled_panes: &'a mut TiledPanes,
     floating_panes: &'a mut FloatingPanes,
-    senders: ThreadSenders,
+    side_effects: &'a mut LayoutSideEffects,
     character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
 }
 
@@ -1270,7 +1504,7 @@ impl<'a> PaneApplier<'a> {
     pub fn new(
         tiled_panes: &'a mut TiledPanes,
         floating_panes: &'a mut FloatingPanes,
-        senders: &ThreadSenders,
+        side_effects: &'a mut LayoutSideEffects,
         character_cell_size: &Rc<RefCell<Option<SizeInPixels>>>,
     ) -> Self {
         PaneApplier {
@@ -1278,7 +1512,7 @@ impl<'a> PaneApplier<'a> {
             pane_ids_expanded_in_stack: vec![],
             tiled_panes,
             floating_panes,
-            senders: senders.clone(),
+            side_effects,
             character_cell_size: character_cell_size.clone(),
         }
     }
@@ -1295,18 +1529,37 @@ impl<'a> PaneApplier<'a> {
         if layout.is_expanded_in_stack {
             self.pane_ids_expanded_in_stack.push(pane.pid());
         }
-        let _ = resize_pty!(pane, self.os_api, self.senders, self.character_cell_size);
+        self.side_effects
+            .resize_pane(&*pane, &self.character_cell_size);
         self.tiled_panes
             .add_pane_with_existing_geom(pane.pid(), pane);
     }
     pub fn apply_floating_panes_layout_to_floating_pane(
         &mut self,
-        mut pane: Box<dyn Pane>,
+        pane: Box<dyn Pane>,
         floating_panes_layout: FloatingPaneLayout,
     ) -> Result<()> {
-        let position_and_size = self
-            .floating_panes
-            .position_floating_pane_layout(&floating_panes_layout)?;
+        let position_and_size = self.position_floating_pane_layout(&floating_panes_layout)?;
+        self.apply_floating_panes_layout_at_position(
+            pane,
+            floating_panes_layout,
+            position_and_size,
+        );
+        Ok(())
+    }
+    pub fn position_floating_pane_layout(
+        &mut self,
+        floating_panes_layout: &FloatingPaneLayout,
+    ) -> Result<PaneGeom> {
+        self.floating_panes
+            .position_floating_pane_layout(floating_panes_layout)
+    }
+    pub fn apply_floating_panes_layout_at_position(
+        &mut self,
+        mut pane: Box<dyn Pane>,
+        floating_panes_layout: FloatingPaneLayout,
+        position_and_size: PaneGeom,
+    ) {
         if let Some(pane_title) = floating_panes_layout.name.as_ref() {
             pane.set_title(pane_title.into());
         }
@@ -1317,7 +1570,6 @@ impl<'a> PaneApplier<'a> {
             pane.set_borderless(should_be_borderless);
         }
         self.apply_position_and_size_to_floating_pane(pane, position_and_size);
-        Ok(())
     }
     pub fn apply_position_and_size_to_floating_pane(
         &mut self,
@@ -1325,7 +1577,8 @@ impl<'a> PaneApplier<'a> {
         position_and_size: PaneGeom,
     ) {
         pane.set_geom(position_and_size);
-        let _ = resize_pty!(pane, self.os_api, self.senders, self.character_cell_size);
+        self.side_effects
+            .resize_pane(&*pane, &self.character_cell_size);
         self.floating_panes.add_pane(pane.pid(), pane);
     }
 
@@ -1361,7 +1614,10 @@ impl<'a> PaneApplier<'a> {
                     }
                 },
                 None => {
-                    log::error!("could not find room for pane!")
+                    log::error!("could not find room for pane!");
+                    if let Some(pane) = existing_tab_state.remove_pane(&pane_id) {
+                        self.floating_panes.add_pane(pane_id, pane);
+                    }
                 },
             }
         }

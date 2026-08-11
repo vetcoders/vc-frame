@@ -1,14 +1,14 @@
+use crate::ClientId;
 use crate::output::{CharacterChunk, SixelImageChunk};
-use crate::panes::sixel::SixelImageStore;
 use crate::panes::LinkHandler;
+use crate::panes::sixel::SixelImageStore;
 use crate::panes::{
     grid::Grid,
-    terminal_character::{render_first_run_banner, TerminalCharacter, EMPTY_TERMINAL_CHARACTER},
+    terminal_character::{EMPTY_TERMINAL_CHARACTER, TerminalCharacter, render_first_run_banner},
 };
 use crate::pty::VteBytes;
 use crate::route::NotificationEnd;
 use crate::tab::{AdjustedInput, Pane};
-use crate::ClientId;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
@@ -123,7 +123,6 @@ type IsFirstRun = bool;
 
 // FIXME: This should hold an os_api handle so that terminal panes can set their own size via FD in
 // their `reflow_lines()` method. Drop a Box<dyn ServerOsApi> in here somewhere.
-#[allow(clippy::too_many_arguments)]
 pub struct TerminalPane {
     pub grid: Grid,
     pub pid: u32,
@@ -153,6 +152,7 @@ pub struct TerminalPane {
     #[allow(dead_code)]
     arrow_fonts: bool,
     notification_end: Option<NotificationEnd>,
+    layout_reflow_deferred: bool,
     /// `true` while a host-terminal forward initiated by this pane is
     /// outstanding. While set, processing of `pending_pty_input` is
     /// suspended so that the async host reply lands on the pane's
@@ -268,7 +268,7 @@ impl Pane for TerminalPane {
             // panes who do not work in this mode
             match raw_input_bytes.as_slice() {
                 BRACKETED_PASTE_BEGIN | BRACKETED_PASTE_END => {
-                    return Some(AdjustedInput::WriteBytesToTerminal(vec![]))
+                    return Some(AdjustedInput::WriteBytesToTerminal(vec![]));
                 },
                 _ => {},
             }
@@ -331,6 +331,9 @@ impl Pane for TerminalPane {
         self.grid.should_render = should_render;
     }
     fn render_full_viewport(&mut self) {
+        if self.layout_reflow_deferred {
+            return;
+        }
         // this marks the pane for a full re-render, rather than just rendering the
         // diff as it usually does with the OutputBuffer
         self.frame.clear();
@@ -448,6 +451,10 @@ impl Pane for TerminalPane {
         }
         if let Some((frame_color_override, _text)) = self.pane_frame_color_override.as_ref() {
             frame.override_color(*frame_color_override);
+        } else if matches!(self.invoked_with, Some(Run::EditFile(..))) {
+            // The editor "ticket" overlay must not blend into the grayscale
+            // frames around it — it always renders with the accent color.
+            frame.override_color(self.style.colors.frame_highlight.base);
         }
 
         let res = match self.frame.get(&client_id) {
@@ -657,17 +664,26 @@ impl Pane for TerminalPane {
     fn update_selection(&mut self, to: &Position, _client_id: ClientId) {
         let should_scroll = self.selection_scrolled_at.elapsed()
             >= time::Duration::from_millis(SELECTION_SCROLL_INTERVAL_MS);
-        let cursor_at_the_bottom = to.line.0 < 0 && should_scroll;
-        let cursor_at_the_top = to.line.0 as usize >= self.grid.height && should_scroll;
+        let dragged_above_top = to.line.0 < 0 && should_scroll;
+        let dragged_below_bottom = to.line.0 as usize >= self.grid.height && should_scroll;
         let cursor_in_the_middle = to.line.0 >= 0 && (to.line.0 as usize) < self.grid.height;
 
         // TODO: check how far up/down mouse is relative to pane, to increase scroll lines?
-        if cursor_at_the_bottom {
+        if dragged_above_top {
             self.grid.scroll_up_one_line();
+            // extend the selection to the row the scroll just revealed,
+            // otherwise the viewport moves but the selection stays behind
+            let edge = Position::new(0, to.column.0 as u16);
+            self.grid.update_selection(&edge);
             self.selection_scrolled_at = time::Instant::now();
             self.set_should_render(true);
-        } else if cursor_at_the_top {
+        } else if dragged_below_bottom {
             self.grid.scroll_down_one_line();
+            let edge = Position::new(
+                self.grid.height.saturating_sub(1) as i32,
+                to.column.0 as u16,
+            );
+            self.grid.update_selection(&edge);
             self.selection_scrolled_at = time::Instant::now();
             self.set_should_render(true);
         } else if cursor_in_the_middle {
@@ -691,7 +707,9 @@ impl Pane for TerminalPane {
     }
 
     fn set_frame(&mut self, _frame: bool) {
-        self.frame.clear();
+        if !self.layout_reflow_deferred {
+            self.frame.clear();
+        }
     }
 
     fn set_content_offset(&mut self, offset: Offset) {
@@ -826,17 +844,17 @@ impl Pane for TerminalPane {
     fn hold(&mut self, exit_status: Option<i32>, is_first_run: bool, run_command: RunCommand) {
         self.invoked_with = Some(Run::Command(run_command.clone()));
         self.is_held = Some((exit_status, is_first_run, run_command));
-        if let Some(notification_end) = self.notification_end.as_mut() {
-            if let Some(exit_status) = exit_status {
-                notification_end.set_exit_status(exit_status);
+        if let Some(notification_end) = self.notification_end.as_mut()
+            && let Some(exit_status) = exit_status
+        {
+            notification_end.set_exit_status(exit_status);
 
-                // Check if unblock condition is met
-                if let Some(condition) = notification_end.unblock_condition() {
-                    if condition.is_met(exit_status) {
-                        // Condition met - drop the NotificationEnd now to unblock
-                        drop(self.notification_end.take());
-                    }
-                }
+            // Check if unblock condition is met
+            if let Some(condition) = notification_end.unblock_condition()
+                && condition.is_met(exit_status)
+            {
+                // Condition met - drop the NotificationEnd now to unblock
+                drop(self.notification_end.take());
             }
         }
         if is_first_run {
@@ -881,6 +899,44 @@ impl Pane for TerminalPane {
     }
     fn set_title(&mut self, title: String) {
         self.pane_title = title;
+    }
+    fn layout_title(&self) -> String {
+        self.pane_title.clone()
+    }
+    fn begin_layout_transaction(&mut self) {
+        self.layout_reflow_deferred = true;
+    }
+    fn commit_layout_transaction(&mut self) {
+        self.layout_reflow_deferred = false;
+        self.reflow_lines();
+        self.render_full_viewport();
+    }
+    fn rollback_layout_transaction(&mut self) {
+        self.layout_reflow_deferred = false;
+    }
+    fn attach_blocking_completion(
+        &mut self,
+        mut completion: NotificationEnd,
+    ) -> std::result::Result<(), NotificationEnd> {
+        if self.notification_end.is_some() {
+            Err(completion)
+        } else {
+            if let Some((Some(exit_status), _, _)) = self.is_held.as_ref() {
+                completion.set_exit_status(*exit_status);
+                if completion
+                    .unblock_condition()
+                    .is_some_and(|condition| condition.is_met(*exit_status))
+                {
+                    drop(completion);
+                    return Ok(());
+                }
+            }
+            self.notification_end = Some(completion);
+            Ok(())
+        }
+    }
+    fn can_attach_blocking_completion(&self) -> bool {
+        self.notification_end.is_none()
     }
     fn current_title(&self) -> String {
         if self.pane_name.is_empty() {
@@ -972,11 +1028,11 @@ impl Pane for TerminalPane {
     fn intercept_left_mouse_click(&mut self, position: &Position, client_id: ClientId) -> bool {
         if self.position_is_on_frame(position) {
             let relative_position = self.relative_position(position);
-            if let Some(client_frame) = self.frame.get_mut(&client_id) {
-                if client_frame.clicked_on_pinned(relative_position) {
-                    self.toggle_pinned();
-                    return true;
-                }
+            if let Some(client_frame) = self.frame.get_mut(&client_id)
+                && client_frame.clicked_on_pinned(relative_position)
+            {
+                self.toggle_pinned();
+                return true;
             }
         }
         false
@@ -984,13 +1040,12 @@ impl Pane for TerminalPane {
     fn intercept_mouse_event_on_frame(&mut self, event: &MouseEvent, client_id: ClientId) -> bool {
         if self.position_is_on_frame(&event.position) {
             let relative_position = self.relative_position(&event.position);
-            if let MouseEventType::Press = event.event_type {
-                if let Some(client_frame) = self.frame.get_mut(&client_id) {
-                    if client_frame.clicked_on_pinned(relative_position) {
-                        self.toggle_pinned();
-                        return true;
-                    }
-                }
+            if let MouseEventType::Press = event.event_type
+                && let Some(client_frame) = self.frame.get_mut(&client_id)
+                && client_frame.clicked_on_pinned(relative_position)
+            {
+                self.toggle_pinned();
+                return true;
             }
         }
         false
@@ -1020,11 +1075,11 @@ impl Pane for TerminalPane {
         if let Some(notification_end) = self.notification_end.as_mut() {
             notification_end.set_exit_status(exit_status);
             // Check if unblock condition is met
-            if let Some(condition) = notification_end.unblock_condition() {
-                if condition.is_met(exit_status) {
-                    // Condition met - drop the NotificationEnd now to unblock
-                    drop(self.notification_end.take());
-                }
+            if let Some(condition) = notification_end.unblock_condition()
+                && condition.is_met(exit_status)
+            {
+                // Condition met - drop the NotificationEnd now to unblock
+                drop(self.notification_end.take());
             }
         }
     }
@@ -1068,33 +1123,54 @@ impl Pane for TerminalPane {
     }
 }
 
+pub struct TerminalPaneOptions {
+    pub pid: u32,
+    pub position_and_size: PaneGeom,
+    pub style: Style,
+    pub pane_index: usize,
+    pub pane_name: String,
+    pub link_handler: Rc<RefCell<LinkHandler>>,
+    pub character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
+    pub sixel_image_store: Rc<RefCell<SixelImageStore>>,
+    pub terminal_emulator_colors: Rc<RefCell<Palette>>,
+    pub terminal_emulator_color_codes: Rc<RefCell<HashMap<usize, String>>>,
+    pub initial_pane_title: Option<String>,
+    pub invoked_with: Option<Run>,
+    pub debug: bool,
+    pub arrow_fonts: bool,
+    pub styled_underlines: bool,
+    pub osc8_hyperlinks: bool,
+    pub explicitly_disable_keyboard_protocol: bool,
+    pub notification_end: Option<NotificationEnd>,
+}
+
 impl TerminalPane {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        pid: u32,
-        position_and_size: PaneGeom,
-        style: Style,
-        pane_index: usize,
-        pane_name: String,
-        link_handler: Rc<RefCell<LinkHandler>>,
-        character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
-        sixel_image_store: Rc<RefCell<SixelImageStore>>,
-        terminal_emulator_colors: Rc<RefCell<Palette>>,
-        terminal_emulator_color_codes: Rc<RefCell<HashMap<usize, String>>>,
-        initial_pane_title: Option<String>,
-        invoked_with: Option<Run>,
-        debug: bool,
-        arrow_fonts: bool,
-        styled_underlines: bool,
-        osc8_hyperlinks: bool,
-        explicitly_disable_keyboard_protocol: bool,
-        mut notification_end: Option<NotificationEnd>,
-    ) -> TerminalPane {
+    pub fn new(opts: TerminalPaneOptions) -> TerminalPane {
+        let TerminalPaneOptions {
+            pid,
+            position_and_size,
+            style,
+            pane_index,
+            pane_name,
+            link_handler,
+            character_cell_size,
+            sixel_image_store,
+            terminal_emulator_colors,
+            terminal_emulator_color_codes,
+            initial_pane_title,
+            invoked_with,
+            debug,
+            arrow_fonts,
+            styled_underlines,
+            osc8_hyperlinks,
+            explicitly_disable_keyboard_protocol,
+            mut notification_end,
+        } = opts;
         let initial_pane_title =
             initial_pane_title.unwrap_or_else(|| format!("Pane #{}", pane_index));
-        let grid = Grid::new(
-            position_and_size.rows.as_usize(),
-            position_and_size.cols.as_usize(),
+        let grid = Grid::new(crate::panes::grid::GridOptions {
+            rows: position_and_size.rows.as_usize(),
+            columns: position_and_size.cols.as_usize(),
             terminal_emulator_colors,
             terminal_emulator_color_codes,
             link_handler,
@@ -1105,8 +1181,8 @@ impl TerminalPane {
             arrow_fonts,
             styled_underlines,
             osc8_hyperlinks,
-            explicitly_disable_keyboard_protocol,
-        );
+            explicitly_disable_kitty_keyboard_protocol: explicitly_disable_keyboard_protocol,
+        });
         if let Some(notification_end) = notification_end.as_mut() {
             notification_end.set_affected_pane_id(PaneId::Terminal(pid));
         }
@@ -1136,6 +1212,7 @@ impl TerminalPane {
             invoked_with,
             arrow_fonts,
             notification_end,
+            layout_reflow_deferred: false,
             forward_paused: false,
             pending_pty_input: VecDeque::new(),
         }
@@ -1165,6 +1242,9 @@ impl TerminalPane {
         }
     }
     fn reflow_lines(&mut self) {
+        if self.layout_reflow_deferred {
+            return;
+        }
         let rows = self.get_content_rows();
         let cols = self.get_content_columns();
         self.grid.force_change_size(rows, cols);

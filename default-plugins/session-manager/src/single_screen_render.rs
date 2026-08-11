@@ -3,7 +3,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use zellij_tile::prelude::*;
 
 use crate::single_screen_data::UnifiedSearchResult;
-use crate::ui::components::{compute_reduction_tier, Colors};
+use crate::ui::components::{Colors, compute_reduction_tier};
 
 #[derive(Clone)]
 pub struct CachedRowData {

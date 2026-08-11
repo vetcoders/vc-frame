@@ -2,7 +2,15 @@ tab_template name="ui" {
    pane size=1 borderless=true {
        plugin location="tab-bar"
    }
-   children
+   pane split_direction="vertical" {
+       pane size=24 borderless=true {
+           plugin location="session-manager" {
+               rail true
+               pane_title "Sessions"
+           }
+       }
+       pane { children; }
+   }
    pane size=1 borderless=true {
        plugin location="status-bar"
    }

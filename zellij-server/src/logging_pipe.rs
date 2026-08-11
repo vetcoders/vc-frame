@@ -38,8 +38,7 @@ impl LoggingPipe {
 impl Write for LoggingPipe {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         if self.buffer.len() + buf.len() > ZELLIJ_MAX_PIPE_BUFFER_SIZE {
-            let error_msg =
-                "Exceeded log buffer size. Make sure that your plugin calls flush on stderr on \
+            let error_msg = "Exceeded log buffer size. Make sure that your plugin calls flush on stderr on \
                 valid UTF-8 symbol boundary. Additionally, make sure that your log message contains \
                 endline \\n symbol.";
             error!("{}: {}", self.plugin_name, error_msg);

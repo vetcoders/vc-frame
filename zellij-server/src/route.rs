@@ -5,15 +5,15 @@ use tokio::sync::oneshot;
 use crate::global_async_runtime::get_tokio_runtime;
 use crate::thread_bus::ThreadSenders;
 use crate::{
+    ServerInstruction, SessionMetaData, SessionState,
     os_input_output::ServerOsApi,
     panes::PaneId,
     plugins::PluginInstruction,
     pty::{ClientTabIndexOrPaneId, PtyInstruction},
-    screen::ScreenInstruction,
-    ServerInstruction, SessionMetaData, SessionState,
+    screen::{DumpScreenTargetIdentity, ScreenInstruction},
 };
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 use zellij_utils::{
     channels::SenderWithContext,
@@ -28,12 +28,21 @@ use zellij_utils::{
         actions::{Action, SearchDirection, SearchOption},
         command::TerminalAction,
     },
-    ipc::{ClientToServerMsg, ExitReason, IpcReceiverWithContext, ServerToClientMsg},
+    ipc::{
+        ClientReceiveOutcome, ClientToServerMsg, ExitReason, IpcReceiverWithContext,
+        ServerToClientMsg,
+    },
 };
 
 use crate::ClientId;
 
 const ACTION_COMPLETION_TIMEOUT: Duration = Duration::from_secs(1);
+// Most `CliTriageIo` child commands have a 10-second outer budget. NewTab is
+// the exception: `NEW_TAB_COMMAND_TIMEOUT` is 30s because cold debug wasm
+// plugin load on layout activation (tab-bar/status-bar/session-manager) can
+// legitimately exceed 8s on hosted CI. Keep critical completion under that
+// outer budget so the route still fails closed instead of hanging forever.
+const CRITICAL_ACTION_COMPLETION_TIMEOUT: Duration = Duration::from_secs(25);
 
 #[derive(Debug, Clone)]
 pub struct ActionCompletionResult {
@@ -47,45 +56,54 @@ pub struct ActionCompletionResult {
 pub fn wait_for_action_completion(
     receiver: oneshot::Receiver<ActionCompletionResult>,
     action_name: &str,
-    wait_forever: bool,
+    critical_completion: bool,
+) -> ActionCompletionResult {
+    let completion_timeout = if critical_completion {
+        CRITICAL_ACTION_COMPLETION_TIMEOUT
+    } else {
+        ACTION_COMPLETION_TIMEOUT
+    };
+    wait_for_action_completion_with_timeout(receiver, action_name, completion_timeout)
+}
+
+fn wait_for_action_completion_with_timeout(
+    receiver: oneshot::Receiver<ActionCompletionResult>,
+    action_name: &str,
+    completion_timeout: Duration,
 ) -> ActionCompletionResult {
     let runtime = get_tokio_runtime();
-    if wait_forever {
-        runtime.block_on(async {
-            match receiver.await {
-                Ok(result) => result,
-                Err(e) => {
-                    log::error!("Failed to wait for action {}: {}", action_name, e);
-                    ActionCompletionResult {
-                        exit_status: None,
-                        affected_pane_id: None,
-                        affected_tab_id: None,
-                        error_message: None,
-                        stdout_message: None,
-                    }
-                },
+    match runtime.block_on(async { tokio::time::timeout(completion_timeout, receiver).await }) {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => {
+            log::error!("Failed to wait for action {}: {}", action_name, error);
+            ActionCompletionResult {
+                exit_status: Some(1),
+                affected_pane_id: None,
+                affected_tab_id: None,
+                error_message: Some(format!(
+                    "action '{}' completion channel closed before acknowledgement: {}",
+                    action_name, error
+                )),
+                stdout_message: None,
             }
-        })
-    } else {
-        match runtime
-            .block_on(async { tokio::time::timeout(ACTION_COMPLETION_TIMEOUT, receiver).await })
-        {
-            Ok(Ok(result)) => result,
-            Err(_) | Ok(Err(_)) => {
-                log::error!(
-                    "Action {} did not complete within {:?} timeout",
-                    action_name,
-                    ACTION_COMPLETION_TIMEOUT
-                );
-                ActionCompletionResult {
-                    exit_status: None,
-                    affected_pane_id: None,
-                    affected_tab_id: None,
-                    error_message: None,
-                    stdout_message: None,
-                }
-            },
-        }
+        },
+        Err(_) => {
+            log::error!(
+                "Action {} did not complete within {:?} timeout",
+                action_name,
+                completion_timeout
+            );
+            ActionCompletionResult {
+                exit_status: Some(1),
+                affected_pane_id: None,
+                affected_tab_id: None,
+                error_message: Some(format!(
+                    "action '{}' did not acknowledge completion within {:?}",
+                    action_name, completion_timeout
+                )),
+                stdout_message: None,
+            }
+        },
     }
 }
 
@@ -93,11 +111,25 @@ pub fn wait_for_action_completion(
 // dropping this struct sends a notification through the oneshot channel to the receiver, letting
 // it know the action is ended and thus releasing it
 //
-// Note: Cloning this struct DOES NOT clone that internal receiver, it only implements Clone so
+// Note: Cloning this struct DOES NOT clone that internal sender, it only implements Clone so
 // that it can be included in various other larger structs - DO NOT RELY ON CLONING IT!
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotificationResolution {
+    Pending,
+    Success,
+    Failure,
+}
+
+const PENDING_NOTIFICATION_DROPPED_ERROR: &str =
+    "action completion dropped before explicit success or failure resolution";
+
 #[derive(Debug)]
 pub struct NotificationEnd {
     channel: Option<oneshot::Sender<ActionCompletionResult>>,
+    // `None` preserves the legacy drop-as-success contract for callers that
+    // have not migrated to explicit completion yet. Once a caller opts in via
+    // `require_explicit_resolution`, dropping while Pending is always failure.
+    resolution: Option<NotificationResolution>,
     exit_status: Option<i32>,
     unblock_condition: Option<UnblockCondition>,
     affected_pane_id: Option<PaneId>, // optional payload of the pane id affected by this action
@@ -111,6 +143,7 @@ impl Clone for NotificationEnd {
         // Always clone as None - only the original holder should signal completion
         NotificationEnd {
             channel: None,
+            resolution: self.resolution,
             exit_status: self.exit_status,
             unblock_condition: self.unblock_condition,
             affected_pane_id: self.affected_pane_id,
@@ -125,6 +158,7 @@ impl NotificationEnd {
     pub fn new(sender: oneshot::Sender<ActionCompletionResult>) -> Self {
         NotificationEnd {
             channel: Some(sender),
+            resolution: None,
             exit_status: None,
             unblock_condition: None,
             affected_pane_id: None,
@@ -140,6 +174,7 @@ impl NotificationEnd {
     ) -> Self {
         NotificationEnd {
             channel: Some(sender),
+            resolution: None,
             exit_status: None,
             unblock_condition: Some(unblock_condition),
             affected_pane_id: None,
@@ -151,6 +186,20 @@ impl NotificationEnd {
 
     pub fn set_exit_status(&mut self, exit_status: i32) {
         self.exit_status = Some(exit_status);
+        if self
+            .unblock_condition
+            .is_some_and(|condition| !condition.is_met(exit_status))
+        {
+            // A blocking terminal can be rerun until its requested condition
+            // is met. An intermediate exit updates the eventual payload but
+            // must not poison the still-pending completion.
+            return;
+        }
+        if exit_status == 0 {
+            self.mark_success();
+        } else {
+            self.resolution = Some(NotificationResolution::Failure);
+        }
     }
 
     pub fn set_affected_pane_id(&mut self, pane_id: PaneId) {
@@ -163,6 +212,10 @@ impl NotificationEnd {
 
     pub fn set_error_message(&mut self, message: String) {
         self.error_message = Some(message);
+        if self.exit_status.is_none_or(|exit_status| exit_status == 0) {
+            self.exit_status = Some(1);
+        }
+        self.resolution = Some(NotificationResolution::Failure);
     }
 
     pub fn set_stdout_message(&mut self, message: String) {
@@ -172,11 +225,36 @@ impl NotificationEnd {
     pub fn unblock_condition(&self) -> Option<UnblockCondition> {
         self.unblock_condition
     }
+
+    pub fn require_explicit_resolution(&mut self) {
+        if self.resolution.is_none() {
+            self.resolution = Some(NotificationResolution::Pending);
+        }
+    }
+
+    pub fn mark_success(&mut self) {
+        if self.resolution != Some(NotificationResolution::Failure) {
+            self.resolution = Some(NotificationResolution::Success);
+        }
+    }
+
+    pub fn mark_failure(&mut self, message: impl Into<String>) {
+        self.set_error_message(message.into());
+    }
 }
 
 impl Drop for NotificationEnd {
     fn drop(&mut self) {
         if let Some(tx) = self.channel.take() {
+            if self.resolution == Some(NotificationResolution::Pending) {
+                self.exit_status = Some(1);
+                self.error_message = Some(PENDING_NOTIFICATION_DROPPED_ERROR.to_string());
+                self.resolution = Some(NotificationResolution::Failure);
+            } else if self.resolution == Some(NotificationResolution::Failure)
+                && self.exit_status.is_none_or(|exit_status| exit_status == 0)
+            {
+                self.exit_status = Some(1);
+            }
             let result = ActionCompletionResult {
                 exit_status: self.exit_status,
                 affected_pane_id: self.affected_pane_id,
@@ -189,21 +267,43 @@ impl Drop for NotificationEnd {
     }
 }
 
+fn complete_action_immediately(sender: oneshot::Sender<ActionCompletionResult>) {
+    let mut completion = NotificationEnd::new(sender);
+    completion.require_explicit_resolution();
+    completion.mark_success();
+}
+
 // `route_action` must not borrow from the `session_data` read guard.
 // otherwise blocking-CLI actions
-// (`wait_forever=true`) park this function while still holding the guard,
+// (`critical_completion=true`) park this function while still holding the guard,
 // deadlocking concurrent `session_data.write()`s.
+pub(crate) struct RouteActionParams<'a> {
+    pub action: Action,
+    pub caller: &'a str,
+    pub client_id: ClientId,
+    pub cli_client_id: Option<ClientId>,
+    pub pane_id: Option<PaneId>,
+    pub senders: ThreadSenders,
+    pub default_shell: Option<TerminalAction>,
+    pub seen_cli_pipes: Option<&'a mut HashSet<String>>,
+    pub default_mode: InputMode,
+}
+
 pub(crate) fn route_action(
-    action: Action,
-    client_id: ClientId,
-    cli_client_id: Option<ClientId>,
-    pane_id: Option<PaneId>,
-    senders: ThreadSenders,
-    default_shell: Option<TerminalAction>,
-    mut seen_cli_pipes: Option<&mut HashSet<String>>,
-    default_mode: InputMode,
-    os_input: Option<Box<dyn ServerOsApi>>,
+    params: RouteActionParams<'_>,
 ) -> Result<(bool, Option<ActionCompletionResult>)> {
+    let RouteActionParams {
+        action,
+        caller,
+        client_id,
+        cli_client_id,
+        pane_id,
+        senders,
+        default_shell,
+        mut seen_cli_pipes,
+        default_mode,
+    } = params;
+    let route_started = Instant::now();
     let mut should_break = false;
     let err_context = || format!("failed to route action for client {client_id}");
     let action_name = action.to_string();
@@ -223,11 +323,11 @@ pub(crate) fn route_action(
     // we use this oneshot channel to wait for an action to be "logically"
     // done, meaning that it traveled through all the threads it needed to travel through and the
     // app has confirmed that it is complete. Once this happens, we get a signal through the
-    // wait_for_action_completion call below (or timeout after 1 second) and release this thread,
+    // wait_for_action_completion call below (or its bounded deadline) and release this thread,
     // allowing the client to produce another action without risking races
     let (completion_tx, completion_rx) = oneshot::channel();
 
-    let mut wait_forever = false;
+    let mut critical_completion = false;
 
     match action {
         Action::ToggleTab => {
@@ -452,7 +552,36 @@ pub(crate) fn route_action(
             include_scrollback,
             pane_id,
             ansi,
+            expected_tab_id,
+            expected_tab_name,
+            expected_session_incarnation,
+            expected_tab_instance_id,
         } => {
+            let target_identity = match (
+                expected_tab_id,
+                expected_tab_name,
+                expected_session_incarnation,
+                expected_tab_instance_id,
+            ) {
+                (None, None, None, None) => None,
+                (
+                    Some(tab_id),
+                    Some(tab_name),
+                    Some(session_incarnation),
+                    Some(tab_instance_id),
+                ) => Some(DumpScreenTargetIdentity {
+                    tab_id: tab_id as usize,
+                    tab_name,
+                    session_incarnation,
+                    tab_instance_id,
+                }),
+                _ => {
+                    return Err(anyhow!(
+                        "typed dump requires a complete tab identity selector"
+                    ));
+                },
+            };
+            critical_completion = true;
             senders
                 .send_to_screen(ScreenInstruction::DumpScreen(
                     file_path,
@@ -462,6 +591,15 @@ pub(crate) fn route_action(
                     Some(NotificationEnd::new(completion_tx)),
                     cli_client_id,
                     ansi,
+                    target_identity,
+                ))
+                .with_context(err_context)?;
+        },
+        Action::CopyPaneScrollback => {
+            senders
+                .send_to_screen(ScreenInstruction::CopyPaneScrollback(
+                    client_id,
+                    Some(NotificationEnd::new(completion_tx)),
                 ))
                 .with_context(err_context)?;
         },
@@ -679,7 +817,7 @@ pub(crate) fn route_action(
                     set_pane_blocking,
                 ))
                 .with_context(err_context)?;
-            wait_forever = true;
+            critical_completion = true;
         },
         Action::EditFile {
             payload: open_file_payload,
@@ -988,20 +1126,29 @@ pub(crate) fn route_action(
             cwd,
             initial_panes,
             first_pane_unblock_condition,
+            placement,
         } => {
+            // New-tab completion is the commit acknowledgement. Returning after
+            // the generic one-second timeout lets a late server writer create a
+            // duplicate tab after the caller has already retried.
+            critical_completion = true;
             let shell = default_shell.clone();
             let is_web_client = false; // actions cannot be initiated directly from the web
 
             // Construct completion_tx conditionally
-            let (completion_tx, block_on_first_terminal) = if let Some(condition) =
+            let (mut completion_tx, block_on_first_terminal) = if let Some(condition) =
                 first_pane_unblock_condition
             {
                 let notification = NotificationEnd::new_with_condition(completion_tx, condition);
-                wait_forever = true;
+                critical_completion = true;
                 (notification, true)
             } else {
                 (NotificationEnd::new(completion_tx), false)
             };
+            // NewTab spans Route -> Screen -> Plugin -> PTY -> Screen -> PTY.
+            // Opt in before the first handoff so losing ownership anywhere in
+            // that chain can never look like a successful commit.
+            completion_tx.require_explicit_resolution();
 
             senders
                 .send_to_screen(ScreenInstruction::NewTab(
@@ -1014,6 +1161,7 @@ pub(crate) fn route_action(
                     initial_panes,
                     block_on_first_terminal,
                     should_change_focus_to_new_tab,
+                    placement,
                     (client_id, is_web_client),
                     Some(completion_tx),
                 ))
@@ -1106,6 +1254,40 @@ pub(crate) fn route_action(
                 ))
                 .with_context(err_context)?;
         },
+        Action::CloseTabByIdIfName {
+            id,
+            expected_name,
+            expected_session_incarnation,
+            expected_tab_instance_id,
+        } => {
+            critical_completion = true;
+            senders
+                .send_to_screen(ScreenInstruction::CloseTabWithIdIfName(
+                    id as usize,
+                    expected_name,
+                    expected_session_incarnation,
+                    expected_tab_instance_id,
+                    Some(NotificationEnd::new(completion_tx)),
+                ))
+                .with_context(err_context)?;
+        },
+        Action::CloseTabByIdIfNameIfQuiescent {
+            id,
+            expected_name,
+            expected_session_incarnation,
+            expected_tab_instance_id,
+        } => {
+            critical_completion = true;
+            senders
+                .send_to_screen(ScreenInstruction::CloseTabWithIdIfNameIfQuiescent(
+                    id as usize,
+                    expected_name,
+                    expected_session_incarnation,
+                    expected_tab_instance_id,
+                    Some(NotificationEnd::new(completion_tx)),
+                ))
+                .with_context(err_context)?;
+        },
         Action::RenameTabById { id, name } => {
             senders
                 .send_to_screen(ScreenInstruction::RenameTabWithId(
@@ -1194,7 +1376,7 @@ pub(crate) fn route_action(
                     .with_context(err_context)?;
                 should_break = true;
             } else {
-                drop(completion_tx); // no need to wait, this is a no-op
+                complete_action_immediately(completion_tx);
             }
         },
         Action::MouseEvent { event } => {
@@ -1214,27 +1396,23 @@ pub(crate) fn route_action(
                 ))
                 .with_context(err_context)?;
         },
-        Action::Confirm => {
+        Action::Confirm | Action::Deny => {
             // no-op, these are deprecated and should be removed when we upgrade the server/client
             // contract
+            complete_action_immediately(completion_tx);
         },
-        Action::Deny => {
-            // no-op, these are deprecated and should be removed when we upgrade the server/client
-            // contract
-        },
-        #[allow(clippy::single_match)]
         Action::SkipConfirm { action } => match *action {
             Action::Quit => {
-                drop(completion_tx);
+                complete_action_immediately(completion_tx);
                 senders
                     .send_to_server(ServerInstruction::ClientExit(client_id, None))
                     .with_context(err_context)?;
                 should_break = true;
             },
-            _ => {},
+            _ => complete_action_immediately(completion_tx),
         },
         Action::NoOp => {
-            drop(completion_tx);
+            complete_action_immediately(completion_tx);
         },
         Action::SearchInput { input } => {
             senders
@@ -1274,7 +1452,7 @@ pub(crate) fn route_action(
                 .send_to_screen(instruction)
                 .with_context(err_context)?;
         },
-        Action::ToggleMouseMode => {}, // Handled client side
+        Action::ToggleMouseMode => complete_action_immediately(completion_tx), // Handled client side
         Action::PreviousSwapLayout => {
             senders
                 .send_to_screen(ScreenInstruction::PreviousSwapLayout(
@@ -1582,23 +1760,27 @@ pub(crate) fn route_action(
             pane_title,
             ..
         } => {
-            drop(completion_tx); // releasing pipes is handled by the plugins, so we don't want
-                                 // this to block additionallu
-            if let Some(seen_cli_pipes) = seen_cli_pipes.as_mut() {
-                if !seen_cli_pipes.contains(&pipe_id) {
-                    seen_cli_pipes.insert(pipe_id.clone());
-                    senders
-                        .send_to_server(ServerInstruction::AssociatePipeWithClient {
-                            pipe_id: pipe_id.clone(),
-                            client_id: cli_client_id.unwrap_or(client_id),
-                        })
-                        .with_context(err_context)?;
-                }
+            // Route-level dispatch is complete immediately. The CLI client
+            // remains blocked independently until a destination plugin sends
+            // UnblockCliPipeInput for this pipe id.
+            complete_action_immediately(completion_tx);
+            if let Some(seen_cli_pipes) = seen_cli_pipes.as_mut()
+                && !seen_cli_pipes.contains(&pipe_id)
+            {
+                seen_cli_pipes.insert(pipe_id.clone());
+                senders
+                    .send_to_server(ServerInstruction::AssociatePipeWithClient {
+                        pipe_id: pipe_id.clone(),
+                        client_id: cli_client_id.unwrap_or(client_id),
+                    })
+                    .with_context(err_context)?;
             }
             if let Some(name) = name.take() {
                 let should_open_in_place = in_place.unwrap_or(false);
                 if should_open_in_place && pane_id.is_none() {
-                    log::error!("Was asked to open a new plugin in-place, but cannot identify the pane id... is the ZELLIJ_PANE_ID variable set?");
+                    log::error!(
+                        "Was asked to open a new plugin in-place, but cannot identify the pane id... is the VC_FRAME_PANE_ID or ZELLIJ_PANE_ID variable set?"
+                    );
                 }
                 let pane_id_to_replace = if should_open_in_place { pane_id } else { None };
                 senders
@@ -1689,6 +1871,7 @@ pub(crate) fn route_action(
             show_all,
             output_json,
         } => {
+            let mut completion = NotificationEnd::new(completion_tx);
             let maybe_panes =
                 request_panes_from_screen(&senders, show_all).with_context(err_context)?;
 
@@ -1710,11 +1893,12 @@ pub(crate) fn route_action(
                     )
                 };
 
-                send_output_to_client(cli_client_id, os_input.as_deref(), output_lines);
+                completion.set_stdout_message(output_lines.join("\n"));
             } else {
-                send_error_to_client(cli_client_id, os_input.as_deref(), "Timeout listing panes");
+                completion.set_exit_status(1);
+                completion.set_error_message("Timeout listing panes".to_string());
             }
-            drop(NotificationEnd::new(completion_tx));
+            drop(completion);
         },
         Action::ListTabs {
             show_state,
@@ -1724,6 +1908,7 @@ pub(crate) fn route_action(
             show_all,
             output_json,
         } => {
+            let mut completion = NotificationEnd::new(completion_tx);
             let maybe_tabs =
                 request_tabs_from_screen(&senders, client_id).with_context(err_context)?;
 
@@ -1732,7 +1917,7 @@ pub(crate) fn route_action(
                     format_tabs_as_json(&tab_infos)
                 } else {
                     format_tabs_table(
-                        &tab_infos,
+                        &tab_infos.tabs,
                         show_state || show_all,
                         show_dimensions || show_all,
                         show_panes || show_all,
@@ -1740,13 +1925,15 @@ pub(crate) fn route_action(
                     )
                 };
 
-                send_output_to_client(cli_client_id, os_input.as_deref(), output_lines);
+                completion.set_stdout_message(output_lines.join("\n"));
             } else {
-                send_error_to_client(cli_client_id, os_input.as_deref(), "Timeout listing tabs");
+                completion.set_exit_status(1);
+                completion.set_error_message("Timeout listing tabs".to_string());
             }
-            drop(NotificationEnd::new(completion_tx));
+            drop(completion);
         },
         Action::CurrentTabInfo { output_json } => {
+            let mut completion = NotificationEnd::new(completion_tx);
             let maybe_tab_info = request_current_tab_info_from_screen(&senders, client_id)
                 .with_context(err_context)?;
 
@@ -1757,17 +1944,15 @@ pub(crate) fn route_action(
                     } else {
                         format_current_tab_info_plain(&tab_info)
                     };
-                    send_output_to_client(cli_client_id, os_input.as_deref(), output_lines);
+                    completion.set_stdout_message(output_lines.join("\n"));
                 },
                 None => {
-                    send_error_to_client(
-                        cli_client_id,
-                        os_input.as_deref(),
-                        "No active tab found for current client",
-                    );
+                    completion.set_exit_status(1);
+                    completion
+                        .set_error_message("No active tab found for current client".to_string());
                 },
             }
-            drop(NotificationEnd::new(completion_tx));
+            drop(completion);
         },
         Action::TogglePanePinned => {
             senders
@@ -2084,67 +2269,18 @@ pub(crate) fn route_action(
                 .with_context(err_context)?;
         },
     }
-    let result = wait_for_action_completion(completion_rx, &action_name, wait_forever);
-    if let Some(error_message) = &result.error_message {
-        if let Some(cli_client_id) = cli_client_id {
-            if let Some(ref os_input) = os_input {
-                let _ = os_input.send_to_client(
-                    cli_client_id,
-                    ServerToClientMsg::LogError {
-                        lines: vec![error_message.clone()],
-                    },
-                );
-            }
-        }
-    } else if let Some(stdout_message) = &result.stdout_message {
-        if let Some(cli_client_id) = cli_client_id {
-            if let Some(ref os_input) = os_input {
-                let _ = os_input.send_to_client(
-                    cli_client_id,
-                    ServerToClientMsg::Log {
-                        lines: vec![stdout_message.clone()],
-                    },
-                );
-            }
-        }
-    } else if let Some(exit_status) = result.exit_status {
-        if let Some(cli_client_id) = cli_client_id {
-            if let Some(ref os_input) = os_input {
-                let _ = os_input.send_to_client(
-                    cli_client_id,
-                    ServerToClientMsg::Exit {
-                        exit_reason: ExitReason::CustomExitStatus(exit_status),
-                    },
-                );
-            }
-        }
-    }
-    // Return tab ID to CLI clients as plain text
-    if let Some(tab_id) = result.affected_tab_id {
-        if let Some(cli_client_id) = cli_client_id {
-            if let Some(ref os_input) = os_input {
-                let _ = os_input.send_to_client(
-                    cli_client_id,
-                    ServerToClientMsg::Log {
-                        lines: vec![tab_id.to_string()],
-                    },
-                );
-            }
-        }
-    }
-    // Return pane ID to CLI clients as plain text
-    if let Some(pane_id) = result.affected_pane_id {
-        if let Some(cli_client_id) = cli_client_id {
-            if let Some(ref os_input) = os_input {
-                let _ = os_input.send_to_client(
-                    cli_client_id,
-                    ServerToClientMsg::Log {
-                        lines: vec![pane_id.to_string()],
-                    },
-                );
-            }
-        }
-    }
+    let result = wait_for_action_completion(completion_rx, &action_name, critical_completion);
+    let timed_out = result
+        .error_message
+        .as_deref()
+        .is_some_and(|message| message.contains("did not acknowledge completion within"));
+    crate::route_telemetry::record(
+        caller,
+        &action_name,
+        route_started.elapsed(),
+        timed_out,
+        result.error_message.is_none() && result.exit_status.is_none_or(|status| status == 0),
+    );
     Ok((should_break, Some(result)))
 }
 
@@ -2164,6 +2300,22 @@ macro_rules! send_to_screen_or_retry_queue {
     }};
 }
 
+fn normalize_route_caller(value: &str) -> String {
+    let normalized = value
+        .trim()
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | ':' | '/')
+        })
+        .take(64)
+        .collect::<String>();
+    if normalized.is_empty() {
+        "anonymous".to_string()
+    } else {
+        normalized
+    }
+}
+
 pub(crate) fn route_thread_main(
     session_data: Arc<RwLock<Option<SessionMetaData>>>,
     session_state: Arc<RwLock<SessionState>>,
@@ -2173,13 +2325,14 @@ pub(crate) fn route_thread_main(
     client_id: ClientId,
 ) -> Result<()> {
     let mut retry_queue = VecDeque::new();
+    let mut caller = "anonymous".to_string();
+    let connection_started = Instant::now();
     let err_context = || format!("failed to handle instruction for client {client_id}");
     let mut seen_cli_pipes = HashSet::new();
-    let mut consecutive_unknown_messages_received = 0;
     'route_loop: loop {
-        match receiver.recv_client_msg() {
-            Some((instruction, err_ctx)) => {
-                consecutive_unknown_messages_received = 0;
+        match receiver.recv_client_msg_outcome() {
+            ClientReceiveOutcome::Message(instruction, err_ctx) => {
+                let instruction = *instruction;
                 err_ctx.update_thread_ctx();
                 let mut handle_instruction = |instruction: ClientToServerMsg,
                                               mut retry_queue: Option<
@@ -2197,26 +2350,25 @@ pub(crate) fn route_thread_main(
                     let is_watcher = session_state.read().unwrap().is_watcher(&client_id);
                     if is_watcher {
                         match &instruction {
-                            ClientToServerMsg::Key { key, .. } => {
-                                if (key.bare_key == BareKey::Char('q')
+                            ClientToServerMsg::Key { key, .. }
+                                if ((key.bare_key == BareKey::Char('q')
                                     && key.key_modifiers.contains(&KeyModifier::Ctrl))
                                     || key.bare_key == BareKey::Esc
                                     || (key.bare_key == BareKey::Char('c')
-                                        && key.key_modifiers.contains(&KeyModifier::Ctrl))
-                                {
-                                    let _ = os_input.send_to_client(
+                                        && key.key_modifiers.contains(&KeyModifier::Ctrl))) =>
+                            {
+                                let _ = os_input.send_to_client(
+                                    client_id,
+                                    ServerToClientMsg::Exit {
+                                        exit_reason: ExitReason::Normal,
+                                    },
+                                );
+                                let _ = senders.as_ref().map(|s| {
+                                    s.send_to_screen(ScreenInstruction::RemoveWatcherClient(
                                         client_id,
-                                        ServerToClientMsg::Exit {
-                                            exit_reason: ExitReason::Normal,
-                                        },
-                                    );
-                                    let _ = senders.as_ref().map(|s| {
-                                        s.send_to_screen(ScreenInstruction::RemoveWatcherClient(
-                                            client_id,
-                                        ))
-                                    });
-                                    should_break = true;
-                                }
+                                    ))
+                                });
+                                should_break = true;
                             },
                             ClientToServerMsg::TerminalResize { new_size } => {
                                 // For watchers: send size to Screen for rendering adjustments, but
@@ -2238,6 +2390,20 @@ pub(crate) fn route_thread_main(
                     }
 
                     match instruction {
+                        ClientToServerMsg::DeclareCaller { caller: declared } => {
+                            caller = normalize_route_caller(&declared);
+                        },
+                        ClientToServerMsg::DoctorRoutes { json: _ } => {
+                            os_input
+                                .send_to_client(
+                                    client_id,
+                                    ServerToClientMsg::Log {
+                                        lines: vec![crate::route_telemetry::snapshot_json()],
+                                    },
+                                )
+                                .with_context(err_context)?;
+                            should_break = true;
+                        },
                         ClientToServerMsg::Key {
                             key,
                             raw_bytes,
@@ -2284,17 +2450,17 @@ pub(crate) fn route_thread_main(
                                         cli_client_id: None,
                                     });
 
-                                    match route_action(
+                                    match route_action(RouteActionParams {
                                         action,
+                                        caller: "interactive",
                                         client_id,
-                                        None,
-                                        None,
-                                        senders.clone(),
-                                        default_shell.clone(),
-                                        Some(&mut seen_cli_pipes),
-                                        client_input_mode,
-                                        Some(os_input.clone()),
-                                    ) {
+                                        cli_client_id: None,
+                                        pane_id: None,
+                                        senders: senders.clone(),
+                                        default_shell: default_shell.clone(),
+                                        seen_cli_pipes: Some(&mut seen_cli_pipes),
+                                        default_mode: client_input_mode,
+                                    }) {
                                         Ok(route_action_should_break) => {
                                             if route_action_should_break.0 {
                                                 should_break = true;
@@ -2360,26 +2526,62 @@ pub(crate) fn route_thread_main(
                             if let Some((senders, default_shell, client_input_mode)) =
                                 session_data_assets
                             {
-                                match route_action(
+                                let completion_client_id = (is_cli_client
+                                    && !cli_action_has_dedicated_response(&action))
+                                .then_some(cli_client_id);
+                                match route_action(RouteActionParams {
                                     action,
+                                    caller: &caller,
                                     client_id,
-                                    Some(cli_client_id),
-                                    maybe_pane_id.map(PaneId::Terminal),
+                                    cli_client_id: Some(cli_client_id),
+                                    pane_id: maybe_pane_id.map(PaneId::Terminal),
                                     senders,
                                     default_shell,
-                                    Some(&mut seen_cli_pipes),
-                                    client_input_mode,
-                                    Some(os_input.clone()),
-                                ) {
-                                    Ok(route_action_should_break) => {
-                                        if route_action_should_break.0 {
+                                    seen_cli_pipes: Some(&mut seen_cli_pipes),
+                                    default_mode: client_input_mode,
+                                }) {
+                                    Ok((route_action_should_break, completion)) => {
+                                        if route_action_should_break {
                                             should_break = true;
+                                        }
+                                        if let Some(cli_client_id) = completion_client_id {
+                                            let message =
+                                                cli_action_completion_message(completion.as_ref());
+                                            if let Err(error) =
+                                                os_input.send_to_client(cli_client_id, message)
+                                            {
+                                                log::error!(
+                                                    "failed to send CLI action completion to client {}: {}",
+                                                    cli_client_id,
+                                                    error
+                                                );
+                                            }
                                         }
                                     },
                                     Err(e) => {
                                         log::error!("{}", e);
+                                        if is_cli_client {
+                                            let _ = os_input.send_to_client(
+                                                cli_client_id,
+                                                ServerToClientMsg::LogError {
+                                                    lines: vec![format!(
+                                                        "failed to route CLI action: {e}"
+                                                    )],
+                                                },
+                                            );
+                                        }
                                     },
                                 }
+                            } else if is_cli_client {
+                                let _ = os_input.send_to_client(
+                                    cli_client_id,
+                                    ServerToClientMsg::LogError {
+                                        lines: vec![
+                                            "session runtime is not ready for CLI actions"
+                                                .to_string(),
+                                        ],
+                                    },
+                                );
                             }
                         },
                         ClientToServerMsg::TerminalResize { new_size } => {
@@ -2648,30 +2850,38 @@ pub(crate) fn route_thread_main(
                 if should_break {
                     break 'route_loop;
                 }
+                // signal to the client that the action has finished processing and it can either
+                // exit (if it's a cli client) or allow the user to perform another action (if it's
+                // an actively connected user)
+                let _ = os_input.send_to_client(client_id, ServerToClientMsg::UnblockInputThread);
             },
-            None => {
-                consecutive_unknown_messages_received += 1;
-                if consecutive_unknown_messages_received == 1 {
-                    log::error!("Received unknown message from client.");
-                }
-                if consecutive_unknown_messages_received >= 1000 {
-                    log::error!("Client sent over 1000 consecutive unknown messages, this is probably an infinite loop, logging client out");
-                    let _ = os_input.send_to_client(
+            ClientReceiveOutcome::Disconnected => {
+                // Clean EOF / broken pipe — end the route without the historical
+                // "unknown message" retry loop that eventually forced logout.
+                let age = connection_started.elapsed();
+                if age >= Duration::from_secs(60) {
+                    log::warn!(
+                        "warden.expired_client caller={} client_id={} age_seconds={} result=disconnected",
+                        caller,
                         client_id,
-                        ServerToClientMsg::Exit {
-                            exit_reason: ExitReason::Error("Received empty message".to_string()),
-                        },
+                        age.as_secs()
                     );
-                    let _ = to_server.send(ServerInstruction::RemoveClient(client_id));
-                    break 'route_loop;
                 }
+                log::info!("Client {client_id} disconnected");
+                break 'route_loop;
+            },
+            ClientReceiveOutcome::ProtocolError(reason) => {
+                log::error!("Client {client_id} protocol error: {reason}");
+                let _ = os_input.send_to_client(
+                    client_id,
+                    ServerToClientMsg::Exit {
+                        exit_reason: ExitReason::Error(format!("Protocol error: {reason}")),
+                    },
+                );
+                let _ = to_server.send(ServerInstruction::RemoveClient(client_id));
+                break 'route_loop;
             },
         }
-
-        // signal to the client that the action has finished processing and it can either exit (if
-        // it's a cli client) or allow the user to perform another action (if it's an actively
-        // connected user)
-        let _ = os_input.send_to_client(client_id, ServerToClientMsg::UnblockInputThread);
     }
     // route thread exited, make sure we clean up
     let _ = to_server.send(ServerInstruction::RemoveClient(client_id));
@@ -2682,7 +2892,7 @@ fn request_panes_from_screen(
     senders: &ThreadSenders,
     show_all: bool,
 ) -> Result<Option<ListPanesResponse>> {
-    use crossbeam::channel::{unbounded, RecvTimeoutError};
+    use crossbeam::channel::{RecvTimeoutError, unbounded};
     use std::time::Duration;
 
     let (response_sender, response_receiver) = unbounded();
@@ -2708,7 +2918,7 @@ fn request_tabs_from_screen(
     senders: &ThreadSenders,
     client_id: ClientId,
 ) -> Result<Option<ListTabsResponse>> {
-    use crossbeam::channel::{unbounded, RecvTimeoutError};
+    use crossbeam::channel::{RecvTimeoutError, unbounded};
     use std::time::Duration;
 
     let (response_sender, response_receiver) = unbounded();
@@ -2734,7 +2944,7 @@ fn request_current_tab_info_from_screen(
     senders: &ThreadSenders,
     client_id: ClientId,
 ) -> Result<Option<TabInfo>> {
-    use crossbeam::channel::{unbounded, RecvTimeoutError};
+    use crossbeam::channel::{RecvTimeoutError, unbounded};
     use std::time::Duration;
 
     let (response_sender, response_receiver) = unbounded();
@@ -2958,8 +3168,31 @@ fn extract_cwd(entry: &PaneListEntry) -> String {
     entry.pane_cwd.as_deref().unwrap_or("-").to_string()
 }
 
-fn format_tabs_as_json(tab_infos: &[TabInfo]) -> Vec<String> {
-    vec![serde_json::to_string_pretty(tab_infos).unwrap_or_else(|_| "[]".to_string())]
+fn format_tabs_as_json(response: &ListTabsResponse) -> Vec<String> {
+    let tab_infos = response
+        .tabs
+        .iter()
+        .filter_map(|tab| serde_json::to_value(tab).ok())
+        .map(|mut tab| {
+            if let Some(tab) = tab.as_object_mut() {
+                let tab_id = tab.get("tab_id").and_then(serde_json::Value::as_u64);
+                tab.insert(
+                    "session_incarnation".to_owned(),
+                    serde_json::Value::String(response.session_incarnation.clone()),
+                );
+                if let Some(tab_instance_id) =
+                    tab_id.and_then(|tab_id| response.tab_instance_ids.get(&(tab_id as usize)))
+                {
+                    tab.insert(
+                        "tab_instance_id".to_owned(),
+                        serde_json::Value::String(tab_instance_id.clone()),
+                    );
+                }
+            }
+            tab
+        })
+        .collect::<Vec<_>>();
+    vec![serde_json::to_string_pretty(&tab_infos).unwrap_or_else(|_| "[]".to_string())]
 }
 
 fn format_tabs_table(
@@ -3091,43 +3324,65 @@ fn format_current_tab_info_plain(tab_info: &TabInfo) -> Vec<String> {
     ]
 }
 
-fn send_error_to_client(
-    cli_client_id: Option<ClientId>,
-    os_input: Option<&dyn ServerOsApi>,
-    error_message: &str,
-) {
-    if let Some(cli_client_id) = cli_client_id {
-        if let Some(os_input) = os_input {
-            let _ = os_input.send_to_client(
-                cli_client_id,
-                ServerToClientMsg::LogError {
-                    lines: vec![error_message.to_string()],
-                },
-            );
+fn cli_action_completion_message(result: Option<&ActionCompletionResult>) -> ServerToClientMsg {
+    let Some(result) = result else {
+        return ServerToClientMsg::LogError {
+            lines: vec!["CLI action ended without a completion result".to_string()],
+        };
+    };
+
+    if let Some(error_message) = &result.error_message {
+        ServerToClientMsg::LogError {
+            lines: vec![error_message.clone()],
         }
+    } else if let Some(stdout_message) = &result.stdout_message {
+        ServerToClientMsg::Log {
+            lines: vec![stdout_message.clone()],
+        }
+    } else if let Some(exit_status) = result.exit_status {
+        ServerToClientMsg::Exit {
+            exit_reason: ExitReason::CustomExitStatus(exit_status),
+        }
+    } else if let Some(tab_id) = result.affected_tab_id {
+        ServerToClientMsg::Log {
+            lines: vec![tab_id.to_string()],
+        }
+    } else if let Some(pane_id) = result.affected_pane_id {
+        ServerToClientMsg::Log {
+            lines: vec![pane_id.to_string()],
+        }
+    } else {
+        // Generic input unblocks are session-wide and can race an unrelated CLI
+        // request. A targeted empty Log is the explicit success acknowledgement
+        // for an action that has no stdout payload.
+        ServerToClientMsg::Log { lines: vec![] }
     }
 }
 
-fn send_output_to_client(
-    cli_client_id: Option<ClientId>,
-    os_input: Option<&dyn ServerOsApi>,
-    output_lines: Vec<String>,
-) {
-    if let Some(cli_client_id) = cli_client_id {
-        if let Some(os_input) = os_input {
-            let _ = os_input.send_to_client(
-                cli_client_id,
-                ServerToClientMsg::Log {
-                    lines: output_lines,
-                },
-            );
-        }
+fn cli_action_has_dedicated_response(action: &Action) -> bool {
+    match action {
+        Action::CliPipe { .. }
+        | Action::DumpLayout
+        | Action::ListClients
+        | Action::QueryTabNames => true,
+        Action::DumpScreen { file_path, .. } => file_path.is_none(),
+        _ => false,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn route_caller_is_bounded_and_safe_for_receipts() {
+        assert_eq!(
+            normalize_route_caller("  settlement worker  "),
+            "settlementworker"
+        );
+        assert_eq!(normalize_route_caller("💥"), "anonymous");
+        assert_eq!(normalize_route_caller(&"a".repeat(100)).len(), 64);
+    }
 
     #[test]
     fn test_notification_end_sets_affected_tab_id() {
@@ -3151,6 +3406,8 @@ mod tests {
 
         let result = rx.blocking_recv().unwrap();
         assert_eq!(result.affected_tab_id, None);
+        assert_eq!(result.exit_status, None);
+        assert_eq!(result.error_message, None);
     }
 
     #[test]
@@ -3164,6 +3421,344 @@ mod tests {
         };
 
         assert_eq!(result.affected_tab_id, Some(123));
+    }
+
+    #[test]
+    fn cli_completion_without_payload_gets_targeted_success_ack() {
+        let result = ActionCompletionResult {
+            exit_status: None,
+            affected_pane_id: None,
+            affected_tab_id: None,
+            error_message: None,
+            stdout_message: None,
+        };
+
+        assert!(matches!(
+            cli_action_completion_message(Some(&result)),
+            ServerToClientMsg::Log { lines } if lines.is_empty()
+        ));
+    }
+
+    #[test]
+    fn cli_completion_carries_stdout_instead_of_generic_unblock() {
+        let result = ActionCompletionResult {
+            exit_status: None,
+            affected_pane_id: None,
+            affected_tab_id: None,
+            error_message: None,
+            stdout_message: Some("[{\"tab_id\":1}]".to_string()),
+        };
+
+        assert!(matches!(
+            cli_action_completion_message(Some(&result)),
+            ServerToClientMsg::Log { lines }
+                if lines == vec!["[{\"tab_id\":1}]".to_string()]
+        ));
+    }
+
+    #[test]
+    fn missing_cli_completion_is_an_explicit_error() {
+        assert!(matches!(
+            cli_action_completion_message(None),
+            ServerToClientMsg::LogError { lines }
+                if lines == vec!["CLI action ended without a completion result".to_string()]
+        ));
+    }
+
+    #[test]
+    fn existing_cli_response_protocols_do_not_get_a_second_ack() {
+        let cli_pipe = Action::CliPipe {
+            pipe_id: "pipe".to_string(),
+            name: Some("test".to_string()),
+            payload: None,
+            args: None,
+            plugin: None,
+            configuration: None,
+            launch_new: false,
+            skip_cache: false,
+            floating: None,
+            in_place: None,
+            cwd: None,
+            pane_title: None,
+        };
+
+        assert!(cli_action_has_dedicated_response(&cli_pipe));
+        assert!(cli_action_has_dedicated_response(&Action::DumpLayout));
+        assert!(cli_action_has_dedicated_response(&Action::ListClients));
+        assert!(cli_action_has_dedicated_response(&Action::QueryTabNames));
+        let dump_to_stdout = Action::DumpScreen {
+            file_path: None,
+            include_scrollback: false,
+            pane_id: None,
+            ansi: false,
+            expected_tab_id: None,
+            expected_tab_name: None,
+            expected_session_incarnation: None,
+            expected_tab_instance_id: None,
+        };
+        let dump_to_file = Action::DumpScreen {
+            file_path: Some("dump".into()),
+            include_scrollback: false,
+            pane_id: None,
+            ansi: false,
+            expected_tab_id: None,
+            expected_tab_name: None,
+            expected_session_incarnation: None,
+            expected_tab_instance_id: None,
+        };
+        assert!(cli_action_has_dedicated_response(&dump_to_stdout));
+        assert!(!cli_action_has_dedicated_response(&dump_to_file));
+        assert!(!cli_action_has_dedicated_response(&Action::NoOp));
+    }
+
+    #[test]
+    fn cli_completion_precedence_is_error_stdout_exit_tab_then_pane() {
+        let mut result = ActionCompletionResult {
+            exit_status: Some(7),
+            affected_pane_id: Some(PaneId::Terminal(9)),
+            affected_tab_id: Some(8),
+            error_message: Some("error".to_string()),
+            stdout_message: Some("stdout".to_string()),
+        };
+
+        assert!(matches!(
+            cli_action_completion_message(Some(&result)),
+            ServerToClientMsg::LogError { lines } if lines == vec!["error".to_string()]
+        ));
+        result.error_message = None;
+        assert!(matches!(
+            cli_action_completion_message(Some(&result)),
+            ServerToClientMsg::Log { lines } if lines == vec!["stdout".to_string()]
+        ));
+        result.stdout_message = None;
+        assert!(matches!(
+            cli_action_completion_message(Some(&result)),
+            ServerToClientMsg::Exit {
+                exit_reason: ExitReason::CustomExitStatus(7)
+            }
+        ));
+        result.exit_status = None;
+        assert!(matches!(
+            cli_action_completion_message(Some(&result)),
+            ServerToClientMsg::Log { lines } if lines == vec!["8".to_string()]
+        ));
+        result.affected_tab_id = None;
+        assert!(matches!(
+            cli_action_completion_message(Some(&result)),
+            ServerToClientMsg::Log { lines } if lines == vec!["terminal_9".to_string()]
+        ));
+    }
+
+    #[test]
+    fn closed_action_completion_channel_is_an_explicit_failure() {
+        let (tx, rx) = oneshot::channel();
+        drop(tx);
+
+        let result = wait_for_action_completion(rx, "dump-screen", true);
+
+        assert_eq!(result.exit_status, Some(1));
+        assert!(
+            result
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("closed before acknowledgement"))
+        );
+    }
+
+    #[test]
+    fn immediate_action_completion_is_an_acknowledged_success() {
+        let (tx, rx) = oneshot::channel();
+        complete_action_immediately(tx);
+
+        let result = wait_for_action_completion(rx, "CliPipe", false);
+
+        assert_eq!(result.exit_status, None);
+        assert_eq!(result.error_message, None);
+    }
+
+    #[test]
+    fn pending_notification_drop_is_an_explicit_failure() {
+        let (tx, rx) = oneshot::channel();
+        let mut completion = NotificationEnd::new(tx);
+        completion.require_explicit_resolution();
+
+        drop(completion);
+
+        let result = rx.blocking_recv().unwrap();
+        assert_eq!(result.exit_status, Some(1));
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some(PENDING_NOTIFICATION_DROPPED_ERROR)
+        );
+    }
+
+    #[test]
+    fn explicitly_successful_notification_is_success() {
+        let (tx, rx) = oneshot::channel();
+        let mut completion = NotificationEnd::new(tx);
+        completion.require_explicit_resolution();
+        completion.mark_success();
+
+        drop(completion);
+
+        let result = rx.blocking_recv().unwrap();
+        assert_eq!(result.exit_status, None);
+        assert_eq!(result.error_message, None);
+    }
+
+    #[test]
+    fn explicit_zero_exit_status_resolves_success() {
+        let (tx, rx) = oneshot::channel();
+        let mut completion = NotificationEnd::new(tx);
+        completion.require_explicit_resolution();
+        completion.set_exit_status(0);
+
+        drop(completion);
+
+        let result = rx.blocking_recv().unwrap();
+        assert_eq!(result.exit_status, Some(0));
+        assert_eq!(result.error_message, None);
+    }
+
+    #[test]
+    fn unmet_blocking_exit_does_not_poison_a_later_success() {
+        let (tx, rx) = oneshot::channel();
+        let mut completion =
+            NotificationEnd::new_with_condition(tx, UnblockCondition::OnExitSuccess);
+        completion.require_explicit_resolution();
+        completion.set_exit_status(7);
+        assert_eq!(completion.resolution, Some(NotificationResolution::Pending));
+        completion.set_exit_status(0);
+
+        drop(completion);
+
+        let result = rx.blocking_recv().unwrap();
+        assert_eq!(result.exit_status, Some(0));
+        assert_eq!(result.error_message, None);
+    }
+
+    #[test]
+    fn unmet_blocking_success_waits_for_a_later_failure() {
+        let (tx, rx) = oneshot::channel();
+        let mut completion =
+            NotificationEnd::new_with_condition(tx, UnblockCondition::OnExitFailure);
+        completion.require_explicit_resolution();
+        completion.set_exit_status(0);
+        assert_eq!(completion.resolution, Some(NotificationResolution::Pending));
+        completion.set_exit_status(9);
+
+        drop(completion);
+
+        let result = rx.blocking_recv().unwrap();
+        assert_eq!(result.exit_status, Some(9));
+        assert_eq!(result.error_message, None);
+    }
+
+    #[test]
+    fn explicitly_failed_notification_preserves_the_exact_failure() {
+        let (tx, rx) = oneshot::channel();
+        let mut completion = NotificationEnd::new(tx);
+        completion.require_explicit_resolution();
+        completion.mark_failure("layout commit rejected");
+
+        drop(completion);
+
+        let result = rx.blocking_recv().unwrap();
+        assert_eq!(result.exit_status, Some(1));
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some("layout commit rejected")
+        );
+    }
+
+    #[test]
+    fn explicit_nonzero_exit_status_preserves_the_exact_status() {
+        let (tx, rx) = oneshot::channel();
+        let mut completion = NotificationEnd::new(tx);
+        completion.require_explicit_resolution();
+        completion.set_exit_status(7);
+
+        drop(completion);
+
+        let result = rx.blocking_recv().unwrap();
+        assert_eq!(result.exit_status, Some(7));
+        assert_eq!(result.error_message, None);
+    }
+
+    #[test]
+    fn explicit_failure_cannot_be_overwritten_by_late_success() {
+        let (tx, rx) = oneshot::channel();
+        let mut completion = NotificationEnd::new(tx);
+        completion.require_explicit_resolution();
+        completion.mark_failure("commit activation failed");
+        completion.mark_success();
+
+        drop(completion);
+
+        let result = rx.blocking_recv().unwrap();
+        assert_eq!(result.exit_status, Some(1));
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some("commit activation failed")
+        );
+    }
+
+    #[test]
+    fn notification_clone_cannot_resolve_the_owning_channel() {
+        let (tx, mut rx) = oneshot::channel();
+        let mut owner = NotificationEnd::new(tx);
+        owner.require_explicit_resolution();
+        let mut cloned = owner.clone();
+
+        cloned.mark_success();
+        drop(cloned);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+
+        drop(owner);
+        let result = rx.blocking_recv().unwrap();
+        assert_eq!(result.exit_status, Some(1));
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some(PENDING_NOTIFICATION_DROPPED_ERROR)
+        );
+    }
+
+    #[test]
+    fn notification_drop_tolerates_a_disconnected_receiver() {
+        let (tx, rx) = oneshot::channel();
+        drop(rx);
+        let mut completion = NotificationEnd::new(tx);
+        completion.require_explicit_resolution();
+        completion.mark_success();
+
+        drop(completion);
+    }
+
+    #[test]
+    fn action_completion_timeout_is_an_explicit_failure() {
+        let (_tx, rx) = oneshot::channel();
+
+        let result =
+            wait_for_action_completion_with_timeout(rx, "legacy-action", Duration::from_millis(20));
+
+        assert_eq!(result.exit_status, Some(1));
+        assert!(
+            result
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("did not acknowledge completion"))
+        );
+    }
+
+    #[test]
+    fn critical_action_deadline_finishes_before_the_outer_new_tab_cli_timeout() {
+        // `CliTriageIo::NEW_TAB_COMMAND_TIMEOUT` is 30s; critical completion must
+        // stay strictly inside that outer budget so the route fails first.
+        assert!(CRITICAL_ACTION_COMPLETION_TIMEOUT < Duration::from_secs(30));
+        assert!(CRITICAL_ACTION_COMPLETION_TIMEOUT > Duration::from_secs(8));
     }
 
     #[test]

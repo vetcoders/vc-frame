@@ -8,9 +8,10 @@ use super::layout::{
 use crate::cli::CliAction;
 use crate::data::{
     CommandOrPlugin, Direction, KeyWithModifier, LayoutInfo, NewPanePlacement, OriginatingPlugin,
-    PaneId, Resize, UnblockCondition,
+    PaneId, Resize, TabPlacement, UnblockCondition,
 };
 use crate::data::{FloatingPaneCoordinates, InputMode};
+use crate::envs::{PANE_ID_ENV_KEY, VC_FRAME_PANE_ID_ENV_KEY, get_pane_id};
 use crate::home::{find_default_config_dir, get_layout_dir};
 use crate::input::config::{Config, ConfigError, KdlError};
 use crate::input::mouse::MouseEvent;
@@ -117,6 +118,10 @@ impl FromStr for SearchOption {
 )]
 #[strum(ascii_case_insensitive)]
 #[derive(Default)]
+// Layout-bearing actions intentionally keep their payloads inline. Boxing the
+// largest variants would change this public action contract across every
+// client, plugin and IPC conversion for no GC-safety benefit.
+#[allow(clippy::large_enum_variant)]
 pub enum Action {
     /// Quit Zellij.
     Quit,
@@ -183,7 +188,13 @@ pub enum Action {
         include_scrollback: bool,
         pane_id: Option<PaneId>,
         ansi: bool,
+        expected_tab_id: Option<u64>,
+        expected_tab_name: Option<String>,
+        expected_session_incarnation: Option<String>,
+        expected_tab_instance_id: Option<String>,
     },
+    /// Copy the focused pane with full scrollback to the configured clipboard target.
+    CopyPaneScrollback,
     /// Dumps
     DumpLayout,
     /// Save the current session state to disk
@@ -319,6 +330,8 @@ pub enum Action {
         cwd: Option<PathBuf>,
         initial_panes: Option<Vec<CommandOrPlugin>>,
         first_pane_unblock_condition: Option<UnblockCondition>,
+        /// Where the tab lands in the bar. Defaults to appending.
+        placement: TabPlacement,
     },
     /// Do nothing.
     #[default]
@@ -489,6 +502,18 @@ pub enum Action {
     },
     CloseTabById {
         id: u64,
+    },
+    CloseTabByIdIfName {
+        id: u64,
+        expected_name: String,
+        expected_session_incarnation: String,
+        expected_tab_instance_id: String,
+    },
+    CloseTabByIdIfNameIfQuiescent {
+        id: u64,
+        expected_name: String,
+        expected_session_incarnation: String,
+        expected_tab_instance_id: String,
     },
     RenameTabById {
         id: u64,
@@ -675,19 +700,15 @@ impl Action {
                 Some(pane_id_str) => {
                     let parsed_pane_id = PaneId::from_str(&pane_id_str);
                     match parsed_pane_id {
-                            Ok(parsed_pane_id) => {
-                                Ok(vec![Action::WriteToPaneId {
-                                    bytes,
-                                    pane_id: parsed_pane_id,
-                                }])
-                            },
-                            Err(_e) => {
-                                Err(format!(
-                                    "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
-                                    pane_id_str
-                                ))
-                            }
-                        }
+                        Ok(parsed_pane_id) => Ok(vec![Action::WriteToPaneId {
+                            bytes,
+                            pane_id: parsed_pane_id,
+                        }]),
+                        Err(_e) => Err(format!(
+                            "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
+                            pane_id_str
+                        )),
+                    }
                 },
                 None => Ok(vec![Action::Write {
                     key_with_modifier: None,
@@ -699,19 +720,15 @@ impl Action {
                 Some(pane_id_str) => {
                     let parsed_pane_id = PaneId::from_str(&pane_id_str);
                     match parsed_pane_id {
-                            Ok(parsed_pane_id) => {
-                                Ok(vec![Action::WriteCharsToPaneId {
-                                    chars,
-                                    pane_id: parsed_pane_id,
-                                }])
-                            },
-                            Err(_e) => {
-                                Err(format!(
-                                    "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
-                                    pane_id_str
-                                ))
-                            }
-                        }
+                        Ok(parsed_pane_id) => Ok(vec![Action::WriteCharsToPaneId {
+                            chars,
+                            pane_id: parsed_pane_id,
+                        }]),
+                        Err(_e) => Err(format!(
+                            "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
+                            pane_id_str
+                        )),
+                    }
                 },
                 None => Ok(vec![Action::WriteChars { chars }]),
             },
@@ -719,18 +736,14 @@ impl Action {
                 Some(pane_id_str) => {
                     let parsed_pane_id = PaneId::from_str(&pane_id_str);
                     match parsed_pane_id {
-                        Ok(parsed_pane_id) => {
-                            Ok(vec![Action::Paste {
-                                chars,
-                                pane_id: Some(parsed_pane_id),
-                            }])
-                        },
-                        Err(_e) => {
-                            Err(format!(
-                                "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
-                                pane_id_str
-                            ))
-                        }
+                        Ok(parsed_pane_id) => Ok(vec![Action::Paste {
+                            chars,
+                            pane_id: Some(parsed_pane_id),
+                        }]),
+                        Err(_e) => Err(format!(
+                            "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
+                            pane_id_str
+                        )),
                     }
                 },
                 None => Ok(vec![Action::Paste {
@@ -859,24 +872,54 @@ impl Action {
                 full,
                 pane_id,
                 ansi,
-            } => match pane_id {
+                expected_tab_id,
+                expected_tab_name,
+                expected_session_incarnation,
+                expected_tab_instance_id,
+            } => {
+                let typed_selector = match (
+                    expected_tab_id,
+                    expected_tab_name,
+                    expected_session_incarnation,
+                    expected_tab_instance_id,
+                ) {
+                    (None, None, None, None) => (None, None, None, None),
+                    (
+                        Some(tab_id),
+                        Some(tab_name),
+                        Some(session_incarnation),
+                        Some(tab_instance_id),
+                    ) if pane_id.is_some() && path.is_some() => (
+                        Some(tab_id as u64),
+                        Some(tab_name),
+                        Some(session_incarnation),
+                        Some(tab_instance_id),
+                    ),
+                    _ => {
+                        return Err(
+                            "typed dump requires --path, --pane-id, --expected-tab-id, --expected-tab-name, --expected-session-incarnation and --expected-tab-instance-id together"
+                                .to_owned(),
+                        );
+                    },
+                };
+                match pane_id {
                 Some(pane_id_str) => {
                     let parsed_pane_id = PaneId::from_str(&pane_id_str);
                     match parsed_pane_id {
-                        Ok(parsed_pane_id) => {
-                            Ok(vec![Action::DumpScreen {
-                                file_path: path.map(|p| p.as_os_str().to_string_lossy().into()),
-                                include_scrollback: full,
-                                pane_id: Some(parsed_pane_id),
-                                ansi,
-                            }])
-                        },
-                        Err(_e) => {
-                            Err(format!(
-                                "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
-                                pane_id_str
-                            ))
-                        }
+                        Ok(parsed_pane_id) => Ok(vec![Action::DumpScreen {
+                            file_path: path.map(|p| p.as_os_str().to_string_lossy().into()),
+                            include_scrollback: full,
+                            pane_id: Some(parsed_pane_id),
+                            ansi,
+                            expected_tab_id: typed_selector.0,
+                            expected_tab_name: typed_selector.1,
+                            expected_session_incarnation: typed_selector.2,
+                            expected_tab_instance_id: typed_selector.3,
+                        }]),
+                        Err(_e) => Err(format!(
+                            "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
+                            pane_id_str
+                        )),
                     }
                 },
                 None => Ok(vec![Action::DumpScreen {
@@ -884,10 +927,18 @@ impl Action {
                     include_scrollback: full,
                     pane_id: None,
                     ansi,
+                    expected_tab_id: typed_selector.0,
+                    expected_tab_name: typed_selector.1,
+                    expected_session_incarnation: typed_selector.2,
+                    expected_tab_instance_id: typed_selector.3,
                 }]),
+                }
             },
             CliAction::DumpLayout => Ok(vec![Action::DumpLayout]),
             CliAction::SaveSession => Ok(vec![Action::SaveSession]),
+            CliAction::DoctorRoutes { .. } => Err(
+                "doctor-routes is handled by the dedicated route telemetry client".to_string(),
+            ),
             CliAction::EditScrollback { pane_id, ansi } => match pane_id {
                 Some(pane_id_str) => {
                     let pane_id = PaneId::from_str(&pane_id_str)
@@ -1257,10 +1308,10 @@ impl Action {
                 let mut file = file;
                 let current_dir = get_current_dir();
                 let cwd = cwd.map(|cwd| current_dir.join(cwd)).or(Some(current_dir));
-                if file.is_relative() {
-                    if let Some(cwd) = cwd.as_ref() {
-                        file = cwd.join(file);
-                    }
+                if file.is_relative()
+                    && let Some(cwd) = cwd.as_ref()
+                {
+                    file = cwd.join(file);
                 }
                 let start_suppressed = false;
                 Ok(vec![Action::EditFile {
@@ -1337,9 +1388,53 @@ impl Action {
             },
             CliAction::GoToNextTab => Ok(vec![Action::GoToNextTab]),
             CliAction::GoToPreviousTab => Ok(vec![Action::GoToPreviousTab]),
-            CliAction::CloseTab { tab_id } => match tab_id {
-                Some(id) => Ok(vec![Action::CloseTabById { id: id as u64 }]),
-                None => Ok(vec![Action::CloseTab]),
+            CliAction::CloseTab {
+                tab_id,
+                expected_name,
+                expected_session_incarnation,
+                expected_tab_instance_id,
+                gc_if_quiescent,
+            } => match (
+                tab_id,
+                expected_name,
+                expected_session_incarnation,
+                expected_tab_instance_id,
+                gc_if_quiescent,
+            ) {
+                (
+                    Some(id),
+                    Some(expected_name),
+                    Some(expected_session_incarnation),
+                    Some(expected_tab_instance_id),
+                    true,
+                ) => Ok(vec![Action::CloseTabByIdIfNameIfQuiescent {
+                    id: id as u64,
+                    expected_name,
+                    expected_session_incarnation,
+                    expected_tab_instance_id,
+                }]),
+                (
+                    Some(id),
+                    Some(expected_name),
+                    Some(expected_session_incarnation),
+                    Some(expected_tab_instance_id),
+                    false,
+                ) => {
+                    Ok(vec![Action::CloseTabByIdIfName {
+                        id: id as u64,
+                        expected_name,
+                        expected_session_incarnation,
+                        expected_tab_instance_id,
+                    }])
+                },
+                (Some(id), None, None, None, false) => {
+                    Ok(vec![Action::CloseTabById { id: id as u64 }])
+                },
+                (None, None, None, None, false) => Ok(vec![Action::CloseTab]),
+                _ => Err(
+                    "--gc-if-quiescent requires --tab-id and the complete --expected-name, --expected-session-incarnation and --expected-tab-instance-id identity; the identity flags require each other"
+                        .to_owned(),
+                ),
             },
             CliAction::GoToTab { index } => Ok(vec![Action::GoToTab { index }]),
             CliAction::GoToTabName { name, create } => {
@@ -1370,6 +1465,8 @@ impl Action {
                 layout_string,
                 layout_dir,
                 cwd,
+                after_base,
+                no_focus,
                 initial_command,
                 initial_plugin,
                 close_on_exit,
@@ -1378,6 +1475,19 @@ impl Action {
                 block_until_exit_failure,
                 block_until_exit,
             } => {
+                // Placement is decided here, once, and rides the action all the
+                // way to `Screen::new_tab` — there is no create-then-move step
+                // for the tab bar to render in between.
+                let placement = if after_base {
+                    TabPlacement::AfterBase
+                } else {
+                    TabPlacement::Append
+                };
+                // Focus is the historical default (true). `--no-focus` inverts
+                // it so worker-spawned tabs can land without yanking the
+                // operator's view. Absent/false keeps every pre-existing call
+                // site byte-identical.
+                let force_no_focus = no_focus;
                 let current_dir = get_current_dir();
                 let cwd = cwd
                     .map(|cwd| current_dir.join(cwd))
@@ -1439,7 +1549,8 @@ impl Action {
                     let should_start_layout_commands_suspended = false;
                     let raw_layout_for_error = raw_layout.clone();
                     let mut layout = Layout::from_str(&raw_layout, path_to_raw_layout, swap_layouts.as_ref().map(|(f, p)| (f.as_str(), p.as_str())), cwd).map_err(|e| {
-                        let stringified_error = match e {
+
+                        match e {
                             ConfigError::KdlError(kdl_error) => {
                                 let error = kdl_error.add_src(layout_source_name.clone(), raw_layout_for_error);
                                 let report: Report = error.into();
@@ -1467,8 +1578,7 @@ impl Action {
                                 format!("{:?}", report)
                             },
                             e => format!("{}", e)
-                        };
-                        stringified_error
+                        }
                     })?;
                     if should_start_layout_commands_suspended {
                         layout.recursively_add_start_suspended_including_template(Some(true));
@@ -1483,7 +1593,9 @@ impl Action {
                             .any(|(_, layout, _)| layout.focus.unwrap_or(false));
                         for (tab_name, layout, floating_panes_layout) in tabs.drain(..) {
                             let name = tab_name.or_else(|| name.clone());
-                            let should_change_focus_to_new_tab =
+                            let should_change_focus_to_new_tab = if force_no_focus {
+                                false
+                            } else {
                                 layout.focus.unwrap_or_else(|| {
                                     if !has_focused_tab {
                                         has_focused_tab = true;
@@ -1491,7 +1603,8 @@ impl Action {
                                     } else {
                                         false
                                     }
-                                });
+                                })
+                            };
                             new_tab_actions.push(Action::NewTab {
                                 tiled_layout: Some(layout),
                                 floating_layouts: floating_panes_layout,
@@ -1502,6 +1615,7 @@ impl Action {
                                 cwd: None,
                                 initial_panes: initial_panes.clone(),
                                 first_pane_unblock_condition,
+                                placement,
                             });
                         }
                         Ok(new_tab_actions)
@@ -1509,7 +1623,7 @@ impl Action {
                         let swap_tiled_layouts = Some(layout.swap_tiled_layouts.clone());
                         let swap_floating_layouts = Some(layout.swap_floating_layouts.clone());
                         let (layout, floating_panes_layout) = layout.new_tab();
-                        let should_change_focus_to_new_tab = true;
+                        let should_change_focus_to_new_tab = !force_no_focus;
                         Ok(vec![Action::NewTab {
                             tiled_layout: Some(layout),
                             floating_layouts: floating_panes_layout,
@@ -1520,6 +1634,7 @@ impl Action {
                             cwd: None,
                             initial_panes,
                             first_pane_unblock_condition,
+                            placement,
                         }])
                     }
                 } else if let Some(layout_path) = layout {
@@ -1555,7 +1670,8 @@ impl Action {
                             .map_err(|e| format!("Failed to load layout: {}", e))?
                     };
                     let mut layout = Layout::from_str(&raw_layout, path_to_raw_layout, swap_layouts.as_ref().map(|(f, p)| (f.as_str(), p.as_str())), cwd).map_err(|e| {
-                        let stringified_error = match e {
+
+                        match e {
                             ConfigError::KdlError(kdl_error) => {
                                 let error = kdl_error.add_src(layout_source_name.clone(), raw_layout);
                                 let report: Report = error.into();
@@ -1583,8 +1699,7 @@ impl Action {
                                 format!("{:?}", report)
                             },
                             e => format!("{}", e)
-                        };
-                        stringified_error
+                        }
                     })?;
                     if should_start_layout_commands_suspended {
                         layout.recursively_add_start_suspended_including_template(Some(true));
@@ -1599,7 +1714,9 @@ impl Action {
                             .any(|(_, layout, _)| layout.focus.unwrap_or(false));
                         for (tab_name, layout, floating_panes_layout) in tabs.drain(..) {
                             let name = tab_name.or_else(|| name.clone());
-                            let should_change_focus_to_new_tab =
+                            let should_change_focus_to_new_tab = if force_no_focus {
+                                false
+                            } else {
                                 layout.focus.unwrap_or_else(|| {
                                     if !has_focused_tab {
                                         has_focused_tab = true;
@@ -1607,7 +1724,8 @@ impl Action {
                                     } else {
                                         false
                                     }
-                                });
+                                })
+                            };
                             new_tab_actions.push(Action::NewTab {
                                 tiled_layout: Some(layout),
                                 floating_layouts: floating_panes_layout,
@@ -1618,6 +1736,7 @@ impl Action {
                                 cwd: None, // the cwd is done through the layout
                                 initial_panes: initial_panes.clone(),
                                 first_pane_unblock_condition,
+                                placement,
                             });
                         }
                         Ok(new_tab_actions)
@@ -1625,7 +1744,7 @@ impl Action {
                         let swap_tiled_layouts = Some(layout.swap_tiled_layouts.clone());
                         let swap_floating_layouts = Some(layout.swap_floating_layouts.clone());
                         let (layout, floating_panes_layout) = layout.new_tab();
-                        let should_change_focus_to_new_tab = true;
+                        let should_change_focus_to_new_tab = !force_no_focus;
                         Ok(vec![Action::NewTab {
                             tiled_layout: Some(layout),
                             floating_layouts: floating_panes_layout,
@@ -1636,10 +1755,11 @@ impl Action {
                             cwd: None, // the cwd is done through the layout
                             initial_panes,
                             first_pane_unblock_condition,
+                            placement,
                         }])
                     }
                 } else {
-                    let should_change_focus_to_new_tab = true;
+                    let should_change_focus_to_new_tab = !force_no_focus;
                     Ok(vec![Action::NewTab {
                         tiled_layout: None,
                         floating_layouts: vec![],
@@ -1650,6 +1770,7 @@ impl Action {
                         cwd,
                         initial_panes,
                         first_pane_unblock_condition,
+                        placement,
                     }])
                 }
             },
@@ -1716,20 +1837,17 @@ impl Action {
                     swap_layouts.as_ref().map(|(f, p)| (f.as_str(), p.as_str())),
                     None, // cwd
                 )
-                .map_err(|e| {
-                    let stringified_error = match e {
-                        ConfigError::KdlError(kdl_error) => {
-                            let error = kdl_error.add_src(layout_source_name.clone(), raw_layout);
-                            let report: Report = error.into();
-                            format!("{:?}", report)
-                        },
-                        ConfigError::KdlDeserializationError(kdl_error) => {
-                            let error_message = kdl_error.to_string();
-                            format!("Failed to deserialize KDL layout: {}", error_message)
-                        },
-                        e => format!("{}", e),
-                    };
-                    stringified_error
+                .map_err(|e| match e {
+                    ConfigError::KdlError(kdl_error) => {
+                        let error = kdl_error.add_src(layout_source_name.clone(), raw_layout);
+                        let report: Report = error.into();
+                        format!("{:?}", report)
+                    },
+                    ConfigError::KdlDeserializationError(kdl_error) => {
+                        let error_message = kdl_error.to_string();
+                        format!("Failed to deserialize KDL layout: {}", error_message)
+                    },
+                    e => format!("{}", e),
                 })?;
 
                 // Convert all tabs to Vec<TabLayoutInfo>
@@ -1930,12 +2048,10 @@ impl Action {
                     )
                     .collect();
                 if !malformed_ids.is_empty() {
-                    Err(
-                        format!(
-                            "Malformed pane ids: {}, expecting a space separated list of either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
-                            malformed_ids.join(", ")
-                        )
-                    )
+                    Err(format!(
+                        "Malformed pane ids: {}, expecting a space separated list of either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
+                        malformed_ids.join(", ")
+                    ))
                 } else {
                     Ok(vec![Action::StackPanes { pane_ids }])
                 }
@@ -1956,34 +2072,26 @@ impl Action {
                 };
                 let parsed_pane_id = PaneId::from_str(&pane_id);
                 match parsed_pane_id {
-                    Ok(parsed_pane_id) => {
-                        Ok(vec![Action::ChangeFloatingPaneCoordinates {
-                            pane_id: parsed_pane_id,
-                            coordinates,
-                        }])
-                    },
-                    Err(_e) => {
-                        Err(format!(
-                            "Malformed pane id: {}, expecting a space separated list of either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
-                            pane_id
-                        ))
-                    }
+                    Ok(parsed_pane_id) => Ok(vec![Action::ChangeFloatingPaneCoordinates {
+                        pane_id: parsed_pane_id,
+                        coordinates,
+                    }]),
+                    Err(_e) => Err(format!(
+                        "Malformed pane id: {}, expecting a space separated list of either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
+                        pane_id
+                    )),
                 }
             },
             CliAction::TogglePaneBorderless { pane_id } => {
                 let parsed_pane_id = PaneId::from_str(&pane_id);
                 match parsed_pane_id {
-                    Ok(parsed_pane_id) => {
-                        Ok(vec![Action::TogglePaneBorderless {
-                            pane_id: parsed_pane_id,
-                        }])
-                    },
-                    Err(_e) => {
-                        Err(format!(
-                            "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
-                            pane_id
-                        ))
-                    }
+                    Ok(parsed_pane_id) => Ok(vec![Action::TogglePaneBorderless {
+                        pane_id: parsed_pane_id,
+                    }]),
+                    Err(_e) => Err(format!(
+                        "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
+                        pane_id
+                    )),
                 }
             },
             CliAction::SetPaneBorderless {
@@ -1992,18 +2100,14 @@ impl Action {
             } => {
                 let parsed_pane_id = PaneId::from_str(&pane_id);
                 match parsed_pane_id {
-                    Ok(parsed_pane_id) => {
-                        Ok(vec![Action::SetPaneBorderless {
-                            pane_id: parsed_pane_id,
-                            borderless,
-                        }])
-                    },
-                    Err(_e) => {
-                        Err(format!(
-                            "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
-                            pane_id
-                        ))
-                    }
+                    Ok(parsed_pane_id) => Ok(vec![Action::SetPaneBorderless {
+                        pane_id: parsed_pane_id,
+                        borderless,
+                    }]),
+                    Err(_e) => Err(format!(
+                        "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
+                        pane_id
+                    )),
                 }
             },
             CliAction::SetPaneColor {
@@ -2014,18 +2118,17 @@ impl Action {
             } => {
                 let pane_id_str = match pane_id {
                     Some(id) => id,
-                    None => std::env::var("ZELLIJ_PANE_ID").map_err(|_| {
-                        "No --pane-id provided and ZELLIJ_PANE_ID is not set".to_string()
+                    None => get_pane_id().map_err(|_| {
+                        format!(
+                            "No --pane-id provided and neither {} nor {} is set",
+                            VC_FRAME_PANE_ID_ENV_KEY, PANE_ID_ENV_KEY
+                        )
                     })?,
                 };
                 let parsed_pane_id = PaneId::from_str(&pane_id_str);
                 match parsed_pane_id {
                     Ok(parsed_pane_id) => {
-                        let (fg, bg) = if reset {
-                            (None, None)
-                        } else {
-                            (fg, bg)
-                        };
+                        let (fg, bg) = if reset { (None, None) } else { (fg, bg) };
                         Ok(vec![Action::SetPaneColor {
                             pane_id: parsed_pane_id,
                             fg,
@@ -3017,7 +3120,13 @@ mod tests {
     // 20. CloseTab
     #[test]
     fn test_close_tab_with_tab_id() {
-        let cli_action = CliAction::CloseTab { tab_id: Some(5) };
+        let cli_action = CliAction::CloseTab {
+            tab_id: Some(5),
+            expected_name: None,
+            expected_session_incarnation: None,
+            expected_tab_instance_id: None,
+            gc_if_quiescent: false,
+        };
         let result = Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None);
         assert!(result.is_ok());
         let actions = result.unwrap();
@@ -3032,12 +3141,75 @@ mod tests {
 
     #[test]
     fn test_close_tab_without_tab_id() {
-        let cli_action = CliAction::CloseTab { tab_id: None };
+        let cli_action = CliAction::CloseTab {
+            tab_id: None,
+            expected_name: None,
+            expected_session_incarnation: None,
+            expected_tab_instance_id: None,
+            gc_if_quiescent: false,
+        };
         let result = Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None);
         assert!(result.is_ok());
         let actions = result.unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::CloseTab));
+    }
+
+    #[test]
+    fn test_close_tab_with_expected_name_requires_and_binds_tab_id() {
+        let cli_action = CliAction::CloseTab {
+            tab_id: Some(5),
+            expected_name: Some("work-123".to_owned()),
+            expected_session_incarnation: Some("server-abc".to_owned()),
+            expected_tab_instance_id: Some("11111111111111111111111111111111".to_owned()),
+            gc_if_quiescent: false,
+        };
+        let actions =
+            Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None).unwrap();
+
+        assert_eq!(
+            actions,
+            vec![Action::CloseTabByIdIfName {
+                id: 5,
+                expected_name: "work-123".to_owned(),
+                expected_session_incarnation: "server-abc".to_owned(),
+                expected_tab_instance_id: "11111111111111111111111111111111".to_owned(),
+            }]
+        );
+
+        let invalid = CliAction::CloseTab {
+            tab_id: None,
+            expected_name: Some("work-123".to_owned()),
+            expected_session_incarnation: Some("server-abc".to_owned()),
+            expected_tab_instance_id: Some("11111111111111111111111111111111".to_owned()),
+            gc_if_quiescent: false,
+        };
+        assert!(
+            Action::actions_from_cli(invalid, Box::new(|| PathBuf::from("/tmp")), None).is_err()
+        );
+    }
+
+    #[test]
+    fn test_close_tab_gc_if_quiescent_uses_dedicated_action() {
+        let cli_action = CliAction::CloseTab {
+            tab_id: Some(5),
+            expected_name: Some("work-123".to_owned()),
+            expected_session_incarnation: Some("server-abc".to_owned()),
+            expected_tab_instance_id: Some("11111111111111111111111111111111".to_owned()),
+            gc_if_quiescent: true,
+        };
+        let actions =
+            Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None).unwrap();
+
+        assert_eq!(
+            actions,
+            vec![Action::CloseTabByIdIfNameIfQuiescent {
+                id: 5,
+                expected_name: "work-123".to_owned(),
+                expected_session_incarnation: "server-abc".to_owned(),
+                expected_tab_instance_id: "11111111111111111111111111111111".to_owned(),
+            }]
+        );
     }
 
     #[test]
@@ -3319,6 +3491,10 @@ mod tests {
             full: true,
             pane_id: None,
             ansi: true,
+            expected_tab_id: None,
+            expected_tab_name: None,
+            expected_session_incarnation: None,
+            expected_tab_instance_id: None,
         };
         let result = Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None);
         assert!(result.is_ok());
@@ -3344,6 +3520,10 @@ mod tests {
             full: false,
             pane_id: Some("terminal_5".to_string()),
             ansi: true,
+            expected_tab_id: None,
+            expected_tab_name: None,
+            expected_session_incarnation: None,
+            expected_tab_instance_id: None,
         };
         let result = Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None);
         assert!(result.is_ok());
@@ -3426,6 +3606,8 @@ mod tests {
             layout_string: Some("layout {\n    pane\n    pane\n}\n".into()),
             layout_dir: None,
             cwd: None,
+            after_base: false,
+            no_focus: false,
             initial_command: vec![],
             initial_plugin: None,
             close_on_exit: Default::default(),
@@ -3454,6 +3636,102 @@ mod tests {
         }
     }
 
+    fn new_tab_cli_action(after_base: bool, no_focus: bool) -> CliAction {
+        CliAction::NewTab {
+            name: None,
+            layout: None,
+            layout_string: None,
+            layout_dir: None,
+            cwd: None,
+            after_base,
+            no_focus,
+            initial_command: vec![],
+            initial_plugin: None,
+            close_on_exit: Default::default(),
+            start_suspended: Default::default(),
+            block_until_exit: false,
+            block_until_exit_success: false,
+            block_until_exit_failure: false,
+        }
+    }
+
+    fn placement_of(cli_action: CliAction) -> TabPlacement {
+        let actions =
+            Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None)
+                .expect("TEST");
+        match actions.as_slice() {
+            [Action::NewTab { placement, .. }] => *placement,
+            other => panic!("Expected a single NewTab action, got {other:?}"),
+        }
+    }
+
+    fn focus_of(cli_action: CliAction) -> bool {
+        let actions =
+            Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None)
+                .expect("TEST");
+        match actions.as_slice() {
+            [
+                Action::NewTab {
+                    should_change_focus_to_new_tab,
+                    ..
+                },
+            ] => *should_change_focus_to_new_tab,
+            other => panic!("Expected a single NewTab action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_new_tab_defaults_to_appending() {
+        assert_eq!(
+            placement_of(new_tab_cli_action(false, false)),
+            TabPlacement::Append
+        );
+    }
+
+    #[test]
+    fn test_new_tab_after_base_flag_selects_after_base_placement() {
+        assert_eq!(
+            placement_of(new_tab_cli_action(true, false)),
+            TabPlacement::AfterBase
+        );
+    }
+
+    #[test]
+    fn test_new_tab_defaults_to_taking_focus() {
+        assert!(focus_of(new_tab_cli_action(false, false)));
+    }
+
+    #[test]
+    fn test_new_tab_no_focus_flag_keeps_operator_on_current_tab() {
+        assert!(!focus_of(new_tab_cli_action(false, true)));
+    }
+
+    #[test]
+    fn test_new_tab_no_focus_combines_with_after_base() {
+        let actions = Action::actions_from_cli(
+            new_tab_cli_action(true, true),
+            Box::new(|| PathBuf::from("/tmp")),
+            None,
+        )
+        .expect("TEST");
+        match actions.as_slice() {
+            [
+                Action::NewTab {
+                    placement,
+                    should_change_focus_to_new_tab,
+                    ..
+                },
+            ] => {
+                assert_eq!(*placement, TabPlacement::AfterBase);
+                assert!(
+                    !*should_change_focus_to_new_tab,
+                    "placement and silence are independent axes"
+                );
+            },
+            other => panic!("Expected a single NewTab action, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_new_tab_with_invalid_layout_string() {
         let cli_action = CliAction::NewTab {
@@ -3462,6 +3740,8 @@ mod tests {
             layout_string: Some("invalid { kdl".into()),
             layout_dir: None,
             cwd: None,
+            after_base: false,
+            no_focus: false,
             initial_command: vec![],
             initial_plugin: None,
             close_on_exit: Default::default(),

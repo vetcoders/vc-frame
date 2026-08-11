@@ -6,7 +6,9 @@ mod single_screen;
 mod single_screen_data;
 mod single_screen_render;
 mod ui;
-use std::collections::BTreeMap;
+use serde::{Deserialize, Deserializer};
+use std::collections::{BTreeMap, BTreeSet};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use uuid::Uuid;
 use zellij_tile::prelude::*;
 
@@ -15,13 +17,13 @@ use single_screen::{SingleScreenMode, SingleScreenState};
 use single_screen_data::{DeleteTarget, UnifiedSearchResult};
 use single_screen_render::render_unified_results;
 use ui::{
+    SessionUiInfo, TabUiInfo,
     components::{
-        render_controls_line, render_error, render_new_session_block, render_prompt,
+        Colors, render_controls_line, render_error, render_new_session_block, render_prompt,
         render_renaming_session_screen, render_screen_toggle, render_single_screen_prompt,
-        render_unsaved_changes_line, Colors,
+        render_unsaved_changes_line,
     },
     welcome_screen::{render_banner, render_welcome_boundaries},
-    SessionUiInfo,
 };
 
 use resurrectable_sessions::ResurrectableSessions;
@@ -34,6 +36,144 @@ enum ActiveScreen {
     AttachToSession,
     ResurrectSession,
     SingleScreen,
+}
+
+const SETTLEMENT_COUNTS_PIPE: &str = "vc_settlement_counts";
+const SETTLEMENT_HISTORY_SCHEMA: &str = "vibecrafted.settlement-history.v1";
+const VC_CHROME_VISIBILITY_MESSAGE: &str = "vc.status-bar-visibility.v1";
+const VC_CHROME_HEARTBEAT_MESSAGE: &str = "vc.fleet-live-count.v1";
+// Semantic Live-runs truth: control-plane census of headless workers with a
+// live pid, produced by the server's session-metadata loop. Never derived
+// from Zellij tabs — a viewer tab is only an observer of a run.
+const VC_LIVE_RUNS_MESSAGE: &str = "vc.live-runs.v1";
+// Same freshness lease as the settlement feed: the producer re-sends at least
+// every five seconds, so three missed windows demote exact counts.
+const LIVE_RUNS_FEED_STALE_AFTER_TICKS: u8 = 15;
+// Guardian republishes at least every five seconds. Three missed refresh
+// windows turn exact counts into lower bounds instead of letting a dead
+// producer leave stale values looking authoritative forever.
+const SETTLEMENT_FEED_STALE_AFTER_TICKS: u8 = 15;
+
+// Floor for a renderable main-menu frame: anything below is a transient
+// startup event, not a legal surface. The menu needs at least a banner row
+// plus a content row; kept far below the comfortable chrome minimum
+// (tools/repro_chrome.py MIN_COLUMNS) so legal small panes still render.
+// The rail path has its own zero-dimension guard and legally lives at
+// cols 6-10 — these thresholds must never apply to it.
+const MIN_MENU_RENDER_ROWS: usize = 2;
+const MIN_MENU_RENDER_COLS: usize = 4;
+
+fn menu_dimensions_are_transient(rows: usize, cols: usize) -> bool {
+    rows < MIN_MENU_RENDER_ROWS || cols < MIN_MENU_RENDER_COLS
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SettlementPipeOutcome {
+    acknowledged: bool,
+    should_render: bool,
+}
+
+impl SettlementPipeOutcome {
+    fn accepted(should_render: bool) -> Self {
+        Self {
+            acknowledged: true,
+            should_render,
+        }
+    }
+
+    fn rejected(should_render: bool) -> Self {
+        Self {
+            acknowledged: false,
+            should_render,
+        }
+    }
+}
+
+fn acknowledge_cli_pipe(pipe_id: &str) {
+    #[cfg(target_arch = "wasm32")]
+    unblock_cli_pipe_input(pipe_id);
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = pipe_id;
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct SettlementCounts {
+    f: u64,
+    x: u64,
+    n: u64,
+    total: u64,
+}
+
+impl SettlementCounts {
+    fn has_valid_total(&self) -> bool {
+        self.f
+            .checked_add(self.x)
+            .and_then(|total| total.checked_add(self.n))
+            == Some(self.total)
+    }
+
+    fn historical_count(&self, bucket: BucketKind) -> u64 {
+        match bucket {
+            BucketKind::Finalized => self.f,
+            BucketKind::Failed => self.x,
+            BucketKind::NeedsAttention => self.n,
+        }
+    }
+
+    fn is_monotonic_from(&self, previous: &Self) -> bool {
+        self.f >= previous.f
+            && self.x >= previous.x
+            && self.n >= previous.n
+            && self.total >= previous.total
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct SettlementHistory {
+    schema: String,
+    generation: String,
+    sequence: u64,
+    historical_transitions: SettlementCounts,
+    latest_by_run: SettlementCounts,
+    gaps: u64,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    complete_from: Option<u64>,
+}
+
+fn deserialize_required_option<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<u64>::deserialize(deserializer)
+}
+
+impl SettlementHistory {
+    fn parse(payload: &str) -> Option<Self> {
+        let snapshot: Self = serde_json::from_str(payload).ok()?;
+        let generation = Uuid::parse_str(&snapshot.generation).ok()?;
+        let has_canonical_generation = generation.to_string() == snapshot.generation;
+        let has_valid_completeness = matches!(
+            (snapshot.sequence, snapshot.gaps, snapshot.complete_from),
+            (0, 0, None) | (1.., 0, Some(1)) | (_, 1.., None)
+        );
+        (snapshot.schema == SETTLEMENT_HISTORY_SCHEMA
+            && has_canonical_generation
+            && snapshot.historical_transitions.has_valid_total()
+            && snapshot.latest_by_run.has_valid_total()
+            && snapshot.sequence == snapshot.historical_transitions.total
+            && snapshot.latest_by_run.total <= snapshot.historical_transitions.total
+            && snapshot.latest_by_run.f <= snapshot.historical_transitions.f
+            && snapshot.latest_by_run.x <= snapshot.historical_transitions.x
+            && snapshot.latest_by_run.n <= snapshot.historical_transitions.n
+            && has_valid_completeness)
+            .then_some(snapshot)
+    }
+
+    fn is_complete(&self) -> bool {
+        self.gaps == 0
+    }
 }
 
 #[derive(Default)]
@@ -51,21 +191,57 @@ struct State {
     is_multi_screen: bool,
     single_screen_state: SingleScreenState,
     show_kill_all_sessions_warning: bool,
+    /// Last-session kill confirmation (Ctrl+o → x when no other live sessions).
+    show_kill_last_session_warning: bool,
     request_ids: Vec<String>,
     is_web_client: bool,
     current_session_last_saved_time: Option<u64>,
     is_visible: bool,
     refresh_timer_armed: bool,
+    is_rail: bool,
+    // screen row -> click target, rebuilt on every rail render so mouse
+    // clicks resolve against exactly what is on screen (incl. scroll window).
+    // Header / footer / blank gap rows are absent → click is a no-op.
+    rail_click_map: BTreeMap<usize, RailClickTarget>,
+    // Hovered rail row (plugin-relative line). Sessions and f/x/n drawers share
+    // the same OS-like highlight so every chrome row feels equally interactive.
+    rail_hover_row: Option<usize>,
+    // Canonical, append-only settlement truth delivered by Vibecrafted. This
+    // never falls back to bucket viewer tabs: before the first valid payload,
+    // f/x/n render as unavailable.
+    settlement_history: Option<SettlementHistory>,
+    // A rejected payload on the canonical transport means the last accepted
+    // snapshot is only a lower bound until a valid replay confirms it again.
+    // Never leave stale values looking exact after producer corruption,
+    // divergence, or a non-monotonic advancement.
+    settlement_feed_degraded: bool,
+    // The visible session-manager already receives one host timer per second.
+    // Reuse that cadence as a freshness lease without adding another timer or
+    // coupling plugin rendering to Guardian process state.
+    settlement_feed_age_ticks: Option<u8>,
+    // Once a producer generation has been superseded, a delayed payload from
+    // that retired generation must never roll the rail back.
+    retired_settlement_generations: BTreeSet<String>,
+    // Control-plane Live census (`vc.live-runs.v1`). `None` until the first
+    // valid payload → the pinned row renders `…`, never a guessed digit.
+    live_runs_count: Option<u64>,
+    live_runs_feed_degraded: bool,
+    live_runs_feed_age_ticks: Option<u8>,
 }
 
 register_plugin!(State);
 
 impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
+        self.is_rail = configuration
+            .get("rail")
+            .map(|v| v == "true")
+            .unwrap_or(false);
         self.is_welcome_screen = configuration
             .get("welcome_screen")
             .map(|v| v == "true")
-            .unwrap_or(false);
+            .unwrap_or(false)
+            && !self.is_rail;
         if self.is_welcome_screen {
             self.active_screen = ActiveScreen::NewSession;
         }
@@ -73,21 +249,36 @@ impl ZellijPlugin for State {
         self.is_multi_screen = configuration
             .get("multi_screen")
             .map(|v| v == "true")
-            .unwrap_or(false);
+            .unwrap_or(false)
+            || self.is_rail;
         if !self.is_multi_screen {
             self.active_screen = ActiveScreen::SingleScreen;
+        } else if self.is_rail {
+            self.active_screen = ActiveScreen::AttachToSession;
         }
         self.single_screen_state.is_welcome_screen = self.is_welcome_screen;
-        self.is_visible = true;
-        subscribe(&[
+        // Rail instances are per-tab chrome and start parked. Screen wakes
+        // only the exact plugin/client target that is actually visible.
+        self.is_visible = !self.is_rail;
+        let mut subscriptions = vec![
             EventType::ModeUpdate,
-            EventType::SessionUpdate,
             EventType::Key,
+            EventType::Mouse,
             EventType::RunCommandResult,
             EventType::Timer,
             EventType::Visible,
-        ]);
-        let pane_title = if self.is_welcome_screen {
+            EventType::CustomMessage,
+        ];
+        if self.is_visible {
+            subscriptions.push(EventType::SessionUpdate);
+        }
+        subscribe(&subscriptions);
+        let pane_title = if self.is_rail {
+            configuration
+                .get("pane_title")
+                .cloned()
+                .unwrap_or_else(|| "Sessions".to_owned())
+        } else if self.is_welcome_screen {
             configuration
                 .get("pane_title")
                 .cloned()
@@ -99,14 +290,45 @@ impl ZellijPlugin for State {
                 .unwrap_or_else(|| "Session Manager".to_owned())
         };
         rename_plugin_pane(get_plugin_ids().plugin_id, pane_title);
-        self.refresh_session_list();
-        if !self.is_welcome_screen {
+        if self.is_visible {
+            self.refresh_session_list();
+        }
+        if self.is_visible && !self.is_welcome_screen {
             self.arm_refresh_timer();
         }
     }
 
     fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
-        if pipe_message.name == "filepicker_result" {
+        if pipe_message.name == SETTLEMENT_COUNTS_PIPE {
+            // This is route integrity, not cryptographic authentication:
+            // accept only the public local-CLI broadcast Guardian emits. A
+            // process running as the same OS user can already mutate both
+            // runtimes and therefore remains inside this trust boundary.
+            let PipeSource::Cli(pipe_id) = &pipe_message.source else {
+                return false;
+            };
+            if pipe_message.is_private {
+                return false;
+            }
+            let outcome = match pipe_message.payload.as_deref() {
+                Some(payload) => self.apply_settlement_history(payload),
+                None => SettlementPipeOutcome::rejected(self.mark_settlement_feed_degraded()),
+            };
+            if outcome.acknowledged {
+                acknowledge_cli_pipe(pipe_id);
+            }
+            outcome.should_render
+        } else if pipe_message.name == "vc_rail_nav" {
+            match pipe_message.payload.as_deref() {
+                Some("up") => self.switch_session_relative(-1),
+                Some("down") => self.switch_session_relative(1),
+                _ => (),
+            }
+            true
+        } else if pipe_message.name == "vc_kill_current_session" {
+            self.kill_current_session_preserving_client();
+            true
+        } else if pipe_message.name == "filepicker_result" {
             if let (Some(payload), Some(request_id)) =
                 (pipe_message.payload, pipe_message.args.get("request_id"))
             {
@@ -138,6 +360,12 @@ impl ZellijPlugin for State {
                 if !self.is_visible {
                     return false;
                 }
+                if self.age_settlement_feed() {
+                    should_render = true;
+                }
+                if self.age_live_runs_feed() {
+                    should_render = true;
+                }
                 let new_saved_time = current_session_last_saved_time();
                 if new_saved_time != self.current_session_last_saved_time {
                     self.current_session_last_saved_time = new_saved_time;
@@ -149,14 +377,63 @@ impl ZellijPlugin for State {
                 self.arm_refresh_timer();
             },
             Event::Visible(is_visible) => {
+                if self.is_rail {
+                    return false;
+                }
                 let was_visible = self.is_visible;
                 self.is_visible = is_visible;
                 if is_visible && !was_visible {
+                    subscribe(&[EventType::SessionUpdate]);
+                    if self.refresh_session_list() {
+                        should_render = true;
+                    }
+                    self.arm_refresh_timer();
+                } else if !is_visible && was_visible {
+                    // Hidden instances drop the subscription entirely so the
+                    // server does not serialize the snapshot into their wasm
+                    // memory every second.
+                    unsubscribe(&[EventType::SessionUpdate]);
+                }
+            },
+            Event::CustomMessage(message, payload)
+                if self.is_rail && message == VC_CHROME_VISIBILITY_MESSAGE =>
+            {
+                match payload.as_str() {
+                    "true" => {
+                        let was_visible = self.is_visible;
+                        self.is_visible = true;
+                        if !was_visible {
+                            subscribe(&[EventType::SessionUpdate]);
+                            if self.refresh_session_list() {
+                                should_render = true;
+                            }
+                            self.arm_refresh_timer();
+                        }
+                    },
+                    "false" => {
+                        self.is_visible = false;
+                        unsubscribe(&[EventType::SessionUpdate]);
+                    },
+                    _ => {},
+                }
+            },
+            Event::CustomMessage(message, _payload)
+                if self.is_rail && message == VC_CHROME_HEARTBEAT_MESSAGE =>
+            {
+                let was_visible = self.is_visible;
+                self.is_visible = true;
+                if !was_visible {
+                    subscribe(&[EventType::SessionUpdate]);
                     if self.refresh_session_list() {
                         should_render = true;
                     }
                     self.arm_refresh_timer();
                 }
+            },
+            Event::CustomMessage(message, payload)
+                if self.is_rail && message == VC_LIVE_RUNS_MESSAGE =>
+            {
+                should_render = self.apply_live_runs_payload(&payload);
             },
             Event::ModeUpdate(mode_info) => {
                 self.colors = Colors::new(mode_info.style.colors);
@@ -166,10 +443,26 @@ impl ZellijPlugin for State {
             Event::Key(key) => {
                 should_render = self.handle_key(key);
             },
+            Event::Mouse(mouse_event) if self.is_rail => {
+                if self.error.is_some() {
+                    self.error = None;
+                    should_render = true;
+                }
+                // Always process mouse so hover + click stay live even after an error.
+                if self.handle_session_rail_mouse(mouse_event) {
+                    should_render = true;
+                }
+            },
             Event::PermissionRequestResult(_result) => {
                 should_render = true;
             },
             Event::SessionUpdate(session_infos, resurrectable_session_list) => {
+                // Every tab carries its own rail instance; hidden instances must
+                // not pay the full rebuild for each 1s broadcast — the visible
+                // transition refreshes them from scratch instead.
+                if !self.is_visible {
+                    return false;
+                }
                 for session_info in &session_infos {
                     if session_info.is_current_session {
                         self.new_session_info
@@ -178,7 +471,7 @@ impl ZellijPlugin for State {
                 }
                 self.resurrectable_sessions
                     .update(resurrectable_session_list);
-                self.update_session_infos(session_infos);
+                let session_display_changed = self.update_session_infos(session_infos);
                 if !self.is_multi_screen {
                     self.single_screen_state.update_search_term(
                         &self.sessions.session_ui_infos,
@@ -198,7 +491,7 @@ impl ZellijPlugin for State {
                     self.single_screen_state.layout_list.selected_layout_index =
                         previous_selection.min(self.single_screen_state.layout_list.max_index());
                 }
-                should_render = true;
+                should_render = !self.is_rail || session_display_changed;
             },
             _ => (),
         };
@@ -206,6 +499,22 @@ impl ZellijPlugin for State {
     }
 
     fn render(&mut self, rows: usize, cols: usize) {
+        if self.is_rail {
+            self.render_session_rail(rows, cols);
+            if let Some(error) = self.error.as_ref() {
+                render_error(error, rows, cols, 0, 0);
+            }
+            return;
+        }
+
+        // Transient initial resize events arrive with rows/cols at or near
+        // zero before the real layout lands; painting the main menu on those
+        // frames is what makes the view visibly jump at startup. The rail
+        // branch above keeps its own long-standing zero-dimension guard.
+        if menu_dimensions_are_transient(rows, cols) {
+            return;
+        }
+
         let (x, y, width, height) = self.main_menu_size(rows, cols);
 
         let background = self.colors.palette.text_unselected.background;
@@ -238,6 +547,8 @@ impl ZellijPlugin for State {
             ActiveScreen::AttachToSession => {
                 if let Some(new_session_name) = self.renaming_session_name.as_ref() {
                     render_renaming_session_screen(new_session_name, height, width, x, y + 2);
+                } else if self.show_kill_last_session_warning {
+                    self.render_kill_last_session_warning(height, width, x, y);
                 } else if self.show_kill_all_sessions_warning {
                     self.render_kill_all_sessions_warning(height, width, x, y);
                 } else {
@@ -261,6 +572,8 @@ impl ZellijPlugin for State {
                     SingleScreenMode::SearchAndSelect => {
                         if let Some(new_session_name) = self.renaming_session_name.as_ref() {
                             render_renaming_session_screen(new_session_name, height, width, x, y);
+                        } else if self.show_kill_last_session_warning {
+                            self.render_kill_last_session_warning(height, width, x, y);
                         } else if self.show_kill_all_sessions_warning {
                             self.render_kill_all_sessions_warning(height, width, x, y);
                         } else {
@@ -268,7 +581,7 @@ impl ZellijPlugin for State {
                             // prompt position stays stable regardless of result count
                             let max_table_rows = height.saturating_sub(5);
                             let content_height = 2 + max_table_rows; // prompt + header + max data rows
-                                                                     // Available space above help lines (2 help rows at bottom)
+                            // Available space above help lines (2 help rows at bottom)
                             let available = height.saturating_sub(3);
                             let y_offset = y + available.saturating_sub(content_height) / 2;
 
@@ -436,19 +749,1396 @@ impl ZellijPlugin for State {
         }
         if self.is_welcome_screen {
             render_welcome_boundaries(rows, cols); // explicitly done in the end to override some
-                                                   // stuff, see comment in function
+            // stuff, see comment in function
         }
     }
 }
 
+fn rail_ordinal_key_to_index(character: char) -> Option<usize> {
+    match character {
+        '1'..='9' => Some(character as usize - '1' as usize),
+        '0' => Some(9),
+        _ => None,
+    }
+}
+
+/// The rail reads its allocated width and picks one of three faces
+/// (audit topology 2026-08-05). Sharp thresholds, no hysteresis — the
+/// operator resizes the panel, the runtime never does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RailWidthMode {
+    /// Full render: `SESSIONS N · name` header, full names, counters.
+    /// The default operator layout allocates `size=24`, so Wide is the
+    /// byte-for-byte baseline.
+    Wide,
+    /// Header drops the current-session anchor, names truncate through
+    /// `fit_rail_line`, the ◉/○ indicators stay.
+    Normal,
+    /// Iconic strip: ordinal + state indicator only, ultra-short header,
+    /// no long text — built at row level, never by truncating prose into
+    /// mincemeat.
+    Dense,
+}
+
+/// Wide is today's baseline: the default operator layout gives the rail 24
+/// columns (see compact-bar/src/line.rs rail note).
+const RAIL_WIDE_MIN_COLS: usize = 24;
+/// Below this the header/name mix stops being readable and the rail switches
+/// to the iconic strip.
+const RAIL_NORMAL_MIN_COLS: usize = 14;
+
+impl RailWidthMode {
+    fn from_cols(cols: usize) -> Self {
+        if cols >= RAIL_WIDE_MIN_COLS {
+            RailWidthMode::Wide
+        } else if cols >= RAIL_NORMAL_MIN_COLS {
+            RailWidthMode::Normal
+        } else {
+            RailWidthMode::Dense
+        }
+    }
+}
+
+/// Header text per width mode. Wide anchors "you are here" with the current
+/// session name; Normal keeps the count only; Dense is an ultra-short badge.
+fn rail_header_text(
+    mode: RailWidthMode,
+    session_count: usize,
+    current_session_name: Option<&str>,
+) -> String {
+    match mode {
+        RailWidthMode::Wide => {
+            let mut text = format!("SESSIONS {}", session_count);
+            if let Some(name) = current_session_name {
+                text.push_str(&format!(" · {}", sanitize_display_label(name)));
+            }
+            text
+        },
+        RailWidthMode::Normal => format!("SESSIONS {}", session_count),
+        RailWidthMode::Dense => format!("S{}", session_count),
+    }
+}
+
+fn format_session_rail_entry(
+    session: &SessionUiInfo,
+    ordinal: usize,
+    mode: RailWidthMode,
+) -> String {
+    // The fisheye is the one "you are here" glyph across the whole chrome —
+    // the same ◉/○ pair the tab chips carry.
+    let status = if session.is_current_session {
+        "◉"
+    } else {
+        "○"
+    };
+    if mode == RailWidthMode::Dense {
+        // Iconic row: ordinal keeps the 1..9/0 hotkey affordance visible,
+        // the fisheye carries the state — no name to shred.
+        return format!("{:02} {}", ordinal, status);
+    }
+    // Sanitize the name *before* pad/fit so control bytes and multi-space
+    // runs cannot change display width frame-to-frame (rail flicker).
+    format!(
+        "{:02} {} {}",
+        ordinal,
+        status,
+        sanitize_display_label(&session.name)
+    )
+}
+
+/// Strip control/line-break characters and collapse internal whitespace so a
+/// rail/help row paints at a stable grid width every tick.
+fn sanitize_display_label(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut prev_space = false;
+    for ch in input.chars() {
+        // Newlines/tabs/other whitespace → single space (never a hard break
+        // that would reflow the one-row rail cell). Other controls vanish.
+        let as_space = ch.is_whitespace()
+            || ch == '\n'
+            || ch == '\r'
+            || ch == '\t'
+            || ch == '\u{2028}'
+            || ch == '\u{2029}';
+        if as_space {
+            if !prev_space && !out.is_empty() {
+                out.push(' ');
+                prev_space = true;
+            }
+            continue;
+        }
+        if ch.is_control() {
+            continue;
+        }
+        prev_space = false;
+        out.push(ch);
+    }
+    // Trim trailing space from the collapse pass.
+    while out.ends_with(' ') {
+        out.pop();
+    }
+    out
+}
+
+/// Kill/delete contract for laptops (macOS): ⌥⌫ is primary. Forward-delete
+/// (Del) remains accepted for full keyboards but is never advertised in help
+/// — it is scarce on MacBooks and steals sequences under some hosts.
+fn is_kill_or_delete_key(key: &KeyWithModifier) -> bool {
+    (key.bare_key == BareKey::Backspace && key.has_only_modifiers(&[KeyModifier::Alt]))
+        || (key.bare_key == BareKey::Delete && key.has_no_modifiers())
+}
+
+/// Status buckets finished runs are transferred into.
+///
+/// These names are a wire contract with the triage reaper — they must stay
+/// identical to `FINALIZED_RUNS_SESSION` / `FAILED_RUNS_SESSION` /
+/// `NEEDS_ATTENTION_SESSION` in `zellij-utils/src/run_triage.rs`. The plugin
+/// cannot import them (pulling zellij-utils into a wasm plugin for three string
+/// literals is not worth it), so `bucket_names_match_the_triage_contract` pins
+/// them from this side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BucketKind {
+    Finalized,
+    Failed,
+    NeedsAttention,
+}
+
+/// Rail order, top to bottom. Best outcome first, ambiguity last.
+const RAIL_BUCKETS: [BucketKind; 3] = [
+    BucketKind::Finalized,
+    BucketKind::Failed,
+    BucketKind::NeedsAttention,
+];
+
+/// Char offset of `needle` in `haystack`, searching from char offset `from`.
+/// Text::color_range speaks char offsets, while `str::find` returns bytes —
+/// this bridges the two for rows containing multi-byte glyphs (`◉`, `·`).
+fn char_offset_of(haystack: &str, needle: &str, from: usize) -> Option<usize> {
+    let byte_start = if from == 0 {
+        0
+    } else {
+        haystack.char_indices().nth(from).map(|(byte, _)| byte)?
+    };
+    haystack[byte_start..]
+        .find(needle)
+        .map(|relative| haystack[..byte_start + relative].chars().count())
+}
+
+impl BucketKind {
+    fn session_name(&self) -> &'static str {
+        match self {
+            BucketKind::Finalized => "Finalized runs",
+            BucketKind::Failed => "Failed runs",
+            BucketKind::NeedsAttention => "Needs attention",
+        }
+    }
+    /// Squared-letter glyph of the dense f/x/n status line (Fork IV).
+    fn glyph(&self) -> &'static str {
+        match self {
+            BucketKind::Finalized => "🅵",
+            BucketKind::Failed => "🆇",
+            BucketKind::NeedsAttention => "🅽",
+        }
+    }
+    /// Hotkey, deliberately outside the '0'-'9' range the session ordinals use.
+    /// `x` rather than the initial `f` for "failed" — `f` is already finalized,
+    /// and these three are the only character keys the rail claims.
+    fn hotkey(&self) -> char {
+        match self {
+            BucketKind::Finalized => 'f',
+            BucketKind::Failed => 'x',
+            BucketKind::NeedsAttention => 'n',
+        }
+    }
+    fn from_session_name(name: &str) -> Option<Self> {
+        RAIL_BUCKETS
+            .into_iter()
+            .find(|bucket| bucket.session_name() == name)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SessionRailRowKind {
+    Session(usize),
+    LiveProcess {
+        session_index: usize,
+        /// 0-based tab position — handed straight to `switch_session_with_focus`
+        /// / `go_to_tab` (both expect 0-based and bump internally).
+        tab_position: usize,
+    },
+    /// Pinned bucket row. `session_index` is `None` until the reaper has had a
+    /// reason to create the bucket session — the row still shows, at zero.
+    Bucket {
+        bucket: BucketKind,
+        session_index: Option<usize>,
+    },
+}
+
+/// What a left-click on a rail row should do. Derived from the rendered row
+/// kind so hit-testing stays pure and independent of keyboard selection state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RailClickTarget {
+    Session(usize),
+    LiveProcess {
+        session_index: usize,
+        tab_position: usize,
+    },
+    Bucket(BucketKind),
+    /// Pinned `● Live N` row — opens the control-plane Live read surface.
+    LiveRuns,
+}
+
+fn rail_row_click_target(kind: &SessionRailRowKind) -> RailClickTarget {
+    match *kind {
+        SessionRailRowKind::Session(session_index) => RailClickTarget::Session(session_index),
+        SessionRailRowKind::LiveProcess {
+            session_index,
+            tab_position,
+        } => RailClickTarget::LiveProcess {
+            session_index,
+            tab_position,
+        },
+        SessionRailRowKind::Bucket { bucket, .. } => RailClickTarget::Bucket(bucket),
+    }
+}
+
+/// Resolve hover highlight for a plugin-relative mouse line.
+/// Missing map key / negative line → clear (no sticky highlight on chrome gaps).
+fn rail_hover_target(line: isize, click_map: &BTreeMap<usize, RailClickTarget>) -> Option<usize> {
+    usize::try_from(line)
+        .ok()
+        .filter(|row| click_map.contains_key(row))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionRailRow {
+    kind: SessionRailRowKind,
+    text: String,
+}
+
+impl SessionRailRow {
+    #[cfg(test)]
+    fn is_live_process(&self) -> bool {
+        matches!(self.kind, SessionRailRowKind::LiveProcess { .. })
+    }
+    fn is_bucket(&self) -> bool {
+        matches!(self.kind, SessionRailRowKind::Bucket { .. })
+    }
+}
+
+/// One count cell of the dense f/x/n line (Fork IV). Open-now truth only:
+/// exact number, `~n` when the feed is degraded/incomplete, `999+` past the
+/// display cap, and `…` when there is no feed at all — never a placeholder
+/// digit and never a clipped one.
+fn format_bucket_count(live_count: Option<u64>, truth_is_exact: bool) -> String {
+    const DISPLAY_CAP: u64 = 999;
+    match live_count {
+        Some(n) if n > DISPLAY_CAP => format!("{DISPLAY_CAP}+"),
+        Some(n) if truth_is_exact => n.to_string(),
+        Some(n) => format!("~{n}"),
+        None => "…".to_owned(),
+    }
+}
+
+/// Fork IV: the three drawer rows collapse into ONE dense status line —
+/// ` 🅵118 · 🆇435 · 🅽999+` — instead of a three-row `f/x/n` block.
+fn format_bucket_summary_entry(segments: &[String]) -> String {
+    format!(" {}", segments.join(" · "))
+}
+
+fn format_process_tab_rail_entry(tab: &TabUiInfo, mode: RailWidthMode) -> String {
+    let activity = if tab.is_active { "◉" } else { "·" };
+    if mode == RailWidthMode::Dense {
+        // Iconic strip: the indented activity dot alone carries the state —
+        // truncating "name · command +N" into mincemeat is not an option.
+        return format!("   {}", activity);
+    }
+    let tab_name = sanitize_display_label(&tab.name);
+    let mut text = format!("   {} {}", activity, tab_name);
+    if let Some(process_label) = tab.primary_process_label() {
+        let process_label = stable_process_label(process_label);
+        if process_label != tab_name && !process_label.contains(&tab_name) {
+            text.push_str(" · ");
+            text.push_str(&process_label);
+        }
+    }
+    let additional_processes = tab.live_process_count().saturating_sub(1);
+    if additional_processes > 0 {
+        text.push_str(&format!(" +{}", additional_processes));
+    }
+    text
+}
+
+/// Remove a leading braille animation frame while preserving the meaningful
+/// process status that follows it. Terminal-local progress stays visible, but
+/// spinner-only title churn cannot repaint the whole session rail.
+fn stable_process_label(input: &str) -> String {
+    let sanitized = sanitize_display_label(input);
+    let mut chars = sanitized.chars();
+    let Some(first) = chars.next() else {
+        return sanitized;
+    };
+    let remainder = chars.as_str().trim_start();
+    if ('\u{2800}'..='\u{28ff}').contains(&first) && !remainder.is_empty() {
+        remainder.to_owned()
+    } else {
+        sanitized
+    }
+}
+
+// Direct rail navigation (vc_rail_nav pipe): product contract v3 is
+// Cmd/Super+Up/Down in every mode (Ctrl+Up/Down mirrors it outside LOCK);
+// tab-mode Up/Down and bare arrows on a focused rail also hit this path. The target
+// is resolved relative to the *current* session with wrap-around, so every
+// rail instance receiving the broadcast computes the same destination and
+// the switch stays idempotent. Navigation walks the *working* sessions in
+// rail order only — the f/x/n bucket sessions have their own hotkeys and
+// must not swallow a step.
+fn relative_session_target(sessions: &[SessionUiInfo], offset: isize) -> Option<String> {
+    let working = working_session_indices(sessions);
+    if working.len() < 2 {
+        return None;
+    }
+    let current_pos = working
+        .iter()
+        .position(|&index| sessions[index].is_current_session)?;
+    let count = working.len() as isize;
+    let target_pos = (current_pos as isize + offset).rem_euclid(count) as usize;
+    if target_pos == current_pos {
+        return None;
+    }
+    sessions
+        .get(working[target_pos])
+        .map(|session| session.name.clone())
+}
+
+/// Where the client should land after killing the current session: the next
+/// working session in nav order first, then any other working session (the
+/// nav helper cannot even find "here" when the current session is a bucket),
+/// then any other bucket — an f/x/n drawer is still a live session, and
+/// hopping into it beats killing the whole client. Only a true "nothing else
+/// is alive" returns `None`.
+///
+/// Navigation may skip buckets; the kill path must not — that asymmetry is
+/// deliberate. Collapsing both onto [`relative_session_target`] was how
+/// killing a session next to live buckets took the client down with it.
+fn kill_fallback_target(sessions: &[SessionUiInfo]) -> Option<String> {
+    if let Some(target) = relative_session_target(sessions, 1) {
+        return Some(target);
+    }
+    let current_index = sessions.iter().position(|s| s.is_current_session);
+    let is_other = |index: usize| Some(index) != current_index;
+    if let Some(index) = working_session_indices(sessions)
+        .into_iter()
+        .find(|&index| is_other(index))
+    {
+        return Some(sessions[index].name.clone());
+    }
+    sessions
+        .iter()
+        .enumerate()
+        .find(|&(index, _)| is_other(index))
+        .map(|(_, session)| session.name.clone())
+}
+
+/// Working sessions in rail order — bucket sessions are pinned separately and
+/// must not also appear in the ordinary listing.
+fn working_session_indices(sessions: &[SessionUiInfo]) -> Vec<usize> {
+    sessions
+        .iter()
+        .enumerate()
+        .filter(|(_, session)| BucketKind::from_session_name(&session.name).is_none())
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// Pure policy for f/x/n open — unit-tested without WASM I/O.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BucketOpenAction {
+    Stay,
+    SwitchExisting,
+    /// Floating control-plane / reports read — never create a god session.
+    ReadSurface,
+}
+
+fn bucket_open_action(drawer_session_exists: bool, is_current: bool) -> BucketOpenAction {
+    if drawer_session_exists && is_current {
+        BucketOpenAction::Stay
+    } else if drawer_session_exists {
+        BucketOpenAction::SwitchExisting
+    } else {
+        BucketOpenAction::ReadSurface
+    }
+}
+
+fn settlement_read_coordinates() -> Option<FloatingPaneCoordinates> {
+    FloatingPaneCoordinates::new(
+        Some("12%".to_owned()),
+        Some("12%".to_owned()),
+        Some("76%".to_owned()),
+        Some("70%".to_owned()),
+        Some(false),
+        None,
+    )
+}
+
+/// `● Live N` — the rail's one semantic row for running work, pinned to the
+/// top. Count comes from the control-plane feed; `…`/`~n` reuse the
+/// bucket-count honesty language when the feed is absent or degraded.
+fn format_live_runs_rail_entry(
+    count: Option<u64>,
+    truth_is_exact: bool,
+    mode: RailWidthMode,
+) -> String {
+    let count = format_bucket_count(count, truth_is_exact);
+    if mode == RailWidthMode::Dense {
+        format!(" ●{count}")
+    } else {
+        format!(" ● Live {count}")
+    }
+}
+
+/// Floating Live view: one compact card per running worker straight from the
+/// control plane, then a combined `tail -F` of their transcripts. The card
+/// pane is only an observer — closing it never touches a run, and a finished
+/// run drops out on the next open because its pid is gone.
+fn open_live_runs_read_surface() {
+    // POSIX sh only (dash-clean). meta.json is runtime-owned, pretty-printed
+    // one key per line — the sed extraction reads exactly that shape and
+    // degrades to `?` fields rather than guessing.
+    let script = r#"root="${VIBECRAFTED_CONTROL_PLANE:-${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/control_plane}"
+runs_dir="$root/runtime_runs"
+printf '\n  VIBECRAFTED · Live runs (control plane, read-only)\n\n'
+count=0
+set --
+if [ -d "$runs_dir" ]; then
+  for dir in "$runs_dir"/*/; do
+    meta="${dir}meta.json"
+    [ -f "$meta" ] || continue
+    pid=$(sed -n 's/.*"worker_pid": *\([0-9][0-9]*\).*/\1/p' "$meta" | head -1)
+    [ -n "$pid" ] || continue
+    kill -0 "$pid" 2>/dev/null || continue
+    run_id=$(sed -n 's/.*"run_id": *"\([^"]*\)".*/\1/p' "$meta" | head -1)
+    agent=$(sed -n 's/.*"agent": *"\([^"]*\)".*/\1/p' "$meta" | head -1)
+    skill=$(sed -n 's/.*"skill": *"\([^"]*\)".*/\1/p' "$meta" | head -1)
+    workdir=$(sed -n 's/.*"root": *"\([^"]*\)".*/\1/p' "$meta" | head -1)
+    count=$((count + 1))
+    printf '  ● %s\n' "${run_id:-$(basename "$dir")}"
+    printf '      agent %s · skill %s · repo %s · pid %s\n' \
+      "${agent:-?}" "${skill:-?}" "$(basename "${workdir:-?}")" "$pid"
+    [ -f "${dir}transcript.log" ] && set -- "$@" "${dir}transcript.log"
+  done
+fi
+if [ "$count" -eq 0 ]; then
+  printf '  no live runs — workers appear here while their pid is alive\n\n  [enter to close]\n'
+  read -r _ || true
+  exit 0
+fi
+if [ "$#" -eq 0 ]; then
+  printf '\n  no transcripts yet for %s run(s)\n\n  [enter to close]\n' "$count"
+  read -r _ || true
+  exit 0
+fi
+printf '\n  tail -F · %s transcript(s) — close this pane to stop watching\n' "$count"
+exec tail -n 8 -F "$@"
+"#;
+    let command = CommandToRun::new_with_args("sh", vec!["-c", script]);
+    let _ = open_command_pane_floating(command, settlement_read_coordinates(), BTreeMap::new());
+}
+
+/// Floating diagnostic: control plane + loctree reports. No new Zellij session.
+fn open_settlement_read_surface(bucket: BucketKind) {
+    let letter = match bucket {
+        BucketKind::Finalized => "f",
+        BucketKind::Failed => "x",
+        BucketKind::NeedsAttention => "n",
+    };
+    // POSIX sh only (dash-clean). Prints settlement truth then waits.
+    let script = format!(
+        r#"b="{letter}"
+printf '\n  VIBECRAFTED · settlement %s (read-only)\n' "$b"
+printf '  No god-session created. Counts come from the control plane feed.\n\n'
+shown=0
+for base in \
+  "http://127.0.0.1:3024" \
+  "http://127.0.0.1:3025" \
+  "http://100.82.232.70:3025"
+do
+  if command -v curl >/dev/null 2>&1 \
+    && curl -sf --max-time 2 "$base/api/control/state" 2>/dev/null \
+    | head -c 6000
+  then
+    printf '\n  [eye] %s\n' "$base"
+    shown=1
+    break
+  fi
+done
+if [ "$shown" -eq 0 ]; then
+  printf '  control plane not reachable on 3024/3025 — try: vibecrafted server status\n'
+fi
+printf '\n  loctree-suite reports (if present):\n'
+for d in \
+  "${{HOME}}/vc-workspace/vetcoders/loctree-suite/reports" \
+  "${{HOME}}/.vibecrafted/artifacts"
+do
+  if [ -d "$d" ]; then
+    ls -1t "$d" 2>/dev/null | head -12 | sed 's/^/    /'
+    shown=1
+  fi
+done
+if [ "$shown" -eq 0 ]; then
+  printf '    (none found)\n'
+fi
+printf '\n  [enter to close]\n'
+read -r _ || true
+"#
+    );
+    let command = CommandToRun::new_with_args("sh", vec!["-c", &script]);
+    let _ = open_command_pane_floating(command, settlement_read_coordinates(), BTreeMap::new());
+}
+
+/// Resolve an ordinal keypress against the *working* sessions, so the buckets
+/// sitting at the bottom of the rail do not shift what `3` means.
+fn rail_ordinal_target(sessions: &[SessionUiInfo], character: char) -> Option<usize> {
+    let ordinal = rail_ordinal_key_to_index(character)?;
+    working_session_indices(sessions).get(ordinal).copied()
+}
+
+fn session_rail_rows_with_truth(
+    sessions: &[SessionUiInfo],
+    settlement_history: Option<&SettlementHistory>,
+    settlement_feed_degraded: bool,
+    mode: RailWidthMode,
+) -> Vec<SessionRailRow> {
+    let mut rows = session_rail_session_rows(sessions, mode);
+    rows.extend(bucket_rail_rows(
+        sessions,
+        settlement_history,
+        settlement_feed_degraded,
+    ));
+    rows
+}
+
+/// Session/process portion of the rail, excluding independently refreshed
+/// settlement buckets. This is also the stable render projection used to
+/// suppress redraws when only terminal animation frames changed.
+fn session_rail_session_rows(
+    sessions: &[SessionUiInfo],
+    mode: RailWidthMode,
+) -> Vec<SessionRailRow> {
+    let mut rows = vec![];
+    for (ordinal, session_index) in working_session_indices(sessions).into_iter().enumerate() {
+        let session = &sessions[session_index];
+        rows.push(SessionRailRow {
+            kind: SessionRailRowKind::Session(session_index),
+            text: format_session_rail_entry(session, ordinal + 1, mode),
+        });
+        rows.extend(
+            session
+                .tabs
+                .iter()
+                .filter(|tab| tab.live_process_count() > 0)
+                .map(|tab| SessionRailRow {
+                    kind: SessionRailRowKind::LiveProcess {
+                        session_index,
+                        tab_position: tab.position,
+                    },
+                    text: format_process_tab_rail_entry(tab, mode),
+                }),
+        );
+    }
+    rows
+}
+
+#[cfg(test)]
+fn session_rail_rows(sessions: &[SessionUiInfo]) -> Vec<SessionRailRow> {
+    session_rail_rows_with_truth(sessions, None, false, RailWidthMode::Wide)
+}
+
+/// The pinned tail of the rail. Always all three buckets, whether or not their
+/// sessions exist yet — a permanent entry point beats one that appears only
+/// once something has already failed.
+fn bucket_rail_rows(
+    sessions: &[SessionUiInfo],
+    settlement_history: Option<&SettlementHistory>,
+    settlement_feed_degraded: bool,
+) -> Vec<SessionRailRow> {
+    // Fork IV: one dense status line for all three buckets, pinned to the
+    // rail tail. Open-now counts (latest_by_run), never the append-only
+    // historical mountain that painted ≥118 / ≥435 / ≥2247 forever.
+    let truth_is_exact =
+        !settlement_feed_degraded && settlement_history.is_some_and(SettlementHistory::is_complete);
+    let segments: Vec<String> = RAIL_BUCKETS
+        .into_iter()
+        .map(|bucket| {
+            let live_count =
+                settlement_history.map(|snapshot| snapshot.latest_by_run.historical_count(bucket));
+            format!(
+                "{}{}",
+                bucket.glyph(),
+                format_bucket_count(live_count, truth_is_exact)
+            )
+        })
+        .collect();
+    // Click target: the actionable drawer. The full per-bucket dashboard
+    // (vc-server stats) is Fork IV's follow-up; f/x/n hotkeys keep opening
+    // their own drawers regardless of this row.
+    let needs_index = sessions
+        .iter()
+        .position(|session| session.name == BucketKind::NeedsAttention.session_name());
+    vec![SessionRailRow {
+        kind: SessionRailRowKind::Bucket {
+            bucket: BucketKind::NeedsAttention,
+            session_index: needs_index,
+        },
+        text: format_bucket_summary_entry(&segments),
+    }]
+}
+
+fn rail_range_to_render(
+    visible_rows: usize,
+    results_len: usize,
+    selected_index: Option<usize>,
+) -> (usize, usize) {
+    if visible_rows == 0 || results_len == 0 {
+        return (0, 0);
+    }
+    if visible_rows >= results_len {
+        return (0, results_len);
+    }
+    let anchor = selected_index
+        .unwrap_or(0)
+        .min(results_len.saturating_sub(1));
+    let half = visible_rows / 2;
+    let mut start = anchor.saturating_sub(half);
+    let mut end = start + visible_rows;
+    if end > results_len {
+        end = results_len;
+        start = results_len.saturating_sub(visible_rows);
+    }
+    (start, end)
+}
+
+fn fit_rail_line(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let mut fitted = truncate_to_width(text, width);
+    let fitted_width = fitted.width();
+    if fitted_width < width {
+        fitted.push_str(&" ".repeat(width - fitted_width));
+    }
+    fitted
+}
+
+/// The dense f/x/n line sheds whole ` · `-separated segments from the right.
+/// An open-now count is either rendered in full or omitted entirely: clipping
+/// `999+` into an exact-looking `99` would corrupt the operator truth.
+fn fit_bucket_rail_line(text: &str, width: usize) -> String {
+    if text.width() <= width {
+        return fit_rail_line(text, width);
+    }
+    if !text.contains(" · ") {
+        // Not a segmented summary — plain clip is the only honest option.
+        return fit_rail_line(text, width);
+    }
+    let mut segments: Vec<&str> = text.split(" · ").collect();
+    while segments.len() > 1 {
+        segments.pop();
+        let candidate = format!("{} …", segments.join(" · "));
+        if candidate.width() <= width {
+            return fit_rail_line(&candidate, width);
+        }
+    }
+    fit_rail_line("…", width)
+}
+
+fn truncate_to_width(text: &str, width: usize) -> String {
+    let mut current_width = 0;
+    let mut truncated = String::new();
+    for character in text.chars() {
+        let character_width = character.width().unwrap_or(0);
+        if current_width + character_width > width {
+            break;
+        }
+        current_width += character_width;
+        truncated.push(character);
+    }
+    truncated
+}
+
 impl State {
+    /// Accept a canonical snapshot iff it advances the sequence without ever
+    /// decreasing append-only historical counts inside one durable producer
+    /// generation. A new canonical generation is an explicit store reset and
+    /// may restart at zero; its completeness marker keeps partial replay honest.
+    /// Exact replay is idempotent, while stale sequence numbers and same-sequence
+    /// divergence are rejected.
+    fn apply_settlement_history(&mut self, payload: &str) -> SettlementPipeOutcome {
+        let Some(incoming) = SettlementHistory::parse(payload) else {
+            return SettlementPipeOutcome::rejected(self.mark_settlement_feed_degraded());
+        };
+        if self
+            .retired_settlement_generations
+            .contains(&incoming.generation)
+        {
+            return SettlementPipeOutcome::rejected(false);
+        }
+        if let Some(current) = &self.settlement_history {
+            if incoming.generation != current.generation {
+                if incoming.is_complete()
+                    && !incoming
+                        .historical_transitions
+                        .is_monotonic_from(&current.historical_transitions)
+                {
+                    return SettlementPipeOutcome::rejected(self.mark_settlement_feed_degraded());
+                }
+                self.retired_settlement_generations
+                    .insert(current.generation.clone());
+                self.settlement_history = Some(incoming);
+                self.mark_settlement_feed_fresh();
+                return SettlementPipeOutcome::accepted(true);
+            }
+            if incoming.sequence < current.sequence {
+                return SettlementPipeOutcome::rejected(false);
+            }
+            if incoming.sequence == current.sequence {
+                if incoming != *current {
+                    eprintln!(
+                        "rejecting divergent settlement history at sequence {}",
+                        incoming.sequence
+                    );
+                    return SettlementPipeOutcome::rejected(self.mark_settlement_feed_degraded());
+                }
+                let should_render = std::mem::take(&mut self.settlement_feed_degraded);
+                self.settlement_feed_age_ticks = Some(0);
+                return SettlementPipeOutcome::accepted(should_render);
+            }
+            if !incoming
+                .historical_transitions
+                .is_monotonic_from(&current.historical_transitions)
+            {
+                return SettlementPipeOutcome::rejected(self.mark_settlement_feed_degraded());
+            }
+        }
+        self.settlement_history = Some(incoming);
+        self.mark_settlement_feed_fresh();
+        SettlementPipeOutcome::accepted(true)
+    }
+
+    fn mark_settlement_feed_fresh(&mut self) {
+        self.settlement_feed_degraded = false;
+        self.settlement_feed_age_ticks = Some(0);
+    }
+
+    fn mark_settlement_feed_degraded(&mut self) -> bool {
+        self.settlement_history.is_some()
+            && !std::mem::replace(&mut self.settlement_feed_degraded, true)
+    }
+
+    fn age_settlement_feed(&mut self) -> bool {
+        let Some(age_ticks) = self.settlement_feed_age_ticks.as_mut() else {
+            return false;
+        };
+        *age_ticks = age_ticks.saturating_add(1);
+        if *age_ticks < SETTLEMENT_FEED_STALE_AFTER_TICKS {
+            return false;
+        }
+        self.mark_settlement_feed_degraded()
+    }
+
+    /// Ingest a `vc.live-runs.v1` payload. The rail only needs the census
+    /// size; the read surface re-reads the control plane itself, so richer
+    /// per-run fields never have to survive this hop.
+    fn apply_live_runs_payload(&mut self, payload: &str) -> bool {
+        #[derive(Deserialize)]
+        struct LiveRunsFeed {
+            schema: String,
+            runs: Vec<serde_json::Value>,
+        }
+        let previous = (self.live_runs_count, self.live_runs_feed_degraded);
+        let parsed: Option<LiveRunsFeed> = serde_json::from_str(payload)
+            .ok()
+            .filter(|feed: &LiveRunsFeed| feed.schema == VC_LIVE_RUNS_MESSAGE);
+        let Some(feed) = parsed else {
+            // Same contract as the settlement feed: a corrupt payload turns
+            // the last accepted count into a lower bound, never a blank.
+            return self.mark_live_runs_feed_degraded();
+        };
+        self.live_runs_count = Some(feed.runs.len() as u64);
+        self.live_runs_feed_degraded = false;
+        self.live_runs_feed_age_ticks = Some(0);
+        (self.live_runs_count, self.live_runs_feed_degraded) != previous
+    }
+
+    fn mark_live_runs_feed_degraded(&mut self) -> bool {
+        self.live_runs_count.is_some()
+            && !std::mem::replace(&mut self.live_runs_feed_degraded, true)
+    }
+
+    fn age_live_runs_feed(&mut self) -> bool {
+        let Some(age_ticks) = self.live_runs_feed_age_ticks.as_mut() else {
+            return false;
+        };
+        *age_ticks = age_ticks.saturating_add(1);
+        if *age_ticks < LIVE_RUNS_FEED_STALE_AFTER_TICKS {
+            return false;
+        }
+        self.mark_live_runs_feed_degraded()
+    }
+
     fn reset_selected_index(&mut self) {
         self.sessions.reset_selected_index();
     }
+    fn ensure_rail_selection(&mut self) {
+        if self.sessions.session_ui_infos.is_empty() {
+            self.reset_selected_index();
+            return;
+        }
+        if let Some(selected_index) = self.sessions.selected_index.0
+            && selected_index < self.sessions.session_ui_infos.len()
+        {
+            return;
+        }
+        let current_session_index = self
+            .sessions
+            .session_ui_infos
+            .iter()
+            .position(|s| s.is_current_session)
+            .unwrap_or(0);
+        self.sessions.select_session_index(current_session_index);
+    }
+    fn render_session_rail(&mut self, rows: usize, cols: usize) {
+        if rows == 0 || cols == 0 {
+            return;
+        }
+        self.ensure_rail_selection();
+        let mode = RailWidthMode::from_cols(cols);
+
+        let all_rows = session_rail_rows_with_truth(
+            &self.sessions.session_ui_infos,
+            self.settlement_history.as_ref(),
+            self.settlement_feed_degraded,
+            mode,
+        );
+        // The buckets are pinned to the bottom of the rail, so only the leading
+        // working-session rows take part in scrolling.
+        let bucket_row_start = all_rows.iter().position(|row| row.is_bucket()).unwrap_or(0);
+        let (rail_rows, bucket_rows) = all_rows.split_at(bucket_row_start);
+
+        // The LIVE number lives in the bottom status-bar's fleet chip; the
+        // header keeps the session count and the current-session anchor — the
+        // top bar carries brand   mode   tabs only, so "where am I" lives
+        // here, right above the session list.
+        let session_count = working_session_indices(&self.sessions.session_ui_infos).len();
+        let current_session_name = self
+            .sessions
+            .session_ui_infos
+            .iter()
+            .find(|s| s.is_current_session)
+            .map(|s| s.name.as_str());
+        // Anchor offset only exists in Wide — the other modes drop the name.
+        let anchor_start = format!("SESSIONS {}", session_count).width() + 3; // " · "
+        let header_text = rail_header_text(mode, session_count, current_session_name);
+        let header = fit_rail_line(&header_text, cols);
+        let header_width = header.width();
+        let header_chars = header.chars().count();
+        let mut header = Text::new(header);
+        match mode {
+            RailWidthMode::Wide | RailWidthMode::Normal => {
+                if cols >= 8 {
+                    header = header.color_range(1, 0..8);
+                }
+                if mode == RailWidthMode::Wide && header_width > anchor_start {
+                    // The anchor takes the same accent as SESSIONS — one hue
+                    // for "you are here", per the THEMES_GUIDE doctrine.
+                    header = header.color_range(1, anchor_start..);
+                }
+            },
+            RailWidthMode::Dense => {
+                // The whole badge is the accent; the range never exceeds the
+                // fitted text (trailing pad spaces carry no visible ink).
+                header = header.color_range(1, 0..header_chars);
+            },
+        }
+        print_text_with_coordinates(header, 0, 0, None, None);
+        self.rail_click_map.clear();
+
+        // Pinned `● Live N` row, right under the header: the ONE semantic
+        // entry for running work. Its truth is the control-plane census —
+        // the physical viewer tabs below are only observers of those runs.
+        let mut chrome_rows = 1;
+        if rows > 1 {
+            let live_row = chrome_rows;
+            let fitted = fit_rail_line(
+                &format_live_runs_rail_entry(
+                    self.live_runs_count,
+                    !self.live_runs_feed_degraded,
+                    mode,
+                ),
+                cols,
+            );
+            let fitted_chars = fitted.chars().count();
+            let mut live_text = Text::new(fitted);
+            if fitted_chars > 1 {
+                // The dot carries the accent — same colour language as the
+                // active-tab dot and the f/x/n glyphs.
+                live_text = live_text.color_range(1, 1..2);
+            }
+            if self.rail_hover_row == Some(live_row) {
+                live_text = live_text.selected();
+            }
+            self.rail_click_map
+                .insert(live_row, RailClickTarget::LiveRuns);
+            print_text_with_coordinates(live_text, 0, live_row, None, None);
+            chrome_rows += 1;
+        }
+
+        let list_rows = rows.saturating_sub(chrome_rows);
+        if list_rows == 0 {
+            return;
+        }
+        // Buckets only give up their pinned slots when the rail is too short to
+        // hold even one working session alongside them.
+        let pinned_rows = bucket_rows.len().min(list_rows.saturating_sub(1));
+        let scrollable_rows = list_rows.saturating_sub(pinned_rows);
+        let footer_rows = usize::from(rail_rows.len() > scrollable_rows && scrollable_rows > 1);
+        let entry_rows = scrollable_rows.saturating_sub(footer_rows);
+        let selected_index = self.sessions.selected_index.0;
+        let selected_row_index = selected_index.and_then(|selected_session_index| {
+            rail_rows
+                .iter()
+                .position(|row| row.kind == SessionRailRowKind::Session(selected_session_index))
+        });
+        let (start, end) = rail_range_to_render(entry_rows, rail_rows.len(), selected_row_index);
+        let mut row = chrome_rows;
+
+        for rail_row in &rail_rows[start..end] {
+            let fitted = fit_rail_line(&rail_row.text, cols);
+            let fitted_chars = fitted.chars().count();
+            let mut text = Text::new(fitted.clone());
+            match rail_row.kind {
+                SessionRailRowKind::Session(session_index) => {
+                    let is_current = self
+                        .sessions
+                        .session_ui_infos
+                        .get(session_index)
+                        .is_some_and(|session| session.is_current_session);
+                    if cols >= 4 {
+                        // The `*` current-session marker must be the brightest
+                        // ink on the line: leave it at the row's base color and
+                        // dim the `-` of every other session instead. Painting
+                        // both with the same muted emphasis made "you are
+                        // here" invisible.
+                        // Ordinal digits are chrome, not content — dim them.
+                        text = text.color_range(2, 0..2);
+                        if is_current {
+                            if mode == RailWidthMode::Dense {
+                                // No name in the iconic strip — the accent
+                                // lands on the fisheye itself.
+                                text = text.color_range(1, 3..4);
+                            } else if fitted_chars > 5 {
+                                // "You are here" carries the accent on the
+                                // NAME, the same ink as the header — one
+                                // glance finds it.
+                                text = text.color_range(1, 5..fitted_chars);
+                            }
+                        } else {
+                            text = text.color_range(2, 3..4);
+                        }
+                    }
+                    // The whole current-session block sits on a full-width
+                    // highlight bed — this header row opens it.
+                    if is_current || selected_index == Some(session_index) {
+                        text = text.selected();
+                    }
+                },
+                SessionRailRowKind::LiveProcess { session_index, .. } => {
+                    let in_current_session = self
+                        .sessions
+                        .session_ui_infos
+                        .get(session_index)
+                        .is_some_and(|session| session.is_current_session);
+                    let is_active_tab_row = fitted.chars().nth(3) == Some('◉');
+                    if cols >= 4 {
+                        // Active tab dot gets the accent, idle dot stays dim;
+                        // the trailing "· command +N" diagnostics dim away so
+                        // the tab name is the only bright ink on the line.
+                        if is_active_tab_row {
+                            text = text.color_range(1, 3..4);
+                        } else {
+                            text = text.color_range(2, 3..4);
+                        }
+                        if let Some(separator) = char_offset_of(&fitted, " · ", 4) {
+                            text = text.color_range(2, separator..fitted_chars);
+                        }
+                        if in_current_session && is_active_tab_row && mode != RailWidthMode::Dense {
+                            // Strongest level of the three: on the highlight
+                            // bed, the tab you are actually in carries the
+                            // accent on its whole name. (Dense has no name —
+                            // the dot already took the accent above.)
+                            let name_end =
+                                char_offset_of(&fitted, " · ", 4).unwrap_or(fitted_chars);
+                            text = text.color_range(1, 3..name_end);
+                        }
+                    }
+                    // Process rows extend the current-session highlight block
+                    // so the whole "you are here" region reads as one shape.
+                    if in_current_session {
+                        text = text.selected();
+                    }
+                },
+                SessionRailRowKind::Bucket { .. } => {},
+            }
+            // OS hover: same highlight language for sessions, live tabs, drawers.
+            if self.rail_hover_row == Some(row) {
+                text = text.selected();
+            }
+            // Every data row is clickable; header (row 0) never enters the map.
+            self.rail_click_map
+                .insert(row, rail_row_click_target(&rail_row.kind));
+            print_text_with_coordinates(text, 0, row, None, None);
+            row += 1;
+        }
+
+        if footer_rows == 1 && row < rows {
+            let hidden_above = start;
+            let hidden_below = rail_rows.len().saturating_sub(end);
+            let footer = match (hidden_above, hidden_below) {
+                (0, below) => format!("+{} more", below),
+                (above, 0) => format!("+{} above", above),
+                (above, below) => format!("+{} above +{} more", above, below),
+            };
+            print_text_with_coordinates(
+                Text::new(fit_rail_line(&footer, cols)),
+                0,
+                row,
+                None,
+                None,
+            );
+            row += 1;
+        }
+
+        // Blank out the gap so the buckets always sit flush with the bottom
+        // edge, whatever the working-session list is doing above them.
+        let first_pinned_row = rows.saturating_sub(pinned_rows);
+        while row < first_pinned_row {
+            print_text_with_coordinates(Text::new(" ".repeat(cols)), 0, row, None, None);
+            row += 1;
+        }
+
+        for bucket_row in &bucket_rows[bucket_rows.len() - pinned_rows..] {
+            let fitted = fit_bucket_rail_line(&bucket_row.text, cols);
+            let mut text = Text::new(&fitted);
+            // Accent the 🅵/🆇/🅽 glyphs so the dense line keeps the same
+            // colour language the drawer rows had.
+            for (offset, character) in fitted.chars().enumerate() {
+                if matches!(character, '🅵' | '🆇' | '🅽') {
+                    text = text.color_range(1, offset..offset + 1);
+                }
+            }
+            if let SessionRailRowKind::Bucket {
+                session_index: Some(session_index),
+                ..
+            } = bucket_row.kind
+                && selected_index == Some(session_index)
+            {
+                text = text.selected();
+            }
+            if self.rail_hover_row == Some(row) {
+                text = text.selected();
+            }
+            // Empty drawers stay clickable: mouse + f/x/n open the control-plane
+            // read surface (never mint Finalized/Failed/Needs god-sessions).
+            self.rail_click_map
+                .insert(row, rail_row_click_target(&bucket_row.kind));
+            print_text_with_coordinates(text, 0, row, None, None);
+            row += 1;
+        }
+    }
+    fn handle_session_rail_key(&mut self, key: KeyWithModifier) -> bool {
+        // Bare arrows are deliberately NOT handled here. Session switching by
+        // arrow lives only in the ^T tab-mode keybinds (vc_rail_nav pipe) and
+        // the always-on Super chords; a focused rail consuming raw arrows made
+        // LOCK mode switch sessions, since LOCK routes keys to the focused pane.
+        match key.bare_key {
+            BareKey::Enter if key.has_no_modifiers() => {
+                self.handle_session_rail_selection();
+                true
+            },
+            BareKey::Char('+') | BareKey::Char('=') if key.has_no_modifiers() => {
+                // Rail width is operator-tunable: the layout's size=24 is only
+                // the starting point. Growing the right edge widens the column.
+                resize_focused_pane_with_direction(Resize::Increase, Direction::Right);
+                true
+            },
+            BareKey::Char('-') if key.has_no_modifiers() => {
+                resize_focused_pane_with_direction(Resize::Decrease, Direction::Right);
+                true
+            },
+            BareKey::Char(character) if key.has_no_modifiers() => {
+                if character == '\n' {
+                    self.handle_session_rail_selection();
+                    true
+                } else if let Some(index) =
+                    rail_ordinal_target(&self.sessions.session_ui_infos, character)
+                {
+                    if self.sessions.select_session_index(index) {
+                        self.handle_session_rail_selection();
+                    }
+                    true
+                } else if let Some(bucket) = RAIL_BUCKETS
+                    .into_iter()
+                    .find(|bucket| bucket.hotkey() == character)
+                {
+                    self.jump_to_bucket(bucket);
+                    true
+                } else {
+                    false
+                }
+            },
+            BareKey::Char('c') if key.has_modifiers(&[KeyModifier::Ctrl]) => {
+                hide_self();
+                true
+            },
+            BareKey::Esc if key.has_no_modifiers() => {
+                hide_self();
+                true
+            },
+            _ => false,
+        }
+    }
+    fn handle_session_rail_mouse(&mut self, mouse_event: Mouse) -> bool {
+        match mouse_event {
+            Mouse::LeftClick(line, _column) => {
+                let Ok(row) = usize::try_from(line) else {
+                    return false;
+                };
+                // Keep hover on the row we just activated (OS list selection).
+                self.rail_hover_row = Some(row);
+                // Header, footer, blank gap between working sessions and the
+                // pinned buckets: not in the map → quiet no-op, no crash.
+                let Some(target) = self.rail_click_map.get(&row).cloned() else {
+                    return false;
+                };
+                match target {
+                    RailClickTarget::Session(session_index) => {
+                        if !self.sessions.select_session_index(session_index) {
+                            return false;
+                        }
+                        if !self.sessions.selected_is_current_session() {
+                            self.handle_session_rail_selection();
+                        }
+                        true
+                    },
+                    RailClickTarget::LiveProcess {
+                        session_index,
+                        tab_position,
+                    } => {
+                        if !self.sessions.select_session_index(session_index) {
+                            return false;
+                        }
+                        let Some(session_name) = self.sessions.get_selected_session_name() else {
+                            return false;
+                        };
+                        if self.sessions.selected_is_current_session() {
+                            // Same 0-based position the keyboard path uses;
+                            // the plugin shim bumps it for Action::GoToTab.
+                            go_to_tab(tab_position as u32);
+                        } else {
+                            switch_session_with_focus(&session_name, Some(tab_position), None);
+                            self.reset_selected_index();
+                        }
+                        true
+                    },
+                    RailClickTarget::Bucket(bucket) => {
+                        // Same entry point as the `f`/`x`/`n` hotkeys.
+                        self.jump_to_bucket(bucket);
+                        true
+                    },
+                    RailClickTarget::LiveRuns => {
+                        // One compact read-only view over the control plane;
+                        // never a per-run tab hunt through the rail.
+                        open_live_runs_read_surface();
+                        true
+                    },
+                }
+            },
+            Mouse::Hover(line, _column) => {
+                // Only clickable rows highlight. Header / blank / footer /
+                // out-of-bounds / leave (line < 0 from server) clear hover.
+                // Hover is delivered both while focused (SendToTerminal) and
+                // while unfocused (UpdateHover → mouse_event) so the rail
+                // lights under the cursor without a prior click.
+                let next = rail_hover_target(line, &self.rail_click_map);
+                if self.rail_hover_row != next {
+                    self.rail_hover_row = next;
+                    true
+                } else {
+                    false
+                }
+            },
+            Mouse::ScrollUp(_) => {
+                self.sessions.move_session_selection_up();
+                true
+            },
+            Mouse::ScrollDown(_) => {
+                self.sessions.move_session_selection_down();
+                true
+            },
+            // Right-click / middle not mapped. Shift+click is client passthrough.
+            _ => false,
+        }
+    }
+    /// Open settlement truth for f/x/n — control-plane read surface.
+    ///
+    /// Primary path must **not** mint "Finalized runs" / "Failed runs" /
+    /// "Needs attention" god-sessions. Counts already come from the settlement
+    /// feed; click opens a floating diagnostic that reads the control plane
+    /// (and loctree-suite reports when present). If an operator already created
+    /// a drawer session manually, switch into it — never create one here.
+    fn jump_to_bucket(&mut self, bucket: BucketKind) {
+        let name = bucket.session_name();
+        let existing = self
+            .sessions
+            .session_ui_infos
+            .iter()
+            .find(|session| session.name == name);
+        let exists = existing.is_some();
+        let is_current = existing.is_some_and(|s| s.is_current_session);
+        match bucket_open_action(exists, is_current) {
+            BucketOpenAction::Stay => {},
+            BucketOpenAction::SwitchExisting => {
+                switch_session_with_focus(name, None, None);
+                self.reset_selected_index();
+            },
+            BucketOpenAction::ReadSurface => {
+                open_settlement_read_surface(bucket);
+                self.reset_selected_index();
+            },
+        }
+    }
+    fn switch_session_relative(&mut self, offset: isize) {
+        if let Some(target_session_name) =
+            relative_session_target(&self.sessions.session_ui_infos, offset)
+        {
+            switch_session_with_focus(&target_session_name, None, None);
+        }
+    }
+
+    /// Kill the current session without leaving vc-frame when another live
+    /// session exists (switch first, then kill the abandoned server). If this
+    /// is the last active session, arm a y/n confirmation overlay.
+    fn kill_current_session_preserving_client(&mut self) {
+        if self.show_kill_last_session_warning {
+            // Second Ctrl+o → x (or repeated pipe) acts as explicit confirm.
+            self.confirm_kill_last_session();
+            return;
+        }
+
+        let current_name = self
+            .sessions
+            .session_ui_infos
+            .iter()
+            .find(|session| session.is_current_session)
+            .map(|session| session.name.clone())
+            .or_else(|| self.session_name.clone());
+        let Some(current_name) = current_name else {
+            self.show_error("No current session to kill.");
+            return;
+        };
+
+        if let Some(target) = kill_fallback_target(&self.sessions.session_ui_infos) {
+            // Hop first so the client stays inside vc-frame, then kill the old server.
+            switch_session_with_focus(&target, None, None);
+            match kill_sessions(std::slice::from_ref(&current_name)) {
+                Ok(()) => {
+                    self.sessions
+                        .session_ui_infos
+                        .retain(|session| session.name != current_name);
+                    self.show_kill_last_session_warning = false;
+                },
+                Err(error) => {
+                    self.show_error(&format!("Failed to kill session: {error}"));
+                },
+            }
+            return;
+        }
+
+        // Last active session in this window — require explicit confirmation.
+        self.show_kill_last_session_warning = true;
+        self.show_kill_all_sessions_warning = false;
+        // Rail is narrow: use the error banner. Floating manager uses the
+        // dedicated y/n overlay (see render_kill_last_session_warning).
+        if self.is_rail {
+            self.show_error(
+                "You are about to close the last active session in this window. Are you sure? y/n \
+                 (or Ctrl+o → x again).",
+            );
+        }
+        // Make the plugin pane visible so the prompt is not buried.
+        show_self(true);
+    }
+
+    fn confirm_kill_last_session(&mut self) {
+        self.show_kill_last_session_warning = false;
+        let name = self
+            .sessions
+            .session_ui_infos
+            .iter()
+            .find(|session| session.is_current_session)
+            .map(|session| session.name.clone())
+            .or_else(|| self.session_name.clone());
+        let Some(name) = name else {
+            self.show_error("No current session to kill.");
+            return;
+        };
+        // No other session to hop to — kill this server (client exits with it).
+        if let Err(error) = kill_sessions(std::slice::from_ref(&name)) {
+            self.show_error(&format!("Failed to kill session: {error}"));
+        }
+    }
+
+    fn handle_kill_last_session_warning_key(&mut self, key: KeyWithModifier) -> bool {
+        match key.bare_key {
+            BareKey::Char('y') if key.has_no_modifiers() => {
+                self.confirm_kill_last_session();
+                true
+            },
+            BareKey::Char('n') | BareKey::Esc if key.has_no_modifiers() => {
+                self.show_kill_last_session_warning = false;
+                self.error = None;
+                true
+            },
+            BareKey::Char('c') if key.has_modifiers(&[KeyModifier::Ctrl]) => {
+                self.show_kill_last_session_warning = false;
+                self.error = None;
+                true
+            },
+            _ => true,
+        }
+    }
+    fn handle_session_rail_selection(&mut self) {
+        self.ensure_rail_selection();
+        if let Some(selected_session_name) = self.sessions.get_selected_session_name() {
+            if self.sessions.selected_is_current_session() {
+                // Already here — quiet (same contract as jump_to_bucket).
+            } else {
+                switch_session_with_focus(&selected_session_name, None, None);
+                self.reset_selected_index();
+            }
+        }
+    }
     fn handle_key(&mut self, key: KeyWithModifier) -> bool {
+        if self.show_kill_last_session_warning {
+            return self.handle_kill_last_session_warning_key(key);
+        }
         if self.error.is_some() {
             self.error = None;
             return true;
+        }
+        if self.is_rail {
+            return self.handle_session_rail_key(key);
         }
         match self.active_screen {
             ActiveScreen::NewSession => self.handle_new_session_key(key),
@@ -622,7 +2312,7 @@ impl State {
                     self.renaming_session_name = Some(String::new());
                     should_render = true;
                 },
-                BareKey::Delete if key.has_no_modifiers() => {
+                _ if is_kill_or_delete_key(&key) => {
                     if let Some(selected_session_name) = self.sessions.get_selected_session_name() {
                         let was_searching = self.sessions.is_searching;
                         let prev_search_idx = self.sessions.selected_search_index;
@@ -685,12 +2375,12 @@ impl State {
                         close_self();
                     }
                 },
-                BareKey::Char('a') if key.has_modifiers(&[KeyModifier::Ctrl]) => {
-                    if !self.is_welcome_screen {
-                        // we don't want to save welcome screen sessions
-                        if let Err(e) = save_session() {
-                            self.show_error(&format!("Couldn't save session: {}", e));
-                        }
+                BareKey::Char('a')
+                    if key.has_modifiers(&[KeyModifier::Ctrl]) && !self.is_welcome_screen =>
+                {
+                    // we don't want to save welcome screen sessions
+                    if let Err(e) = save_session() {
+                        self.show_error(&format!("Couldn't save session: {}", e));
                     }
                 },
                 _ => {},
@@ -733,7 +2423,7 @@ impl State {
                 self.toggle_active_screen();
                 should_render = true;
             },
-            BareKey::Delete if key.has_no_modifiers() => {
+            _ if is_kill_or_delete_key(&key) => {
                 self.resurrectable_sessions.delete_selected_session();
                 should_render = true;
             },
@@ -742,10 +2432,8 @@ impl State {
                     .show_delete_all_sessions_warning();
                 should_render = true;
             },
-            BareKey::Esc if key.has_no_modifiers() => {
-                if !self.is_welcome_screen {
-                    close_self();
-                }
+            BareKey::Esc if key.has_no_modifiers() && !self.is_welcome_screen => {
+                close_self();
             },
             _ => {},
         }
@@ -876,7 +2564,7 @@ impl State {
                 self.renaming_session_name = Some(String::new());
                 should_render = true;
             },
-            BareKey::Delete if key.has_no_modifiers() => {
+            _ if is_kill_or_delete_key(&key) => {
                 let selected = self
                     .single_screen_state
                     .get_selected_result()
@@ -923,10 +2611,10 @@ impl State {
                 disconnect_other_clients();
             },
             BareKey::Char('a') if key.has_modifiers(&[KeyModifier::Ctrl]) => {
-                if !self.is_welcome_screen {
-                    if let Err(e) = save_session() {
-                        self.show_error(&format!("Couldn't save session: {}", e));
-                    }
+                if !self.is_welcome_screen
+                    && let Err(e) = save_session()
+                {
+                    self.show_error(&format!("Couldn't save session: {}", e));
                 }
             },
             BareKey::Char('c') if key.has_modifiers(&[KeyModifier::Ctrl]) => {
@@ -1082,7 +2770,7 @@ impl State {
                         } else if let Some(tab_position) = selected_tab {
                             go_to_tab(tab_position as u32);
                         } else {
-                            self.show_error("Already attached...");
+                            // Already on this session with no tab/pane target — quiet.
                         }
                     } else {
                         switch_session_with_focus(
@@ -1156,7 +2844,7 @@ impl State {
                                     is_current_session, ..
                                 } => {
                                     if *is_current_session {
-                                        self.show_error("Already attached...");
+                                        // Already here — quiet (same contract as rail drawers).
                                     } else {
                                         switch_session_with_focus(&session_name, None, None);
                                     }
@@ -1195,7 +2883,7 @@ impl State {
                             // Check exact match against active sessions
                             if self.sessions.has_session(&typed_name) {
                                 if self.session_name.as_deref() == Some(&typed_name) {
-                                    self.show_error("Already attached...");
+                                    // Already here — quiet (same contract as rail drawers).
                                 } else {
                                     switch_session_with_focus(&typed_name, None, None);
                                     if self.is_welcome_screen {
@@ -1289,7 +2977,7 @@ impl State {
         }
         self.resurrectable_sessions
             .update(snapshot.resurrectable_sessions);
-        self.update_session_infos(snapshot.live_sessions);
+        let session_display_changed = self.update_session_infos(snapshot.live_sessions);
         if !self.is_multi_screen {
             self.single_screen_state.update_search_term(
                 &self.sessions.session_ui_infos,
@@ -1307,10 +2995,18 @@ impl State {
             self.single_screen_state.layout_list.selected_layout_index =
                 previous_selection.min(self.single_screen_state.layout_list.max_index());
         }
-        true
+        !self.is_rail || session_display_changed
     }
 
-    fn update_session_infos(&mut self, session_infos: Vec<SessionInfo>) {
+    fn update_session_infos(&mut self, session_infos: Vec<SessionInfo>) -> bool {
+        let previous_rail_projection = self.is_rail.then(|| {
+            session_rail_rows_with_truth(
+                &self.sessions.session_ui_infos,
+                self.settlement_history.as_ref(),
+                self.settlement_feed_degraded,
+                RailWidthMode::Wide,
+            )
+        });
         let session_ui_infos: Vec<SessionUiInfo> = session_infos
             .iter()
             .filter_map(|s| {
@@ -1350,6 +3046,15 @@ impl State {
         }
         self.sessions
             .set_sessions(session_ui_infos, forbidden_sessions);
+        previous_rail_projection.is_none_or(|previous| {
+            previous
+                != session_rail_rows_with_truth(
+                    &self.sessions.session_ui_infos,
+                    self.settlement_history.as_ref(),
+                    self.settlement_feed_degraded,
+                    RailWidthMode::Wide,
+                )
+        })
     }
     fn main_menu_size(&self, rows: usize, cols: usize) -> (usize, usize, usize, usize) {
         // x, y, width, height
@@ -1443,5 +3148,1553 @@ impl State {
             None,
             None,
         );
+    }
+
+    fn render_kill_last_session_warning(&self, rows: usize, columns: usize, x: usize, y: usize) {
+        if rows == 0 || columns == 0 {
+            return;
+        }
+        let warning_description_text =
+            "You are about to close the last active session in this window.";
+        let confirmation_text = "Are you sure? (y/n)";
+        let warning_y_location = y + (rows / 2).saturating_sub(1);
+        let confirmation_y_location = y + (rows / 2) + 1;
+        let warning_x_location =
+            x + columns.saturating_sub(warning_description_text.chars().count()) / 2;
+        let confirmation_x_location =
+            x + columns.saturating_sub(confirmation_text.chars().count()) / 2;
+        print_text_with_coordinates(
+            Text::new(warning_description_text).color_range(0, ..),
+            warning_x_location,
+            warning_y_location,
+            None,
+            None,
+        );
+        print_text_with_coordinates(
+            Text::new(confirmation_text).color_indices(2, vec![15, 17]),
+            confirmation_x_location,
+            confirmation_y_location,
+            None,
+            None,
+        );
+    }
+}
+
+#[cfg(test)]
+mod rail_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn transient_menu_dimensions_are_guarded() {
+        assert!(menu_dimensions_are_transient(0, 80));
+        assert!(menu_dimensions_are_transient(1, 80));
+        assert!(menu_dimensions_are_transient(2, 3));
+        assert!(menu_dimensions_are_transient(0, 0));
+    }
+
+    #[test]
+    fn legal_menu_dimensions_are_not_transient() {
+        assert!(!menu_dimensions_are_transient(2, 4));
+        assert!(!menu_dimensions_are_transient(24, 80));
+        // The rail path never consults this predicate: it keeps its own
+        // zero-dimension guard and legally renders at cols 6-10.
+    }
+
+    #[test]
+    fn rail_width_mode_thresholds_are_sharp() {
+        assert_eq!(RailWidthMode::from_cols(24), RailWidthMode::Wide);
+        assert_eq!(RailWidthMode::from_cols(23), RailWidthMode::Normal);
+        assert_eq!(RailWidthMode::from_cols(14), RailWidthMode::Normal);
+        assert_eq!(RailWidthMode::from_cols(13), RailWidthMode::Dense);
+        assert_eq!(RailWidthMode::from_cols(6), RailWidthMode::Dense);
+        assert_eq!(RailWidthMode::from_cols(80), RailWidthMode::Wide);
+    }
+
+    #[test]
+    fn rail_header_speaks_three_faces() {
+        // Wide anchors the current session name.
+        assert_eq!(
+            rail_header_text(RailWidthMode::Wide, 3, Some("alpha")),
+            "SESSIONS 3 · alpha"
+        );
+        // Normal keeps the count, drops the anchor.
+        assert_eq!(
+            rail_header_text(RailWidthMode::Normal, 3, Some("alpha")),
+            "SESSIONS 3"
+        );
+        // Dense is an ultra-short badge.
+        assert_eq!(
+            rail_header_text(RailWidthMode::Dense, 3, Some("alpha")),
+            "S3"
+        );
+        // No current session: Wide degrades to the count alone.
+        assert_eq!(rail_header_text(RailWidthMode::Wide, 2, None), "SESSIONS 2");
+    }
+
+    #[test]
+    fn dense_rows_are_iconic_and_fit_narrow_columns() {
+        let entry = format_session_rail_entry(
+            &session("very-long-session-name", true),
+            1,
+            RailWidthMode::Dense,
+        );
+        assert_eq!(entry, "01 ◉");
+        let entry = format_session_rail_entry(&session("other", false), 7, RailWidthMode::Dense);
+        assert_eq!(entry, "07 ○");
+        // Every dense row fits the narrowest legal rail without shredding.
+        for cols in [4, 6, 8, 13] {
+            assert!(fit_rail_line(&entry, cols).width() <= cols);
+        }
+    }
+
+    #[test]
+    fn dense_and_wide_build_the_same_row_inventory() {
+        // Same sessions, same number and kinds of rows in both faces — the
+        // click-map is built per row in render, so kind parity here proves
+        // every dense row stays clickable.
+        let mut alpha = session("alpha", true);
+        alpha.tabs = vec![TabUiInfo::for_rail_test("build", true, "cargo", 1)];
+        let sessions = [alpha, session("beta", false)];
+        let wide = session_rail_rows_with_truth(&sessions, None, false, RailWidthMode::Wide);
+        let dense = session_rail_rows_with_truth(&sessions, None, false, RailWidthMode::Dense);
+        assert_eq!(wide.len(), dense.len());
+        for (wide_row, dense_row) in wide.iter().zip(dense.iter()) {
+            assert_eq!(wide_row.kind, dense_row.kind);
+        }
+    }
+
+    #[test]
+    fn normal_rows_keep_names_and_indicators() {
+        let entry = format_session_rail_entry(&session("alpha", true), 1, RailWidthMode::Normal);
+        assert_eq!(entry, "01 ◉ alpha");
+        let entry = format_session_rail_entry(&session("beta", false), 2, RailWidthMode::Normal);
+        assert_eq!(entry, "02 ○ beta");
+    }
+
+    fn session(name: &str, is_current_session: bool) -> SessionUiInfo {
+        SessionUiInfo {
+            name: name.to_owned(),
+            tabs: vec![],
+            connected_users: 1,
+            is_current_session,
+            creation_time: Duration::ZERO,
+        }
+    }
+
+    /// Product key-contract v3: bare arrows switch sessions ONLY through the
+    /// ^T tab-mode keybinds (vc_rail_nav pipe). A focused rail pane must not
+    /// consume them — LOCK routes raw keys to the focused pane, so a rail
+    /// arrow handler becomes a hidden mode-proof session switcher.
+    #[test]
+    fn rail_ignores_bare_arrow_keys() {
+        let mut state = State::default();
+        state.sessions.session_ui_infos = vec![session("solo", true)];
+        assert!(!state.handle_session_rail_key(KeyWithModifier::new(BareKey::Up)));
+        assert!(!state.handle_session_rail_key(KeyWithModifier::new(BareKey::Down)));
+    }
+
+    fn session_launched_at(name: &str, is_current_session: bool, secs: u64) -> SessionUiInfo {
+        SessionUiInfo {
+            creation_time: Duration::from_secs(secs),
+            ..session(name, is_current_session)
+        }
+    }
+
+    /// Killing next to live buckets must hop into a bucket, never take the
+    /// client down: buckets are invisible to navigation, not to the kill path.
+    #[test]
+    fn kill_next_to_buckets_hops_into_a_bucket_instead_of_dying() {
+        let sessions = vec![
+            session("work", true),
+            session("Finalized runs", false),
+            session("Needs attention", false),
+        ];
+        // Navigation deliberately sees nothing…
+        assert_eq!(relative_session_target(&sessions, 1), None);
+        // …but the kill path still finds a live session to land on.
+        assert_eq!(
+            kill_fallback_target(&sessions),
+            Some("Finalized runs".to_owned())
+        );
+    }
+
+    /// When the CURRENT session is a bucket, nav cannot even locate "here";
+    /// the kill path must still prefer a working session over dying.
+    #[test]
+    fn kill_from_inside_a_bucket_prefers_a_working_session() {
+        let sessions = vec![
+            session("Failed runs", true),
+            session("work", false),
+            session("Finalized runs", false),
+        ];
+        assert_eq!(kill_fallback_target(&sessions), Some("work".to_owned()));
+    }
+
+    /// Two working sessions: the kill path follows the same wrap-around
+    /// order the rail nav uses.
+    #[test]
+    fn kill_with_working_neighbours_follows_nav_order() {
+        let sessions = vec![
+            session("alpha", true),
+            session("beta", false),
+            session("Finalized runs", false),
+        ];
+        assert_eq!(kill_fallback_target(&sessions), Some("beta".to_owned()));
+    }
+
+    /// Only when nothing else is alive may the kill path return None —
+    /// that is the one case where the confirmation overlay is honest.
+    #[test]
+    fn kill_of_the_truly_last_session_returns_none() {
+        let sessions = vec![session("only", true)];
+        assert_eq!(kill_fallback_target(&sessions), None);
+    }
+
+    /// The rail contract: slot = launch order. The session started first holds
+    /// slot 01 for as long as it lives — regardless of its name and of which
+    /// session the viewing instance considers current.
+    #[test]
+    fn rail_orders_sessions_by_launch_time_not_name_or_current() {
+        let mut rail = SessionList::default();
+        rail.set_sessions(
+            vec![
+                session_launched_at("alpha", true, 200),
+                session_launched_at("zeta", false, 100),
+            ],
+            vec![],
+        );
+        let names: Vec<&str> = rail
+            .session_ui_infos
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["zeta", "alpha"],
+            "the earlier-launched session holds the earlier slot, name and current-ness be damned"
+        );
+    }
+
+    /// Activating a different session must not reshuffle the rail: two views
+    /// with different `is_current_session` flags render the same order.
+    #[test]
+    fn activation_does_not_reshuffle_rail() {
+        let order_seen_by = |current: &str| {
+            let mut rail = SessionList::default();
+            rail.set_sessions(
+                vec![
+                    session_launched_at("morning", current == "morning", 100),
+                    session_launched_at("noon", current == "noon", 200),
+                    session_launched_at("evening", current == "evening", 300),
+                ],
+                vec![],
+            );
+            rail.session_ui_infos
+                .iter()
+                .map(|s| s.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(order_seen_by("morning"), order_seen_by("evening"));
+        assert_eq!(order_seen_by("noon"), vec!["morning", "noon", "evening"]);
+    }
+
+    /// ctrl+t Up/Down steps through working sessions in rail order, wrapping
+    /// around — and never lands on an f/x/n bucket session.
+    #[test]
+    fn rail_nav_steps_over_working_sessions_and_skips_buckets() {
+        let sessions = vec![
+            session_launched_at("early", false, 100),
+            session_launched_at("Finalized runs", false, 150),
+            session_launched_at("late", true, 200),
+            session_launched_at("Needs attention", false, 250),
+        ];
+        // current = "late" (last working session): down wraps to "early",
+        // up steps back to "early" as well (two working sessions total).
+        assert_eq!(
+            relative_session_target(&sessions, 1).as_deref(),
+            Some("early"),
+            "down from the last working session must wrap, not hit a bucket"
+        );
+        assert_eq!(
+            relative_session_target(&sessions, -1).as_deref(),
+            Some("early")
+        );
+        // A single working session has nowhere to go.
+        let lonely = vec![
+            session_launched_at("only", true, 100),
+            session_launched_at("Failed runs", false, 200),
+        ];
+        assert_eq!(relative_session_target(&lonely, 1), None);
+    }
+
+    /// When a session dies, the sessions below it move up one slot — the
+    /// survivors keep their relative launch order and a newly launched
+    /// session appends at the end.
+    #[test]
+    fn dead_session_compacts_slots_preserving_launch_order() {
+        let mut rail = SessionList::default();
+        rail.set_sessions(
+            vec![
+                session_launched_at("first", true, 100),
+                session_launched_at("second", false, 200),
+                session_launched_at("third", false, 300),
+            ],
+            vec![],
+        );
+        // "second" dies; a fresh "fourth" launches later.
+        rail.set_sessions(
+            vec![
+                session_launched_at("third", false, 300),
+                session_launched_at("first", true, 100),
+                session_launched_at("fourth", false, 400),
+            ],
+            vec![],
+        );
+        let names: Vec<&str> = rail
+            .session_ui_infos
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["first", "third", "fourth"]);
+    }
+
+    #[test]
+    fn hidden_instance_ignores_session_update_broadcasts() {
+        let mut state = State {
+            is_visible: false,
+            ..Default::default()
+        };
+        state
+            .sessions
+            .set_sessions(vec![session("alpha", true)], vec![]);
+        let rendered = state.update(Event::SessionUpdate(vec![], vec![]));
+        assert!(!rendered, "hidden rail must not render on broadcast");
+        assert_eq!(
+            state.sessions.session_ui_infos.len(),
+            1,
+            "hidden rail must keep stale state instead of rebuilding it"
+        );
+    }
+
+    #[test]
+    fn visible_instance_processes_session_update_broadcasts() {
+        let mut state = State {
+            is_visible: true,
+            ..Default::default()
+        };
+        state
+            .sessions
+            .set_sessions(vec![session("alpha", true)], vec![]);
+        let rendered = state.update(Event::SessionUpdate(vec![], vec![]));
+        assert!(rendered);
+        assert!(state.sessions.session_ui_infos.is_empty());
+    }
+
+    #[test]
+    fn rail_entries_include_ordinal_status_and_name() {
+        assert_eq!(
+            format_session_rail_entry(&session("alpha", true), 1, RailWidthMode::Wide),
+            "01 ◉ alpha"
+        );
+        assert_eq!(
+            format_session_rail_entry(&session("beta", false), 12, RailWidthMode::Wide),
+            "12 ○ beta"
+        );
+    }
+
+    /// The same inventory as seen by two different plugin instances: each one
+    /// considers a different session current.
+    fn two_views_of_the_same_inventory() -> (SessionList, SessionList) {
+        let mut view_from_alpha = SessionList::default();
+        view_from_alpha.set_sessions(
+            vec![
+                session("zeta", false),
+                session("alpha", true),
+                session("mid", false),
+            ],
+            vec![],
+        );
+        let mut view_from_zeta = SessionList::default();
+        view_from_zeta.set_sessions(
+            vec![
+                session("zeta", true),
+                session("alpha", false),
+                session("mid", false),
+            ],
+            vec![],
+        );
+        (view_from_alpha, view_from_zeta)
+    }
+
+    fn working_row_texts(sessions: &[SessionUiInfo]) -> Vec<String> {
+        session_rail_rows(sessions)
+            .into_iter()
+            .filter(|row| !row.is_bucket())
+            .map(|row| row.text)
+            .collect()
+    }
+
+    #[test]
+    fn session_order_is_independent_of_current_session() {
+        let (view_from_alpha, view_from_zeta) = two_views_of_the_same_inventory();
+        let names = |list: &SessionList| -> Vec<String> {
+            list.session_ui_infos
+                .iter()
+                .map(|s| s.name.clone())
+                .collect()
+        };
+        assert_eq!(names(&view_from_alpha), vec!["alpha", "mid", "zeta"]);
+        assert_eq!(
+            names(&view_from_alpha),
+            names(&view_from_zeta),
+            "session order must not depend on which session is current"
+        );
+    }
+
+    #[test]
+    fn current_session_change_moves_only_the_marker() {
+        let (view_from_alpha, view_from_zeta) = two_views_of_the_same_inventory();
+        assert_eq!(
+            working_row_texts(&view_from_alpha.session_ui_infos),
+            vec!["01 ◉ alpha", "02 ○ mid", "03 ○ zeta"]
+        );
+        assert_eq!(
+            working_row_texts(&view_from_zeta.session_ui_infos),
+            vec!["01 ○ alpha", "02 ○ mid", "03 ◉ zeta"]
+        );
+    }
+
+    #[test]
+    fn hotkeys_and_rail_rows_target_the_same_sessions_in_every_view() {
+        let (view_from_alpha, view_from_zeta) = two_views_of_the_same_inventory();
+        for character in ['1', '2', '3'] {
+            let target_a =
+                rail_ordinal_target(&view_from_alpha.session_ui_infos, character).unwrap();
+            let target_b =
+                rail_ordinal_target(&view_from_zeta.session_ui_infos, character).unwrap();
+            assert_eq!(
+                view_from_alpha.session_ui_infos[target_a].name,
+                view_from_zeta.session_ui_infos[target_b].name,
+                "hotkey {} must resolve to the same session in every view",
+                character
+            );
+        }
+        // Click rows carry the session index they display, so the row under a
+        // given ordinal and the hotkey for that ordinal must agree.
+        let rows = session_rail_rows(&view_from_alpha.session_ui_infos);
+        for (ordinal, row) in rows.iter().filter(|row| !row.is_bucket()).enumerate() {
+            let SessionRailRowKind::Session(session_index) = &row.kind else {
+                panic!("expected a session row, got {:?}", row.kind);
+            };
+            let hotkey = char::from_digit(ordinal as u32 + 1, 10).unwrap();
+            assert_eq!(
+                rail_ordinal_target(&view_from_alpha.session_ui_infos, hotkey),
+                Some(*session_index),
+                "click target and hotkey {} must point at the same session",
+                hotkey
+            );
+        }
+    }
+
+    #[test]
+    fn buckets_stay_pinned_below_name_sorted_sessions() {
+        let mut rail = SessionList::default();
+        // Bucket names sort alphabetically before the working sessions, which
+        // must not pull them out of their pinned tail position.
+        rail.set_sessions(
+            vec![
+                session("zzz", false),
+                session("Finalized runs", false),
+                session("aaa", true),
+                session("Failed runs", false),
+                session("Needs attention", false),
+            ],
+            vec![],
+        );
+        let rows = session_rail_rows(&rail.session_ui_infos);
+        let bucket_start = rows.iter().position(|row| row.is_bucket()).unwrap();
+        assert_eq!(
+            bucket_start, 2,
+            "only the two working sessions may precede the buckets"
+        );
+        assert!(rows[bucket_start..].iter().all(|row| row.is_bucket()));
+        assert_eq!(rows[0].text, "01 ◉ aaa");
+        assert_eq!(rows[1].text, "02 ○ zzz");
+    }
+
+    #[test]
+    fn rail_expands_sessions_with_live_process_tabs_only() {
+        let mut alpha = session("alpha", true);
+        alpha.tabs = vec![
+            TabUiInfo::for_rail_test("impl-260718-120000-01000", true, "claude", 1),
+            TabUiInfo::for_rail_test("old-run", false, "codex", 0),
+            TabUiInfo::for_rail_test("audit-260718-130000-02000", false, "codex", 2),
+        ];
+        let beta = session("beta", false);
+
+        let rows = session_rail_rows(&[alpha, beta]);
+        let text: Vec<&str> = rows.iter().map(|row| row.text.as_str()).collect();
+
+        assert_eq!(
+            text,
+            vec![
+                "01 ◉ alpha",
+                "   ◉ impl-260718-120000-01000 · claude",
+                "   · audit-260718-130000-02000 · codex +1",
+                "02 ○ beta",
+                // the buckets are always pinned to the tail of the rail;
+                // no settlement feed yet = no number at all (never a "?")
+                " 🅵… · 🆇… · 🅽…",
+            ]
+        );
+        assert_eq!(rows.iter().filter(|row| row.is_live_process()).count(), 2);
+    }
+
+    #[test]
+    fn rail_does_not_repeat_process_label_when_tab_already_names_the_agent() {
+        let tab = TabUiInfo::for_rail_test("claude", true, "claude", 1);
+
+        assert_eq!(
+            format_process_tab_rail_entry(&tab, RailWidthMode::Wide),
+            "   ◉ claude"
+        );
+    }
+
+    #[test]
+    fn rail_strips_spinner_frame_but_keeps_meaningful_process_progress() {
+        let spinning = TabUiInfo::for_rail_test("resume-codex", true, "⣧ vc", 1);
+        let progressing = TabUiInfo::for_rail_test("resume-codex", true, "⣇ indexing workspace", 1);
+
+        assert_eq!(
+            format_process_tab_rail_entry(&spinning, RailWidthMode::Wide),
+            "   ◉ resume-codex · vc"
+        );
+        assert_eq!(
+            format_process_tab_rail_entry(&progressing, RailWidthMode::Wide),
+            "   ◉ resume-codex · indexing workspace"
+        );
+    }
+
+    #[test]
+    fn spinner_frame_changes_do_not_change_the_rail_projection() {
+        let mut first = session("vc-frame", true);
+        first.tabs = vec![TabUiInfo::for_rail_test("resume-codex", true, "⣧ vc", 1)];
+        let mut next = session("vc-frame", true);
+        next.tabs = vec![TabUiInfo::for_rail_test("resume-codex", true, "⣇ vc", 1)];
+
+        assert_eq!(
+            session_rail_session_rows(&[first], RailWidthMode::Wide),
+            session_rail_session_rows(&[next], RailWidthMode::Wide)
+        );
+    }
+
+    #[test]
+    fn meaningful_progress_changes_still_change_the_rail_projection() {
+        let mut first = session("vc-frame", true);
+        first.tabs = vec![TabUiInfo::for_rail_test("resume-codex", true, "⣧ vc", 1)];
+        let mut next = session("vc-frame", true);
+        next.tabs = vec![TabUiInfo::for_rail_test(
+            "resume-codex",
+            true,
+            "⣇ applying patch",
+            1,
+        )];
+
+        assert_ne!(
+            session_rail_session_rows(&[first], RailWidthMode::Wide),
+            session_rail_session_rows(&[next], RailWidthMode::Wide)
+        );
+    }
+
+    #[test]
+    fn live_runs_rail_entry_reuses_the_bucket_honesty_language() {
+        assert_eq!(
+            format_live_runs_rail_entry(None, true, RailWidthMode::Wide),
+            " ● Live …"
+        );
+        assert_eq!(
+            format_live_runs_rail_entry(Some(4), true, RailWidthMode::Wide),
+            " ● Live 4"
+        );
+        assert_eq!(
+            format_live_runs_rail_entry(Some(4), false, RailWidthMode::Wide),
+            " ● Live ~4"
+        );
+        assert_eq!(
+            format_live_runs_rail_entry(Some(4), true, RailWidthMode::Dense),
+            " ●4"
+        );
+    }
+
+    #[test]
+    fn live_runs_feed_accepts_only_the_canonical_schema() {
+        let mut state = State {
+            is_rail: true,
+            ..Default::default()
+        };
+        assert!(state.update(Event::CustomMessage(
+            VC_LIVE_RUNS_MESSAGE.to_owned(),
+            r#"{"schema":"vc.live-runs.v1","runs":[{"run_id":"a"},{"run_id":"b"}]}"#.to_owned(),
+        )));
+        assert_eq!(state.live_runs_count, Some(2));
+        assert!(!state.live_runs_feed_degraded);
+
+        // Same census again: no repaint for an unchanged truth.
+        assert!(!state.update(Event::CustomMessage(
+            VC_LIVE_RUNS_MESSAGE.to_owned(),
+            r#"{"schema":"vc.live-runs.v1","runs":[{"run_id":"a"},{"run_id":"b"}]}"#.to_owned(),
+        )));
+
+        // A corrupt payload demotes the count to a lower bound, never a blank.
+        assert!(state.update(Event::CustomMessage(
+            VC_LIVE_RUNS_MESSAGE.to_owned(),
+            r#"{"schema":"someone-elses.schema","runs":[]}"#.to_owned(),
+        )));
+        assert_eq!(state.live_runs_count, Some(2));
+        assert!(state.live_runs_feed_degraded);
+    }
+
+    #[test]
+    fn live_runs_feed_degrades_after_missed_refresh_windows() {
+        let mut state = State {
+            is_rail: true,
+            ..Default::default()
+        };
+        assert!(state.apply_live_runs_payload(r#"{"schema":"vc.live-runs.v1","runs":[{}]}"#));
+        for _ in 1..LIVE_RUNS_FEED_STALE_AFTER_TICKS {
+            assert!(!state.age_live_runs_feed());
+            assert!(!state.live_runs_feed_degraded);
+        }
+        assert!(state.age_live_runs_feed());
+        assert!(state.live_runs_feed_degraded);
+
+        // A fresh payload restores exact truth.
+        assert!(state.apply_live_runs_payload(r#"{"schema":"vc.live-runs.v1","runs":[{}]}"#));
+        assert!(!state.live_runs_feed_degraded);
+    }
+
+    #[test]
+    fn bucket_click_ownership_is_part_of_the_stable_rail_projection() {
+        let working = session("vc-frame", true);
+        let before = session_rail_rows_with_truth(
+            std::slice::from_ref(&working),
+            None,
+            false,
+            RailWidthMode::Wide,
+        );
+        let after = session_rail_rows_with_truth(
+            &[working, bucket_session("Needs attention", 0)],
+            None,
+            false,
+            RailWidthMode::Wide,
+        );
+
+        assert_eq!(before.last().unwrap().text, after.last().unwrap().text);
+        assert_ne!(
+            before, after,
+            "bucket session_index changes must refresh the click map"
+        );
+    }
+
+    fn bucket_session(name: &str, tabs: usize) -> SessionUiInfo {
+        let mut bucket = session(name, false);
+        bucket.tabs = (0..tabs)
+            .map(|index| TabUiInfo::for_rail_test(&format!("run-{}", index), false, "", 0))
+            .collect();
+        bucket
+    }
+
+    fn settlement_payload(
+        sequence: u64,
+        historical: (u64, u64, u64),
+        latest: (u64, u64, u64),
+    ) -> String {
+        settlement_payload_for(
+            "00000000-0000-4000-8000-000000000001",
+            sequence,
+            historical,
+            latest,
+            0,
+            (sequence > 0).then_some(1),
+        )
+    }
+
+    fn settlement_payload_for(
+        generation: &str,
+        sequence: u64,
+        historical: (u64, u64, u64),
+        latest: (u64, u64, u64),
+        gaps: u64,
+        complete_from: Option<u64>,
+    ) -> String {
+        serde_json::json!({
+            "schema": SETTLEMENT_HISTORY_SCHEMA,
+            "generation": generation,
+            "sequence": sequence,
+            "historical_transitions": {
+                "f": historical.0,
+                "x": historical.1,
+                "n": historical.2,
+                "total": historical.0 + historical.1 + historical.2,
+            },
+            "latest_by_run": {
+                "f": latest.0,
+                "x": latest.1,
+                "n": latest.2,
+                "total": latest.0 + latest.1 + latest.2,
+            },
+            "gaps": gaps,
+            "complete_from": complete_from,
+        })
+        .to_string()
+    }
+
+    fn settlement_pipe(payload: String) -> PipeMessage {
+        PipeMessage {
+            source: PipeSource::Cli("settlement-history-test".to_owned()),
+            name: SETTLEMENT_COUNTS_PIPE.to_owned(),
+            payload: Some(payload),
+            args: BTreeMap::new(),
+            is_private: false,
+        }
+    }
+
+    #[test]
+    fn canonical_pipe_acknowledgement_is_independent_from_rendering() {
+        let mut state = State::default();
+        let canonical = settlement_payload(10, (4, 3, 3), (2, 1, 1));
+
+        assert_eq!(
+            state.apply_settlement_history(&canonical),
+            SettlementPipeOutcome::accepted(true)
+        );
+        assert_eq!(
+            state.apply_settlement_history(&canonical),
+            SettlementPipeOutcome::accepted(false)
+        );
+
+        let divergent = settlement_payload(10, (5, 2, 3), (3, 1, 1));
+        assert_eq!(
+            state.apply_settlement_history(&divergent),
+            SettlementPipeOutcome::rejected(true)
+        );
+        assert_eq!(
+            state.apply_settlement_history(&canonical),
+            SettlementPipeOutcome::accepted(true)
+        );
+
+        let stale = settlement_payload(9, (4, 3, 2), (2, 1, 1));
+        assert_eq!(
+            state.apply_settlement_history(&stale),
+            SettlementPipeOutcome::rejected(false)
+        );
+    }
+
+    #[test]
+    fn latest_by_run_drives_open_now_primary_counts() {
+        let snapshot =
+            SettlementHistory::parse(&settlement_payload(681, (97, 176, 408), (12, 7, 3)))
+                .expect("valid settlement history");
+        let rows = session_rail_rows_with_truth(
+            &[session("alpha", true)],
+            Some(&snapshot),
+            false,
+            RailWidthMode::Wide,
+        );
+        let buckets: Vec<&str> = rows
+            .iter()
+            .filter(|row| row.is_bucket())
+            .map(|row| row.text.as_str())
+            .collect();
+
+        assert_eq!(buckets, vec![" 🅵12 · 🆇7 · 🅽3",]);
+    }
+
+    #[test]
+    fn incomplete_or_degraded_marks_open_counts_as_approximate() {
+        let payload = settlement_payload_for(
+            "00000000-0000-4000-8000-000000000001",
+            681,
+            (97, 176, 408),
+            (12, 7, 3),
+            4,
+            None,
+        );
+        let snapshot = SettlementHistory::parse(&payload).expect("valid partial history");
+        let rows = session_rail_rows_with_truth(&[], Some(&snapshot), false, RailWidthMode::Wide);
+        let buckets: Vec<&str> = rows
+            .iter()
+            .filter(|row| row.is_bucket())
+            .map(|row| row.text.as_str())
+            .collect();
+
+        assert_eq!(buckets, vec![" 🅵~12 · 🆇~7 · 🅽~3",]);
+        assert!(
+            SettlementHistory::parse(&settlement_payload_for(
+                "00000000-0000-4000-8000-000000000001",
+                681,
+                (97, 176, 408),
+                (12, 7, 3),
+                4,
+                Some(1),
+            ))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn generation_reset_is_partial_and_a_retired_generation_cannot_return() {
+        let mut state = State::default();
+        let first_generation = settlement_payload_for(
+            "00000000-0000-4000-8000-000000000001",
+            u64::MAX,
+            (u64::MAX, 0, 0),
+            (1, 0, 0),
+            1,
+            None,
+        );
+        assert!(state.pipe(settlement_pipe(first_generation)));
+
+        let dishonest_exact_reset = settlement_payload_for(
+            "00000000-0000-4000-8000-000000000002",
+            0,
+            (0, 0, 0),
+            (0, 0, 0),
+            0,
+            None,
+        );
+        assert!(state.pipe(settlement_pipe(dishonest_exact_reset)));
+        assert!(state.settlement_feed_degraded);
+
+        let reset_generation = settlement_payload_for(
+            "00000000-0000-4000-8000-000000000002",
+            0,
+            (0, 0, 0),
+            (0, 0, 0),
+            1,
+            None,
+        );
+        assert!(state.pipe(settlement_pipe(reset_generation)));
+        assert!(!state.settlement_feed_degraded);
+        assert_eq!(
+            state
+                .settlement_history
+                .as_ref()
+                .map(|history| history.sequence),
+            Some(0)
+        );
+
+        let delayed_retired_generation = settlement_payload_for(
+            "00000000-0000-4000-8000-000000000001",
+            u64::MAX,
+            (u64::MAX, 0, 0),
+            (1, 0, 0),
+            1,
+            None,
+        );
+        assert!(!state.pipe(settlement_pipe(delayed_retired_generation)));
+        assert_eq!(
+            state
+                .settlement_history
+                .as_ref()
+                .map(|history| history.generation.as_str()),
+            Some("00000000-0000-4000-8000-000000000002")
+        );
+    }
+
+    #[test]
+    fn settlement_history_accepts_only_cli_transport_and_canonical_generation() {
+        let payload = settlement_payload(1, (1, 0, 0), (1, 0, 0));
+        let mut state = State::default();
+        let mut keybind = settlement_pipe(payload.clone());
+        keybind.source = PipeSource::Keybind;
+        assert!(!state.pipe(keybind));
+        assert!(state.settlement_history.is_none());
+
+        let mut targeted_private_cli = settlement_pipe(payload.clone());
+        targeted_private_cli.is_private = true;
+        assert!(!state.pipe(targeted_private_cli));
+        assert!(state.settlement_history.is_none());
+
+        let malformed_generation = settlement_payload_for(
+            "00000000-0000-4000-8000-00000000000A",
+            1,
+            (1, 0, 0),
+            (1, 0, 0),
+            0,
+            Some(1),
+        );
+        assert!(!state.pipe(settlement_pipe(malformed_generation)));
+        assert!(state.pipe(settlement_pipe(payload.clone())));
+
+        let mut missing_payload = settlement_pipe(payload);
+        missing_payload.payload = None;
+        assert!(state.pipe(missing_payload));
+        assert!(state.settlement_feed_degraded);
+    }
+
+    #[test]
+    fn settlement_feed_silence_degrades_exact_truth_until_replay() {
+        let mut state = State::default();
+        let accepted = settlement_payload(10, (4, 3, 3), (2, 1, 1));
+        assert!(state.pipe(settlement_pipe(accepted.clone())));
+        assert_eq!(state.settlement_feed_age_ticks, Some(0));
+
+        for _ in 1..SETTLEMENT_FEED_STALE_AFTER_TICKS {
+            assert!(!state.age_settlement_feed());
+            assert!(!state.settlement_feed_degraded);
+        }
+        assert!(state.age_settlement_feed());
+        assert!(state.settlement_feed_degraded);
+
+        let degraded_rows = session_rail_rows_with_truth(
+            &[],
+            state.settlement_history.as_ref(),
+            state.settlement_feed_degraded,
+            RailWidthMode::Wide,
+        );
+        assert_eq!(
+            degraded_rows
+                .iter()
+                .filter(|row| row.is_bucket())
+                .map(|row| row.text.as_str())
+                .collect::<Vec<_>>(),
+            vec![" 🅵~2 · 🆇~1 · 🅽~1",]
+        );
+
+        // An exact canonical replay is both an integrity confirmation and a
+        // heartbeat. It restores exact rendering and renews the lease.
+        assert!(state.pipe(settlement_pipe(accepted)));
+        assert!(!state.settlement_feed_degraded);
+        assert_eq!(state.settlement_feed_age_ticks, Some(0));
+    }
+
+    #[test]
+    fn settlement_pipe_rejects_stale_decrease_divergence_and_malformed_truth() {
+        let mut state = State::default();
+        let accepted = settlement_payload(10, (4, 3, 3), (2, 1, 1));
+        assert!(state.pipe(settlement_pipe(accepted.clone())));
+        let baseline = state.settlement_history.clone();
+
+        // Exact replay is idempotent: no render and no state change.
+        assert!(!state.pipe(settlement_pipe(accepted.clone())));
+        assert_eq!(state.settlement_history, baseline);
+        assert!(!state.settlement_feed_degraded);
+
+        // Same sequence with different valid content is divergence. The last
+        // good snapshot remains visible only as a lower bound until replay.
+        assert!(state.pipe(settlement_pipe(settlement_payload(
+            10,
+            (5, 2, 3),
+            (3, 1, 1),
+        ))));
+        assert_eq!(state.settlement_history, baseline);
+        assert!(state.settlement_feed_degraded);
+        let degraded_rows = session_rail_rows_with_truth(
+            &[],
+            state.settlement_history.as_ref(),
+            state.settlement_feed_degraded,
+            RailWidthMode::Wide,
+        );
+        assert_eq!(
+            degraded_rows
+                .iter()
+                .filter(|row| row.is_bucket())
+                .map(|row| row.text.as_str())
+                .collect::<Vec<_>>(),
+            vec![" 🅵~2 · 🆇~1 · 🅽~1",]
+        );
+        assert!(state.pipe(settlement_pipe(accepted.clone())));
+        assert!(!state.settlement_feed_degraded);
+
+        // Older snapshots remain stale even if their counters are larger.
+        assert!(!state.pipe(settlement_pipe(
+            settlement_payload(9, (4, 3, 2), (2, 1, 1),)
+        )));
+        assert_eq!(state.settlement_history, baseline);
+        assert!(!state.settlement_feed_degraded);
+
+        // A new sequence cannot rewrite append-only history downward.
+        assert!(state.pipe(settlement_pipe(settlement_payload(
+            11,
+            (3, 3, 5),
+            (2, 1, 1),
+        ))));
+        assert_eq!(state.settlement_history, baseline);
+        assert!(state.settlement_feed_degraded);
+        assert!(state.pipe(settlement_pipe(accepted.clone())));
+        assert!(!state.settlement_feed_degraded);
+
+        let malformed_total = serde_json::json!({
+            "schema": SETTLEMENT_HISTORY_SCHEMA,
+            "generation": "00000000-0000-4000-8000-000000000001",
+            "sequence": 11,
+            "historical_transitions": {"f": 5, "x": 3, "n": 3, "total": 999},
+            "latest_by_run": {"f": 2, "x": 1, "n": 1, "total": 4},
+            "gaps": 0,
+            "complete_from": 1,
+        })
+        .to_string();
+        assert!(state.pipe(settlement_pipe(malformed_total)));
+        assert!(state.settlement_feed_degraded);
+
+        let missing_complete_from = serde_json::json!({
+            "schema": SETTLEMENT_HISTORY_SCHEMA,
+            "generation": "00000000-0000-4000-8000-000000000001",
+            "sequence": 11,
+            "historical_transitions": {"f": 5, "x": 3, "n": 3, "total": 11},
+            "latest_by_run": {"f": 2, "x": 1, "n": 1, "total": 4},
+            "gaps": 1,
+        })
+        .to_string();
+        assert!(!state.pipe(settlement_pipe(missing_complete_from)));
+
+        let impossible_latest_bucket = serde_json::json!({
+            "schema": SETTLEMENT_HISTORY_SCHEMA,
+            "generation": "00000000-0000-4000-8000-000000000001",
+            "sequence": 11,
+            "historical_transitions": {"f": 0, "x": 8, "n": 3, "total": 11},
+            "latest_by_run": {"f": 4, "x": 0, "n": 0, "total": 4},
+            "gaps": 0,
+            "complete_from": 1,
+        })
+        .to_string();
+        assert!(!state.pipe(settlement_pipe(impossible_latest_bucket)));
+
+        let wrong_schema = serde_json::json!({
+            "schema": "vibecrafted.settlement-history.v0",
+            "generation": "00000000-0000-4000-8000-000000000001",
+            "sequence": 11,
+            "historical_transitions": {"f": 5, "x": 3, "n": 3, "total": 11},
+            "latest_by_run": {"f": 2, "x": 1, "n": 1, "total": 4},
+            "gaps": 0,
+            "complete_from": 1,
+        })
+        .to_string();
+        assert!(!state.pipe(settlement_pipe(wrong_schema)));
+
+        let unknown_field = serde_json::json!({
+            "schema": SETTLEMENT_HISTORY_SCHEMA,
+            "generation": "00000000-0000-4000-8000-000000000001",
+            "sequence": 11,
+            "historical_transitions": {"f": 5, "x": 3, "n": 3, "total": 11},
+            "latest_by_run": {"f": 2, "x": 1, "n": 1, "total": 4},
+            "gaps": 0,
+            "complete_from": 1,
+            "viewer_tabs": 999,
+        })
+        .to_string();
+        assert!(!state.pipe(settlement_pipe(unknown_field)));
+        assert_eq!(state.settlement_history, baseline);
+        assert!(state.settlement_feed_degraded);
+
+        // A canonical replay proves that the accepted lower bound is current
+        // again and restores exact rendering.
+        assert!(state.pipe(settlement_pipe(accepted)));
+        assert!(!state.settlement_feed_degraded);
+    }
+
+    #[test]
+    fn needs_attention_viewer_tab_does_not_inflate_open_now_count() {
+        let snapshot =
+            SettlementHistory::parse(&settlement_payload(681, (97, 176, 408), (1, 0, 0)))
+                .expect("valid settlement history");
+        let rows = session_rail_rows_with_truth(
+            &[session("alpha", true), bucket_session("Needs attention", 1)],
+            Some(&snapshot),
+            false,
+            RailWidthMode::Wide,
+        );
+        let summary = rows
+            .iter()
+            .find(|row| row.is_bucket())
+            .expect("bucket summary row");
+
+        assert_eq!(
+            summary.text, " 🅵1 · 🆇0 · 🅽0",
+            "open-now latest_by_run is primary; historical n=408 and viewer tabs are not"
+        );
+    }
+
+    #[test]
+    fn viewer_inventory_is_secondary_while_truth_is_unavailable() {
+        let rows = session_rail_rows(&[bucket_session("Finalized runs", 2)]);
+        let summary = rows
+            .iter()
+            .find(|row| row.is_bucket())
+            .expect("bucket summary row");
+
+        assert_eq!(summary.text, " 🅵… · 🆇… · 🅽…");
+        assert!(
+            !summary.text.contains("🅵2"),
+            "viewer inventory must never masquerade as settlement truth"
+        );
+    }
+
+    #[test]
+    fn bucket_names_match_the_triage_contract() {
+        // Pinned against zellij-utils/src/run_triage.rs — the reaper creates
+        // sessions by these exact names, and a silent rename here would leave
+        // transferred runs invisible in the rail.
+        assert_eq!(BucketKind::Finalized.session_name(), "Finalized runs");
+        assert_eq!(BucketKind::Failed.session_name(), "Failed runs");
+        assert_eq!(BucketKind::NeedsAttention.session_name(), "Needs attention");
+    }
+
+    #[test]
+    fn bucket_glyphs_match_the_dense_contract() {
+        assert_eq!(BucketKind::Finalized.glyph(), "🅵");
+        assert_eq!(BucketKind::Failed.glyph(), "🆇");
+        assert_eq!(BucketKind::NeedsAttention.glyph(), "🅽");
+    }
+
+    #[test]
+    fn buckets_are_pinned_below_working_sessions_with_secondary_viewer_inventory() {
+        let rows = session_rail_rows(&[
+            session("alpha", true),
+            bucket_session("Finalized runs", 3),
+            session("beta", false),
+            bucket_session("Needs attention", 1),
+            bucket_session("Failed runs", 2),
+        ]);
+        let text: Vec<&str> = rows.iter().map(|row| row.text.as_str()).collect();
+
+        // Segment order is fixed by RAIL_BUCKETS, not by session creation
+        // order. Without canonical truth every count collapses to `…`.
+        assert_eq!(text, vec!["01 ◉ alpha", "02 ○ beta", " 🅵… · 🆇… · 🅽…",]);
+    }
+
+    #[test]
+    fn secondary_viewer_inventory_ignores_default_layout_chrome_tabs() {
+        // A bucket session materialized via `attach --create-background` starts
+        // with the default-layout chrome ("Start here" + "Shell"). Those tabs
+        // are furniture — the drawer must still read zero runs.
+        let mut chrome_only = session("Finalized runs", false);
+        chrome_only.tabs = vec![
+            TabUiInfo::for_rail_test("Start here", false, "", 0),
+            TabUiInfo::for_rail_test("Shell", false, "", 0),
+        ];
+        let mut chrome_plus_run = session("Needs attention", false);
+        chrome_plus_run.tabs = vec![
+            TabUiInfo::for_rail_test("Start here", false, "", 0),
+            TabUiInfo::for_rail_test("Shell", false, "", 0),
+            TabUiInfo::for_rail_test("revi-260723-011839-18000", false, "", 0),
+        ];
+        let rows = session_rail_rows(&[session("alpha", true), chrome_only, chrome_plus_run]);
+        let buckets: Vec<&str> = rows
+            .iter()
+            .filter(|row| row.is_bucket())
+            .map(|row| row.text.as_str())
+            .collect();
+        assert_eq!(buckets, vec![" 🅵… · 🆇… · 🅽…",]);
+    }
+
+    #[test]
+    fn bucket_summary_shows_even_before_its_sessions_exist() {
+        let rows = session_rail_rows(&[session("alpha", true)]);
+        let buckets: Vec<&SessionRailRow> = rows.iter().filter(|row| row.is_bucket()).collect();
+
+        // Fork IV: ONE dense line, still pinned before any drawer exists.
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].text, " 🅵… · 🆇… · 🅽…");
+        assert!(matches!(
+            buckets[0].kind,
+            SessionRailRowKind::Bucket {
+                session_index: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn bucket_summary_carries_the_session_index_so_clicks_reuse_the_existing_plumbing() {
+        let rows =
+            session_rail_rows(&[session("alpha", true), bucket_session("Needs attention", 2)]);
+        let summary = rows.iter().find(|row| row.is_bucket()).unwrap();
+
+        assert_eq!(
+            summary.kind,
+            SessionRailRowKind::Bucket {
+                bucket: BucketKind::NeedsAttention,
+                session_index: Some(1),
+            }
+        );
+    }
+
+    #[test]
+    fn buckets_do_not_shift_the_working_session_ordinals() {
+        // All three drawers interleaved with the working sessions: pressing 2
+        // must still mean beta no matter how many buckets sit above it.
+        let sessions = vec![
+            session("alpha", true),
+            bucket_session("Finalized runs", 5),
+            session("beta", false),
+            bucket_session("Failed runs", 4),
+            bucket_session("Needs attention", 3),
+            session("gamma", false),
+        ];
+
+        assert_eq!(rail_ordinal_target(&sessions, '1'), Some(0));
+        assert_eq!(rail_ordinal_target(&sessions, '2'), Some(2));
+        assert_eq!(rail_ordinal_target(&sessions, '3'), Some(5));
+        assert_eq!(rail_ordinal_target(&sessions, '4'), None);
+        for bucket in RAIL_BUCKETS {
+            assert_eq!(rail_ordinal_target(&sessions, bucket.hotkey()), None);
+        }
+    }
+
+    #[test]
+    fn bucket_hotkeys_stay_clear_of_the_session_ordinals_and_of_each_other() {
+        let mut hotkeys: Vec<char> = RAIL_BUCKETS.into_iter().map(|b| b.hotkey()).collect();
+        for hotkey in &hotkeys {
+            assert_eq!(rail_ordinal_key_to_index(*hotkey), None);
+        }
+        let claimed = hotkeys.len();
+        hotkeys.sort_unstable();
+        hotkeys.dedup();
+        assert_eq!(hotkeys.len(), claimed, "two buckets claim the same hotkey");
+
+        assert_eq!(BucketKind::Finalized.hotkey(), 'f');
+        assert_eq!(BucketKind::Failed.hotkey(), 'x');
+        assert_eq!(BucketKind::NeedsAttention.hotkey(), 'n');
+    }
+
+    #[test]
+    fn a_bucket_session_is_never_listed_twice() {
+        let rows = session_rail_rows(&[bucket_session("Finalized runs", 2)]);
+
+        assert_eq!(rows.iter().filter(|row| row.is_bucket()).count(), 1);
+        assert!(
+            !rows
+                .iter()
+                .any(|row| matches!(row.kind, SessionRailRowKind::Session(_))),
+            "bucket session leaked into the ordinary listing"
+        );
+    }
+
+    #[test]
+    fn rail_ordinal_keys_map_to_session_indices() {
+        assert_eq!(rail_ordinal_key_to_index('1'), Some(0));
+        assert_eq!(rail_ordinal_key_to_index('2'), Some(1));
+        assert_eq!(rail_ordinal_key_to_index('9'), Some(8));
+        assert_eq!(rail_ordinal_key_to_index('0'), Some(9));
+        assert_eq!(rail_ordinal_key_to_index('a'), None);
+    }
+
+    #[test]
+    fn rail_range_keeps_selected_session_visible() {
+        assert_eq!(rail_range_to_render(4, 10, Some(7)), (5, 9));
+        assert_eq!(rail_range_to_render(4, 10, Some(0)), (0, 4));
+        assert_eq!(rail_range_to_render(4, 10, Some(9)), (6, 10));
+    }
+
+    #[test]
+    fn rail_lines_are_clipped_and_padded_to_width() {
+        assert_eq!(fit_rail_line("abcdef", 4), "abcd");
+        assert_eq!(fit_rail_line("ab", 4), "ab  ");
+    }
+
+    #[test]
+    fn sanitize_display_label_strips_controls_and_collapses_whitespace() {
+        assert_eq!(sanitize_display_label("  hello\n\tworld  "), "hello world");
+        assert_eq!(sanitize_display_label("Main\u{0007}"), "Main");
+        // Stable width: control-laden and clean labels pad to the same grid.
+        let dirty = fit_rail_line(&sanitize_display_label("Main\n\r  "), 10);
+        let clean = fit_rail_line(&sanitize_display_label("Main"), 10);
+        assert_eq!(dirty.width(), clean.width());
+        assert_eq!(dirty.width(), 10);
+    }
+
+    #[test]
+    fn format_session_rail_entry_sanitizes_name_for_stable_columns() {
+        let mut session = session("alpha", true);
+        session.name = "alpha\nbeta".to_owned();
+        let text = format_session_rail_entry(&session, 1, RailWidthMode::Wide);
+        assert!(!text.contains('\n'));
+        assert!(
+            text.contains("alpha beta") || text.contains("alphabeta") || text.contains("alpha")
+        );
+        // After sanitize newline becomes space collapse → "alpha beta"
+        assert_eq!(sanitize_display_label("alpha\nbeta"), "alpha beta");
+    }
+
+    #[test]
+    fn bucket_rail_lines_truncate_label_and_omit_overflowing_counts() {
+        // Wide enough: untouched, padded like any rail line.
+        assert_eq!(
+            fit_bucket_rail_line(" n ○ 408 · needs", 34),
+            " n ○ 408 · needs                  "
+        );
+        // Narrow: whole trailing segments drop, the loss is marked with `…`.
+        assert_eq!(
+            fit_bucket_rail_line(" 🅵97 · 🆇176 · 🅽408", 14).trim_end(),
+            " 🅵97 · 🆇176 …"
+        );
+        // Generous width pads instead of truncating.
+        assert_eq!(
+            fit_bucket_rail_line(" 🅵97 · 🆇176 …", 16),
+            " 🅵97 · 🆇176 …   "
+        );
+        // Degenerate width: bare ellipsis, never a clipped digit.
+        assert_eq!(fit_bucket_rail_line(" 🅵97 · 🆇176 · 🅽408", 3), "…  ");
+        // A summary that cannot keep even one segment collapses entirely.
+        let huge = fit_bucket_rail_line(" 🅵18446744073709551615 · 🆇… · 🅽…", 8);
+        assert!(
+            !huge.chars().any(|character| character.is_ascii_digit()),
+            "an overflowing count must be omitted, never clipped into a smaller exact number"
+        );
+        // Non-bucket text without separators falls back to plain clipping.
+        assert_eq!(fit_bucket_rail_line("01 ◉ alpha", 6), "01 ◉ a");
+    }
+
+    #[test]
+    fn relative_session_target_wraps_in_both_directions() {
+        let sessions = vec![
+            session("alpha", false),
+            session("beta", true),
+            session("gamma", false),
+        ];
+        assert_eq!(
+            relative_session_target(&sessions, 1),
+            Some("gamma".to_owned())
+        );
+        assert_eq!(
+            relative_session_target(&sessions, -1),
+            Some("alpha".to_owned())
+        );
+
+        let at_end = vec![session("alpha", false), session("beta", true)];
+        assert_eq!(
+            relative_session_target(&at_end, 1),
+            Some("alpha".to_owned())
+        );
+    }
+
+    #[test]
+    fn relative_session_target_refuses_degenerate_lists() {
+        assert_eq!(relative_session_target(&[], 1), None);
+        assert_eq!(relative_session_target(&[session("solo", true)], 1), None);
+        // no current session marker — nothing sane to be relative to
+        let orphaned = vec![session("alpha", false), session("beta", false)];
+        assert_eq!(relative_session_target(&orphaned, 1), None);
+    }
+
+    #[test]
+    fn live_process_rows_carry_tab_position_so_clicks_can_focus_the_worker() {
+        let mut alpha = session("alpha", true);
+        let mut run_a = TabUiInfo::for_rail_test("impl-a", true, "claude", 1);
+        run_a.position = 0;
+        let mut dead = TabUiInfo::for_rail_test("dead", false, "codex", 0);
+        dead.position = 1;
+        let mut run_b = TabUiInfo::for_rail_test("impl-b", false, "codex", 1);
+        run_b.position = 2;
+        alpha.tabs = vec![run_a, dead, run_b];
+
+        let rows = session_rail_rows(&[alpha]);
+        let live: Vec<&SessionRailRow> = rows.iter().filter(|row| row.is_live_process()).collect();
+
+        assert_eq!(live.len(), 2, "dead tabs stay collapsed");
+        assert_eq!(
+            live[0].kind,
+            SessionRailRowKind::LiveProcess {
+                session_index: 0,
+                tab_position: 0,
+            }
+        );
+        assert_eq!(
+            live[1].kind,
+            SessionRailRowKind::LiveProcess {
+                session_index: 0,
+                tab_position: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn rail_row_click_target_maps_session_tab_and_bucket_including_empty() {
+        assert_eq!(
+            rail_row_click_target(&SessionRailRowKind::Session(3)),
+            RailClickTarget::Session(3)
+        );
+        assert_eq!(
+            rail_row_click_target(&SessionRailRowKind::LiveProcess {
+                session_index: 1,
+                tab_position: 4,
+            }),
+            RailClickTarget::LiveProcess {
+                session_index: 1,
+                tab_position: 4,
+            }
+        );
+        assert_eq!(
+            rail_row_click_target(&SessionRailRowKind::Bucket {
+                bucket: BucketKind::Failed,
+                session_index: Some(2),
+            }),
+            RailClickTarget::Bucket(BucketKind::Failed)
+        );
+        // Empty drawer: still a bucket target so mouse + f/x/n open the
+        // control-plane read surface (not a silent dead zone; never mint god sessions).
+        assert_eq!(
+            rail_row_click_target(&SessionRailRowKind::Bucket {
+                bucket: BucketKind::NeedsAttention,
+                session_index: None,
+            }),
+            RailClickTarget::Bucket(BucketKind::NeedsAttention)
+        );
+        assert_eq!(
+            bucket_open_action(false, false),
+            BucketOpenAction::ReadSurface
+        );
+        assert_eq!(
+            bucket_open_action(true, false),
+            BucketOpenAction::SwitchExisting
+        );
+        assert_eq!(bucket_open_action(true, true), BucketOpenAction::Stay);
+    }
+
+    #[test]
+    fn simulated_left_click_on_session_row_selects_that_session() {
+        // Hit-test only: the host-side switch is exercised by the existing
+        // selection path. We rebuild the map the way render does and prove a
+        // LeftClick(line) on a data row resolves to the right session.
+        let sessions = vec![session("alpha", true), session("beta", false)];
+        let rows = session_rail_rows(&sessions);
+        let mut click_map: BTreeMap<usize, RailClickTarget> = BTreeMap::new();
+        // row 0 is the header; data starts at 1, same as render_session_rail.
+        for (offset, row) in rows.iter().enumerate() {
+            click_map.insert(offset + 1, rail_row_click_target(&row.kind));
+        }
+
+        assert_eq!(
+            click_map.get(&1),
+            Some(&RailClickTarget::Session(0)),
+            "first data row is the first working session"
+        );
+        assert_eq!(
+            click_map.get(&2),
+            Some(&RailClickTarget::Session(1)),
+            "second data row is the second working session"
+        );
+        // Header never maps — LeftClick(0) is a no-op.
+        assert!(!click_map.contains_key(&0));
+    }
+
+    #[test]
+    fn simulated_left_click_on_live_process_row_targets_session_and_tab() {
+        let mut alpha = session("alpha", true);
+        let mut run = TabUiInfo::for_rail_test("worker-run", true, "claude", 1);
+        run.position = 3;
+        alpha.tabs = vec![run];
+        let beta = session("beta", false);
+        let rows = session_rail_rows(&[alpha, beta]);
+        let mut click_map: BTreeMap<usize, RailClickTarget> = BTreeMap::new();
+        for (offset, row) in rows.iter().enumerate() {
+            click_map.insert(offset + 1, rail_row_click_target(&row.kind));
+        }
+
+        // row 1: alpha session, row 2: its live worker tab, row 3: beta, then buckets
+        assert_eq!(click_map.get(&1), Some(&RailClickTarget::Session(0)));
+        assert_eq!(
+            click_map.get(&2),
+            Some(&RailClickTarget::LiveProcess {
+                session_index: 0,
+                tab_position: 3,
+            })
+        );
+        assert_eq!(click_map.get(&3), Some(&RailClickTarget::Session(1)));
+    }
+
+    #[test]
+    fn simulated_left_click_on_bucket_row_targets_bucket_hotkey_equivalent() {
+        let rows = session_rail_rows(&[session("alpha", true)]);
+        let mut click_map: BTreeMap<usize, RailClickTarget> = BTreeMap::new();
+        for (offset, row) in rows.iter().enumerate() {
+            click_map.insert(offset + 1, rail_row_click_target(&row.kind));
+        }
+        // alpha + one dense summary line; clicking it opens the actionable
+        // drawer (the vc-server stats dashboard is Fork IV's follow-up).
+        assert_eq!(
+            click_map.get(&2),
+            Some(&RailClickTarget::Bucket(BucketKind::NeedsAttention))
+        );
+        assert_eq!(click_map.get(&3), None);
+        assert_eq!(click_map.get(&4), None);
+    }
+
+    #[test]
+    fn simulated_left_click_outside_data_rows_is_noop() {
+        // Pure map lookup mirrors handle_session_rail_mouse: missing key → false.
+        let click_map: BTreeMap<usize, RailClickTarget> = BTreeMap::new();
+        assert!(
+            !click_map.contains_key(&0),
+            "header / empty map must not resolve a target"
+        );
+        assert!(!click_map.contains_key(&99));
+        // Negative lines are rejected before map lookup via usize::try_from.
+        assert!(usize::try_from(-1_isize).is_err());
+    }
+
+    #[test]
+    fn rail_hover_only_on_clickable_rows_and_clears_elsewhere() {
+        let rows = session_rail_rows(&[session("alpha", true)]);
+        let mut click_map: BTreeMap<usize, RailClickTarget> = BTreeMap::new();
+        for (offset, row) in rows.iter().enumerate() {
+            click_map.insert(offset + 1, rail_row_click_target(&row.kind));
+        }
+        // Data rows (1 = session, 2 = f/x/n summary) highlight.
+        assert_eq!(rail_hover_target(1, &click_map), Some(1));
+        assert_eq!(
+            rail_hover_target(2, &click_map),
+            Some(2),
+            "the f/x/n summary stays hoverable before any drawer exists"
+        );
+        // Header, blank gap, out-of-bounds, negative leave → clear.
+        assert_eq!(rail_hover_target(0, &click_map), None);
+        assert_eq!(rail_hover_target(99, &click_map), None);
+        assert_eq!(rail_hover_target(-1, &click_map), None);
+    }
+
+    #[test]
+    fn bucket_counts_are_exact_capped_tilde_or_ellipsis_never_clipped() {
+        // Fork IV count cell: exact / `~n` degraded / `999+` capped / `…`
+        // when there is no feed — never a "?" and never a clipped digit.
+        assert_eq!(format_bucket_count(Some(12), true), "12");
+        assert_eq!(format_bucket_count(Some(12), false), "~12");
+        assert_eq!(format_bucket_count(Some(2247), true), "999+");
+        assert_eq!(format_bucket_count(Some(2247), false), "999+");
+        assert_eq!(format_bucket_count(None, true), "…");
+        assert_eq!(format_bucket_count(None, false), "…");
+    }
+
+    #[test]
+    fn bucket_summary_sheds_whole_segments_never_digits() {
+        let line = " 🅵118 · 🆇435 · 🅽999+";
+        // Plenty of room: unchanged (padded to width).
+        assert_eq!(fit_bucket_rail_line(line, 40).trim_end(), line);
+        // Too narrow for the tail: whole segments drop, `…` marks the loss.
+        let narrow = fit_bucket_rail_line(line, 16);
+        assert!(narrow.contains("🅵118"), "head survives: {narrow:?}");
+        assert!(!narrow.contains("🅽"), "tail segment dropped: {narrow:?}");
+        assert!(narrow.contains('…'), "loss is marked: {narrow:?}");
+        // No width clips a count mid-number.
+        for width in 1..=24 {
+            let fitted = fit_bucket_rail_line(line, width);
+            assert!(
+                !fitted.contains("99 ") && !fitted.trim_end().ends_with("99"),
+                "clipped digit at width {width}: {fitted:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn char_offset_of_speaks_chars_not_bytes() {
+        // "   ◉ tab · cmd" — the dot separator sits after multi-byte `◉`.
+        let row = "   ◉ tab · cmd";
+        assert_eq!(char_offset_of(row, " · ", 4), Some(8));
+        assert_eq!(char_offset_of(row, " · ", 0), Some(8));
+        assert_eq!(char_offset_of(row, "missing", 0), None);
+        assert_eq!(char_offset_of("ab", "b", 5), None, "from beyond end");
     }
 }

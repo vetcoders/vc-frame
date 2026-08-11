@@ -1,6 +1,6 @@
 ---
 source: zellij-server/src/./unit/screen_tests.rs
-expression: "format!(\"{:#?}\", new_tab_instruction)"
+expression: output
 ---
 NewTab(
     None,
@@ -98,6 +98,7 @@ NewTab(
     ),
     [],
     1,
+    2,
     None,
     false,
     true,
@@ -108,6 +109,9 @@ NewTab(
     Some(
         NotificationEnd {
             channel: None,
+            resolution: Some(
+                Pending,
+            ),
             exit_status: None,
             unblock_condition: None,
             affected_pane_id: None,
@@ -116,4 +120,5 @@ NewTab(
             stdout_message: None,
         },
     ),
+    None,
 )

@@ -1,8 +1,8 @@
 //! Handle running `cargo fmt` on the sources.
-use crate::{flags, WorkspaceMember};
+use crate::{WorkspaceMember, flags};
 use anyhow::Context;
 use std::path::{Path, PathBuf};
-use xshell::{cmd, Shell};
+use xshell::{Shell, cmd};
 
 pub fn format(sh: &Shell, flags: flags::Format) -> anyhow::Result<()> {
     let _pd = sh.push_dir(crate::project_root());

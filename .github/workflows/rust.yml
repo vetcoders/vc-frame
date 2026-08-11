@@ -2,10 +2,18 @@ name: Rust
 
 on:
   push:
+    # Direct delivery only. Do not add `develop` here: the open develop→main
+    # PR already re-runs on every develop push, and a second push trigger would
+    # double every CI run.
     branches: [main]
   pull_request:
-    branches: [main]
+    # Feature branches targeting develop need the same gate as main-bound PRs.
+    branches: [main, develop]
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,114 +22,138 @@ env:
 jobs:
   build:
     name: Build
+    timeout-minutes: 60
 
     strategy:
       fail-fast: false
       matrix:
-        os: [ops-linux, dragon-macos]
+        os: [ubuntu-latest, macos-latest]
 
-    runs-on: [self-hosted, '${{ matrix.os }}']
+    runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
 
-      - name: Install Protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install pinned Protoc
+        uses: ./.github/actions/setup-protoc
 
       - name: Setup toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
+          target: wasm32-wasip1
           rustflags: ""
 
       - name: Build
-        run: cargo xtask build
+        run: |
+          cargo xtask build
+          cargo build --bin vc-frame
+
+      - name: Triage runtime process-boundary regression
+        env:
+          VC_FRAME_E2E_ARTIFACT_ROOT: ${{ runner.temp }}/vc-frame-triage-runtime-e2e
+        run: make triage-runtime-e2e
+
+      - name: Upload triage runtime evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: triage-runtime-e2e-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}
+          path: ${{ runner.temp }}/vc-frame-triage-runtime-e2e
+          if-no-files-found: warn
+          retention-days: 14
 
   build-windows:
     name: Build (Windows)
-    runs-on: [self-hosted, windows]
+    timeout-minutes: 60
+    runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
 
-      - name: Install Protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install pinned Protoc
+        uses: ./.github/actions/setup-protoc
 
       - name: Setup toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
           target: wasm32-wasip1
           rustflags: ""
 
       - name: Install NASM
-        uses: ilammy/setup-nasm@v1
+        uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1
 
+      # Vendored OpenSSL on the MSVC toolchain needs only perl + nasm; the
+      # hosted windows-latest image ships Strawberry Perl on PATH. The MSYS
+      # perl relocation dance that used to live here was scaffolding for the
+      # self-hosted mingw runner (retired 2026-08-02, public repos run on
+      # GitHub-hosted runners only).
       - name: Build
         run: cargo xtask build
 
   test:
     name: Test
+    timeout-minutes: 90
 
     strategy:
       fail-fast: false
       matrix:
-        os: [ops-linux, dragon-macos]
+        os: [ubuntu-latest, macos-latest]
 
-    runs-on: [self-hosted, '${{ matrix.os }}']
+    runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
 
-      - name: Install Protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install pinned Protoc
+        uses: ./.github/actions/setup-protoc
 
       - name: Setup toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
+          target: wasm32-wasip1
           rustflags: ""
 
-      - name: Test
-        run: cargo xtask test
+      - name: Workflow contract
+        run: ./scripts/workflow-contract.sh
+
+      # Canonical repo-native gate: precheck (fmt, plugins, clippy, check)
+      # + full test suite. Same command, same meaning, locally and here.
+      - name: CI gate (make ci)
+        run: make ci
 
   test-windows:
     name: Test (Windows)
-    runs-on: [self-hosted, windows]
+    timeout-minutes: 60
+    runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
 
-      - name: Install Protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install pinned Protoc
+        uses: ./.github/actions/setup-protoc
 
       - name: Setup toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
           rustflags: ""
 
@@ -136,24 +168,24 @@ jobs:
 
   test-no-web:
     name: Test (No Web)
-    runs-on: [self-hosted, ops-linux]
+    timeout-minutes: 90
+    runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
 
-      - name: Install Protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install pinned Protoc
+        uses: ./.github/actions/setup-protoc
 
       - name: Setup toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
+          target: wasm32-wasip1
           rustflags: ""
 
       - name: Test without web support
@@ -161,13 +193,14 @@ jobs:
 
   format:
     name: Check Formatting
-    runs-on: [self-hosted, ops-linux]
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
           rustflags: ""
 

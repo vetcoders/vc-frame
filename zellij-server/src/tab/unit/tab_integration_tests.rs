@@ -1,11 +1,180 @@
-use super::{Output, Tab};
+use super::{
+    ApplyLayoutOptions, NewFloatingPaneOptions, NewInPlacePaneOptions, NewPaneOptions, Output,
+    Tab as TabImpl, TabOptions,
+};
+
+trait TabTestHelper {
+    fn new_pane_compat(
+        &mut self,
+        pid: PaneId,
+        initial_pane_title: Option<String>,
+        invoked_with: Option<zellij_utils::input::layout::Run>,
+        start_suppressed: bool,
+        should_focus_pane: bool,
+        new_pane_placement: NewPanePlacement,
+        client_id: Option<ClientId>,
+        blocking_notification: Option<crate::route::NotificationEnd>,
+    ) -> Result<()>;
+    fn apply_layout_compat(
+        &mut self,
+        layout: TiledPaneLayout,
+        floating_panes_layout: Vec<FloatingPaneLayout>,
+        new_terminal_ids: Vec<(u32, Option<RunCommand>)>,
+        new_floating_terminal_ids: Vec<(u32, Option<RunCommand>)>,
+        new_plugin_ids: HashMap<RunPluginOrAlias, Vec<u32>>,
+        client_id: ClientId,
+        blocking_terminal: Option<(u32, crate::route::NotificationEnd)>,
+    ) -> Result<()>;
+}
+
+impl TabTestHelper for TabImpl {
+    fn new_pane_compat(
+        &mut self,
+        pid: PaneId,
+        initial_pane_title: Option<String>,
+        invoked_with: Option<zellij_utils::input::layout::Run>,
+        start_suppressed: bool,
+        should_focus_pane: bool,
+        new_pane_placement: NewPanePlacement,
+        client_id: Option<ClientId>,
+        blocking_notification: Option<crate::route::NotificationEnd>,
+    ) -> Result<()> {
+        self.new_pane(NewPaneOptions {
+            pid,
+            initial_pane_title,
+            invoked_with,
+            start_suppressed,
+            should_focus_pane,
+            new_pane_placement,
+            client_id,
+            blocking_notification,
+        })
+    }
+    fn apply_layout_compat(
+        &mut self,
+        layout: TiledPaneLayout,
+        floating_panes_layout: Vec<FloatingPaneLayout>,
+        new_terminal_ids: Vec<(u32, Option<RunCommand>)>,
+        new_floating_terminal_ids: Vec<(u32, Option<RunCommand>)>,
+        new_plugin_ids: HashMap<RunPluginOrAlias, Vec<u32>>,
+        client_id: ClientId,
+        blocking_terminal: Option<(u32, crate::route::NotificationEnd)>,
+    ) -> Result<()> {
+        self.apply_layout(ApplyLayoutOptions {
+            layout,
+            floating_panes_layout,
+            new_terminal_ids,
+            new_floating_terminal_ids,
+            new_plugin_ids,
+            client_id,
+            blocking_terminal,
+        })
+    }
+}
+
+struct Tab;
+impl Tab {
+    // Positional compat shim: `new` deliberately returns the real (aliased)
+    // type, not the unit-struct namespace it hangs off.
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new(
+        id: usize,
+        position: usize,
+        name: String,
+        display_area: Size,
+        character_cell_size: std::rc::Rc<std::cell::RefCell<Option<SizeInPixels>>>,
+        stacked_resize: std::rc::Rc<std::cell::RefCell<bool>>,
+        sixel_image_store: std::rc::Rc<std::cell::RefCell<SixelImageStore>>,
+        os_api: Box<dyn ServerOsApi>,
+        senders: ThreadSenders,
+        max_panes: Option<usize>,
+        style: Style,
+        default_mode_info: ModeInfo,
+        draw_pane_frames: bool,
+        auto_layout: bool,
+        connected_clients_in_app: std::rc::Rc<
+            std::cell::RefCell<std::collections::HashMap<ClientId, bool>>,
+        >,
+        session_is_mirrored: bool,
+        client_id: Option<ClientId>,
+        copy_options: CopyOptions,
+        terminal_emulator_colors: std::rc::Rc<std::cell::RefCell<Palette>>,
+        terminal_emulator_color_codes: std::rc::Rc<
+            std::cell::RefCell<std::collections::HashMap<usize, String>>,
+        >,
+        swap_layouts: (
+            Vec<zellij_utils::input::layout::SwapTiledLayout>,
+            Vec<zellij_utils::input::layout::SwapFloatingLayout>,
+        ),
+        default_shell: PathBuf,
+        debug: bool,
+        arrow_fonts: bool,
+        styled_underlines: bool,
+        osc8_hyperlinks: bool,
+        explicitly_disable_kitty_keyboard_protocol: bool,
+        default_editor: Option<PathBuf>,
+        web_clients_allowed: bool,
+        web_sharing: WebSharing,
+        current_pane_group: std::rc::Rc<std::cell::RefCell<PaneGroups>>,
+        currently_marking_pane_group: std::rc::Rc<
+            std::cell::RefCell<std::collections::HashMap<ClientId, bool>>,
+        >,
+        advanced_mouse_actions: bool,
+        mouse_hover_effects: bool,
+        focus_follows_mouse: bool,
+        mouse_click_through: bool,
+        web_server_ip: IpAddr,
+        web_server_port: u16,
+    ) -> TabImpl {
+        TabImpl::new(TabOptions {
+            id,
+            position,
+            name,
+            display_area,
+            character_cell_size,
+            stacked_resize,
+            sixel_image_store,
+            os_api,
+            senders,
+            max_panes,
+            style,
+            default_mode_info,
+            draw_pane_frames,
+            auto_layout,
+            connected_clients_in_app,
+            session_is_mirrored,
+            client_id,
+            copy_options,
+            terminal_emulator_colors,
+            terminal_emulator_color_codes,
+            swap_layouts,
+            default_shell,
+            debug,
+            arrow_fonts,
+            styled_underlines,
+            osc8_hyperlinks,
+            explicitly_disable_kitty_keyboard_protocol,
+            default_editor,
+            web_clients_allowed,
+            web_sharing,
+            current_pane_group,
+            currently_marking_pane_group,
+            advanced_mouse_actions,
+            mouse_hover_effects,
+            focus_follows_mouse,
+            mouse_click_through,
+            web_server_ip,
+            web_server_port,
+        })
+    }
+}
+use crate::Arc;
 use crate::panes::sixel::SixelImageStore;
 use crate::screen::CopyOptions;
-use crate::Arc;
 
 use crate::{
-    os_input_output::ServerOsApi, pane_groups::PaneGroups, panes::PaneId,
-    plugins::PluginInstruction, thread_bus::ThreadSenders, ClientId, ServerInstruction,
+    ClientId, ServerInstruction, os_input_output::ServerOsApi, pane_groups::PaneGroups,
+    panes::PaneId, plugins::PluginInstruction, thread_bus::ThreadSenders,
 };
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
@@ -17,7 +186,7 @@ use zellij_utils::data::Resize;
 use zellij_utils::data::ResizeStrategy;
 use zellij_utils::data::WebSharing;
 use zellij_utils::envs::set_session_name;
-use zellij_utils::errors::{prelude::*, ErrorContext};
+use zellij_utils::errors::{ErrorContext, prelude::*};
 use zellij_utils::input::layout::{
     FloatingPaneLayout, Layout, PercentOrFixed, RunPluginOrAlias, SwapFloatingLayout,
     SwapTiledLayout, TiledPaneLayout,
@@ -37,7 +206,7 @@ use std::rc::Rc;
 
 use interprocess::local_socket::Stream as LocalSocketStream;
 use zellij_utils::{
-    data::{FloatingPaneCoordinates, InputMode, ModeInfo, NewPanePlacement, Palette, Style},
+    data::{Event, FloatingPaneCoordinates, InputMode, ModeInfo, NewPanePlacement, Palette, Style},
     input::command::{RunCommand, TerminalAction},
     ipc::{ClientToServerMsg, ServerToClientMsg},
 };
@@ -204,7 +373,7 @@ impl MockPtyInstructionBus {
     }
 }
 
-fn create_new_tab(size: Size, default_mode: ModeInfo) -> Tab {
+fn create_new_tab(size: Size, default_mode: ModeInfo) -> TabImpl {
     set_session_name("test".into());
     let index = 0;
     let position = 0;
@@ -278,7 +447,7 @@ fn create_new_tab(size: Size, default_mode: ModeInfo) -> Tab {
         web_server_ip,
         web_server_port,
     );
-    tab.apply_layout(
+    tab.apply_layout_compat(
         TiledPaneLayout::default(),
         vec![],
         vec![(1, None)],
@@ -291,7 +460,7 @@ fn create_new_tab(size: Size, default_mode: ModeInfo) -> Tab {
     tab
 }
 
-fn create_new_tab_without_pane_frames(size: Size, default_mode: ModeInfo) -> Tab {
+fn create_new_tab_without_pane_frames(size: Size, default_mode: ModeInfo) -> TabImpl {
     set_session_name("test".into());
     let index = 0;
     let position = 0;
@@ -365,7 +534,7 @@ fn create_new_tab_without_pane_frames(size: Size, default_mode: ModeInfo) -> Tab
         web_server_ip,
         web_server_port,
     );
-    tab.apply_layout(
+    tab.apply_layout_compat(
         TiledPaneLayout::default(),
         vec![],
         vec![(1, None)],
@@ -393,16 +562,39 @@ fn create_new_tab_with_swap_layouts(
     base_layout_and_ids: Option<BaseLayoutAndIds>,
     draw_pane_frames: bool,
     stacked_resize: bool,
-) -> Tab {
+) -> TabImpl {
+    let (mock_plugin_sender, _mock_plugin_receiver): ChannelWithContext<PluginInstruction> =
+        channels::unbounded();
+    create_new_tab_with_swap_layouts_and_plugin_sender(
+        size,
+        default_mode,
+        swap_layouts,
+        base_layout_and_ids,
+        draw_pane_frames,
+        stacked_resize,
+        SenderWithContext::new(mock_plugin_sender),
+    )
+}
+
+// Plugin panes clone the to_plugin sender at construction time, so a test that
+// wants to observe pane-internal sends (e.g. mouse events) must inject its own
+// channel before the layout is applied.
+fn create_new_tab_with_swap_layouts_and_plugin_sender(
+    size: Size,
+    default_mode: ModeInfo,
+    swap_layouts: (Vec<SwapTiledLayout>, Vec<SwapFloatingLayout>),
+    base_layout_and_ids: Option<BaseLayoutAndIds>,
+    draw_pane_frames: bool,
+    stacked_resize: bool,
+    plugin_sender: SenderWithContext<PluginInstruction>,
+) -> TabImpl {
     set_session_name("test".into());
     let index = 0;
     let position = 0;
     let name = String::new();
     let os_api = Box::new(FakeInputOutput::default());
     let mut senders = ThreadSenders::default().silently_fail_on_send();
-    let (mock_plugin_sender, _mock_plugin_receiver): ChannelWithContext<PluginInstruction> =
-        channels::unbounded();
-    senders.replace_to_plugin(SenderWithContext::new(mock_plugin_sender));
+    senders.replace_to_plugin(plugin_sender);
     let max_panes = None;
     let mode_info = default_mode;
     let style = Style::default();
@@ -481,7 +673,7 @@ fn create_new_tab_with_swap_layouts(
     } else {
         new_terminal_ids
     };
-    tab.apply_layout(
+    tab.apply_layout_compat(
         base_layout,
         base_floating_layout,
         new_terminal_ids,
@@ -494,7 +686,164 @@ fn create_new_tab_with_swap_layouts(
     tab
 }
 
-fn create_new_tab_with_os_api(size: Size, default_mode: ModeInfo, os_api: &FakeInputOutput) -> Tab {
+#[test]
+fn session_manager_projector_forwards_input_and_stays_parked_when_hidden() {
+    let size = Size { cols: 80, rows: 20 };
+    let client_id = 1;
+    let base_layout = r#"
+        layout {
+            pane
+            pane size=3 borderless=true {
+                plugin location="vc-frame:session-manager"
+            }
+        }
+    "#;
+    let (base_layout, base_floating_layout) =
+        Layout::from_kdl(base_layout, Some("projector.kdl".into()), None, None)
+            .unwrap()
+            .template
+            .unwrap();
+    let session_manager =
+        RunPluginOrAlias::from_url("vc-frame:session-manager", &None, None, None).unwrap();
+    let mut plugin_ids = HashMap::new();
+    plugin_ids.insert(session_manager, vec![41]);
+    let mut tab = create_new_tab_with_swap_layouts(
+        size,
+        ModeInfo::default(),
+        (vec![], vec![]),
+        Some((
+            base_layout,
+            base_floating_layout,
+            vec![(1, None)],
+            vec![],
+            plugin_ids,
+        )),
+        true,
+        true,
+    );
+
+    tab.bind_plugin_projectors(&HashMap::from([(41, 7)]));
+    assert_eq!(tab.get_plugin_ids(), vec![7]);
+    assert!(tab.has_plugin_runtime(7));
+
+    let (plugin_tx, plugin_rx): ChannelWithContext<PluginInstruction> = channels::unbounded();
+    tab.senders
+        .replace_to_plugin(SenderWithContext::new(plugin_tx));
+    tab.focus_pane_with_id(PaneId::Plugin(41), false, false, client_id)
+        .unwrap();
+    tab.write_to_active_terminal(&None, b"x".to_vec(), false, client_id)
+        .unwrap();
+    let (instruction, _) = plugin_rx.recv().unwrap();
+    match instruction {
+        PluginInstruction::Update(updates) => {
+            assert_eq!(updates.len(), 1);
+            assert_eq!(updates[0].0, Some(7));
+            assert_eq!(updates[0].1, Some(client_id));
+        },
+        other => panic!("unexpected projector input instruction: {other:?}"),
+    }
+
+    tab.remove_client(client_id);
+    let projector = tab
+        .get_pane_with_id_mut(PaneId::Plugin(41))
+        .expect("projector pane");
+    projector.set_should_render(false);
+    tab.handle_plugin_bytes(7, client_id, b"hidden frame".to_vec())
+        .unwrap();
+    assert!(
+        !tab.get_pane_with_id(PaneId::Plugin(41))
+            .expect("projector pane")
+            .should_render(),
+        "a parked projector must not consume singleton render work"
+    );
+}
+
+#[test]
+fn session_manager_projector_routes_mouse_events_to_runtime_plugin() {
+    let size = Size { cols: 80, rows: 20 };
+    let client_id = 1;
+    let base_layout = r#"
+        layout {
+            pane
+            pane size=3 borderless=true {
+                plugin location="vc-frame:session-manager"
+            }
+        }
+    "#;
+    let (base_layout, base_floating_layout) =
+        Layout::from_kdl(base_layout, Some("projector.kdl".into()), None, None)
+            .unwrap()
+            .template
+            .unwrap();
+    let session_manager =
+        RunPluginOrAlias::from_url("vc-frame:session-manager", &None, None, None).unwrap();
+    let mut plugin_ids = HashMap::new();
+    plugin_ids.insert(session_manager, vec![41]);
+    let (plugin_tx, plugin_rx): ChannelWithContext<PluginInstruction> = channels::unbounded();
+    let mut tab = create_new_tab_with_swap_layouts_and_plugin_sender(
+        size,
+        ModeInfo::default(),
+        (vec![], vec![]),
+        Some((
+            base_layout,
+            base_floating_layout,
+            vec![(1, None)],
+            vec![],
+            plugin_ids,
+        )),
+        true,
+        true,
+        SenderWithContext::new(plugin_tx),
+    );
+
+    tab.bind_plugin_projectors(&HashMap::from([(41, 7)]));
+    assert!(
+        tab.has_plugin_runtime(7),
+        "projector pane 41 must be bound to runtime plugin 7"
+    );
+
+    tab.focus_pane_with_id(PaneId::Plugin(41), false, false, client_id)
+        .unwrap();
+    while plugin_rx.try_recv().is_ok() {} // drain layout/focus noise
+
+    let inside_projector = Position::new(18, 5);
+    tab.handle_mouse_event(
+        &MouseEvent::new_left_press_event(inside_projector),
+        client_id,
+    )
+    .unwrap();
+    tab.handle_mouse_event(
+        &MouseEvent::new_left_release_event(inside_projector),
+        client_id,
+    )
+    .unwrap();
+
+    let mut mouse_targets = vec![];
+    while let Ok((instruction, _)) = plugin_rx.try_recv() {
+        if let PluginInstruction::Update(updates) = instruction {
+            for (plugin_id, update_client_id, event) in updates {
+                if let Event::Mouse(_) = event {
+                    assert_eq!(update_client_id, Some(client_id));
+                    mouse_targets.push(plugin_id);
+                }
+            }
+        }
+    }
+    assert!(
+        !mouse_targets.is_empty(),
+        "a click inside the projector pane must reach the plugin runtime"
+    );
+    assert!(
+        mouse_targets.iter().all(|target| *target == Some(7)),
+        "projector mouse events must route to runtime_plugin_id 7 (never local pane id 41), got {mouse_targets:?}"
+    );
+}
+
+fn create_new_tab_with_os_api(
+    size: Size,
+    default_mode: ModeInfo,
+    os_api: &FakeInputOutput,
+) -> TabImpl {
     set_session_name("test".into());
     let index = 0;
     let position = 0;
@@ -568,7 +917,7 @@ fn create_new_tab_with_os_api(size: Size, default_mode: ModeInfo, os_api: &FakeI
         web_server_ip,
         web_server_port,
     );
-    tab.apply_layout(
+    tab.apply_layout_compat(
         TiledPaneLayout::default(),
         vec![],
         vec![(1, None)],
@@ -581,7 +930,7 @@ fn create_new_tab_with_os_api(size: Size, default_mode: ModeInfo, os_api: &FakeI
     tab
 }
 
-fn create_new_tab_with_layout(size: Size, default_mode: ModeInfo, layout: &str) -> Tab {
+fn create_new_tab_with_layout(size: Size, default_mode: ModeInfo, layout: &str) -> TabImpl {
     set_session_name("test".into());
     let index = 0;
     let position = 0;
@@ -668,7 +1017,7 @@ fn create_new_tab_with_layout(size: Size, default_mode: ModeInfo, layout: &str) 
         .enumerate()
         .map(|(i, _)| (i as u32, None))
         .collect();
-    tab.apply_layout(
+    tab.apply_layout_compat(
         tab_layout,
         floating_panes_layout,
         pane_ids,
@@ -685,7 +1034,7 @@ fn create_new_tab_with_mock_pty_writer(
     size: Size,
     default_mode: ModeInfo,
     mock_pty_writer: SenderWithContext<PtyWriteInstruction>,
-) -> Tab {
+) -> TabImpl {
     set_session_name("test".into());
     let index = 0;
     let position = 0;
@@ -760,7 +1109,7 @@ fn create_new_tab_with_mock_pty_writer(
         web_server_ip,
         web_server_port,
     );
-    tab.apply_layout(
+    tab.apply_layout_compat(
         TiledPaneLayout::default(),
         vec![],
         vec![(1, None)],
@@ -776,7 +1125,7 @@ fn create_new_tab_with_mock_pty_writer(
 fn create_new_tab_with_sixel_support(
     size: Size,
     sixel_image_store: Rc<RefCell<SixelImageStore>>,
-) -> Tab {
+) -> TabImpl {
     // this is like the create_new_tab function but includes stuff needed for sixel,
     // eg. character_cell_size
     set_session_name("test".into());
@@ -854,7 +1203,7 @@ fn create_new_tab_with_sixel_support(
         web_server_ip,
         web_server_port,
     );
-    tab.apply_layout(
+    tab.apply_layout_compat(
         TiledPaneLayout::default(),
         vec![],
         vec![(1, None)],
@@ -877,10 +1226,50 @@ fn read_fixture(fixture_name: &str) -> Vec<u8> {
         .unwrap_or_else(|_| panic!("could not read fixture {:?}", &fixture_name))
 }
 
-use crate::panes::grid::Grid;
+use crate::panes::grid::{Grid as GridImpl, GridOptions};
 use crate::panes::link_handler::LinkHandler;
 use insta::assert_snapshot;
 use vte;
+
+// Positional shim over the option-struct `GridImpl::new(GridOptions)` constructor, so the
+// snapshot helpers below keep reading as flat argument lists.
+struct Grid;
+impl Grid {
+    // Positional compat shim: `new` deliberately returns the real (aliased)
+    // type, not the unit-struct namespace it hangs off.
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new(
+        rows: usize,
+        columns: usize,
+        terminal_emulator_colors: Rc<RefCell<Palette>>,
+        terminal_emulator_color_codes: Rc<RefCell<HashMap<usize, String>>>,
+        link_handler: Rc<RefCell<LinkHandler>>,
+        character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
+        sixel_image_store: Rc<RefCell<SixelImageStore>>,
+        style: Style,
+        debug: bool,
+        arrow_fonts: bool,
+        styled_underlines: bool,
+        osc8_hyperlinks: bool,
+        explicitly_disable_kitty_keyboard_protocol: bool,
+    ) -> GridImpl {
+        GridImpl::new(GridOptions {
+            rows,
+            columns,
+            terminal_emulator_colors,
+            terminal_emulator_color_codes,
+            link_handler,
+            character_cell_size,
+            sixel_image_store,
+            style,
+            debug,
+            arrow_fonts,
+            styled_underlines,
+            osc8_hyperlinks,
+            explicitly_disable_kitty_keyboard_protocol,
+        })
+    }
+}
 
 fn take_snapshot(ansi_instructions: &str, rows: usize, columns: usize, palette: Palette) -> String {
     let sixel_image_store = Rc::new(RefCell::new(SixelImageStore::default()));
@@ -1006,7 +1395,7 @@ fn increase_tiled_pane_sizes_with_stacked_resizes() {
     let mut output = Output::default();
     for i in 2..5 {
         let new_pane_id_1 = PaneId::Terminal(i);
-        tab.new_pane(
+        tab.new_pane_compat(
             new_pane_id_1,
             None,
             None,
@@ -1060,7 +1449,7 @@ fn increase_tiled_pane_sizes_with_stacked_resizes_into_uneven_panes() {
     let mut output = Output::default();
     for i in 2..4 {
         let new_pane_id_1 = PaneId::Terminal(i);
-        tab.new_pane(
+        tab.new_pane_compat(
             new_pane_id_1,
             None,
             None,
@@ -1121,7 +1510,7 @@ fn split_stack_vertically() {
     let mut output = Output::default();
     for i in 2..4 {
         let new_pane_id_1 = PaneId::Terminal(i);
-        tab.new_pane(
+        tab.new_pane_compat(
             new_pane_id_1,
             None,
             None,
@@ -1162,7 +1551,7 @@ fn split_stack_horizontally() {
     let mut output = Output::default();
     for i in 2..4 {
         let new_pane_id_1 = PaneId::Terminal(i);
-        tab.new_pane(
+        tab.new_pane_compat(
             new_pane_id_1,
             None,
             None,
@@ -1205,7 +1594,7 @@ fn render_stacks_without_pane_frames() {
     let mut output = Output::default();
     for i in 2..4 {
         let new_pane_id_1 = PaneId::Terminal(i);
-        tab.new_pane(
+        tab.new_pane_compat(
             new_pane_id_1,
             None,
             None,
@@ -1226,7 +1615,7 @@ fn render_stacks_without_pane_frames() {
         .unwrap();
     for i in 5..7 {
         let new_pane_id_1 = PaneId::Terminal(i);
-        tab.new_pane(
+        tab.new_pane_compat(
             new_pane_id_1,
             None,
             None,
@@ -1241,7 +1630,7 @@ fn render_stacks_without_pane_frames() {
     let _ = tab.focus_pane_with_id(PaneId::Terminal(1), false, false, client_id);
     for i in 7..9 {
         let new_pane_id_1 = PaneId::Terminal(i);
-        tab.new_pane(
+        tab.new_pane_compat(
             new_pane_id_1,
             None,
             None,
@@ -1256,7 +1645,7 @@ fn render_stacks_without_pane_frames() {
     let _ = tab.focus_pane_with_id(PaneId::Terminal(1), false, false, client_id);
     for i in 9..11 {
         let new_pane_id_1 = PaneId::Terminal(i);
-        tab.new_pane(
+        tab.new_pane_compat(
             new_pane_id_1,
             None,
             None,
@@ -1300,7 +1689,7 @@ fn dump_screen() {
         ..Default::default()
     });
     let new_pane_id = PaneId::Terminal(2);
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id,
         None,
         None,
@@ -1337,7 +1726,7 @@ fn clear_screen() {
         ..Default::default()
     });
     let new_pane_id = PaneId::Terminal(2);
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id,
         None,
         None,
@@ -1373,7 +1762,7 @@ fn new_floating_pane() {
     let mut output = Output::default();
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id,
         None,
         None,
@@ -1409,7 +1798,7 @@ fn new_stacked_pane() {
     let mut tab = create_new_tab(size, ModeInfo::default());
     let new_pane_id = PaneId::Terminal(2);
     let mut output = Output::default();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id,
         None,
         None,
@@ -1445,7 +1834,7 @@ fn floating_panes_persist_across_toggles() {
     let mut output = Output::default();
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id,
         None,
         None,
@@ -1489,7 +1878,7 @@ fn toggle_floating_panes_off() {
     let mut output = Output::default();
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id,
         None,
         None,
@@ -1529,7 +1918,7 @@ fn toggle_floating_panes_on() {
     let mut output = Output::default();
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id,
         None,
         None,
@@ -1575,7 +1964,7 @@ fn five_new_floating_panes() {
     let mut output = Output::default();
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -1586,7 +1975,7 @@ fn five_new_floating_panes() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -1597,7 +1986,7 @@ fn five_new_floating_panes() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -1608,7 +1997,7 @@ fn five_new_floating_panes() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_4,
         None,
         None,
@@ -1619,7 +2008,7 @@ fn five_new_floating_panes() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_5,
         None,
         None,
@@ -1665,7 +2054,7 @@ fn increase_floating_pane_size() {
     let mut output = Output::default();
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -1705,7 +2094,7 @@ fn decrease_floating_pane_size() {
     let mut output = Output::default();
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -1745,7 +2134,7 @@ fn resize_floating_pane_left() {
     let mut output = Output::default();
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -1788,7 +2177,7 @@ fn resize_floating_pane_right() {
     let mut output = Output::default();
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -1831,7 +2220,7 @@ fn resize_floating_pane_up() {
     let mut output = Output::default();
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -1874,7 +2263,7 @@ fn resize_floating_pane_down() {
     let mut output = Output::default();
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -1921,7 +2310,7 @@ fn move_floating_pane_focus_left() {
     let mut output = Output::default();
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -1932,7 +2321,7 @@ fn move_floating_pane_focus_left() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -1943,7 +2332,7 @@ fn move_floating_pane_focus_left() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -1954,7 +2343,7 @@ fn move_floating_pane_focus_left() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_4,
         None,
         None,
@@ -1965,7 +2354,7 @@ fn move_floating_pane_focus_left() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_5,
         None,
         None,
@@ -2022,7 +2411,7 @@ fn move_floating_pane_focus_right() {
     let mut output = Output::default();
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -2033,7 +2422,7 @@ fn move_floating_pane_focus_right() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -2044,7 +2433,7 @@ fn move_floating_pane_focus_right() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -2055,7 +2444,7 @@ fn move_floating_pane_focus_right() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_4,
         None,
         None,
@@ -2066,7 +2455,7 @@ fn move_floating_pane_focus_right() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_5,
         None,
         None,
@@ -2124,7 +2513,7 @@ fn move_floating_pane_focus_up() {
     let mut output = Output::default();
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -2135,7 +2524,7 @@ fn move_floating_pane_focus_up() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -2146,7 +2535,7 @@ fn move_floating_pane_focus_up() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -2157,7 +2546,7 @@ fn move_floating_pane_focus_up() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_4,
         None,
         None,
@@ -2168,7 +2557,7 @@ fn move_floating_pane_focus_up() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_5,
         None,
         None,
@@ -2225,7 +2614,7 @@ fn move_floating_pane_focus_down() {
     let mut output = Output::default();
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -2236,7 +2625,7 @@ fn move_floating_pane_focus_down() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -2247,7 +2636,7 @@ fn move_floating_pane_focus_down() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -2258,7 +2647,7 @@ fn move_floating_pane_focus_down() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_4,
         None,
         None,
@@ -2269,7 +2658,7 @@ fn move_floating_pane_focus_down() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_5,
         None,
         None,
@@ -2327,7 +2716,7 @@ fn move_floating_pane_focus_with_mouse() {
     let mut output = Output::default();
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -2338,7 +2727,7 @@ fn move_floating_pane_focus_with_mouse() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -2349,7 +2738,7 @@ fn move_floating_pane_focus_with_mouse() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -2360,7 +2749,7 @@ fn move_floating_pane_focus_with_mouse() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_4,
         None,
         None,
@@ -2371,7 +2760,7 @@ fn move_floating_pane_focus_with_mouse() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_5,
         None,
         None,
@@ -2437,7 +2826,7 @@ fn move_pane_focus_with_mouse_to_non_floating_pane() {
     let mut output = Output::default();
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -2448,7 +2837,7 @@ fn move_pane_focus_with_mouse_to_non_floating_pane() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -2459,7 +2848,7 @@ fn move_pane_focus_with_mouse_to_non_floating_pane() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -2470,7 +2859,7 @@ fn move_pane_focus_with_mouse_to_non_floating_pane() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_4,
         None,
         None,
@@ -2481,7 +2870,7 @@ fn move_pane_focus_with_mouse_to_non_floating_pane() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_5,
         None,
         None,
@@ -2547,7 +2936,7 @@ fn drag_pane_with_mouse() {
     let mut output = Output::default();
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -2558,7 +2947,7 @@ fn drag_pane_with_mouse() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -2569,7 +2958,7 @@ fn drag_pane_with_mouse() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -2580,7 +2969,7 @@ fn drag_pane_with_mouse() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_4,
         None,
         None,
@@ -2591,7 +2980,7 @@ fn drag_pane_with_mouse() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_5,
         None,
         None,
@@ -2657,7 +3046,7 @@ fn mark_text_inside_floating_pane() {
     let mut output = Output::default();
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -2668,7 +3057,7 @@ fn mark_text_inside_floating_pane() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -2679,7 +3068,7 @@ fn mark_text_inside_floating_pane() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -2690,7 +3079,7 @@ fn mark_text_inside_floating_pane() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_4,
         None,
         None,
@@ -2701,7 +3090,7 @@ fn mark_text_inside_floating_pane() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_5,
         None,
         None,
@@ -2775,7 +3164,7 @@ fn resize_tab_with_floating_panes() {
     let mut output = Output::default();
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -2786,7 +3175,7 @@ fn resize_tab_with_floating_panes() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -2797,7 +3186,7 @@ fn resize_tab_with_floating_panes() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -2808,7 +3197,7 @@ fn resize_tab_with_floating_panes() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_4,
         None,
         None,
@@ -2819,7 +3208,7 @@ fn resize_tab_with_floating_panes() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_5,
         None,
         None,
@@ -2875,7 +3264,7 @@ fn shrink_whole_tab_with_floating_panes_horizontally_and_vertically() {
     let mut output = Output::default();
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -2886,7 +3275,7 @@ fn shrink_whole_tab_with_floating_panes_horizontally_and_vertically() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -2897,7 +3286,7 @@ fn shrink_whole_tab_with_floating_panes_horizontally_and_vertically() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -2908,7 +3297,7 @@ fn shrink_whole_tab_with_floating_panes_horizontally_and_vertically() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_4,
         None,
         None,
@@ -2919,7 +3308,7 @@ fn shrink_whole_tab_with_floating_panes_horizontally_and_vertically() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_5,
         None,
         None,
@@ -2971,7 +3360,7 @@ fn shrink_whole_tab_with_floating_panes_horizontally_and_vertically_and_expand_b
     let mut output = Output::default();
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -2982,7 +3371,7 @@ fn shrink_whole_tab_with_floating_panes_horizontally_and_vertically_and_expand_b
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -2993,7 +3382,7 @@ fn shrink_whole_tab_with_floating_panes_horizontally_and_vertically_and_expand_b
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -3004,7 +3393,7 @@ fn shrink_whole_tab_with_floating_panes_horizontally_and_vertically_and_expand_b
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_4,
         None,
         None,
@@ -3015,7 +3404,7 @@ fn shrink_whole_tab_with_floating_panes_horizontally_and_vertically_and_expand_b
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_5,
         None,
         None,
@@ -3068,7 +3457,7 @@ fn embed_floating_pane() {
     let mut output = Output::default();
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id,
         None,
         None,
@@ -3105,7 +3494,7 @@ fn float_embedded_pane() {
     let mut tab = create_new_tab(size, ModeInfo::default());
     let new_pane_id = PaneId::Terminal(2);
     let mut output = Output::default();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id,
         None,
         None,
@@ -3145,7 +3534,7 @@ fn embed_floating_pane_without_pane_frames() {
     tab.set_pane_frames(false);
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id,
         None,
         None,
@@ -3183,7 +3572,7 @@ fn float_embedded_pane_without_pane_frames() {
     let new_pane_id = PaneId::Terminal(2);
     let mut output = Output::default();
     tab.set_pane_frames(false);
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id,
         None,
         None,
@@ -3295,7 +3684,7 @@ fn rename_floating_pane() {
     let mut tab = create_new_tab(size, ModeInfo::default());
     let new_pane_id = PaneId::Terminal(2);
     let mut output = Output::default();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id,
         None,
         None,
@@ -3401,7 +3790,7 @@ fn move_floating_pane_with_sixel_image() {
 
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id,
         None,
         None,
@@ -3460,7 +3849,7 @@ fn floating_pane_above_sixel_image() {
 
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id,
         None,
         None,
@@ -3539,7 +3928,7 @@ fn suppress_floating_pane() {
 
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id,
         None,
         None,
@@ -3605,7 +3994,7 @@ fn close_suppressing_floating_pane() {
 
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id,
         None,
         None,
@@ -3675,7 +4064,7 @@ fn suppress_floating_pane_embed_it_and_close_it() {
 
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id,
         None,
         None,
@@ -3747,7 +4136,7 @@ fn resize_whole_tab_while_floting_pane_is_suppressed() {
 
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id,
         None,
         None,
@@ -3859,7 +4248,7 @@ fn enter_search_floating_pane() {
     let mut output = Output::default();
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id,
         None,
         None,
@@ -4683,7 +5072,7 @@ fn move_pane_focus_sends_tty_csi_event() {
     });
     let mut tab = create_new_tab_with_os_api(size, ModeInfo::default(), os_api.as_ref());
     let new_pane_id_1 = PaneId::Terminal(2);
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -4728,7 +5117,7 @@ fn move_floating_pane_focus_sends_tty_csi_event() {
 
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -4739,7 +5128,7 @@ fn move_floating_pane_focus_sends_tty_csi_event() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -4790,7 +5179,7 @@ fn toggle_floating_panes_on_sends_tty_csi_event() {
 
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -4801,7 +5190,7 @@ fn toggle_floating_panes_on_sends_tty_csi_event() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -4855,7 +5244,7 @@ fn toggle_floating_panes_off_sends_tty_csi_event() {
 
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -4866,7 +5255,7 @@ fn toggle_floating_panes_off_sends_tty_csi_event() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -4938,7 +5327,7 @@ fn can_swap_tiled_layout_at_runtime() {
     );
     let new_pane_id_1 = PaneId::Terminal(2);
 
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -5005,7 +5394,7 @@ fn can_swap_floating_layout_at_runtime() {
 
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -5016,7 +5405,7 @@ fn can_swap_floating_layout_at_runtime() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -5078,7 +5467,7 @@ fn swapping_layouts_after_resize_snaps_to_current_layout() {
     );
     let new_pane_id_1 = PaneId::Terminal(2);
 
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -5139,7 +5528,7 @@ fn swap_tiled_layout_with_stacked_children() {
     let new_pane_id_2 = PaneId::Terminal(3);
     let new_pane_id_3 = PaneId::Terminal(4);
 
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -5150,7 +5539,7 @@ fn swap_tiled_layout_with_stacked_children() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -5161,7 +5550,7 @@ fn swap_tiled_layout_with_stacked_children() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -5215,7 +5604,7 @@ fn swap_tiled_layout_with_only_stacked_children() {
     let new_pane_id_2 = PaneId::Terminal(3);
     let new_pane_id_3 = PaneId::Terminal(4);
 
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -5226,7 +5615,7 @@ fn swap_tiled_layout_with_only_stacked_children() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -5237,7 +5626,7 @@ fn swap_tiled_layout_with_only_stacked_children() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -5294,7 +5683,7 @@ fn swap_tiled_layout_with_stacked_children_and_no_pane_frames() {
     let new_pane_id_2 = PaneId::Terminal(3);
     let new_pane_id_3 = PaneId::Terminal(4);
 
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -5305,7 +5694,7 @@ fn swap_tiled_layout_with_stacked_children_and_no_pane_frames() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -5316,7 +5705,7 @@ fn swap_tiled_layout_with_stacked_children_and_no_pane_frames() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -5373,7 +5762,7 @@ fn move_focus_up_with_stacked_panes() {
     let new_pane_id_2 = PaneId::Terminal(3);
     let new_pane_id_3 = PaneId::Terminal(4);
 
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -5384,7 +5773,7 @@ fn move_focus_up_with_stacked_panes() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -5395,7 +5784,7 @@ fn move_focus_up_with_stacked_panes() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -5454,7 +5843,7 @@ fn move_focus_down_with_stacked_panes() {
     let new_pane_id_2 = PaneId::Terminal(3);
     let new_pane_id_3 = PaneId::Terminal(4);
 
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -5465,7 +5854,7 @@ fn move_focus_down_with_stacked_panes() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -5476,7 +5865,7 @@ fn move_focus_down_with_stacked_panes() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -5537,7 +5926,7 @@ fn move_focus_right_into_stacked_panes() {
     );
     for i in 0..12 {
         let new_pane_id = i + 2;
-        tab.new_pane(
+        tab.new_pane_compat(
             PaneId::Terminal(new_pane_id),
             None,
             None,
@@ -5609,7 +5998,7 @@ fn move_focus_left_into_stacked_panes() {
     );
     for i in 0..13 {
         let new_pane_id = i + 2;
-        tab.new_pane(
+        tab.new_pane_compat(
             PaneId::Terminal(new_pane_id),
             None,
             None,
@@ -5683,7 +6072,7 @@ fn move_focus_up_into_stacked_panes() {
     );
     for i in 0..4 {
         let new_pane_id = i + 3;
-        tab.new_pane(
+        tab.new_pane_compat(
             PaneId::Terminal(new_pane_id),
             None,
             None,
@@ -5758,7 +6147,7 @@ fn move_focus_down_into_stacked_panes() {
     );
     for i in 0..4 {
         let new_pane_id = i + 3;
-        tab.new_pane(
+        tab.new_pane_compat(
             PaneId::Terminal(new_pane_id),
             None,
             None,
@@ -5829,7 +6218,7 @@ fn close_main_stacked_pane() {
     let new_pane_id_2 = PaneId::Terminal(3);
     let new_pane_id_3 = PaneId::Terminal(4);
 
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -5840,7 +6229,7 @@ fn close_main_stacked_pane() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -5851,7 +6240,7 @@ fn close_main_stacked_pane() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -5911,7 +6300,7 @@ fn close_main_stacked_pane_in_mid_stack() {
     let new_pane_id_4 = PaneId::Terminal(5);
     let new_pane_id_5 = PaneId::Terminal(6);
 
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -5922,7 +6311,7 @@ fn close_main_stacked_pane_in_mid_stack() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -5933,7 +6322,7 @@ fn close_main_stacked_pane_in_mid_stack() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -5944,7 +6333,7 @@ fn close_main_stacked_pane_in_mid_stack() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_4,
         None,
         None,
@@ -5955,7 +6344,7 @@ fn close_main_stacked_pane_in_mid_stack() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_5,
         None,
         None,
@@ -6018,7 +6407,7 @@ fn close_one_liner_stacked_pane_below_main_pane() {
     let new_pane_id_4 = PaneId::Terminal(5);
     let new_pane_id_5 = PaneId::Terminal(6);
 
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -6029,7 +6418,7 @@ fn close_one_liner_stacked_pane_below_main_pane() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -6040,7 +6429,7 @@ fn close_one_liner_stacked_pane_below_main_pane() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -6051,7 +6440,7 @@ fn close_one_liner_stacked_pane_below_main_pane() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_4,
         None,
         None,
@@ -6062,7 +6451,7 @@ fn close_one_liner_stacked_pane_below_main_pane() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_5,
         None,
         None,
@@ -6126,7 +6515,7 @@ fn close_one_liner_stacked_pane_above_main_pane() {
     let new_pane_id_4 = PaneId::Terminal(5);
     let new_pane_id_5 = PaneId::Terminal(6);
 
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -6137,7 +6526,7 @@ fn close_one_liner_stacked_pane_above_main_pane() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -6148,7 +6537,7 @@ fn close_one_liner_stacked_pane_above_main_pane() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -6159,7 +6548,7 @@ fn close_one_liner_stacked_pane_above_main_pane() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_4,
         None,
         None,
@@ -6170,7 +6559,7 @@ fn close_one_liner_stacked_pane_above_main_pane() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_5,
         None,
         None,
@@ -6233,7 +6622,7 @@ fn can_increase_size_of_main_pane_in_stack_horizontally() {
     let new_pane_id_4 = PaneId::Terminal(5);
     let new_pane_id_5 = PaneId::Terminal(6);
 
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -6244,7 +6633,7 @@ fn can_increase_size_of_main_pane_in_stack_horizontally() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -6255,7 +6644,7 @@ fn can_increase_size_of_main_pane_in_stack_horizontally() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -6266,7 +6655,7 @@ fn can_increase_size_of_main_pane_in_stack_horizontally() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_4,
         None,
         None,
@@ -6277,7 +6666,7 @@ fn can_increase_size_of_main_pane_in_stack_horizontally() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_5,
         None,
         None,
@@ -6344,7 +6733,7 @@ fn can_increase_size_of_main_pane_in_stack_vertically() {
     let new_pane_id_4 = PaneId::Terminal(5);
     let new_pane_id_5 = PaneId::Terminal(6);
 
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -6355,7 +6744,7 @@ fn can_increase_size_of_main_pane_in_stack_vertically() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -6366,7 +6755,7 @@ fn can_increase_size_of_main_pane_in_stack_vertically() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -6377,7 +6766,7 @@ fn can_increase_size_of_main_pane_in_stack_vertically() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_4,
         None,
         None,
@@ -6388,7 +6777,7 @@ fn can_increase_size_of_main_pane_in_stack_vertically() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_5,
         None,
         None,
@@ -6455,7 +6844,7 @@ fn can_increase_size_of_main_pane_in_stack_non_directionally() {
     let new_pane_id_4 = PaneId::Terminal(5);
     let new_pane_id_5 = PaneId::Terminal(6);
 
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -6466,7 +6855,7 @@ fn can_increase_size_of_main_pane_in_stack_non_directionally() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -6477,7 +6866,7 @@ fn can_increase_size_of_main_pane_in_stack_non_directionally() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -6488,7 +6877,7 @@ fn can_increase_size_of_main_pane_in_stack_non_directionally() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_4,
         None,
         None,
@@ -6499,7 +6888,7 @@ fn can_increase_size_of_main_pane_in_stack_non_directionally() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_5,
         None,
         None,
@@ -6561,7 +6950,7 @@ fn can_increase_size_into_pane_stack_horizontally() {
     let new_pane_id_4 = PaneId::Terminal(5);
     let new_pane_id_5 = PaneId::Terminal(6);
 
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -6572,7 +6961,7 @@ fn can_increase_size_into_pane_stack_horizontally() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -6583,7 +6972,7 @@ fn can_increase_size_into_pane_stack_horizontally() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -6594,7 +6983,7 @@ fn can_increase_size_into_pane_stack_horizontally() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_4,
         None,
         None,
@@ -6605,7 +6994,7 @@ fn can_increase_size_into_pane_stack_horizontally() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_5,
         None,
         None,
@@ -6671,7 +7060,7 @@ fn can_increase_size_into_pane_stack_vertically() {
     let new_pane_id_4 = PaneId::Terminal(5);
     let new_pane_id_5 = PaneId::Terminal(6);
 
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -6682,7 +7071,7 @@ fn can_increase_size_into_pane_stack_vertically() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -6693,7 +7082,7 @@ fn can_increase_size_into_pane_stack_vertically() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -6704,7 +7093,7 @@ fn can_increase_size_into_pane_stack_vertically() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_4,
         None,
         None,
@@ -6715,7 +7104,7 @@ fn can_increase_size_into_pane_stack_vertically() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_5,
         None,
         None,
@@ -6784,7 +7173,7 @@ fn can_increase_size_into_pane_stack_non_directionally() {
     let new_pane_id_4 = PaneId::Terminal(5);
     let new_pane_id_5 = PaneId::Terminal(6);
 
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -6795,7 +7184,7 @@ fn can_increase_size_into_pane_stack_non_directionally() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -6806,7 +7195,7 @@ fn can_increase_size_into_pane_stack_non_directionally() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -6817,7 +7206,7 @@ fn can_increase_size_into_pane_stack_non_directionally() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_4,
         None,
         None,
@@ -6828,7 +7217,7 @@ fn can_increase_size_into_pane_stack_non_directionally() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_5,
         None,
         None,
@@ -6889,7 +7278,7 @@ fn decreasing_size_of_whole_tab_treats_stacked_panes_properly() {
     let new_pane_id_4 = PaneId::Terminal(5);
     let new_pane_id_5 = PaneId::Terminal(6);
 
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -6900,7 +7289,7 @@ fn decreasing_size_of_whole_tab_treats_stacked_panes_properly() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -6911,7 +7300,7 @@ fn decreasing_size_of_whole_tab_treats_stacked_panes_properly() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -6922,7 +7311,7 @@ fn decreasing_size_of_whole_tab_treats_stacked_panes_properly() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_4,
         None,
         None,
@@ -6933,7 +7322,7 @@ fn decreasing_size_of_whole_tab_treats_stacked_panes_properly() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_5,
         None,
         None,
@@ -6996,7 +7385,7 @@ fn increasing_size_of_whole_tab_treats_stacked_panes_properly() {
     let new_pane_id_4 = PaneId::Terminal(5);
     let new_pane_id_5 = PaneId::Terminal(6);
 
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -7007,7 +7396,7 @@ fn increasing_size_of_whole_tab_treats_stacked_panes_properly() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -7018,7 +7407,7 @@ fn increasing_size_of_whole_tab_treats_stacked_panes_properly() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -7029,7 +7418,7 @@ fn increasing_size_of_whole_tab_treats_stacked_panes_properly() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_4,
         None,
         None,
@@ -7040,7 +7429,7 @@ fn increasing_size_of_whole_tab_treats_stacked_panes_properly() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_5,
         None,
         None,
@@ -7108,7 +7497,7 @@ fn cannot_decrease_stack_size_beyond_minimum_height() {
     let new_pane_id_4 = PaneId::Terminal(5);
     let new_pane_id_5 = PaneId::Terminal(6);
 
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -7119,7 +7508,7 @@ fn cannot_decrease_stack_size_beyond_minimum_height() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -7130,7 +7519,7 @@ fn cannot_decrease_stack_size_beyond_minimum_height() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -7141,7 +7530,7 @@ fn cannot_decrease_stack_size_beyond_minimum_height() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_4,
         None,
         None,
@@ -7152,7 +7541,7 @@ fn cannot_decrease_stack_size_beyond_minimum_height() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_5,
         None,
         None,
@@ -7220,7 +7609,7 @@ fn focus_stacked_pane_over_flexible_pane_with_the_mouse() {
     let new_pane_id_4 = PaneId::Terminal(5);
     let new_pane_id_5 = PaneId::Terminal(6);
 
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -7231,7 +7620,7 @@ fn focus_stacked_pane_over_flexible_pane_with_the_mouse() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -7242,7 +7631,7 @@ fn focus_stacked_pane_over_flexible_pane_with_the_mouse() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -7253,7 +7642,7 @@ fn focus_stacked_pane_over_flexible_pane_with_the_mouse() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_4,
         None,
         None,
@@ -7264,7 +7653,7 @@ fn focus_stacked_pane_over_flexible_pane_with_the_mouse() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_5,
         None,
         None,
@@ -7334,7 +7723,7 @@ fn focus_stacked_pane_under_flexible_pane_with_the_mouse() {
     let new_pane_id_4 = PaneId::Terminal(5);
     let new_pane_id_5 = PaneId::Terminal(6);
 
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -7345,7 +7734,7 @@ fn focus_stacked_pane_under_flexible_pane_with_the_mouse() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -7356,7 +7745,7 @@ fn focus_stacked_pane_under_flexible_pane_with_the_mouse() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -7367,7 +7756,7 @@ fn focus_stacked_pane_under_flexible_pane_with_the_mouse() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_4,
         None,
         None,
@@ -7378,7 +7767,7 @@ fn focus_stacked_pane_under_flexible_pane_with_the_mouse() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_5,
         None,
         None,
@@ -7448,7 +7837,7 @@ fn close_stacked_pane_with_previously_focused_other_pane() {
     let new_pane_id_4 = PaneId::Terminal(5);
     let new_pane_id_5 = PaneId::Terminal(6);
 
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -7459,7 +7848,7 @@ fn close_stacked_pane_with_previously_focused_other_pane() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -7470,7 +7859,7 @@ fn close_stacked_pane_with_previously_focused_other_pane() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -7481,7 +7870,7 @@ fn close_stacked_pane_with_previously_focused_other_pane() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_4,
         None,
         None,
@@ -7492,7 +7881,7 @@ fn close_stacked_pane_with_previously_focused_other_pane() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_5,
         None,
         None,
@@ -7578,7 +7967,7 @@ fn close_pane_near_stacked_panes() {
     let new_pane_id_4 = PaneId::Terminal(5);
     let new_pane_id_5 = PaneId::Terminal(6);
 
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -7589,7 +7978,7 @@ fn close_pane_near_stacked_panes() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -7600,7 +7989,7 @@ fn close_pane_near_stacked_panes() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -7611,7 +8000,7 @@ fn close_pane_near_stacked_panes() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_4,
         None,
         None,
@@ -7622,7 +8011,7 @@ fn close_pane_near_stacked_panes() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_5,
         None,
         None,
@@ -7689,7 +8078,7 @@ fn focus_next_pane_expands_stacked_panes() {
     let new_pane_id_4 = PaneId::Terminal(5);
     let new_pane_id_5 = PaneId::Terminal(6);
 
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -7700,7 +8089,7 @@ fn focus_next_pane_expands_stacked_panes() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -7711,7 +8100,7 @@ fn focus_next_pane_expands_stacked_panes() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -7722,7 +8111,7 @@ fn focus_next_pane_expands_stacked_panes() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_4,
         None,
         None,
@@ -7733,7 +8122,7 @@ fn focus_next_pane_expands_stacked_panes() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_5,
         None,
         None,
@@ -7796,7 +8185,7 @@ fn stacked_panes_can_become_fullscreen() {
     let new_pane_id_4 = PaneId::Terminal(5);
     let new_pane_id_5 = PaneId::Terminal(6);
 
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -7807,7 +8196,7 @@ fn stacked_panes_can_become_fullscreen() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -7818,7 +8207,7 @@ fn stacked_panes_can_become_fullscreen() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -7829,7 +8218,7 @@ fn stacked_panes_can_become_fullscreen() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_4,
         None,
         None,
@@ -7840,7 +8229,7 @@ fn stacked_panes_can_become_fullscreen() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_5,
         None,
         None,
@@ -8527,7 +8916,7 @@ fn new_pane_in_auto_layout() {
     ];
     for i in 0..7 {
         let new_pane_id = i + 2;
-        tab.new_pane(
+        tab.new_pane_compat(
             PaneId::Terminal(new_pane_id),
             None,
             None,
@@ -8598,7 +8987,7 @@ fn new_pane_in_stacked_resizes() {
     let mut expected_cursor_coordinates = vec![(101, 1), (101, 21), (151, 21), (151, 22)];
     for i in 0..4 {
         let new_pane_id = i + 2;
-        tab.new_pane(
+        tab.new_pane_compat(
             PaneId::Terminal(new_pane_id),
             None,
             None,
@@ -8785,8 +9174,8 @@ fn when_swapping_tiled_layouts_in_an_undamaged_state_pane_focuses_on_focused_nod
 }
 
 #[test]
-fn when_swapping_tiled_layouts_in_an_undamaged_state_with_no_focus_node_pane_focuses_on_deepest_node(
-) {
+fn when_swapping_tiled_layouts_in_an_undamaged_state_with_no_focus_node_pane_focuses_on_deepest_node()
+ {
     let size = Size {
         cols: 121,
         rows: 20,
@@ -9572,7 +9961,7 @@ fn new_floating_pane_in_auto_layout() {
     let mut expected_cursor_coordinates = vec![(61, 11), (61, 6), (34, 12)];
     for i in 0..3 {
         let new_pane_id = i + 2;
-        tab.new_pane(
+        tab.new_pane_compat(
             PaneId::Terminal(new_pane_id),
             None,
             None,
@@ -9757,8 +10146,8 @@ fn when_swapping_floating_layouts_in_an_undamaged_state_pane_focuses_on_focused_
 }
 
 #[test]
-fn when_swapping_floating_layouts_in_an_undamaged_state_with_no_focus_node_pane_focuses_on_deepest_node(
-) {
+fn when_swapping_floating_layouts_in_an_undamaged_state_with_no_focus_node_pane_focuses_on_deepest_node()
+ {
     let size = Size {
         cols: 121,
         rows: 20,
@@ -10065,15 +10454,15 @@ fn borderless_floating_pane() {
         borderless: Some(true),
     };
 
-    tab.new_floating_pane(
-        new_pane_id,
-        None,
-        None,
-        false,
-        true,
-        Some(coordinates),
-        None,
-    )
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: new_pane_id,
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: Some(coordinates),
+        blocking_notification: None,
+    })
     .unwrap();
 
     tab.handle_pty_bytes(
@@ -10112,15 +10501,15 @@ fn borderless_pane_content_fills_edges() {
         borderless: Some(true),
     };
 
-    tab.new_floating_pane(
-        new_pane_id,
-        None,
-        None,
-        false,
-        true,
-        Some(coordinates),
-        None,
-    )
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: new_pane_id,
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: Some(coordinates),
+        blocking_notification: None,
+    })
     .unwrap();
 
     // Fill with X's to verify content reaches edges
@@ -10160,15 +10549,15 @@ fn borderless_pinned_floating_pane() {
         borderless: Some(true),
     };
 
-    tab.new_floating_pane(
-        borderless_pane_id,
-        None,
-        None,
-        false,
-        true,
-        Some(coordinates),
-        None,
-    )
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: borderless_pane_id,
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: Some(coordinates),
+        blocking_notification: None,
+    })
     .unwrap();
 
     // Toggle floating panes off to test pinned behavior
@@ -10212,15 +10601,15 @@ fn cursor_hidden_when_floating_pane_is_under_pinned_pane() {
         borderless: Some(false),
     };
 
-    tab.new_floating_pane(
-        PaneId::Terminal(2),
-        None,
-        None,
-        false,
-        true,
-        Some(bottom_pane_coordinates),
-        None,
-    )
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: PaneId::Terminal(2),
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: Some(bottom_pane_coordinates),
+        blocking_notification: None,
+    })
     .unwrap();
 
     // Create overlapping pinned pane on top
@@ -10233,15 +10622,15 @@ fn cursor_hidden_when_floating_pane_is_under_pinned_pane() {
         borderless: Some(false),
     };
 
-    tab.new_floating_pane(
-        PaneId::Terminal(3),
-        None,
-        None,
-        false,
-        true,
-        Some(top_pane_coordinates),
-        None,
-    )
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: PaneId::Terminal(3),
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: Some(top_pane_coordinates),
+        blocking_notification: None,
+    })
     .unwrap();
 
     // Add some text to both panes so we can see them
@@ -10292,15 +10681,15 @@ fn cursor_visible_when_pinned_pane_is_focused() {
         borderless: Some(false),
     };
 
-    tab.new_floating_pane(
-        PaneId::Terminal(2),
-        None,
-        None,
-        false,
-        true,
-        Some(bottom_pane_coordinates),
-        None,
-    )
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: PaneId::Terminal(2),
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: Some(bottom_pane_coordinates),
+        blocking_notification: None,
+    })
     .unwrap();
 
     // Create overlapping pinned pane on top
@@ -10313,15 +10702,15 @@ fn cursor_visible_when_pinned_pane_is_focused() {
         borderless: Some(false),
     };
 
-    tab.new_floating_pane(
-        PaneId::Terminal(3),
-        None,
-        None,
-        false,
-        true,
-        Some(top_pane_coordinates),
-        None,
-    )
+    tab.new_floating_pane(NewFloatingPaneOptions {
+        pid: PaneId::Terminal(3),
+        initial_pane_title: None,
+        invoked_with: None,
+        start_suppressed: false,
+        should_focus_pane: true,
+        floating_pane_coordinates: Some(top_pane_coordinates),
+        blocking_notification: None,
+    })
     .unwrap();
 
     // Add some text to both panes
@@ -10699,7 +11088,7 @@ fn test_ctrl_drag_resizes_floating_pane_from_edge() {
 
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         floating_pane_id,
         None,
         None,
@@ -10780,7 +11169,7 @@ fn test_ctrl_drag_resizes_floating_pane_from_corner() {
 
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         floating_pane_id,
         None,
         None,
@@ -10859,7 +11248,7 @@ fn test_ctrl_drag_resizes_pinned_floating_pane_when_floating_panes_not_shown() {
         borderless: Some(false),
     };
 
-    tab.new_pane(
+    tab.new_pane_compat(
         floating_pane_id,
         None,
         None,
@@ -10934,7 +11323,7 @@ fn test_ctrl_click_on_floating_pin_button_toggles_pin() {
     // Toggle floating panes mode and create a floating pane
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         floating_pane_id,
         None,
         None,
@@ -10995,7 +11384,7 @@ fn test_ctrl_click_on_floating_frame_not_on_pin_starts_resize() {
     // Toggle floating panes mode and create a floating pane
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         floating_pane_id,
         None,
         None,
@@ -11039,7 +11428,7 @@ fn test_left_drag_moves_floating_pane() {
     // Toggle floating panes mode and create a floating pane
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         floating_pane_id,
         None,
         None,
@@ -11133,7 +11522,7 @@ fn test_left_click_on_floating_pane_changes_focus() {
 
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         floating_pane_id_1,
         None,
         None,
@@ -11144,7 +11533,7 @@ fn test_left_click_on_floating_pane_changes_focus() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         floating_pane_id_2,
         None,
         None,
@@ -11206,7 +11595,7 @@ fn test_left_click_on_pinned_floating_pane() {
         .unwrap();
 
     // will be pinned
-    tab.new_pane(
+    tab.new_pane_compat(
         floating_pane_id_1,
         None,
         None,
@@ -11219,7 +11608,7 @@ fn test_left_click_on_pinned_floating_pane() {
     .unwrap();
 
     // will not be pinned
-    tab.new_pane(
+    tab.new_pane_compat(
         floating_pane_id_2,
         None,
         None,
@@ -11749,7 +12138,7 @@ fn test_resize_tiled_then_move_floating_sequence() {
     // Now toggle floating and create a floating pane
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         floating_pane_id,
         None,
         None,
@@ -11811,7 +12200,7 @@ fn test_alt_click_works_on_floating_panes() {
     // Toggle floating panes mode and create a floating pane
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         floating_pane_id,
         None,
         None,
@@ -11882,7 +12271,7 @@ fn test_left_click_on_floating_frame_not_on_pin_moves_pane() {
 
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         floating_pane_id,
         None,
         None,
@@ -12151,7 +12540,7 @@ fn test_ctrl_scroll_up_increases_floating_pane_size() {
 
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id,
         None,
         None,
@@ -12212,7 +12601,7 @@ fn test_ctrl_scroll_down_decreases_floating_pane_size() {
 
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id,
         None,
         None,
@@ -12280,7 +12669,7 @@ fn test_ctrl_scroll_up_increases_pinned_floating_pane_size_when_floating_panes_h
         borderless: Some(false),
     };
 
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id,
         None,
         None,
@@ -12348,7 +12737,7 @@ fn test_ctrl_scroll_down_decreases_pinned_floating_pane_size_when_floating_panes
         borderless: Some(false),
     };
 
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id,
         None,
         None,
@@ -12411,7 +12800,7 @@ fn in_place_pane_with_close_replaced_pane_false_restores_original() {
     let mut output = Output::default();
 
     // Create a second tiled pane so closing the in-place pane doesn't leave an empty tab
-    tab.new_pane(
+    tab.new_pane_compat(
         PaneId::Terminal(2),
         None,
         None,
@@ -12433,16 +12822,16 @@ fn in_place_pane_with_close_replaced_pane_false_restores_original() {
         .unwrap();
 
     // Open pane 3 in-place of pane 2 without closing the replaced pane (suppress it)
-    tab.new_in_place_pane(
-        PaneId::Terminal(3),
-        None,
-        None,
-        Some(PaneId::Terminal(2)),
-        false, // close_replaced_pane
-        Some(client_id),
-        None,
-        None,
-    )
+    tab.new_in_place_pane(NewInPlacePaneOptions {
+        pid: PaneId::Terminal(3),
+        initial_pane_title: None,
+        invoked_with: None,
+        pane_id_to_replace: Some(PaneId::Terminal(2)),
+        close_replaced_pane: false,
+        client_id: Some(client_id),
+        blocking_notification: None,
+        borderless: None,
+    })
     .unwrap();
     tab.handle_pty_bytes(3, Vec::from("\n\n\nI am the in-place pane".as_bytes()))
         .unwrap();
@@ -12474,7 +12863,7 @@ fn in_place_pane_with_close_replaced_pane_true_closes_original() {
     let mut output = Output::default();
 
     // Create a second tiled pane
-    tab.new_pane(
+    tab.new_pane_compat(
         PaneId::Terminal(2),
         None,
         None,
@@ -12495,16 +12884,16 @@ fn in_place_pane_with_close_replaced_pane_true_closes_original() {
         .unwrap();
 
     // Open pane 3 in-place of pane 2, closing the replaced pane permanently
-    tab.new_in_place_pane(
-        PaneId::Terminal(3),
-        None,
-        None,
-        Some(PaneId::Terminal(2)),
-        true, // close_replaced_pane
-        Some(client_id),
-        None,
-        None,
-    )
+    tab.new_in_place_pane(NewInPlacePaneOptions {
+        pid: PaneId::Terminal(3),
+        initial_pane_title: None,
+        invoked_with: None,
+        pane_id_to_replace: Some(PaneId::Terminal(2)),
+        close_replaced_pane: true,
+        client_id: Some(client_id),
+        blocking_notification: None,
+        borderless: None,
+    })
     .unwrap();
     tab.handle_pty_bytes(3, Vec::from("\n\n\nI am the in-place pane".as_bytes()))
         .unwrap();
@@ -12532,7 +12921,7 @@ use zellij_utils::data::{HighlightLayer, HighlightStyle, RegexHighlight};
 fn create_new_tab_with_plugin_receiver(
     size: Size,
     default_mode: ModeInfo,
-) -> (Tab, Receiver<(PluginInstruction, ErrorContext)>) {
+) -> (TabImpl, Receiver<(PluginInstruction, ErrorContext)>) {
     set_session_name("test".into());
     let index = 0;
     let position = 0;
@@ -12609,7 +12998,7 @@ fn create_new_tab_with_plugin_receiver(
         web_server_ip,
         web_server_port,
     );
-    tab.apply_layout(
+    tab.apply_layout_compat(
         TiledPaneLayout::default(),
         vec![],
         vec![(1, None)],
@@ -12688,6 +13077,87 @@ fn click_on_plugin_highlight_sends_highlight_clicked() {
         found_highlight_clicked,
         "Expected HighlightClicked instruction to be sent"
     );
+}
+
+fn external_open_click_test(configure_event: impl Fn(&mut MouseEvent)) {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 1;
+    let (mut tab, mock_plugin_receiver) =
+        create_new_tab_with_plugin_receiver(size, ModeInfo::default());
+
+    tab.handle_pty_bytes(1, Vec::from("click here foo bar".as_bytes()))
+        .unwrap();
+
+    let highlights = vec![RegexHighlight {
+        pattern: "foo".into(),
+        style: HighlightStyle::Emphasis0,
+        layer: HighlightLayer::Hint,
+        context: BTreeMap::new(),
+        on_hover: false,
+        bold: false,
+        italic: false,
+        underline: true,
+        tooltip_text: None,
+    }];
+    tab.set_plugin_regex_highlights_for_pane(
+        PaneId::Terminal(1),
+        42,
+        highlights,
+        &Style::default(),
+    );
+
+    let click_position = Position::new(1, 12);
+    let mut click = MouseEvent::new_left_press_event(click_position);
+    configure_event(&mut click);
+    let effect = tab.handle_mouse_event(&click, client_id).unwrap();
+
+    assert!(effect.state_changed);
+
+    let mut found_external_open = false;
+    while let Ok((instruction, _ctx)) = mock_plugin_receiver.try_recv() {
+        if let PluginInstruction::HighlightClicked {
+            plugin_id,
+            pane_id,
+            matched_string,
+            context,
+            ..
+        } = instruction
+        {
+            assert_eq!(plugin_id, 42);
+            assert_eq!(pane_id, PaneId::Terminal(1));
+            assert_eq!(matched_string, "foo");
+            assert_eq!(
+                context.get("vc_open_external").map(String::as_str),
+                Some("true"),
+                "external-open click must tag the highlight context"
+            );
+            found_external_open = true;
+            break;
+        }
+    }
+    assert!(
+        found_external_open,
+        "Expected HighlightClicked with vc_open_external for the shift-modified click"
+    );
+}
+
+#[test]
+fn alt_shift_click_on_highlight_sends_external_open() {
+    external_open_click_test(|click| {
+        click.alt = true;
+        click.shift = true;
+    });
+}
+
+#[test]
+fn ctrl_shift_click_on_highlight_sends_external_open() {
+    external_open_click_test(|click| {
+        click.ctrl = true;
+        click.shift = true;
+    });
 }
 
 #[test]
@@ -12935,7 +13405,7 @@ fn set_and_clear_highlights_across_tiled_and_floating() {
     // Create a floating pane
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         pane3,
         None,
         None,
@@ -13555,7 +14025,7 @@ fn focus_follows_mouse_focuses_floating_pane_on_hover() {
 
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         floating_pane_id_1,
         None,
         None,
@@ -13566,7 +14036,7 @@ fn focus_follows_mouse_focuses_floating_pane_on_hover() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         floating_pane_id_2,
         None,
         None,
@@ -13753,7 +14223,7 @@ fn focus_follows_mouse_ignores_tiled_pane_when_floating_visible() {
     let floating_pane_id = PaneId::Terminal(3);
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         floating_pane_id,
         None,
         None,
@@ -13803,7 +14273,7 @@ fn focus_follows_mouse_focuses_floating_pane_when_floating_visible() {
     let floating_pane_id_2 = PaneId::Terminal(3);
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         floating_pane_id_1,
         None,
         None,
@@ -13821,7 +14291,7 @@ fn focus_follows_mouse_focuses_floating_pane_when_floating_visible() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         floating_pane_id_2,
         None,
         None,
@@ -13895,7 +14365,7 @@ fn focus_follows_mouse_skips_stacked_one_liner_pane() {
     let new_pane_id_1 = PaneId::Terminal(2);
     let new_pane_id_2 = PaneId::Terminal(3);
     let new_pane_id_3 = PaneId::Terminal(4);
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_1,
         None,
         None,
@@ -13906,7 +14376,7 @@ fn focus_follows_mouse_skips_stacked_one_liner_pane() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_2,
         None,
         None,
@@ -13917,7 +14387,7 @@ fn focus_follows_mouse_skips_stacked_one_liner_pane() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         new_pane_id_3,
         None,
         None,
@@ -14093,7 +14563,7 @@ fn mouse_click_through_sends_click_to_newly_focused_floating_pane() {
     let floating_pane_id_2 = PaneId::Terminal(3);
     tab.toggle_floating_panes(Some(client_id), None, None)
         .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         floating_pane_id_1,
         None,
         None,
@@ -14104,7 +14574,7 @@ fn mouse_click_through_sends_click_to_newly_focused_floating_pane() {
         None,
     )
     .unwrap();
-    tab.new_pane(
+    tab.new_pane_compat(
         floating_pane_id_2,
         None,
         None,
@@ -14327,7 +14797,7 @@ fn mouse_click_through_respects_live_toggle() {
 fn create_new_tab_with_server_receiver(
     size: Size,
     default_mode: ModeInfo,
-) -> (Tab, Receiver<(ServerInstruction, ErrorContext)>) {
+) -> (TabImpl, Receiver<(ServerInstruction, ErrorContext)>) {
     set_session_name("test".into());
     let index = 0;
     let position = 0;
@@ -14393,7 +14863,7 @@ fn create_new_tab_with_server_receiver(
         IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
         8080,
     );
-    tab.apply_layout(
+    tab.apply_layout_compat(
         TiledPaneLayout::default(),
         vec![],
         vec![(1, None)],
@@ -14596,7 +15066,7 @@ fn osc99_notification_preserves_metadata_keys() {
 fn osc99_grid_parses_and_stores_notification() {
     // Direct Grid-level test: feed OSC 99 bytes through vte parser,
     // verify pending_desktop_notifications is populated correctly.
-    use crate::panes::grid::Grid;
+    // NOTE: `Grid` here is the module-level positional shim over `GridImpl::new(GridOptions)`.
     use crate::panes::link_handler::LinkHandler;
 
     let sixel_image_store = Rc::new(RefCell::new(SixelImageStore::default()));
@@ -14634,7 +15104,7 @@ fn osc99_grid_parses_and_stores_notification() {
         "Should have one pending notification"
     );
 
-    let (ref payload, ref _terminator) = grid.pending_desktop_notifications.first().unwrap();
+    let (payload, _terminator) = grid.pending_desktop_notifications.first().unwrap();
     assert!(
         payload.contains("i=gridtest"),
         "Payload should contain i=gridtest, got: {:?}",
@@ -14889,5 +15359,148 @@ fn hidden_cursor_still_emits_cup_for_host_terminal_positioning() {
     assert!(
         !client_output.contains("\u{1b}[?25h"),
         "Show-cursor sequence must not be present when app has hidden the cursor"
+    );
+}
+
+#[test]
+fn drag_selection_past_pane_top_scrolls_viewport() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+
+    // Fill the pane with many lines to create scrollback
+    let mut content = String::new();
+    for i in 0..50 {
+        content.push_str(&format!("Line {}\r\n", i));
+    }
+    tab.handle_pty_bytes(1, Vec::from(content.as_bytes()))
+        .unwrap();
+    assert!(
+        !tab.get_pane_with_id(PaneId::Terminal(1))
+            .unwrap()
+            .is_scrolled(),
+        "pane starts unscrolled"
+    );
+
+    // Start selecting inside the pane content, then drag above the pane's top
+    // edge (with frames on, screen row 0 is the frame => relative line -1)
+    tab.handle_mouse_event(
+        &MouseEvent::new_left_press_event(Position::new(10, 20)),
+        client_id,
+    )
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(15)); // selection scroll rate limit
+    tab.handle_mouse_event(
+        &MouseEvent::new_left_motion_event(Position::new(0, 20)),
+        client_id,
+    )
+    .unwrap();
+
+    let pane = tab.get_pane_with_id(PaneId::Terminal(1)).unwrap();
+    assert!(
+        pane.is_scrolled(),
+        "dragging a selection past the pane top scrolls the viewport into the scrollback"
+    );
+    let selected_text = pane.get_selected_text(client_id).unwrap_or_default();
+    assert!(
+        selected_text.contains('\n'),
+        "the selection extends to the row revealed by the scroll, got: {:?}",
+        selected_text
+    );
+}
+
+#[test]
+fn drag_selection_pinned_at_screen_top_scrolls_viewport() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab_without_pane_frames(size, ModeInfo::default());
+
+    // Fill the pane with many lines to create scrollback
+    let mut content = String::new();
+    for i in 0..50 {
+        content.push_str(&format!("Line {}\r\n", i));
+    }
+    tab.handle_pty_bytes(1, Vec::from(content.as_bytes()))
+        .unwrap();
+
+    // Without frames the pane content starts at screen row 0: the cursor can
+    // never report a position above the pane, so dragging against the first
+    // screen row must still engage selection autoscroll
+    tab.handle_mouse_event(
+        &MouseEvent::new_left_press_event(Position::new(10, 20)),
+        client_id,
+    )
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(15)); // selection scroll rate limit
+    tab.handle_mouse_event(
+        &MouseEvent::new_left_motion_event(Position::new(0, 20)),
+        client_id,
+    )
+    .unwrap();
+
+    let pane = tab.get_pane_with_id(PaneId::Terminal(1)).unwrap();
+    assert!(
+        pane.is_scrolled(),
+        "dragging a selection against the first screen row scrolls the viewport"
+    );
+}
+
+#[test]
+fn drag_selection_pinned_at_screen_bottom_scrolls_viewport_down() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab_without_pane_frames(size, ModeInfo::default());
+
+    // Fill the pane with many lines to create scrollback, then scroll up so
+    // there are lines below the viewport
+    let mut content = String::new();
+    for i in 0..50 {
+        content.push_str(&format!("Line {}\r\n", i));
+    }
+    tab.handle_pty_bytes(1, Vec::from(content.as_bytes()))
+        .unwrap();
+    for _ in 0..3 {
+        tab.handle_mouse_event(
+            &MouseEvent::new_scroll_up_event(Position::new(10, 20)),
+            client_id,
+        )
+        .unwrap();
+    }
+    assert!(
+        tab.get_pane_with_id(PaneId::Terminal(1))
+            .unwrap()
+            .is_scrolled(),
+        "pane is scrolled up before the drag"
+    );
+
+    // Without frames the pane content ends at the last screen row: dragging
+    // against it must scroll the viewport back down towards the prompt
+    tab.handle_mouse_event(
+        &MouseEvent::new_left_press_event(Position::new(10, 20)),
+        client_id,
+    )
+    .unwrap();
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(15)); // selection scroll rate limit
+        tab.handle_mouse_event(
+            &MouseEvent::new_left_motion_event(Position::new(19, 20)),
+            client_id,
+        )
+        .unwrap();
+    }
+
+    let pane = tab.get_pane_with_id(PaneId::Terminal(1)).unwrap();
+    assert!(
+        !pane.is_scrolled(),
+        "dragging a selection against the last screen row scrolls the viewport back down"
     );
 }

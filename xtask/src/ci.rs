@@ -9,7 +9,7 @@ use std::{
     ffi::OsString,
     path::{Path, PathBuf},
 };
-use xshell::{cmd, Shell};
+use xshell::{Shell, cmd};
 
 pub fn main(sh: &Shell, flags: flags::Ci) -> anyhow::Result<()> {
     let err_context = "failed to run CI task";

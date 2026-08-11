@@ -3,9 +3,21 @@ use crate::input::config::Config;
 use insta::assert_snapshot;
 use std::path::{Path, PathBuf};
 
+fn strip_unassigned_layout_metadata(s: String) -> String {
+    s.lines()
+        .filter(|line| {
+            !matches!(
+                line.trim(),
+                "tab_instance_id: None," | "session_layer: None,"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(not(windows))]
 fn normalize_layout_debug(s: String) -> String {
-    s
+    strip_unassigned_layout_metadata(s)
 }
 
 #[cfg(windows)]
@@ -13,7 +25,7 @@ fn normalize_layout_debug(s: String) -> String {
     // On Windows, PathBuf's Debug output uses `\\` (escaped backslash).
     // Replace `\\\\` (two escaped backslashes in Debug repr) with `/`
     // so that snapshots match Unix-recorded baselines.
-    s.replace("\\\\", "/")
+    strip_unassigned_layout_metadata(s.replace("\\\\", "/"))
 }
 
 #[test]
@@ -46,6 +58,33 @@ fn layout_with_one_pane() {
         ..Default::default()
     };
     assert_eq!(layout, expected_layout);
+}
+
+#[test]
+fn root_tab_instance_reservation_survives_single_tab_layout_parsing() {
+    let tab_instance_id = "0123456789abcdef0123456789abcdef";
+    let kdl_layout = format!(
+        r#"
+        layout vc_tab_instance_id="{tab_instance_id}" {{
+            pane
+        }}
+    "#
+    );
+    let layout =
+        Layout::from_kdl(&kdl_layout, Some("layout_file_name".into()), None, None).unwrap();
+
+    assert_eq!(layout.tabs.len(), 1);
+    assert_eq!(
+        layout.tabs[0].1.tab_instance_id.as_deref(),
+        Some(tab_instance_id)
+    );
+    assert_eq!(
+        layout
+            .template
+            .as_ref()
+            .and_then(|(template, _)| template.tab_instance_id.as_deref()),
+        Some(tab_instance_id)
+    );
 }
 
 #[test]
@@ -303,7 +342,8 @@ fn vibecrafted_layouts_can_be_loaded_from_builtin_assets() {
         let (_path, raw_layout, _swap_layout) =
             Layout::stringified_from_default_assets(Path::new(layout_name)).unwrap();
         assert!(
-            raw_layout.contains("VibeCrafted with AI Agents")
+            raw_layout.contains("Vibecrafted")
+                || raw_layout.contains("vibecrafted")
                 || raw_layout.contains("𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍."),
             "expected {layout_name} to resolve from built-in assets"
         );
@@ -315,7 +355,10 @@ fn vibecrafted_layouts_include_companion_repo_fallbacks() {
     let expected_companion_root =
         "${VIBECRAFTED_COMPANION_ROOT:-$HOME/Libraxis/vibecrafted}/skills/vc-agents";
 
-    for layout_name in ["vibecrafted", "vc-dashboard", "vc-marbles"] {
+    // "vibecrafted" dropped 2026-07-20: the default operator layout is now the
+    // operator-authored capture (plain suspended shell in the operator pane);
+    // mission-control helper resolution lives on in the dashboard/marbles layouts.
+    for layout_name in ["vc-dashboard", "vc-marbles"] {
         let (_path, raw_layout, _swap_layout) =
             Layout::stringified_from_default_assets(Path::new(layout_name)).unwrap();
         assert!(
@@ -334,9 +377,196 @@ fn vc_dashboard_guide_tab_uses_branded_mission_control_mode() {
         "expected vc-dashboard to configure the about plugin for the mission-control guide"
     );
     assert!(
-        raw_layout.contains("pane_title \"VibeCrafted Shell Guide\""),
-        "expected vc-dashboard guide tab to set a branded pane title"
+        raw_layout.contains("guide_mode \"mission-control\""),
+        "expected vc-dashboard guide tab to use mission-control guide mode"
     );
+}
+
+#[test]
+fn vibecrafted_layout_has_start_here_and_shell_tabs() {
+    let (_path, raw_layout, _swap) =
+        Layout::stringified_from_default_assets(Path::new("vibecrafted")).unwrap();
+    assert!(
+        raw_layout.contains("tab name=\"Start here\""),
+        "first tab must be Start here (first-run map)"
+    );
+    assert!(
+        raw_layout.contains("tab name=\"Shell\""),
+        "work tab must be named Shell"
+    );
+    assert!(
+        raw_layout.contains("guide_mode \"mission-control\""),
+        "Start here must load mission-control onboarding"
+    );
+    assert!(
+        !raw_layout.contains("start_suspended true")
+            && !raw_layout.contains("start_suspended=true"),
+        "Shell tab must not hide behind suspended Enter void"
+    );
+    assert!(
+        raw_layout.contains("vibecrafted start"),
+        "Shell banner must mention vibecrafted start"
+    );
+    let session_layer_start = raw_layout
+        .find("session_layer {")
+        .expect("vibecrafted layout must declare a session layer");
+    let default_template_start = raw_layout
+        .find("default_tab_template {")
+        .expect("vibecrafted layout must declare a content template");
+    let explicit_tabs_start = raw_layout
+        .find("tab name=\"Start here\"")
+        .expect("vibecrafted layout must declare its first content tab");
+    let session_layer = &raw_layout[session_layer_start..default_template_start];
+    let default_template = &raw_layout[default_template_start..explicit_tabs_start];
+    for chrome in ["compact-bar", "session-manager", "status-bar"] {
+        assert!(
+            session_layer.contains(chrome),
+            "session layer must own {chrome}"
+        );
+        assert!(
+            session_layer.contains(&format!("session_canvas_kind \"{chrome}\"")),
+            "session layer must preserve the stable singleton role for {chrome}"
+        );
+        assert!(
+            !default_template.contains(chrome),
+            "content-only default_tab_template must not own {chrome}"
+        );
+    }
+
+    let (layout, _config) =
+        Layout::from_default_assets(Path::new("vibecrafted"), None, Config::default()).unwrap();
+    assert!(layout.session_layer.is_some());
+    for (_, tiled, _) in layout.tabs() {
+        let runs = tiled.extract_run_instructions();
+        for chrome in ["compact-bar", "session-manager", "status-bar"] {
+            assert_eq!(
+                runs.iter()
+                    .filter(|run| run.as_ref().is_some_and(|run| {
+                        matches!(run, Run::Plugin(plugin) if plugin.location_string() == chrome)
+                    }))
+                    .count(),
+                1,
+                "each materialized tab view must project {chrome} exactly once"
+            );
+        }
+    }
+}
+
+#[test]
+fn default_layout_new_tabs_use_the_session_canvas() {
+    let (layout, _config) =
+        Layout::from_default_assets(Path::new("default"), None, Config::default()).unwrap();
+    let (tiled, _) = layout.new_tab();
+    let runs = tiled.extract_run_instructions();
+
+    for (chrome, kind) in [
+        ("tab-bar", "compact-bar"),
+        ("session-manager", "session-manager"),
+        ("status-bar", "status-bar"),
+    ] {
+        let plugin = runs
+            .iter()
+            .find_map(|run| match run {
+                Some(Run::Plugin(plugin)) if plugin.location_string() == chrome => Some(plugin),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("default session canvas omitted {chrome}"));
+        let configuration = match plugin {
+            RunPluginOrAlias::RunPlugin(plugin) => Some(&plugin.configuration),
+            RunPluginOrAlias::Alias(alias) => alias.configuration.as_ref(),
+        }
+        .expect("session canvas plugin must carry role configuration");
+        assert_eq!(
+            configuration
+                .inner()
+                .get("session_canvas")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            configuration
+                .inner()
+                .get("session_canvas_kind")
+                .map(String::as_str),
+            Some(kind)
+        );
+    }
+}
+
+#[test]
+fn product_layouts_always_include_sessions_rail() {
+    // Contract: left Sessions column is not optional on product surfaces.
+    // Every built-in product layout must embed session-manager with rail true
+    // (session_layer, a legacy default template, or an explicit pane). Legacy
+    // compact/classic/strider are deliberately off the product picker.
+    for layout_name in [
+        "default",
+        "vibecrafted",
+        "vc-dashboard",
+        "vc-workflow",
+        "vc-marbles",
+        "vc-research",
+    ] {
+        let (_path, raw_layout, swap) =
+            Layout::stringified_from_default_assets(Path::new(layout_name)).unwrap();
+        let combined = match &swap {
+            Some((_, swap_body)) => format!("{raw_layout}\n{swap_body}"),
+            None => raw_layout.clone(),
+        };
+        assert!(
+            combined.contains("session-manager"),
+            "{layout_name}: missing session-manager (Sessions rail)"
+        );
+        assert!(
+            combined.contains("rail true") || combined.contains("rail \"true\""),
+            "{layout_name}: session-manager must set rail true"
+        );
+        // Parse must succeed — broken kdl is not "optional rail".
+        let (layout, _config) =
+            Layout::from_default_assets(Path::new(layout_name), None, Config::default()).unwrap();
+        assert!(
+            layout.has_tabs() || !layout.is_empty(),
+            "{layout_name}: empty after parse"
+        );
+    }
+}
+
+#[test]
+fn product_picker_excludes_legacy_no_rail_zellij_layouts() {
+    let (available, _) = Layout::list_available_layouts(None, &Some("vibecrafted".to_owned()));
+    let names: Vec<_> = available
+        .iter()
+        .filter_map(|info| match info {
+            LayoutInfo::BuiltIn(name) => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    for banned in [
+        "strider",
+        "compact",
+        "classic",
+        "welcome",
+        "disable-status-bar",
+        "no-plugins",
+    ] {
+        assert!(
+            !names.contains(&banned),
+            "product picker must not offer legacy no-rail layout {banned}"
+        );
+    }
+    for required in [
+        "default",
+        "vibecrafted",
+        "vc-dashboard",
+        "vc-workflow",
+        "vc-marbles",
+        "vc-research",
+    ] {
+        assert!(
+            names.contains(&required),
+            "product picker missing {required}"
+        );
+    }
 }
 
 #[test]
@@ -2327,14 +2557,17 @@ fn env_var_expansion() {
     // set environment variables for test, keeping track of existing values.
     for (key, value) in env_vars {
         old_vars.push((key, std::env::var(key).ok()));
-        std::env::set_var(key, value);
+        // TODO: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var(key, value) };
     }
     let layout = Layout::from_kdl(raw_layout, Some("layout_file_name".into()), None, None);
     // restore environment.
     for (key, opt) in old_vars {
         match opt {
-            Some(value) => std::env::set_var(key, &value),
-            None => std::env::remove_var(key),
+            // TODO: Audit that the environment access only happens in single-threaded code.
+            Some(value) => unsafe { std::env::set_var(key, &value) },
+            // TODO: Audit that the environment access only happens in single-threaded code.
+            None => unsafe { std::env::remove_var(key) },
         }
     }
     let layout = layout.unwrap();
@@ -2343,7 +2576,8 @@ fn env_var_expansion() {
 
 #[test]
 fn env_var_missing() {
-    std::env::remove_var("SOME_UNIQUE_VALUE");
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("SOME_UNIQUE_VALUE") };
     let kdl_layout = r#"
         layout {
             cwd "$SOME_UNIQUE_VALUE"

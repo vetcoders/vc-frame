@@ -1,6 +1,6 @@
-use crate::panes::PaneId;
 use crate::ClientId;
-use std::collections::{BTreeMap, HashMap};
+use crate::panes::PaneId;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use zellij_utils::common_path::common_path_all;
@@ -11,8 +11,8 @@ use zellij_utils::{
     input::layout::{Layout, Run, RunPlugin, RunPluginOrAlias},
     input::plugins::PluginAliases,
     session_serialization::{
-        extract_command_and_args, extract_edit_and_line_number, extract_plugin_and_config,
-        GlobalLayoutManifest, PaneLayoutManifest, TabLayoutManifest,
+        GlobalLayoutManifest, PaneLayoutManifest, TabLayoutManifest, extract_command_and_args,
+        extract_edit_and_line_number, extract_plugin_and_config,
     },
 };
 
@@ -38,25 +38,25 @@ impl SessionLayoutMetadata {
         }
         for tab in self.tabs.iter_mut() {
             for tiled_pane in tab.tiled_panes.iter_mut() {
-                if let Some(Run::Command(run_command)) = tiled_pane.run.as_mut() {
-                    if Self::is_default_shell(
+                if let Some(Run::Command(run_command)) = tiled_pane.run.as_mut()
+                    && Self::is_default_shell(
                         self.default_shell.as_ref(),
                         &run_command.command.display().to_string(),
                         &run_command.args,
-                    ) {
-                        tiled_pane.run = None;
-                    }
+                    )
+                {
+                    tiled_pane.run = None;
                 }
             }
             for floating_pane in tab.floating_panes.iter_mut() {
-                if let Some(Run::Command(run_command)) = floating_pane.run.as_mut() {
-                    if Self::is_default_shell(
+                if let Some(Run::Command(run_command)) = floating_pane.run.as_mut()
+                    && Self::is_default_shell(
                         self.default_shell.as_ref(),
                         &run_command.command.display().to_string(),
                         &run_command.args,
-                    ) {
-                        floating_pane.run = None;
-                    }
+                    )
+                {
+                    floating_pane.run = None;
                 }
             }
         }
@@ -120,14 +120,14 @@ impl SessionLayoutMetadata {
         for tab in &self.tabs {
             for tiled_pane in &tab.tiled_panes {
                 match tiled_pane.run.as_ref() {
-                    Some(Run::Command(run_command)) => {
+                    Some(Run::Command(run_command))
                         if !Self::is_default_shell(
                             self.default_shell.as_ref(),
                             &run_command.command.display().to_string(),
                             &run_command.args,
-                        ) {
-                            return true;
-                        }
+                        ) =>
+                    {
+                        return true;
                     },
                     Some(Run::EditFile(_, _, _)) => return true,
                     _ => {},
@@ -135,14 +135,14 @@ impl SessionLayoutMetadata {
             }
             for floating_pane in &tab.floating_panes {
                 match floating_pane.run.as_ref() {
-                    Some(Run::Command(run_command)) => {
+                    Some(Run::Command(run_command))
                         if !Self::is_default_shell(
                             self.default_shell.as_ref(),
                             &run_command.command.display().to_string(),
                             &run_command.args,
-                        ) {
-                            return true;
-                        }
+                        ) =>
+                    {
+                        return true;
                     },
                     Some(Run::EditFile(_, _, _)) => return true,
                     _ => {},
@@ -169,24 +169,24 @@ impl SessionLayoutMetadata {
     }
     fn should_exclude_from_count(&self, pane: &PaneLayoutMetadata) -> bool {
         if let Some(Run::Plugin(run_plugin)) = &pane.run {
+            // Match by tag only so vc-frame: and legacy zellij: both exclude.
             let location_string = run_plugin.location_string();
-            if location_string == "zellij:about" {
-                return true;
-            }
-            if location_string == "zellij:session-manager" {
-                return true;
-            }
-            if location_string == "zellij:plugin-manager" {
-                return true;
-            }
-            if location_string == "zellij:configuration-manager" {
-                return true;
-            }
-            if location_string == "zellij:share" {
-                return true;
-            }
+            let tag = location_string
+                .rsplit_once(':')
+                .map(|(_, t)| t)
+                .unwrap_or(location_string.as_str());
+            matches!(
+                tag,
+                "about"
+                    | "session-manager"
+                    | "plugin-manager"
+                    | "configuration-manager"
+                    | "configuration"
+                    | "share"
+            )
+        } else {
+            false
         }
-        false
     }
     fn is_default_shell(
         default_shell: Option<&PathBuf>,
@@ -206,6 +206,7 @@ impl SessionLayoutMetadata {
     pub fn add_tab(
         &mut self,
         name: String,
+        tab_instance_id: String,
         is_focused: bool,
         hide_floating_panes: bool,
         tiled_panes: Vec<PaneLayoutMetadata>,
@@ -213,6 +214,7 @@ impl SessionLayoutMetadata {
     ) {
         self.tabs.push(TabLayoutMetadata {
             name: Some(name),
+            tab_instance_id,
             is_focused,
             hide_floating_panes,
             tiled_panes,
@@ -251,6 +253,22 @@ impl SessionLayoutMetadata {
         }
         plugin_ids
     }
+    /// Plugin panes whose metadata carries no `run` identity at all. Only these
+    /// lose information when the WASM bridge cannot resolve their command —
+    /// parked or not-yet-activated chrome keeps the pane's own `invoked_with`.
+    pub fn plugin_ids_missing_run(&self) -> HashSet<u32> {
+        let mut plugin_ids = HashSet::new();
+        for tab in &self.tabs {
+            for pane_layout_metadata in tab.tiled_panes.iter().chain(tab.floating_panes.iter()) {
+                if let PaneId::Plugin(id) = pane_layout_metadata.id
+                    && pane_layout_metadata.run.is_none()
+                {
+                    plugin_ids.insert(id);
+                }
+            }
+        }
+        plugin_ids
+    }
     pub fn remove_plugin_from_layout(&mut self, plugin_id_to_remove: u32) {
         for tab in &mut self.tabs {
             // Filter tiled panes
@@ -277,19 +295,18 @@ impl SessionLayoutMetadata {
         mut terminal_ids_to_commands: HashMap<u32, Vec<String>>,
     ) {
         let mut update_cmd_in_pane_metadata = |pane_layout_metadata: &mut PaneLayoutMetadata| {
-            if let PaneId::Terminal(id) = pane_layout_metadata.id {
-                if let Some(command) = terminal_ids_to_commands.remove(&id) {
-                    let mut command_line = command.iter();
-                    if let Some(command_name) = command_line.next() {
-                        let args: Vec<String> = command_line.map(|c| c.to_owned()).collect();
-                        if Self::is_default_shell(self.default_shell.as_ref(), command_name, &args)
-                        {
-                            pane_layout_metadata.run = None;
-                        } else {
-                            let mut run_command = RunCommand::new(PathBuf::from(command_name));
-                            run_command.args = args;
-                            pane_layout_metadata.run = Some(Run::Command(run_command));
-                        }
+            if let PaneId::Terminal(id) = pane_layout_metadata.id
+                && let Some(command) = terminal_ids_to_commands.remove(&id)
+            {
+                let mut command_line = command.iter();
+                if let Some(command_name) = command_line.next() {
+                    let args: Vec<String> = command_line.map(|c| c.to_owned()).collect();
+                    if Self::is_default_shell(self.default_shell.as_ref(), command_name, &args) {
+                        pane_layout_metadata.run = None;
+                    } else {
+                        let mut run_command = RunCommand::new(PathBuf::from(command_name));
+                        run_command.args = args;
+                        pane_layout_metadata.run = Some(Run::Command(run_command));
                     }
                 }
             }
@@ -315,10 +332,10 @@ impl SessionLayoutMetadata {
             self.global_cwd = Some(common_path_between_cwds);
         }
         let mut update_cwd_in_pane_metadata = |pane_layout_metadata: &mut PaneLayoutMetadata| {
-            if let PaneId::Terminal(id) = pane_layout_metadata.id {
-                if let Some(cwd) = terminal_ids_to_cwds.remove(&id) {
-                    pane_layout_metadata.cwd = Some(cwd);
-                }
+            if let PaneId::Terminal(id) = pane_layout_metadata.id
+                && let Some(cwd) = terminal_ids_to_cwds.remove(&id)
+            {
+                pane_layout_metadata.cwd = Some(cwd);
             }
         };
         for tab in self.tabs.iter_mut() {
@@ -332,11 +349,11 @@ impl SessionLayoutMetadata {
     }
     pub fn update_plugin_cmds(&mut self, mut plugin_ids_to_run_plugins: HashMap<u32, RunPlugin>) {
         let mut update_cmd_in_pane_metadata = |pane_layout_metadata: &mut PaneLayoutMetadata| {
-            if let PaneId::Plugin(id) = pane_layout_metadata.id {
-                if let Some(run_plugin) = plugin_ids_to_run_plugins.remove(&id) {
-                    pane_layout_metadata.run =
-                        Some(Run::Plugin(RunPluginOrAlias::RunPlugin(run_plugin)));
-                }
+            if let PaneId::Plugin(id) = pane_layout_metadata.id
+                && let Some(run_plugin) = plugin_ids_to_run_plugins.remove(&id)
+            {
+                pane_layout_metadata.run =
+                    Some(Run::Plugin(RunPluginOrAlias::RunPlugin(run_plugin)));
             }
         };
         for tab in self.tabs.iter_mut() {
@@ -492,6 +509,7 @@ impl From<SessionLayoutMetadata> for GlobalLayoutManifest {
 impl From<TabLayoutMetadata> for TabLayoutManifest {
     fn from(val: TabLayoutMetadata) -> Self {
         TabLayoutManifest {
+            tab_instance_id: val.tab_instance_id,
             tiled_panes: val.tiled_panes.into_iter().map(|t| t.into()).collect(),
             floating_panes: val.floating_panes.into_iter().map(|t| t.into()).collect(),
             is_focused: val.is_focused,
@@ -540,6 +558,7 @@ impl From<PaneLayoutMetadata> for PaneLayoutManifest {
 #[derive(Default, Debug, Clone)]
 pub struct TabLayoutMetadata {
     name: Option<String>,
+    tab_instance_id: String,
     tiled_panes: Vec<PaneLayoutMetadata>,
     floating_panes: Vec<PaneLayoutMetadata>,
     is_focused: bool,
@@ -699,7 +718,14 @@ mod tests {
             default_editor: Some(PathBuf::from(editor)),
             ..Default::default()
         };
-        meta.add_tab("tab1".to_string(), true, false, panes, vec![]);
+        meta.add_tab(
+            "tab1".to_string(),
+            "11111111111111111111111111111111".to_string(),
+            true,
+            false,
+            panes,
+            vec![],
+        );
         meta
     }
 

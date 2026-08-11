@@ -4,20 +4,20 @@ use crate::web_client::control_message::{
     WebClientToWebServerControlMessagePayload, WebServerToWebClientControlMessage,
 };
 use crate::web_client::message_handlers::{
-    parse_stdin, render_to_client, send_control_messages_to_client, StdinSession,
+    StdinSession, parse_stdin, render_to_client, send_control_messages_to_client,
 };
 use crate::web_client::server_listener::zellij_server_listener;
 use crate::web_client::types::{AppState, TerminalParams};
 
 use axum::{
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
         Path as AxumPath, Query, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
     },
     response::IntoResponse,
 };
 use futures::StreamExt;
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::{Arc, atomic::AtomicBool};
 use tokio_util::sync::CancellationToken;
 use zellij_utils::{
     input::mouse::MouseEvent,
@@ -182,17 +182,18 @@ async fn handle_ws_terminal(
 
     let (attachment_complete_tx, attachment_complete_rx) = tokio::sync::oneshot::channel();
 
-    zellij_server_listener(
-        os_input.box_clone(),
-        state.connection_table.clone(),
-        session_name.map(|p| p.0),
-        state.config.lock().unwrap().clone(),
-        state.config_options.clone(),
-        Some(state.config_file_path.clone()),
-        web_client_id.clone(),
-        state.session_manager.clone(),
-        Some(attachment_complete_tx),
-    );
+    use crate::web_client::server_listener::ServerListenerOptions;
+    zellij_server_listener(ServerListenerOptions {
+        os_input: os_input.box_clone(),
+        connection_table: state.connection_table.clone(),
+        session_name: session_name.map(|p| p.0),
+        config: state.config.lock().unwrap().clone(),
+        config_options: state.config_options.clone(),
+        config_file_path: Some(state.config_file_path.clone()),
+        web_client_id: web_client_id.clone(),
+        session_manager: state.session_manager.clone(),
+        attachment_complete_tx: Some(attachment_complete_tx),
+    });
 
     let terminal_channel_cancellation_token = CancellationToken::new();
     let should_not_reconnect = state
@@ -252,18 +253,21 @@ async fn handle_ws_terminal(
                 // Idle timeout fired with `pending_finalize` set:
                 // drain any ambiguous-but-complete events termwiz held
                 // back on the previous frame.
-                if let Some(client_connection) = state
+                match state
                     .connection_table
                     .lock()
                     .unwrap()
                     .get_client_os_api(&web_client_id)
                     .map(|api| api.box_clone())
                 {
-                    stdin_session.finalize(&*client_connection, &mut mouse_old_event);
-                } else {
-                    // No client to send drained events to — clear the
-                    // flag so we don't busy-loop the idle timer.
-                    stdin_session.clear_pending_finalize();
+                    Some(client_connection) => {
+                        stdin_session.finalize(&*client_connection, &mut mouse_old_event);
+                    },
+                    _ => {
+                        // No client to send drained events to — clear the
+                        // flag so we don't busy-loop the idle timer.
+                        stdin_session.clear_pending_finalize();
+                    },
                 }
                 continue;
             },

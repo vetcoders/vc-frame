@@ -36,18 +36,19 @@ sixel-tokenizer = { version = "0.1.0", default-features = false }
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 tempfile = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 typetag = { version = "0.1.7", default-features = false }
 unicode-width = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
 vte = { workspace = true }
-wasmi_wasi = { version = "0.51.3" }
+wasmi_wasi = { version = "1.1.0" }
 zellij-utils = { workspace = true }
 once_cell = "1.19"
 num_cpus = { workspace = true }
 
 [dependencies.wasmi]
-version = "0.51.3"
+version = "1.1.0"
 default-features = false
 features = ["std"]
 
@@ -71,7 +72,7 @@ windows-sys = { workspace = true, features = [
 [dev-dependencies]
 insta = "1.6.0"
 tempfile = "3.2.0"
-wasmi = { version = "0.51.3", features = ["std"] }
+wasmi = { version = "1.1.0", features = ["std"] }
 
 [features]
 web_server_capability = ["zellij-utils/web_server_capability"]

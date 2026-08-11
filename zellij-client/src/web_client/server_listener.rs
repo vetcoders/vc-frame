@@ -20,17 +20,30 @@ use zellij_utils::{
     setup::Setup,
 };
 
-pub fn zellij_server_listener(
-    os_input: Box<dyn ClientOsApi>,
-    connection_table: Arc<Mutex<ConnectionTable>>,
-    session_name: Option<String>,
-    mut config: Config,
-    mut config_options: Options,
-    config_file_path: Option<PathBuf>,
-    web_client_id: String,
-    session_manager: Arc<dyn SessionManager>,
-    attachment_complete_tx: Option<tokio::sync::oneshot::Sender<()>>,
-) {
+pub struct ServerListenerOptions {
+    pub os_input: Box<dyn ClientOsApi>,
+    pub connection_table: Arc<Mutex<ConnectionTable>>,
+    pub session_name: Option<String>,
+    pub config: Config,
+    pub config_options: Options,
+    pub config_file_path: Option<PathBuf>,
+    pub web_client_id: String,
+    pub session_manager: Arc<dyn SessionManager>,
+    pub attachment_complete_tx: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+pub fn zellij_server_listener(opts: ServerListenerOptions) {
+    let ServerListenerOptions {
+        os_input,
+        connection_table,
+        session_name,
+        mut config,
+        mut config_options,
+        config_file_path,
+        web_client_id,
+        session_manager,
+        attachment_complete_tx,
+    } = opts;
     let _server_listener_thread = std::thread::Builder::new()
         .name("server_listener".to_string())
         .spawn({
@@ -197,8 +210,8 @@ pub fn zellij_server_listener(
                             },
                             Some(ServerToClientMsg::ConfigFileUpdated) => {
 
-                                if let Some(config_file_path) = &config_file_path {
-                                    if let Ok(new_config) = Config::from_path(config_file_path, Some(config.clone())) {
+                                if let Some(config_file_path) = &config_file_path
+                                    && let Ok(new_config) = Config::from_path(config_file_path, Some(config.clone())) {
                                         // Re-seed host-query cache for this client
                                         // so OSC 10/11/4 replies follow the new theme.
                                         for seed in build_host_query_seed_msgs(&new_config, &config_options) {
@@ -245,7 +258,6 @@ pub fn zellij_server_listener(
                                             }
                                         }
                                     }
-                                }
                             },
                             // Subscribe-only messages — not relevant for web clients
                             Some(ServerToClientMsg::PaneRenderUpdate { .. }) => {},

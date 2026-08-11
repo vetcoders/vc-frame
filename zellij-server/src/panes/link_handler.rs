@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 
 use super::LinkAnchor;
 
@@ -8,6 +9,11 @@ const TERMINATOR: &str = "\u{1b}\\";
 pub struct LinkHandler {
     links: HashMap<u16, Link>,
     link_index: u16,
+    /// Anchor ids already reported as missing. `output_osc8` runs per character
+    /// inside the render loop; a single stale anchor must not turn into a
+    /// warn-per-cell log storm (observed: 22k+ identical lines in 30 minutes).
+    /// Interior mutability because the render path only holds `Ref<Self>`.
+    missing_link_ids_warned: RefCell<HashSet<u16>>,
 }
 #[derive(Debug, Clone)]
 pub struct Link {
@@ -20,6 +26,7 @@ impl LinkHandler {
         Self {
             links: HashMap::new(),
             link_index: 0,
+            missing_link_ids_warned: RefCell::new(HashSet::new()),
         }
     }
 
@@ -75,9 +82,10 @@ impl LinkHandler {
                     format!("\u{1b}]8;{};{}{}", id, link.uri, TERMINATOR)
                 });
 
-                if output.is_none() {
+                if output.is_none() && self.missing_link_ids_warned.borrow_mut().insert(index) {
                     log::warn!(
-                        "attempted to output osc8 link start, but id: {} was not found!",
+                        "attempted to output osc8 link start, but id: {} was not found! \
+                         (further occurrences of this id are suppressed)",
                         index
                     );
                 }
@@ -144,5 +152,15 @@ mod tests {
         let link_handler = LinkHandler::default();
         let anchor = LinkAnchor::Start(100);
         assert_eq!(link_handler.output_osc8(Some(anchor)), None);
+    }
+
+    #[test]
+    fn repeated_missing_link_id_is_recorded_once() {
+        let link_handler = LinkHandler::default();
+        let anchor = LinkAnchor::Start(100);
+        // Render loops call this per character; the miss must be idempotent.
+        assert_eq!(link_handler.output_osc8(Some(anchor)), None);
+        assert_eq!(link_handler.output_osc8(Some(anchor)), None);
+        assert_eq!(link_handler.missing_link_ids_warned.borrow().len(), 1);
     }
 }

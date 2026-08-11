@@ -21,6 +21,7 @@ pub struct GlobalLayoutManifest {
 
 #[derive(Default, Debug, Clone)]
 pub struct TabLayoutManifest {
+    pub tab_instance_id: String,
     pub tiled_panes: Vec<PaneLayoutManifest>,
     pub floating_panes: Vec<PaneLayoutManifest>,
     pub is_focused: bool,
@@ -94,6 +95,7 @@ pub fn serialize_session_layout(
 
 fn serialize_tab(
     tab_name: String,
+    tab_instance_id: String,
     is_focused: bool,
     hide_floating_panes: bool,
     tiled_panes: &[PaneLayoutManifest],
@@ -116,6 +118,11 @@ fn serialize_tab(
             serialized_tab
                 .entries_mut()
                 .push(KdlEntry::new_prop("name", tab_name));
+            if !tab_instance_id.is_empty() {
+                serialized_tab
+                    .entries_mut()
+                    .push(KdlEntry::new_prop("vc_tab_instance_id", tab_instance_id));
+            }
             if is_focused {
                 serialized_tab
                     .entries_mut()
@@ -323,15 +330,16 @@ fn serialize_pane_title_and_attributes(
             .entries_mut()
             .push(KdlEntry::new_prop("focus", KdlValue::Bool(true)));
     }
-    if let Some(initial_pane_contents) = initial_pane_contents.as_ref() {
-        if command.is_none() && edit.is_none() {
-            let file_name = format!("initial_contents_{}", pane_contents.keys().len() + 1);
-            kdl_node
-                .entries_mut()
-                .push(KdlEntry::new_prop("contents_file", file_name.clone()));
+    if let Some(initial_pane_contents) = initial_pane_contents.as_ref()
+        && command.is_none()
+        && edit.is_none()
+    {
+        let file_name = format!("initial_contents_{}", pane_contents.keys().len() + 1);
+        kdl_node
+            .entries_mut()
+            .push(KdlEntry::new_prop("contents_file", file_name.clone()));
 
-            pane_contents.insert(file_name, initial_pane_contents.clone());
-        }
+        pane_contents.insert(file_name, initial_pane_contents.clone());
     }
 }
 
@@ -637,6 +645,10 @@ fn serialize_multiple_tabs(
     tabs: Vec<(String, TabLayoutManifest)>,
     pane_contents: &mut BTreeMap<String, String>,
 ) -> Result<Vec<KdlNode>, &'static str> {
+    // Best-effort: a tab whose pane geometry is transiently indecomposable
+    // (mid-resize, chrome swap) must not block persisting every other tab —
+    // an all-or-nothing failure here means the session never reaches disk.
+    let had_tabs = !tabs.is_empty();
     let mut serialized_tabs: Vec<KdlNode> = vec![];
     for (tab_name, tab_layout_manifest) in tabs {
         let tiled_panes = tab_layout_manifest.tiled_panes;
@@ -644,6 +656,7 @@ fn serialize_multiple_tabs(
         let hide_floating_panes = tab_layout_manifest.hide_floating_panes;
         let serialized = serialize_tab(
             tab_name.clone(),
+            tab_layout_manifest.tab_instance_id,
             tab_layout_manifest.is_focused,
             hide_floating_panes,
             &tiled_panes,
@@ -653,8 +666,15 @@ fn serialize_multiple_tabs(
         if let Some(serialized) = serialized {
             serialized_tabs.push(serialized);
         } else {
-            return Err("Failed to serialize session state");
+            log::warn!(
+                "Failed to serialize tab '{}' (pane geometry did not decompose into splits); \
+                 skipping it in this session snapshot",
+                tab_name
+            );
         }
+    }
+    if had_tabs && serialized_tabs.is_empty() {
+        return Err("Failed to serialize session state");
     }
     Ok(serialized_tabs)
 }
@@ -873,10 +893,10 @@ fn get_floating_panes_layout_from_panegeoms(
         .iter()
         .map(|m| {
             let mut run = m.run.clone();
-            if let Some(cwd) = &m.cwd {
-                if let Some(r) = run.as_mut() {
-                    r.add_cwd(cwd)
-                }
+            if let Some(cwd) = &m.cwd
+                && let Some(r) = run.as_mut()
+            {
+                r.add_cwd(cwd)
             }
             FloatingPaneLayout {
                 name: m.title.clone(),
@@ -1376,6 +1396,29 @@ mod tests {
         };
         let kdl = serialize_session_layout(global_layout_manifest).unwrap();
         assert_snapshot!(kdl.0);
+    }
+
+    #[test]
+    fn serializes_only_assigned_tab_instance_identity() {
+        let assigned = GlobalLayoutManifest {
+            tabs: vec![(
+                "owned".to_owned(),
+                TabLayoutManifest {
+                    tab_instance_id: "33333333333333333333333333333333".to_owned(),
+                    ..Default::default()
+                },
+            )],
+            ..Default::default()
+        };
+        let assigned_kdl = serialize_session_layout(assigned).unwrap().0;
+        assert!(assigned_kdl.contains("vc_tab_instance_id=\"33333333333333333333333333333333\""));
+
+        let fresh = GlobalLayoutManifest {
+            tabs: vec![("fresh".to_owned(), TabLayoutManifest::default())],
+            ..Default::default()
+        };
+        let fresh_kdl = serialize_session_layout(fresh).unwrap().0;
+        assert!(!fresh_kdl.contains("vc_tab_instance_id"));
     }
     #[test]
     fn can_serialize_tab_focus() {
@@ -2234,7 +2277,8 @@ mod tests {
 
     fn get_dim(dim_hm: &Value) -> Dimension {
         let constr_str = dim_hm["constraint"].to_string();
-        let dim = if constr_str.contains("Fixed") {
+
+        if constr_str.contains("Fixed") {
             let value = &constr_str[7..constr_str.len() - 2];
             Dimension::fixed(value.parse().unwrap())
         } else if constr_str.contains("Percent") {
@@ -2244,7 +2288,6 @@ mod tests {
             dim
         } else {
             panic!("Constraint is nor a percent nor fixed");
-        };
-        dim
+        }
     }
 }

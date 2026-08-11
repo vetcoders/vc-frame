@@ -5,9 +5,10 @@ use std::rc::Rc;
 
 use crate::pages::{
     ActiveComponent, BulletinList, ClickAction, ComponentLine, Page, TextOrCustomRender,
+    VC_FRAME_REPOSITORY_URL,
 };
 
-pub const MAX_TIP_INDEX: usize = 11;
+pub const MAX_TIP_INDEX: usize = 12;
 
 impl Page {
     pub fn new_tip_screen(
@@ -39,6 +40,8 @@ impl Page {
             Page::tip_11(link_executable)
         } else if tip_index == 11 {
             Page::tip_12(link_executable, base_mode)
+        } else if tip_index == 12 {
+            Page::tip_13(link_executable)
         } else {
             Page::tip_1(link_executable)
         }
@@ -46,16 +49,16 @@ impl Page {
     pub fn tip_1(link_executable: Rc<RefCell<String>>) -> Self {
         Page::new()
             .main_screen()
-            .with_title(Text::new("Zellij Tip #1").color_range(0, ..))
+            .with_title(Text::new("vc-frame Tip #1").color_range(0, ..))
             .with_paragraph(vec![
                 ComponentLine::new(vec![
                     ActiveComponent::new(TextOrCustomRender::Text(
-                            Text::new("Check out the Zellij screencasts/tutorials to learn how to better take advantage")
+                            Text::new("Check out the vc-frame screencasts/tutorials to learn how to better take advantage")
                     ))
                 ]),
                 ComponentLine::new(vec![
                     ActiveComponent::new(TextOrCustomRender::Text(
-                            Text::new("of all the Zellij features. Learn about basic usage, layouts, sessions and more!")
+                            Text::new("of all the vc-frame features. Learn about basic usage, layouts, sessions and more!")
                     ))
                 ])
             ])
@@ -79,7 +82,7 @@ impl Page {
                         Box::new(sponsors_link_text_selected_len),
                     ))
                     .with_left_click_action(ClickAction::new_open_link(
-                        "https://github.com/sponsors/imsnif".to_owned(),
+                        VC_FRAME_REPOSITORY_URL.to_owned(),
                         link_executable.clone(),
                     )),
             ])])
@@ -90,7 +93,7 @@ impl Page {
     pub fn tip_2(link_executable: Rc<RefCell<String>>, base_mode: Rc<RefCell<InputMode>>) -> Self {
         Page::new()
             .main_screen()
-            .with_title(Text::new("Zellij Tip #2").color_range(0, ..))
+            .with_title(Text::new("vc-frame Tip #2").color_range(0, ..))
             .with_paragraph(vec![
                 ComponentLine::new(vec![
                     ActiveComponent::new(TextOrCustomRender::Text(
@@ -130,7 +133,7 @@ impl Page {
                         Box::new(sponsors_link_text_selected_len),
                     ))
                     .with_left_click_action(ClickAction::new_open_link(
-                        "https://github.com/sponsors/imsnif".to_owned(),
+                        VC_FRAME_REPOSITORY_URL.to_owned(),
                         link_executable.clone(),
                     )),
             ])])
@@ -141,7 +144,7 @@ impl Page {
     pub fn tip_3(link_executable: Rc<RefCell<String>>) -> Self {
         Page::new()
             .main_screen()
-            .with_title(Text::new("Zellij Tip #3").color_range(0, ..))
+            .with_title(Text::new("vc-frame Tip #3").color_range(0, ..))
             .with_paragraph(vec![
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new("Want to make your floating pane bigger?"),
@@ -162,7 +165,7 @@ impl Page {
                         Box::new(sponsors_link_text_selected_len),
                     ))
                     .with_left_click_action(ClickAction::new_open_link(
-                        "https://github.com/sponsors/imsnif".to_owned(),
+                        VC_FRAME_REPOSITORY_URL.to_owned(),
                         link_executable.clone(),
                     )),
             ])])
@@ -173,7 +176,7 @@ impl Page {
     fn tip_4(link_executable: Rc<RefCell<String>>, base_mode: Rc<RefCell<InputMode>>) -> Page {
         Page::new()
             .main_screen()
-            .with_title(Text::new("Zellij tip #4").color_range(0, ..))
+            .with_title(Text::new("vc-frame tip #4").color_range(0, ..))
             .with_paragraph(vec![
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new("It's possible to \"pin\" a floating pane so that it will always"),
@@ -220,7 +223,7 @@ impl Page {
                         Box::new(sponsors_link_text_selected_len),
                     ))
                     .with_left_click_action(ClickAction::new_open_link(
-                        "https://github.com/sponsors/imsnif".to_owned(),
+                        VC_FRAME_REPOSITORY_URL.to_owned(),
                         link_executable.clone(),
                     )),
             ])])
@@ -231,7 +234,7 @@ impl Page {
     pub fn tip_5(link_executable: Rc<RefCell<String>>) -> Page {
         Page::new()
             .main_screen()
-            .with_title(Text::new("Zellij Tip #5").color_range(0, ..))
+            .with_title(Text::new("vc-frame Tip #5").color_range(0, ..))
             .with_paragraph(vec![
                 ComponentLine::new(vec![
                     ActiveComponent::new(TextOrCustomRender::Text(Text::new("Panes can be resized into stacks to be managed easier."))),
@@ -266,7 +269,7 @@ impl Page {
             .with_paragraph(vec![
                 ComponentLine::new(vec![
                     ActiveComponent::new(TextOrCustomRender::Text(
-                            Text::new("To disable this behavior, add stacked_resize false to the Zellij Configuration")
+                            Text::new("To disable this behavior, add stacked_resize false to the vc-frame Configuration")
                                 .color_range(3, 30..=49)
                     )),
                 ])
@@ -290,7 +293,7 @@ impl Page {
                         Box::new(sponsors_link_text_selected_len),
                     ))
                     .with_left_click_action(ClickAction::new_open_link(
-                        "https://github.com/sponsors/imsnif".to_owned(),
+                        VC_FRAME_REPOSITORY_URL.to_owned(),
                         link_executable.clone(),
                     )),
             ])])
@@ -301,10 +304,10 @@ impl Page {
     pub fn tip_6(link_executable: Rc<RefCell<String>>, base_mode: Rc<RefCell<InputMode>>) -> Page {
         Page::new()
             .main_screen()
-            .with_title(Text::new("Zellij Tip #6").color_range(0, ..))
+            .with_title(Text::new("vc-frame Tip #6").color_range(0, ..))
             .with_paragraph(vec![
                 ComponentLine::new(vec![
-                    ActiveComponent::new(TextOrCustomRender::Text(Text::new("Are the Zellij keybindings colliding with other applications for you?")))
+                    ActiveComponent::new(TextOrCustomRender::Text(Text::new("Are the vc-frame keybindings colliding with other applications for you?")))
                 ]),
             ])
             .with_bulletin_list(BulletinList::new(Text::new("Check out the non-colliding keybindings preset:"))
@@ -312,12 +315,12 @@ impl Page {
                     ActiveComponent::new(TextOrCustomRender::Text(
                             match *base_mode.borrow() {
                                 InputMode::Locked => {
-                                    Text::new("Open the Zellij configuration with Ctrl g + o + c")
+                                    Text::new("Open the vc-frame configuration with Ctrl g + o + c")
                                         .color_range(3, 35..=40)
                                         .color_indices(3, vec![44, 48])
                                 },
                                 _ => {
-                                    Text::new("Open the Zellij configuration with Ctrl o + c")
+                                    Text::new("Open the vc-frame configuration with Ctrl o + c")
                                         .color_range(3, 35..=40)
                                         .color_indices(3, vec![44])
                                 }
@@ -353,7 +356,7 @@ impl Page {
                         Box::new(sponsors_link_text_selected_len),
                     ))
                     .with_left_click_action(ClickAction::new_open_link(
-                        "https://github.com/sponsors/imsnif".to_owned(),
+                        VC_FRAME_REPOSITORY_URL.to_owned(),
                         link_executable.clone(),
                     )),
             ])])
@@ -364,10 +367,10 @@ impl Page {
     pub fn tip_7(link_executable: Rc<RefCell<String>>) -> Page {
         Page::new()
             .main_screen()
-            .with_title(Text::new("Zellij Tip #7").color_range(0, ..))
+            .with_title(Text::new("vc-frame Tip #7").color_range(0, ..))
             .with_paragraph(vec![ComponentLine::new(vec![ActiveComponent::new(
                 TextOrCustomRender::Text(Text::new(
-                    "Want to customize the appearance and colors of Zellij?",
+                    "Want to customize the appearance and colors of vc-frame?",
                 )),
             )])])
             .with_paragraph(vec![
@@ -412,7 +415,7 @@ impl Page {
                         Box::new(sponsors_link_text_selected_len),
                     ))
                     .with_left_click_action(ClickAction::new_open_link(
-                        "https://github.com/sponsors/imsnif".to_owned(),
+                        VC_FRAME_REPOSITORY_URL.to_owned(),
                         link_executable.clone(),
                     )),
             ])])
@@ -423,7 +426,7 @@ impl Page {
     pub fn tip_8(link_executable: Rc<RefCell<String>>) -> Page {
         Page::new()
             .main_screen()
-            .with_title(Text::new("Zellij Tip #8").color_range(0, ..))
+            .with_title(Text::new("vc-frame Tip #8").color_range(0, ..))
             .with_paragraph(vec![
                 ComponentLine::new(vec![
                     ActiveComponent::new(TextOrCustomRender::Text(
@@ -446,7 +449,7 @@ impl Page {
                         Box::new(sponsors_link_text_selected_len),
                     ))
                     .with_left_click_action(ClickAction::new_open_link(
-                        "https://github.com/sponsors/imsnif".to_owned(),
+                        VC_FRAME_REPOSITORY_URL.to_owned(),
                         link_executable.clone(),
                     )),
             ])])
@@ -457,7 +460,7 @@ impl Page {
     pub fn tip_9(link_executable: Rc<RefCell<String>>) -> Page {
         Page::new()
             .main_screen()
-            .with_title(Text::new("Zellij Tip #9").color_range(0, ..))
+            .with_title(Text::new("vc-frame Tip #9").color_range(0, ..))
             .with_paragraph(vec![
                 ComponentLine::new(vec![
                     ActiveComponent::new(TextOrCustomRender::Text(
@@ -520,7 +523,7 @@ impl Page {
                         Box::new(sponsors_link_text_selected_len),
                     ))
                     .with_left_click_action(ClickAction::new_open_link(
-                        "https://github.com/sponsors/imsnif".to_owned(),
+                        VC_FRAME_REPOSITORY_URL.to_owned(),
                         link_executable.clone(),
                     )),
             ])])
@@ -531,10 +534,10 @@ impl Page {
     pub fn tip_10(link_executable: Rc<RefCell<String>>, base_mode: Rc<RefCell<InputMode>>) -> Page {
         Page::new()
             .main_screen()
-            .with_title(Text::new("Zellij Tip #10").color_range(0, ..))
+            .with_title(Text::new("vc-frame Tip #10").color_range(0, ..))
             .with_bulletin_list(
                 BulletinList::new(
-                    Text::new("The Zellij session-manager can:").color_range(2, 11..=25),
+                    Text::new("The vc-frame session-manager can:").color_range(2, 11..=27),
                 )
                 .with_items(vec![
                     ActiveComponent::new(TextOrCustomRender::Text(Text::new(
@@ -566,7 +569,7 @@ impl Page {
             )])])
             .with_paragraph(vec![ComponentLine::new(vec![ActiveComponent::new(
                 TextOrCustomRender::Text(
-                    Text::new("You can also use it as a welcome screen with: zellij -l welcome")
+                    Text::new("You can also use it as a welcome screen with: vc-frame -l welcome")
                         .color_range(0, 46..=62),
                 ),
             )])])
@@ -578,7 +581,7 @@ impl Page {
                         Box::new(sponsors_link_text_selected_len),
                     ))
                     .with_left_click_action(ClickAction::new_open_link(
-                        "https://github.com/sponsors/imsnif".to_owned(),
+                        VC_FRAME_REPOSITORY_URL.to_owned(),
                         link_executable.clone(),
                     )),
             ])])
@@ -589,7 +592,7 @@ impl Page {
     pub fn tip_11(link_executable: Rc<RefCell<String>>) -> Page {
         Page::new()
             .main_screen()
-            .with_title(Text::new("Zellij Tip #11").color_range(0, ..))
+            .with_title(Text::new("vc-frame Tip #11").color_range(0, ..))
             .with_paragraph(vec![
                 ComponentLine::new(vec![
                     ActiveComponent::new(TextOrCustomRender::Text(
@@ -631,7 +634,7 @@ impl Page {
                         Box::new(sponsors_link_text_selected_len),
                     ))
                     .with_left_click_action(ClickAction::new_open_link(
-                        "https://github.com/sponsors/imsnif".to_owned(),
+                        VC_FRAME_REPOSITORY_URL.to_owned(),
                         link_executable.clone(),
                     )),
             ])])
@@ -642,11 +645,11 @@ impl Page {
     pub fn tip_12(link_executable: Rc<RefCell<String>>, base_mode: Rc<RefCell<InputMode>>) -> Page {
         Page::new()
             .main_screen()
-            .with_title(Text::new("Zellij Tip #12").color_range(0, ..))
+            .with_title(Text::new("vc-frame Tip #12").color_range(0, ..))
             .with_paragraph(vec![
                 ComponentLine::new(vec![
                     ActiveComponent::new(TextOrCustomRender::Text(
-                        Text::new("Zellij plugins can be loaded, reloaded and tracked from the plugin-manager.")
+                        Text::new("vc-frame plugins can be loaded, reloaded and tracked from the plugin-manager.")
                     )),
                 ]),
                 ComponentLine::new(vec![
@@ -686,7 +689,45 @@ impl Page {
                         Box::new(sponsors_link_text_selected_len),
                     ))
                     .with_left_click_action(ClickAction::new_open_link(
-                        "https://github.com/sponsors/imsnif".to_owned(),
+                        VC_FRAME_REPOSITORY_URL.to_owned(),
+                        link_executable.clone(),
+                    )),
+            ])])
+            .with_help(Box::new(|hovering_over_link, _menu_item_is_selected| {
+                tips_help_text(hovering_over_link)
+            }))
+    }
+    pub fn tip_13(link_executable: Rc<RefCell<String>>) -> Page {
+        Page::new()
+            .main_screen()
+            .with_title(Text::new("vc-frame Tip #13").color_range(0, ..))
+            .with_paragraph(vec![
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        "Cmd+E opens the Command Composer — draft long commands in a real editor.",
+                    )
+                    .color_range(3, ..=4),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new("Inside it, press ? for a built-in cheat sheet (q closes it).")
+                        .color_range(3, 17..=17),
+                ))]),
+                ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
+                    Text::new(
+                        ":wq sends the text to your shell UNEXECUTED — you press Enter yourself.",
+                    )
+                    .color_range(2, ..=2),
+                ))]),
+            ])
+            .with_paragraph(vec![ComponentLine::new(vec![
+                ActiveComponent::new(TextOrCustomRender::Text(support_the_developer_text())),
+                ActiveComponent::new(TextOrCustomRender::Text(sponsors_link_text_unselected()))
+                    .with_hover(TextOrCustomRender::CustomRender(
+                        Box::new(sponsors_link_text_selected),
+                        Box::new(sponsors_link_text_selected_len),
+                    ))
+                    .with_left_click_action(ClickAction::new_open_link(
+                        VC_FRAME_REPOSITORY_URL.to_owned(),
                         link_executable.clone(),
                     )),
             ])])
@@ -697,20 +738,21 @@ impl Page {
 }
 
 fn sponsors_link_text_unselected() -> Text {
-    Text::new("https://github.com/sponsors/imsnif")
+    Text::new(VC_FRAME_REPOSITORY_URL)
 }
 
 fn sponsors_link_text_selected(x: usize, y: usize) -> usize {
     print!(
-        "\u{1b}[{};{}H\u{1b}[m\u{1b}[1;4mhttps://github.com/sponsors/imsnif",
+        "\u{1b}[{};{}H\u{1b}[m\u{1b}[1;4m{}",
         y + 1,
-        x + 1
+        x + 1,
+        VC_FRAME_REPOSITORY_URL
     );
-    34
+    VC_FRAME_REPOSITORY_URL.chars().count()
 }
 
 fn sponsors_link_text_selected_len() -> usize {
-    34
+    VC_FRAME_REPOSITORY_URL.chars().count()
 }
 
 fn plugin_docs_link_text_selected(x: usize, y: usize) -> usize {
@@ -816,7 +858,7 @@ fn theme_list_selected_len() -> usize {
 }
 
 fn support_the_developer_text() -> Text {
-    let support_text = "Please support the VibeCrafted / Zellij craft <3: ".to_string();
+    let support_text = "Source, issues, and the vc-frame craft: ".to_string();
     Text::new(support_text).color_range(3, ..)
 }
 
@@ -837,7 +879,8 @@ fn screencasts_link_selected_len() -> Box<dyn Fn() -> usize> {
 
 fn tips_help_text(hovering_over_link: bool) -> Text {
     if hovering_over_link {
-        let help_text = "Help: Click or Shift-Click to open in browser".to_string();
+        let help_text =
+            "Help: Click → open · Shift+click URL → host · Alt+Shift path → system app".to_string();
         Text::new(help_text)
             .color_range(3, 6..=10)
             .color_range(3, 15..=25)

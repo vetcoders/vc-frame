@@ -12,14 +12,17 @@ use crate::home_unix as platform;
 use crate::home_windows as platform;
 
 #[cfg(not(test))]
-/// Goes through a predefined list and checks for an already
-/// existing config directory, returns the first match
+/// Goes through a predefined list and returns the first usable config dir.
+///
+/// Prefer a directory that already has `config.kdl` (so an empty
+/// `~/.config/vc-frame` cannot shadow the frontier install). Fall back to the
+/// first directory that merely exists.
 pub fn find_default_config_dir() -> Option<PathBuf> {
-    default_config_dirs()
-        .into_iter()
-        .filter(|p| p.is_some())
-        .find(|p| p.clone().unwrap().exists())
-        .flatten()
+    let dirs: Vec<PathBuf> = default_config_dirs().into_iter().flatten().collect();
+    dirs.iter()
+        .find(|p| p.join("config.kdl").is_file())
+        .cloned()
+        .or_else(|| dirs.into_iter().find(|p| p.exists()))
 }
 
 #[cfg(test)]
@@ -27,13 +30,30 @@ pub fn find_default_config_dir() -> Option<PathBuf> {
     None
 }
 
-/// Order in which config directories are checked
-pub(crate) fn default_config_dirs() -> Vec<Option<PathBuf>> {
+/// Order in which config directories are checked.
+///
+/// `home` first, then the vibecrafted frontier install path, then XDG and the
+/// system default. Env `VC_FRAME_CONFIG_DIR` is handled by the CLI layer before
+/// this list is consulted.
+pub fn default_config_dirs() -> Vec<Option<PathBuf>> {
     vec![
         home_config_dir(),
+        frontier_config_dir(),
         Some(xdg_config_dir()),
         Some(Path::new(SYSTEM_DEFAULT_CONFIG_DIR).to_path_buf()),
     ]
+}
+
+/// Operator frontier install: `~/.config/vetcoders/frontier/vc-frame`.
+/// Present on machines launched through vibecrafted; must beat an empty
+/// legacy home dir so configless GUI sessions land on real chrome.
+pub fn frontier_config_dir() -> Option<PathBuf> {
+    platform::home_config_dir().map(|home| {
+        // home_config_dir returns ~/.config/vc-frame — climb to ~/.config
+        home.parent()
+            .map(|cfg| cfg.join("vetcoders/frontier/vc-frame"))
+            .unwrap_or(home)
+    })
 }
 
 /// Looks for an existing dir, uses that, else returns a

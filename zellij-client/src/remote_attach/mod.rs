@@ -8,8 +8,8 @@ mod unit;
 
 pub use websockets::WebSocketConnections;
 
-use crate::os_input_output::ClientOsApi;
 use crate::RemoteClientError;
+use crate::os_input_output::ClientOsApi;
 use tokio::runtime::Handle;
 use zellij_utils::remote_session_tokens;
 
@@ -21,7 +21,7 @@ const MAX_AUTH_ATTEMPTS: u32 = 1;
 #[cfg(not(test))]
 const MAX_AUTH_ATTEMPTS: u32 = 3;
 
-/// Attach to a remote Zellij session via HTTP(S)
+/// Attach to a remote vc-frame session via HTTP(S)
 ///
 /// This function handles the complete authentication flow including:
 /// - URL validation
@@ -31,49 +31,53 @@ const MAX_AUTH_ATTEMPTS: u32 = 3;
 /// - Saving session tokens when --remember is used
 ///
 /// Returns WebSocketConnections on success
+pub struct AttachRemoteSessionOptions<'a> {
+    pub runtime: Handle,
+    pub _os_input: Box<dyn ClientOsApi>,
+    pub remote_session_url: &'a str,
+    pub token: Option<String>,
+    pub remember: bool,
+    pub forget: bool,
+    pub ca_cert: Option<&'a std::path::Path>,
+    pub insecure: bool,
+}
+
 pub fn attach_to_remote_session(
-    runtime: Handle,
-    _os_input: Box<dyn ClientOsApi>,
-    remote_session_url: &str,
-    token: Option<String>,
-    remember: bool,
-    forget: bool,
-    ca_cert: Option<&std::path::Path>,
-    insecure: bool,
+    opts: AttachRemoteSessionOptions<'_>,
 ) -> Result<WebSocketConnections, RemoteClientError> {
     // Extract server URL for token management
-    let server_url = extract_server_url(remote_session_url)?;
+    let server_url = extract_server_url(opts.remote_session_url)?;
 
     // Handle --forget flag
-    if forget {
+    if opts.forget {
         let _ = remote_session_tokens::delete_session_token(&server_url);
     }
 
     // If --token provided, delete saved session token
-    if token.is_some() {
+    if opts.token.is_some() {
         let _ = remote_session_tokens::delete_session_token(&server_url);
     }
 
-    if token.is_none() {
-        if let Some(connections) = try_to_connect_with_saved_session_token(
-            runtime.clone(),
-            remote_session_url,
+    if opts.token.is_none()
+        && let Some(connections) = try_to_connect_with_saved_session_token(
+            opts.runtime.clone(),
+            opts.remote_session_url,
             &server_url,
-            ca_cert,
-            insecure,
-        )? {
-            return Ok(connections);
-        }
+            opts.ca_cert,
+            opts.insecure,
+        )?
+    {
+        return Ok(connections);
     }
 
     // Normal auth flow with retry logic
     authenticate_with_retry(
-        runtime,
-        remote_session_url,
-        token,
-        remember,
-        ca_cert,
-        insecure,
+        opts.runtime,
+        opts.remote_session_url,
+        opts.token,
+        opts.remember,
+        opts.ca_cert,
+        opts.insecure,
     )
 }
 

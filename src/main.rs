@@ -1,11 +1,12 @@
+mod clinic;
 mod commands;
+mod run_triage_cli;
 #[cfg(test)]
 mod tests;
 
-use clap::Parser;
 use zellij_utils::{
     cli::{CliAction, CliArgs, Command, Sessions},
-    consts::{create_config_and_cache_folders, VERSION},
+    consts::{VERSION, create_config_and_cache_folders},
     data::UnblockCondition,
     envs,
     input::config::Config,
@@ -16,8 +17,31 @@ use zellij_utils::{
 
 fn main() {
     configure_logger();
+    envs::normalize_vc_frame_env_aliases();
     create_config_and_cache_folders();
     let opts = CliArgs::parse();
+
+    // Provenance is a pure read of embedded values — answer before any session,
+    // config or IPC work so it stays usable on a broken install.
+    if opts.build_info {
+        println!("{}", zellij_utils::build_info::build_info().to_json());
+        std::process::exit(0);
+    }
+
+    // The clinic diagnoses and treats the config itself, so it must answer
+    // before any client, server or IPC work — a frozen config is exactly the
+    // state in which the rest of the startup path is not to be trusted.
+    if let Some(Command::Doctor(doctor_cli)) = &opts.command {
+        std::process::exit(clinic::doctor(&opts, doctor_cli.json));
+    }
+    if let Some(Command::Repair(repair_cli)) = &opts.command {
+        std::process::exit(clinic::repair(&opts, repair_cli));
+    }
+    if let Some(Command::Action(cli_action)) = &opts.command
+        && let zellij_utils::cli::CliAction::DoctorRoutes { json } = cli_action.as_ref()
+    {
+        std::process::exit(commands::doctor_routes(opts.session.clone(), *json));
+    }
 
     {
         let config = Config::try_from(&opts).ok();
@@ -170,10 +194,10 @@ fn main() {
         {
             let mut file = file;
             let cwd = cwd.or_else(|| std::env::current_dir().ok());
-            if file.is_relative() {
-                if let Some(cwd) = cwd.as_ref() {
-                    file = cwd.join(file);
-                }
+            if file.is_relative()
+                && let Some(cwd) = cwd.as_ref()
+            {
+                file = cwd.join(file);
             }
             let command_cli_action = CliAction::Edit {
                 file,
@@ -195,17 +219,49 @@ fn main() {
             commands::send_action_to_session(command_cli_action, opts.session, config);
             std::process::exit(0);
         }
-        if let Some(Command::Sessions(Sessions::ConvertConfig { old_config_file })) = opts.command {
-            commands::convert_old_config_file(old_config_file);
-            std::process::exit(0);
-        }
-        if let Some(Command::Sessions(Sessions::ConvertLayout { old_layout_file })) = opts.command {
-            commands::convert_old_layout_file(old_layout_file);
-            std::process::exit(0);
-        }
-        if let Some(Command::Sessions(Sessions::ConvertTheme { old_theme_file })) = opts.command {
-            commands::convert_old_theme_file(old_theme_file);
-            std::process::exit(0);
+        if let Some(Command::Sessions(Sessions::TriageRun {
+            run,
+            exit_code,
+            bucket,
+            origin_session,
+            origin_tab,
+            pane_id,
+            runtime_transcript,
+            cwd,
+            dry_run,
+            transfer_lock_fd,
+            settlement_revision,
+            command,
+        })) = opts.command
+        {
+            match run_triage_cli::triage_run(run_triage_cli::TriageRunParams {
+                run,
+                exit_code,
+                bucket_verdict: bucket,
+                origin_session,
+                origin_tab,
+                pane_id,
+                runtime_transcript,
+                cwd,
+                dry_run,
+                transfer_lock_fd,
+                settlement_revision,
+                command,
+            }) {
+                Ok(report) => {
+                    println!(
+                        "{} → {} (scrollback: {})",
+                        report.run,
+                        report.bucket.session_name(),
+                        report.scrollback.display()
+                    );
+                    std::process::exit(0);
+                },
+                Err(e) => {
+                    eprintln!("{}", e);
+                    std::process::exit(2);
+                },
+            }
         }
         if let Some(Command::Sessions(Sessions::Pipe {
             name,
@@ -247,10 +303,13 @@ fn main() {
         commands::watch_session(session_name.clone(), opts);
     } else if let Some(Command::Sessions(Sessions::KillAllSessions { yes })) = opts.command {
         commands::kill_all_sessions(yes);
-    } else if let Some(Command::Sessions(Sessions::KillSession { ref target_session })) =
-        opts.command
+    } else if let Some(Command::Sessions(Sessions::KillSession {
+        ref target_session,
+        yes: _,
+        force,
+    })) = opts.command
     {
-        commands::kill_session(target_session);
+        commands::kill_session(target_session, force);
     } else if let Some(Command::Sessions(Sessions::DeleteAllSessions { yes, force })) = opts.command
     {
         commands::delete_all_sessions(yes, force);
@@ -277,6 +336,8 @@ fn main() {
                 layout_dir: options.as_ref().and_then(|o| o.layout_dir.clone()),
                 name: None,
                 cwd: options.as_ref().and_then(|o| o.default_cwd.clone()),
+                after_base: false,
+                no_focus: false,
                 initial_command: vec![],
                 initial_plugin: None,
                 close_on_exit: Default::default(),
@@ -336,11 +397,11 @@ fn main() {
                     if version != VERSION {
                         println!();
                         println!(
-                            "Note: this version differs from the current Zellij version: {}.",
+                            "Note: this version differs from the current vc-frame version: {}.",
                             VERSION
                         );
-                        println!("Consider stopping the server with: zellij web --stop");
-                        println!("And then restarting it with: zellij web --start");
+                        println!("Consider stopping the server with: vc-frame web --stop");
+                        println!("And then restarting it with: vc-frame web --start");
                     }
                 },
                 Err(_e) => {

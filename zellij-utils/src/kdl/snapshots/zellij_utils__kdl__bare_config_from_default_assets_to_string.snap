@@ -30,8 +30,20 @@ keybinds clear-defaults=true {
     }
     tab {
         bind "left" { GoToPreviousTab; }
-        bind "down" { GoToNextTab; }
-        bind "up" { GoToPreviousTab; }
+        bind "down" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "down"
+                floating false
+            }
+        }
+        bind "up" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "up"
+                floating false
+            }
+        }
         bind "right" { GoToNextTab; }
         bind "1" { GoToTab 1; SwitchToMode "normal"; }
         bind "2" { GoToTab 2; SwitchToMode "normal"; }
@@ -46,8 +58,20 @@ keybinds clear-defaults=true {
         bind "]" { BreakPaneRight; SwitchToMode "normal"; }
         bind "b" { BreakPane; SwitchToMode "normal"; }
         bind "h" { GoToPreviousTab; }
-        bind "j" { GoToNextTab; }
-        bind "k" { GoToPreviousTab; }
+        bind "j" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "down"
+                floating false
+            }
+        }
+        bind "k" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "up"
+                floating false
+            }
+        }
         bind "l" { GoToNextTab; }
         bind "n" { NewTab; SwitchToMode "normal"; }
         bind "r" { SwitchToMode "renametab"; TabNameInput 0; }
@@ -91,6 +115,14 @@ keybinds clear-defaults=true {
     scroll {
         bind "e" { EditScrollback; SwitchToMode "normal"; }
         bind "s" { SwitchToMode "entersearch"; SearchInput 0; }
+        bind "v" {
+            Run "sh" "-c" "if [ -x \"${HOME}/.config/vetcoders/frontier/vc-frame/scrollback-select.sh\" ]; then \"${HOME}/.config/vetcoders/frontier/vc-frame/scrollback-select.sh\"; elif [ -x \"${HOME}/.config/vc-frame/scrollback-select.sh\" ]; then \"${HOME}/.config/vc-frame/scrollback-select.sh\"; else vc-frame action dump-screen --full --path /tmp/vc-sb.txt; ${EDITOR:-vim} -R -c 'set number' -c 'set laststatus=0' /tmp/vc-sb.txt; fi" {
+                floating true
+                close_on_exit true
+                name "Scrollback · visual"
+            }
+            SwitchToMode "normal"
+        }
     }
     search {
         bind "c" { SearchToggleOption "CaseSensitivity"; }
@@ -101,7 +133,7 @@ keybinds clear-defaults=true {
     }
     session {
         bind "a" {
-            LaunchOrFocusPlugin "zellij:about" {
+            LaunchOrFocusPlugin "vc-frame:about" {
                 floating true
                 move_to_focused_tab true
             }
@@ -115,7 +147,7 @@ keybinds clear-defaults=true {
             SwitchToMode "normal"
         }
         bind "l" {
-            LaunchOrFocusPlugin "zellij:layout-manager" {
+            LaunchOrFocusPlugin "vc-frame:layout-manager" {
                 floating true
                 move_to_focused_tab true
             }
@@ -129,8 +161,14 @@ keybinds clear-defaults=true {
             }
             SwitchToMode "normal"
         }
+        bind "r" {
+            LaunchOrFocusPlugin "session-rail" {
+                move_to_focused_tab true
+            }
+            SwitchToMode "normal"
+        }
         bind "s" {
-            LaunchOrFocusPlugin "zellij:share" {
+            LaunchOrFocusPlugin "vc-frame:share" {
                 floating true
                 move_to_focused_tab true
             }
@@ -143,17 +181,81 @@ keybinds clear-defaults=true {
             }
             SwitchToMode "normal"
         }
+        bind "x" {
+            MessagePlugin "session-rail" {
+                name "vc_kill_current_session"
+                floating false
+            }
+            SwitchToMode "normal"
+        }
+    }
+    shared {
+        bind "Super left" { GoToPreviousTab; }
+        bind "Ctrl Shift down" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "down"
+                floating false
+            }
+        }
+        bind "Super down" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "down"
+                floating false
+            }
+        }
+        bind "Ctrl Shift up" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "up"
+                floating false
+            }
+        }
+        bind "Super up" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "up"
+                floating false
+            }
+        }
+        bind "Super right" { GoToNextTab; }
+        bind "Super k" {
+            MessagePlugin "compact-bar" {
+                name "vc_quick_cmd"
+                floating false
+            }
+        }
     }
     shared_except "locked" {
-        bind "Alt left" { MoveFocusOrTab "left"; }
-        bind "Alt down" { MoveFocus "down"; }
-        bind "Alt up" { MoveFocus "up"; }
-        bind "Alt right" { MoveFocusOrTab "right"; }
+        bind "Ctrl left" { GoToPreviousTab; }
+        bind "Ctrl down" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "down"
+                floating false
+            }
+        }
+        bind "Ctrl up" {
+            MessagePlugin "session-rail" {
+                name "vc_rail_nav"
+                payload "up"
+                floating false
+            }
+        }
+        bind "Ctrl right" { GoToNextTab; }
         bind "Alt +" { Resize "Increase"; }
         bind "Alt -" { Resize "Decrease"; }
         bind "Alt =" { Resize "Increase"; }
         bind "Alt [" { PreviousSwapLayout; }
         bind "Alt ]" { NextSwapLayout; }
+        bind "Super e" {
+            Run "sh" "-c" "if [ -x \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\"; elif [ -x \"${HOME}/.config/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vc-frame/vc-composer.sh\"; else f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${EDITOR:-vim} -c 'set number' -c 'set laststatus=0' -c 'set nowrap' -c 'set textwidth=0' -c 'set sidescroll=1' -c 'nnoremap <silent> <F2> :set wrap! wrap?<CR>' \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"; fi" {
+                floating true
+                close_on_exit true
+                name "✍ Composer · ⧉ Paste stack"
+            }
+        }
         bind "Alt f" { ToggleFloatingPanes; }
         bind "Ctrl g" { SwitchToMode "locked"; }
         bind "Alt h" { MoveFocusOrTab "left"; }
@@ -165,7 +267,7 @@ keybinds clear-defaults=true {
         bind "Alt o" { MoveTab "right"; }
         bind "Alt p" { TogglePaneInGroup; }
         bind "Alt Shift p" { ToggleGroupMarking; }
-        bind "Ctrl q" { Quit; }
+        bind "Ctrl q" { CloseFocus; }
     }
     shared_except "locked" "move" {
         bind "Ctrl h" { SwitchToMode "move"; }
@@ -255,24 +357,31 @@ keybinds clear-defaults=true {
     }
 }
 plugins {
-    about location="zellij:about"
-    compact-bar location="zellij:compact-bar"
-    configuration location="zellij:configuration"
-    filepicker location="zellij:strider" {
+    about location="vc-frame:about"
+    compact-bar location="vc-frame:compact-bar"
+    configuration location="vc-frame:configuration"
+    filepicker location="vc-frame:strider" {
         cwd "/"
     }
-    plugin-manager location="zellij:plugin-manager"
-    session-manager location="zellij:session-manager"
-    status-bar location="zellij:status-bar"
-    strider location="zellij:strider"
-    tab-bar location="zellij:tab-bar"
-    welcome-screen location="zellij:session-manager" {
+    plugin-manager location="vc-frame:plugin-manager"
+    session-manager location="vc-frame:session-manager"
+    session-rail location="vc-frame:session-manager" {
+        pane_title "Sessions"
+        rail true
+    }
+    status-bar location="vc-frame:status-bar"
+    strider location="vc-frame:strider"
+    tab-bar location="vc-frame:tab-bar"
+    vc-tab-title location="vc-frame:vc-tab-title"
+    welcome-screen location="vc-frame:session-manager" {
         welcome_screen true
     }
 }
 load_plugins {
-    zellij:link
+    vc-frame:link
+    vc-frame:vc-tab-title
 }
 web_client {
     font "monospace"
 }
+auto_lock_after_seconds 30

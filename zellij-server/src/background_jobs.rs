@@ -1,32 +1,34 @@
-#[allow(unused_imports)] // some imports used only with web_server_capability feature
+// Parts of these three imports are consumed only under web_server_capability;
+// builds without the feature would otherwise flag them.
+#[cfg_attr(not(feature = "web_server_capability"), allow(unused_imports))]
 use zellij_utils::consts::{
-    session_info_cache_file_name, session_info_folder_for_session, session_layout_cache_file_name,
-    VERSION, ZELLIJ_SESSION_INFO_CACHE_DIR, ZELLIJ_SOCK_DIR,
+    VERSION, ZELLIJ_SESSION_INFO_CACHE_DIR, ZELLIJ_SOCK_DIR, session_info_cache_file_name,
+    session_info_folder_for_session, session_layout_cache_file_name,
 };
-#[allow(unused_imports)]
+#[cfg_attr(not(feature = "web_server_capability"), allow(unused_imports))]
 use zellij_utils::data::{Event, HttpVerb, LayoutInfo, SessionInfo, WebServerStatus};
-use zellij_utils::errors::{prelude::*, BackgroundJobContext, ContextType};
+use zellij_utils::errors::{BackgroundJobContext, ContextType, prelude::*};
 use zellij_utils::input::layout::RunPlugin;
-#[allow(unused_imports)]
+#[cfg_attr(not(feature = "web_server_capability"), allow(unused_imports))]
 use zellij_utils::shared::parse_base_url;
 
 #[cfg(feature = "web_server_capability")]
 use zellij_utils::web_server_commands::{
-    discover_webserver_sockets, query_webserver_with_response, InstructionForWebServer,
-    WebServerResponse,
+    InstructionForWebServer, WebServerResponse, discover_webserver_sockets,
+    query_webserver_with_response,
 };
 
-use isahc::prelude::*;
 use isahc::AsyncReadResponseExt;
-use isahc::{config::RedirectPolicy, HttpClient, Request};
+use isahc::prelude::*;
+use isahc::{HttpClient, Request, config::RedirectPolicy};
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc, Mutex,
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
 use zellij_utils::consts::is_ipc_socket;
@@ -41,11 +43,11 @@ use crate::{ClientId, ServerInstruction};
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub enum BackgroundJob {
     DisplayPaneError(Vec<PaneId>, String),
-    AnimatePluginLoading(u32),                            // u32 - plugin_id
-    StopPluginLoadingAnimation(u32),                      // u32 - plugin_id
-    ReportSessionInfo(String, SessionInfo),               // String - session name
-    ReportPluginList(BTreeMap<PluginId, RunPlugin>),      // String - session name
-    ReportLayoutInfo((String, BTreeMap<String, String>)), // BTreeMap<file_name, pane_contents>
+    AnimatePluginLoading(u32),                       // u32 - plugin_id
+    StopPluginLoadingAnimation(u32),                 // u32 - plugin_id
+    ReportSessionInfo(String, SessionInfo),          // String - session name
+    ReportPluginList(BTreeMap<PluginId, RunPlugin>), // String - session name
+    ReportLayoutInfo(SessionLayoutSnapshot),
     ReadAllSessionInfosOnMachine,
     RunCommand(
         PluginId,
@@ -76,6 +78,78 @@ pub enum BackgroundJob {
     FlashTabBell(usize),     // usize = tab_id
     StopFlashTabBell(usize), // usize = tab_id
     Exit,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub struct SessionLayoutSnapshot {
+    pub session_name: String,
+    pub generation: u64,
+    pub layout: (String, BTreeMap<String, String>),
+}
+
+#[derive(Default)]
+struct SessionStatePersistenceCoordinator {
+    next_generation: AtomicU64,
+    latest_generations: Mutex<HashMap<String, u64>>,
+}
+
+impl SessionStatePersistenceCoordinator {
+    fn reserve(&self, session_name: &str) -> Result<u64, String> {
+        let previous = self
+            .next_generation
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                current.checked_add(1)
+            })
+            .map_err(|_| "session persistence generation space is exhausted".to_owned())?;
+        let generation = previous + 1;
+        let mut latest_generations = self.latest_generations.lock().map_err(|_| {
+            format!(
+                "session persistence coordinator is poisoned for '{}'",
+                session_name
+            )
+        })?;
+        latest_generations
+            .entry(session_name.to_owned())
+            .and_modify(|latest| *latest = (*latest).max(generation))
+            .or_insert(generation);
+        Ok(generation)
+    }
+
+    fn commit_if_current<F>(
+        &self,
+        session_name: &str,
+        generation: u64,
+        persist: F,
+    ) -> Result<bool, String>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        let latest_generations = self.latest_generations.lock().map_err(|_| {
+            format!(
+                "session persistence coordinator is poisoned for '{}'",
+                session_name
+            )
+        })?;
+        if latest_generations
+            .get(session_name)
+            .is_some_and(|latest| generation < *latest)
+        {
+            return Ok(false);
+        }
+        persist()?;
+        Ok(true)
+    }
+}
+
+static SESSION_STATE_PERSISTENCE: std::sync::OnceLock<SessionStatePersistenceCoordinator> =
+    std::sync::OnceLock::new();
+
+fn session_state_persistence() -> &'static SessionStatePersistenceCoordinator {
+    SESSION_STATE_PERSISTENCE.get_or_init(SessionStatePersistenceCoordinator::default)
+}
+
+pub fn reserve_session_state_generation(session_name: &str) -> Result<u64, String> {
+    session_state_persistence().reserve(session_name)
 }
 
 impl From<&BackgroundJob> for BackgroundJobContext {
@@ -130,7 +204,8 @@ pub fn session_scan_state() -> Option<&'static SessionScanState> {
     SESSION_SCAN_STATE.get()
 }
 
-#[allow(unused_variables)] // web_server_base_url used only with web_server_capability feature
+// web_server_base_url is read only under web_server_capability.
+#[cfg_attr(not(feature = "web_server_capability"), allow(unused_variables))]
 pub(crate) fn background_jobs_main(
     bus: Bus<BackgroundJob>,
     serialization_interval: Option<u64>,
@@ -145,7 +220,8 @@ pub(crate) fn background_jobs_main(
     let current_session_info = Arc::new(Mutex::new(SessionInfo::default()));
     let current_session_plugin_list: Arc<Mutex<BTreeMap<PluginId, RunPlugin>>> =
         Arc::new(Mutex::new(BTreeMap::new()));
-    let current_session_layout = Arc::new(Mutex::new((String::new(), BTreeMap::new())));
+    let current_session_layout: Arc<Mutex<Option<SessionLayoutSnapshot>>> =
+        Arc::new(Mutex::new(None));
 
     let _ = SESSION_SCAN_STATE.set(SessionScanState {
         current_session_name: current_session_name.clone(),
@@ -154,25 +230,29 @@ pub(crate) fn background_jobs_main(
     });
     let last_serialization_time = Arc::new(Mutex::new(Instant::now()));
     let serialization_interval = serialization_interval.map(|s| s * 1000); // convert to
-                                                                           // milliseconds
+    // milliseconds
     let last_render_request: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
     let pending_help_text_clear: Arc<Mutex<HashMap<ClientId, Instant>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let mut flashing_pane_bells: HashMap<PaneId, Arc<AtomicBool>> = HashMap::new();
     let mut flashing_tab_bells: HashMap<usize, Arc<AtomicBool>> = HashMap::new();
 
+    log::info!("background_jobs_main: building http client");
     let http_client = HttpClient::builder()
         // TODO: timeout?
         .redirect_policy(RedirectPolicy::Follow)
         .build()
         .ok();
+    log::info!("background_jobs_main: acquiring tokio runtime");
     // We needn't do anything with the runtime, but it should exist at this point.
     let runtime = crate::global_async_runtime::get_tokio_runtime();
 
+    log::info!("background_jobs_main: bootstrapping session metadata job");
     let _ = bus
         .senders
         .send_to_background_jobs(BackgroundJob::ReadAllSessionInfosOnMachine);
 
+    log::info!("background_jobs_main: entering event loop");
     loop {
         let (event, mut err_ctx) = bus.recv().with_context(err_context)?;
         err_ctx.add_call(ContextType::BackgroundJob((&event).into()));
@@ -236,21 +316,25 @@ pub(crate) fn background_jobs_main(
                 *current_session_plugin_list.lock().unwrap() = plugin_list;
             },
             BackgroundJob::ReportLayoutInfo(session_layout) => {
-                *current_session_layout.lock().unwrap() = session_layout;
-
-                // Update session save time for plugin query
-                let timestamp_millis = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
-                let _ = bus
-                    .senders
-                    .send_to_plugin(PluginInstruction::UpdateSessionSaveTime(timestamp_millis));
+                let current_name = current_session_name.lock().unwrap().clone();
+                let mut cached_layout = current_session_layout.lock().unwrap();
+                let is_current_session =
+                    current_name.is_empty() || session_layout.session_name == current_name;
+                let is_newest_generation = cached_layout
+                    .as_ref()
+                    .is_none_or(|cached| session_layout.generation >= cached.generation);
+                if is_current_session && is_newest_generation {
+                    *cached_layout = Some(session_layout);
+                }
             },
             BackgroundJob::ReadAllSessionInfosOnMachine => {
                 // this job should only be run once and it keeps track of other sessions (as well
                 // as this one's) infos (metadata mostly) and sends it to the screen which in turn
                 // forwards it to plugins and other places it needs to be
+                log::info!(
+                    "ReadAllSessionInfosOnMachine received (already running: {})",
+                    running_jobs.contains_key(&job)
+                );
                 if running_jobs.contains_key(&job) {
                     continue;
                 }
@@ -264,45 +348,64 @@ pub(crate) fn background_jobs_main(
                     let last_serialization_time = last_serialization_time.clone();
                     let has_clients = has_clients.clone();
                     async move {
+                        log::info!(
+                            "session metadata loop started (disable_session_metadata: {})",
+                            disable_session_metadata
+                        );
                         loop {
                             let current_session_name =
                                 current_session_name.lock().unwrap().to_string();
                             let current_session_info = current_session_info.lock().unwrap().clone();
-                            let available_layouts = current_session_info.available_layouts.clone();
                             let current_session_layout =
                                 current_session_layout.lock().unwrap().clone();
                             if !disable_session_metadata {
-                                write_session_state_to_disk(
+                                let (generation, layout) = current_session_layout
+                                    .filter(|snapshot| {
+                                        snapshot.session_name == current_session_name
+                                    })
+                                    .map(|snapshot| (snapshot.generation, snapshot.layout))
+                                    .unwrap_or_else(|| (0, (String::new(), BTreeMap::new())));
+                                match write_session_state_to_disk(
+                                    generation,
                                     current_session_name.clone(),
-                                    current_session_info,
-                                    current_session_layout,
-                                );
-
-                                // Send SavedCurrentSession instruction to plugin thread
-                                let timestamp_millis = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_millis()
-                                    as u64;
-                                let _ = senders.send_to_plugin(
-                                    PluginInstruction::UpdateSessionSaveTime(timestamp_millis),
-                                );
+                                    current_session_info.clone(),
+                                    layout,
+                                ) {
+                                    Err(error) => log::error!(
+                                        "Failed to durably save session '{}': {}",
+                                        current_session_name,
+                                        error
+                                    ),
+                                    Ok(false) => {},
+                                    Ok(true) => {
+                                        // Send SavedCurrentSession instruction to plugin thread only
+                                        // after every cache file reached durable storage.
+                                        let timestamp_millis = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_millis()
+                                            as u64;
+                                        let _ = senders.send_to_plugin(
+                                            PluginInstruction::UpdateSessionSaveTime(
+                                                timestamp_millis,
+                                            ),
+                                        );
+                                    },
+                                }
                             }
                             let mut session_infos_on_machine = read_other_live_session_states(
                                 &current_session_name,
                                 &ZELLIJ_SOCK_DIR,
                                 &ZELLIJ_SESSION_INFO_CACHE_DIR,
                             );
-                            for (session_name, session_info) in session_infos_on_machine.iter_mut()
-                            {
-                                if session_name == &current_session_name {
-                                    let current_session_plugin_list =
-                                        current_session_plugin_list.lock().unwrap().clone();
-                                    session_info.populate_plugin_list(current_session_plugin_list);
-                                    // these are not serialized, so must be explicitly added
-                                    session_info.available_layouts = available_layouts.clone();
-                                }
-                            }
+                            let current_session_plugin_list =
+                                current_session_plugin_list.lock().unwrap().clone();
+                            overlay_current_session_info(
+                                &mut session_infos_on_machine,
+                                &current_session_name,
+                                &current_session_info,
+                                &current_session_plugin_list,
+                            );
                             let resurrectable_sessions = find_resurrectable_sessions(
                                 &session_infos_on_machine,
                                 &ZELLIJ_SESSION_INFO_CACHE_DIR,
@@ -312,6 +415,30 @@ pub(crate) fn background_jobs_main(
                                 resurrectable_sessions,
                             ));
                             let _ = senders.send_to_pty(PtyInstruction::UpdateAndReportCwds);
+                            // Control-plane Live census for the rail's `● Live N`
+                            // row: headless workers with a live pid, never Zellij
+                            // tabs (a viewer tab only observes a run). Re-sent
+                            // every cycle so the rail's freshness lease can tell
+                            // a quiet feed from a dead producer.
+                            if let Some(control_plane_root) =
+                                zellij_utils::run_triage::control_plane_root()
+                            {
+                                let census = crate::vc_live_runs::LiveRunsSnapshot::new(
+                                    crate::vc_live_runs::scan_live_runs(&control_plane_root),
+                                );
+                                if let Some(payload) = census.payload() {
+                                    let _ =
+                                        senders.send_to_plugin(PluginInstruction::Update(vec![(
+                                            None,
+                                            None,
+                                            Event::CustomMessage(
+                                                crate::vc_live_runs::VC_LIVE_RUNS_MESSAGE
+                                                    .to_owned(),
+                                                payload,
+                                            ),
+                                        )]));
+                                }
+                            }
                             if last_serialization_time
                                 .lock()
                                 .unwrap()
@@ -513,15 +640,14 @@ pub(crate) fn background_jobs_main(
                             let _ = senders.send_to_screen(ScreenInstruction::RenderToClients);
                             {
                                 let mut last_render_request = last_render_request.lock().unwrap();
-                                if let Some(last_render_request) = *last_render_request {
-                                    if last_render_request > task_start_time {
-                                        // another render request was received while we were
-                                        // sleeping, schedule this job again so that we can also
-                                        // render that request
-                                        let _ = senders.send_to_background_jobs(
-                                            BackgroundJob::RenderToClients,
-                                        );
-                                    }
+                                if let Some(last_render_request) = *last_render_request
+                                    && last_render_request > task_start_time
+                                {
+                                    // another render request was received while we were
+                                    // sleeping, schedule this job again so that we can also
+                                    // render that request
+                                    let _ = senders
+                                        .send_to_background_jobs(BackgroundJob::RenderToClients);
                                 }
                                 // reset the last_render_request so that the task will be spawned
                                 // again once a new request is received
@@ -709,43 +835,110 @@ fn file_content_changed(path: &std::path::Path, new_content: &[u8]) -> bool {
     }
 }
 
+fn sync_parent_directory(path: &Path) -> Result<(), String> {
+    #[cfg(not(unix))]
+    let _ = path;
+    #[cfg(unix)]
+    {
+        let parent = path
+            .parent()
+            .ok_or_else(|| format!("cache path has no parent: {}", path.display()))?;
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| {
+                format!(
+                    "cannot sync cache directory {}: {}",
+                    parent.display(),
+                    error
+                )
+            })?;
+    }
+    Ok(())
+}
+
+fn write_file_durably(path: &Path, contents: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("cache path has no parent: {}", path.display()))?;
+    std::fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "cannot create cache directory {}: {}",
+            parent.display(),
+            error
+        )
+    })?;
+
+    if !file_content_changed(path, contents) {
+        std::fs::File::open(path)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| format!("cannot sync cache file {}: {}", path.display(), error))?;
+        return sync_parent_directory(path);
+    }
+
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|error| {
+        format!(
+            "cannot create temporary cache file in {}: {}",
+            parent.display(),
+            error
+        )
+    })?;
+    temporary.write_all(contents).map_err(|error| {
+        format!(
+            "cannot write temporary cache file for {}: {}",
+            path.display(),
+            error
+        )
+    })?;
+    temporary.as_file_mut().sync_all().map_err(|error| {
+        format!(
+            "cannot sync temporary cache file for {}: {}",
+            path.display(),
+            error
+        )
+    })?;
+    temporary.persist(path).map_err(|error| {
+        format!(
+            "cannot atomically replace cache file {}: {}",
+            path.display(),
+            error.error
+        )
+    })?;
+    sync_parent_directory(path)
+}
+
 pub fn write_session_state_to_disk(
+    generation: u64,
     current_session_name: String,
     current_session_info: SessionInfo,
     current_session_layout: (String, BTreeMap<String, String>),
-) {
-    let metadata_cache_file_name = session_info_cache_file_name(&current_session_name);
-    let (current_session_layout, layout_files_to_write) = current_session_layout;
-    let new_metadata = current_session_info.to_string();
-    if file_content_changed(&metadata_cache_file_name, new_metadata.as_bytes()) {
-        let _wrote_metadata_file = std::fs::create_dir_all(
-            session_info_folder_for_session(&current_session_name).as_path(),
-        )
-        .and_then(|_| std::fs::File::create(&metadata_cache_file_name))
-        .and_then(|mut f| write!(f, "{}", new_metadata));
-    }
-
-    if !current_session_layout.is_empty() {
-        let layout_cache_file_name = session_layout_cache_file_name(&current_session_name);
-        if file_content_changed(&layout_cache_file_name, current_session_layout.as_bytes()) {
-            let _wrote_layout_file = std::fs::create_dir_all(
-                session_info_folder_for_session(&current_session_name).as_path(),
-            )
-            .and_then(|_| std::fs::File::create(&layout_cache_file_name))
-            .and_then(|mut f| write!(f, "{}", current_session_layout));
-        }
+) -> Result<bool, String> {
+    session_state_persistence().commit_if_current(&current_session_name, generation, || {
         let session_info_folder = session_info_folder_for_session(&current_session_name);
-        for (external_file_name, external_file_contents) in layout_files_to_write {
-            let external_file_path = session_info_folder.join(&external_file_name);
-            if file_content_changed(&external_file_path, external_file_contents.as_bytes()) {
-                std::fs::File::create(&external_file_path)
-                    .and_then(|mut f| write!(f, "{}", external_file_contents))
-                    .unwrap_or_else(|e| {
-                        log::error!("Failed to write layout metadata file: {:?}", e);
-                    });
+        std::fs::create_dir_all(&session_info_folder).map_err(|error| {
+            format!(
+                "cannot create session cache directory {}: {}",
+                session_info_folder.display(),
+                error
+            )
+        })?;
+
+        let metadata_cache_file_name = session_info_cache_file_name(&current_session_name);
+        let (current_session_layout, layout_files_to_write) = current_session_layout;
+        let new_metadata = current_session_info.to_string();
+        write_file_durably(&metadata_cache_file_name, new_metadata.as_bytes())?;
+
+        if !current_session_layout.is_empty() {
+            for (external_file_name, external_file_contents) in layout_files_to_write {
+                let external_file_path = session_info_folder.join(&external_file_name);
+                write_file_durably(&external_file_path, external_file_contents.as_bytes())?;
             }
+            // The layout is the resurrection commit point. Publish it only after
+            // every referenced external pane-content file is durable.
+            let layout_cache_file_name = session_layout_cache_file_name(&current_session_name);
+            write_file_durably(&layout_cache_file_name, current_session_layout.as_bytes())?;
         }
-    }
+        Ok(())
+    })
 }
 
 pub fn scan_session_list(
@@ -766,6 +959,32 @@ pub fn scan_session_list(
     let resurrectable_sessions =
         find_resurrectable_sessions(&session_infos_on_machine, session_info_cache_dir);
     (session_infos_on_machine, resurrectable_sessions)
+}
+
+pub(crate) fn overlay_current_session_info(
+    session_infos: &mut BTreeMap<String, SessionInfo>,
+    current_session_name: &str,
+    current_session_info: &SessionInfo,
+    current_session_plugin_list: &BTreeMap<PluginId, RunPlugin>,
+) {
+    if current_session_info.name == current_session_name
+        && session_infos.contains_key(current_session_name)
+    {
+        // The socket scan is the canonical source for launch age. The live
+        // screen snapshot can be uninitialized during startup or rounded to
+        // whole seconds, so replacing this value can reshuffle the session
+        // rail whenever the current-session overlay refreshes.
+        let scanned_creation_time = session_infos
+            .get(current_session_name)
+            .map(|session_info| session_info.creation_time)
+            .unwrap_or(current_session_info.creation_time);
+        let mut live_current_session = current_session_info.clone();
+        live_current_session.name = current_session_name.to_string();
+        live_current_session.is_current_session = true;
+        live_current_session.creation_time = scanned_creation_time;
+        live_current_session.populate_plugin_list(current_session_plugin_list.clone());
+        session_infos.insert(current_session_name.to_string(), live_current_session);
+    }
 }
 
 pub fn scan_session_list_default_dirs(
@@ -793,17 +1012,16 @@ fn read_other_live_session_states(
     // reasonably sure their session is running
     if let Ok(files) = fs::read_dir(sock_dir) {
         files.for_each(|file| {
-            if let Ok(file) = file {
-                if let Ok(file_name) = file.file_name().into_string() {
-                    if is_ipc_socket(&file.file_type().unwrap()) {
-                        let creation_time = std::fs::metadata(file.path())
-                            .ok()
-                            .and_then(|f| f.created().ok().or_else(|| f.modified().ok()))
-                            .and_then(|d| d.elapsed().ok())
-                            .unwrap_or_default();
-                        other_session_names.push((file_name, creation_time));
-                    }
-                }
+            if let Ok(file) = file
+                && let Ok(file_name) = file.file_name().into_string()
+                && is_ipc_socket(&file.file_type().unwrap())
+            {
+                let creation_time = std::fs::metadata(file.path())
+                    .ok()
+                    .and_then(|f| f.created().ok().or_else(|| f.modified().ok()))
+                    .and_then(|d| d.elapsed().ok())
+                    .unwrap_or_default();
+                other_session_names.push((file_name, creation_time));
             }
         });
     }
@@ -812,14 +1030,15 @@ fn read_other_live_session_states(
         let session_cache_file_name = session_info_cache_dir
             .join(&session_name)
             .join("session-metadata.kdl");
-        if let Ok(raw_session_info) = fs::read_to_string(&session_cache_file_name) {
-            if let Ok(mut session_info) =
-                SessionInfo::from_string(&raw_session_info, current_session_name)
-            {
-                session_info.creation_time = creation_time;
-                session_infos_on_machine.insert(session_name, session_info);
-            }
-        }
+        let mut session_info = fs::read_to_string(&session_cache_file_name)
+            .ok()
+            .and_then(|raw_session_info| {
+                SessionInfo::from_string(&raw_session_info, current_session_name).ok()
+            })
+            .unwrap_or_else(|| SessionInfo::new(session_name.clone()));
+        session_info.creation_time = creation_time;
+        session_info.is_current_session = session_name == current_session_name;
+        session_infos_on_machine.insert(session_name, session_info);
     }
     session_infos_on_machine
 }
@@ -848,7 +1067,7 @@ fn find_resurrectable_sessions(
                         Err(e) => {
                             if e.kind() == std::io::ErrorKind::NotFound {
                                 return None; // no layout file, cannot resurrect session, let's not
-                                             // list it
+                            // list it
                             } else {
                                 log::error!(
                                     "Failed to read created stamp of resurrection file: {:?}",
@@ -914,7 +1133,7 @@ mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
     use tempfile::tempdir;
-    use zellij_utils::data::SessionInfo;
+    use zellij_utils::data::{PaneInfo, PaneManifest, SessionInfo};
 
     fn make_socket(dir: &std::path::Path, name: &str) -> UnixListener {
         UnixListener::bind(dir.join(name)).expect("bind unix socket")
@@ -930,6 +1149,80 @@ mod tests {
         let folder = info_dir.join(session);
         std::fs::create_dir_all(&folder).unwrap();
         std::fs::write(folder.join("session-layout.kdl"), "layout { }").unwrap();
+    }
+
+    #[test]
+    fn durable_cache_write_atomically_replaces_existing_contents() {
+        let root = tempdir().unwrap();
+        let target = root.path().join("session-layout.kdl");
+        std::fs::write(&target, "old layout").unwrap();
+
+        write_file_durably(&target, b"new durable layout").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "new durable layout"
+        );
+    }
+
+    #[test]
+    fn durable_cache_write_reports_failure_without_destroying_the_target() {
+        let root = tempdir().unwrap();
+        let target = root.path().join("session-layout.kdl");
+        std::fs::create_dir(&target).unwrap();
+        let marker = target.join("old-cache-marker");
+        std::fs::write(&marker, "still here").unwrap();
+
+        let error = write_file_durably(&target, b"replacement").unwrap_err();
+
+        assert!(error.contains("cannot atomically replace cache file"));
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "still here");
+    }
+
+    #[test]
+    fn newer_session_generation_fences_a_delayed_older_snapshot() {
+        let persistence = SessionStatePersistenceCoordinator::default();
+        let writes = Mutex::new(Vec::new());
+        let older = persistence.reserve("drawer").unwrap();
+        let newer = persistence.reserve("drawer").unwrap();
+
+        assert!(
+            persistence
+                .commit_if_current("drawer", newer, || {
+                    writes.lock().unwrap().push("new");
+                    Ok(())
+                })
+                .unwrap()
+        );
+        assert!(
+            !persistence
+                .commit_if_current("drawer", older, || {
+                    writes.lock().unwrap().push("stale");
+                    Ok(())
+                })
+                .unwrap()
+        );
+        assert_eq!(*writes.lock().unwrap(), vec!["new"]);
+    }
+
+    #[test]
+    fn reserved_session_generation_fences_older_writes_even_if_it_fails() {
+        let persistence = SessionStatePersistenceCoordinator::default();
+        let older = persistence.reserve("drawer").unwrap();
+        let newer = persistence.reserve("drawer").unwrap();
+        let failed = persistence.commit_if_current("drawer", newer, || Err("disk full".to_owned()));
+        assert_eq!(failed.unwrap_err(), "disk full");
+
+        let mut older_wrote = false;
+        assert!(
+            !persistence
+                .commit_if_current("drawer", older, || {
+                    older_wrote = true;
+                    Ok(())
+                })
+                .unwrap()
+        );
+        assert!(!older_wrote);
     }
 
     #[test]
@@ -965,6 +1258,77 @@ mod tests {
         assert_eq!(live.len(), 1);
         assert!(live.contains_key(peer));
         assert!(resurrectable.is_empty());
+    }
+
+    #[test]
+    fn scan_session_list_keeps_live_socket_without_metadata() {
+        let sock_dir = tempdir().unwrap();
+        let info_dir = tempdir().unwrap();
+        let peer = "peer-without-metadata";
+        let _listener = make_socket(sock_dir.path(), peer);
+
+        let (live, resurrectable) = scan_session_list(
+            "me",
+            &[],
+            &BTreeMap::new(),
+            sock_dir.path(),
+            info_dir.path(),
+        );
+        let peer_info = live.get(peer).expect("live socket should be visible");
+        assert_eq!(peer_info.name, peer);
+        assert!(!peer_info.is_current_session);
+        assert!(resurrectable.is_empty());
+    }
+
+    #[test]
+    fn live_current_session_truth_replaces_stale_disk_snapshot() {
+        let scanned_creation_time = Duration::from_secs(42);
+        let mut scanned_current_session = SessionInfo::new("me".to_string());
+        scanned_current_session.creation_time = scanned_creation_time;
+        let mut scanned_sessions = BTreeMap::from([
+            ("me".to_string(), scanned_current_session),
+            ("peer".to_string(), SessionInfo::new("peer".to_string())),
+        ]);
+        let mut panes = HashMap::new();
+        panes.insert(
+            0,
+            vec![PaneInfo {
+                title: "agent".to_string(),
+                terminal_command: Some("codex".to_string()),
+                ..Default::default()
+            }],
+        );
+        let mut current_session = SessionInfo::new("me".to_string());
+        current_session.panes = PaneManifest { panes };
+
+        overlay_current_session_info(
+            &mut scanned_sessions,
+            "me",
+            &current_session,
+            &BTreeMap::new(),
+        );
+
+        let current = scanned_sessions.get("me").unwrap();
+        assert_eq!(current.panes, current_session.panes);
+        assert!(current.is_current_session);
+        assert_eq!(current.creation_time, scanned_creation_time);
+        assert_eq!(scanned_sessions.get("peer").unwrap().name, "peer");
+    }
+
+    #[test]
+    fn uninitialized_current_session_truth_does_not_erase_disk_snapshot() {
+        let mut scanned_session = SessionInfo::new("me".to_string());
+        scanned_session.connected_clients = 2;
+        let mut scanned_sessions = BTreeMap::from([("me".to_string(), scanned_session)]);
+
+        overlay_current_session_info(
+            &mut scanned_sessions,
+            "me",
+            &SessionInfo::default(),
+            &BTreeMap::new(),
+        );
+
+        assert_eq!(scanned_sessions.get("me").unwrap().connected_clients, 2);
     }
 
     #[test]

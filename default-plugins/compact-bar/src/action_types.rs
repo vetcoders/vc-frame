@@ -20,6 +20,8 @@ pub enum ActionType {
     SessionManager,
     Configuration,
     PluginManager,
+    LayoutManager,
+    Share,
     About,
     SwitchToMode(InputMode),
     TogglePaneEmbedOrFloating,
@@ -56,9 +58,11 @@ impl ActionType {
             ActionType::PageScroll => "Scroll page".to_string(),
             ActionType::HalfPageScroll => "Scroll half Page".to_string(),
             ActionType::SessionManager => "Session manager".to_string(),
+            ActionType::LayoutManager => "Layout manager".to_string(),
             ActionType::PluginManager => "Plugin manager".to_string(),
             ActionType::Configuration => "Configuration".to_string(),
-            ActionType::About => "About Zellij".to_string(),
+            ActionType::Share => "Share session".to_string(),
+            ActionType::About => "About vc-frame".to_string(),
             ActionType::SwitchToMode(input_mode) if input_mode == &InputMode::RenamePane => {
                 "Rename pane".to_string()
             },
@@ -135,9 +139,13 @@ impl ActionType {
             Action::Detach => ActionType::Detach,
             Action::Quit => ActionType::Quit,
             action if action.launches_plugin("session-manager") => ActionType::SessionManager,
+            action if action.launches_plugin("vc-frame:layout-manager") => {
+                ActionType::LayoutManager
+            },
             action if action.launches_plugin("configuration") => ActionType::Configuration,
             action if action.launches_plugin("plugin-manager") => ActionType::PluginManager,
-            action if action.launches_plugin("zellij:about") => ActionType::About,
+            action if action.launches_plugin("vc-frame:share") => ActionType::Share,
+            action if action.launches_plugin("vc-frame:about") => ActionType::About,
             Action::NewTab { .. } => ActionType::NewTab,
             _ => ActionType::Other(format!("{:?}", action)),
         }

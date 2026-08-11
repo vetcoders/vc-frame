@@ -37,7 +37,7 @@ struct ColumnWidths {
 }
 
 pub struct TokenManagementScreen<'a> {
-    token_list: &'a Vec<(String, String, bool)>, // bool -> is_read_only
+    token_list: &'a [(String, String, bool)], // bool -> is_read_only
     selected_list_index: Option<usize>,
     renaming_token: &'a Option<String>,
     entering_new_token_name: &'a Option<String>,
@@ -47,26 +47,28 @@ pub struct TokenManagementScreen<'a> {
     cols: usize,
 }
 
+pub struct TokenManagementScreenInput<'a> {
+    pub token_list: &'a [(String, String, bool)],
+    pub selected_list_index: Option<usize>,
+    pub renaming_token: &'a Option<String>,
+    pub entering_new_token_name: &'a Option<String>,
+    pub error: &'a Option<String>,
+    pub info: &'a Option<String>,
+    pub rows: usize,
+    pub cols: usize,
+}
+
 impl<'a> TokenManagementScreen<'a> {
-    pub fn new(
-        token_list: &'a Vec<(String, String, bool)>,
-        selected_list_index: Option<usize>,
-        renaming_token: &'a Option<String>,
-        entering_new_token_name: &'a Option<String>,
-        error: &'a Option<String>,
-        info: &'a Option<String>,
-        rows: usize,
-        cols: usize,
-    ) -> Self {
+    pub fn new(input: TokenManagementScreenInput<'a>) -> Self {
         Self {
-            token_list,
-            selected_list_index,
-            renaming_token,
-            entering_new_token_name,
-            error,
-            info,
-            rows,
-            cols,
+            token_list: input.token_list,
+            selected_list_index: input.selected_list_index,
+            renaming_token: input.renaming_token,
+            entering_new_token_name: input.entering_new_token_name,
+            error: input.error,
+            info: input.info,
+            rows: input.rows,
+            cols: input.cols,
         }
     }
     pub fn render(&self) {
@@ -387,7 +389,7 @@ impl<'a> TokenManagementScreen<'a> {
         }
     }
 
-    fn add_truncation_indicator(&self, row: &mut Vec<Text>, count: usize) {
+    fn add_truncation_indicator(&self, row: &mut [Text], count: usize) {
         let indicator = format!("+[{}]", count);
 
         // Replace the last cell (controls column) with the truncation indicator

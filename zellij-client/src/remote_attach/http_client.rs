@@ -1,6 +1,7 @@
 use super::config::connection_timeout;
 use isahc::prelude::*;
-use isahc::{config::RedirectPolicy, AsyncBody, HttpClient, Request, Response};
+use isahc::tls::{TlsConfig, TrustStore};
+use isahc::{AsyncBody, HttpClient, Request, Response, config::RedirectPolicy};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -13,16 +14,26 @@ pub fn create_http_client(
         .redirect_policy(RedirectPolicy::Follow)
         .timeout(connection_timeout());
 
-    if insecure {
+    let tls_config = if insecure {
         eprintln!(
             "WARNING: TLS certificate validation is disabled. This connection is NOT secure."
         );
-        builder = builder.ssl_options(
-            isahc::config::SslOption::DANGER_ACCEPT_INVALID_CERTS
-                | isahc::config::SslOption::DANGER_ACCEPT_INVALID_HOSTS,
-        );
-    } else if let Some(ca_path) = ca_cert {
-        builder = builder.ssl_ca_certificate(isahc::config::CaCertificate::file(ca_path));
+        Some(
+            TlsConfig::builder()
+                .danger_accept_invalid_certs(true)
+                .danger_accept_invalid_hosts(true)
+                .build(),
+        )
+    } else {
+        ca_cert.map(|ca_path| {
+            TlsConfig::builder()
+                .trust_store(TrustStore::from_file(ca_path))
+                .build()
+        })
+    };
+
+    if let Some(tls_config) = tls_config {
+        builder = builder.tls_config(tls_config);
     }
 
     builder.build()
@@ -48,25 +59,25 @@ impl HttpClientWithCookies {
         let mut req = request.into();
 
         // Add cookies to request
-        if let Ok(cookies) = self.cookies.lock() {
-            if !cookies.is_empty() {
-                let cookie_header = cookies
-                    .iter()
-                    .map(|(k, v)| format!("{}={}", k, v))
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                req.headers_mut()
-                    .insert("cookie", cookie_header.parse().unwrap());
-            }
+        if let Ok(cookies) = self.cookies.lock()
+            && !cookies.is_empty()
+        {
+            let cookie_header = cookies
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect::<Vec<_>>()
+                .join("; ");
+            req.headers_mut()
+                .insert("cookie", cookie_header.parse().unwrap());
         }
 
         let response = self.client.send_async(req).await?;
 
         // Extract and store cookies from response
-        if let Some(set_cookie_headers) = response.headers().get_all("set-cookie").iter().next() {
-            if let Ok(cookie_str) = set_cookie_headers.to_str() {
-                self.parse_and_store_cookies(cookie_str);
-            }
+        if let Some(set_cookie_headers) = response.headers().get_all("set-cookie").iter().next()
+            && let Ok(cookie_str) = set_cookie_headers.to_str()
+        {
+            self.parse_and_store_cookies(cookie_str);
         }
 
         Ok(response)
@@ -92,15 +103,15 @@ impl HttpClientWithCookies {
     }
 
     pub fn get_cookie_header(&self) -> Option<String> {
-        if let Ok(cookies) = self.cookies.lock() {
-            if !cookies.is_empty() {
-                let cookie_header = cookies
-                    .iter()
-                    .map(|(k, v)| format!("{}={}", k, v))
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                return Some(cookie_header);
-            }
+        if let Ok(cookies) = self.cookies.lock()
+            && !cookies.is_empty()
+        {
+            let cookie_header = cookies
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Some(cookie_header);
         }
         None
     }

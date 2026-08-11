@@ -113,15 +113,15 @@ use vte::{Params, Perform};
 use zellij_utils::{consts::VERSION, shared::version_number};
 
 use crate::output::{CharacterChunk, HighlightSelection, OutputBuffer, SixelImageChunk};
+use crate::panes::Selection;
 use crate::panes::alacritty_functions::{parse_number, xparse_color};
 use crate::panes::hyperlink_tracker::HyperlinkTracker;
 use crate::panes::link_handler::LinkHandler;
 use crate::panes::search::SearchResult;
 use crate::panes::terminal_character::{
-    AnsiCode, CharsetIndex, Cursor, CursorShape, RcCharacterStyles, StandardCharset,
-    TerminalCharacter, EMPTY_TERMINAL_CHARACTER,
+    AnsiCode, CharsetIndex, Cursor, CursorShape, EMPTY_TERMINAL_CHARACTER, RcCharacterStyles,
+    StandardCharset, TerminalCharacter,
 };
-use crate::panes::Selection;
 use crate::ui::components::UiComponentParser;
 
 pub type LogicalLineMatch = (usize, usize, String, Vec<(usize, usize)>);
@@ -214,7 +214,6 @@ fn get_top_canonical_row_and_wraps(rows: &mut VecDeque<Row>) -> Vec<Row> {
 fn transfer_rows_from_lines_above_to_viewport(
     lines_above: &mut VecDeque<Row>,
     viewport: &mut VecDeque<Row>,
-    sixel_grid: &mut SixelGrid,
     count: usize,
     max_viewport_width: usize,
 ) -> usize {
@@ -246,7 +245,9 @@ fn transfer_rows_from_lines_above_to_viewport(
     }
     if !next_lines.is_empty() {
         let excess_row = Row::from_rows(next_lines);
-        bounded_push(lines_above, sixel_grid, excess_row);
+        // This is the remainder of the line popped above, not new history.
+        // Restoring it cannot exceed the pre-existing scrollback budget.
+        lines_above.push_back(excess_row);
     }
     usize::try_from(lines_added_to_viewport).unwrap_or(0)
 }
@@ -257,26 +258,25 @@ fn transfer_rows_from_viewport_to_lines_above(
     sixel_grid: &mut SixelGrid,
     count: usize,
     max_viewport_width: usize,
-) -> isize {
-    let mut transferred_rows_count: isize = 0;
+    scrollback_buffer_lines: &mut usize,
+) {
     let drained_lines = std::cmp::min(count, viewport.len());
     for next_line in viewport.drain(..drained_lines) {
         let mut next_lines: Vec<Row> = vec![];
-        transferred_rows_count +=
-            calculate_row_display_height(next_line.width(), max_viewport_width) as isize;
         if !next_line.is_canonical {
             let mut bottom_canonical_row_and_wraps_in_dst =
                 get_lines_above_bottom_canonical_row_and_wraps(lines_above);
             next_lines.append(&mut bottom_canonical_row_and_wraps_in_dst);
         }
         next_lines.push(next_line);
-        let dropped_line_width = bounded_push(lines_above, sixel_grid, Row::from_rows(next_lines));
-        if let Some(width) = dropped_line_width {
-            transferred_rows_count -=
-                calculate_row_display_height(width, max_viewport_width) as isize;
-        }
+        bounded_push(
+            lines_above,
+            sixel_grid,
+            Row::from_rows(next_lines),
+            max_viewport_width,
+            scrollback_buffer_lines,
+        );
     }
-    transferred_rows_count
 }
 
 fn transfer_rows_from_lines_below_to_viewport(
@@ -319,17 +319,37 @@ fn transfer_rows_from_lines_below_to_viewport(
     }
 }
 
-fn bounded_push(vec: &mut VecDeque<Row>, sixel_grid: &mut SixelGrid, value: Row) -> Option<usize> {
-    let mut dropped_line_width = None;
-    if vec.len() >= *SCROLL_BUFFER_SIZE.get().unwrap() {
-        let line = vec.pop_front();
-        if let Some(line) = line {
+fn bounded_push(
+    vec: &mut VecDeque<Row>,
+    sixel_grid: &mut SixelGrid,
+    mut value: Row,
+    viewport_width: usize,
+    current_display_lines: &mut usize,
+) {
+    let max_display_lines = *SCROLL_BUFFER_SIZE.get().unwrap();
+    if max_display_lines == 0 {
+        vec.clear();
+        *current_display_lines = 0;
+        return;
+    }
+
+    let viewport_width = viewport_width.max(1);
+    value.trim_front_to_width(max_display_lines.saturating_mul(viewport_width));
+    let value_display_lines = calculate_row_display_height(value.width(), viewport_width);
+
+    while !vec.is_empty()
+        && (vec.len() >= max_display_lines
+            || current_display_lines.saturating_add(value_display_lines) > max_display_lines)
+    {
+        if let Some(line) = vec.pop_front() {
             sixel_grid.offset_grid_top();
-            dropped_line_width = Some(line.width());
+            *current_display_lines = current_display_lines
+                .saturating_sub(calculate_row_display_height(line.width(), viewport_width));
         }
     }
+
     vec.push_back(value);
-    dropped_line_width
+    *current_display_lines = current_display_lines.saturating_add(value_display_lines);
 }
 
 pub fn create_horizontal_tabstops(columns: usize) -> BTreeSet<usize> {
@@ -350,14 +370,6 @@ fn calculate_row_display_height(row_width: usize, viewport_width: usize) -> usiz
         return 1;
     }
     (row_width as f64 / viewport_width as f64).ceil() as usize
-}
-
-fn subtract_isize_from_usize(u: usize, i: isize) -> usize {
-    if i.is_negative() {
-        u - i.unsigned_abs()
-    } else {
-        u + i as usize
-    }
 }
 
 pub fn parse_osc7_path(raw: &[u8]) -> Option<std::path::PathBuf> {
@@ -901,22 +913,39 @@ fn resolve_highlight_colors(
     }
 }
 
+pub struct GridOptions {
+    pub rows: usize,
+    pub columns: usize,
+    pub terminal_emulator_colors: Rc<RefCell<Palette>>,
+    pub terminal_emulator_color_codes: Rc<RefCell<HashMap<usize, String>>>,
+    pub link_handler: Rc<RefCell<LinkHandler>>,
+    pub character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
+    pub sixel_image_store: Rc<RefCell<SixelImageStore>>,
+    pub style: Style,
+    pub debug: bool,
+    pub arrow_fonts: bool,
+    pub styled_underlines: bool,
+    pub osc8_hyperlinks: bool,
+    pub explicitly_disable_kitty_keyboard_protocol: bool,
+}
+
 impl Grid {
-    pub fn new(
-        rows: usize,
-        columns: usize,
-        terminal_emulator_colors: Rc<RefCell<Palette>>,
-        terminal_emulator_color_codes: Rc<RefCell<HashMap<usize, String>>>,
-        link_handler: Rc<RefCell<LinkHandler>>,
-        character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
-        sixel_image_store: Rc<RefCell<SixelImageStore>>,
-        style: Style, // TODO: consolidate this with terminal_emulator_colors
-        debug: bool,
-        arrow_fonts: bool,
-        styled_underlines: bool,
-        osc8_hyperlinks: bool,
-        explicitly_disable_kitty_keyboard_protocol: bool,
-    ) -> Self {
+    pub fn new(opts: GridOptions) -> Self {
+        let GridOptions {
+            rows,
+            columns,
+            terminal_emulator_colors,
+            terminal_emulator_color_codes,
+            link_handler,
+            character_cell_size,
+            sixel_image_store,
+            style,
+            debug,
+            arrow_fonts,
+            styled_underlines,
+            osc8_hyperlinks,
+            explicitly_disable_kitty_keyboard_protocol,
+        } = opts;
         let sixel_grid = SixelGrid::new(character_cell_size.clone(), sixel_image_store);
         // make sure this is initialized as it is used internally
         // if it was already initialized (which should happen normally unless this is a test or
@@ -1151,7 +1180,6 @@ impl Grid {
             let transferred_rows_height = transfer_rows_from_lines_above_to_viewport(
                 &mut self.lines_above,
                 &mut self.viewport,
-                &mut self.sixel_grid,
                 1,
                 self.width,
             );
@@ -1176,9 +1204,6 @@ impl Grid {
         {
             let mut line_to_push_up = self.viewport.pop_front().unwrap();
 
-            self.scrollback_buffer_lines +=
-                calculate_row_display_height(line_to_push_up.width(), self.width);
-
             let line_to_push_up = if line_to_push_up.is_canonical {
                 line_to_push_up
             } else {
@@ -1195,15 +1220,13 @@ impl Grid {
                 }
             };
 
-            let dropped_line_width =
-                bounded_push(&mut self.lines_above, &mut self.sixel_grid, line_to_push_up);
-            if let Some(width) = dropped_line_width {
-                let dropped_line_height = calculate_row_display_height(width, self.width);
-
-                self.scrollback_buffer_lines = self
-                    .scrollback_buffer_lines
-                    .saturating_sub(dropped_line_height);
-            }
+            bounded_push(
+                &mut self.lines_above,
+                &mut self.sixel_grid,
+                line_to_push_up,
+                self.width,
+                &mut self.scrollback_buffer_lines,
+            );
 
             transfer_rows_from_lines_below_to_viewport(
                 &mut self.lines_below,
@@ -1409,7 +1432,6 @@ impl Grid {
                     transfer_rows_from_lines_above_to_viewport(
                         &mut self.lines_above,
                         &mut self.viewport,
-                        &mut self.sixel_grid,
                         row_count_to_transfer,
                         new_columns,
                     );
@@ -1439,6 +1461,7 @@ impl Grid {
                         &mut self.sixel_grid,
                         row_count_to_transfer,
                         new_columns,
+                        &mut self.scrollback_buffer_lines,
                     );
                 },
                 Ordering::Equal => {},
@@ -2024,15 +2047,15 @@ impl Grid {
         }
         if let Some(current_row) = self.viewport.get_mut(self.cursor.y) {
             let mut effective_pad = pad_character;
-            if let Some(bg_color) = current_row.bg_color {
-                if matches!(
+            if let Some(bg_color) = current_row.bg_color
+                && matches!(
                     effective_pad.styles.background,
                     Some(AnsiCode::Reset) | None
-                ) {
-                    effective_pad
-                        .styles
-                        .update(|styles| styles.background = Some(bg_color));
-                }
+                )
+            {
+                effective_pad
+                    .styles
+                    .update(|styles| styles.background = Some(bg_color));
             }
             for _ in current_row.width()..position {
                 current_row.push(effective_pad.clone());
@@ -2370,23 +2393,22 @@ impl Grid {
                     };
                     if let Some((_sel, start_row, start_col, end_row, end_col)) =
                         match_to_selection(&mat, &boundaries, &self.viewport)
-                    {
-                        if position_in_span(
+                        && position_in_span(
                             click_row, click_col, start_row, start_col, end_row, end_col,
-                        ) {
-                            let dominated = match &best {
-                                Some((best_layer, ..)) => compiled.layer > *best_layer,
-                                None => true,
-                            };
-                            if dominated {
-                                best = Some((
-                                    compiled.layer,
-                                    *plugin_id,
-                                    pattern.clone(),
-                                    mat.as_str().to_string(),
-                                    compiled.context.clone(),
-                                ));
-                            }
+                        )
+                    {
+                        let dominated = match &best {
+                            Some((best_layer, ..)) => compiled.layer > *best_layer,
+                            None => true,
+                        };
+                        if dominated {
+                            best = Some((
+                                compiled.layer,
+                                *plugin_id,
+                                pattern.clone(),
+                                mat.as_str().to_string(),
+                                compiled.context.clone(),
+                            ));
                         }
                     }
                 }
@@ -2471,18 +2493,17 @@ impl Grid {
                     };
                     if let Some((_sel, start_row, start_col, end_row, end_col)) =
                         match_to_selection(&mat, &boundaries, &self.viewport)
-                    {
-                        if position_in_span(
+                        && position_in_span(
                             hover_row, hover_col, start_row, start_col, end_row, end_col,
-                        ) {
-                            let dominated = match best_layer {
-                                Some(bl) => compiled.layer > bl,
-                                None => true,
-                            };
-                            if dominated {
-                                best_layer = Some(compiled.layer);
-                                best_tooltip = compiled.tooltip_text.clone();
-                            }
+                        )
+                    {
+                        let dominated = match best_layer {
+                            Some(bl) => compiled.layer > bl,
+                            None => true,
+                        };
+                        if dominated {
+                            best_layer = Some(compiled.layer);
+                            best_tooltip = compiled.tooltip_text.clone();
                         }
                     }
                 }
@@ -2513,40 +2534,39 @@ impl Grid {
             // style when the cursor overlaps the match.  They are suppressed
             // when mouse tracking is active (events pass through to the app)
             // and on unfocused panes (hover_position is not set for those).
-            if self.mouse_tracking == MouseTracking::Off {
-                if let Some(hover_pos) = self.hover_position {
-                    let hover_row = hover_pos.line.0 as usize;
-                    let group_end_row = ridx + group_len - 1;
-                    if hover_row >= ridx && hover_row <= group_end_row {
-                        let hover_col = hover_pos.column.0;
-                        for pattern_map in self.plugin_highlights.values() {
-                            for (_pattern, compiled) in pattern_map {
-                                if !compiled.on_hover || !compiled.has_visual_effect() {
+            if self.mouse_tracking == MouseTracking::Off
+                && let Some(hover_pos) = self.hover_position
+            {
+                let hover_row = hover_pos.line.0 as usize;
+                let group_end_row = ridx + group_len - 1;
+                if hover_row >= ridx && hover_row <= group_end_row {
+                    let hover_col = hover_pos.column.0;
+                    for pattern_map in self.plugin_highlights.values() {
+                        for (_pattern, compiled) in pattern_map {
+                            if !compiled.on_hover || !compiled.has_visual_effect() {
+                                continue;
+                            }
+                            for captures in compiled.regex.captures_iter(&logical_text) {
+                                let Some(mat) = highlight_match(&captures) else {
                                     continue;
-                                }
-                                for captures in compiled.regex.captures_iter(&logical_text) {
-                                    let Some(mat) = highlight_match(&captures) else {
-                                        continue;
-                                    };
-                                    if let Some((sel, start_row, start_col, end_row, end_col)) =
-                                        match_to_selection(&mat, &boundaries, &self.viewport)
-                                    {
-                                        if position_in_span(
-                                            hover_row, hover_col, start_row, start_col, end_row,
-                                            end_col,
-                                        ) {
-                                            selections.push(HighlightSelection {
-                                                selection: sel,
-                                                bg: compiled.bg,
-                                                fg: compiled.fg,
-                                                bold: compiled.bold,
-                                                italic: compiled.italic,
-                                                underline: compiled.underline,
-                                                layer: compiled.layer,
-                                            });
-                                            break; // only one match per pattern per hover
-                                        }
-                                    }
+                                };
+                                if let Some((sel, start_row, start_col, end_row, end_col)) =
+                                    match_to_selection(&mat, &boundaries, &self.viewport)
+                                    && position_in_span(
+                                        hover_row, hover_col, start_row, start_col, end_row,
+                                        end_col,
+                                    )
+                                {
+                                    selections.push(HighlightSelection {
+                                        selection: sel,
+                                        bg: compiled.bg,
+                                        fg: compiled.fg,
+                                        bold: compiled.bold,
+                                        italic: compiled.italic,
+                                        underline: compiled.underline,
+                                        layer: compiled.layer,
+                                    });
+                                    break; // only one match per pattern per hover
                                 }
                             }
                         }
@@ -2879,22 +2899,17 @@ impl Grid {
         }
     }
     fn transfer_rows_to_lines_above(&mut self, count: usize) {
-        let transferred_rows_count = transfer_rows_from_viewport_to_lines_above(
+        transfer_rows_from_viewport_to_lines_above(
             &mut self.viewport,
             &mut self.lines_above,
             &mut self.sixel_grid,
             count,
             self.width,
+            &mut self.scrollback_buffer_lines,
         );
-
-        self.scrollback_buffer_lines =
-            subtract_isize_from_usize(self.scrollback_buffer_lines, transferred_rows_count);
     }
     fn move_cursor_down_by_pixels(&mut self, pixel_count: usize) {
-        if let Some(character_cell_size) = {
-            let c = *self.character_cell_size.borrow();
-            c
-        } {
+        if let Some(character_cell_size) = { *self.character_cell_size.borrow() } {
             // thanks borrow checker
             let pixel_height = character_cell_size.height;
             let to_move = (pixel_count as f64 / pixel_height as f64).ceil() as usize;
@@ -3317,11 +3332,12 @@ impl Grid {
                 lines_above_viewport.push(s);
             }
             // Truncate to last N lines if max specified (Some(0) means "all" — no truncation)
-            if let Some(max) = max_scrollback_lines {
-                if max > 0 && lines_above_viewport.len() > max {
-                    let start = lines_above_viewport.len() - max;
-                    lines_above_viewport = lines_above_viewport.split_off(start);
-                }
+            if let Some(max) = max_scrollback_lines
+                && max > 0
+                && lines_above_viewport.len() > max
+            {
+                let start = lines_above_viewport.len() - max;
+                lines_above_viewport = lines_above_viewport.split_off(start);
             }
             let mut lines_below_viewport: Vec<String> = Vec::with_capacity(self.lines_below.len());
             for row in &self.lines_below {
@@ -3384,11 +3400,12 @@ impl Grid {
             for row in &self.lines_above {
                 lines_above_viewport.push(extract_row_with_ansi(row));
             }
-            if let Some(max) = max_scrollback_lines {
-                if max > 0 && lines_above_viewport.len() > max {
-                    let start = lines_above_viewport.len() - max;
-                    lines_above_viewport = lines_above_viewport.split_off(start);
-                }
+            if let Some(max) = max_scrollback_lines
+                && max > 0
+                && lines_above_viewport.len() > max
+            {
+                let start = lines_above_viewport.len() - max;
+                lines_above_viewport = lines_above_viewport.split_off(start);
             }
             let mut lines_below_viewport: Vec<String> = Vec::with_capacity(self.lines_below.len());
             for row in &self.lines_below {
@@ -3525,10 +3542,10 @@ impl Perform for Grid {
             },
 
             b"7" => {
-                if let Some(raw) = params.get(1) {
-                    if let Some(path) = parse_osc7_path(raw) {
-                        self.pending_osc7_cwd = Some(path);
-                    }
+                if let Some(raw) = params.get(1)
+                    && let Some(path) = parse_osc7_path(raw)
+                {
+                    self.pending_osc7_cwd = Some(path);
                 }
             },
 
@@ -3543,23 +3560,22 @@ impl Perform for Grid {
                         }
                         self.changed_colors.as_mut().unwrap()[i as usize] = Some(c);
                         return;
-                    } else if chunk.get(1).as_ref().and_then(|c| c.first()) == Some(&b'?') {
-                        if let Some(index) = index {
-                            // Forward palette-register queries to the
-                            // host — apps want the actual host palette,
-                            // not Zellij's cached copy. (Zellij's cache
-                            // still auto-refreshes via double-dispatch
-                            // when the host's reply comes back.)
-                            self.pending_forwarded_queries.push(
-                                crate::host_query::HostQuery::PaletteRegister {
-                                    index,
-                                    terminator:
-                                        crate::host_query::OscTerminator::from_bell_terminated(
-                                            bell_terminated,
-                                        ),
-                                },
-                            );
-                        }
+                    } else if chunk.get(1).as_ref().and_then(|c| c.first()) == Some(&b'?')
+                        && let Some(index) = index
+                    {
+                        // Forward palette-register queries to the
+                        // host — apps want the actual host palette,
+                        // not Zellij's cached copy. (Zellij's cache
+                        // still auto-refreshes via double-dispatch
+                        // when the host's reply comes back.)
+                        self.pending_forwarded_queries.push(
+                            crate::host_query::HostQuery::PaletteRegister {
+                                index,
+                                terminator: crate::host_query::OscTerminator::from_bell_terminated(
+                                    bell_terminated,
+                                ),
+                            },
+                        );
                     }
                 }
             },
@@ -3576,79 +3592,78 @@ impl Perform for Grid {
 
             // Get/set Foreground (b"10") or background (b"11") colors
             b"10" | b"11" => {
-                if params.len() >= 2 {
-                    if let Some(mut dynamic_code) = parse_number(params[0]) {
-                        for param in &params[1..] {
-                            if param == b"?" {
-                                // If this pane has a local override for
-                                // the channel being queried (set via
-                                // `zellij action set-pane-color` or via
-                                // a prior OSC 10;<rgb> / 11;<rgb> from
-                                // inside the pane), answer with that
-                                // override directly instead of
-                                // forwarding to the host. Apps inside
-                                // the pane must see the colors Zellij
-                                // is actually rendering for them, not
-                                // the host terminal's background.
-                                let local_override = match dynamic_code {
-                                    10 => self.pane_default_fg,
-                                    11 => self.pane_default_bg,
-                                    _ => None,
-                                };
-                                if let Some(rgb) = local_override {
-                                    let reply = format!(
-                                        "\u{1b}]{};{}{}",
-                                        dynamic_code,
-                                        osc_color_reply_body(rgb),
-                                        terminator
-                                    );
-                                    self.pending_messages_to_pty.push(reply.as_bytes().to_vec());
-                                } else {
-                                    // No local override — forward to
-                                    // the host so the app observes the
-                                    // terminal's actual color. Zellij's
-                                    // cached copy is refreshed via the
-                                    // double-dispatch on the reply.
-                                    let term =
-                                        crate::host_query::OscTerminator::from_bell_terminated(
-                                            bell_terminated,
-                                        );
-                                    let query = match dynamic_code {
-                                        10 => crate::host_query::HostQuery::DefaultForeground {
-                                            terminator: term,
-                                        },
-                                        11 => crate::host_query::HostQuery::DefaultBackground {
-                                            terminator: term,
-                                        },
-                                        _ => {
-                                            // Out-of-range dynamic_code
-                                            // (shouldn't happen since
-                                            // the outer match pins it to
-                                            // 10 or 11): skip.
-                                            dynamic_code += 1;
-                                            continue;
-                                        },
-                                    };
-                                    self.pending_forwarded_queries.push(query);
-                                }
+                if params.len() >= 2
+                    && let Some(mut dynamic_code) = parse_number(params[0])
+                {
+                    for param in &params[1..] {
+                        if param == b"?" {
+                            // If this pane has a local override for
+                            // the channel being queried (set via
+                            // `zellij action set-pane-color` or via
+                            // a prior OSC 10;<rgb> / 11;<rgb> from
+                            // inside the pane), answer with that
+                            // override directly instead of
+                            // forwarding to the host. Apps inside
+                            // the pane must see the colors Zellij
+                            // is actually rendering for them, not
+                            // the host terminal's background.
+                            let local_override = match dynamic_code {
+                                10 => self.pane_default_fg,
+                                11 => self.pane_default_bg,
+                                _ => None,
+                            };
+                            if let Some(rgb) = local_override {
+                                let reply = format!(
+                                    "\u{1b}]{};{}{}",
+                                    dynamic_code,
+                                    osc_color_reply_body(rgb),
+                                    terminator
+                                );
+                                self.pending_messages_to_pty.push(reply.as_bytes().to_vec());
                             } else {
-                                // Set: parse color and store as pane
-                                // default. Only literal RGB is stored;
-                                // palette-indexed / named variants (or
-                                // a parse failure) are silently dropped
-                                // to keep the pane-default fields
-                                // narrow.
-                                if let Some(rgb) = xparse_color(param).and_then(rgb_of_ansi_code) {
-                                    if dynamic_code == 10 {
-                                        self.pane_default_fg = Some(rgb);
-                                    } else if dynamic_code == 11 {
-                                        self.pane_default_bg = Some(rgb);
-                                    }
-                                    self.output_buffer.update_all_lines();
-                                }
+                                // No local override — forward to
+                                // the host so the app observes the
+                                // terminal's actual color. Zellij's
+                                // cached copy is refreshed via the
+                                // double-dispatch on the reply.
+                                let term = crate::host_query::OscTerminator::from_bell_terminated(
+                                    bell_terminated,
+                                );
+                                let query = match dynamic_code {
+                                    10 => crate::host_query::HostQuery::DefaultForeground {
+                                        terminator: term,
+                                    },
+                                    11 => crate::host_query::HostQuery::DefaultBackground {
+                                        terminator: term,
+                                    },
+                                    _ => {
+                                        // Out-of-range dynamic_code
+                                        // (shouldn't happen since
+                                        // the outer match pins it to
+                                        // 10 or 11): skip.
+                                        dynamic_code += 1;
+                                        continue;
+                                    },
+                                };
+                                self.pending_forwarded_queries.push(query);
                             }
-                            dynamic_code += 1;
+                        } else {
+                            // Set: parse color and store as pane
+                            // default. Only literal RGB is stored;
+                            // palette-indexed / named variants (or
+                            // a parse failure) are silently dropped
+                            // to keep the pane-default fields
+                            // narrow.
+                            if let Some(rgb) = xparse_color(param).and_then(rgb_of_ansi_code) {
+                                if dynamic_code == 10 {
+                                    self.pane_default_fg = Some(rgb);
+                                } else if dynamic_code == 11 {
+                                    self.pane_default_bg = Some(rgb);
+                                }
+                                self.output_buffer.update_all_lines();
+                            }
                         }
+                        dynamic_code += 1;
                     }
                 }
             },
@@ -3687,10 +3702,10 @@ impl Perform for Grid {
                         // TBD: paste from own clipboard - currently unsupported
                     },
                     base64 => {
-                        if let Ok(bytes) = base64::decode(base64) {
-                            if let Ok(string) = String::from_utf8(bytes) {
-                                self.pending_clipboard_update = Some(string);
-                            }
+                        if let Ok(bytes) = base64::decode(base64)
+                            && let Ok(string) = String::from_utf8(bytes)
+                        {
+                            self.pending_clipboard_update = Some(string);
                         };
                     },
                 }
@@ -3706,10 +3721,10 @@ impl Perform for Grid {
 
                 // Reset color indexes given as parameters.
                 for param in &params[1..] {
-                    if let Some(index) = parse_number(param) {
-                        if let Some(changed_colors) = self.changed_colors.as_mut() {
-                            changed_colors[index as usize] = None;
-                        }
+                    if let Some(index) = parse_number(param)
+                        && let Some(changed_colors) = self.changed_colors.as_mut()
+                    {
+                        changed_colors[index as usize] = None;
                     }
                 }
 
@@ -4528,6 +4543,71 @@ impl AlternateScreenState {
 #[cfg(test)]
 #[path = "./unit/grid_tests.rs"]
 mod grid_tests;
+
+#[cfg(test)]
+mod scrollback_memory_budget_tests {
+    use super::*;
+    use crate::panes::terminal_character::TerminalCharacter;
+
+    fn row_of(character: char, width: usize) -> Row {
+        Row::from_columns(VecDeque::from(vec![
+            TerminalCharacter::new(character);
+            width
+        ]))
+        .canonical()
+    }
+
+    #[test]
+    fn one_logical_line_cannot_bypass_the_display_line_budget() {
+        let max_lines = *SCROLL_BUFFER_SIZE.get_or_init(|| DEFAULT_SCROLL_BUFFER_SIZE);
+        let viewport_width = 2;
+        let mut lines = VecDeque::new();
+        let mut sixel_grid = SixelGrid::default();
+        let mut display_lines = 0;
+
+        bounded_push(
+            &mut lines,
+            &mut sixel_grid,
+            row_of('x', max_lines * viewport_width + 37),
+            viewport_width,
+            &mut display_lines,
+        );
+
+        assert!(display_lines <= max_lines);
+        assert!(lines.front().unwrap().width() <= max_lines * viewport_width);
+    }
+
+    #[test]
+    fn adding_new_history_evicts_enough_old_display_lines() {
+        let max_lines = *SCROLL_BUFFER_SIZE.get_or_init(|| DEFAULT_SCROLL_BUFFER_SIZE);
+        let viewport_width = 2;
+        let mut lines = VecDeque::new();
+        let mut sixel_grid = SixelGrid::default();
+        let mut display_lines = 0;
+
+        bounded_push(
+            &mut lines,
+            &mut sixel_grid,
+            row_of('a', max_lines * viewport_width),
+            viewport_width,
+            &mut display_lines,
+        );
+        bounded_push(
+            &mut lines,
+            &mut sixel_grid,
+            row_of('b', (max_lines / 2 + 1) * viewport_width),
+            viewport_width,
+            &mut display_lines,
+        );
+
+        assert!(display_lines <= max_lines);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            lines.front().unwrap().columns.front().unwrap().character,
+            'b'
+        );
+    }
+}
 
 #[cfg(test)]
 mod osc7_parser_tests {

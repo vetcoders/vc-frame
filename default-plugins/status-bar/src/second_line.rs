@@ -1,16 +1,15 @@
 use ansi_term::{
-    unstyled_len, ANSIString, ANSIStrings,
-    Color::{Fixed, RGB},
-    Style,
+    AnsiString, AnsiStrings,
+    Color::{Fixed, Rgb},
+    Style, unstyled_len,
 };
 use zellij_tile::prelude::actions::Action;
 use zellij_tile::prelude::*;
 use zellij_tile_utils::palette_match;
 
 use crate::{
-    action_key, action_key_group, style_key_with_modifier,
-    tip::{data::TIPS, TipFn},
-    LinePart, MORE_MSG, TO_NORMAL,
+    LinePart, MORE_MSG, TO_NORMAL, action_key, action_key_group, style_key_with_modifier,
+    tip::{TipFn, data::TIPS},
 };
 
 fn full_length_shortcut(
@@ -26,7 +25,7 @@ fn full_length_shortcut(
     let text_color = palette_match!(palette.text_unselected.base);
 
     let separator = if is_first_shortcut { " " } else { " / " };
-    let mut bits: Vec<ANSIString> = vec![Style::new().fg(text_color).paint(separator)];
+    let mut bits: Vec<AnsiString> = vec![Style::new().fg(text_color).paint(separator)];
     bits.extend(style_key_with_modifier(&key, &palette, None));
     bits.push(
         Style::new()
@@ -34,7 +33,7 @@ fn full_length_shortcut(
             .bold()
             .paint(format!(" {}", action)),
     );
-    let part = ANSIStrings(&bits);
+    let part = AnsiStrings(&bits);
 
     LinePart {
         part: part.to_string(),
@@ -183,6 +182,7 @@ fn get_keys_and_hints(mi: &ModeInfo) -> Vec<(String, String, Vec<KeyWithModifier
             cwd: None,
             initial_panes: None,
             first_pane_unblock_condition: None,
+            placement: TabPlacement::Append,
         }, TO_NORMAL])),
         (s("Change focus"), s("Move"), focus_keys),
         (s("Close"), s("Close"), action_key(&km, &[A::CloseTab, TO_NORMAL])),
@@ -254,7 +254,13 @@ fn get_keys_and_hints(mi: &ModeInfo) -> Vec<(String, String, Vec<KeyWithModifier
             action_key(&km, &[A::SearchToggleOption{option: SOpt::WholeWord}])),
     ]} else if mi.mode == IM::Session { vec![
         (s("Detach"), s("Detach"), action_key(&km, &[Action::Detach])),
-        (s("Session Manager"), s("Manager"), action_key(&km, &[A::LaunchOrFocusPlugin{plugin: Default::default(), should_float: true, move_to_focused_tab: true, should_open_in_place: false, close_replaced_pane: false, skip_cache: false, tab_id: None}, TO_NORMAL])), // not entirely accurate
+        (s("Session Manager"), s("Manager"), plugin_key(&km, "session-manager")),
+        (s("Layout Manager"), s("Layouts"), plugin_key(&km, "vc-frame:layout-manager")),
+        (s("Plugin Manager"), s("Plugins"), plugin_key(&km, "plugin-manager")),
+        (s("Configure"), s("Config"), plugin_key(&km, "configuration")),
+        (s("Share"), s("Share"), plugin_key(&km, "vc-frame:share")),
+        (s("About"), s("About"), plugin_key(&km, "vc-frame:about")),
+        (s("Quit"), s("Quit"), action_key(&km, &[Action::Quit])),
         (s("Select pane"), s("Select"), to_normal_key),
     ]} else if mi.mode == IM::Tmux { vec![
         (s("Move focus"), s("Move"), action_key_group(&km, &[
@@ -273,6 +279,7 @@ fn get_keys_and_hints(mi: &ModeInfo) -> Vec<(String, String, Vec<KeyWithModifier
             cwd: None,
             initial_panes: None,
             first_pane_unblock_condition: None,
+            placement: TabPlacement::Append,
         }, TO_NORMAL])),
         (s("Rename tab"), s("Rename"),
             action_key(&km, &[A::SwitchToMode{input_mode: IM::RenameTab}, A::TabNameInput{input: vec![0]}])),
@@ -349,6 +356,19 @@ fn best_effort_shortcut_list(help: &ModeInfo, tip: TipFn, max_len: usize) -> Lin
         },
         _ => best_effort_shortcut_list_nonstandard_mode(help, max_len),
     }
+}
+
+fn plugin_key(keymap: &[(KeyWithModifier, Vec<Action>)], plugin_url: &str) -> Vec<KeyWithModifier> {
+    keymap
+        .iter()
+        .find_map(|(key, acvec)| {
+            acvec
+                .iter()
+                .any(|action| action.launches_plugin(plugin_url))
+                .then(|| key.clone())
+        })
+        .into_iter()
+        .collect()
 }
 
 pub fn keybinds(help: &ModeInfo, tip_name: &str, max_width: usize) -> LinePart {
@@ -620,7 +640,7 @@ mod tests {
         let ret = full_length_shortcut(false, keyvec, "Foobar", palette);
         let ret = unstyle(ret);
 
-        assert_eq!(ret, " / Ctrl + <a> Foobar");
+        assert_eq!(ret, " / ⌃ + <a> Foobar");
     }
 
     #[test]
@@ -631,7 +651,7 @@ mod tests {
         let ret = full_length_shortcut(false, keyvec, "Foobar", palette);
         let ret = unstyle(ret);
 
-        assert_eq!(ret, " / Alt + <a> Foobar");
+        assert_eq!(ret, " / ⌥ + <a> Foobar");
     }
 
     #[test]
@@ -661,7 +681,7 @@ mod tests {
         let ret = full_length_shortcut(false, keyvec, "Foobar", palette);
         let ret = unstyle(ret);
 
-        assert_eq!(ret, " / <a|Ctrl b|ENTER> Foobar");
+        assert_eq!(ret, " / <a|⌃b|ENTER> Foobar");
     }
 
     #[test]
@@ -676,7 +696,7 @@ mod tests {
         let ret = full_length_shortcut(false, keyvec, "Foobar", palette);
         let ret = unstyle(ret);
 
-        assert_eq!(ret, " / Ctrl + <a|b|c> Foobar");
+        assert_eq!(ret, " / ⌃ + <a|b|c> Foobar");
     }
     //pub fn keybinds(help: &ModeInfo, tip_name: &str, max_width: usize) -> LinePart {
 
@@ -865,6 +885,9 @@ mod tests {
         let ret = keybinds(&mode_info, "quicknav", 500);
         let ret = unstyle(ret);
 
-        assert_eq!(ret, " <BACKSPACE> New / Ctrl + <a|ENTER|1|SPACE> Change Focus / <ESC> Close / <END> Toggle Fullscreen");
+        assert_eq!(
+            ret,
+            " <BACKSPACE> New / ⌃ + <a|ENTER|1|SPACE> Change Focus / <ESC> Close / <END> Toggle Fullscreen"
+        );
     }
 }

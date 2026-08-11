@@ -1,9 +1,7 @@
 pub use super::generated_api::api::{
     action::{Action as ProtobufAction, Position as ProtobufPosition},
     event::{
-        event::Payload as ProtobufEventPayload,
-        layout_parsing_error::ErrorType as ProtobufLayoutParsingErrorType,
-        pane_scrollback_response, ActionCompletePayload as ProtobufActionCompletePayload,
+        ActionCompletePayload as ProtobufActionCompletePayload,
         AvailableLayoutInfoPayload as ProtobufAvailableLayoutInfoPayload,
         ClientInfo as ProtobufClientInfo, ClientPaneHistory as ProtobufClientPaneHistory,
         ClientTabHistory as ProtobufClientTabHistory,
@@ -29,12 +27,17 @@ pub use super::generated_api::api::{
         SyntaxError as ProtobufSyntaxError, TabInfo as ProtobufTabInfo,
         TabMetadata as ProtobufTabMetadata, UserActionPayload as ProtobufUserActionPayload,
         WebServerStatusPayload as ProtobufWebServerStatusPayload, WebSharing as ProtobufWebSharing,
-        *,
+        event::Payload as ProtobufEventPayload,
+        layout_parsing_error::ErrorType as ProtobufLayoutParsingErrorType,
+        pane_scrollback_response, *,
     },
     input_mode::InputMode as ProtobufInputMode,
     key::Key as ProtobufKey,
     style::Style as ProtobufStyle,
 };
+// The generated-prost glob above re-exports ~18 names that these hand-rolled
+// data:: types deliberately shadow inside this module; replacing the glob with
+// an explicit list is a public plugin-api cut of its own (2026-08-09 sweep).
 #[allow(hidden_glob_reexports)]
 use crate::data::{
     ClientId, ClientInfo, CopyDestination, Event, EventType, FileMetadata, HostTerminalThemeMode,

@@ -1,6 +1,6 @@
-use ansi_term::{ANSIString, ANSIStrings};
+use ansi_term::{AnsiString, AnsiStrings};
 use ansi_term::{
-    Color::{Fixed, RGB},
+    Color::{Fixed, Rgb},
     Style,
 };
 use std::collections::HashMap;
@@ -8,10 +8,12 @@ use zellij_tile::prelude::actions::Action;
 use zellij_tile::prelude::*;
 use zellij_tile_utils::palette_match;
 
-use crate::first_line::{to_char, KeyAction, KeyMode, KeyShortcut};
+use crate::first_line::{
+    KeyAction, KeyMode, KeyShortcut, chrome_key_label, format_modifiers, to_char,
+};
 use crate::second_line::{system_clipboard_error, text_copied_hint};
-use crate::{action_key, action_key_group, color_elements, MORE_MSG, TO_NORMAL};
 use crate::{ColoredElements, LinePart};
+use crate::{MORE_MSG, TO_NORMAL, action_key, action_key_group, color_elements};
 use unicode_width::UnicodeWidthStr;
 
 pub fn one_line_ui(
@@ -568,7 +570,7 @@ fn render_mode_key_indicators(
 }
 
 fn full_inline_keys_modes_shortcut_list(
-    keys_without_common_modifiers: &Vec<KeyShortcut>,
+    keys_without_common_modifiers: &[KeyShortcut],
     help: &ModeInfo,
 ) -> LinePart {
     let mut full_shortcut_list = LinePart::default();
@@ -589,7 +591,7 @@ fn full_inline_keys_modes_shortcut_list(
 }
 
 fn shortened_inline_keys_modes_shortcut_list(
-    keys_without_common_modifiers: &Vec<KeyShortcut>,
+    keys_without_common_modifiers: &[KeyShortcut],
     help: &ModeInfo,
 ) -> LinePart {
     let mut shortened_shortcut_list = LinePart::default();
@@ -627,6 +629,8 @@ fn full_modes_shortcut_list(default_keys: &Vec<KeyShortcut>, help: &ModeInfo) ->
 }
 
 fn shortened_modes_shortcut_list(default_keys: &Vec<KeyShortcut>, help: &ModeInfo) -> LinePart {
+    // Medium labels (LOCK/PANE/TAB — same as short_text now). Never 2-letter
+    // "Lo"/"Pa" stubs; those read as broken chrome (operator 2026-08-04).
     let mut shortened_shortcut_list = LinePart::default();
     for key in default_keys {
         let is_selected = key.is_selected();
@@ -683,29 +687,16 @@ fn common_modifiers_in_all_modes(
 fn render_common_modifiers(
     palette: &ColoredElements,
     mode_info: &ModeInfo,
-    common_modifiers: &Vec<KeyModifier>,
+    common_modifiers: &[KeyModifier],
     line_part_to_render: &mut LinePart,
     separator: &str,
 ) {
+    let mods = format_modifiers(common_modifiers);
     let prefix_text = if mode_info.capabilities.arrow_fonts {
         // Add extra space in simplified ui
-        format!(
-            " {} + ",
-            common_modifiers
-                .iter()
-                .map(|m| m.to_string())
-                .collect::<Vec<_>>()
-                .join("-")
-        )
+        format!(" {} + ", mods)
     } else {
-        format!(
-            " {} +",
-            common_modifiers
-                .iter()
-                .map(|m| m.to_string())
-                .collect::<Vec<_>>()
-                .join("-")
-        )
+        format!(" {} +", mods)
     };
 
     let suffix_separator = palette.superkey_suffix_separator.paint(separator);
@@ -732,7 +723,7 @@ fn render_secondary_info(
     let mut padding = String::new();
     let mut padding_len = 0;
     for _ in 0..remaining_space {
-        padding.push_str(&ANSIStrings(&[colored_elements.superkey_prefix.paint(" ")]).to_string());
+        padding.push_str(&AnsiStrings(&[colored_elements.superkey_prefix.paint(" ")]).to_string());
         padding_len += 1;
     }
     secondary_info.part = format!("{}{}", padding, secondary_info.part);
@@ -932,14 +923,7 @@ fn secondary_keybinds(help: &ModeInfo, tab_info: Option<&TabInfo>, max_len: usiz
         ));
     } else {
         let modifier_str = text_as_line_part_with_emphasis(
-            format!(
-                "{} + ",
-                common_modifiers
-                    .iter()
-                    .map(|m| m.to_string())
-                    .collect::<Vec<_>>()
-                    .join("-")
-            ),
+            format!("{} + ", format_modifiers(&common_modifiers)),
             0,
         );
         secondary_info.append(&modifier_str);
@@ -1024,14 +1008,7 @@ fn secondary_keybinds(help: &ModeInfo, tab_info: Option<&TabInfo>, max_len: usiz
             ));
         } else {
             let modifier_str = text_as_line_part_with_emphasis(
-                format!(
-                    "{} + ",
-                    common_modifiers
-                        .iter()
-                        .map(|m| m.to_string())
-                        .collect::<Vec<_>>()
-                        .join("-")
-                ),
+                format!("{} + ", format_modifiers(&common_modifiers)),
                 0,
             );
             short_line.append(&modifier_str);
@@ -1121,7 +1098,7 @@ fn keybinds(help: &ModeInfo, max_width: usize) -> Option<LinePart> {
 fn add_shortcut(
     help: &ModeInfo,
     text: &str,
-    keys: &Vec<KeyWithModifier>,
+    keys: &[KeyWithModifier],
     selected: bool,
     key_color_index: Option<usize>,
 ) -> LinePart {
@@ -1131,7 +1108,7 @@ fn add_shortcut(
     }
 
     ret.append(&style_key_with_modifier(keys, key_color_index)); // TODO: alternate
-                                                                 //
+    //
     let ribbon = if selected {
         serialize_ribbon(&Text::new(text.to_string()).selected())
     } else {
@@ -1256,7 +1233,7 @@ fn add_keygroup_separator(help: &ModeInfo, max_len: usize) -> Option<LinePart> {
 
     let separator_color = palette_match!(palette.text_unselected.emphasis_0);
     let bg_color = palette_match!(palette.ribbon_selected.base);
-    let mut bits: Vec<ANSIString> = vec![];
+    let mut bits: Vec<AnsiString> = vec![];
     let mode_help_text = match help.mode {
         InputMode::RenamePane => Some("RENAMING PANE"),
         InputMode::RenameTab => Some("RENAMING TAB"),
@@ -1295,14 +1272,10 @@ fn add_keygroup_separator(help: &ModeInfo, max_len: usize) -> Option<LinePart> {
             .bold()
             .paint(separator.to_string()),
     );
-    ret.part = format!("{}{}", ret.part, ANSIStrings(&bits));
+    ret.part = format!("{}{}", ret.part, AnsiStrings(&bits));
     ret.len += 3; // padding and arrow fonts
 
-    if ret.len <= max_len {
-        Some(ret)
-    } else {
-        None
-    }
+    if ret.len <= max_len { Some(ret) } else { None }
 }
 
 fn full_shortcut_list(help: &ModeInfo) -> LinePart {
@@ -1406,6 +1379,7 @@ fn get_keys_and_hints(mi: &ModeInfo) -> Vec<(String, String, Vec<KeyWithModifier
             cwd: None,
             initial_panes: None,
             first_pane_unblock_condition: None,
+            placement: TabPlacement::Append,
         }, TO_NORMAL])),
         (s("Change focus"), s("Move"), focus_keys),
         (s("Close"), s("Close"), single_action_key(&km, &[A::CloseTab, TO_NORMAL])),
@@ -1479,11 +1453,12 @@ fn get_keys_and_hints(mi: &ModeInfo) -> Vec<(String, String, Vec<KeyWithModifier
     ]} else if mi.mode == IM::Session { vec![
         (s("Detach"), s("Detach"), action_key(&km, &[Action::Detach])),
         (s("Session Manager"), s("Manager"), session_manager_key(&km)),
-        (s("Share"), s("Share"), share_key(&km)),
-        (s("Configure"), s("Config"), configuration_key(&km)),
         (s("Layout Manager"), s("Layouts"), layout_manager_key(&km)),
         (s("Plugin Manager"), s("Plugins"), plugin_manager_key(&km)),
+        (s("Configure"), s("Config"), configuration_key(&km)),
+        (s("Share"), s("Share"), share_key(&km)),
         (s("About"), s("About"), about_key(&km)),
+        (s("Quit"), s("Quit"), action_key(&km, &[Action::Quit])),
         (s("Select pane"), s("Select"), to_basemode_key),
     ]} else if mi.mode == IM::Tmux { vec![
         (s("Move focus"), s("Move"), action_key_group(&km, &[
@@ -1502,6 +1477,7 @@ fn get_keys_and_hints(mi: &ModeInfo) -> Vec<(String, String, Vec<KeyWithModifier
             cwd: None,
             initial_panes: None,
             first_pane_unblock_condition: None,
+            placement: TabPlacement::Append,
         }, TO_NORMAL])),
         (s("Rename tab"), s("Rename"),
             action_key(&km, &[A::SwitchToMode{input_mode: IM::RenameTab}, A::TabNameInput{input: vec![0]}])),
@@ -1568,11 +1544,7 @@ fn single_action_key(
 fn session_manager_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithModifier> {
     let mut matching = keymap.iter().find_map(|(key, acvec)| {
         let has_match = acvec.iter().any(|a| a.launches_plugin("session-manager"));
-        if has_match {
-            Some(key.clone())
-        } else {
-            None
-        }
+        if has_match { Some(key.clone()) } else { None }
     });
     if let Some(matching) = matching.take() {
         vec![matching]
@@ -1583,12 +1555,8 @@ fn session_manager_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWith
 
 fn share_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithModifier> {
     let mut matching = keymap.iter().find_map(|(key, acvec)| {
-        let has_match = acvec.iter().any(|a| a.launches_plugin("zellij:share"));
-        if has_match {
-            Some(key.clone())
-        } else {
-            None
-        }
+        let has_match = acvec.iter().any(|a| a.launches_plugin("vc-frame:share"));
+        if has_match { Some(key.clone()) } else { None }
     });
     if let Some(matching) = matching.take() {
         vec![matching]
@@ -1600,11 +1568,7 @@ fn share_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithModifier> 
 fn plugin_manager_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithModifier> {
     let mut matching = keymap.iter().find_map(|(key, acvec)| {
         let has_match = acvec.iter().any(|a| a.launches_plugin("plugin-manager"));
-        if has_match {
-            Some(key.clone())
-        } else {
-            None
-        }
+        if has_match { Some(key.clone()) } else { None }
     });
     if let Some(matching) = matching.take() {
         vec![matching]
@@ -1617,12 +1581,8 @@ fn layout_manager_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithM
     let mut matching = keymap.iter().find_map(|(key, acvec)| {
         let has_match = acvec
             .iter()
-            .any(|a| a.launches_plugin("zellij:layout-manager"));
-        if has_match {
-            Some(key.clone())
-        } else {
-            None
-        }
+            .any(|a| a.launches_plugin("vc-frame:layout-manager"));
+        if has_match { Some(key.clone()) } else { None }
     });
     if let Some(matching) = matching.take() {
         vec![matching]
@@ -1633,12 +1593,8 @@ fn layout_manager_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithM
 
 fn about_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithModifier> {
     let mut matching = keymap.iter().find_map(|(key, acvec)| {
-        let has_match = acvec.iter().any(|a| a.launches_plugin("zellij:about"));
-        if has_match {
-            Some(key.clone())
-        } else {
-            None
-        }
+        let has_match = acvec.iter().any(|a| a.launches_plugin("vc-frame:about"));
+        if has_match { Some(key.clone()) } else { None }
     });
     if let Some(matching) = matching.take() {
         vec![matching]
@@ -1650,11 +1606,7 @@ fn about_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithModifier> 
 fn configuration_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithModifier> {
     let mut matching = keymap.iter().find_map(|(key, acvec)| {
         let has_match = acvec.iter().any(|a| a.launches_plugin("configuration"));
-        if has_match {
-            Some(key.clone())
-        } else {
-            None
-        }
+        if has_match { Some(key.clone()) } else { None }
     });
     if let Some(matching) = matching.take() {
         vec![matching]
@@ -1671,20 +1623,16 @@ fn style_key_with_modifier(keyvec: &[KeyWithModifier], color_index: Option<usize
     let common_modifiers = get_common_modifiers(keyvec.iter().collect());
 
     let no_common_modifier = common_modifiers.is_empty();
-    let modifier_str = common_modifiers
-        .iter()
-        .map(|m| m.to_string())
-        .collect::<Vec<_>>()
-        .join("-");
+    let modifier_str = format_modifiers(&common_modifiers);
 
-    // Prints the keys
+    // Prints the keys — macOS glyphs (⌃g not "Ctrl g")
     let key = keyvec
         .iter()
         .map(|key| {
             if no_common_modifier || keyvec.len() == 1 {
-                format!("{}", key)
+                chrome_key_label(key)
             } else {
-                format!("{}", key.strip_common_modifiers(&common_modifiers))
+                chrome_key_label(&key.strip_common_modifiers(&common_modifiers))
             }
         })
         .collect::<Vec<String>>();

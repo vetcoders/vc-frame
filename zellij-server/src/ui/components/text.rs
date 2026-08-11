@@ -1,5 +1,5 @@
-use super::{is_too_wide, parse_indices, parse_opaque, parse_selected, Coordinates};
-use crate::panes::{terminal_character::CharacterStyles, AnsiCode};
+use super::{Coordinates, is_too_wide, parse_indices, parse_opaque, parse_selected};
+use crate::panes::{AnsiCode, terminal_character::CharacterStyles};
 use zellij_utils::{
     data::{PaletteColor, Style, StyleDeclaration},
     shared::ansi_len,
@@ -125,8 +125,8 @@ pub fn color_index_character(
         character_style = character_style
             .bold(Some(AnsiCode::On))
             .dim(Some(AnsiCode::Reset)); // default, to reset any
-                                         // possible dim/bold values
-                                         // from previous indices
+        // possible dim/bold values
+        // from previous indices
     }
 
     format!("{}{}{}", character_style, character, base_text_style)
@@ -190,17 +190,17 @@ impl Text {
         const SUCCESS_COLOR_LEVEL: usize = 7;
 
         // Check error color first (highest precedence)
-        if let Some(indices) = self.indices.get(ERROR_COLOR_LEVEL) {
-            if indices.contains(&index) {
-                return Some(styling.exit_code_error.base);
-            }
+        if let Some(indices) = self.indices.get(ERROR_COLOR_LEVEL)
+            && indices.contains(&index)
+        {
+            return Some(styling.exit_code_error.base);
         }
 
         // Check success color (second highest precedence)
-        if let Some(indices) = self.indices.get(SUCCESS_COLOR_LEVEL) {
-            if indices.contains(&index) {
-                return Some(styling.exit_code_success.base);
-            }
+        if let Some(indices) = self.indices.get(SUCCESS_COLOR_LEVEL)
+            && indices.contains(&index)
+        {
+            return Some(styling.exit_code_success.base);
         }
 
         // Check regular emphasis levels (existing code)
@@ -213,10 +213,10 @@ impl Text {
         for i in (0..=3).rev() {
             // we do this in reverse to give precedence to the last applied
             // style
-            if let Some(indices) = self.indices.get(i) {
-                if indices.contains(&index) {
-                    return Some(index_variant_styles[i]);
-                }
+            if let Some(indices) = self.indices.get(i)
+                && indices.contains(&index)
+            {
+                return Some(index_variant_styles[i]);
             }
         }
         Some(style.base)

@@ -2,7 +2,7 @@
 source: zellij-server/src/tab/./unit/tab_integration_tests.rs
 expression: snapshot
 ---
-00 (C): ┌ fish /home/thomas/Projects/zellij ───────────────────────────────────────────────────────────────────── SCROLL:  0/58 ┐
+00 (C): ┌ fish /home/thomas/Projects/zellij ───────────────────────────────────────────────────────────────────── SCROLL:  0/62 ┐
 01 (C): │m arcu. Libero id faucibus nisl tincidunt eget nullam non. Sed elementum tempus egestas sed sed risus pretium quam vulp│
 02 (C): │utate. Turpis egestas maecenas pharetra convallis. Arcu cursus vitae congue mauris rhoncus aenean vel. Augue ut lectus │
 03 (C): │arcu bibendum. Scelerisque varius morbi enim nunc faucibus a pellentesque. Mattis pellentesque id nibh tortor id alique│

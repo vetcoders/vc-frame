@@ -1,85 +1,74 @@
 <h1 align="center">
   <br>
-  <img src="https://raw.githubusercontent.com/zellij-org/zellij/main/assets/logo.png" alt="logo" width="200">
-  <br>
-  Zellij
+  vc-frame ⚒ (vibecrafted runtime)
   <br>
   <br>
 </h1>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/zellij-org/zellij/main/assets/demo.gif" alt="demo">
+  <img src="docs/assets/vc-frame-dual-rail-terminal.svg" alt="vc-frame default operator surface: left sessions rail, top run tabs, grayscale chrome">
 </p>
 <h4 align="center">
-  [<a href="https://zellij.dev/documentation/installation">Installation</a>]
-  [<a href="https://zellij.dev/screencasts/">Screencasts & Tutorials</a>]
-  [<a href="https://zellij.dev/documentation/configuration">Configuration</a>]
-  [<a href="https://zellij.dev/documentation/layouts">Layouts</a>]
-  [<a href="https://zellij.dev/documentation/faq">FAQ</a>]
+  [<a href="docs/VC_FRAME_OPERATOR_SURFACE.md">Operator Surface</a>]
+  [<a href="#how-do-i-install-it">Install</a>]
+  [<a href="docs/RELEASE.md">Release Runbook</a>]
+  [<a href="docs/TERMINOLOGY.md">Terminology</a>]
+  [<a href="https://zellij.dev/documentation/">Upstream Zellij Docs</a>]
 </h4>
-<p align="center">
-  <a href="https://discord.gg/CrUAFH3"><img alt="Discord Chat" src="https://img.shields.io/discord/771367133715628073?color=5865F2&label=discord&style=flat-square"></a>
-  <a href="https://matrix.to/#/#zellij_general:matrix.org"><img alt="Matrix Chat" src="https://img.shields.io/matrix/zellij_general:matrix.org?color=1d7e64&label=matrix%20chat&style=flat-square&logo=matrix"></a>
-  <a href="https://zellij.dev/documentation/"><img alt="Zellij documentation" src="https://img.shields.io/badge/zellij-documentation-fc0060?style=flat-square"></a>
-</p>
-
-<br>
-    <p align="center">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/bc5daac4-140a-4b83-8729-71c944ee1100">
-      <img src="https://github.com/user-attachments/assets/55156624-a71a-46b5-939e-f562e3b2dd7f" alt="Sponsored by ">
-    </picture>
-    &nbsp;
-    &nbsp;
-    <a href="https://www.gresearch.com/">
-        <picture>
-          <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/d609936a-abf8-4406-8cfc-889f76a09d74">
-          <img src="https://github.com/user-attachments/assets/742ae902-fe9d-41c6-baf2-4bc143061da3" alt="gresearch logo">
-        </picture>
-    </a>
-</p>
 
 # What is this?
 
-[Zellij](#origin-of-the-name) is a workspace aimed at developers, ops-oriented people and anyone who loves the terminal. Similar programs are sometimes called "Terminal Multiplexers".
+vc-frame is a vibecrafted runtime and terminal workspace built on the Zellij core. It is aimed at developers, operators, AI-agent workflows, and anyone who lives in the terminal. Similar programs are sometimes called "Terminal Multiplexers".
 
-Zellij is designed around the philosophy that one must not sacrifice simplicity for power, taking pride in its great experience out of the box as well as the advanced features it places at its users' fingertips.
+vc-frame keeps the Zellij philosophy that one must not sacrifice simplicity for power, while adding a fork-owned surface for Vibecrafted operator workflows.
 
-Zellij is geared toward beginner and power users alike - allowing deep customizability, personal automation through [layouts](https://zellij.dev/documentation/layouts.html), true multiplayer collaboration, unique UX features such as floating and stacked panes, and a [plugin system](https://zellij.dev/documentation/plugins.html) allowing one to create plugins in any language that compiles to WebAssembly.
+The default vc-frame surface is now grayscale-first and dual-rail: sessions live in a persistent left rail, while runs and tabs stay in the familiar top bar. Color themes remain available as explicit opt-in themes.
 
-Zellij includes a built-in [web-client](https://zellij.dev/tutorials/web-client/), making a terminal optional.
+vc-frame is geared toward beginner and power users alike - allowing deep customizability, personal automation through [layouts](https://zellij.dev/documentation/layouts.html), true multiplayer collaboration, unique UX features such as floating and stacked panes, and a [plugin system](https://zellij.dev/documentation/plugins.html) allowing one to create plugins in any language that compiles to WebAssembly.
 
-You can get started by [installing](https://zellij.dev/documentation/installation.html) Zellij and checking out the [Screencasts & Tutorials](https://zellij.dev/screencasts/).
+vc-frame includes a built-in [web-client](https://zellij.dev/tutorials/web-client/), making a terminal optional.
 
-For more details about our future plans, read about upcoming features in our [roadmap](#roadmap).
+You can get started from a tagged release or build `vc-frame` locally.
+
+For the redesign promise, proof, and quick-start path, read [docs/VC_FRAME_OPERATOR_SURFACE.md](docs/VC_FRAME_OPERATOR_SURFACE.md).
+
+## Default operator surface
+
+Fresh starts with no theme configured use built-in grayscale styling for ordinary chrome: frames, tab bars, status ribbons, lists, tables, and default text accents. Named color themes are still shipped, but they are opt-in.
+
+The default layout has two rails:
+
+- **Sessions left:** a 24-column `session-manager` rail (`rail true`) with ordinal switching.
+- **Runs top:** the existing `tab-bar` remains the run/tab surface.
+
+The Vibecrafted fleet contracts are still release-blocking: `list-sessions --no-formatting` keeps `[Created ...]` / `(current)` liveness output, and panes still receive `VC_FRAME_PANE_ID` / `VC_FRAME_SESSION_NAME`.
 
 ## How do I install it?
 
-The easiest way to install Zellij is through a [package for your OS](./docs/THIRD_PARTY_INSTALL.md).
+For a published release, use the signed GitHub Release installer:
 
-If one is not available for your OS, you could download a prebuilt binary from the [latest release](https://github.com/zellij-org/zellij/releases/latest) and place it in your `$PATH`. If you'd like, we could [automatically choose one for you](#try-zellij-without-installing).
-
-You can also install (compile) with `cargo`:
-
-```
-cargo install --locked zellij
-```
-
-#### Try Zellij without installing
-
-bash/zsh:
 ```bash
-bash <(curl -L https://zellij.dev/launch)
+VCFRAME_GPG_FINGERPRINT=<pinned-fingerprint> \
+  sh -c "$(curl -fsSL https://github.com/vetcoders/vc-frame/releases/latest/download/install.sh)"
+vc-frame --version
 ```
-fish/xonsh:
+
+Before the first release is published, use a source checkout:
+
 ```bash
-bash -c 'bash <(curl -L https://zellij.dev/launch)'
+make install
 ```
+
+This installs `vc-frame`. Existing Zellij configuration and layout concepts
+remain compatible, but vc-frame does not claim ownership of the public
+`zellij` executable or package channel.
+
+This is not the same as a public package channel. Upstream distro/Homebrew packages named `zellij` install upstream Zellij, not this Vetcoders `vc-frame` runtime. See [docs/THIRD_PARTY_INSTALL.md](docs/THIRD_PARTY_INSTALL.md) for that compatibility boundary and [docs/RELEASE.md](docs/RELEASE.md) for the release-grade `curl ... | sh` path.
 
 #### Installing from `main`
-Installing Zellij from the `main` branch is not recommended. This branch represents pre-release code, is constantly being worked on and may contain broken or unusable features. In addition, using it may corrupt the cache for future versions, forcing users to clear it before they can use the officially released version.
+Installing vc-frame from an arbitrary development branch is not recommended for daily use. Development branches represent pre-release code, are constantly being worked on, and may contain broken or unusable features.
 
-That being said - no-one will stop you from using it (and bug reports involving new features are greatly appreciated), but please consider using the latest release instead as detailed at the top of this section.
+That being said - no-one will stop you from using it (and bug reports involving new features are greatly appreciated), but outside users should prefer a tagged vc-frame release once one is published.
 
 ## How do I start a development environment?
 
@@ -90,10 +79,14 @@ That being said - no-one will stop you from using it (and bug reports involving 
 For more build commands, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Configuration
-For configuring Zellij, please see the [Configuration Documentation](https://zellij.dev/documentation/configuration.html).
+vc-frame keeps compatibility with Zellij configuration and layout concepts. For inherited syntax, see the [upstream Zellij configuration documentation](https://zellij.dev/documentation/configuration.html). For vc-frame-specific default surface and theme behavior, see [docs/VC_FRAME_OPERATOR_SURFACE.md](docs/VC_FRAME_OPERATOR_SURFACE.md).
 
-## VibeCrafted Shell Layouts
-This fork also ships built-in VibeCrafted operator layouts meant to back the
+The product key contract (v3) — one modifier per owner: `Cmd+←/→` previous/next tab, `Cmd+↑/↓` previous/next session, `Cmd+K` Quick cmd and `Cmd+E` Command Composer in **every** mode, LOCK included (Cmd/Super is empty real estate in the terminal, so nothing a pane runs can collide with it); `Ctrl+arrows` mirror the switcher outside LOCK and belong to the pane inside it; `Alt` belongs entirely to the writer (diacritics, word-jump). Host terminal requirements (the Cmd translation layer, hints, glyph width) live in [docs/ALACRITTY_INTEGRATION.md](docs/ALACRITTY_INTEGRATION.md).
+
+If keys from the guide do nothing — or closing a pane kills a whole session — your user config is probably shadowing the shipped contract with a frozen `keybinds clear-defaults=true` dump. Run `vc-frame doctor` to diagnose and `vc-frame repair key-bindings` to fix it; see [docs/DOCTOR.md](docs/DOCTOR.md).
+
+## Vibecrafted Shell Layouts
+This fork also ships built-in Vibecrafted operator layouts meant to back the
 `vibecrafted` flow when repo-owned config is not available:
 
 - `vibecrafted` — operator-first shell surface
@@ -105,10 +98,10 @@ This fork also ships built-in VibeCrafted operator layouts meant to back the
 Use them the same way as the stock built-ins, for example:
 
 ```bash
-zellij -l vibecrafted
-zellij -l vc-dashboard
-zellij setup --dump-layout vibecrafted
-zellij setup --dump-layout vc-dashboard
+vc-frame -l vibecrafted
+vc-frame -l vc-dashboard
+vc-frame setup --dump-layout vibecrafted
+vc-frame setup --dump-layout vc-dashboard
 ```
 
 They are exposed as first-class built-ins, so they also surface in layout
@@ -119,21 +112,21 @@ The shell-provider layouts resolve mission-control helpers from the standard
 home store first, then from a companion repo checkout at
 `~/Libraxis/vibecrafted` via `VIBECRAFTED_COMPANION_ROOT`, and finally from
 repo-local stores. `vc-dashboard` also acts as a branded control hub for the
-native Zellij surfaces we lean on most: live monitoring, session atlas, layout
+native vc-frame surfaces we lean on most: live monitoring, session atlas, layout
 forge, configuration control, plugin curation, workspace navigation, sharing,
-and the VibeCrafted shell guide.
+and the Vibecrafted shell guide.
 
 ### Installing repo-owned layouts into `~/.config/zellij/layouts/`
 
 The Vibecrafted framework ships its canonical layouts (`dashboard`, `marbles`,
 `operator`, `research`, `workflow`) as real `.kdl` files under
 `<vibecrafted-root>/config/zellij/layouts/`. To make them visible to stock
-`zellij --layout <name>` invocations, run:
+`vc-frame --layout <name>` invocations, run:
 
 ```bash
-zellij setup --install-vibecrafted-layouts
+vc-frame setup --install-vibecrafted-layouts
 # or with explicit root:
-zellij setup --install-vibecrafted-layouts --vibecrafted-root /path/to/vibecrafted
+vc-frame setup --install-vibecrafted-layouts --vibecrafted-root /path/to/vibecrafted
 ```
 
 The installer:
@@ -184,10 +177,10 @@ vibecrafted.kdl=operator.kdl
 ```
 
 ## About issues in this repository
-Issues in this repository, whether open or closed, do not necessarily indicate a problem or a bug in the software. They only indicate that the reporter wanted to communicate their experiences or thoughts to the maintainers. The Zellij maintainers do their best to go over and reply to all issue reports, but unfortunately cannot promise these will always be dealt with or even read. Your understanding is appreciated.
+Issues in this repository, whether open or closed, do not necessarily indicate a problem or a bug in the software. They only indicate that the reporter wanted to communicate their experiences or thoughts to the maintainers. The vc-frame maintainers do their best to go over and reply to all issue reports, but unfortunately cannot promise these will always be dealt with or even read. Your understanding is appreciated.
 
-## Roadmap
-Presented here is the project roadmap, divided into three main sections.
+## Upstream roadmap
+Presented here is the inherited upstream Zellij roadmap, divided into three main sections.
 
 These are issues that are either being actively worked on or are planned for the near future.
 
@@ -195,7 +188,7 @@ These are issues that are either being actively worked on or are planned for the
 
 [![roadmap](https://github.com/user-attachments/assets/bb55d213-4a68-4c84-ae72-7db5c9bf94fb)](https://zellij.dev/roadmap)
 
-## Origin of the Name
+## Origin of the upstream name
 [From Wikipedia, the free encyclopedia](https://en.wikipedia.org/wiki/Zellij)
 
 Zellij (Arabic: الزليج, romanized: zillīj; also spelled zillij or zellige) is a style of mosaic tilework made from individually hand-chiseled tile pieces. The pieces were typically of different colours and fitted together to form various patterns on the basis of tessellations, most notably elaborate Islamic geometric motifs such as radiating star patterns composed of various polygons. This form of Islamic art is one of the main characteristics of architecture in the western Islamic world. It is found in the architecture of Morocco, the architecture of Algeria, early Islamic sites in Tunisia, and in the historic monuments of al-Andalus (in the Iberian Peninsula).
@@ -203,6 +196,3 @@ Zellij (Arabic: الزليج, romanized: zillīj; also spelled zillij or zellige
 ## License
 
 MIT
-
-## Sponsored by
-<a href="https://terminaltrove.com/"><img src="https://avatars.githubusercontent.com/u/121595180?s=200&v=4" width="80px"></a>

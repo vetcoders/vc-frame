@@ -3,8 +3,8 @@ use std::sync::OnceLock;
 use crossterm::event::{self, Event, KeyEventKind};
 use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
 use windows_sys::Win32::System::Console::{
-    GetConsoleMode, GetStdHandle, SetConsoleMode, ENABLE_EXTENDED_FLAGS, ENABLE_MOUSE_INPUT,
-    ENABLE_VIRTUAL_TERMINAL_INPUT, ENABLE_WINDOW_INPUT, STD_INPUT_HANDLE,
+    ENABLE_EXTENDED_FLAGS, ENABLE_MOUSE_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT, ENABLE_WINDOW_INPUT,
+    GetConsoleMode, GetStdHandle, STD_INPUT_HANDLE, SetConsoleMode,
 };
 
 use crate::InputInstruction;

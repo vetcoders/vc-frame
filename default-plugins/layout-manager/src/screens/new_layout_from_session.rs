@@ -1,7 +1,7 @@
 use super::{ErrorScreen, KeyResponse, LayoutListScreen, OptimisticUpdate, Screen};
-use crate::text_input::{InputAction, TextInput};
-use crate::ui::{truncate_with_ellipsis_start, LayoutDetail};
 use crate::DisplayLayout;
+use crate::text_input::{InputAction, TextInput};
+use crate::ui::{LayoutDetail, truncate_with_ellipsis_start};
 use zellij_tile::prelude::*;
 
 #[derive(Clone)]
@@ -202,7 +202,7 @@ impl NewLayoutFromCurrentSessionScreen {
 
         let save_as_line_y = base_y + 5;
         self.update_cursor_position(base_x, save_as_line_y, actual_ui_width); // NOTE: must be before any render
-                                                                              // happens
+        // happens
 
         self.render_title(base_x, base_y, actual_ui_width);
         self.render_description(base_x, base_y + 2, actual_ui_width);
