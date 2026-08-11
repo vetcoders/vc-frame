@@ -2,7 +2,7 @@
 """Isolated command-boundary proof for truthful run triage.
 
 The harness accepts only an exact, clean, profile-matched ``vc-frame`` build,
-constructs two empty runtime namespaces below one short ``mkdtemp`` root, and
+constructs three empty runtime namespaces below one short ``mkdtemp`` root, and
 never discovers or mutates the operator's normal socket tree. Durable evidence
 and the isolated control plane live below the requested artifact directory;
 only the Unix-socket runtime uses the short root required by macOS.
@@ -3597,8 +3597,10 @@ def main() -> int:
         tempfile.mkdtemp(prefix=f"vcf-e2e-{unique}-", dir=SHORT_RUNTIME_PARENT)
     ).resolve()
     primary_root = runtime_root / "p"
+    headless_root = runtime_root / "h"
     restart_root = runtime_root / "r"
     env = isolated_env(primary_root, control_plane)
+    headless_env = isolated_env(headless_root, control_plane)
     restart_env = isolated_env(restart_root, control_plane)
     receipt_path = root / "evidence.json"
     recorder = EvidenceRecorder(
@@ -3622,6 +3624,10 @@ def main() -> int:
                 "primary": {
                     "root": str(primary_root),
                     "socket_root": env["VC_FRAME_SOCKET_DIR"],
+                },
+                "headless": {
+                    "root": str(headless_root),
+                    "socket_root": headless_env["VC_FRAME_SOCKET_DIR"],
                 },
                 "restart": {
                     "root": str(restart_root),
@@ -3650,7 +3656,8 @@ def main() -> int:
     missing_origin_session = f"{unique}-miss"
     empty_origin = f"{unique}-empty"
     drawers = set(DRAWER_BY_BUCKET.values())
-    primary_targets = {origin, peer, headless_origin, *drawers}
+    primary_targets = {origin, peer, *drawers}
+    headless_targets = {headless_origin, "Needs attention"}
     restart_targets = {"Finalized runs"}
     primary_session_selectors = primary_targets | {
         missing_name,
@@ -3664,6 +3671,10 @@ def main() -> int:
                 pathlib.Path(env["VC_FRAME_SOCKET_DIR"]),
                 primary_session_selectors,
             ),
+            "headless": socket_path_budget(
+                pathlib.Path(headless_env["VC_FRAME_SOCKET_DIR"]),
+                headless_targets,
+            ),
             "restart": socket_path_budget(
                 pathlib.Path(restart_env["VC_FRAME_SOCKET_DIR"]), restart_targets
             ),
@@ -3674,6 +3685,7 @@ def main() -> int:
         "fixtures",
         {
             "primary_owned_sessions": sorted(primary_targets),
+            "headless_owned_sessions": sorted(headless_targets),
             "restart_owned_sessions": sorted(restart_targets),
             "probe_root": str(probe_root),
             "control_plane": str(control_plane),
@@ -3714,7 +3726,7 @@ def main() -> int:
             expected_sha = validate_sha(options.expected_sha, "expected SHA")
         recorder.set("expected_sha", expected_sha)
 
-        # Both namespaces are proven empty and the exact binary provenance is
+        # All namespaces are proven empty and the exact binary provenance is
         # proven before any server can be created.
         build_info = namespace_preflight(
             binary,
@@ -3732,8 +3744,17 @@ def main() -> int:
             expected_sha=expected_sha,
             expected_profile=options.expected_profile,
         )
+        headless_build_info = namespace_preflight(
+            binary,
+            headless_env,
+            headless_root,
+            control_plane,
+            expected_sha=expected_sha,
+            expected_profile=options.expected_profile,
+        )
         require(
-            build_info == restart_build_info, "build provenance changed by namespace"
+            build_info == restart_build_info == headless_build_info,
+            "build provenance changed by namespace",
         )
         recorder.set("build_info", build_info)
         recorder.set("status", "running")
@@ -4663,10 +4684,10 @@ def main() -> int:
         # merely that a recorded pane id is stale.
         fallback_run = f"{unique}-transcript"
         fallback_marker = f"HEADLESS-{unique}"
-        create_session(binary, env, headless_origin)
+        create_session(binary, headless_env, headless_origin)
         _fallback_tab_id, fallback_panes = create_marker_tab(
             binary,
-            env,
+            headless_env,
             headless_origin,
             fallback_run,
             fallback_marker,
@@ -4674,7 +4695,7 @@ def main() -> int:
         )
         wait_for_marker(
             binary,
-            env,
+            headless_env,
             headless_origin,
             fallback_panes[0],
             fallback_marker,
@@ -4691,10 +4712,10 @@ def main() -> int:
             ownership_root=root,
         )
         transcript_bytes = transcript.read_bytes()
-        kill_confirmed_session(binary, env, headless_origin)
+        kill_confirmed_session(binary, headless_env, headless_origin)
         fallback_result = triage(
             binary,
-            env,
+            headless_env,
             fallback_run,
             -9,
             headless_origin,
@@ -4703,7 +4724,7 @@ def main() -> int:
         )
         fallback_capture, _fallback_receipt = verify_transfer(
             binary,
-            env,
+            headless_env,
             control_plane,
             run=fallback_run,
             exit_code=-9,
@@ -4713,7 +4734,7 @@ def main() -> int:
             expected_bytes=transcript_bytes,
         )
         require(
-            query_session(binary, env, headless_origin).state == "absent",
+            query_session(binary, headless_env, headless_origin).state == "absent",
             "transcript fallback resurrected the dead origin",
         )
         require(
@@ -4727,7 +4748,7 @@ def main() -> int:
         recorder.append("transfers", fallback_evidence)
         fallback_replay = triage(
             binary,
-            env,
+            headless_env,
             fallback_run,
             -9,
             headless_origin,
@@ -4736,7 +4757,7 @@ def main() -> int:
         )
         fallback_after, _fallback_receipt = verify_transfer(
             binary,
-            env,
+            headless_env,
             control_plane,
             run=fallback_run,
             exit_code=-9,
@@ -4863,6 +4884,7 @@ def main() -> int:
         if mutation_started:
             for label, cleanup_env, targets in (
                 ("primary", env, primary_targets),
+                ("headless", headless_env, headless_targets),
                 ("restart", restart_env, restart_targets),
             ):
                 try:
