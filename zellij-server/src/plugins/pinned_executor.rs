@@ -592,6 +592,11 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    // The panic hook writes and symbolizes a backtrace before `catch_unwind`
+    // can invoke the executor callback. Windows serializes that output slowly,
+    // so concurrent intentional-panic tests can consume each other's timeout.
+    static PANIC_TEST_LOCK: Mutex<()> = Mutex::new(());
+
     type TestDependencies = (
         ThreadSenders,
         Arc<Mutex<PluginMap>>,
@@ -988,6 +993,7 @@ mod tests {
 
     #[test]
     fn panicking_job_releases_busy_count_and_worker_accepts_next_job() {
+        let _panic_test_guard = PANIC_TEST_LOCK.lock().unwrap();
         let executor = create_test_executor(1);
         let (panic_tx, panic_rx) = channel();
         executor
@@ -1055,6 +1061,7 @@ mod tests {
 
     #[test]
     fn panicking_fire_and_forget_unload_retains_executor_assignment_for_retry() {
+        let _panic_test_guard = PANIC_TEST_LOCK.lock().unwrap();
         let executor = create_test_executor(1);
         executor.register_plugin(43);
 
@@ -1096,6 +1103,7 @@ mod tests {
 
     #[test]
     fn completion_aware_unload_panic_retains_assignment_for_retry() {
+        let _panic_test_guard = PANIC_TEST_LOCK.lock().unwrap();
         let executor = create_test_executor(1);
         executor.register_plugin(44);
 
