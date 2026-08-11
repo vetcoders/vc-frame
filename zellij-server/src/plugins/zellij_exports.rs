@@ -4214,13 +4214,13 @@ fn get_session_list(env: &PluginEnv) {
                 &plugin_list,
             );
 
-            let _ = env
-                .senders
-                .send_to_screen(ScreenInstruction::UpdateSessionInfos(
-                    live_sessions_map.clone(),
-                    resurrectable_sessions_map.clone(),
-                ));
-
+            // Deliberately no `ScreenInstruction::UpdateSessionInfos` here.
+            // This is a plugin-initiated read: feeding it back to Screen made
+            // Screen broadcast `SessionUpdate` to every plugin, including the
+            // caller, which rebuilt its model and asked again on its next
+            // timer — a self-sustaining loop whose cost is quadratic in the
+            // number of live sessions. Screen's cache is kept fresh by the
+            // session-metadata background job, which owns that cadence.
             let snapshot = SessionListSnapshot {
                 live_sessions: live_sessions_map.into_values().collect(),
                 resurrectable_sessions: resurrectable_sessions_map.into_iter().collect(),
