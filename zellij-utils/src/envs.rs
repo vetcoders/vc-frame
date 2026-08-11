@@ -32,8 +32,13 @@ pub fn set_session_name(v: String) {
 
 pub const SOCKET_DIR_ENV_KEY: &str = "ZELLIJ_SOCKET_DIR";
 pub const VC_FRAME_SOCKET_DIR_ENV_KEY: &str = "VC_FRAME_SOCKET_DIR";
+pub const VC_FRAME_SERVER_FOREGROUND_ENV_KEY: &str = "VC_FRAME_SERVER_FOREGROUND";
 pub fn get_socket_dir() -> Result<String> {
     aliased_var(VC_FRAME_SOCKET_DIR_ENV_KEY, SOCKET_DIR_ENV_KEY)
+}
+
+pub fn server_foreground_requested() -> bool {
+    std::env::var(VC_FRAME_SERVER_FOREGROUND_ENV_KEY).as_deref() == Ok("1")
 }
 
 pub const PANE_ID_ENV_KEY: &str = "ZELLIJ_PANE_ID";

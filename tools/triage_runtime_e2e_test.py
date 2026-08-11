@@ -40,6 +40,13 @@ def completed(
 
 
 class ProvenanceTests(unittest.TestCase):
+    def test_isolated_env_keeps_server_inside_owned_process_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            env = MODULE.isolated_env(root / "namespace", root / "control-plane")
+
+        self.assertEqual(env["VC_FRAME_SERVER_FOREGROUND"], "1")
+
     def test_makefile_preserves_ci_artifact_root_and_explicit_override(self) -> None:
         repo_root = MODULE_PATH.parents[1]
         makefile = repo_root / "Makefile"
@@ -1341,6 +1348,101 @@ class EvidenceAndCleanupTests(unittest.TestCase):
             self.assertEqual(inventory.call_count, 4)
             exact_kill.assert_not_called()
             process.send_signal.assert_not_called()
+
+    def test_group_topology_accepts_only_exact_isolated_foreground_server(
+        self,
+    ) -> None:
+        process = mock.Mock()
+        process.pid = 9_731
+        process.poll.return_value = None
+        process.vc_frame_server_foreground = "1"
+        process.vc_frame_socket_root = "/tmp/proof/sockets"
+        process.vc_frame_owned_binary = "/bin/vc-frame"
+        leader = {
+            "pid": process.pid,
+            "ppid": 1,
+            "pgid": process.pid,
+            "uid": 501,
+            "sid": process.pid,
+            "sid_errno": None,
+            "sid_error": None,
+            "state": "T",
+            "command": "/bin/vc-frame triage-run --run proof",
+        }
+        detached = {
+            "pid": 9_732,
+            "ppid": 1,
+            "pgid": process.pid,
+            "uid": 501,
+            "sid": process.pid,
+            "sid_errno": None,
+            "sid_error": None,
+            "state": "T",
+            "command": (
+                "/bin/vc-frame --server "
+                "'/tmp/proof/sockets/contract_version_2/Needs attention'"
+            ),
+        }
+        detached_child = {
+            "pid": 9_733,
+            "ppid": 9_732,
+            "pgid": process.pid,
+            "uid": 501,
+            "sid": process.pid,
+            "sid_errno": None,
+            "sid_error": None,
+            "state": "T",
+            "command": "/bin/sh -c fixture-child",
+        }
+        unsignalable_child = {
+            **detached_child,
+            "pid": 9_734,
+            "uid": 0,
+            "command": "ps -ao ppid,args",
+        }
+        with mock.patch.object(
+            MODULE.os, "getpgid", return_value=process.pid
+        ), mock.patch.object(
+            MODULE.os, "getsid", return_value=process.pid
+        ), mock.patch.object(
+            MODULE.os, "geteuid", return_value=501
+        ), mock.patch.object(
+            MODULE,
+            "process_group_members",
+            return_value=[leader, detached, detached_child, unsignalable_child],
+        ):
+            validated = MODULE.validated_owned_process_group_members(process)
+
+        proven = next(member for member in validated if member["pid"] == 9_732)
+        self.assertTrue(proven["detached_owned"])
+        self.assertEqual(proven["ownership_proof"], "isolated_foreground_server")
+        self.assertNotIn("topology_error", proven)
+        child = next(member for member in validated if member["pid"] == 9_733)
+        self.assertTrue(child["detached_owned_subtree"])
+        self.assertEqual(child["depth"], 2)
+        unsignalable = next(
+            member for member in validated if member["pid"] == 9_734
+        )
+        self.assertTrue(unsignalable["unsignalable_owned_descendant"])
+
+        outside = {
+            **detached,
+            "command": "/bin/vc-frame --server /tmp/proof/sockets-neighbor/session",
+        }
+        with mock.patch.object(
+            MODULE.os, "getpgid", return_value=process.pid
+        ), mock.patch.object(
+            MODULE.os, "getsid", return_value=process.pid
+        ), mock.patch.object(
+            MODULE.os, "geteuid", return_value=501
+        ), mock.patch.object(
+            MODULE, "process_group_members", return_value=[leader, outside]
+        ), mock.patch.object(MODULE.time, "sleep"):
+            with self.assertRaisesRegex(
+                MODULE.OwnedProcessGroupRefusal,
+                r"persistently ambiguous process group 9731",
+            ):
+                MODULE.validated_owned_process_group_members(process)
 
     def test_transient_disconnected_live_member_disappears_without_signal(
         self,

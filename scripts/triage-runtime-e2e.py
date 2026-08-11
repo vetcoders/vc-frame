@@ -746,6 +746,11 @@ def isolated_env(
             # Set both spellings so even a compatibility path cannot fall back
             # to an inherited operator socket.
             "VC_FRAME_SOCKET_DIR": str(socket_root),
+            # Keep fixture servers as real descendants of the interrupted
+            # triage process. The fail-closed cleanup can then pin every exact
+            # PID through its stopped parent instead of trusting reparented
+            # daemon PIDs.
+            "VC_FRAME_SERVER_FOREGROUND": "1",
             "ZELLIJ_SOCKET_DIR": str(socket_root),
             "VIBECRAFTED_CONTROL_PLANE": str(control_plane),
         }
@@ -878,6 +883,10 @@ def namespace_preflight(
             socket_root == namespace_root / "sockets",
             f"{key} escaped the fixture namespace: {socket_root}",
         )
+    require(
+        env.get("VC_FRAME_SERVER_FOREGROUND") == "1",
+        "isolated runtime must keep server processes in the owned tree",
+    )
     for key in ISOLATION_PATH_KEYS:
         resolved = pathlib.Path(env[key]).resolve()
         require(
@@ -1820,6 +1829,45 @@ def validate_owned_process_group_leader(
         )
 
 
+def is_isolated_foreground_server_member(
+    process: subprocess.Popen[bytes],
+    member: dict[str, object],
+    leader: dict[str, object] | None,
+) -> bool:
+    """Prove a reparented fixture server still belongs to the fresh session."""
+    if (
+        getattr(process, "vc_frame_server_foreground", None) != "1"
+        or int(member.get("ppid", -1)) != 1
+        or leader is None
+    ):
+        return False
+    socket_root_value = getattr(process, "vc_frame_socket_root", None)
+    owned_binary = getattr(process, "vc_frame_owned_binary", None)
+    if not isinstance(socket_root_value, str) or not isinstance(owned_binary, str):
+        return False
+    try:
+        member_args = shlex.split(str(member.get("command", "")))
+        leader_args = shlex.split(str(leader.get("command", "")))
+    except ValueError:
+        return False
+    if (
+        not member_args
+        or not leader_args
+        or member_args[0] != leader_args[0]
+        or pathlib.Path(member_args[0]).resolve() != pathlib.Path(owned_binary).resolve()
+    ):
+        return False
+    server_paths = server_argument_paths(str(member.get("command", "")))
+    if len(server_paths) != 1:
+        return False
+    try:
+        server_path = server_paths[0].resolve()
+        socket_root = pathlib.Path(socket_root_value).resolve()
+    except OSError:
+        return False
+    return server_path.is_relative_to(socket_root)
+
+
 def annotate_owned_process_group_depths(
     process: subprocess.Popen[bytes],
     members: list[dict[str, object]],
@@ -1835,6 +1883,13 @@ def annotate_owned_process_group_depths(
         by_pid[pid] = member
 
     invalid: list[dict[str, object]] = []
+    leader = by_pid.get(process.pid)
+    detached_roots = {
+        int(member["pid"])
+        for member in annotated
+        if int(member.get("pid", -1)) != process.pid
+        and is_isolated_foreground_server_member(process, member, leader)
+    }
     for member in annotated:
         pid = int(member.get("pid", -1))
         if pid in duplicate_pids:
@@ -1846,13 +1901,24 @@ def annotate_owned_process_group_depths(
             member["depth"] = 0
             member["ancestry"] = [process.pid]
             continue
+        if pid in detached_roots:
+            member["depth"] = 1
+            member["ancestry"] = [pid, 1]
+            member["detached_owned"] = True
+            member["ownership_proof"] = "isolated_foreground_server"
+            continue
 
         ancestry = [pid]
         visited: set[int] = set()
         cursor = pid
         depth: int | None = None
         topology_error: str | None = None
+        detached_ancestor: int | None = None
         while cursor != process.pid:
+            if cursor in detached_roots:
+                detached_ancestor = cursor
+                depth = len(ancestry)
+                break
             if cursor in visited:
                 topology_error = f"cycle through pid {cursor}"
                 break
@@ -1880,6 +1946,11 @@ def annotate_owned_process_group_depths(
 
         member["depth"] = depth
         member["ancestry"] = ancestry
+        if detached_ancestor is not None:
+            member["detached_owned_subtree"] = True
+            member["ownership_proof"] = (
+                f"descendant_of_isolated_foreground_server:{detached_ancestor}"
+            )
         if topology_error is not None:
             member["topology_error"] = topology_error
             if "Z" not in str(member.get("state", "")):
@@ -1903,7 +1974,6 @@ def validated_owned_process_group_members(
         members, topology_invalid = annotate_owned_process_group_depths(
             process, members
         )
-        observations.append(members)
         leader = next(
             (member for member in members if int(member["pid"]) == process.pid),
             None,
@@ -1930,6 +2000,38 @@ def validated_owned_process_group_members(
             is not None
             and "Z" in str(parent.get("state", ""))
         ]
+        detached_foreign_uid_members = [
+            member
+            for member in members
+            if member.get("detached_owned_subtree") is True
+            and int(member.get("uid", -1)) != expected_uid
+            and "Z" not in str(member.get("state", ""))
+        ]
+        unsignalable_pids = {
+            int(member["pid"]) for member in detached_foreign_uid_members
+        }
+        for member in members:
+            ancestry = member.get("ancestry")
+            if member.get("detached_owned_subtree") is True and isinstance(
+                ancestry, list
+            ):
+                if any(
+                    isinstance(pid, int) and pid in unsignalable_pids
+                    for pid in ancestry
+                ):
+                    member["unsignalable_owned_descendant"] = True
+                    member["ownership_proof"] = (
+                        f"{member.get('ownership_proof')}+foreign_uid_evidence_only"
+                    )
+        sid_ambiguous_members = [
+            member
+            for member in sid_ambiguous_members
+            if member.get("unsignalable_owned_descendant") is not True
+        ]
+        sid_ambiguous_pids = {
+            int(member["pid"]) for member in sid_ambiguous_members
+        }
+        observations.append(members)
         ambiguous_members = list(
             {
                 int(member["pid"]): member
@@ -1938,20 +2040,27 @@ def validated_owned_process_group_members(
                     *unstable_parent_members,
                     *topology_invalid,
                 ]
+                if member.get("unsignalable_owned_descendant") is not True
             }.values()
         )
         invalid_members = [
             member
             for member in members
-            if int(member.get("pgid", -1)) != process.pid
-            or int(member.get("uid", -1)) != expected_uid
-            or (
-                member.get("sid") != process.pid
-                and int(member.get("pid", -1)) not in sid_ambiguous_pids
-                and not (
-                    "Z" in str(member.get("state", ""))
-                    and member.get("sid") is None
-                    and member.get("sid_errno") == errno.ESRCH
+            if member.get("unsignalable_owned_descendant") is not True
+            and (
+                int(member.get("pgid", -1)) != process.pid
+                or (
+                    int(member.get("uid", -1)) != expected_uid
+                    and member.get("detached_owned_subtree") is not True
+                )
+                or (
+                    member.get("sid") != process.pid
+                    and int(member.get("pid", -1)) not in sid_ambiguous_pids
+                    and not (
+                        "Z" in str(member.get("state", ""))
+                        and member.get("sid") is None
+                        and member.get("sid_errno") == errno.ESRCH
+                    )
                 )
             )
         ]
@@ -2098,6 +2207,7 @@ def wait_for_owned_member_quiescence(
     deadline: float,
     expected_stopped_parent: int | None,
     terminal: bool,
+    allow_disappearance: bool = False,
 ) -> None:
     """Observe a signalled PID only while its immediate parent stays stopped."""
     last_members: list[dict[str, object]] = []
@@ -2112,6 +2222,8 @@ def wait_for_owned_member_quiescence(
             None,
         )
         if member is None:
+            if allow_disappearance:
+                return
             parent = (
                 next(
                     (
@@ -2213,6 +2325,9 @@ def stop_owned_process_group(
             for member in last_members
             if "T" not in str(member.get("state", ""))
             and "Z" not in str(member.get("state", ""))
+            and member.get("unsignalable_owned_descendant") is not True
+            and member.get("detached_owned") is not True
+            and member.get("detached_owned_subtree") is not True
         ]
         if not running:
             signature = tuple(
@@ -2223,6 +2338,9 @@ def stop_owned_process_group(
                     member.get("depth"),
                 )
                 for member in last_members
+                if member.get("unsignalable_owned_descendant") is not True
+                and member.get("detached_owned") is not True
+                and member.get("detached_owned_subtree") is not True
             )
             if signature == quiesced_signature:
                 return last_members
@@ -2238,6 +2356,7 @@ def stop_owned_process_group(
             member
             for member in running
             if int(member["pid"]) == process.pid
+            or member.get("detached_owned") is True
             or (
                 (parent := members_by_pid.get(int(member.get("ppid", -1))))
                 is not None
@@ -2288,7 +2407,8 @@ def stop_owned_process_group(
             )
             continue
 
-        expected_parent = int(target["ppid"])
+        detached_owned = target.get("detached_owned") is True
+        expected_parent = None if detached_owned else int(target["ppid"])
         signalled = signal_exact_owned_group_member(
             process,
             target_pid,
@@ -2308,6 +2428,7 @@ def stop_owned_process_group(
             deadline=deadline,
             expected_stopped_parent=expected_parent,
             terminal=False,
+            allow_disappearance=detached_owned,
         )
         time.sleep(0.001)
     raise OwnedProcessGroupRefusal(
@@ -2328,6 +2449,9 @@ def continue_owned_process_group(
         for member in members
         if "Z" not in str(member.get("state", ""))
         and "T" not in str(member.get("state", ""))
+        and member.get("unsignalable_owned_descendant") is not True
+        and member.get("detached_owned") is not True
+        and member.get("detached_owned_subtree") is not True
     ]
     if unstopped:
         raise OwnedProcessGroupRefusal(
@@ -2335,7 +2459,12 @@ def continue_owned_process_group(
             f"unstopped={unstopped!r}, members={members!r}"
         )
     targets = [
-        member for member in members if "Z" not in str(member.get("state", ""))
+        member
+        for member in members
+        if "Z" not in str(member.get("state", ""))
+        and member.get("unsignalable_owned_descendant") is not True
+        and member.get("detached_owned") is not True
+        and member.get("detached_owned_subtree") is not True
     ]
     targets.sort(
         key=lambda member: (
@@ -2377,7 +2506,11 @@ def continue_owned_process_group(
             signal.SIGCONT,
             deadline=deadline,
             require_stopped=True,
-            expected_stopped_parent=int(member["ppid"]),
+            expected_stopped_parent=(
+                None
+                if member.get("detached_owned") is True
+                else int(member["ppid"])
+            ),
         )
 
 
@@ -2395,16 +2528,19 @@ def kill_owned_process_group(
         member
         for member in stopped_members
         if "Z" not in str(member.get("state", ""))
+        and member.get("unsignalable_owned_descendant") is not True
+        and member.get("detached_owned_subtree") is not True
     ]
     targets.sort(
         key=lambda member: (
             -int(member.get("depth", -1)),
+            member.get("detached_owned") is True,
             int(member["pid"]),
         )
     )
     target_pids = {int(member["pid"]) for member in targets}
     addressed: set[int] = set()
-    for member in targets:
+    for target_index, member in enumerate(targets):
         member_pid = int(member["pid"])
         if member_pid in addressed:
             raise OwnedProcessGroupRefusal(
@@ -2416,6 +2552,8 @@ def kill_owned_process_group(
             current
             for current in current_members
             if "Z" not in str(current.get("state", ""))
+            and current.get("unsignalable_owned_descendant") is not True
+            and current.get("detached_owned_subtree") is not True
             and int(current["pid"]) not in target_pids
         ]
         if unexpected_live:
@@ -2444,23 +2582,38 @@ def kill_owned_process_group(
                 )
             process.kill()
             return
-        expected_parent = int(member["ppid"])
+        detached_owned = member.get("detached_owned") is True
+        expected_parent = None if detached_owned else int(member["ppid"])
         signalled = signal_exact_owned_group_member(
             process,
             member_pid,
             signal.SIGKILL,
             deadline=deadline,
-            require_stopped=True,
+            require_stopped=not detached_owned,
             expected_stopped_parent=expected_parent,
         )
         if not signalled:
             continue
+        remaining_nonleaders = [
+            candidate
+            for candidate in targets[target_index + 1 :]
+            if int(candidate["pid"]) != process.pid
+        ]
+        if member.get("detached_owned") is True and not remaining_nonleaders:
+            # Killing this last detached root intentionally dissolves the
+            # ancestry proof for its unsignalable evidence-only descendants.
+            # The exact unreaped Popen leader is still pinned, so terminate it
+            # now and let the mandatory stable-empty group proof decide whether
+            # any server residue survived.
+            process.kill()
+            return
         wait_for_owned_member_quiescence(
             process,
             member_pid,
             deadline=deadline,
             expected_stopped_parent=expected_parent,
             terminal=True,
+            allow_disappearance=detached_owned,
         )
     raise OwnedProcessGroupRefusal(
         f"owned process group {process.pid} lost its leader before exact KILL"
@@ -2760,6 +2913,13 @@ def interrupt_process_at_state(
             stderr=stderr,
             start_new_session=True,
         )
+        process.vc_frame_server_foreground = env.get(  # type: ignore[attr-defined]
+            "VC_FRAME_SERVER_FOREGROUND"
+        )
+        process.vc_frame_socket_root = env.get(  # type: ignore[attr-defined]
+            "VC_FRAME_SOCKET_DIR"
+        )
+        process.vc_frame_owned_binary = str(binary.resolve())  # type: ignore[attr-defined]
         try:
             wait_for_process_stop(process)
             for slices in range(1, max_slices + 1):
@@ -4048,11 +4208,23 @@ def main() -> int:
             == empty_viewer_interrupted.observed_state.get("capture_sha256"),
             "empty-viewer recovery rewrote durable scrollback",
         )
+        empty_viewer_identity_after = empty_viewer_receipt_after.get(
+            "viewer_tab_identity"
+        )
         require(
             empty_viewer_receipt_after.get("viewer_token")
             == empty_viewer_receipt_before.get("viewer_token")
-            and empty_viewer_receipt_after.get("viewer_tab_identity")
-            == empty_viewer_identity_before
+            and isinstance(empty_viewer_identity_after, dict)
+            and all(
+                empty_viewer_identity_after.get(key)
+                == empty_viewer_identity_before.get(key)
+                for key in ("session", "id", "name", "tab_instance_id")
+            )
+            and isinstance(
+                empty_viewer_identity_after.get("session_incarnation"), str
+            )
+            and empty_viewer_identity_after.get("session_incarnation")
+            != empty_viewer_identity_before.get("session_incarnation")
             and empty_viewer_receipt_after.get("viewer_creation_generation") == 2
             and empty_viewer_receipt_after.get("viewer_creation_pending") is False,
             "empty-viewer recovery changed ownership or skipped generation two",
@@ -4081,7 +4253,8 @@ def main() -> int:
                 "scenario": "after_empty_viewer_reservation",
                 "phase": "recovered",
                 "triage_exit": empty_viewer_recovery.returncode,
-                "same_viewer_identity": empty_viewer_identity_before,
+                "stable_viewer_identity_before": empty_viewer_identity_before,
+                "stable_viewer_identity_after": empty_viewer_identity_after,
                 "transfer": transfer_evidence(
                     control_plane,
                     empty_viewer_run,
