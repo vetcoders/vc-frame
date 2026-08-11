@@ -77,9 +77,11 @@ use zellij_utils::{
         plugins::PluginAliases,
     },
     ipc::{ClientAttributes, ExitReason, ServerToClientMsg},
-    sessions::SocketOwnership,
     shared::{default_palette, web_server_base_url},
 };
+// Only the Unix startup path probes socket ownership.
+#[cfg(unix)]
+use zellij_utils::sessions::SocketOwnership;
 
 pub type ClientId = u16;
 
@@ -813,6 +815,12 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                 // running but unreachable: an orphan with zero clients that no
                 // reaper ever collects, burning CPU until reboot. A stale file
                 // left by a crashed server stays legal to clean up.
+                //
+                // Unix only: elsewhere the path is a marker file and the
+                // listener is a named pipe whose name the OS refuses to hand
+                // out twice, so the bind below already decides ownership and
+                // there is nothing here to take away.
+                #[cfg(unix)]
                 match zellij_utils::sessions::probe_socket_ownership(&socket_path) {
                     SocketOwnership::Vacant => {
                         drop(std::fs::remove_file(&socket_path));
