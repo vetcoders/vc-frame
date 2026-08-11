@@ -2,7 +2,7 @@
 source: src/tests/e2e/cases.rs
 expression: last_snapshot
 ---
- Ctrl +g LOCK p PANE t TAB n RESIZE h MOVE s SEARCH o SESSION 
+ ⌃ +g LOCK p PANE t TAB n RESIZE h MOVE s SEARCH o SESSION 
 ┌ Pane #1 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │$ █                                                                                                                   │
 │                                                                                                                      │

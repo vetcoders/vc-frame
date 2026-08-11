@@ -34,6 +34,7 @@ TERMINAL_CFG_TEST_MODULES = {
 WEB_CLIENT_TEST_PATH = "zellij-client/src/web_client/unit/web_client_tests.rs"
 WEB_CLIENT_PARENT_PATH = "zellij-client/src/web_client/mod.rs"
 CURRENT_EXE_PATHS = {
+    "src/clinic.rs",
     "src/run_triage_cli.rs",
     "xtask/src/pipelines.rs",
     "zellij-client/src/lib.rs",
@@ -216,6 +217,17 @@ def require_current_exe_policy(path: str, lines: list[str], line: int) -> None:
     if path not in CURRENT_EXE_PATHS:
         raise InventoryError(f"current-exe finding has no source policy: {path}:{line}")
     source_line = lines[line - 1].strip()
+    if path == "src/clinic.rs":
+        nearby = [candidate.strip() for candidate in lines[line - 1:line + 8]]
+        if (
+            source_line != "let Ok(exe) = std::env::current_exe() else {"
+            or "let Ok(installed_at) = std::fs::metadata(&exe).and_then(|meta| meta.modified()) else {"
+            not in nearby
+        ):
+            raise InventoryError(
+                f"clinic current-exe drift probe source shape changed at {path}:{line}"
+            )
+        return
     if path == "src/run_triage_cli.rs":
         nearby = [candidate.strip() for candidate in lines[line - 1:line + 8]]
         production_shape = [
@@ -613,6 +625,14 @@ def adjudicate(
         )
     if rule == "rust.lang.security.current-exe.current-exe":
         require_current_exe_policy(path, lines, line)
+        if path == "src/clinic.rs":
+            return (
+                "scoped_false_positive",
+                "current_exe is read only to identify the running binary for a local drift diagnosis.",
+                "The resolved path is used only for metadata and local process-name comparison; it is never executed or trusted as update provenance.",
+                "Clinic runtime diagnostics",
+                ["security/semgrep/EVIDENCE.md#current-executable", path],
+            )
         if path == XTASK_INSTALL_PATH:
             return (
                 "scoped_false_positive",

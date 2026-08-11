@@ -195,6 +195,8 @@ struct CliTriageIo {
 const CLI_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const NEW_TAB_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const VIEWER_CREATION_RECONCILIATION_TIMEOUT: Duration = Duration::from_secs(30);
+const INVENTORY_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
+const SESSION_READY_TIMEOUT: Duration = Duration::from_secs(20);
 
 fn run_command_with_timeout(
     executable: &Path,
@@ -402,13 +404,13 @@ impl CliTriageIo {
     }
 
     fn tab_inventory(&self, session: &str) -> Result<String, String> {
-        retry_json_array_output("vc-frame tab inventory", Duration::from_secs(2), || {
+        retry_json_array_output("vc-frame tab inventory", INVENTORY_RETRY_TIMEOUT, || {
             self.run(&["-s", session, "action", "list-tabs", "--json"])
         })
     }
 
     fn pane_inventory(&self, session: &str) -> Result<String, String> {
-        retry_json_array_output("vc-frame pane inventory", Duration::from_secs(2), || {
+        retry_json_array_output("vc-frame pane inventory", INVENTORY_RETRY_TIMEOUT, || {
             self.run(&[
                 "-s",
                 session,
@@ -423,7 +425,7 @@ impl CliTriageIo {
     }
 
     fn wait_for_session_ready(&self, session: &str) -> Result<(), String> {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + SESSION_READY_TIMEOUT;
         loop {
             let readiness = self
                 .tab_inventory(session)

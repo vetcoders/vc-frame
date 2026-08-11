@@ -9,7 +9,7 @@ expression: last_snapshot
 │line2aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa │
 │line3aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa │
 │line4aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa │
-│line5aaaaaaaaaaaaaaaaaaaaaaaa┌ Pane #2 ──────────────────────────────────────── PIN [+] ┐aaaaaaaaaaaaaaaaaaaaaaaaaaaa │
+│line5aaaaaaaaaaaaaaaaaaaaaaaa┌ Pane #2 ────────────────────────────────────────── PIN ◉ ┐aaaaaaaaaaaaaaaaaaaaaaaaaaaa │
 │line6aaaaaaaaaaaaaaaaaaaaaaaa│$                                                         │aaaaaaaaaaaaaaaaaaaaaaaaaaaa │
 │line7aaaaaaaaaaaaaaaaaaaaaaaa│                                                          │aaaaaaaaaaaaaaaaaaaaaaaaaaaa │
 │line8aaaaaaaaaaaaaaaaaaaaaaaa│                                                          │aaaaaaaaaaaaaaaaaaaaaaaaaaaa │
@@ -25,4 +25,4 @@ expression: last_snapshot
 │                                                                                                                      │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
- Ctrl p  PANE   n  New  ←↓↑→  Move  Ctrl q  Close  ... 
+ ⌃g  LOCK  ⌃p  PANE  ⌃t  TAB  ⌃n  RESIZE  ⌃h  MOVE  ⌃s  SEARCH  ⌃o  SESSION                            ...

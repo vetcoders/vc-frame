@@ -655,9 +655,15 @@ impl ServerOsApi for ServerOsInputOutput {
         run_command: RunCommand,
         quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
     ) -> Result<(Box<dyn AsyncReader>, Option<u32>)> {
+        self.pty_backend
+            .reserve_terminal_id_for_rerun(terminal_id)?;
+        let spawn_result = self
+            .pty_backend
+            .spawn_terminal(run_command, None, quit_cb, terminal_id);
         let (async_reader, child_fd) =
-            self.pty_backend
-                .spawn_terminal(run_command, None, quit_cb, terminal_id)?;
+            resolve_reserved_terminal_spawn(terminal_id, spawn_result, |terminal_id| {
+                self.pty_backend.clear_terminal_id(terminal_id)
+            })?;
         Ok((async_reader, Some(child_fd as u32)))
     }
     fn clear_terminal_id(&self, terminal_id: u32) -> Result<()> {

@@ -22,12 +22,25 @@ mod wire_contract_guard {
         "bafef87a5b86ae76f9ba26301ac4540f6d65d3a57bc3686a08980c3b2a47f076",
     );
 
+    fn normalized_source_bytes(source: &[u8]) -> Vec<u8> {
+        let mut normalized = Vec::with_capacity(source.len());
+        let mut bytes = source.iter().copied().peekable();
+        while let Some(byte) = bytes.next() {
+            if byte == b'\r' && bytes.peek() == Some(&b'\n') {
+                continue;
+            }
+            normalized.push(byte);
+        }
+        normalized
+    }
+
     #[test]
     fn wire_contract_changes_require_a_version_bump() {
-        let current = sha256_hex(include_bytes!(concat!(
+        let source = normalized_source_bytes(include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/assets/prost_ipc/client_server_contract.rs"
         )));
+        let current = sha256_hex(&source);
         assert_eq!(
             (CLIENT_SERVER_CONTRACT_VERSION, current.as_str()),
             PINNED_CONTRACT,
@@ -35,6 +48,14 @@ mod wire_contract_guard {
              surface, bump CLIENT_SERVER_CONTRACT_VERSION in consts.rs AND \
              update PINNED_CONTRACT here (version + new sha256) in the same \
              commit — old servers cannot decode new message variants."
+        );
+    }
+
+    #[test]
+    fn wire_contract_hash_is_independent_of_checkout_line_endings() {
+        assert_eq!(
+            normalized_source_bytes(b"one\r\ntwo\r\nthree\n"),
+            b"one\ntwo\nthree\n"
         );
     }
 }

@@ -52,7 +52,7 @@ Some(
                                             configuration: Some(
                                                 PluginUserConfiguration(
                                                     {
-                                                        "left_inset": "9",
+                                                        "left_inset": "6",
                                                     },
                                                 ),
                                             ),

@@ -196,11 +196,23 @@ fn migrate_legacy_path(legacy_path: &Path, vc_frame_path: &Path) {
 }
 
 fn copy_path_if_target_absent(source: &Path, target: &Path) -> std::io::Result<()> {
-    if !source.exists() || target.exists() {
+    let source_metadata = match std::fs::symlink_metadata(source) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if target.exists() {
         return Ok(());
     }
 
-    if source.is_dir() {
+    if source_metadata.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("refusing to migrate symlink {}", source.display()),
+        ));
+    }
+
+    if source_metadata.is_dir() {
         copy_dir_recursively(source, target)
     } else {
         if let Some(parent) = target.parent() {
@@ -826,6 +838,24 @@ mod tests {
             std::fs::read_to_string(target.join("nested").join("token.txt")).unwrap(),
             "owned"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_path_if_target_absent_refuses_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let outside = tmp_dir.path().join("outside");
+        let source = tmp_dir.path().join("source-link");
+        let target = tmp_dir.path().join("target");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "do not copy").unwrap();
+        symlink(&outside, &source).unwrap();
+
+        let error = copy_path_if_target_absent(&source, &target).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(!target.exists());
     }
 
     #[cfg(unix)]

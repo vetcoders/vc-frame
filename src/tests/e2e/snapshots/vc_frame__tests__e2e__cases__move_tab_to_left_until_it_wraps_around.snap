@@ -25,3 +25,4 @@ expression: account_for_races_in_snapshot(last_snapshot)
 │                                                                                                                      │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ ⌃g  LOCK  ⌃p  PANE  ⌃t  TAB  ⌃n  RESIZE  ⌃h  MOVE  ⌃s  SEARCH  ⌃o  SESSION                            ...
