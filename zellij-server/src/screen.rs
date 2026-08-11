@@ -1663,6 +1663,12 @@ pub(crate) struct Screen {
     pane_render_subscribers: HashMap<ClientId, PaneRenderSubscription>,
     plugins_need_ansi_pane_contents: bool,
     background_plugin_subscriptions: HashMap<(PluginId, ClientId), HashSet<EventType>>,
+    /// Chrome plugin/client targets that were told they are visible by the
+    /// previous transition. Kept so a target can still be parked after the
+    /// tab (or the whole client) it belonged to is gone — otherwise the last
+    /// detach leaves both target sets empty and the chrome stays latched
+    /// visible, refreshing once a second on a server nobody is watching.
+    last_visible_chrome_targets: BTreeSet<ChromePluginTarget>,
     has_clients_flag: Arc<AtomicBool>,
     /// Monotonic counter used to tag each forwarded host-terminal query
     /// with a unique token. 0 is reserved as a sentinel (see
@@ -2767,6 +2773,7 @@ impl Screen {
             pane_render_subscribers: HashMap::new(),
             plugins_need_ansi_pane_contents: false,
             background_plugin_subscriptions: HashMap::new(),
+            last_visible_chrome_targets: BTreeSet::new(),
             has_clients_flag,
             next_forward_token: 1, // 0 is reserved as the startup sentinel
             pending_forwarded_queries: HashMap::new(),
@@ -6468,12 +6475,28 @@ impl Screen {
         &mut self,
     ) -> (Vec<ChromePluginTarget>, Vec<ChromePluginTarget>) {
         let active_targets = self.active_status_bar_plugin_targets();
-        let hidden_targets = self
+        let mut hidden_targets: BTreeSet<ChromePluginTarget> = self
             .all_status_bar_plugin_targets()
             .difference(&active_targets)
             .copied()
             .collect();
-        (active_targets.into_iter().collect(), hidden_targets)
+        // Both target sets are built from `active_tab_ids`, so a client that
+        // detaches takes its own chrome out of them and would never be told it
+        // stopped being visible — while its plugin instances outlive it and
+        // keep refreshing. Park what a departed client leaves behind; targets
+        // of still-connected clients stay governed by `all - active` above.
+        let connected_clients: BTreeSet<ClientId> = self.active_tab_ids.keys().copied().collect();
+        hidden_targets.extend(
+            self.last_visible_chrome_targets
+                .iter()
+                .filter(|(_, client_id)| !connected_clients.contains(client_id))
+                .copied(),
+        );
+        self.last_visible_chrome_targets = active_targets.clone();
+        (
+            active_targets.into_iter().collect(),
+            hidden_targets.into_iter().collect(),
+        )
     }
 
     fn log_and_report_session_state(&mut self) -> Result<()> {
