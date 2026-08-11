@@ -56,7 +56,12 @@ once from the session snapshot it already owns and sends a small scalar message
 only to the status-bar plugin/client pairs viewing active tabs. When a client
 switches tabs, the server sends an exact plugin/client deactivation signal to
 the status bar it left; sampling does not rely on the tab-global `Visible`
-event, which cannot distinguish multiple clients in one session. Per-tab
+event, which cannot distinguish multiple clients in one session. A client that
+detaches is covered by the same transition: the chrome it had visible is parked
+as the client leaves, so a server with nobody attached holds no chrome that
+keeps polling for cross-session state. Attaching re-activates that chrome
+through the ordinary active-target path, and the session list it shows is
+rebuilt on the spot. Per-tab
 status bars never subscribe to the full cross-session `SessionUpdate`, and
 unrelated `CustomMessage` consumers are not awakened. Host resource sampling
 also runs only in active status-bar instances, and clipboard timers cannot
@@ -71,6 +76,27 @@ The lifecycle recognizer covers the canonical `vc-frame:status-bar`, the legacy
 resolve to that built-in plugin. An unrelated `file:` or remote plugin is not
 treated as the built-in status bar merely because its filename looks similar;
 custom replacements must implement and wire their own sampling lifecycle.
+
+## Session Socket Ownership
+
+A session name maps to one socket file, and exactly one live server may own it.
+A starting server probes that path before binding: if a process is listening
+there — even one too busy to answer a health probe — the newcomer refuses to
+start and says so in the log instead of unlinking the file and binding over it.
+Only a path that nothing is listening on (missing, stale after a crash, or not
+a socket at all) is cleaned up and re-bound.
+
+The rule exists because stealing a socket does not stop the previous server: it
+keeps running, unreachable, with zero clients, and nothing ever reaps it. A
+server that already runs a session also rejects a second new-session request
+rather than re-initializing over live state; the caller sees the refusal and
+can attach to the existing session instead.
+
+The probe is a Unix-only mechanism, because only there is the session path a
+socket that a second server can unlink and rebind. Off Unix the path is a
+marker file and the listener is a named pipe whose name the OS refuses to hand
+out twice, so the bind itself already decides ownership — the marker is written
+only after it succeeds.
 
 ## Key Contract
 
