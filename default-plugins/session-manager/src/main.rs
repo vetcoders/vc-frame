@@ -1857,16 +1857,11 @@ impl State {
         }
     }
     fn handle_session_rail_key(&mut self, key: KeyWithModifier) -> bool {
+        // Bare arrows are deliberately NOT handled here. Session switching by
+        // arrow lives only in the ^T tab-mode keybinds (vc_rail_nav pipe) and
+        // the always-on Super chords; a focused rail consuming raw arrows made
+        // LOCK mode switch sessions, since LOCK routes keys to the focused pane.
         match key.bare_key {
-            BareKey::Down if key.has_no_modifiers() => {
-                // Operator contract: arrow = immediate switch, no Enter confirm.
-                self.switch_session_relative(1);
-                true
-            },
-            BareKey::Up if key.has_no_modifiers() => {
-                self.switch_session_relative(-1);
-                true
-            },
             BareKey::Enter if key.has_no_modifiers() => {
                 self.handle_session_rail_selection();
                 true
@@ -3285,6 +3280,18 @@ mod rail_tests {
             is_current_session,
             creation_time: Duration::ZERO,
         }
+    }
+
+    /// Product key-contract v3: bare arrows switch sessions ONLY through the
+    /// ^T tab-mode keybinds (vc_rail_nav pipe). A focused rail pane must not
+    /// consume them — LOCK routes raw keys to the focused pane, so a rail
+    /// arrow handler becomes a hidden mode-proof session switcher.
+    #[test]
+    fn rail_ignores_bare_arrow_keys() {
+        let mut state = State::default();
+        state.sessions.session_ui_infos = vec![session("solo", true)];
+        assert!(!state.handle_session_rail_key(KeyWithModifier::new(BareKey::Up)));
+        assert!(!state.handle_session_rail_key(KeyWithModifier::new(BareKey::Down)));
     }
 
     fn session_launched_at(name: &str, is_current_session: bool, secs: u64) -> SessionUiInfo {
