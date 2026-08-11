@@ -220,6 +220,12 @@ keybinds clear-defaults=true {
             }
         }
         bind "Super right" { GoToNextTab; }
+        bind "Super k" {
+            MessagePlugin "compact-bar" {
+                name "vc_quick_cmd"
+                floating false
+            }
+        }
     }
     shared_except "locked" {
         bind "Ctrl left" { GoToPreviousTab; }

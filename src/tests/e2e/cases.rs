@@ -112,6 +112,7 @@ fn account_for_races_in_snapshot(snapshot: String) -> String {
     // stay about product layout, not runner load. Segments can appear in any
     // order or subset (e.g. only MEM|DISK|HEALTH when LIVE is zero/absent).
     let live_replace = Regex::new(r"LIVE \d+\s*").unwrap();
+    let rail_live_replace = Regex::new(r"Live (?:\d+|…)").unwrap();
     let cockpit_seg_replace = Regex::new(r"(?:\| )?(?:CPU|MEM|DISK|HDD|HEALTH) [^|\n]*").unwrap();
     // Rotating startup tips and the default-mode bottom tip chip row race with
     // snapshot timing (present/absent, and tip body changes). Strip them so
@@ -121,6 +122,10 @@ fn account_for_races_in_snapshot(snapshot: String) -> String {
     // Scroll-position totals vary with fixture prompt/newline edge cases
     // (e.g. 1/3 vs 1/4) while still proving scroll mode is active.
     let scroll_indicator_replace = Regex::new(r"SCROLL:\s*\d+/\d+").unwrap();
+    // Shells can repaint the prompt between the echoed `echo $?` command and
+    // its output. Keep the status line while ignoring whether the input echo
+    // survived that repaint.
+    let echo_status_command_replace = Regex::new(r"(?m)^(│\$) echo \$\?(\s+│)$").unwrap();
     let snapshot = base_replace.replace_all(&snapshot, "\n").to_string();
     let snapshot = base_replace_tmux_mode_1
         .replace_all(&snapshot, "\n")
@@ -129,6 +134,9 @@ fn account_for_races_in_snapshot(snapshot: String) -> String {
         .replace_all(&snapshot, "\n")
         .to_string();
     let snapshot = live_replace.replace_all(&snapshot, "").to_string();
+    let snapshot = rail_live_replace
+        .replace_all(&snapshot, "Live …")
+        .to_string();
     let snapshot = cockpit_seg_replace.replace_all(&snapshot, "").to_string();
     // Collapse leftover " | " runs and trailing pipes after cockpit strip.
     let pipe_ws_replace = Regex::new(r"(?: \| )+").unwrap();
@@ -139,6 +147,10 @@ fn account_for_races_in_snapshot(snapshot: String) -> String {
     let snapshot = alt_tip_replace.replace_all(&snapshot, "").to_string();
     let snapshot = scroll_indicator_replace
         .replace_all(&snapshot, "SCROLL:  N/M")
+        .to_string();
+    let snapshot = echo_status_command_replace
+        // Preserve the terminal-grid width while erasing the optional echo.
+        .replace_all(&snapshot, "$1        $2")
         .to_string();
 
     eol_arrow_replace.replace_all(&snapshot, "\n").to_string()
@@ -162,19 +174,23 @@ pub fn starts_with_one_terminal() {
             name: "Wait for app to load",
             instruction: |remote_terminal: RemoteTerminal| -> bool {
                 let mut step_is_complete = false;
-                if remote_terminal.status_bar_appears() && remote_terminal.cursor_position_is(3, 2)
+                if remote_terminal.status_bar_appears()
+                    && remote_terminal.snapshot_contains("SESSION")
+                    && remote_terminal.cursor_position_is(3, 2)
                 {
                     step_is_complete = true;
                 }
                 step_is_complete
             },
         });
-        if runner.test_timed_out && test_attempts > 0 {
-            test_attempts -= 1;
-            continue;
-        } else {
-            break last_snapshot;
+        if runner.test_timed_out {
+            if test_attempts > 0 {
+                test_attempts -= 1;
+                continue;
+            }
+            panic!("starts_with_one_terminal exhausted all E2E retries");
         }
+        break last_snapshot;
     };
 
     let last_snapshot = account_for_races_in_snapshot(last_snapshot);
@@ -479,7 +495,7 @@ pub fn open_new_tab() {
                 let mut step_is_complete = false;
                 if remote_terminal.cursor_position_is(3, 2)
                     && remote_terminal.snapshot_contains("Tab #2")
-                    && remote_terminal.status_bar_appears()
+                    && remote_terminal.mode_status_bar_appears()
                 {
                     // cursor is in the newly opened second tab
                     step_is_complete = true;
@@ -1669,6 +1685,7 @@ pub fn mirrored_sessions() {
                 let mut step_is_complete = false;
                 if remote_terminal.cursor_position_is(63, 2)
                     && remote_terminal.snapshot_contains("┐┌")
+                    && remote_terminal.snapshot_contains("𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍.")
                 {
                     // cursor is back in the first tab
                     step_is_complete = true;
@@ -1682,6 +1699,7 @@ pub fn mirrored_sessions() {
                 let mut step_is_complete = false;
                 if remote_terminal.cursor_position_is(63, 2)
                     && remote_terminal.snapshot_contains("┐┌")
+                    && remote_terminal.snapshot_contains("𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍.")
                 {
                     // cursor is back in the first tab
                     step_is_complete = true;
@@ -2379,15 +2397,15 @@ pub fn send_command_through_the_cli() {
                 name: "Wait for command to run",
                 instruction: |mut remote_terminal: RemoteTerminal| -> bool {
                     let mut step_is_complete = false;
-                    if remote_terminal.snapshot_contains("<Ctrl-c>")
-                        && remote_terminal.cursor_position_is(76, 3)
+                    if remote_terminal.snapshot_contains("foo-1")
+                        && remote_terminal.snapshot_contains("<ENTER> re-run")
                     {
+                        // The banner reaches the SSH-side parser just before the
+                        // server finishes transitioning the pane back to Held.
                         std::thread::sleep(std::time::Duration::from_millis(100));
-                        remote_terminal.send_key(&SPACE); // re-run script - here we use SPACE
-                        // instead of the default ENTER because
-                        // sending ENTER over SSH can be a little
-                        // problematic (read: I couldn't get it
-                        // to pass consistently)
+                        // A held command accepts Enter or Space. Use Space in the SSH
+                        // harness because PTY newline translation makes Enter flaky.
+                        remote_terminal.send_key(&SPACE);
                         step_is_complete = true
                     }
                     step_is_complete
@@ -2397,8 +2415,8 @@ pub fn send_command_through_the_cli() {
                 name: "Wait for script to run again",
                 instruction: |mut remote_terminal: RemoteTerminal| -> bool {
                     let mut step_is_complete = false;
-                    if remote_terminal.snapshot_contains("<Ctrl-c>")
-                        && remote_terminal.cursor_position_is(76, 4)
+                    if remote_terminal.snapshot_contains("foo-2")
+                        && remote_terminal.snapshot_contains("<ENTER> re-run")
                     {
                         step_is_complete = true
                     }
@@ -2411,8 +2429,8 @@ pub fn send_command_through_the_cli() {
             name: "Wait for script to run twice",
             instruction: |remote_terminal: RemoteTerminal| -> bool {
                 let mut step_is_complete = false;
-                if remote_terminal.snapshot_contains("foo")
-                    && remote_terminal.cursor_position_is(76, 4)
+                if remote_terminal.snapshot_contains("foo-2")
+                    && remote_terminal.snapshot_contains("<ENTER> re-run")
                 {
                     step_is_complete = true
                 }
@@ -2420,12 +2438,14 @@ pub fn send_command_through_the_cli() {
             },
         });
 
-        if runner.test_timed_out && test_attempts > 0 {
-            test_attempts -= 1;
-            continue;
-        } else {
-            break last_snapshot;
+        if runner.test_timed_out {
+            if test_attempts > 0 {
+                test_attempts -= 1;
+                continue;
+            }
+            panic!("send_command_through_the_cli exhausted all E2E retries");
         }
+        break last_snapshot;
     };
     let last_snapshot = account_for_races_in_snapshot(last_snapshot);
     assert_snapshot!(last_snapshot);

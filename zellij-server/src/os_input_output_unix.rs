@@ -723,6 +723,27 @@ impl UnixPtyBackend {
             .insert(terminal_id, None);
     }
 
+    pub fn reserve_terminal_id_for_rerun(&self, terminal_id: u32) -> Result<()> {
+        let mut terminal_registry = self
+            .terminal_id_to_raw_fd
+            .lock()
+            .to_anyhow()
+            .context("failed to lock terminal registry before rerun")?;
+        match terminal_registry.get(&terminal_id) {
+            Some(Some(_)) => {
+                terminal_registry.insert(terminal_id, None);
+                Ok(())
+            },
+            // `start_suspended` reserves the id before the first run. The same
+            // rerun path activates both that initial reservation and a later
+            // held command, so an existing reservation is already ready.
+            Some(None) => Ok(()),
+            None => Err(anyhow!(
+                "terminal {terminal_id} cannot be rerun because it is not registered"
+            )),
+        }
+    }
+
     pub fn clear_terminal_id(&self, terminal_id: u32) {
         self.terminal_id_to_raw_fd
             .lock()
@@ -924,6 +945,34 @@ mod tests {
                 .contains_key(&77),
             "cleanup must recover the poisoned guard instead of panicking again"
         );
+    }
+
+    #[test]
+    fn rerun_transitions_an_active_terminal_back_to_reserved() {
+        let backend = UnixPtyBackend::new().expect("backend");
+        let terminal_id = 77;
+        backend
+            .terminal_id_to_raw_fd
+            .lock()
+            .expect("terminal registry")
+            .insert(terminal_id, Some(123));
+
+        backend
+            .reserve_terminal_id_for_rerun(terminal_id)
+            .expect("active terminal should become a reserved rerun slot");
+
+        assert!(matches!(
+            backend
+                .terminal_id_to_raw_fd
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(&terminal_id),
+            Some(None)
+        ));
+
+        backend
+            .reserve_terminal_id_for_rerun(terminal_id)
+            .expect("a start-suspended reservation should remain usable");
     }
 
     /// Verify that `try_write_to_fd` writes as many bytes as the kernel will

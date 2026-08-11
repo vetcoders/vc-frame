@@ -25,4 +25,4 @@ expression: last_snapshot
 │                                                          ││line20                                                    │
 │                                                          ││li█e21                                                    │
 └──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
- Ctrl s  SEARCH   s  Search  ↓↑  Scroll  ...      
+ ⌃s  SEARCH   s  Search  ↓↑  Scroll  PgDn|PgUp  Scroll  d|u  Scroll  e  Edit  ENTER  Select       BASE

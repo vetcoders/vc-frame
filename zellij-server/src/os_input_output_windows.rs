@@ -860,6 +860,27 @@ impl WindowsPtyBackend {
             .insert(terminal_id, None);
     }
 
+    pub fn reserve_terminal_id_for_rerun(&self, terminal_id: u32) -> Result<()> {
+        let mut terminals = self
+            .terminals
+            .lock()
+            .to_anyhow()
+            .context("failed to lock terminal registry before rerun")?;
+        match terminals.get(&terminal_id) {
+            Some(Some(_)) => {
+                terminals.insert(terminal_id, None);
+                Ok(())
+            },
+            // `start_suspended` reserves the id before the first run. The same
+            // rerun path activates both that initial reservation and a later
+            // held command, so an existing reservation is already ready.
+            Some(None) => Ok(()),
+            None => Err(anyhow!(
+                "terminal {terminal_id} cannot be rerun because it is not registered"
+            )),
+        }
+    }
+
     pub fn clear_terminal_id(&self, terminal_id: u32) {
         self.terminals
             .lock()

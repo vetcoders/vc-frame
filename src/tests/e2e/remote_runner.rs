@@ -504,6 +504,10 @@ impl RemoteTerminal {
         let snap = self.last_snapshot.lock().unwrap().clone();
         chrome_appears_in(&snap)
     }
+    pub fn mode_status_bar_appears(&self) -> bool {
+        let snap = self.last_snapshot.lock().unwrap();
+        snap.contains("LOCK") && snap.contains("PANE") && snap.contains("SESSION")
+    }
     pub fn ctrl_plus_appears(&self) -> bool {
         let snap = self.last_snapshot.lock().unwrap().clone();
         // Dense chips may drop the superkey prefix; treat mode chrome as enough.
@@ -1086,14 +1090,19 @@ impl RemoteRunner {
                 return self.last_snapshot.lock().unwrap().clone();
             }
             let (cursor_x, cursor_y) = *self.cursor_coordinates.lock().unwrap();
+            // Evaluate the readiness predicate against the exact frame we will
+            // return. The reader thread can otherwise replace `last_snapshot`
+            // between the predicate and the clone, producing a frame that no
+            // longer satisfies the condition that accepted it.
+            let snapshot = self.last_snapshot.lock().unwrap().clone();
             let remote_terminal = RemoteTerminal {
                 cursor_x,
                 cursor_y,
-                last_snapshot: self.last_snapshot.clone(),
+                last_snapshot: Arc::new(Mutex::new(snapshot.clone())),
                 channel: self.channel.clone(),
             };
             if instruction(remote_terminal) {
-                return self.last_snapshot.lock().unwrap().clone();
+                return snapshot;
             } else {
                 retries_left -= 1;
                 std::thread::sleep(std::time::Duration::from_millis(100));

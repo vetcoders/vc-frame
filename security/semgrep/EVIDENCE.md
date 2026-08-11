@@ -1,8 +1,8 @@
 # Semgrep adjudication evidence
 
 Receiver baseline: Semgrep 1.172.0, explicit registry pack `p/rust`, 60 resolved
-rules, 57 rules executed over 358 targets, 326 blocking findings and zero scan
-errors at `6ba1ab7b`. The exact raw JSON hash is pinned in `baseline.json`;
+rules, 57 rules executed over 363 targets, 327 blocking findings and zero scan
+errors at `09656c0c`. The exact raw JSON hash is pinned in `baseline.json`;
 `findings.jsonl` is the checked-in machine-verifiable verdict surface.
 The gate also hashes Semgrep's normalized resolved rule representation, so a
 registry rule-body change fails even when rule IDs stay the same. Scanner
@@ -85,6 +85,8 @@ temp directory and contain only the current user's terminal dump.
 
 `current_exe` starts another internal mode of the already running vc-frame
 binary. It establishes no identity, trust, privilege or update provenance.
+The clinic also resolves the current executable for a read-only mtime and
+local process-name drift diagnosis; it neither executes nor authorizes it.
 The triage transfer-lock tests additionally re-enter the same test executable
 under fixed test names with only the selected isolated scenario or the lock
 path and expected lock state. The macOS-only xtask installer test copies its
