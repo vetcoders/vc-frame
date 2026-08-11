@@ -760,11 +760,13 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
         // preserve the current umask: read current value by setting to another mode, and then restoring it
         let current_umask = umask(Mode::all());
         umask(current_umask);
-        daemonize::Daemonize::new()
-            .working_directory(std::env::current_dir().unwrap())
-            .umask(current_umask.bits() as u32)
-            .start()
-            .expect("could not daemonize the server process");
+        if !zellij_utils::envs::server_foreground_requested() {
+            daemonize::Daemonize::new()
+                .working_directory(std::env::current_dir().unwrap())
+                .umask(current_umask.bits() as u32)
+                .start()
+                .expect("could not daemonize the server process");
+        }
     }
 
     #[cfg(windows)]
