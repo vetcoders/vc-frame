@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 ## [Unreleased]
 
+* fix(operator): collapse runtime truth to one clickable `LIVE n↗` chip in the bottom status bar, sourced from vc-server `/api/control/state.active_runs`; make the left rail session-only by removing PID-reuse-prone Live/process rows and the blinking F/X/N settlement strip
 * feat(input): `Cmd+K` / `Super+k` opens the existing `❯_ Quick cmd` mini-console in every mode including LOCK; the keybind messages the active compact-bar so keyboard and click share one runner, geometry and pane-title contract, with matching Alacritty CSI-u translation and help
 
 ## [0.47.3] - 2026-08-06

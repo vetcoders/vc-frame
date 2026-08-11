@@ -101,8 +101,6 @@ pub struct TabUiInfo {
     pub name: String,
     pub panes: Vec<PaneUiInfo>,
     pub position: usize,
-    pub is_active: bool,
-    live_processes: Vec<LiveProcessUiInfo>,
 }
 
 impl TabUiInfo {
@@ -126,51 +124,23 @@ impl TabUiInfo {
                     .collect()
             })
             .unwrap_or_default();
-        let live_processes = pane_infos
-            .map(|panes| {
-                panes
-                    .iter()
-                    .filter(|pane| !pane.is_plugin && !pane.exited && !pane.is_held)
-                    .map(LiveProcessUiInfo::from_pane_info)
-                    .collect()
-            })
-            .unwrap_or_default();
         TabUiInfo {
             name: tab_info.name.clone(),
             panes,
             position: tab_info.position,
-            is_active: tab_info.active,
-            live_processes,
         }
-    }
-    pub fn live_process_count(&self) -> usize {
-        self.live_processes.len()
-    }
-    pub fn primary_process_label(&self) -> Option<&str> {
-        self.live_processes
-            .iter()
-            .find(|process| process.is_focused)
-            .or_else(|| self.live_processes.first())
-            .map(|process| process.label.as_str())
     }
     #[cfg(test)]
     pub fn for_rail_test(
         name: &str,
-        is_active: bool,
-        process_label: &str,
-        live_process_count: usize,
+        _is_active: bool,
+        _process_label: &str,
+        _live_process_count: usize,
     ) -> Self {
         Self {
             name: name.to_owned(),
             panes: vec![],
             position: 0,
-            is_active,
-            live_processes: (0..live_process_count)
-                .map(|index| LiveProcessUiInfo {
-                    label: process_label.to_owned(),
-                    is_focused: index == 0,
-                })
-                .collect(),
         }
     }
     pub fn line_count(&self, selected_index: &SelectedIndex) -> usize {
@@ -196,41 +166,6 @@ impl TabUiInfo {
 }
 
 #[derive(Debug, Clone)]
-struct LiveProcessUiInfo {
-    label: String,
-    is_focused: bool,
-}
-
-impl LiveProcessUiInfo {
-    fn from_pane_info(pane_info: &PaneInfo) -> Self {
-        let title = pane_info.title.trim();
-        let label = if !title.is_empty() && !is_generic_pane_title(title) {
-            title.to_owned()
-        } else {
-            pane_info
-                .terminal_command
-                .as_deref()
-                .and_then(command_basename)
-                .unwrap_or_else(|| "terminal".to_owned())
-        };
-        Self {
-            label,
-            is_focused: pane_info.is_focused,
-        }
-    }
-}
-
-fn is_generic_pane_title(title: &str) -> bool {
-    title == "Terminal" || title.starts_with("Pane #")
-}
-
-fn command_basename(command: &str) -> Option<String> {
-    let executable = command.split_whitespace().next()?;
-    let basename = executable.rsplit('/').next().unwrap_or(executable);
-    (!basename.is_empty()).then(|| basename.to_owned())
-}
-
-#[derive(Debug, Clone)]
 pub struct PaneUiInfo {
     pub name: String,
     pub exit_code: Option<i32>,
@@ -251,83 +186,5 @@ impl PaneUiInfo {
             span.render(None, &mut line_to_render, &mut max_cols);
         }
         line_to_render
-    }
-}
-
-#[cfg(test)]
-mod process_projection_tests {
-    use super::*;
-
-    fn terminal(title: &str, command: Option<&str>) -> PaneInfo {
-        PaneInfo {
-            title: title.to_owned(),
-            terminal_command: command.map(str::to_owned),
-            is_selectable: true,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn live_process_projection_ignores_plugins_exited_and_held_panes() {
-        let tab_info = TabInfo {
-            position: 0,
-            name: "impl-260718-120000-01000".to_owned(),
-            active: true,
-            ..Default::default()
-        };
-        let mut live = terminal("claude", Some("/Users/me/.local/bin/claude"));
-        live.is_focused = true;
-        let mut plugin = terminal("Sessions", None);
-        plugin.is_plugin = true;
-        let mut exited = terminal("old-codex", Some("codex"));
-        exited.exited = true;
-        let mut held = terminal("failed-run", Some("dispatcher.sh"));
-        held.is_held = true;
-        let manifest = PaneManifest {
-            panes: [(0, vec![plugin, exited, held, live])].into(),
-        };
-
-        let projected = TabUiInfo::new(&tab_info, &manifest);
-
-        assert!(projected.is_active);
-        assert_eq!(projected.live_process_count(), 1);
-        assert_eq!(projected.primary_process_label(), Some("claude"));
-    }
-
-    #[test]
-    fn live_process_label_falls_back_to_command_basename() {
-        let tab_info = TabInfo {
-            position: 0,
-            name: "agent".to_owned(),
-            ..Default::default()
-        };
-        let manifest = PaneManifest {
-            panes: [(
-                0,
-                vec![terminal("", Some("/opt/homebrew/bin/codex --resume"))],
-            )]
-            .into(),
-        };
-
-        let projected = TabUiInfo::new(&tab_info, &manifest);
-
-        assert_eq!(projected.primary_process_label(), Some("codex"));
-    }
-
-    #[test]
-    fn unlabeled_live_terminal_still_keeps_its_tab_visible() {
-        let tab_info = TabInfo {
-            position: 0,
-            name: "operator".to_owned(),
-            ..Default::default()
-        };
-        let manifest = PaneManifest {
-            panes: [(0, vec![terminal("", None)])].into(),
-        };
-
-        let projected = TabUiInfo::new(&tab_info, &manifest);
-
-        assert_eq!(projected.live_process_count(), 1);
-        assert_eq!(projected.primary_process_label(), Some("terminal"));
     }
 }

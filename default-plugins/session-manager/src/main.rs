@@ -16,8 +16,10 @@ use new_session_info::NewSessionInfo;
 use single_screen::{SingleScreenMode, SingleScreenState};
 use single_screen_data::{DeleteTarget, UnifiedSearchResult};
 use single_screen_render::render_unified_results;
+#[cfg(test)]
+use ui::TabUiInfo;
 use ui::{
-    SessionUiInfo, TabUiInfo,
+    SessionUiInfo,
     components::{
         Colors, render_controls_line, render_error, render_new_session_block, render_prompt,
         render_renaming_session_screen, render_screen_toggle, render_single_screen_prompt,
@@ -45,10 +47,6 @@ const VC_CHROME_HEARTBEAT_MESSAGE: &str = "vc.fleet-live-count.v1";
 // Semantic Live-runs truth: control-plane census of headless workers with a
 // live pid, produced by the server's session-metadata loop. Never derived
 // from Zellij tabs — a viewer tab is only an observer of a run.
-const VC_LIVE_RUNS_MESSAGE: &str = "vc.live-runs.v1";
-// Same freshness lease as the settlement feed: the producer re-sends at least
-// every five seconds, so three missed windows demote exact counts.
-const LIVE_RUNS_FEED_STALE_AFTER_TICKS: u8 = 15;
 // Guardian republishes at least every five seconds. Three missed refresh
 // windows turn exact counts into lower bounds instead of letting a dead
 // producer leave stale values looking authoritative forever.
@@ -113,6 +111,7 @@ impl SettlementCounts {
             == Some(self.total)
     }
 
+    #[cfg(test)]
     fn historical_count(&self, bucket: BucketKind) -> u64 {
         match bucket {
             BucketKind::Finalized => self.f,
@@ -222,11 +221,6 @@ struct State {
     // Once a producer generation has been superseded, a delayed payload from
     // that retired generation must never roll the rail back.
     retired_settlement_generations: BTreeSet<String>,
-    // Control-plane Live census (`vc.live-runs.v1`). `None` until the first
-    // valid payload → the pinned row renders `…`, never a guessed digit.
-    live_runs_count: Option<u64>,
-    live_runs_feed_degraded: bool,
-    live_runs_feed_age_ticks: Option<u8>,
 }
 
 register_plugin!(State);
@@ -317,7 +311,9 @@ impl ZellijPlugin for State {
             if outcome.acknowledged {
                 acknowledge_cli_pipe(pipe_id);
             }
-            outcome.should_render
+            // Settlement no longer renders in the rail. Keep acknowledging
+            // the legacy producer during migration, but never repaint chrome.
+            false
         } else if pipe_message.name == "vc_rail_nav" {
             match pipe_message.payload.as_deref() {
                 Some("up") => self.switch_session_relative(-1),
@@ -361,9 +357,6 @@ impl ZellijPlugin for State {
                     return false;
                 }
                 if self.age_settlement_feed() {
-                    should_render = true;
-                }
-                if self.age_live_runs_feed() {
                     should_render = true;
                 }
                 let new_saved_time = current_session_last_saved_time();
@@ -429,11 +422,6 @@ impl ZellijPlugin for State {
                     }
                     self.arm_refresh_timer();
                 }
-            },
-            Event::CustomMessage(message, payload)
-                if self.is_rail && message == VC_LIVE_RUNS_MESSAGE =>
-            {
-                should_render = self.apply_live_runs_payload(&payload);
             },
             Event::ModeUpdate(mode_info) => {
                 self.colors = Colors::new(mode_info.style.colors);
@@ -913,6 +901,7 @@ const RAIL_BUCKETS: [BucketKind; 3] = [
 /// Char offset of `needle` in `haystack`, searching from char offset `from`.
 /// Text::color_range speaks char offsets, while `str::find` returns bytes —
 /// this bridges the two for rows containing multi-byte glyphs (`◉`, `·`).
+#[cfg(test)]
 fn char_offset_of(haystack: &str, needle: &str, from: usize) -> Option<usize> {
     let byte_start = if from == 0 {
         0
@@ -933,6 +922,7 @@ impl BucketKind {
         }
     }
     /// Squared-letter glyph of the dense f/x/n status line (Fork IV).
+    #[cfg(test)]
     fn glyph(&self) -> &'static str {
         match self {
             BucketKind::Finalized => "🅵",
@@ -960,14 +950,9 @@ impl BucketKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SessionRailRowKind {
     Session(usize),
-    LiveProcess {
-        session_index: usize,
-        /// 0-based tab position — handed straight to `switch_session_with_focus`
-        /// / `go_to_tab` (both expect 0-based and bump internally).
-        tab_position: usize,
-    },
     /// Pinned bucket row. `session_index` is `None` until the reaper has had a
     /// reason to create the bucket session — the row still shows, at zero.
+    #[cfg(test)]
     Bucket {
         bucket: BucketKind,
         session_index: Option<usize>,
@@ -979,25 +964,14 @@ enum SessionRailRowKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RailClickTarget {
     Session(usize),
-    LiveProcess {
-        session_index: usize,
-        tab_position: usize,
-    },
+    #[cfg(test)]
     Bucket(BucketKind),
-    /// Pinned `● Live N` row — opens the control-plane Live read surface.
-    LiveRuns,
 }
 
 fn rail_row_click_target(kind: &SessionRailRowKind) -> RailClickTarget {
     match *kind {
         SessionRailRowKind::Session(session_index) => RailClickTarget::Session(session_index),
-        SessionRailRowKind::LiveProcess {
-            session_index,
-            tab_position,
-        } => RailClickTarget::LiveProcess {
-            session_index,
-            tab_position,
-        },
+        #[cfg(test)]
         SessionRailRowKind::Bucket { bucket, .. } => RailClickTarget::Bucket(bucket),
     }
 }
@@ -1018,9 +992,6 @@ struct SessionRailRow {
 
 impl SessionRailRow {
     #[cfg(test)]
-    fn is_live_process(&self) -> bool {
-        matches!(self.kind, SessionRailRowKind::LiveProcess { .. })
-    }
     fn is_bucket(&self) -> bool {
         matches!(self.kind, SessionRailRowKind::Bucket { .. })
     }
@@ -1030,6 +1001,7 @@ impl SessionRailRow {
 /// exact number, `~n` when the feed is degraded/incomplete, `999+` past the
 /// display cap, and `…` when there is no feed at all — never a placeholder
 /// digit and never a clipped one.
+#[cfg(test)]
 fn format_bucket_count(live_count: Option<u64>, truth_is_exact: bool) -> String {
     const DISPLAY_CAP: u64 = 999;
     match live_count {
@@ -1042,48 +1014,9 @@ fn format_bucket_count(live_count: Option<u64>, truth_is_exact: bool) -> String 
 
 /// Fork IV: the three drawer rows collapse into ONE dense status line —
 /// ` 🅵118 · 🆇435 · 🅽999+` — instead of a three-row `f/x/n` block.
+#[cfg(test)]
 fn format_bucket_summary_entry(segments: &[String]) -> String {
     format!(" {}", segments.join(" · "))
-}
-
-fn format_process_tab_rail_entry(tab: &TabUiInfo, mode: RailWidthMode) -> String {
-    let activity = if tab.is_active { "◉" } else { "·" };
-    if mode == RailWidthMode::Dense {
-        // Iconic strip: the indented activity dot alone carries the state —
-        // truncating "name · command +N" into mincemeat is not an option.
-        return format!("   {}", activity);
-    }
-    let tab_name = sanitize_display_label(&tab.name);
-    let mut text = format!("   {} {}", activity, tab_name);
-    if let Some(process_label) = tab.primary_process_label() {
-        let process_label = stable_process_label(process_label);
-        if process_label != tab_name && !process_label.contains(&tab_name) {
-            text.push_str(" · ");
-            text.push_str(&process_label);
-        }
-    }
-    let additional_processes = tab.live_process_count().saturating_sub(1);
-    if additional_processes > 0 {
-        text.push_str(&format!(" +{}", additional_processes));
-    }
-    text
-}
-
-/// Remove a leading braille animation frame while preserving the meaningful
-/// process status that follows it. Terminal-local progress stays visible, but
-/// spinner-only title churn cannot repaint the whole session rail.
-fn stable_process_label(input: &str) -> String {
-    let sanitized = sanitize_display_label(input);
-    let mut chars = sanitized.chars();
-    let Some(first) = chars.next() else {
-        return sanitized;
-    };
-    let remainder = chars.as_str().trim_start();
-    if ('\u{2800}'..='\u{28ff}').contains(&first) && !remainder.is_empty() {
-        remainder.to_owned()
-    } else {
-        sanitized
-    }
 }
 
 // Direct rail navigation (vc_rail_nav pipe): product contract v3 is
@@ -1182,70 +1115,6 @@ fn settlement_read_coordinates() -> Option<FloatingPaneCoordinates> {
     )
 }
 
-/// `● Live N` — the rail's one semantic row for running work, pinned to the
-/// top. Count comes from the control-plane feed; `…`/`~n` reuse the
-/// bucket-count honesty language when the feed is absent or degraded.
-fn format_live_runs_rail_entry(
-    count: Option<u64>,
-    truth_is_exact: bool,
-    mode: RailWidthMode,
-) -> String {
-    let count = format_bucket_count(count, truth_is_exact);
-    if mode == RailWidthMode::Dense {
-        format!(" ●{count}")
-    } else {
-        format!(" ● Live {count}")
-    }
-}
-
-/// Floating Live view: one compact card per running worker straight from the
-/// control plane, then a combined `tail -F` of their transcripts. The card
-/// pane is only an observer — closing it never touches a run, and a finished
-/// run drops out on the next open because its pid is gone.
-fn open_live_runs_read_surface() {
-    // POSIX sh only (dash-clean). meta.json is runtime-owned, pretty-printed
-    // one key per line — the sed extraction reads exactly that shape and
-    // degrades to `?` fields rather than guessing.
-    let script = r#"root="${VIBECRAFTED_CONTROL_PLANE:-${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/control_plane}"
-runs_dir="$root/runtime_runs"
-printf '\n  VIBECRAFTED · Live runs (control plane, read-only)\n\n'
-count=0
-set --
-if [ -d "$runs_dir" ]; then
-  for dir in "$runs_dir"/*/; do
-    meta="${dir}meta.json"
-    [ -f "$meta" ] || continue
-    pid=$(sed -n 's/.*"worker_pid": *\([0-9][0-9]*\).*/\1/p' "$meta" | head -1)
-    [ -n "$pid" ] || continue
-    kill -0 "$pid" 2>/dev/null || continue
-    run_id=$(sed -n 's/.*"run_id": *"\([^"]*\)".*/\1/p' "$meta" | head -1)
-    agent=$(sed -n 's/.*"agent": *"\([^"]*\)".*/\1/p' "$meta" | head -1)
-    skill=$(sed -n 's/.*"skill": *"\([^"]*\)".*/\1/p' "$meta" | head -1)
-    workdir=$(sed -n 's/.*"root": *"\([^"]*\)".*/\1/p' "$meta" | head -1)
-    count=$((count + 1))
-    printf '  ● %s\n' "${run_id:-$(basename "$dir")}"
-    printf '      agent %s · skill %s · repo %s · pid %s\n' \
-      "${agent:-?}" "${skill:-?}" "$(basename "${workdir:-?}")" "$pid"
-    [ -f "${dir}transcript.log" ] && set -- "$@" "${dir}transcript.log"
-  done
-fi
-if [ "$count" -eq 0 ]; then
-  printf '  no live runs — workers appear here while their pid is alive\n\n  [enter to close]\n'
-  read -r _ || true
-  exit 0
-fi
-if [ "$#" -eq 0 ]; then
-  printf '\n  no transcripts yet for %s run(s)\n\n  [enter to close]\n' "$count"
-  read -r _ || true
-  exit 0
-fi
-printf '\n  tail -F · %s transcript(s) — close this pane to stop watching\n' "$count"
-exec tail -n 8 -F "$@"
-"#;
-    let command = CommandToRun::new_with_args("sh", vec!["-c", script]);
-    let _ = open_command_pane_floating(command, settlement_read_coordinates(), BTreeMap::new());
-}
-
 /// Floating diagnostic: control plane + loctree reports. No new Zellij session.
 fn open_settlement_read_surface(bucket: BucketKind) {
     let letter = match bucket {
@@ -1304,6 +1173,7 @@ fn rail_ordinal_target(sessions: &[SessionUiInfo], character: char) -> Option<us
     working_session_indices(sessions).get(ordinal).copied()
 }
 
+#[cfg(test)]
 fn session_rail_rows_with_truth(
     sessions: &[SessionUiInfo],
     settlement_history: Option<&SettlementHistory>,
@@ -1319,9 +1189,9 @@ fn session_rail_rows_with_truth(
     rows
 }
 
-/// Session/process portion of the rail, excluding independently refreshed
-/// settlement buckets. This is also the stable render projection used to
-/// suppress redraws when only terminal animation frames changed.
+/// Session-only rail projection. Agent/run discovery belongs to the clickable
+/// vc-server LIVE chip, so terminal title churn cannot expand or repaint this
+/// navigation surface.
 fn session_rail_session_rows(
     sessions: &[SessionUiInfo],
     mode: RailWidthMode,
@@ -1333,19 +1203,6 @@ fn session_rail_session_rows(
             kind: SessionRailRowKind::Session(session_index),
             text: format_session_rail_entry(session, ordinal + 1, mode),
         });
-        rows.extend(
-            session
-                .tabs
-                .iter()
-                .filter(|tab| tab.live_process_count() > 0)
-                .map(|tab| SessionRailRow {
-                    kind: SessionRailRowKind::LiveProcess {
-                        session_index,
-                        tab_position: tab.position,
-                    },
-                    text: format_process_tab_rail_entry(tab, mode),
-                }),
-        );
     }
     rows
 }
@@ -1358,6 +1215,7 @@ fn session_rail_rows(sessions: &[SessionUiInfo]) -> Vec<SessionRailRow> {
 /// The pinned tail of the rail. Always all three buckets, whether or not their
 /// sessions exist yet — a permanent entry point beats one that appears only
 /// once something has already failed.
+#[cfg(test)]
 fn bucket_rail_rows(
     sessions: &[SessionUiInfo],
     settlement_history: Option<&SettlementHistory>,
@@ -1434,6 +1292,7 @@ fn fit_rail_line(text: &str, width: usize) -> String {
 /// The dense f/x/n line sheds whole ` · `-separated segments from the right.
 /// An open-now count is either rendered in full or omitted entirely: clipping
 /// `999+` into an exact-looking `99` would corrupt the operator truth.
+#[cfg(test)]
 fn fit_bucket_rail_line(text: &str, width: usize) -> String {
     if text.width() <= width {
         return fit_rail_line(text, width);
@@ -1547,46 +1406,6 @@ impl State {
         self.mark_settlement_feed_degraded()
     }
 
-    /// Ingest a `vc.live-runs.v1` payload. The rail only needs the census
-    /// size; the read surface re-reads the control plane itself, so richer
-    /// per-run fields never have to survive this hop.
-    fn apply_live_runs_payload(&mut self, payload: &str) -> bool {
-        #[derive(Deserialize)]
-        struct LiveRunsFeed {
-            schema: String,
-            runs: Vec<serde_json::Value>,
-        }
-        let previous = (self.live_runs_count, self.live_runs_feed_degraded);
-        let parsed: Option<LiveRunsFeed> = serde_json::from_str(payload)
-            .ok()
-            .filter(|feed: &LiveRunsFeed| feed.schema == VC_LIVE_RUNS_MESSAGE);
-        let Some(feed) = parsed else {
-            // Same contract as the settlement feed: a corrupt payload turns
-            // the last accepted count into a lower bound, never a blank.
-            return self.mark_live_runs_feed_degraded();
-        };
-        self.live_runs_count = Some(feed.runs.len() as u64);
-        self.live_runs_feed_degraded = false;
-        self.live_runs_feed_age_ticks = Some(0);
-        (self.live_runs_count, self.live_runs_feed_degraded) != previous
-    }
-
-    fn mark_live_runs_feed_degraded(&mut self) -> bool {
-        self.live_runs_count.is_some()
-            && !std::mem::replace(&mut self.live_runs_feed_degraded, true)
-    }
-
-    fn age_live_runs_feed(&mut self) -> bool {
-        let Some(age_ticks) = self.live_runs_feed_age_ticks.as_mut() else {
-            return false;
-        };
-        *age_ticks = age_ticks.saturating_add(1);
-        if *age_ticks < LIVE_RUNS_FEED_STALE_AFTER_TICKS {
-            return false;
-        }
-        self.mark_live_runs_feed_degraded()
-    }
-
     fn reset_selected_index(&mut self) {
         self.sessions.reset_selected_index();
     }
@@ -1615,16 +1434,10 @@ impl State {
         self.ensure_rail_selection();
         let mode = RailWidthMode::from_cols(cols);
 
-        let all_rows = session_rail_rows_with_truth(
-            &self.sessions.session_ui_infos,
-            self.settlement_history.as_ref(),
-            self.settlement_feed_degraded,
-            mode,
-        );
-        // The buckets are pinned to the bottom of the rail, so only the leading
-        // working-session rows take part in scrolling.
-        let bucket_row_start = all_rows.iter().position(|row| row.is_bucket()).unwrap_or(0);
-        let (rail_rows, bucket_rows) = all_rows.split_at(bucket_row_start);
+        // The rail is a physical session/tab navigator only. Runtime and
+        // settlement truth have one entry point in the bottom status bar,
+        // backed by vc-server.
+        let rail_rows = session_rail_session_rows(&self.sessions.session_ui_infos, mode);
 
         // The LIVE number lives in the bottom status-bar's fleet chip; the
         // header keeps the session count and the current-session anchor — the
@@ -1664,44 +1477,13 @@ impl State {
         print_text_with_coordinates(header, 0, 0, None, None);
         self.rail_click_map.clear();
 
-        // Pinned `● Live N` row, right under the header: the ONE semantic
-        // entry for running work. Its truth is the control-plane census —
-        // the physical viewer tabs below are only observers of those runs.
-        let mut chrome_rows = 1;
-        if rows > 1 {
-            let live_row = chrome_rows;
-            let fitted = fit_rail_line(
-                &format_live_runs_rail_entry(
-                    self.live_runs_count,
-                    !self.live_runs_feed_degraded,
-                    mode,
-                ),
-                cols,
-            );
-            let fitted_chars = fitted.chars().count();
-            let mut live_text = Text::new(fitted);
-            if fitted_chars > 1 {
-                // The dot carries the accent — same colour language as the
-                // active-tab dot and the f/x/n glyphs.
-                live_text = live_text.color_range(1, 1..2);
-            }
-            if self.rail_hover_row == Some(live_row) {
-                live_text = live_text.selected();
-            }
-            self.rail_click_map
-                .insert(live_row, RailClickTarget::LiveRuns);
-            print_text_with_coordinates(live_text, 0, live_row, None, None);
-            chrome_rows += 1;
-        }
+        let chrome_rows = 1;
 
         let list_rows = rows.saturating_sub(chrome_rows);
         if list_rows == 0 {
             return;
         }
-        // Buckets only give up their pinned slots when the rail is too short to
-        // hold even one working session alongside them.
-        let pinned_rows = bucket_rows.len().min(list_rows.saturating_sub(1));
-        let scrollable_rows = list_rows.saturating_sub(pinned_rows);
+        let scrollable_rows = list_rows;
         let footer_rows = usize::from(rail_rows.len() > scrollable_rows && scrollable_rows > 1);
         let entry_rows = scrollable_rows.saturating_sub(footer_rows);
         let selected_index = self.sessions.selected_index.0;
@@ -1753,41 +1535,7 @@ impl State {
                         text = text.selected();
                     }
                 },
-                SessionRailRowKind::LiveProcess { session_index, .. } => {
-                    let in_current_session = self
-                        .sessions
-                        .session_ui_infos
-                        .get(session_index)
-                        .is_some_and(|session| session.is_current_session);
-                    let is_active_tab_row = fitted.chars().nth(3) == Some('◉');
-                    if cols >= 4 {
-                        // Active tab dot gets the accent, idle dot stays dim;
-                        // the trailing "· command +N" diagnostics dim away so
-                        // the tab name is the only bright ink on the line.
-                        if is_active_tab_row {
-                            text = text.color_range(1, 3..4);
-                        } else {
-                            text = text.color_range(2, 3..4);
-                        }
-                        if let Some(separator) = char_offset_of(&fitted, " · ", 4) {
-                            text = text.color_range(2, separator..fitted_chars);
-                        }
-                        if in_current_session && is_active_tab_row && mode != RailWidthMode::Dense {
-                            // Strongest level of the three: on the highlight
-                            // bed, the tab you are actually in carries the
-                            // accent on its whole name. (Dense has no name —
-                            // the dot already took the accent above.)
-                            let name_end =
-                                char_offset_of(&fitted, " · ", 4).unwrap_or(fitted_chars);
-                            text = text.color_range(1, 3..name_end);
-                        }
-                    }
-                    // Process rows extend the current-session highlight block
-                    // so the whole "you are here" region reads as one shape.
-                    if in_current_session {
-                        text = text.selected();
-                    }
-                },
+                #[cfg(test)]
                 SessionRailRowKind::Bucket { .. } => {},
             }
             // OS hover: same highlight language for sessions, live tabs, drawers.
@@ -1819,40 +1567,10 @@ impl State {
             row += 1;
         }
 
-        // Blank out the gap so the buckets always sit flush with the bottom
-        // edge, whatever the working-session list is doing above them.
-        let first_pinned_row = rows.saturating_sub(pinned_rows);
-        while row < first_pinned_row {
+        // Blank the remaining viewport so stale rows disappear without a
+        // settlement feed repainting the rail every few seconds.
+        while row < rows {
             print_text_with_coordinates(Text::new(" ".repeat(cols)), 0, row, None, None);
-            row += 1;
-        }
-
-        for bucket_row in &bucket_rows[bucket_rows.len() - pinned_rows..] {
-            let fitted = fit_bucket_rail_line(&bucket_row.text, cols);
-            let mut text = Text::new(&fitted);
-            // Accent the 🅵/🆇/🅽 glyphs so the dense line keeps the same
-            // colour language the drawer rows had.
-            for (offset, character) in fitted.chars().enumerate() {
-                if matches!(character, '🅵' | '🆇' | '🅽') {
-                    text = text.color_range(1, offset..offset + 1);
-                }
-            }
-            if let SessionRailRowKind::Bucket {
-                session_index: Some(session_index),
-                ..
-            } = bucket_row.kind
-                && selected_index == Some(session_index)
-            {
-                text = text.selected();
-            }
-            if self.rail_hover_row == Some(row) {
-                text = text.selected();
-            }
-            // Empty drawers stay clickable: mouse + f/x/n open the control-plane
-            // read surface (never mint Finalized/Failed/Needs god-sessions).
-            self.rail_click_map
-                .insert(row, rail_row_click_target(&bucket_row.kind));
-            print_text_with_coordinates(text, 0, row, None, None);
             row += 1;
         }
     }
@@ -1931,35 +1649,10 @@ impl State {
                         }
                         true
                     },
-                    RailClickTarget::LiveProcess {
-                        session_index,
-                        tab_position,
-                    } => {
-                        if !self.sessions.select_session_index(session_index) {
-                            return false;
-                        }
-                        let Some(session_name) = self.sessions.get_selected_session_name() else {
-                            return false;
-                        };
-                        if self.sessions.selected_is_current_session() {
-                            // Same 0-based position the keyboard path uses;
-                            // the plugin shim bumps it for Action::GoToTab.
-                            go_to_tab(tab_position as u32);
-                        } else {
-                            switch_session_with_focus(&session_name, Some(tab_position), None);
-                            self.reset_selected_index();
-                        }
-                        true
-                    },
+                    #[cfg(test)]
                     RailClickTarget::Bucket(bucket) => {
                         // Same entry point as the `f`/`x`/`n` hotkeys.
                         self.jump_to_bucket(bucket);
-                        true
-                    },
-                    RailClickTarget::LiveRuns => {
-                        // One compact read-only view over the control plane;
-                        // never a per-run tab hunt through the rail.
-                        open_live_runs_read_surface();
                         true
                     },
                 }
@@ -3000,12 +2693,7 @@ impl State {
 
     fn update_session_infos(&mut self, session_infos: Vec<SessionInfo>) -> bool {
         let previous_rail_projection = self.is_rail.then(|| {
-            session_rail_rows_with_truth(
-                &self.sessions.session_ui_infos,
-                self.settlement_history.as_ref(),
-                self.settlement_feed_degraded,
-                RailWidthMode::Wide,
-            )
+            session_rail_session_rows(&self.sessions.session_ui_infos, RailWidthMode::Wide)
         });
         let session_ui_infos: Vec<SessionUiInfo> = session_infos
             .iter()
@@ -3048,12 +2736,7 @@ impl State {
             .set_sessions(session_ui_infos, forbidden_sessions);
         previous_rail_projection.is_none_or(|previous| {
             previous
-                != session_rail_rows_with_truth(
-                    &self.sessions.session_ui_infos,
-                    self.settlement_history.as_ref(),
-                    self.settlement_feed_degraded,
-                    RailWidthMode::Wide,
-                )
+                != session_rail_session_rows(&self.sessions.session_ui_infos, RailWidthMode::Wide)
         })
     }
     fn main_menu_size(&self, rows: usize, cols: usize) -> (usize, usize, usize, usize) {
@@ -3624,7 +3307,7 @@ mod rail_tests {
     }
 
     #[test]
-    fn rail_expands_sessions_with_live_process_tabs_only() {
+    fn runtime_rail_stays_session_only_even_when_workers_are_running() {
         let mut alpha = session("alpha", true);
         alpha.tabs = vec![
             TabUiInfo::for_rail_test("impl-260718-120000-01000", true, "claude", 1),
@@ -3640,138 +3323,12 @@ mod rail_tests {
             text,
             vec![
                 "01 ◉ alpha",
-                "   ◉ impl-260718-120000-01000 · claude",
-                "   · audit-260718-130000-02000 · codex +1",
                 "02 ○ beta",
                 // the buckets are always pinned to the tail of the rail;
                 // no settlement feed yet = no number at all (never a "?")
                 " 🅵… · 🆇… · 🅽…",
             ]
         );
-        assert_eq!(rows.iter().filter(|row| row.is_live_process()).count(), 2);
-    }
-
-    #[test]
-    fn rail_does_not_repeat_process_label_when_tab_already_names_the_agent() {
-        let tab = TabUiInfo::for_rail_test("claude", true, "claude", 1);
-
-        assert_eq!(
-            format_process_tab_rail_entry(&tab, RailWidthMode::Wide),
-            "   ◉ claude"
-        );
-    }
-
-    #[test]
-    fn rail_strips_spinner_frame_but_keeps_meaningful_process_progress() {
-        let spinning = TabUiInfo::for_rail_test("resume-codex", true, "⣧ vc", 1);
-        let progressing = TabUiInfo::for_rail_test("resume-codex", true, "⣇ indexing workspace", 1);
-
-        assert_eq!(
-            format_process_tab_rail_entry(&spinning, RailWidthMode::Wide),
-            "   ◉ resume-codex · vc"
-        );
-        assert_eq!(
-            format_process_tab_rail_entry(&progressing, RailWidthMode::Wide),
-            "   ◉ resume-codex · indexing workspace"
-        );
-    }
-
-    #[test]
-    fn spinner_frame_changes_do_not_change_the_rail_projection() {
-        let mut first = session("vc-frame", true);
-        first.tabs = vec![TabUiInfo::for_rail_test("resume-codex", true, "⣧ vc", 1)];
-        let mut next = session("vc-frame", true);
-        next.tabs = vec![TabUiInfo::for_rail_test("resume-codex", true, "⣇ vc", 1)];
-
-        assert_eq!(
-            session_rail_session_rows(&[first], RailWidthMode::Wide),
-            session_rail_session_rows(&[next], RailWidthMode::Wide)
-        );
-    }
-
-    #[test]
-    fn meaningful_progress_changes_still_change_the_rail_projection() {
-        let mut first = session("vc-frame", true);
-        first.tabs = vec![TabUiInfo::for_rail_test("resume-codex", true, "⣧ vc", 1)];
-        let mut next = session("vc-frame", true);
-        next.tabs = vec![TabUiInfo::for_rail_test(
-            "resume-codex",
-            true,
-            "⣇ applying patch",
-            1,
-        )];
-
-        assert_ne!(
-            session_rail_session_rows(&[first], RailWidthMode::Wide),
-            session_rail_session_rows(&[next], RailWidthMode::Wide)
-        );
-    }
-
-    #[test]
-    fn live_runs_rail_entry_reuses_the_bucket_honesty_language() {
-        assert_eq!(
-            format_live_runs_rail_entry(None, true, RailWidthMode::Wide),
-            " ● Live …"
-        );
-        assert_eq!(
-            format_live_runs_rail_entry(Some(4), true, RailWidthMode::Wide),
-            " ● Live 4"
-        );
-        assert_eq!(
-            format_live_runs_rail_entry(Some(4), false, RailWidthMode::Wide),
-            " ● Live ~4"
-        );
-        assert_eq!(
-            format_live_runs_rail_entry(Some(4), true, RailWidthMode::Dense),
-            " ●4"
-        );
-    }
-
-    #[test]
-    fn live_runs_feed_accepts_only_the_canonical_schema() {
-        let mut state = State {
-            is_rail: true,
-            ..Default::default()
-        };
-        assert!(state.update(Event::CustomMessage(
-            VC_LIVE_RUNS_MESSAGE.to_owned(),
-            r#"{"schema":"vc.live-runs.v1","runs":[{"run_id":"a"},{"run_id":"b"}]}"#.to_owned(),
-        )));
-        assert_eq!(state.live_runs_count, Some(2));
-        assert!(!state.live_runs_feed_degraded);
-
-        // Same census again: no repaint for an unchanged truth.
-        assert!(!state.update(Event::CustomMessage(
-            VC_LIVE_RUNS_MESSAGE.to_owned(),
-            r#"{"schema":"vc.live-runs.v1","runs":[{"run_id":"a"},{"run_id":"b"}]}"#.to_owned(),
-        )));
-
-        // A corrupt payload demotes the count to a lower bound, never a blank.
-        assert!(state.update(Event::CustomMessage(
-            VC_LIVE_RUNS_MESSAGE.to_owned(),
-            r#"{"schema":"someone-elses.schema","runs":[]}"#.to_owned(),
-        )));
-        assert_eq!(state.live_runs_count, Some(2));
-        assert!(state.live_runs_feed_degraded);
-    }
-
-    #[test]
-    fn live_runs_feed_degrades_after_missed_refresh_windows() {
-        let mut state = State {
-            is_rail: true,
-            ..Default::default()
-        };
-        assert!(state.apply_live_runs_payload(r#"{"schema":"vc.live-runs.v1","runs":[{}]}"#));
-        for _ in 1..LIVE_RUNS_FEED_STALE_AFTER_TICKS {
-            assert!(!state.age_live_runs_feed());
-            assert!(!state.live_runs_feed_degraded);
-        }
-        assert!(state.age_live_runs_feed());
-        assert!(state.live_runs_feed_degraded);
-
-        // A fresh payload restores exact truth.
-        assert!(state.apply_live_runs_payload(r#"{"schema":"vc.live-runs.v1","runs":[{}]}"#));
-        assert!(!state.live_runs_feed_degraded);
     }
 
     #[test]
@@ -3954,7 +3511,7 @@ mod rail_tests {
             1,
             None,
         );
-        assert!(state.pipe(settlement_pipe(first_generation)));
+        assert!(!state.pipe(settlement_pipe(first_generation)));
 
         let dishonest_exact_reset = settlement_payload_for(
             "00000000-0000-4000-8000-000000000002",
@@ -3964,7 +3521,7 @@ mod rail_tests {
             0,
             None,
         );
-        assert!(state.pipe(settlement_pipe(dishonest_exact_reset)));
+        assert!(!state.pipe(settlement_pipe(dishonest_exact_reset)));
         assert!(state.settlement_feed_degraded);
 
         let reset_generation = settlement_payload_for(
@@ -3975,7 +3532,7 @@ mod rail_tests {
             1,
             None,
         );
-        assert!(state.pipe(settlement_pipe(reset_generation)));
+        assert!(!state.pipe(settlement_pipe(reset_generation)));
         assert!(!state.settlement_feed_degraded);
         assert_eq!(
             state
@@ -4026,11 +3583,11 @@ mod rail_tests {
             Some(1),
         );
         assert!(!state.pipe(settlement_pipe(malformed_generation)));
-        assert!(state.pipe(settlement_pipe(payload.clone())));
+        assert!(!state.pipe(settlement_pipe(payload.clone())));
 
         let mut missing_payload = settlement_pipe(payload);
         missing_payload.payload = None;
-        assert!(state.pipe(missing_payload));
+        assert!(!state.pipe(missing_payload));
         assert!(state.settlement_feed_degraded);
     }
 
@@ -4038,7 +3595,7 @@ mod rail_tests {
     fn settlement_feed_silence_degrades_exact_truth_until_replay() {
         let mut state = State::default();
         let accepted = settlement_payload(10, (4, 3, 3), (2, 1, 1));
-        assert!(state.pipe(settlement_pipe(accepted.clone())));
+        assert!(!state.pipe(settlement_pipe(accepted.clone())));
         assert_eq!(state.settlement_feed_age_ticks, Some(0));
 
         for _ in 1..SETTLEMENT_FEED_STALE_AFTER_TICKS {
@@ -4065,7 +3622,7 @@ mod rail_tests {
 
         // An exact canonical replay is both an integrity confirmation and a
         // heartbeat. It restores exact rendering and renews the lease.
-        assert!(state.pipe(settlement_pipe(accepted)));
+        assert!(!state.pipe(settlement_pipe(accepted)));
         assert!(!state.settlement_feed_degraded);
         assert_eq!(state.settlement_feed_age_ticks, Some(0));
     }
@@ -4074,7 +3631,7 @@ mod rail_tests {
     fn settlement_pipe_rejects_stale_decrease_divergence_and_malformed_truth() {
         let mut state = State::default();
         let accepted = settlement_payload(10, (4, 3, 3), (2, 1, 1));
-        assert!(state.pipe(settlement_pipe(accepted.clone())));
+        assert!(!state.pipe(settlement_pipe(accepted.clone())));
         let baseline = state.settlement_history.clone();
 
         // Exact replay is idempotent: no render and no state change.
@@ -4084,7 +3641,7 @@ mod rail_tests {
 
         // Same sequence with different valid content is divergence. The last
         // good snapshot remains visible only as a lower bound until replay.
-        assert!(state.pipe(settlement_pipe(settlement_payload(
+        assert!(!state.pipe(settlement_pipe(settlement_payload(
             10,
             (5, 2, 3),
             (3, 1, 1),
@@ -4105,7 +3662,7 @@ mod rail_tests {
                 .collect::<Vec<_>>(),
             vec![" 🅵~2 · 🆇~1 · 🅽~1",]
         );
-        assert!(state.pipe(settlement_pipe(accepted.clone())));
+        assert!(!state.pipe(settlement_pipe(accepted.clone())));
         assert!(!state.settlement_feed_degraded);
 
         // Older snapshots remain stale even if their counters are larger.
@@ -4116,14 +3673,14 @@ mod rail_tests {
         assert!(!state.settlement_feed_degraded);
 
         // A new sequence cannot rewrite append-only history downward.
-        assert!(state.pipe(settlement_pipe(settlement_payload(
+        assert!(!state.pipe(settlement_pipe(settlement_payload(
             11,
             (3, 3, 5),
             (2, 1, 1),
         ))));
         assert_eq!(state.settlement_history, baseline);
         assert!(state.settlement_feed_degraded);
-        assert!(state.pipe(settlement_pipe(accepted.clone())));
+        assert!(!state.pipe(settlement_pipe(accepted.clone())));
         assert!(!state.settlement_feed_degraded);
 
         let malformed_total = serde_json::json!({
@@ -4136,7 +3693,7 @@ mod rail_tests {
             "complete_from": 1,
         })
         .to_string();
-        assert!(state.pipe(settlement_pipe(malformed_total)));
+        assert!(!state.pipe(settlement_pipe(malformed_total)));
         assert!(state.settlement_feed_degraded);
 
         let missing_complete_from = serde_json::json!({
@@ -4191,7 +3748,7 @@ mod rail_tests {
 
         // A canonical replay proves that the accepted lower bound is current
         // again and restores exact rendering.
-        assert!(state.pipe(settlement_pipe(accepted)));
+        assert!(!state.pipe(settlement_pipe(accepted)));
         assert!(!state.settlement_feed_degraded);
     }
 
@@ -4481,51 +4038,10 @@ mod rail_tests {
     }
 
     #[test]
-    fn live_process_rows_carry_tab_position_so_clicks_can_focus_the_worker() {
-        let mut alpha = session("alpha", true);
-        let mut run_a = TabUiInfo::for_rail_test("impl-a", true, "claude", 1);
-        run_a.position = 0;
-        let mut dead = TabUiInfo::for_rail_test("dead", false, "codex", 0);
-        dead.position = 1;
-        let mut run_b = TabUiInfo::for_rail_test("impl-b", false, "codex", 1);
-        run_b.position = 2;
-        alpha.tabs = vec![run_a, dead, run_b];
-
-        let rows = session_rail_rows(&[alpha]);
-        let live: Vec<&SessionRailRow> = rows.iter().filter(|row| row.is_live_process()).collect();
-
-        assert_eq!(live.len(), 2, "dead tabs stay collapsed");
-        assert_eq!(
-            live[0].kind,
-            SessionRailRowKind::LiveProcess {
-                session_index: 0,
-                tab_position: 0,
-            }
-        );
-        assert_eq!(
-            live[1].kind,
-            SessionRailRowKind::LiveProcess {
-                session_index: 0,
-                tab_position: 2,
-            }
-        );
-    }
-
-    #[test]
-    fn rail_row_click_target_maps_session_tab_and_bucket_including_empty() {
+    fn rail_row_click_target_maps_session_and_bucket_including_empty() {
         assert_eq!(
             rail_row_click_target(&SessionRailRowKind::Session(3)),
             RailClickTarget::Session(3)
-        );
-        assert_eq!(
-            rail_row_click_target(&SessionRailRowKind::LiveProcess {
-                session_index: 1,
-                tab_position: 4,
-            }),
-            RailClickTarget::LiveProcess {
-                session_index: 1,
-                tab_position: 4,
-            }
         );
         assert_eq!(
             rail_row_click_target(&SessionRailRowKind::Bucket {
@@ -4579,31 +4095,6 @@ mod rail_tests {
         );
         // Header never maps — LeftClick(0) is a no-op.
         assert!(!click_map.contains_key(&0));
-    }
-
-    #[test]
-    fn simulated_left_click_on_live_process_row_targets_session_and_tab() {
-        let mut alpha = session("alpha", true);
-        let mut run = TabUiInfo::for_rail_test("worker-run", true, "claude", 1);
-        run.position = 3;
-        alpha.tabs = vec![run];
-        let beta = session("beta", false);
-        let rows = session_rail_rows(&[alpha, beta]);
-        let mut click_map: BTreeMap<usize, RailClickTarget> = BTreeMap::new();
-        for (offset, row) in rows.iter().enumerate() {
-            click_map.insert(offset + 1, rail_row_click_target(&row.kind));
-        }
-
-        // row 1: alpha session, row 2: its live worker tab, row 3: beta, then buckets
-        assert_eq!(click_map.get(&1), Some(&RailClickTarget::Session(0)));
-        assert_eq!(
-            click_map.get(&2),
-            Some(&RailClickTarget::LiveProcess {
-                session_index: 0,
-                tab_position: 3,
-            })
-        );
-        assert_eq!(click_map.get(&3), Some(&RailClickTarget::Session(1)));
     }
 
     #[test]

@@ -42,8 +42,10 @@ pushes to the Paste Stack (`~/.cache/vc-frame/paste-stack.json`), then
 `write-chars` into the pane beneath (Enter stays human). Inside the Composer,
 `?` (normal mode) toggles a built-in cheat sheet — `q`/`Esc` closes it;
 backward-search is deliberately traded away, `/` still searches. The bottom
-`status-bar` owns pure status: the fleet `LIVE` count, host CPU/memory/disk
-cockpit (fixed-width fields), health, and layout state.
+`status-bar` owns pure status: canonical vc-server `LIVE` count, host
+CPU/memory/disk cockpit (fixed-width fields), health, and layout state. The
+`LIVE n↗` chip opens vc-server `/runs`. The left rail owns only physical
+sessions; it intentionally has no duplicate Live/process or F/X/N projection.
 The diodes live in the resting mode only (LOCK when the base mode is locked,
 NORMAL otherwise) — action modes hand every column to the shortcut hints and
 keep just the swap-layout chip as arrangement context. On a narrow bar the
@@ -51,21 +53,17 @@ segment degrades block by block (DISK, then MEM, then CPU, then the swap
 chip, then HEALTH; the fleet pulse goes last) instead of vanishing whole,
 and a two-cell seam always separates hints from statuses.
 
-`LIVE` has a bounded background-cost contract. The server derives the count
-once from the session snapshot it already owns and sends a small scalar message
-only to the status-bar plugin/client pairs viewing active tabs. When a client
-switches tabs, the server sends an exact plugin/client deactivation signal to
-the status bar it left; sampling does not rely on the tab-global `Visible`
-event, which cannot distinguish multiple clients in one session. Per-tab
-status bars never subscribe to the full cross-session `SessionUpdate`, and
-unrelated `CustomMessage` consumers are not awakened. Host resource sampling
-also runs only in active status-bar instances, and clipboard timers cannot
-create extra sampling cadences. These lifecycle messages describe refreshable
-current state, so they bypass the shared pending-plugin event cache: an already
-ready exact target receives them immediately even while another client instance
-is loading. A not-yet-ready status bar starts idle and requests a fresh server
-snapshot after it loads successfully. A failed or disconnected attach therefore
-cannot leave a cached lifecycle signal blocking healthy status-bar instances.
+`LIVE` has a bounded background-cost contract. Only the status-bar instances
+visible to a client sample vc-server's `/api/control/state`; the displayed
+number is the length of canonical `active_runs`, never Zellij tab inventory or
+a PID-only rescan of runtime metadata. When a client switches tabs, the server
+sends exact activation/deactivation signals to the affected status bars.
+Sampling does not rely on the tab-global `Visible` event, which cannot
+distinguish multiple clients in one session. Per-tab status bars never
+subscribe to the full cross-session `SessionUpdate`. Host resource and LIVE
+sampling run only in active instances, and clipboard timers cannot create
+extra sampling cadences. A failed API read renders `LIVE ?↗`, never a stale
+number presented as current truth.
 The lifecycle recognizer covers the canonical `vc-frame:status-bar`, the legacy
 `zellij:status-bar`, the default `status-bar` alias, and renamed aliases that
 resolve to that built-in plugin. An unrelated `file:` or remote plugin is not

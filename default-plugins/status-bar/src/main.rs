@@ -35,10 +35,14 @@ const CLIPBOARD_HINT_TTL_SECONDS: f64 = 2.0;
 /// Host resource cockpit (moved here from the session rail): context key of
 /// the sampling run_command and the seconds between samples.
 const RESOURCE_SAMPLE_CONTEXT_KEY: &str = "vc_status_resources";
+const LIVE_STATE_CONTEXT_KEY: &str = "vc_server_live_state";
+const LIVE_STATE_URL_CONTEXT_KEY: &str = "vc_server_base_url";
 const RESOURCE_SAMPLE_SECONDS: f64 = 5.0;
-/// Lightweight server-to-plugin signal carrying the fleet's live terminal-tab
-/// count. Keep this wire name in sync with `zellij-server/src/screen.rs`.
-const VC_FLEET_LIVE_COUNT_MESSAGE: &str = "vc.fleet-live-count.v1";
+const DEFAULT_SERVER_URLS: [&str; 3] = [
+    "http://127.0.0.1:3024",
+    "http://127.0.0.1:3025",
+    "http://100.82.232.70:3025",
+];
 /// Exact per-plugin/client lifecycle signal emitted by Screen. Generic
 /// `Visible` is tab-global and cannot distinguish clients viewing different
 /// tabs in a non-mirrored session.
@@ -90,12 +94,46 @@ struct State {
     resource_sample_in_flight: bool,
     resource_sample_due: Option<Instant>,
     is_visible: bool,
-    // Fleet pulse: the server computes this once from its existing session
-    // snapshot and sends only a scalar custom message to per-tab chrome.
-    live_count: usize,
+    // Canonical run truth from vc-server `/api/control/state`. `None` renders
+    // honestly as unknown; physical Zellij tabs never enter this number.
+    live_count: Option<usize>,
+    live_server_url: Option<String>,
+    live_request_in_flight: bool,
+    live_request_index: usize,
+    live_sample_due: Option<Instant>,
+    server_urls: Vec<String>,
+    live_click_columns: Option<(usize, usize)>,
 }
 
 register_plugin!(State);
+
+fn server_urls(configuration: &BTreeMap<String, String>) -> Vec<String> {
+    let mut urls = Vec::new();
+    if let Some(configured) = configuration
+        .get("server_url")
+        .map(|value| value.trim().trim_end_matches('/'))
+        .filter(|value| !value.is_empty())
+    {
+        urls.push(configured.to_owned());
+    }
+    for fallback in DEFAULT_SERVER_URLS {
+        if !urls.iter().any(|url| url == fallback) {
+            urls.push(fallback.to_owned());
+        }
+    }
+    urls
+}
+
+fn parse_live_count(body: &[u8]) -> Option<usize> {
+    #[derive(serde::Deserialize)]
+    struct ControlState {
+        active_runs: Vec<serde_json::Value>,
+    }
+
+    serde_json::from_slice::<ControlState>(body)
+        .ok()
+        .map(|state| state.active_runs.len())
+}
 
 #[derive(Clone, Default)]
 pub struct LinePart {
@@ -251,12 +289,13 @@ impl ZellijPlugin for State {
             .get("classic")
             .map(|c| c == "true")
             .unwrap_or(false);
+        self.server_urls = server_urls(&configuration);
         set_selectable(false);
         request_permission(&status_bar_permissions());
         subscribe(&status_bar_subscriptions());
         // Attach loads a client instance for plugins in every tab, including
         // hidden tabs. Stay idle until Screen targets this active status-bar
-        // with the fleet heartbeat or its exact lifecycle signal.
+        // with its exact lifecycle signal.
     }
 
     fn update(&mut self, event: Event) -> bool {
@@ -335,6 +374,10 @@ impl ZellijPlugin for State {
                     self.resource_sample_due = None;
                     self.start_resource_sample();
                 }
+                if self.is_visible && self.live_sample_due.is_some_and(|deadline| now >= deadline) {
+                    self.live_sample_due = None;
+                    self.start_live_sample();
+                }
             },
             Event::RunCommandResult(exit_code, stdout, _stderr, context)
                 if context.contains_key(RESOURCE_SAMPLE_CONTEXT_KEY) =>
@@ -362,12 +405,10 @@ impl ZellijPlugin for State {
                     should_render = true;
                 }
             },
-            Event::CustomMessage(message, payload) if message == VC_FLEET_LIVE_COUNT_MESSAGE => {
-                // Screen targets this message only at status-bars on active
-                // tabs. Treat it as a positive visibility heartbeat as well.
-                let became_visible = self.set_visibility(true);
-                let live_count_changed = self.apply_fleet_live_count(&payload);
-                should_render = became_visible || live_count_changed;
+            Event::WebRequestResult(status, _headers, body, context)
+                if context.contains_key(LIVE_STATE_CONTEXT_KEY) =>
+            {
+                should_render = self.handle_live_state_result(status, &body, &context);
             },
             Event::CustomMessage(message, payload)
                 if message == VC_STATUS_BAR_VISIBILITY_MESSAGE =>
@@ -381,8 +422,16 @@ impl ZellijPlugin for State {
             Event::PermissionRequestResult(_) => {
                 if self.is_visible {
                     self.start_resource_sample();
+                    self.start_live_sample();
                 }
                 should_render = true;
+            },
+            Event::Mouse(Mouse::LeftClick(0, column))
+                if self
+                    .live_click_columns
+                    .is_some_and(|(start, end)| (start..end).contains(&column)) =>
+            {
+                self.open_live_runs();
             },
             Event::InputReceived => {
                 if self.text_copy_destination.is_some() || self.display_system_clipboard_failure {
@@ -398,6 +447,7 @@ impl ZellijPlugin for State {
     }
 
     fn render(&mut self, rows: usize, cols: usize) {
+        self.live_click_columns = None;
         // Transient initial resize events arrive with rows/cols at or near
         // zero before the real layout lands; painting those frames is what
         // makes the chrome visibly jump at session start.
@@ -456,6 +506,11 @@ impl ZellijPlugin for State {
                 // bisected to exactly that print. No cursor motion, no
                 // write into the last cell: nothing left to go wrong.
                 let pad = cols.saturating_sub(line.len + right.len + 1);
+                let right_start = line.len + pad;
+                if right.part.contains("LIVE") {
+                    let live_end = right_start + self.live_label().width();
+                    self.live_click_columns = Some((right_start, live_end));
+                }
                 let spacer = style!(background, background).paint(" ".repeat(pad));
                 print!("{}{}{}{}", line, spacer, right.part, fill_bg);
             } else {
@@ -517,8 +572,12 @@ impl State {
         self.is_visible = is_visible;
         if is_visible {
             self.start_resource_sample();
+            self.start_live_sample();
         } else {
             self.resource_sample_due = None;
+            self.live_sample_due = None;
+            self.live_request_in_flight = false;
+            self.live_click_columns = None;
             self.clipboard_hint_deadline = None;
             self.text_copy_destination = None;
             self.display_system_clipboard_failure = false;
@@ -532,15 +591,100 @@ impl State {
         set_timeout(RESOURCE_SAMPLE_SECONDS);
     }
 
-    fn apply_fleet_live_count(&mut self, payload: &str) -> bool {
-        let Ok(live_count) = payload.parse::<usize>() else {
-            return false;
+    fn start_live_sample(&mut self) {
+        if !self.is_visible || self.live_request_in_flight || self.server_urls.is_empty() {
+            return;
+        }
+        self.live_sample_due = None;
+        self.live_request_index = 0;
+        self.request_live_candidate();
+    }
+
+    fn request_live_candidate(&mut self) {
+        let Some(base_url) = self.server_urls.get(self.live_request_index).cloned() else {
+            self.finish_live_sample(None, None);
+            return;
         };
-        if self.live_count == live_count {
+        self.live_request_in_flight = true;
+        let mut context = BTreeMap::new();
+        context.insert(LIVE_STATE_CONTEXT_KEY.to_owned(), "true".to_owned());
+        context.insert(LIVE_STATE_URL_CONTEXT_KEY.to_owned(), base_url.clone());
+        web_request(
+            format!("{base_url}/api/control/state"),
+            HttpVerb::Get,
+            BTreeMap::new(),
+            Vec::new(),
+            context,
+        );
+    }
+
+    fn handle_live_state_result(
+        &mut self,
+        status: u16,
+        body: &[u8],
+        context: &BTreeMap<String, String>,
+    ) -> bool {
+        if !self.is_visible || !self.live_request_in_flight {
             return false;
         }
-        self.live_count = live_count;
-        true
+        if status == 200
+            && let Some(count) = parse_live_count(body)
+            && let Some(base_url) = context.get(LIVE_STATE_URL_CONTEXT_KEY)
+        {
+            return self.finish_live_sample(Some(count), Some(base_url.clone()));
+        }
+        self.live_request_index += 1;
+        if self.live_request_index < self.server_urls.len() {
+            self.request_live_candidate();
+            false
+        } else {
+            self.finish_live_sample(None, None)
+        }
+    }
+
+    fn finish_live_sample(&mut self, count: Option<usize>, base_url: Option<String>) -> bool {
+        self.live_request_in_flight = false;
+        let changed = self.live_count != count || self.live_server_url != base_url;
+        self.live_count = count;
+        self.live_server_url = base_url;
+        if self.is_visible {
+            self.live_sample_due =
+                Some(Instant::now() + Duration::from_secs_f64(RESOURCE_SAMPLE_SECONDS));
+            set_timeout(RESOURCE_SAMPLE_SECONDS);
+        } else {
+            self.live_sample_due = None;
+        }
+        changed
+    }
+
+    fn live_label(&self) -> String {
+        let count = match self.live_count {
+            Some(value) if value > 99 => "99+".to_owned(),
+            Some(value) => value.to_string(),
+            None => "?".to_owned(),
+        };
+        format!("LIVE {count:>3}↗")
+    }
+
+    fn open_live_runs(&self) {
+        let Some(base_url) = self
+            .live_server_url
+            .as_ref()
+            .or_else(|| self.server_urls.first())
+        else {
+            return;
+        };
+        let url = format!("{}/runs", base_url.trim_end_matches('/'));
+        run_command(
+            &[
+                "sh",
+                "-c",
+                "if command -v open >/dev/null 2>&1; then exec open \"$1\"; elif command -v xdg-open >/dev/null 2>&1; then exec xdg-open \"$1\"; fi",
+                "vc-server",
+                &url,
+            ],
+            BTreeMap::new(),
+        );
     }
 
     /// The bar's right edge — pure statuses, zero tools (operator call
@@ -550,7 +694,7 @@ impl State {
     ///
     /// Degradation ladder: instead of dropping the whole segment when the
     /// bar narrows, shed blocks right-to-left — DISK, then MEM, then CPU,
-    /// then the swap chip, then HEALTH; the fleet pulse goes last. The
+    /// then the swap chip, then HEALTH; the server LIVE projection goes last. The
     /// returned segment always fits `max_len` (or is empty).
     fn right_status_segment(&self, active_tab: Option<&TabInfo>, max_len: usize) -> LinePart {
         let cockpit: Vec<&str> = self
@@ -602,11 +746,10 @@ impl State {
         )
         .bold();
 
-        // LIVE = fleet pulse (agent process tabs across sessions).
-        // Two-digit field so LIVE 9 → LIVE 12 never shifts the cockpit.
-        let live_shown = self.live_count.min(99);
-        let live_text = format!("LIVE {:2}", live_shown);
-        let live_part = if self.live_count > 0 {
+        // LIVE = canonical vc-server active_runs. The arrow advertises the
+        // click-through to `/runs`; a fixed three-cell value prevents jitter.
+        let live_text = self.live_label();
+        let live_part = if self.live_count.is_some_and(|count| count > 0) {
             hot.paint(live_text.clone()).to_string()
         } else {
             dim.paint(live_text.clone()).to_string()
@@ -812,7 +955,7 @@ fn parse_resource_sample(stdout: &[u8]) -> Option<ResourceSample> {
 }
 
 fn status_bar_permissions() -> Vec<PermissionType> {
-    vec![PermissionType::RunCommands]
+    vec![PermissionType::RunCommands, PermissionType::WebAccess]
 }
 
 fn status_bar_subscriptions() -> Vec<EventType> {
@@ -820,12 +963,14 @@ fn status_bar_subscriptions() -> Vec<EventType> {
         EventType::ModeUpdate,
         EventType::TabUpdate,
         EventType::PaneUpdate,
+        EventType::Mouse,
         EventType::CopyToClipboard,
         EventType::InputReceived,
         EventType::SystemClipboardFailure,
         EventType::InitialKeybinds,
         EventType::Timer,
         EventType::RunCommandResult,
+        EventType::WebRequestResult,
         EventType::CustomMessage,
         EventType::PermissionRequestResult,
     ]
@@ -1127,7 +1272,7 @@ pub mod tests {
         let sample = parse_resource_sample(b"768 33030144 50331648 23068672").unwrap();
         assert!(sample.line.contains("CPU  768%"));
         let state = State {
-            live_count: 3,
+            live_count: Some(3),
             resource_sample: Some(sample.clone()),
             ..Default::default()
         };
@@ -1140,8 +1285,8 @@ pub mod tests {
         let no_disk = state.right_status_segment(None, 55);
         assert!(no_disk.part.contains("HEALTH !") || no_disk.part.contains("CPU"));
         // ...down to the bare pulse...
-        let bare = state.right_status_segment(None, 8);
-        assert_eq!(bare.len, "LIVE  3".width());
+        let bare = state.right_status_segment(None, 9);
+        assert_eq!(bare.len, "LIVE   3↗".width());
         // ...and an impossible budget yields empty, never an overflow.
         assert_eq!(state.right_status_segment(None, 3).len, 0);
     }
@@ -1151,12 +1296,12 @@ pub mod tests {
         // Calm host: low CPU, modest mem, plenty of disk → HEALTH ok.
         let calm = parse_resource_sample(b"10 8388608 67108864 20971520").unwrap();
         let mut state = State {
-            live_count: 0,
+            live_count: Some(0),
             resource_sample: Some(calm),
             ..Default::default()
         };
-        let narrow = state.right_status_segment(None, "LIVE  0 | HEALTH ok".width());
-        assert_eq!(narrow.len, "LIVE  0 | HEALTH ok".width());
+        let narrow = state.right_status_segment(None, "LIVE   0↗ | HEALTH ok".width());
+        assert_eq!(narrow.len, "LIVE   0↗ | HEALTH ok".width());
         assert!(narrow.part.contains("HEALTH ok"));
 
         // Sample present + finger in the eye (768% CPU) must not say ok.
@@ -1181,11 +1326,11 @@ pub mod tests {
     #[test]
     fn live_pulse_width_is_stable_across_counts() {
         let low = State {
-            live_count: 3,
+            live_count: Some(3),
             ..Default::default()
         };
         let high = State {
-            live_count: 12,
+            live_count: Some(12),
             ..Default::default()
         };
         assert_eq!(
@@ -1237,42 +1382,28 @@ pub mod tests {
             "per-tab status bars must never receive full cross-session snapshots"
         );
         assert!(status_bar_subscriptions().contains(&EventType::CustomMessage));
+        assert!(status_bar_subscriptions().contains(&EventType::WebRequestResult));
+        assert!(status_bar_subscriptions().contains(&EventType::Mouse));
         assert!(
             !status_bar_subscriptions().contains(&EventType::Visible),
             "tab-global visibility must not control a per-client sampler"
         );
         assert!(
             !status_bar_permissions().contains(&PermissionType::ReadApplicationState),
-            "the scalar fleet message must not require cross-session read access"
+            "vc-server owns semantic run truth; status-bar must not inspect sessions"
         );
+        assert!(status_bar_permissions().contains(&PermissionType::WebAccess));
     }
 
     #[test]
-    fn fleet_live_count_accepts_only_valid_changed_scalars() {
-        let mut state = State {
-            is_visible: true,
-            live_count: 3,
-            ..Default::default()
-        };
-
-        assert!(state.update(Event::CustomMessage(
-            VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
-            "4".to_owned(),
-        )));
-        assert_eq!(state.live_count, 4);
-
-        assert!(!state.update(Event::CustomMessage(
-            VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
-            "4".to_owned(),
-        )));
-        assert!(!state.update(Event::CustomMessage(
-            VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
-            "not-a-number".to_owned(),
-        )));
+    fn live_count_is_derived_only_from_control_state_active_runs() {
         assert_eq!(
-            state.live_count, 4,
-            "invalid input must keep last good value"
+            parse_live_count(br#"{"active_runs":[{}, {}, {}]}"#),
+            Some(3)
         );
+        assert_eq!(parse_live_count(br#"{"active_runs":[]}"#), Some(0));
+        assert_eq!(parse_live_count(br#"{"active_runs":4}"#), None);
+        assert_eq!(parse_live_count(b"not-json"), None);
     }
 
     #[test]
@@ -1345,20 +1476,22 @@ pub mod tests {
     }
 
     #[test]
-    fn targeted_fleet_message_resumes_status_bar_after_reattach() {
+    fn targeted_visibility_message_resumes_status_bar_after_reattach() {
         let mut state = State {
             is_visible: false,
-            live_count: 1,
+            live_count: Some(1),
+            server_urls: vec!["http://127.0.0.1:3024".to_owned()],
             ..Default::default()
         };
 
         assert!(state.update(Event::CustomMessage(
-            VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
-            "2".to_owned(),
+            VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
+            "true".to_owned(),
         )));
         assert!(state.is_visible);
         assert!(state.resource_sample_in_flight);
-        assert_eq!(state.live_count, 2);
+        assert!(state.live_request_in_flight);
+        assert_eq!(state.live_count, Some(1));
     }
 
     #[test]

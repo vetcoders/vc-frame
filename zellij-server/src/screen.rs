@@ -61,7 +61,7 @@ use zellij_utils::input::mouse::{MouseEvent, MouseEventType};
 use zellij_utils::input::options::Clipboard;
 use zellij_utils::ipc::{ExitReason, ServerToClientMsg};
 use zellij_utils::pane_size::{PaneGeom, Size, SizeInPixels};
-use zellij_utils::run_triage::{BucketKind, ViewerCreationFence, ViewerCreationFenceRejection};
+use zellij_utils::run_triage::{ViewerCreationFence, ViewerCreationFenceRejection};
 use zellij_utils::shared::clean_string_from_control_and_linebreak;
 use zellij_utils::{
     channels,
@@ -75,9 +75,6 @@ use zellij_utils::{
     position::Position,
 };
 
-/// Lightweight host-to-plugin signal carrying the fleet's live terminal-tab
-/// count. Keep this wire name in sync with the status-bar plugin.
-pub(crate) const VC_FLEET_LIVE_COUNT_MESSAGE: &str = "vc.fleet-live-count.v1";
 /// Exact per-plugin/client deactivation signal. Generic `Visible(false)` is
 /// tab-global and is therefore insufficient when several clients view
 /// different tabs in one non-mirrored session.
@@ -97,29 +94,6 @@ const PARKABLE_CHROME_PLUGIN_URLS: [&str; 9] = [
     "zellij:session-manager",
     "session-manager",
 ];
-
-/// Count live terminal-bearing tabs across working sessions. Triage bucket
-/// sessions are drawers, not fleet, and plugin-only/exited/held tabs do not
-/// represent a running agent process.
-fn fleet_live_count(sessions: &[SessionInfo]) -> usize {
-    sessions
-        .iter()
-        .filter(|session| BucketKind::from_session_name(&session.name).is_none())
-        .map(|session| {
-            session
-                .tabs
-                .iter()
-                .filter(|tab| {
-                    session.panes.panes.get(&tab.position).is_some_and(|panes| {
-                        panes
-                            .iter()
-                            .any(|pane| !pane.is_plugin && !pane.exited && !pane.is_held)
-                    })
-                })
-                .count()
-        })
-        .sum()
-}
 
 fn is_parkable_chrome_plugin_run(run: Option<&Run>) -> bool {
     let Some(Run::Plugin(run_plugin_or_alias)) = run else {
@@ -147,8 +121,6 @@ fn session_update_events(
     status_bar_plugin_targets: Vec<(PluginId, ClientId)>,
     hidden_status_bar_plugin_targets: Vec<(PluginId, ClientId)>,
 ) -> Vec<(Option<PluginId>, Option<ClientId>, Event)> {
-    let live_count = fleet_live_count(&live_sessions).to_string();
-
     let mut updates = hidden_status_bar_plugin_targets
         .into_iter()
         .map(|(plugin_id, client_id)| {
@@ -170,8 +142,8 @@ fn session_update_events(
                     Some(plugin_id),
                     Some(client_id),
                     Event::CustomMessage(
-                        VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
-                        live_count.clone(),
+                        VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
+                        "true".to_owned(),
                     ),
                 )
             }),
