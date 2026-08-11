@@ -203,7 +203,7 @@ impl State {
         let mut desired = HashMap::new();
         for tab in &self.tabs {
             let previous_auto_label = self.auto_labels.get(&tab.tab_id).map(|s| s.as_str());
-            if !is_soft_name(&tab.name, tab.position, previous_auto_label) {
+            if !is_soft_name(&tab.name, tab.tab_id, previous_auto_label) {
                 continue;
             }
             let Some((label, is_shell_fallback)) = self.label_for_tab(tab) else {
@@ -364,18 +364,16 @@ fn token_matches(token: &str, name: &str) -> bool {
 }
 
 /// A name is soft (safe to auto-replace) when it is the default "Tab #N" for
-/// this tab's position, a bare "shell", or the label we applied ourselves.
+/// this tab's stable id, a bare "shell", or the label we applied ourselves.
 /// Protected names and anything the user typed are never soft.
-fn is_soft_name(name: &str, tab_position: usize, previous_auto_label: Option<&str>) -> bool {
+fn is_soft_name(name: &str, tab_id: usize, previous_auto_label: Option<&str>) -> bool {
     if PROTECTED_EXACT.contains(&name)
         || PROTECTED_PREFIXES.iter().any(|p| name.starts_with(p))
         || looks_like_run_id(name)
     {
         return false;
     }
-    name == format!("Tab #{}", tab_position + 1)
-        || name == "shell"
-        || previous_auto_label == Some(name)
+    name == format!("Tab #{}", tab_id + 1) || name == "shell" || previous_auto_label == Some(name)
 }
 
 /// A pane title is soft (safe to auto-replace) when it is empty, the default
@@ -511,9 +509,10 @@ mod tests {
     #[test]
     fn soft_names_allow_auto_rename() {
         assert!(is_soft_name("Tab #1", 0, None));
+        // A moved tab keeps the default name derived from its stable id. The
+        // caller passes that id, so reordering cannot turn a default into a
+        // falsely protected user name.
         assert!(is_soft_name("Tab #3", 2, None));
-        // "Tab #3" on a tab that moved to position 0 is no longer the default
-        // name for that position — but our own label always stays soft.
         assert!(!is_soft_name("Tab #3", 0, None));
         assert!(is_soft_name("shell", 5, None));
         assert!(is_soft_name("codex", 1, Some("codex")));
