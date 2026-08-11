@@ -998,7 +998,12 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                             ),
                         },
                     );
-                    remove_client!(client_id, os_input, session_state, session_data);
+                    // Deliberately no cleanup here. This client's route thread
+                    // is still alive and sends its own `RemoveClient` once the
+                    // connection ends; freeing the id now would hand it to the
+                    // next attach (`SessionState::new_client` always reuses the
+                    // lowest vacant id), and the late cleanup would then
+                    // disconnect that unrelated client instead.
                     continue;
                 }
                 let (config, layout) = cli_assets.load_config_and_layout();
@@ -1422,22 +1427,27 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                 } else {
                     // Handle regular client removal
                     remove_client!(client_id, os_input, session_state, session_data);
-                    session_data
-                        .write()
+                    // A connection can end before this server ever initialized
+                    // a session: the socket-ownership probe of a racing server
+                    // connects and drops immediately, and so does any client
+                    // that gives up inside the startup window. There is no
+                    // Screen or plugin thread to notify yet, and unwrapping the
+                    // still-empty `session_data` here would panic the server
+                    // that just won the socket — leaving both racers with
+                    // nothing.
+                    let senders = session_data
+                        .read()
                         .unwrap()
                         .as_ref()
-                        .unwrap()
-                        .senders
-                        .send_to_screen(ScreenInstruction::RemoveClient(client_id))
-                        .unwrap();
-                    session_data
-                        .write()
-                        .unwrap()
-                        .as_ref()
-                        .unwrap()
-                        .senders
-                        .send_to_plugin(PluginInstruction::RemoveClient(client_id))
-                        .unwrap();
+                        .map(|session_data| session_data.senders.clone());
+                    if let Some(senders) = senders {
+                        senders
+                            .send_to_screen(ScreenInstruction::RemoveClient(client_id))
+                            .unwrap();
+                        senders
+                            .send_to_plugin(PluginInstruction::RemoveClient(client_id))
+                            .unwrap();
+                    }
                 }
             },
             ServerInstruction::SendWebClientsForbidden(client_id) => {
