@@ -71,6 +71,21 @@ resolve to that built-in plugin. An unrelated `file:` or remote plugin is not
 treated as the built-in status bar merely because its filename looks similar;
 custom replacements must implement and wire their own sampling lifecycle.
 
+## Session Socket Ownership
+
+A session name maps to one socket file, and exactly one live server may own it.
+A starting server probes that path before binding: if a process is listening
+there — even one too busy to answer a health probe — the newcomer refuses to
+start and says so in the log instead of unlinking the file and binding over it.
+Only a path that nothing is listening on (missing, stale after a crash, or not
+a socket at all) is cleaned up and re-bound.
+
+The rule exists because stealing a socket does not stop the previous server: it
+keeps running, unreachable, with zero clients, and nothing ever reaps it. A
+server that already runs a session also rejects a second new-session request
+rather than re-initializing over live state; the caller sees the refusal and
+can attach to the existing session instead.
+
 ## Key Contract
 
 The shipped defaults promise one navigation language — one modifier per

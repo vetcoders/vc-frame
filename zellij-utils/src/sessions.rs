@@ -238,6 +238,95 @@ fn assert_socket(_name: &str) -> bool {
     true
 }
 
+/// Whether a session socket path is currently held by a live server.
+///
+/// This asks a deliberately different question than [`assert_socket`]: not "is
+/// the server behind this socket healthy" but "may this path be unlinked and
+/// re-bound". A server that is alive yet too busy to answer a `ConnStatus`
+/// probe within the discovery deadline must never lose its own socket — the
+/// old process keeps running, unreachable and clientless, and nothing reaps it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SocketOwnership {
+    /// Nothing is listening: no file at all, or a leftover from a crashed
+    /// server. Removing it and binding is legal cleanup.
+    Vacant,
+    /// A process is listening on this path right now.
+    Live,
+    /// The path could not be classified. Treated as occupied by callers,
+    /// because guessing wrong destroys a running session.
+    Unknown(String),
+}
+
+/// Deadline for the ownership probe. Longer than `SESSION_PROBE_TIMEOUT`
+/// because the answer decides whether another server gets evicted, and the
+/// call happens exactly once per server start.
+#[cfg(unix)]
+pub const SOCKET_OWNERSHIP_PROBE_TIMEOUT: Duration = Duration::from_millis(1000);
+
+/// On Unix, a successful `connect()` means some process holds the listening
+/// end. That is enough: whether it replies to `ConnStatus` in time says
+/// something about its health, not about its ownership of the name.
+#[cfg(unix)]
+pub fn probe_socket_ownership(path: &std::path::Path) -> SocketOwnership {
+    use crate::consts::ipc_connect_timeout;
+    match fs::symlink_metadata(path) {
+        // Nothing is there, or what is there cannot be a listening socket —
+        // either way nobody can be reached through it.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return SocketOwnership::Vacant,
+        Ok(metadata) if !is_ipc_socket(&metadata.file_type()) => return SocketOwnership::Vacant,
+        _ => {},
+    }
+    match ipc_connect_timeout(path, SOCKET_OWNERSHIP_PROBE_TIMEOUT) {
+        Ok(_stream) => SocketOwnership::Live,
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+            ) =>
+        {
+            SocketOwnership::Vacant
+        },
+        Err(e) => SocketOwnership::Unknown(e.to_string()),
+    }
+}
+
+/// On Windows the socket path is a marker file holding the server PID (the
+/// listener itself is a named pipe, which the OS already refuses to bind
+/// twice). Liveness of that PID is the ownership answer.
+#[cfg(windows)]
+pub fn probe_socket_ownership(path: &std::path::Path) -> SocketOwnership {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    let Ok(pid_str) = fs::read_to_string(path) else {
+        return SocketOwnership::Vacant;
+    };
+    let Ok(pid) = pid_str.trim().parse::<u32>() else {
+        // Marker file exists but carries no valid PID (eg. empty, written by
+        // an older version) — nobody can be reached through it.
+        return SocketOwnership::Vacant;
+    };
+    let alive = unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            false
+        } else {
+            CloseHandle(handle);
+            true
+        }
+    };
+    if alive {
+        SocketOwnership::Live
+    } else {
+        SocketOwnership::Vacant
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn probe_socket_ownership(_path: &std::path::Path) -> SocketOwnership {
+    SocketOwnership::Vacant
+}
+
 #[cfg(all(test, unix))]
 mod session_probe_timeout_tests {
     use super::*;
@@ -276,6 +365,53 @@ mod session_probe_timeout_tests {
             "session discovery must not block on a silent socket"
         );
         server.join().expect("silent server thread");
+    }
+
+    #[test]
+    fn a_busy_but_listening_socket_still_belongs_to_its_server() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let socket = dir.path().join("busy-session.sock");
+        let listener = ListenerOptions::new()
+            .name(socket.as_path().to_fs_name::<GenericFilePath>().unwrap())
+            .create_sync()
+            .expect("bind busy socket");
+        // A server that never answers ConnStatus: `assert_socket` reports it as
+        // gone, which is exactly the misread that used to cost it its socket.
+        let server = std::thread::spawn(move || {
+            let _listener = listener;
+            std::thread::sleep(Duration::from_millis(500));
+        });
+
+        assert_eq!(probe_socket_ownership(&socket), SocketOwnership::Live);
+        server.join().expect("busy server thread");
+    }
+
+    #[test]
+    fn a_stale_socket_file_is_vacant() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let socket = dir.path().join("stale-session.sock");
+        {
+            let listener = ListenerOptions::new()
+                .name(socket.as_path().to_fs_name::<GenericFilePath>().unwrap())
+                .create_sync()
+                .expect("bind stale socket");
+            drop(listener);
+        }
+
+        assert_eq!(probe_socket_ownership(&socket), SocketOwnership::Vacant);
+        assert_eq!(
+            probe_socket_ownership(&dir.path().join("never-existed.sock")),
+            SocketOwnership::Vacant
+        );
+
+        // Junk left at a session path must not block that session name
+        // forever just because connect() reports an unfamiliar error.
+        let not_a_socket = dir.path().join("not-a-socket");
+        std::fs::write(&not_a_socket, b"stale").expect("write junk");
+        assert_eq!(
+            probe_socket_ownership(&not_a_socket),
+            SocketOwnership::Vacant
+        );
     }
 
     #[test]
