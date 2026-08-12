@@ -4,8 +4,8 @@ expression: last_snapshot
 ---
         𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍.    ⎮  ▷ N   ◉ Start here    ○ Shell                            ✍ Composer     · ❯_ Quick cmd       
 SESSIONS 1             │           Start here — map of this workspace                                                   
- ● Live …              │                                                                                                
-01 ◉ e2e-test          │           vc-frame 0.47.3 · Vibecrafted operator layout                                        
+01 ◉ e2e-test          │                                                                                                
+                       │           vc-frame 0.47.3 · Vibecrafted operator layout                                        
                        │           You are looking at ONE session (this window). It has a fixed chrome:                 
                        │             TOP    = this session: (name) · mode chip · tabs — ◉ marks where you are           
                        │             LEFT   = SESSIONS rail — other sessions / agent rooms (click to jump)              
@@ -24,5 +24,5 @@ SESSIONS 1             │           Start here — map of this workspace
                        │           4. What to type on the Shell tab                                                     
                        │           5. Command Composer (Cmd+E)                                                          
                        │           6. Look, themes & host terminal                                                      
- 🅵… · 🆇… · 🅽…          │Help: <↓↑> - Navigate, <ESC> - Dismiss, <?> - Usage Tips                                        
+                       │Help: <↓↑> - Navigate, <ESC> - Dismiss, <?> - Usage Tips                                        
  ⌃g  LOCK  ⌃p  PANE  ⌃t  TAB  ⌃n  RESIZE  ⌃h  MOVE  ⌃s  SEARCH  ⌃o  SESSION                    ...  BASE
