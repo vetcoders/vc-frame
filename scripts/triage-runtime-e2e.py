@@ -2861,15 +2861,28 @@ def interrupt_process_at_state(
     observe: Callable[[], dict[str, object] | None],
     before_interrupt: Callable[[dict[str, object]], dict[str, object]] | None = None,
     signal_process_group: bool = False,
+    pause_process_group: bool | None = None,
     cleanup_proofs: list[dict[str, object]] | None = None,
     slice_seconds: float = 0.0005,
     max_slices: int = 20_000,
 ) -> InterruptedProcess:
     """Time-slice one owned child and interrupt only after durable state is seen.
 
-    Group handling is opt-in and uses exact per-PID signals only after proving
-    every fresh-session member belongs to the harness UID and session.
+    Group cleanup is opt-in and uses exact per-PID signals only after proving
+    every fresh-session member belongs to the harness UID and session. By
+    default a group cleanup also pauses the group; callers that must inspect a
+    responsive owned server may pause only the leader while retaining the same
+    whole-group cleanup proof.
     """
+    pause_owned_group = (
+        signal_process_group
+        if pause_process_group is None
+        else pause_process_group
+    )
+    require(
+        signal_process_group or not pause_owned_group,
+        "cannot pause an owned group without whole-group cleanup",
+    )
     artifact_root.mkdir(parents=True, exist_ok=True)
     stdout_path = artifact_root / f"{scenario}.stdout.log"
     stderr_path = artifact_root / f"{scenario}.stderr.log"
@@ -2906,7 +2919,7 @@ def interrupt_process_at_state(
         try:
             wait_for_process_stop(process)
             for slices in range(1, max_slices + 1):
-                if signal_process_group:
+                if pause_owned_group:
                     continue_owned_process_group(process)
                 else:
                     process.send_signal(signal.SIGCONT)
@@ -2916,7 +2929,7 @@ def interrupt_process_at_state(
                 wait_for_process_stop(
                     process,
                     reassert_stop=True,
-                    signal_process_group=signal_process_group,
+                    signal_process_group=pause_owned_group,
                 )
                 observed = observe()
                 if observed is not None:
@@ -4193,6 +4206,7 @@ def main() -> int:
                 drawer="Needs attention",
             ),
             signal_process_group=True,
+            pause_process_group=False,
             cleanup_proofs=interruption_cleanup_proofs,
             slice_seconds=0.00025,
         )

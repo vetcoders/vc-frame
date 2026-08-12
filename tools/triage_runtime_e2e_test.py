@@ -779,6 +779,110 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                 "empty",
             )
 
+    def test_group_cleanup_can_pause_only_leader_while_owned_child_runs(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            marker = root / "child-pid"
+            heartbeat = root / "heartbeat"
+            child_script = (
+                "import pathlib, time\n"
+                f"heartbeat = pathlib.Path({str(heartbeat)!r})\n"
+                "counter = 0\n"
+                "while True:\n"
+                "    counter += 1\n"
+                "    heartbeat.write_text(str(counter), encoding='utf-8')\n"
+                "    time.sleep(0.005)\n"
+            )
+            parent_script = (
+                "import pathlib, subprocess, sys, time; "
+                f"child = subprocess.Popen([sys.executable, '-c', {child_script!r}]); "
+                f"pathlib.Path({str(marker)!r}).write_text("
+                "str(child.pid), encoding='utf-8'); "
+                "time.sleep(300)"
+            )
+            real_kill = os.kill
+            exact_signals: list[tuple[int, int]] = []
+
+            def observe() -> dict[str, object] | None:
+                if not marker.is_file() or not heartbeat.is_file():
+                    return None
+                child_text = marker.read_text(encoding="utf-8").strip()
+                heartbeat_text = heartbeat.read_text(encoding="utf-8").strip()
+                if not child_text or not heartbeat_text:
+                    return None
+                return {
+                    "child_pid": int(child_text),
+                    "heartbeat_before": heartbeat_text,
+                }
+
+            def prove_child_remained_responsive(
+                state: dict[str, object],
+            ) -> dict[str, object]:
+                child_pid = int(state["child_pid"])
+                initial = str(state["heartbeat_before"])
+                current = initial
+                deadline = time.monotonic() + 1.0
+                while current == initial and time.monotonic() < deadline:
+                    time.sleep(0.005)
+                    current = heartbeat.read_text(encoding="utf-8").strip()
+                return {
+                    **state,
+                    "heartbeat_after": current,
+                    "child_state": MODULE.process_state(child_pid),
+                    "child_stopped_before_interrupt": (
+                        child_pid,
+                        signal.SIGSTOP,
+                    )
+                    in exact_signals,
+                }
+
+            def signal_exact_process(pid: int, signal_number: int) -> None:
+                exact_signals.append((pid, signal_number))
+                real_kill(pid, signal_number)
+
+            with mock.patch.object(
+                MODULE.os,
+                "killpg",
+                side_effect=AssertionError("must not signal a process group"),
+            ), mock.patch.object(
+                MODULE.os,
+                "kill",
+                side_effect=signal_exact_process,
+            ):
+                result = MODULE.interrupt_process_at_state(
+                    pathlib.Path(sys.executable),
+                    dict(os.environ),
+                    ["-c", parent_script],
+                    scenario="unit-owned-server-remains-responsive",
+                    artifact_root=root,
+                    observe=observe,
+                    before_interrupt=prove_child_remained_responsive,
+                    signal_process_group=True,
+                    pause_process_group=False,
+                    slice_seconds=0.001,
+                    max_slices=1_000,
+                )
+
+            child_pid = int(result.observed_state["child_pid"])
+            self.assertNotEqual(
+                result.observed_state["heartbeat_before"],
+                result.observed_state["heartbeat_after"],
+            )
+            self.assertNotIn("T", str(result.observed_state["child_state"]))
+            self.assertFalse(
+                result.observed_state["child_stopped_before_interrupt"]
+            )
+            self.assertIn((child_pid, signal.SIGSTOP), exact_signals)
+            self.assertIn((child_pid, signal.SIGKILL), exact_signals)
+            self.assertIn((result.pid, signal.SIGKILL), exact_signals)
+            self.assertEqual(result.cleanup_proof["status"], "passed")
+            self.assertEqual(
+                result.cleanup_proof["group_proof"]["status"],
+                "empty",
+            )
+
     def test_group_kill_failure_still_reaps_leader_and_proves_residue(
         self,
     ) -> None:
