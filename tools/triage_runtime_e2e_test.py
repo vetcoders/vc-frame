@@ -1502,6 +1502,145 @@ class EvidenceAndCleanupTests(unittest.TestCase):
         exact_kill.assert_not_called()
         process.send_signal.assert_not_called()
 
+    def test_transient_foreign_uid_esrch_member_is_reobserved_without_signal(
+        self,
+    ) -> None:
+        process = mock.Mock()
+        process.pid = 9_741
+        process.poll.return_value = None
+        process.vc_frame_server_foreground = "1"
+        process.vc_frame_socket_root = "/tmp/proof/sockets"
+        process.vc_frame_owned_binary = "/bin/vc-frame"
+        leader = {
+            "pid": process.pid,
+            "ppid": 1,
+            "pgid": process.pid,
+            "uid": 501,
+            "sid": process.pid,
+            "sid_errno": None,
+            "sid_error": None,
+            "state": "T",
+            "command": "/bin/vc-frame triage-run --run proof",
+        }
+        detached = {
+            "pid": 9_742,
+            "ppid": 1,
+            "pgid": process.pid,
+            "uid": 501,
+            "sid": process.pid,
+            "sid_errno": None,
+            "sid_error": None,
+            "state": "T",
+            "command": (
+                "/bin/vc-frame --server "
+                "'/tmp/proof/sockets/contract_version_2/Needs attention'"
+            ),
+        }
+        transient = {
+            "pid": 9_743,
+            "ppid": detached["pid"],
+            "pgid": process.pid,
+            "uid": 0,
+            "sid": None,
+            "sid_errno": errno.ESRCH,
+            "sid_error": "ProcessLookupError: gone",
+            "state": "R",
+            "command": "ps -axo pid=,ppid=,pgid=,uid=,state=,command=",
+        }
+        with mock.patch.object(
+            MODULE.os, "getpgid", return_value=process.pid
+        ), mock.patch.object(
+            MODULE.os, "getsid", return_value=process.pid
+        ), mock.patch.object(
+            MODULE.os, "geteuid", return_value=501
+        ), mock.patch.object(
+            MODULE,
+            "process_group_members",
+            side_effect=[[leader, detached, transient], [leader, detached]],
+        ) as inventory, mock.patch.object(
+            MODULE.time, "sleep"
+        ) as pause, mock.patch.object(
+            MODULE.os, "kill"
+        ) as exact_kill:
+            validated = MODULE.validated_owned_process_group_members(process)
+
+        self.assertEqual(
+            [member["pid"] for member in validated],
+            [process.pid, detached["pid"]],
+        )
+        self.assertEqual(inventory.call_count, 2)
+        pause.assert_called_once_with(0.001)
+        exact_kill.assert_not_called()
+        process.send_signal.assert_not_called()
+
+    def test_persistent_foreign_uid_esrch_member_remains_fail_closed(self) -> None:
+        process = mock.Mock()
+        process.pid = 9_751
+        process.poll.return_value = None
+        process.vc_frame_server_foreground = "1"
+        process.vc_frame_socket_root = "/tmp/proof/sockets"
+        process.vc_frame_owned_binary = "/bin/vc-frame"
+        leader = {
+            "pid": process.pid,
+            "ppid": 1,
+            "pgid": process.pid,
+            "uid": 501,
+            "sid": process.pid,
+            "sid_errno": None,
+            "sid_error": None,
+            "state": "T",
+            "command": "/bin/vc-frame triage-run --run proof",
+        }
+        detached = {
+            "pid": 9_752,
+            "ppid": 1,
+            "pgid": process.pid,
+            "uid": 501,
+            "sid": process.pid,
+            "sid_errno": None,
+            "sid_error": None,
+            "state": "T",
+            "command": (
+                "/bin/vc-frame --server "
+                "'/tmp/proof/sockets/contract_version_2/Needs attention'"
+            ),
+        }
+        unresolved = {
+            "pid": 9_753,
+            "ppid": detached["pid"],
+            "pgid": process.pid,
+            "uid": 0,
+            "sid": None,
+            "sid_errno": errno.ESRCH,
+            "sid_error": "ProcessLookupError: gone",
+            "state": "R",
+            "command": "ps -axo pid=,ppid=,pgid=,uid=,state=,command=",
+        }
+        with mock.patch.object(
+            MODULE.os, "getpgid", return_value=process.pid
+        ), mock.patch.object(
+            MODULE.os, "getsid", return_value=process.pid
+        ), mock.patch.object(
+            MODULE.os, "geteuid", return_value=501
+        ), mock.patch.object(
+            MODULE,
+            "process_group_members",
+            return_value=[leader, detached, unresolved],
+        ) as inventory, mock.patch.object(
+            MODULE.os, "kill"
+        ) as exact_kill:
+            with self.assertRaisesRegex(
+                MODULE.OwnedProcessGroupRefusal,
+                r"persistently ambiguous process group 9751: .*9753",
+            ):
+                MODULE.validated_owned_process_group_members(
+                    process, max_observations=2, observation_interval=0
+                )
+
+        self.assertEqual(inventory.call_count, 2)
+        exact_kill.assert_not_called()
+        process.send_signal.assert_not_called()
+
     def test_group_topology_accepts_detached_zombie_as_evidence_only(self) -> None:
         process = mock.Mock()
         process.pid = 9_711
@@ -2192,6 +2331,68 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                 {"VC_FRAME_SOCKET_DIR": "/tmp/proof/sockets"},
                 {"owned"},
                 timeout=0.01,
+            )
+
+    def test_cleanup_accepts_only_unlocked_exact_lease_lockfiles(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            socket_root = pathlib.Path(temporary) / "sockets"
+            lease_directory = (
+                socket_root
+                / "contract_version_2"
+                / ".vc-frame-socket-leases"
+            )
+            lease_directory.mkdir(parents=True)
+            lease = lease_directory / "owned.lock"
+            lease.write_bytes(b"")
+            lease.chmod(0o600)
+            with mock.patch.object(
+                MODULE, "session_inventory", side_effect=[{}, {}, {}]
+            ), mock.patch.object(
+                MODULE, "server_processes_for_socket_root", return_value=[]
+            ), mock.patch.object(
+                MODULE, "wait_for_no_server_processes", return_value=[]
+            ):
+                receipt = MODULE.cleanup_namespace(
+                    pathlib.Path("vc-frame"),
+                    {"VC_FRAME_SOCKET_DIR": str(socket_root)},
+                    set(),
+                    timeout=0.1,
+                    stable_empty_for=0,
+                )
+
+            self.assertEqual(receipt["socket_residue_after_cleanup"], [])
+            self.assertEqual(
+                receipt["inert_lease_locks_after_cleanup"],
+                [
+                    {
+                        "path": (
+                            "contract_version_2/.vc-frame-socket-leases/owned.lock"
+                        ),
+                        "kind": "inert_lease_lock",
+                        "mode": "0600",
+                        "bytes": 0,
+                    }
+                ],
+            )
+
+            descriptor = os.open(lease, os.O_RDWR | os.O_CLOEXEC)
+            try:
+                MODULE.fcntl.flock(
+                    descriptor, MODULE.fcntl.LOCK_EX | MODULE.fcntl.LOCK_NB
+                )
+                active = MODULE.classify_socket_cleanup_entry(socket_root, lease)
+            finally:
+                MODULE.fcntl.flock(descriptor, MODULE.fcntl.LOCK_UN)
+                os.close(descriptor)
+            self.assertEqual(active["kind"], "residue")
+            self.assertRegex(str(active.get("reason")), r"lease_lock_not_inert")
+
+            symlink = lease_directory / "alias.lock"
+            symlink.symlink_to(lease)
+            linked = MODULE.classify_socket_cleanup_entry(socket_root, symlink)
+            self.assertEqual(linked["kind"], "residue")
+            self.assertEqual(
+                linked["reason"], "not_an_inert_lease_lock_candidate"
             )
 
     @mock.patch.object(MODULE, "wait_for_no_server_processes", return_value=[])

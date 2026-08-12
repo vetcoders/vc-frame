@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -2023,26 +2024,21 @@ def validated_owned_process_group_members(
                     member["ownership_proof"] = (
                         f"{member.get('ownership_proof')}+foreign_uid_evidence_only"
                     )
-        sid_ambiguous_members = [
-            member
-            for member in sid_ambiguous_members
-            if member.get("unsignalable_owned_descendant") is not True
-        ]
         sid_ambiguous_pids = {
             int(member["pid"]) for member in sid_ambiguous_members
         }
         observations.append(members)
-        ambiguous_members = list(
+        ambiguous_by_pid = {
+            int(member["pid"]): member for member in sid_ambiguous_members
+        }
+        ambiguous_by_pid.update(
             {
                 int(member["pid"]): member
-                for member in [
-                    *sid_ambiguous_members,
-                    *unstable_parent_members,
-                    *topology_invalid,
-                ]
+                for member in [*unstable_parent_members, *topology_invalid]
                 if member.get("unsignalable_owned_descendant") is not True
-            }.values()
+            }
         )
+        ambiguous_members = list(ambiguous_by_pid.values())
         invalid_members = [
             member
             for member in members
@@ -3398,6 +3394,71 @@ def kill_confirmed_session(
     wait_for_session_gone(binary, env, session)
 
 
+def classify_socket_cleanup_entry(
+    socket_root: pathlib.Path, path: pathlib.Path
+) -> dict[str, object]:
+    """Classify post-cleanup socket-tree entries without trusting path names alone."""
+    relative = path.relative_to(socket_root)
+    entry: dict[str, object] = {"path": str(relative), "kind": "residue"}
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        entry["reason"] = f"lstat_failed:{type(error).__name__}:{error.errno}"
+        return entry
+    if stat.S_ISDIR(metadata.st_mode):
+        entry["kind"] = "directory"
+        return entry
+
+    parts = relative.parts
+    contract_prefix = "contract_version_"
+    contract_version = (
+        parts[0][len(contract_prefix) :]
+        if parts and parts[0].startswith(contract_prefix)
+        else ""
+    )
+    is_lease_shape = (
+        len(parts) == 3
+        and bool(contract_version)
+        and contract_version.isdigit()
+        and parts[1] == ".vc-frame-socket-leases"
+        and parts[2].endswith(".lock")
+        and parts[2] != ".lock"
+    )
+    mode = stat.S_IMODE(metadata.st_mode)
+    if not (
+        is_lease_shape
+        and stat.S_ISREG(metadata.st_mode)
+        and mode == 0o600
+        and metadata.st_size == 0
+    ):
+        entry["reason"] = "not_an_inert_lease_lock_candidate"
+        return entry
+
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDWR | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+        )
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+            entry["reason"] = "lease_lock_inode_changed"
+            return entry
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+    except OSError as error:
+        entry["reason"] = (
+            f"lease_lock_not_inert:{type(error).__name__}:{error.errno}"
+        )
+        return entry
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+    entry.update({"kind": "inert_lease_lock", "mode": "0600", "bytes": 0})
+    return entry
+
+
 def cleanup_namespace(
     binary: pathlib.Path,
     env: dict[str, str],
@@ -3495,16 +3556,17 @@ def cleanup_namespace(
     require(not process_residue, "isolated namespace retained server processes")
     socket_entries = (
         [
-            {
-                "path": str(path.relative_to(socket_root)),
-                "kind": "directory" if path.is_dir() else "residue",
-            }
+            classify_socket_cleanup_entry(socket_root, path)
             for path in sorted(socket_root.rglob("*"))
         ]
         if socket_root.exists()
         else []
     )
-    socket_residue = [entry for entry in socket_entries if entry["kind"] != "directory"]
+    socket_residue = [
+        entry
+        for entry in socket_entries
+        if entry["kind"] not in {"directory", "inert_lease_lock"}
+    ]
     require(
         not socket_residue,
         f"isolated socket root retained socket/file residue: {socket_residue!r}",
@@ -3516,6 +3578,11 @@ def cleanup_namespace(
         "final_session_inventory": {},
         "process_residue": process_residue,
         "socket_entries_after_cleanup": socket_entries,
+        "inert_lease_locks_after_cleanup": [
+            entry
+            for entry in socket_entries
+            if entry["kind"] == "inert_lease_lock"
+        ],
         "socket_residue_after_cleanup": socket_residue,
     }
 
