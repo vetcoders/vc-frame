@@ -36,8 +36,10 @@ const CLIPBOARD_HINT_TTL_SECONDS: f64 = 2.0;
 /// the sampling run_command and the seconds between samples.
 const RESOURCE_SAMPLE_CONTEXT_KEY: &str = "vc_status_resources";
 const RESOURCE_SAMPLE_SECONDS: f64 = 5.0;
-/// Lightweight server-to-plugin signal carrying the fleet's live terminal-tab
-/// count. Keep this wire name in sync with `zellij-server/src/screen.rs`.
+/// Lightweight server-to-plugin signal carrying the fleet's live-run count —
+/// the control-plane census (workers with a live pid), the same selector that
+/// feeds the session rail's Live rows. Keep this wire name in sync with
+/// `zellij-server/src/screen.rs`.
 const VC_FLEET_LIVE_COUNT_MESSAGE: &str = "vc.fleet-live-count.v1";
 /// Exact per-plugin/client lifecycle signal emitted by Screen. Generic
 /// `Visible` is tab-global and cannot distinguish clients viewing different
@@ -602,7 +604,7 @@ impl State {
         )
         .bold();
 
-        // LIVE = fleet pulse (agent process tabs across sessions).
+        // LIVE = fleet pulse (control-plane run census: workers with live pids).
         // Two-digit field so LIVE 9 → LIVE 12 never shifts the cockpit.
         let live_shown = self.live_count.min(99);
         let live_text = format!("LIVE {:2}", live_shown);

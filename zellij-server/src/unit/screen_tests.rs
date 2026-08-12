@@ -2,10 +2,10 @@ use super::{
     ActiveLayoutTransaction, ApplyLayoutParams, CopyOptions, DurableTabLayoutGeneration,
     LayoutPreparationCleanup, LayoutTabOwner, Screen, ScreenInstruction,
     ScreenLayoutTransactionKind, ScreenOptions, ScreenThreadParams, TabOverrideResult,
-    VC_FLEET_LIVE_COUNT_MESSAGE, VC_STATUS_BAR_VISIBILITY_MESSAGE, fleet_live_count,
-    is_parkable_chrome_plugin_run, register_viewer_creation_post_install_test_hook,
-    reject_after_apply_prepare_for_test, reserve_durable_tab_layout_recovery,
-    reserve_new_durable_tab_layout_generation, screen_thread_main, session_update_events,
+    VC_FLEET_LIVE_COUNT_MESSAGE, VC_STATUS_BAR_VISIBILITY_MESSAGE, is_parkable_chrome_plugin_run,
+    register_viewer_creation_post_install_test_hook, reject_after_apply_prepare_for_test,
+    reserve_durable_tab_layout_recovery, reserve_new_durable_tab_layout_generation,
+    screen_thread_main, session_update_events,
 };
 use crate::panes::PaneId;
 use crate::{
@@ -133,33 +133,10 @@ fn fleet_session(name: &str, panes: &[(bool, bool, bool)]) -> SessionInfo {
     }
 }
 
-#[test]
-fn fleet_live_count_excludes_drawers_plugins_and_stopped_panes() {
-    let sessions = vec![
-        fleet_session(
-            "working",
-            &[
-                (false, false, false),
-                (true, false, false),
-                (false, true, false),
-                (false, false, true),
-            ],
-        ),
-        fleet_session(
-            BucketKind::Finalized.session_name(),
-            &[(false, false, false)],
-        ),
-        fleet_session(BucketKind::Failed.session_name(), &[(false, false, false)]),
-        fleet_session(
-            BucketKind::NeedsAttention.session_name(),
-            &[(false, false, false)],
-        ),
-        fleet_session("another", &[(false, false, false)]),
-    ];
-
-    assert_eq!(fleet_live_count(&sessions), 2);
-}
-
+// The LIVE chip count is the control-plane run census (vc_live_runs.rs owns
+// its selector tests); session_update_events only relays the number it was
+// handed. Tab-census counting was deliberately removed — a Zellij tab is an
+// observer, never a live run.
 #[test]
 fn fleet_live_count_message_targets_only_local_status_bars() {
     let updates = session_update_events(
@@ -170,6 +147,7 @@ fn fleet_live_count_message_targets_only_local_status_bars() {
         vec![],
         vec![(42, 1)],
         vec![(41, 1)],
+        2,
     );
 
     assert!(matches!(
@@ -337,6 +315,7 @@ fn status_bar_target_transition_hides_only_the_client_that_switched_tabs() {
         vec![],
         active_after_switch,
         hidden_after_switch,
+        1,
     );
     let custom_targets = updates
         .into_iter()
@@ -412,6 +391,7 @@ fn last_client_detach_parks_the_chrome_it_leaves_behind() {
         vec![],
         active_after_detach,
         hidden_after_detach,
+        1,
     );
     assert!(matches!(
         updates.first(),

@@ -410,34 +410,38 @@ pub(crate) fn background_jobs_main(
                                 &session_infos_on_machine,
                                 &ZELLIJ_SESSION_INFO_CACHE_DIR,
                             );
+                            // Control-plane Live census: headless workers with a
+                            // live pid, never Zellij tabs (a viewer tab only
+                            // observes a run). ONE scan per cycle feeds BOTH
+                            // surfaces — the rail's `● Live N` rows payload and
+                            // the status-bar LIVE chip count (via screen) — so
+                            // the two can never disagree. Re-sent every cycle so
+                            // the rail's freshness lease can tell a quiet feed
+                            // from a dead producer.
+                            let census = zellij_utils::run_triage::control_plane_root().map(
+                                |control_plane_root| {
+                                    crate::vc_live_runs::LiveRunsSnapshot::new(
+                                        crate::vc_live_runs::scan_live_runs(&control_plane_root),
+                                    )
+                                },
+                            );
+                            let live_run_count =
+                                census.as_ref().map_or(0, |snapshot| snapshot.runs.len());
                             let _ = senders.send_to_screen(ScreenInstruction::UpdateSessionInfos(
                                 session_infos_on_machine,
                                 resurrectable_sessions,
+                                live_run_count,
                             ));
                             let _ = senders.send_to_pty(PtyInstruction::UpdateAndReportCwds);
-                            // Control-plane Live census for the rail's `● Live N`
-                            // row: headless workers with a live pid, never Zellij
-                            // tabs (a viewer tab only observes a run). Re-sent
-                            // every cycle so the rail's freshness lease can tell
-                            // a quiet feed from a dead producer.
-                            if let Some(control_plane_root) =
-                                zellij_utils::run_triage::control_plane_root()
-                            {
-                                let census = crate::vc_live_runs::LiveRunsSnapshot::new(
-                                    crate::vc_live_runs::scan_live_runs(&control_plane_root),
-                                );
-                                if let Some(payload) = census.payload() {
-                                    let _ =
-                                        senders.send_to_plugin(PluginInstruction::Update(vec![(
-                                            None,
-                                            None,
-                                            Event::CustomMessage(
-                                                crate::vc_live_runs::VC_LIVE_RUNS_MESSAGE
-                                                    .to_owned(),
-                                                payload,
-                                            ),
-                                        )]));
-                                }
+                            if let Some(payload) = census.and_then(|snapshot| snapshot.payload()) {
+                                let _ = senders.send_to_plugin(PluginInstruction::Update(vec![(
+                                    None,
+                                    None,
+                                    Event::CustomMessage(
+                                        crate::vc_live_runs::VC_LIVE_RUNS_MESSAGE.to_owned(),
+                                        payload,
+                                    ),
+                                )]));
                             }
                             if last_serialization_time
                                 .lock()

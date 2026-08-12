@@ -61,7 +61,7 @@ use zellij_utils::input::mouse::{MouseEvent, MouseEventType};
 use zellij_utils::input::options::Clipboard;
 use zellij_utils::ipc::{ExitReason, ServerToClientMsg};
 use zellij_utils::pane_size::{PaneGeom, Size, SizeInPixels};
-use zellij_utils::run_triage::{BucketKind, ViewerCreationFence, ViewerCreationFenceRejection};
+use zellij_utils::run_triage::{ViewerCreationFence, ViewerCreationFenceRejection};
 use zellij_utils::shared::clean_string_from_control_and_linebreak;
 use zellij_utils::{
     channels,
@@ -75,8 +75,10 @@ use zellij_utils::{
     position::Position,
 };
 
-/// Lightweight host-to-plugin signal carrying the fleet's live terminal-tab
-/// count. Keep this wire name in sync with the status-bar plugin.
+/// Lightweight host-to-plugin signal carrying the fleet's live-run count —
+/// the control-plane census (workers with a live pid), the SAME selector that
+/// feeds the rail's `vc.live-runs.v1` rows. Never a Zellij tab census.
+/// Keep this wire name in sync with the status-bar plugin.
 pub(crate) const VC_FLEET_LIVE_COUNT_MESSAGE: &str = "vc.fleet-live-count.v1";
 /// Exact per-plugin/client deactivation signal. Generic `Visible(false)` is
 /// tab-global and is therefore insufficient when several clients view
@@ -112,29 +114,6 @@ const PARKABLE_CHROME_PLUGIN_URLS: [&str; 9] = [
     "session-manager",
 ];
 
-/// Count live terminal-bearing tabs across working sessions. Triage bucket
-/// sessions are drawers, not fleet, and plugin-only/exited/held tabs do not
-/// represent a running agent process.
-fn fleet_live_count(sessions: &[SessionInfo]) -> usize {
-    sessions
-        .iter()
-        .filter(|session| BucketKind::from_session_name(&session.name).is_none())
-        .map(|session| {
-            session
-                .tabs
-                .iter()
-                .filter(|tab| {
-                    session.panes.panes.get(&tab.position).is_some_and(|panes| {
-                        panes
-                            .iter()
-                            .any(|pane| !pane.is_plugin && !pane.exited && !pane.is_held)
-                    })
-                })
-                .count()
-        })
-        .sum()
-}
-
 fn is_parkable_chrome_plugin_run(run: Option<&Run>) -> bool {
     let Some(Run::Plugin(run_plugin_or_alias)) = run else {
         return false;
@@ -160,8 +139,12 @@ fn session_update_events(
     resurrectable_sessions: Vec<(String, Duration)>,
     status_bar_plugin_targets: Vec<(PluginId, ClientId)>,
     hidden_status_bar_plugin_targets: Vec<(PluginId, ClientId)>,
+    fleet_live_run_count: usize,
 ) -> Vec<(Option<PluginId>, Option<ClientId>, Event)> {
-    let live_count = fleet_live_count(&live_sessions).to_string();
+    // One canonical liveness selector: the control-plane run census
+    // (vc_live_runs::scan_live_runs) computed by the session-metadata loop.
+    // Zellij tabs never enter this number — a viewer tab only observes a run.
+    let live_count = fleet_live_run_count.to_string();
 
     let mut updates = hidden_status_bar_plugin_targets
         .into_iter()
@@ -943,6 +926,7 @@ pub enum ScreenInstruction {
     UpdateSessionInfos(
         BTreeMap<String, SessionInfo>, // String is the session name
         BTreeMap<String, Duration>,    // resurrectable sessions - <name, created>
+        usize,                         // control-plane live-run census (fleet LIVE chip truth)
     ),
     ReplacePane(
         PaneId,
@@ -1671,6 +1655,10 @@ pub(crate) struct Screen {
     session_name: String,
     peer_sessions_cache: BTreeMap<String, SessionInfo>, // String is the session name, can
     // also be this session
+    // Control-plane live-run census (workers with a live pid), delivered with
+    // UpdateSessionInfos by the session-metadata loop. The status-bar LIVE
+    // chip must show run truth, never a Zellij tab census.
+    fleet_live_run_count: usize,
     resurrectable_sessions_cache: BTreeMap<String, Duration>, // String is the session name,
     // duration is its creation time
     default_layout: Box<Layout>,
@@ -2783,6 +2771,7 @@ impl Screen {
             debug,
             session_name,
             peer_sessions_cache,
+            fleet_live_run_count: 0,
             default_layout,
             default_layout_name,
             default_shell,
@@ -6629,6 +6618,7 @@ impl Screen {
                 resurrectable_sessions,
                 status_bar_plugin_targets,
                 hidden_status_bar_plugin_targets,
+                self.fleet_live_run_count,
             )))
             .with_context(err_context)?;
 
@@ -6659,7 +6649,9 @@ impl Screen {
         &mut self,
         new_session_infos: BTreeMap<String, SessionInfo>,
         resurrectable_sessions: BTreeMap<String, Duration>,
+        live_run_count: usize,
     ) -> Result<()> {
+        self.fleet_live_run_count = live_run_count;
         self.peer_sessions_cache = new_session_infos;
         self.resurrectable_sessions_cache = resurrectable_sessions;
         let live_sessions: Vec<SessionInfo> = self.peer_sessions_cache.values().cloned().collect();
@@ -6677,6 +6669,7 @@ impl Screen {
                 resurrectable_sessions,
                 status_bar_plugin_targets,
                 hidden_status_bar_plugin_targets,
+                self.fleet_live_run_count,
             )))
             .context("failed to update session info")?;
         Ok(())
@@ -14557,8 +14550,16 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
             ) => {
                 screen.break_pane_to_new_tab(Direction::Left, client_id)?;
             },
-            ScreenInstruction::UpdateSessionInfos(new_session_infos, resurrectable_sessions) => {
-                screen.update_session_infos(new_session_infos, resurrectable_sessions)?;
+            ScreenInstruction::UpdateSessionInfos(
+                new_session_infos,
+                resurrectable_sessions,
+                live_run_count,
+            ) => {
+                screen.update_session_infos(
+                    new_session_infos,
+                    resurrectable_sessions,
+                    live_run_count,
+                )?;
             },
             ScreenInstruction::UpdateAvailableLayouts(layouts, errors) => {
                 screen.update_available_layouts(layouts, errors);

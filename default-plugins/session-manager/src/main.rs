@@ -227,6 +227,10 @@ struct State {
     live_runs_count: Option<u64>,
     live_runs_feed_degraded: bool,
     live_runs_feed_age_ticks: Option<u8>,
+    // One LIVE RUNS dashboard pane per rail: a second click focuses the
+    // existing pane instead of stacking duplicates. Tracked through
+    // CommandPaneOpened/Exited context, so a user-closed pane re-arms cleanly.
+    live_dashboard_pane_id: Option<u32>,
 }
 
 register_plugin!(State);
@@ -268,6 +272,8 @@ impl ZellijPlugin for State {
             EventType::Timer,
             EventType::Visible,
             EventType::CustomMessage,
+            EventType::CommandPaneOpened,
+            EventType::CommandPaneExited,
         ];
         if self.is_visible {
             subscriptions.push(EventType::SessionUpdate);
@@ -434,6 +440,19 @@ impl ZellijPlugin for State {
                 if self.is_rail && message == VC_LIVE_RUNS_MESSAGE =>
             {
                 should_render = self.apply_live_runs_payload(&payload);
+            },
+            Event::CommandPaneOpened(terminal_pane_id, context)
+                if context.contains_key(VC_LIVE_DASHBOARD_CONTEXT_KEY) =>
+            {
+                self.live_dashboard_pane_id = Some(terminal_pane_id);
+            },
+            Event::CommandPaneExited(terminal_pane_id, _exit_code, context)
+                if context.contains_key(VC_LIVE_DASHBOARD_CONTEXT_KEY) =>
+            {
+                if self.live_dashboard_pane_id == Some(terminal_pane_id) {
+                    self.live_dashboard_pane_id = None;
+                }
+                close_terminal_pane(terminal_pane_id);
             },
             Event::ModeUpdate(mode_info) => {
                 self.colors = Colors::new(mode_info.style.colors);
@@ -1198,52 +1217,42 @@ fn format_live_runs_rail_entry(
     }
 }
 
-/// Floating Live view: one compact card per running worker straight from the
-/// control plane, then a combined `tail -F` of their transcripts. The card
-/// pane is only an observer — closing it never touches a run, and a finished
-/// run drops out on the next open because its pid is gone.
-fn open_live_runs_read_surface() {
-    // POSIX sh only (dash-clean). meta.json is runtime-owned, pretty-printed
-    // one key per line — the sed extraction reads exactly that shape and
-    // degrades to `?` fields rather than guessing.
-    let script = r#"root="${VIBECRAFTED_CONTROL_PLANE:-${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/control_plane}"
-runs_dir="$root/runtime_runs"
-printf '\n  VIBECRAFTED · Live runs (control plane, read-only)\n\n'
-count=0
-set --
-if [ -d "$runs_dir" ]; then
-  for dir in "$runs_dir"/*/; do
-    meta="${dir}meta.json"
-    [ -f "$meta" ] || continue
-    pid=$(sed -n 's/.*"worker_pid": *\([0-9][0-9]*\).*/\1/p' "$meta" | head -1)
-    [ -n "$pid" ] || continue
-    kill -0 "$pid" 2>/dev/null || continue
-    run_id=$(sed -n 's/.*"run_id": *"\([^"]*\)".*/\1/p' "$meta" | head -1)
-    agent=$(sed -n 's/.*"agent": *"\([^"]*\)".*/\1/p' "$meta" | head -1)
-    skill=$(sed -n 's/.*"skill": *"\([^"]*\)".*/\1/p' "$meta" | head -1)
-    workdir=$(sed -n 's/.*"root": *"\([^"]*\)".*/\1/p' "$meta" | head -1)
-    count=$((count + 1))
-    printf '  ● %s\n' "${run_id:-$(basename "$dir")}"
-    printf '      agent %s · skill %s · repo %s · pid %s\n' \
-      "${agent:-?}" "${skill:-?}" "$(basename "${workdir:-?}")" "$pid"
-    [ -f "${dir}transcript.log" ] && set -- "$@" "${dir}transcript.log"
-  done
-fi
-if [ "$count" -eq 0 ]; then
-  printf '  no live runs — workers appear here while their pid is alive\n\n  [enter to close]\n'
-  read -r _ || true
-  exit 0
-fi
-if [ "$#" -eq 0 ]; then
-  printf '\n  no transcripts yet for %s run(s)\n\n  [enter to close]\n' "$count"
-  read -r _ || true
-  exit 0
-fi
-printf '\n  tail -F · %s transcript(s) — close this pane to stop watching\n' "$count"
-exec tail -n 8 -F "$@"
+/// Context key marking the LIVE RUNS dashboard pane so its lifecycle events
+/// (CommandPaneOpened/Exited) can be told apart from other command panes.
+const VC_LIVE_DASHBOARD_CONTEXT_KEY: &str = "vc_live_dashboard";
+
+/// Floating LIVE RUNS dashboard: the interactive viewer owned by vibecrafted
+/// (`vibecrafted_core.live_dashboard`). Rows and count come from the same
+/// control-plane census that feeds this rail and the status-bar LIVE chip.
+/// The pane is only an observer — closing it never touches a run — and a
+/// second activation focuses the existing pane instead of duplicating it.
+fn open_live_runs_read_surface(existing_pane: Option<u32>) {
+    if let Some(pane_id) = existing_pane {
+        focus_pane_with_id(PaneId::Terminal(pane_id), true, false);
+        return;
+    }
+    // POSIX sh only (dash-clean): resolve a modern Python owned by the
+    // installed vibecrafted toolchain, then hand the terminal to the
+    // dashboard. No shell command echo, no tail(1) processes.
+    let script = r#"for candidate in \
+  "${VIBECRAFTED_PYTHON:-}" \
+  "${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools/vibecrafted-core/bin/python3" \
+  python3
+do
+  [ -n "$candidate" ] || continue
+  command -v "$candidate" >/dev/null 2>&1 || continue
+  if "$candidate" -c 'import vibecrafted_core.live_dashboard' 2>/dev/null; then
+    exec "$candidate" -m vibecrafted_core.live_dashboard
+  fi
+done
+printf '\n  LIVE RUNS dashboard needs an installed vibecrafted runtime\n'
+printf '  (vibecrafted_core.live_dashboard was not importable)\n\n  [enter to close]\n'
+read -r _ || true
 "#;
     let command = CommandToRun::new_with_args("sh", vec!["-c", script]);
-    let _ = open_command_pane_floating(command, settlement_read_coordinates(), BTreeMap::new());
+    let mut context = BTreeMap::new();
+    context.insert(VC_LIVE_DASHBOARD_CONTEXT_KEY.to_owned(), "true".to_owned());
+    let _ = open_command_pane_floating(command, settlement_read_coordinates(), context);
 }
 
 /// Floating diagnostic: control plane + loctree reports. No new Zellij session.
@@ -1957,9 +1966,10 @@ impl State {
                         true
                     },
                     RailClickTarget::LiveRuns => {
-                        // One compact read-only view over the control plane;
-                        // never a per-run tab hunt through the rail.
-                        open_live_runs_read_surface();
+                        // One interactive dashboard over the control plane;
+                        // never a per-run tab hunt through the rail. A second
+                        // click focuses the existing pane (no duplicates).
+                        open_live_runs_read_surface(self.live_dashboard_pane_id);
                         true
                     },
                 }
