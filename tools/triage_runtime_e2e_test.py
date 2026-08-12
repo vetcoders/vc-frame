@@ -244,6 +244,25 @@ class SessionTruthTests(unittest.TestCase):
             MODULE.query_session(pathlib.Path("vc-frame"), {}, "starting")
 
     @mock.patch.object(MODULE.time, "sleep")
+    @mock.patch.object(MODULE, "command")
+    def test_stable_query_retries_successful_empty_inventory(
+        self, command: mock.Mock, _sleep: mock.Mock
+    ) -> None:
+        ready = [{"tab_id": 2, "name": "peer", "active": True}]
+        command.side_effect = [
+            completed(0, stdout="", stderr=""),
+            completed(0, stdout=json.dumps(ready)),
+        ]
+
+        result = MODULE.query_session_until_stable(
+            pathlib.Path("vc-frame"), {}, "peer"
+        )
+
+        self.assertEqual(result.state, "live")
+        self.assertEqual(result.tabs, ready)
+        self.assertEqual(command.call_count, 2)
+
+    @mock.patch.object(MODULE.time, "sleep")
     @mock.patch.object(MODULE, "session_tabs")
     def test_wait_for_tabs_retries_live_query_ambiguity_without_calling_it_absent(
         self, session_tabs: mock.Mock, _sleep: mock.Mock

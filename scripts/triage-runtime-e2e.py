@@ -1101,7 +1101,7 @@ def runtime_state_snapshot(
 ) -> dict[str, object]:
     session_state: dict[str, object] = {}
     for session in sorted(sessions):
-        query = query_session(binary, env, session)
+        query = query_session_until_stable(binary, env, session)
         if query.state == "absent":
             session_state[session] = {
                 "state": "absent",
