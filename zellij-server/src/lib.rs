@@ -26,6 +26,7 @@ mod session_layout_metadata;
 mod terminal_bytes;
 mod thread_bus;
 mod ui;
+mod vc_live_runs;
 
 use crate::plugins::PluginThreadParams;
 use background_jobs::{BackgroundJob, background_jobs_main};
@@ -78,9 +79,9 @@ use zellij_utils::{
     ipc::{ClientAttributes, ExitReason, ServerToClientMsg},
     shared::{default_palette, web_server_base_url},
 };
-// Only the Unix startup path probes socket ownership.
+// Unix session socket ownership is coordinated by one lifetime lease.
 #[cfg(unix)]
-use zellij_utils::sessions::SocketOwnership;
+use zellij_utils::sessions::SessionSocketLease;
 
 pub type ClientId = u16;
 
@@ -111,6 +112,10 @@ pub enum ServerInstruction {
     Log(Vec<String>, ClientId, Option<NotificationEnd>),
     LogError(Vec<String>, ClientId, Option<NotificationEnd>),
     SwitchSession(ConnectToSession, ClientId, Option<NotificationEnd>),
+    RenameSessionSocket {
+        new_socket_path: PathBuf,
+        response_channel: channels::Sender<std::result::Result<(), String>>,
+    },
     UnblockCliPipeInput(String),   // String -> Pipe name
     CliPipeOutput(String, String), // String -> Pipe name, String -> Output
     AssociatePipeWithClient {
@@ -163,6 +168,7 @@ impl From<&ServerInstruction> for ServerContext {
             ServerInstruction::Log(..) => ServerContext::Log,
             ServerInstruction::LogError(..) => ServerContext::LogError,
             ServerInstruction::SwitchSession(..) => ServerContext::SwitchSession,
+            ServerInstruction::RenameSessionSocket { .. } => ServerContext::RenameSessionSocket,
             ServerInstruction::UnblockCliPipeInput(..) => ServerContext::UnblockCliPipeInput,
             ServerInstruction::CliPipeOutput(..) => ServerContext::CliPipeOutput,
             ServerInstruction::AssociatePipeWithClient { .. } => {
@@ -797,61 +803,51 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
         })
     });
 
-    let _ = thread::Builder::new()
+    #[cfg(unix)]
+    let (mut socket_lease, listener) = {
+        let mut socket_lease = SessionSocketLease::acquire(&socket_path).unwrap_or_else(|error| {
+            log::error!(
+                "Refusing to start: cannot acquire ownership of {} ({error})",
+                socket_path.display()
+            );
+            std::process::exit(1);
+        });
+        let listener = socket_lease.bind().unwrap_or_else(|error| {
+            log::error!(
+                "Refusing to start: cannot bind owned session socket {} ({error})",
+                socket_path.display()
+            );
+            std::process::exit(1);
+        });
+        drop(zellij_utils::shared::set_permissions(&socket_path, 0o1700));
+        (socket_lease, listener)
+    };
+
+    #[cfg(windows)]
+    let listener = zellij_utils::consts::ipc_bind(&socket_path).unwrap_or_else(|error| {
+        log::error!(
+            "Refusing to start: cannot bind session pipe {} ({error})",
+            socket_path.display()
+        );
+        std::process::exit(1);
+    });
+    // Unix renames go through the socket lease, which tracks its own path;
+    // only the Windows named-pipe path still needs the current name.
+    #[cfg(windows)]
+    let mut current_socket_path = socket_path.clone();
+
+    let listener_thread = thread::Builder::new()
         .name("server_listener".to_string())
         .spawn({
             use interprocess::local_socket::prelude::*;
-            use zellij_utils::consts::ipc_bind;
-            #[cfg(unix)]
-            use zellij_utils::shared::set_permissions;
 
             let os_input = os_input.clone();
             let session_data = session_data.clone();
             let session_state = session_state.clone();
             let to_server = to_server.clone();
+            #[cfg(windows)]
             let socket_path = socket_path.clone();
             move || {
-                // Never take a socket away from a server that is still alive.
-                // Unlinking and re-binding here leaves the previous process
-                // running but unreachable: an orphan with zero clients that no
-                // reaper ever collects, burning CPU until reboot. A stale file
-                // left by a crashed server stays legal to clean up.
-                //
-                // Unix only: elsewhere the path is a marker file and the
-                // listener is a named pipe whose name the OS refuses to hand
-                // out twice, so the bind below already decides ownership and
-                // there is nothing here to take away.
-                #[cfg(unix)]
-                match zellij_utils::sessions::probe_socket_ownership(&socket_path) {
-                    SocketOwnership::Vacant => {
-                        drop(std::fs::remove_file(&socket_path));
-                    },
-                    SocketOwnership::Live => {
-                        log::error!(
-                            "Refusing to start: another server is alive on {}. \
-                             Attach to the existing session instead.",
-                            socket_path.display()
-                        );
-                        std::process::exit(1);
-                    },
-                    SocketOwnership::Unknown(reason) => {
-                        log::error!(
-                            "Refusing to start: cannot determine whether a server is alive on {} \
-                             ({}). Not evicting a possibly-live session.",
-                            socket_path.display(),
-                            reason
-                        );
-                        std::process::exit(1);
-                    },
-                }
-                let listener = ipc_bind(&socket_path).unwrap();
-                // set the sticky bit to avoid the socket file being potentially cleaned up
-                // https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html states that for XDG_RUNTIME_DIR:
-                // "To ensure that your files are not removed, they should have their access time timestamp modified at least once every 6 hours of monotonic time or the 'sticky' bit should be set on the file. "
-                // It is not guaranteed that all platforms allow setting the sticky bit on sockets!
-                #[cfg(unix)]
-                drop(set_permissions(&socket_path, 0o1700));
-
                 // On Windows, named pipes are half-duplex, so we need a separate
                 // reply pipe for server→client messages.
                 #[cfg(windows)]
@@ -968,6 +964,14 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                 }
             }
         });
+    if let Err(error) = listener_thread {
+        log::error!("failed to spawn session listener thread: {error}");
+        #[cfg(unix)]
+        let _ = socket_lease.remove_if_owned();
+        #[cfg(windows)]
+        let _ = std::fs::remove_file(&current_socket_path);
+        std::process::exit(1);
+    }
 
     // Field 2026-07-22 (Monika / dragon): abandoned `--server` processes can
     // spin at high CPU for many hours with zero clients. After daemonize, PPID
@@ -1676,6 +1680,21 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                         .unwrap();
                 }
             },
+            ServerInstruction::RenameSessionSocket {
+                new_socket_path,
+                response_channel,
+            } => {
+                #[cfg(unix)]
+                let rename_result = socket_lease.rename_owned_socket(&new_socket_path);
+                #[cfg(windows)]
+                let rename_result = std::fs::rename(&current_socket_path, &new_socket_path);
+
+                #[cfg(windows)]
+                if rename_result.is_ok() {
+                    current_socket_path = new_socket_path;
+                }
+                let _ = response_channel.send(rename_result.map_err(|error| error.to_string()));
+            },
             ServerInstruction::AssociatePipeWithClient { pipe_id, client_id } => {
                 session_state
                     .write()
@@ -1951,7 +1970,12 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
     let cached_session = session_data.write().unwrap().take();
     drop(cached_session);
 
-    drop(std::fs::remove_file(&socket_path));
+    #[cfg(unix)]
+    if let Err(error) = socket_lease.remove_if_owned() {
+        log::error!("Failed to remove owned session socket: {error}");
+    }
+    #[cfg(windows)]
+    drop(std::fs::remove_file(&current_socket_path));
 }
 
 /// Parse an explicit idle-exit opt-in from `VC_FRAME_SERVER_IDLE_EXIT_SECS`.

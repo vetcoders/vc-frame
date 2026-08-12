@@ -2502,6 +2502,8 @@ impl Tab {
     }
 
     #[cfg(test)]
+    // Test-only positional adapter; production callers use NewPaneOptions.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_pane_test(
         &mut self,
         pid: PaneId,

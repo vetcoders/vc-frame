@@ -1,6 +1,9 @@
 use super::*;
 use super::{ServeWebClientParams, serve_web_client as serve_web_client_impl};
 
+// Test adapter preserves the established fixture call shape while production
+// passes one ServeWebClientParams value.
+#[allow(clippy::too_many_arguments)]
 async fn serve_web_client(
     config: Config,
     config_options: Options,

@@ -244,25 +244,6 @@ class SessionTruthTests(unittest.TestCase):
             MODULE.query_session(pathlib.Path("vc-frame"), {}, "starting")
 
     @mock.patch.object(MODULE.time, "sleep")
-    @mock.patch.object(MODULE, "command")
-    def test_stable_query_retries_successful_empty_inventory(
-        self, command: mock.Mock, _sleep: mock.Mock
-    ) -> None:
-        ready = [{"tab_id": 2, "name": "peer", "active": True}]
-        command.side_effect = [
-            completed(0, stdout="", stderr=""),
-            completed(0, stdout=json.dumps(ready)),
-        ]
-
-        result = MODULE.query_session_until_stable(
-            pathlib.Path("vc-frame"), {}, "peer"
-        )
-
-        self.assertEqual(result.state, "live")
-        self.assertEqual(result.tabs, ready)
-        self.assertEqual(command.call_count, 2)
-
-    @mock.patch.object(MODULE.time, "sleep")
     @mock.patch.object(MODULE, "session_tabs")
     def test_wait_for_tabs_retries_live_query_ambiguity_without_calling_it_absent(
         self, session_tabs: mock.Mock, _sleep: mock.Mock
@@ -1462,50 +1443,6 @@ class EvidenceAndCleanupTests(unittest.TestCase):
                 r"persistently ambiguous process group 9731",
             ):
                 MODULE.validated_owned_process_group_members(process)
-
-    def test_exited_leader_cleanup_kills_only_exact_detached_fixture_server(
-        self,
-    ) -> None:
-        process = mock.Mock()
-        process.pid = 9_741
-        process.poll.return_value = 2
-        process.vc_frame_server_foreground = "1"
-        process.vc_frame_socket_root = "/tmp/proof/sockets"
-        process.vc_frame_owned_binary = "/bin/vc-frame"
-        exact = {
-            "pid": 9_742,
-            "ppid": 1,
-            "pgid": process.pid,
-            "uid": 501,
-            "sid": process.pid,
-            "sid_errno": None,
-            "sid_error": None,
-            "state": "S",
-            "command": (
-                "/bin/vc-frame --server "
-                "'/tmp/proof/sockets/contract_version_2/Needs attention'"
-            ),
-        }
-        path_neighbor = {
-            **exact,
-            "pid": 9_743,
-            "command": (
-                "/bin/vc-frame --server "
-                "/tmp/proof/sockets-neighbor/contract_version_2/foreign"
-            ),
-        }
-        foreign_uid = {**exact, "pid": 9_744, "uid": 0}
-        with mock.patch.object(
-            MODULE.os, "geteuid", return_value=501
-        ), mock.patch.object(
-            MODULE,
-            "process_group_members",
-            return_value=[exact, path_neighbor, foreign_uid],
-        ), mock.patch.object(MODULE.os, "kill") as exact_kill:
-            killed = MODULE.kill_detached_owned_servers_after_leader_exit(process)
-
-        self.assertEqual(killed, [9_742])
-        exact_kill.assert_called_once_with(9_742, signal.SIGKILL)
 
     def test_transient_disconnected_live_member_disappears_without_signal(
         self,

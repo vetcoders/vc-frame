@@ -4,8 +4,8 @@ expression: last_snapshot
 ---
         𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍.    ⎮  ▷ N   ◉ Start here    ○ Shell                            ✍ Composer     · ❯_ Quick cmd       
 SESSIONS 1 · e2e-test   ┌ Start here — map of this workspace ──────────────────────────────────────────────────────────┐
-01 ◉ e2e-test           │          Start here — map of this workspace                                                  │
-                        │                                                                                              │
+ ● Live …               │          Start here — map of this workspace                                                  │
+01 ◉ e2e-test           │                                                                                              │
                         │          vc-frame 0.47.3 · Vibecrafted operator layout                                       │
                         │          You are looking at ONE session (this window). It has a fixed chrome:                │
                         │            TOP    = this session: (name) · mode chip · tabs — ◉ marks where you are          │
@@ -24,5 +24,5 @@ SESSIONS 1 · e2e-test   ┌ Start here — map of this workspace ────�
                         │          3. Keyboard + mouse cheat sheet                                                     │
                         │          4. What to type on the Shell tab                                                    │
                         │Help: <↓↑> - Navigate, <ESC> - Dismiss, <?> - Usage Tips                                      │
-                        └──────────────────────────────────────────────────────────────────────────────────────────────┘
+ 🅵… · 🆇… · 🅽…           └──────────────────────────────────────────────────────────────────────────────────────────────┘
  F1  LOCK  F2  PANE  F3  TAB  F4  RESIZE  F5  MOVE  F6  SEARCH  ⌥F7  SESSION  ⌃F8  QUIT           BASE

@@ -39,9 +39,11 @@ CURRENT_EXE_PATHS = {
     "xtask/src/pipelines.rs",
     "zellij-client/src/lib.rs",
     "zellij-client/src/web_client/mod.rs",
+    "zellij-utils/src/sessions.rs",
 }
 TRANSFER_LOCK_PATH = "src/run_triage_cli.rs"
 XTASK_INSTALL_PATH = "xtask/src/pipelines.rs"
+SESSION_SOCKET_PATH = "zellij-utils/src/sessions.rs"
 
 
 class InventoryError(RuntimeError):
@@ -335,7 +337,51 @@ def require_current_exe_policy(path: str, lines: list[str], line: int) -> None:
                 f"current-exe is no longer passed directly to Command::new at {path}:{line}"
             )
         return
+    if path == SESSION_SOCKET_PATH:
+        nearby = [candidate.strip() for candidate in lines[line - 1:line + 5]]
+        if nearby != [
+            'Command::new(std::env::current_exe().expect("current test binary"))',
+            '.arg("--exact")',
+            '.arg("sessions::session_probe_timeout_tests::session_socket_lease_child_helper")',
+            '.arg("--nocapture")',
+            '.env(LEASE_CHILD_MODE, mode)',
+            '.env(LEASE_CHILD_SOCKET, socket)',
+        ] or "#[cfg(all(test, unix))]" not in lines[:line]:
+            raise InventoryError(
+                f"session socket current-exe test source shape changed at {path}:{line}"
+            )
+        return
     raise InventoryError(f"current-exe finding has no source policy: {path}:{line}")
+
+
+def require_session_socket_unsafe_policy(path: str, lines: list[str], line: int) -> None:
+    if path != SESSION_SOCKET_PATH:
+        raise InventoryError(f"session socket unsafe policy used for {path}:{line}")
+    source_line = lines[line - 1].strip()
+    previous = [candidate.strip() for candidate in lines[max(0, line - 4):line - 1]]
+    following = [candidate.strip() for candidate in lines[line:line + 10]]
+    has_safety_comment = any(candidate.startswith("// SAFETY:") for candidate in previous)
+
+    if source_line == "let alive = unsafe {":
+        if (
+            "let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);"
+            in following
+            and "CloseHandle(handle);" in following
+        ):
+            return
+    elif source_line == (
+        "let result = unsafe { libc::flock(file.as_raw_fd(), "
+        "libc::LOCK_EX | libc::LOCK_NB) };"
+    ):
+        if has_safety_comment:
+            return
+    elif source_line == "let result = unsafe {" and has_safety_comment:
+        if any(
+            candidate in {"libc::renameatx_np(", "libc::renameat2("}
+            for candidate in following
+        ):
+            return
+    raise InventoryError(f"session socket unsafe source shape changed at {path}:{line}")
 
 
 def require_transfer_lock_fd_policy(path: str, lines: list[str], line: int) -> None:
@@ -545,9 +591,9 @@ def unsafe_policy(path: str) -> tuple[str, str, list[str]]:
             ["security/semgrep/EVIDENCE.md#ipc-libc", "zellij-utils/src/ipc/tests/socket_tests.rs"],
         ),
         "zellij-utils/src/sessions.rs": (
-            "Session discovery",
-            "The libc process probe is read-only and accepts only a PID parsed from a locally owned socket name.",
-            ["security/semgrep/EVIDENCE.md#process-probes", "zellij-utils/src/sessions.rs"],
+            "Session socket lifecycle",
+            "The reviewed libc boundaries are a read-only process probe, a lifetime flock, and checked no-replace rename syscalls over validated current-user session paths.",
+            ["security/semgrep/EVIDENCE.md#session-socket-lifecycle", "zellij-utils/src/sessions.rs"],
         ),
         "zellij-utils/src/envs.rs": (
             "Process environment",
@@ -601,6 +647,8 @@ def adjudicate(
     if rule == "rust.lang.security.unsafe-usage.unsafe-usage":
         if path == TRANSFER_LOCK_PATH:
             require_transfer_lock_fd_policy(path, lines, line)
+        elif path == SESSION_SOCKET_PATH:
+            require_session_socket_unsafe_policy(path, lines, line)
         owner, invariant, evidence = unsafe_policy(path)
         return (
             "accepted_unsafe_boundary",
@@ -641,6 +689,14 @@ def adjudicate(
                 "Rust test harness",
                 ["security/semgrep/EVIDENCE.md#current-executable", path],
             )
+        if path == SESSION_SOCKET_PATH:
+            return (
+                "scoped_false_positive",
+                "The Unix-only lease test re-enters the same test binary under one fixed internal test name.",
+                "The executable receives fixed test-runner arguments and process-private temporary paths; it establishes no production trust or update provenance.",
+                "Rust test harness",
+                ["security/semgrep/EVIDENCE.md#current-executable", path],
+            )
         return (
             "scoped_false_positive",
             "current_exe only spawns another mode of the running vc-frame binary; it establishes no trust.",
@@ -661,6 +717,7 @@ def adjudicate(
             "zellij-utils/src/consts.rs": ("Runtime directories", "Source and target are fixed legacy/current ProjectDirs owned by the local OS user."),
             "zellij-utils/src/input/plugins.rs": ("Plugin loading", "Reading an operator-selected plugin is the explicit plugin capability; builtins resolve from embedded assets first."),
             "zellij-utils/src/ipc/protobuf_conversion.rs": ("IPC data model", "The hit is data-only PathBuf construction; no filesystem operation occurs."),
+            "zellij-utils/src/sessions.rs": ("Session socket lifecycle", "The path is derived from a validated local session name below the current-user runtime socket directory, never from an Actix request."),
             "zellij-utils/src/vibecrafted_install.rs": ("Vibecrafted layout installer", "The source is enumerated from a validated framework root and destination is the current-user layouts directory."),
             "zellij-utils/src/web_server_commands.rs": ("Local webserver IPC", "Socket paths are discovered below the current-user runtime directory and connect probing is bounded."),
         }

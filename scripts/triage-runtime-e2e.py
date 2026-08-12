@@ -2,7 +2,7 @@
 """Isolated command-boundary proof for truthful run triage.
 
 The harness accepts only an exact, clean, profile-matched ``vc-frame`` build,
-constructs three empty runtime namespaces below one short ``mkdtemp`` root, and
+constructs two empty runtime namespaces below one short ``mkdtemp`` root, and
 never discovers or mutates the operator's normal socket tree. Durable evidence
 and the isolated control plane live below the requested artifact directory;
 only the Unix-socket runtime uses the short root required by macOS.
@@ -254,7 +254,6 @@ def validate_build_info(
 COMMAND_TIMEOUT_SECS = 30
 # Nested CLI budgets in src/run_triage_cli.rs for a full triage-run transfer:
 #   CLI_COMMAND_TIMEOUT = 10s (inventory / capture / close chain)
-#   SESSION_CREATE_TIMEOUT = 30s
 #   NEW_TAB_COMMAND_TIMEOUT = 30s
 #   VIEWER_CREATION_RECONCILIATION_TIMEOUT = 30s
 # Matching the outer harness to 30s races those inner budgets and kills
@@ -1102,7 +1101,7 @@ def runtime_state_snapshot(
 ) -> dict[str, object]:
     session_state: dict[str, object] = {}
     for session in sorted(sessions):
-        query = query_session_until_stable(binary, env, session)
+        query = query_session(binary, env, session)
         if query.state == "absent":
             session_state[session] = {
                 "state": "absent",
@@ -1869,76 +1868,6 @@ def is_isolated_foreground_server_member(
     return server_path.is_relative_to(socket_root)
 
 
-def detached_owned_servers_after_leader_exit(
-    process: subprocess.Popen[bytes],
-) -> list[dict[str, object]]:
-    """Re-prove exact foreground servers after their Popen leader has exited."""
-    if (
-        process.poll() is None
-        or getattr(process, "vc_frame_server_foreground", None) != "1"
-    ):
-        return []
-    socket_root_value = getattr(process, "vc_frame_socket_root", None)
-    owned_binary = getattr(process, "vc_frame_owned_binary", None)
-    if not isinstance(socket_root_value, str) or not isinstance(owned_binary, str):
-        return []
-    socket_root = pathlib.Path(socket_root_value).resolve()
-    owned_binary_path = pathlib.Path(owned_binary).resolve()
-    expected_uid = os.geteuid()
-    proven: list[dict[str, object]] = []
-    for member in process_group_members(process.pid):
-        if (
-            int(member.get("ppid", -1)) != 1
-            or int(member.get("pgid", -1)) != process.pid
-            or int(member.get("uid", -1)) != expected_uid
-            or member.get("sid") != process.pid
-            or "Z" in str(member.get("state", ""))
-        ):
-            continue
-        try:
-            member_args = shlex.split(str(member.get("command", "")))
-        except ValueError:
-            continue
-        if not member_args or pathlib.Path(member_args[0]).resolve() != owned_binary_path:
-            continue
-        server_paths = server_argument_paths(str(member.get("command", "")))
-        if len(server_paths) != 1:
-            continue
-        try:
-            server_path = server_paths[0].resolve()
-        except OSError:
-            continue
-        if server_path.is_relative_to(socket_root):
-            proven.append(dict(member))
-    return proven
-
-
-def kill_detached_owned_servers_after_leader_exit(
-    process: subprocess.Popen[bytes],
-) -> list[int]:
-    """Kill only exact reparented fixture servers, revalidating every PID."""
-    killed: list[int] = []
-    for candidate in detached_owned_servers_after_leader_exit(process):
-        candidate_pid = int(candidate["pid"])
-        refreshed = next(
-            (
-                member
-                for member in detached_owned_servers_after_leader_exit(process)
-                if int(member["pid"]) == candidate_pid
-                and member.get("command") == candidate.get("command")
-            ),
-            None,
-        )
-        if refreshed is None:
-            continue
-        try:
-            os.kill(candidate_pid, signal.SIGKILL)
-        except ProcessLookupError:
-            continue
-        killed.append(candidate_pid)
-    return killed
-
-
 def annotate_owned_process_group_depths(
     process: subprocess.Popen[bytes],
     members: list[dict[str, object]],
@@ -2117,21 +2046,18 @@ def validated_owned_process_group_members(
         invalid_members = [
             member
             for member in members
-            if member.get("unsignalable_owned_descendant") is not True
-            and (
-                int(member.get("pgid", -1)) != process.pid
-                or (
-                    int(member.get("uid", -1)) != expected_uid
-                    and member.get("detached_owned_subtree") is not True
-                )
-                or (
-                    member.get("sid") != process.pid
-                    and int(member.get("pid", -1)) not in sid_ambiguous_pids
-                    and not (
-                        "Z" in str(member.get("state", ""))
-                        and member.get("sid") is None
-                        and member.get("sid_errno") == errno.ESRCH
-                    )
+            if int(member.get("pgid", -1)) != process.pid
+            or (
+                int(member.get("uid", -1)) != expected_uid
+                and member.get("detached_owned_subtree") is not True
+            )
+            or (
+                member.get("sid") != process.pid
+                and int(member.get("pid", -1)) not in sid_ambiguous_pids
+                and not (
+                    "Z" in str(member.get("state", ""))
+                    and member.get("sid") is None
+                    and member.get("sid_errno") == errno.ESRCH
                 )
             )
         ]
@@ -2397,8 +2323,6 @@ def stop_owned_process_group(
             if "T" not in str(member.get("state", ""))
             and "Z" not in str(member.get("state", ""))
             and member.get("unsignalable_owned_descendant") is not True
-            and member.get("detached_owned") is not True
-            and member.get("detached_owned_subtree") is not True
         ]
         if not running:
             signature = tuple(
@@ -2410,8 +2334,6 @@ def stop_owned_process_group(
                 )
                 for member in last_members
                 if member.get("unsignalable_owned_descendant") is not True
-                and member.get("detached_owned") is not True
-                and member.get("detached_owned_subtree") is not True
             )
             if signature == quiesced_signature:
                 return last_members
@@ -2521,8 +2443,6 @@ def continue_owned_process_group(
         if "Z" not in str(member.get("state", ""))
         and "T" not in str(member.get("state", ""))
         and member.get("unsignalable_owned_descendant") is not True
-        and member.get("detached_owned") is not True
-        and member.get("detached_owned_subtree") is not True
     ]
     if unstopped:
         raise OwnedProcessGroupRefusal(
@@ -2534,8 +2454,6 @@ def continue_owned_process_group(
         for member in members
         if "Z" not in str(member.get("state", ""))
         and member.get("unsignalable_owned_descendant") is not True
-        and member.get("detached_owned") is not True
-        and member.get("detached_owned_subtree") is not True
     ]
     targets.sort(
         key=lambda member: (
@@ -2600,7 +2518,6 @@ def kill_owned_process_group(
         for member in stopped_members
         if "Z" not in str(member.get("state", ""))
         and member.get("unsignalable_owned_descendant") is not True
-        and member.get("detached_owned_subtree") is not True
     ]
     targets.sort(
         key=lambda member: (
@@ -2624,7 +2541,6 @@ def kill_owned_process_group(
             for current in current_members
             if "Z" not in str(current.get("state", ""))
             and current.get("unsignalable_owned_descendant") is not True
-            and current.get("detached_owned_subtree") is not True
             and int(current["pid"]) not in target_pids
         ]
         if unexpected_live:
@@ -2660,7 +2576,7 @@ def kill_owned_process_group(
             member_pid,
             signal.SIGKILL,
             deadline=deadline,
-            require_stopped=not detached_owned,
+            require_stopped=True,
             expected_stopped_parent=expected_parent,
         )
         if not signalled:
@@ -2776,16 +2692,6 @@ def teardown_interrupted_process(
         errors.append(error)
         proof["leader_poll_error"] = cleanup_error_evidence(error)
         leader_alive = True
-
-    if not leader_alive and signal_process_group:
-        proof["detached_server_kill_attempted"] = True
-        try:
-            proof["detached_server_pids_killed"] = (
-                kill_detached_owned_servers_after_leader_exit(process)
-            )
-        except BaseException as error:
-            errors.append(error)
-            proof["detached_server_kill_error"] = cleanup_error_evidence(error)
 
     if leader_alive and signal_process_group:
         proof["owned_group_kill_attempted"] = True
@@ -3678,10 +3584,8 @@ def main() -> int:
         tempfile.mkdtemp(prefix=f"vcf-e2e-{unique}-", dir=SHORT_RUNTIME_PARENT)
     ).resolve()
     primary_root = runtime_root / "p"
-    headless_root = runtime_root / "h"
     restart_root = runtime_root / "r"
     env = isolated_env(primary_root, control_plane)
-    headless_env = isolated_env(headless_root, control_plane)
     restart_env = isolated_env(restart_root, control_plane)
     receipt_path = root / "evidence.json"
     recorder = EvidenceRecorder(
@@ -3705,10 +3609,6 @@ def main() -> int:
                 "primary": {
                     "root": str(primary_root),
                     "socket_root": env["VC_FRAME_SOCKET_DIR"],
-                },
-                "headless": {
-                    "root": str(headless_root),
-                    "socket_root": headless_env["VC_FRAME_SOCKET_DIR"],
                 },
                 "restart": {
                     "root": str(restart_root),
@@ -3737,8 +3637,7 @@ def main() -> int:
     missing_origin_session = f"{unique}-miss"
     empty_origin = f"{unique}-empty"
     drawers = set(DRAWER_BY_BUCKET.values())
-    primary_targets = {origin, peer, *drawers}
-    headless_targets = {headless_origin, "Needs attention"}
+    primary_targets = {origin, peer, headless_origin, *drawers}
     restart_targets = {"Finalized runs"}
     primary_session_selectors = primary_targets | {
         missing_name,
@@ -3752,10 +3651,6 @@ def main() -> int:
                 pathlib.Path(env["VC_FRAME_SOCKET_DIR"]),
                 primary_session_selectors,
             ),
-            "headless": socket_path_budget(
-                pathlib.Path(headless_env["VC_FRAME_SOCKET_DIR"]),
-                headless_targets,
-            ),
             "restart": socket_path_budget(
                 pathlib.Path(restart_env["VC_FRAME_SOCKET_DIR"]), restart_targets
             ),
@@ -3766,7 +3661,6 @@ def main() -> int:
         "fixtures",
         {
             "primary_owned_sessions": sorted(primary_targets),
-            "headless_owned_sessions": sorted(headless_targets),
             "restart_owned_sessions": sorted(restart_targets),
             "probe_root": str(probe_root),
             "control_plane": str(control_plane),
@@ -3807,7 +3701,7 @@ def main() -> int:
             expected_sha = validate_sha(options.expected_sha, "expected SHA")
         recorder.set("expected_sha", expected_sha)
 
-        # All namespaces are proven empty and the exact binary provenance is
+        # Both namespaces are proven empty and the exact binary provenance is
         # proven before any server can be created.
         build_info = namespace_preflight(
             binary,
@@ -3825,17 +3719,8 @@ def main() -> int:
             expected_sha=expected_sha,
             expected_profile=options.expected_profile,
         )
-        headless_build_info = namespace_preflight(
-            binary,
-            headless_env,
-            headless_root,
-            control_plane,
-            expected_sha=expected_sha,
-            expected_profile=options.expected_profile,
-        )
         require(
-            build_info == restart_build_info == headless_build_info,
-            "build provenance changed by namespace",
+            build_info == restart_build_info, "build provenance changed by namespace"
         )
         recorder.set("build_info", build_info)
         recorder.set("status", "running")
@@ -4310,23 +4195,11 @@ def main() -> int:
             == empty_viewer_interrupted.observed_state.get("capture_sha256"),
             "empty-viewer recovery rewrote durable scrollback",
         )
-        empty_viewer_identity_after = empty_viewer_receipt_after.get(
-            "viewer_tab_identity"
-        )
         require(
             empty_viewer_receipt_after.get("viewer_token")
             == empty_viewer_receipt_before.get("viewer_token")
-            and isinstance(empty_viewer_identity_after, dict)
-            and all(
-                empty_viewer_identity_after.get(key)
-                == empty_viewer_identity_before.get(key)
-                for key in ("session", "id", "name", "tab_instance_id")
-            )
-            and isinstance(
-                empty_viewer_identity_after.get("session_incarnation"), str
-            )
-            and empty_viewer_identity_after.get("session_incarnation")
-            != empty_viewer_identity_before.get("session_incarnation")
+            and empty_viewer_receipt_after.get("viewer_tab_identity")
+            == empty_viewer_identity_before
             and empty_viewer_receipt_after.get("viewer_creation_generation") == 2
             and empty_viewer_receipt_after.get("viewer_creation_pending") is False,
             "empty-viewer recovery changed ownership or skipped generation two",
@@ -4355,8 +4228,7 @@ def main() -> int:
                 "scenario": "after_empty_viewer_reservation",
                 "phase": "recovered",
                 "triage_exit": empty_viewer_recovery.returncode,
-                "stable_viewer_identity_before": empty_viewer_identity_before,
-                "stable_viewer_identity_after": empty_viewer_identity_after,
+                "same_viewer_identity": empty_viewer_identity_before,
                 "transfer": transfer_evidence(
                     control_plane,
                     empty_viewer_run,
@@ -4765,10 +4637,10 @@ def main() -> int:
         # merely that a recorded pane id is stale.
         fallback_run = f"{unique}-transcript"
         fallback_marker = f"HEADLESS-{unique}"
-        create_session(binary, headless_env, headless_origin)
+        create_session(binary, env, headless_origin)
         _fallback_tab_id, fallback_panes = create_marker_tab(
             binary,
-            headless_env,
+            env,
             headless_origin,
             fallback_run,
             fallback_marker,
@@ -4776,7 +4648,7 @@ def main() -> int:
         )
         wait_for_marker(
             binary,
-            headless_env,
+            env,
             headless_origin,
             fallback_panes[0],
             fallback_marker,
@@ -4793,10 +4665,10 @@ def main() -> int:
             ownership_root=root,
         )
         transcript_bytes = transcript.read_bytes()
-        kill_confirmed_session(binary, headless_env, headless_origin)
+        kill_confirmed_session(binary, env, headless_origin)
         fallback_result = triage(
             binary,
-            headless_env,
+            env,
             fallback_run,
             -9,
             headless_origin,
@@ -4805,7 +4677,7 @@ def main() -> int:
         )
         fallback_capture, _fallback_receipt = verify_transfer(
             binary,
-            headless_env,
+            env,
             control_plane,
             run=fallback_run,
             exit_code=-9,
@@ -4815,7 +4687,7 @@ def main() -> int:
             expected_bytes=transcript_bytes,
         )
         require(
-            query_session(binary, headless_env, headless_origin).state == "absent",
+            query_session(binary, env, headless_origin).state == "absent",
             "transcript fallback resurrected the dead origin",
         )
         require(
@@ -4829,7 +4701,7 @@ def main() -> int:
         recorder.append("transfers", fallback_evidence)
         fallback_replay = triage(
             binary,
-            headless_env,
+            env,
             fallback_run,
             -9,
             headless_origin,
@@ -4838,7 +4710,7 @@ def main() -> int:
         )
         fallback_after, _fallback_receipt = verify_transfer(
             binary,
-            headless_env,
+            env,
             control_plane,
             run=fallback_run,
             exit_code=-9,
@@ -4965,7 +4837,6 @@ def main() -> int:
         if mutation_started:
             for label, cleanup_env, targets in (
                 ("primary", env, primary_targets),
-                ("headless", headless_env, headless_targets),
                 ("restart", restart_env, restart_targets),
             ):
                 try:

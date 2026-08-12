@@ -4,6 +4,8 @@ use super::{
 };
 
 trait TabTestHelper {
+    // Keeps legacy integration fixtures flat while production uses options.
+    #[allow(clippy::too_many_arguments)]
     fn new_pane_compat(
         &mut self,
         pid: PaneId,
@@ -15,6 +17,8 @@ trait TabTestHelper {
         client_id: Option<ClientId>,
         blocking_notification: Option<crate::route::NotificationEnd>,
     ) -> Result<()>;
+    // Keeps legacy integration fixtures flat while production uses options.
+    #[allow(clippy::too_many_arguments)]
     fn apply_layout_compat(
         &mut self,
         layout: TiledPaneLayout,
@@ -74,9 +78,9 @@ impl TabTestHelper for TabImpl {
 
 struct Tab;
 impl Tab {
-    // Positional compat shim: `new` deliberately returns the real (aliased)
-    // type, not the unit-struct namespace it hangs off.
-    #[allow(clippy::new_ret_no_self)]
+    // Positional test shim mirrors the legacy constructor while production
+    // uses TabOptions.
+    #[allow(clippy::new_ret_no_self, clippy::too_many_arguments)]
     pub fn new(
         id: usize,
         position: usize,
@@ -1235,9 +1239,9 @@ use vte;
 // snapshot helpers below keep reading as flat argument lists.
 struct Grid;
 impl Grid {
-    // Positional compat shim: `new` deliberately returns the real (aliased)
-    // type, not the unit-struct namespace it hangs off.
-    #[allow(clippy::new_ret_no_self)]
+    // Positional snapshot shim mirrors the legacy constructor while production
+    // uses GridOptions.
+    #[allow(clippy::new_ret_no_self, clippy::too_many_arguments)]
     pub fn new(
         rows: usize,
         columns: usize,

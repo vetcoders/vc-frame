@@ -3756,7 +3756,8 @@ impl WasmBridge {
             && message_cid.is_some()
             && matches!(event,
                 Event::CustomMessage(message, _)
-                    if message == crate::screen::VC_STATUS_BAR_VISIBILITY_MESSAGE)
+                    if message == crate::screen::VC_FLEET_LIVE_COUNT_MESSAGE
+                        || message == crate::screen::VC_STATUS_BAR_VISIBILITY_MESSAGE)
     }
     fn update_parked_chrome_target(
         &mut self,
@@ -3782,6 +3783,12 @@ impl WasmBridge {
                     },
                     _ => {},
                 }
+            },
+            Event::CustomMessage(message, _)
+                if message == crate::screen::VC_FLEET_LIVE_COUNT_MESSAGE =>
+            {
+                self.parked_chrome_plugin_clients
+                    .remove(&(plugin_id, client_id));
             },
             _ => {},
         }
@@ -4863,14 +4870,24 @@ mod layout_plugin_transaction_tests {
 
         bridge
             .update_plugins(
-                vec![(
-                    Some(plugin_id),
-                    Some(client_id),
-                    Event::CustomMessage(
-                        crate::screen::VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
-                        "false".to_owned(),
+                vec![
+                    (
+                        Some(plugin_id),
+                        Some(client_id),
+                        Event::CustomMessage(
+                            crate::screen::VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
+                            "4".to_owned(),
+                        ),
                     ),
-                )],
+                    (
+                        Some(plugin_id),
+                        Some(client_id),
+                        Event::CustomMessage(
+                            crate::screen::VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
+                            "false".to_owned(),
+                        ),
+                    ),
+                ],
                 shutdown_sender,
             )
             .unwrap();
@@ -4922,8 +4939,8 @@ mod layout_plugin_transaction_tests {
             Some(plugin_id),
             Some(client_id),
             &Event::CustomMessage(
-                crate::screen::VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
-                "true".to_owned(),
+                crate::screen::VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
+                "1".to_owned(),
             ),
         );
         assert!(!bridge.is_parked_chrome_state_payload(

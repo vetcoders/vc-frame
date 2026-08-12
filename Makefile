@@ -210,12 +210,7 @@ precheck: chrome-contract
 	@echo "✓ Plugins OK"
 	@echo ""
 	@echo "→ [3/4] Clippy..."
-	@$(CARGO) clippy --workspace --all-targets -- \
-		-D warnings \
-		-A clippy::too_many_arguments \
-		-A clippy::type_complexity \
-		-A clippy::borrowed_box \
-		-A clippy::ptr_arg
+	@$(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
 	@echo "✓ Clippy OK"
 	@echo ""
 	@echo "→ [4/4] Typecheck..."

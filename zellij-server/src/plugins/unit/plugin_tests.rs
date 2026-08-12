@@ -1,5 +1,8 @@
 use super::{PluginThreadParams, plugin_thread_main as plugin_thread_main_impl};
 
+// Test adapter preserves the established fixture call shape while production
+// passes one PluginThreadParams value.
+#[allow(clippy::too_many_arguments)]
 fn plugin_thread_main(
     bus: Bus<PluginInstruction>,
     engine: Engine,

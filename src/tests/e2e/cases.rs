@@ -111,7 +111,7 @@ fn account_for_races_in_snapshot(snapshot: String) -> String {
     // (LIVE count, CPU%, MEM, DISK free, HEALTH). Strip it so chrome diffs
     // stay about product layout, not runner load. Segments can appear in any
     // order or subset (e.g. only MEM|DISK|HEALTH when LIVE is zero/absent).
-    let live_replace = Regex::new(r"LIVE[ \t]+(?:\d+|\?)(?:↗)?[ \t]*").unwrap();
+    let live_replace = Regex::new(r"LIVE \d+\s*").unwrap();
     let rail_live_replace = Regex::new(r"Live (?:\d+|…)").unwrap();
     let cockpit_seg_replace = Regex::new(r"(?:\| )?(?:CPU|MEM|DISK|HDD|HEALTH) [^|\n]*").unwrap();
     // Rotating startup tips and the default-mode bottom tip chip row race with
@@ -154,38 +154,6 @@ fn account_for_races_in_snapshot(snapshot: String) -> String {
         .to_string();
 
     eol_arrow_replace.replace_all(&snapshot, "\n").to_string()
-}
-
-fn normalize_mirrored_guide_content(snapshot: String) -> String {
-    snapshot
-        .split('\n')
-        .enumerate()
-        .map(|(line_index, line)| {
-            if !(2..22).contains(&line_index) {
-                return line.to_owned();
-            }
-            let mut chars: Vec<char> = line.chars().collect();
-            let Some(first_border) = chars.iter().position(|character| *character == '│') else {
-                return line.to_owned();
-            };
-            let Some(last_border) = chars.iter().rposition(|character| *character == '│') else {
-                return line.to_owned();
-            };
-            if first_border < last_border {
-                chars[first_border + 1..last_border].fill(' ');
-            }
-            chars.into_iter().collect()
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-#[test]
-fn snapshot_normalization_ignores_dynamic_server_live_counts() {
-    for count in ["?", "0", "2", "99"] {
-        let snapshot = format!("status ... LIVE {count:>3}↗\n");
-        assert_eq!(account_for_races_in_snapshot(snapshot), "status ... \n");
-    }
 }
 
 // All the E2E tests are marked as "ignored" so that they can be run separately from the normal
@@ -787,12 +755,9 @@ pub fn close_pane() {
             name: "Wait for pane to close",
             instruction: |remote_terminal: RemoteTerminal| -> bool {
                 let mut step_is_complete = false;
-                if remote_terminal.cursor_position_is(3, 2)
-                    && remote_terminal.status_bar_appears()
-                    && remote_terminal.snapshot_contains("LOCK")
+                if remote_terminal.cursor_position_is(3, 2) && remote_terminal.status_bar_appears()
                 {
-                    // Cursor is in the original pane and the mode-switch render
-                    // has caught up with the close acknowledgement.
+                    // cursor is in the original pane
                     step_is_complete = true;
                 }
                 step_is_complete
@@ -877,7 +842,7 @@ pub fn closing_last_pane_exits_zellij() {
             test_attempts -= 1;
             continue;
         }
-        let last_snapshot = runner.take_snapshot_after(Step {
+        break runner.take_snapshot_after(Step {
             name: "Wait for app to exit",
             instruction: |remote_terminal: RemoteTerminal| -> bool {
                 let mut step_is_complete = false;
@@ -888,11 +853,6 @@ pub fn closing_last_pane_exits_zellij() {
                 step_is_complete
             },
         });
-        if runner.test_timed_out && test_attempts > 0 {
-            test_attempts -= 1;
-            continue;
-        }
-        break last_snapshot;
     };
     assert!(last_snapshot.contains("Bye from 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍."));
 }
@@ -1723,7 +1683,10 @@ pub fn mirrored_sessions() {
             name: "take snapshot after",
             instruction: |remote_terminal: RemoteTerminal| -> bool {
                 let mut step_is_complete = false;
-                if remote_terminal.top_bar_appears() && remote_terminal.mode_status_bar_appears() {
+                if remote_terminal.cursor_position_is(63, 2)
+                    && remote_terminal.snapshot_contains("┐┌")
+                    && remote_terminal.top_bar_appears()
+                {
                     // cursor is back in the first tab
                     step_is_complete = true;
                 }
@@ -1734,7 +1697,10 @@ pub fn mirrored_sessions() {
             name: "take snapshot after",
             instruction: |remote_terminal: RemoteTerminal| -> bool {
                 let mut step_is_complete = false;
-                if remote_terminal.top_bar_appears() && remote_terminal.mode_status_bar_appears() {
+                if remote_terminal.cursor_position_is(63, 2)
+                    && remote_terminal.snapshot_contains("┐┌")
+                    && remote_terminal.top_bar_appears()
+                {
                     // cursor is back in the first tab
                     step_is_complete = true;
                 }
@@ -1749,10 +1715,8 @@ pub fn mirrored_sessions() {
             break (first_runner_snapshot, second_runner_snapshot);
         }
     };
-    let first_runner_snapshot =
-        normalize_mirrored_guide_content(account_for_races_in_snapshot(first_runner_snapshot));
-    let second_runner_snapshot =
-        normalize_mirrored_guide_content(account_for_races_in_snapshot(second_runner_snapshot));
+    let first_runner_snapshot = account_for_races_in_snapshot(first_runner_snapshot);
+    let second_runner_snapshot = account_for_races_in_snapshot(second_runner_snapshot);
     assert_snapshot!(first_runner_snapshot);
     assert_snapshot!(second_runner_snapshot);
 }
@@ -2090,12 +2054,8 @@ pub fn bracketed_paste() {
             name: "Wait for terminal to render sent keys",
             instruction: |remote_terminal: RemoteTerminal| -> bool {
                 let mut step_is_complete = false;
-                if remote_terminal.snapshot_contains("abc")
-                    && remote_terminal.top_bar_appears()
-                    && remote_terminal.mode_status_bar_appears()
-                {
-                    // Text has been entered and both chrome surfaces have
-                    // caught up with the terminal repaint.
+                if remote_terminal.snapshot_contains("abc") {
+                    // text has been entered into the only terminal pane
                     step_is_complete = true;
                 }
                 step_is_complete

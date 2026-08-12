@@ -71,14 +71,11 @@ The build uses `cargo-zigbuild` to cross-compile a native musl binary (arm64 on 
 To run these tests locally, you'll need to have either `docker` or `podman` and also `docker compose` installed.
 Once you do, in the repository root:
 
-1. `mkdir -p target && cp -R src/tests/fixtures target/` will stage the fixtures inside the single read-only tree shared with the container
-2. `docker compose up -d` will start up the docker container
-3. `cargo xtask ci e2e --build` will build the vc-frame binary in the target folder, which is shared with the container
-4. `ln -sfn "$(uname -m)-unknown-linux-musl/release/vc-frame" target/zellij` will publish the architecture-stable path expected by the container
-5. `docker compose restart` will install the staged public key after the binary symlink exists
-6. `cargo xtask ci e2e --test` will run the tests
+1. `docker compose up -d` will start up the docker container
+2. `cargo xtask ci e2e --build` will build the vc-frame binary in the target folder, which is shared with the container
+3. `cargo xtask ci e2e --test` will run the tests
 
-To re-run the tests after you've changed something in the code base, be sure to repeat steps 3, 4 and 6.
+To re-run the tests after you've changed something in the code base, be sure to repeat steps 2 and 3.
 
 ## Debugging / Troubleshooting while developing
 vc-frame uses the excellent [`log`](https://crates.io/crates/log) crate to handle its internal logging. The output of these logs will go to `/$temp_dir/vc-frame-<UID>/vc-frame-log/zellij.log` which `$temp_dir` refers to [std::env::temp_dir()](https://doc.rust-lang.org/std/env/fn.temp_dir.html). On most of operating systems it points to `/tmp`, but there are exceptions, such as `/var/folders/dr/xxxxxxxxxxxxxx/T/` for Mac.

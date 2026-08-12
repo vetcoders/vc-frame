@@ -4,6 +4,8 @@ use super::{
 };
 
 trait TabTestHelper {
+    // Keeps legacy test call sites flat while production uses NewPaneOptions.
+    #[allow(clippy::too_many_arguments)]
     fn new_pane_compat(
         &mut self,
         pid: PaneId,
@@ -44,9 +46,9 @@ impl TabTestHelper for TabImpl {
 
 struct Tab;
 impl Tab {
-    // Positional compat shim: `new` deliberately returns the real (aliased)
-    // type, not the unit-struct namespace it hangs off.
-    #[allow(clippy::new_ret_no_self)]
+    // Positional test shim mirrors the legacy constructor while production
+    // uses TabOptions.
+    #[allow(clippy::new_ret_no_self, clippy::too_many_arguments)]
     pub fn new(
         id: usize,
         position: usize,

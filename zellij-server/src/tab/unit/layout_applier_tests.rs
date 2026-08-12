@@ -10,9 +10,9 @@ use crate::tab::layout_applier::{
 
 struct LayoutApplier;
 impl LayoutApplier {
-    // Positional compat shim: `new` deliberately returns the real (aliased)
-    // type, not the unit-struct namespace it hangs off.
-    #[allow(clippy::new_ret_no_self)]
+    // Positional test shim mirrors the legacy constructor while production
+    // uses LayoutApplierOptions.
+    #[allow(clippy::new_ret_no_self, clippy::too_many_arguments)]
     pub fn new<'a>(
         viewport: &'a Rc<RefCell<Viewport>>,
         senders: &'a ThreadSenders,

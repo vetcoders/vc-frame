@@ -5,7 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 ## [Unreleased]
 
-* fix(operator): collapse runtime truth to one clickable `LIVE n↗` chip in the bottom status bar, sourced from vc-server `/api/control/state.active_runs`; make the left rail session-only by removing PID-reuse-prone Live/process rows and the blinking F/X/N settlement strip
+* fix(server): a starting server no longer unlinks and re-binds a session socket that a live server still owns — it probes the path first and refuses to start when someone is listening, even if that server is too busy to answer a health probe; only missing, stale or non-socket paths are cleaned up. A server already running a session likewise rejects a second new-session request instead of re-initializing over live state
+* fix(chrome): the chrome a client had visible is parked when that client detaches, so a server with nobody attached stops refreshing the cross-session list once a second; attaching re-activates it and rebuilds the list on the spot
+* perf(plugins): `get_session_list` no longer feeds its result back into Screen — a plugin-initiated read used to trigger a `SessionUpdate` broadcast to every plugin (including the caller), a self-sustaining loop whose cost grew with the square of the live session count
 * feat(input): `Cmd+K` / `Super+k` opens the existing `❯_ Quick cmd` mini-console in every mode including LOCK; the keybind messages the active compact-bar so keyboard and click share one runner, geometry and pane-title contract, with matching Alacritty CSI-u translation and help
 
 ## [0.47.3] - 2026-08-06

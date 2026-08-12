@@ -61,7 +61,7 @@ use zellij_utils::input::mouse::{MouseEvent, MouseEventType};
 use zellij_utils::input::options::Clipboard;
 use zellij_utils::ipc::{ExitReason, ServerToClientMsg};
 use zellij_utils::pane_size::{PaneGeom, Size, SizeInPixels};
-use zellij_utils::run_triage::{ViewerCreationFence, ViewerCreationFenceRejection};
+use zellij_utils::run_triage::{BucketKind, ViewerCreationFence, ViewerCreationFenceRejection};
 use zellij_utils::shared::clean_string_from_control_and_linebreak;
 use zellij_utils::{
     channels,
@@ -75,11 +75,28 @@ use zellij_utils::{
     position::Position,
 };
 
+/// Lightweight host-to-plugin signal carrying the fleet's live terminal-tab
+/// count. Keep this wire name in sync with the status-bar plugin.
+pub(crate) const VC_FLEET_LIVE_COUNT_MESSAGE: &str = "vc.fleet-live-count.v1";
 /// Exact per-plugin/client deactivation signal. Generic `Visible(false)` is
 /// tab-global and is therefore insufficient when several clients view
 /// different tabs in one non-mirrored session.
 pub(crate) const VC_STATUS_BAR_VISIBILITY_MESSAGE: &str = "vc.status-bar-visibility.v1";
 type ChromePluginTarget = (PluginId, ClientId);
+
+fn request_session_socket_rename(
+    senders: &ThreadSenders,
+    new_socket_path: PathBuf,
+) -> std::result::Result<(), String> {
+    let (response_tx, response_rx) = channels::bounded(1);
+    senders
+        .send_to_server(ServerInstruction::RenameSessionSocket {
+            new_socket_path,
+            response_channel: response_tx,
+        })
+        .map_err(|error| error.to_string())?;
+    response_rx.recv().map_err(|error| error.to_string())?
+}
 // Plugin panes retain either the canonical built-in URL or their layout alias.
 // Keep the three runtime spellings for each parkable chrome plugin and inspect
 // an alias's resolved RunPlugin so renamed built-ins keep the same lifecycle.
@@ -94,6 +111,29 @@ const PARKABLE_CHROME_PLUGIN_URLS: [&str; 9] = [
     "zellij:session-manager",
     "session-manager",
 ];
+
+/// Count live terminal-bearing tabs across working sessions. Triage bucket
+/// sessions are drawers, not fleet, and plugin-only/exited/held tabs do not
+/// represent a running agent process.
+fn fleet_live_count(sessions: &[SessionInfo]) -> usize {
+    sessions
+        .iter()
+        .filter(|session| BucketKind::from_session_name(&session.name).is_none())
+        .map(|session| {
+            session
+                .tabs
+                .iter()
+                .filter(|tab| {
+                    session.panes.panes.get(&tab.position).is_some_and(|panes| {
+                        panes
+                            .iter()
+                            .any(|pane| !pane.is_plugin && !pane.exited && !pane.is_held)
+                    })
+                })
+                .count()
+        })
+        .sum()
+}
 
 fn is_parkable_chrome_plugin_run(run: Option<&Run>) -> bool {
     let Some(Run::Plugin(run_plugin_or_alias)) = run else {
@@ -121,6 +161,8 @@ fn session_update_events(
     status_bar_plugin_targets: Vec<(PluginId, ClientId)>,
     hidden_status_bar_plugin_targets: Vec<(PluginId, ClientId)>,
 ) -> Vec<(Option<PluginId>, Option<ClientId>, Event)> {
+    let live_count = fleet_live_count(&live_sessions).to_string();
+
     let mut updates = hidden_status_bar_plugin_targets
         .into_iter()
         .map(|(plugin_id, client_id)| {
@@ -142,8 +184,8 @@ fn session_update_events(
                     Some(plugin_id),
                     Some(client_id),
                     Event::CustomMessage(
-                        VC_STATUS_BAR_VISIBILITY_MESSAGE.to_owned(),
-                        "true".to_owned(),
+                        VC_FLEET_LIVE_COUNT_MESSAGE.to_owned(),
+                        live_count.clone(),
                     ),
                 )
             }),
@@ -14665,6 +14707,27 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                     let err_context = || "Failed to rename session".to_string();
                     let old_session_name = screen.session_name.clone();
 
+                    // Transfer the IPC ownership first. The server main loop is
+                    // the sole lease writer; a failed transfer must leave both
+                    // the old socket path and semantic session state intact.
+                    let transfer_result = request_session_socket_rename(
+                        &screen.bus.senders,
+                        ZELLIJ_SOCK_DIR.join(&name),
+                    );
+                    if let Err(error) = transfer_result {
+                        let error_text = format!("Failed to rename session socket: {error}");
+                        log::error!("{error_text}");
+                        if let Some(os_input) = &mut screen.bus.os_input {
+                            let _ = os_input.send_to_client(
+                                client_id,
+                                ServerToClientMsg::LogError {
+                                    lines: vec![error_text],
+                                },
+                            );
+                        }
+                        continue;
+                    }
+
                     // update state
                     screen.session_name = name.clone();
                     screen.default_mode_info.session_name = Some(name.clone());
@@ -14673,13 +14736,6 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                     }
                     for (_, tab) in screen.tabs.iter_mut() {
                         tab.rename_session(name.clone()).with_context(err_context)?;
-                    }
-
-                    // rename socket file
-                    let old_socket_file_path = ZELLIJ_SOCK_DIR.join(&old_session_name);
-                    let new_socket_file_path = ZELLIJ_SOCK_DIR.join(&name);
-                    if let Err(e) = std::fs::rename(old_socket_file_path, new_socket_file_path) {
-                        log::error!("Failed to rename ipc socket: {:?}", e);
                     }
 
                     // rename session_info folder (TODO: make this atomic, right now there is a
@@ -15994,6 +16050,61 @@ mod plugin_render_scheduling_tests {
         assert!(!plugin_render_assets_have_visual_change(Some(&empty)));
         assert!(plugin_render_assets_have_visual_change(Some(&rendered)));
         assert!(plugin_render_assets_have_visual_change(None));
+    }
+}
+
+#[cfg(test)]
+mod session_socket_rename_tests {
+    use super::request_session_socket_rename;
+    use crate::{ServerInstruction, thread_bus::ThreadSenders};
+    use std::{path::PathBuf, thread};
+    use zellij_utils::{
+        channels::{self, ChannelWithContext, SenderWithContext},
+        errors::ErrorContext,
+    };
+
+    fn responder(
+        response: std::result::Result<(), String>,
+    ) -> (ThreadSenders, thread::JoinHandle<PathBuf>) {
+        let (server_tx, server_rx): ChannelWithContext<ServerInstruction> = channels::bounded(1);
+        let senders = ThreadSenders {
+            to_server: Some(SenderWithContext::new(server_tx)),
+            ..Default::default()
+        };
+        let responder = thread::spawn(move || {
+            let (instruction, _context): (ServerInstruction, ErrorContext) =
+                server_rx.recv().expect("rename request");
+            let ServerInstruction::RenameSessionSocket {
+                new_socket_path,
+                response_channel,
+            } = instruction
+            else {
+                panic!("unexpected server instruction");
+            };
+            response_channel.send(response).expect("rename response");
+            new_socket_path
+        });
+        (senders, responder)
+    }
+
+    #[test]
+    fn rename_waits_for_positive_socket_owner_ack() {
+        let expected_path = PathBuf::from("/tmp/vc-frame-renamed-session");
+        let (senders, responder) = responder(Ok(()));
+
+        request_session_socket_rename(&senders, expected_path.clone()).expect("positive ack");
+        assert_eq!(responder.join().expect("responder"), expected_path);
+    }
+
+    #[test]
+    fn rename_propagates_socket_owner_rejection() {
+        let expected_path = PathBuf::from("/tmp/vc-frame-occupied-session");
+        let (senders, responder) = responder(Err("destination is occupied".to_owned()));
+
+        let error = request_session_socket_rename(&senders, expected_path.clone())
+            .expect_err("negative ack must stop semantic rename");
+        assert_eq!(error, "destination is occupied");
+        assert_eq!(responder.join().expect("responder"), expected_path);
     }
 }
 

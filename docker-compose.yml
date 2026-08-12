@@ -4,12 +4,11 @@
 # Usage (see CONTRIBUTING.md):
 #   ssh-keygen -t ed25519 -N '' -f .ci-ssh/id_ed25519
 #   export ZELLIJ_E2E_SSH_KEY="$PWD/.ci-ssh/id_ed25519"
-#   mkdir -p target && cp -R src/tests/fixtures target/
 #   docker compose up -d
-#   cargo xtask ci e2e --build
-#   ln -sfn "$(uname -m)-unknown-linux-musl/release/vc-frame" target/zellij
+#   cargo xtask ci e2e --build     # also publishes the target/zellij symlink
 #   docker compose restart         # image init installs the public key
 #   cargo xtask ci e2e --test
+version: "2.1"
 services:
   zellij-e2e:
     image: ghcr.io/linuxserver/openssh-server
@@ -32,9 +31,10 @@ services:
         source: ./target
         target: /usr/src/zellij
         read_only: true
-      # Fixtures are copied into target before startup. Keeping them inside the
-      # single read-only target bind avoids a nested mountpoint that Docker
-      # Desktop cannot create below an already read-only parent mount.
+      - type: bind
+        source: ./src/tests/fixtures
+        target: /usr/src/zellij/fixtures
+        read_only: true
       - type: bind
         source: ./.ci-ssh
         target: /ci-ssh

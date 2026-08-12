@@ -14,6 +14,18 @@ use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 use std::{fs, io, process};
 
+#[cfg(unix)]
+use std::{
+    ffi::{CString, OsString},
+    fs::{File, OpenOptions},
+    os::unix::{
+        ffi::OsStrExt,
+        fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+        io::AsRawFd,
+    },
+    path::{Path, PathBuf},
+};
+
 pub fn get_sessions() -> Result<Vec<(String, Duration)>, io::ErrorKind> {
     match fs::read_dir(&*ZELLIJ_SOCK_DIR) {
         Ok(files) => {
@@ -187,7 +199,10 @@ fn assert_socket(name: &str) -> bool {
     match ipc_connect_timeout(path, SESSION_PROBE_TIMEOUT) {
         Ok(stream) => probe_socket_stream(stream, SESSION_PROBE_TIMEOUT),
         Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {
-            drop(fs::remove_file(path));
+            // A server may be between stale cleanup and bind while holding the
+            // ownership lease. Discovery is allowed to hide that not-yet-live
+            // session, but it must never unlink the path out from under it.
+            let _ = remove_stale_socket_if_unowned(path);
             false
         },
         Err(_) => false,
@@ -290,6 +305,376 @@ pub fn probe_socket_ownership(path: &std::path::Path) -> SocketOwnership {
     }
 }
 
+/// Filesystem identity captured immediately after binding a Unix session
+/// socket. Paths are mutable names; `(dev, ino)` is the ownership proof used by
+/// teardown so an old process cannot unlink a successor's listener.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SocketIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(unix)]
+impl SocketIdentity {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }
+    }
+}
+
+/// Shared lifetime owner for one Unix session socket name.
+///
+/// The advisory lock is intentionally retained for the whole server lifetime,
+/// not merely around `probe -> unlink -> bind`. That gives startup, discovery,
+/// forced stale cleanup, rename, and teardown one writer token. The listener's
+/// own automatic name reclamation is disabled by [`bind`](Self::bind), making
+/// this lease the only code allowed to remove the bound path.
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct SessionSocketLease {
+    socket_path: PathBuf,
+    _lock_file: File,
+    bound_identity: Option<SocketIdentity>,
+}
+
+#[cfg(unix)]
+impl SessionSocketLease {
+    /// Acquire the non-blocking cross-process writer lease for `socket_path`.
+    /// A `WouldBlock` error means another cooperative server owns this name.
+    pub fn acquire(socket_path: &Path) -> io::Result<Self> {
+        let lock_path = socket_lease_path(socket_path)?;
+        let lock_file = acquire_socket_lock(&lock_path)?;
+        Ok(Self {
+            socket_path: socket_path.to_path_buf(),
+            _lock_file: lock_file,
+            bound_identity: None,
+        })
+    }
+
+    /// Clean a stale name and bind while the lifetime lease is held.
+    ///
+    /// The live-owner probe remains necessary during migration: an older
+    /// vc-frame binary can own the socket without owning the new lockfile.
+    pub fn bind(&mut self) -> io::Result<interprocess::local_socket::Listener> {
+        use interprocess::local_socket::prelude::*;
+
+        if self.bound_identity.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "session socket lease is already bound",
+            ));
+        }
+
+        match probe_socket_ownership(&self.socket_path) {
+            SocketOwnership::Vacant => {
+                remove_path_if_unchanged(&self.socket_path)?;
+            },
+            SocketOwnership::Live => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    format!("another server is alive on {}", self.socket_path.display()),
+                ));
+            },
+            SocketOwnership::Unknown(reason) => {
+                return Err(io::Error::other(format!(
+                    "cannot determine ownership of {}: {reason}",
+                    self.socket_path.display()
+                )));
+            },
+        }
+
+        let mut listener = crate::consts::ipc_bind(&self.socket_path)?;
+        // `interprocess` otherwise unlinks the original pathname from its Drop
+        // implementation without checking inode identity. That can erase a
+        // replacement listener after rename or an ownership race.
+        listener.do_not_reclaim_name_on_drop();
+
+        let metadata = fs::symlink_metadata(&self.socket_path)?;
+        if !metadata.file_type().is_socket() {
+            return Err(io::Error::other(format!(
+                "bound session path is not a socket: {}",
+                self.socket_path.display()
+            )));
+        }
+        self.bound_identity = Some(SocketIdentity::from_metadata(&metadata));
+        Ok(listener)
+    }
+
+    /// Move the live socket and its writer lease to a new session name.
+    ///
+    /// The target lease is acquired before any pathname mutation. The old
+    /// lease remains held until the rename and identity capture have completed,
+    /// so concurrent A->B and B->A attempts fail closed instead of deadlocking.
+    pub fn rename_owned_socket(&mut self, new_socket_path: &Path) -> io::Result<()> {
+        if self.socket_path == new_socket_path {
+            return Ok(());
+        }
+        let expected_identity = self.bound_identity.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotConnected,
+                "cannot rename a session socket before it is bound",
+            )
+        })?;
+        if !path_has_identity(&self.socket_path, expected_identity)? {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "refusing to rename session socket whose ownership changed: {}",
+                    self.socket_path.display()
+                ),
+            ));
+        }
+
+        let new_lock_path = socket_lease_path(new_socket_path)?;
+        let new_lock_file = acquire_socket_lock(&new_lock_path)?;
+        match probe_socket_ownership(new_socket_path) {
+            SocketOwnership::Vacant => {
+                remove_path_if_unchanged(new_socket_path)?;
+            },
+            SocketOwnership::Live => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    format!("another server is alive on {}", new_socket_path.display()),
+                ));
+            },
+            SocketOwnership::Unknown(reason) => {
+                return Err(io::Error::other(format!(
+                    "cannot determine ownership of {}: {reason}",
+                    new_socket_path.display()
+                )));
+            },
+        }
+
+        rename_path_noreplace(&self.socket_path, new_socket_path)?;
+        let renamed_metadata = fs::symlink_metadata(new_socket_path)?;
+        let renamed_identity = SocketIdentity::from_metadata(&renamed_metadata);
+        if renamed_identity != expected_identity || !renamed_metadata.file_type().is_socket() {
+            return Err(io::Error::other(format!(
+                "renamed session socket identity changed unexpectedly: {}",
+                new_socket_path.display()
+            )));
+        }
+
+        self.socket_path = new_socket_path.to_path_buf();
+        self._lock_file = new_lock_file;
+        self.bound_identity = Some(renamed_identity);
+        Ok(())
+    }
+
+    /// Remove the current pathname only when it is still this lease's socket.
+    pub fn remove_if_owned(&mut self) -> io::Result<bool> {
+        let Some(expected_identity) = self.bound_identity else {
+            return Ok(false);
+        };
+        if !path_has_identity(&self.socket_path, expected_identity)? {
+            self.bound_identity = None;
+            return Ok(false);
+        }
+        match fs::remove_file(&self.socket_path) {
+            Ok(()) => {
+                self.bound_identity = None;
+                Ok(true)
+            },
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                self.bound_identity = None;
+                Ok(false)
+            },
+            Err(error) => Err(error),
+        }
+    }
+}
+
+/// Remove a stale Unix session socket only when no lifetime owner is active.
+#[cfg(unix)]
+pub fn remove_stale_socket_if_unowned(socket_path: &Path) -> io::Result<bool> {
+    let _lease = match SessionSocketLease::acquire(socket_path) {
+        Ok(lease) => lease,
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if probe_socket_ownership(socket_path) != SocketOwnership::Vacant {
+        return Ok(false);
+    }
+    remove_path_if_unchanged(socket_path)
+}
+
+#[cfg(unix)]
+fn socket_lease_path(socket_path: &Path) -> io::Result<PathBuf> {
+    let parent = socket_path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("session socket has no parent: {}", socket_path.display()),
+        )
+    })?;
+    let file_name = socket_path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("session socket has no file name: {}", socket_path.display()),
+        )
+    })?;
+    let lock_dir = parent.join(".vc-frame-socket-leases");
+    match fs::create_dir(&lock_dir) {
+        Ok(()) => fs::set_permissions(&lock_dir, fs::Permissions::from_mode(0o700))?,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(&lock_dir)?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(io::Error::other(format!(
+                    "session socket lease directory is not a real directory: {}",
+                    lock_dir.display()
+                )));
+            }
+        },
+        Err(error) => return Err(error),
+    }
+    let mut lock_name = OsString::from(file_name);
+    lock_name.push(".lock");
+    Ok(lock_dir.join(lock_name))
+}
+
+#[cfg(unix)]
+fn acquire_socket_lock(lock_path: &Path) -> io::Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(lock_path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::other(format!(
+            "session socket lease is not a regular file: {}",
+            lock_path.display()
+        )));
+    }
+    // SAFETY: `file` owns a valid descriptor for the duration of this call.
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result != 0 {
+        let error = io::Error::last_os_error();
+        if error
+            .raw_os_error()
+            .is_some_and(|code| code == libc::EWOULDBLOCK || code == libc::EAGAIN)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!(
+                    "session socket lease is already held: {}",
+                    lock_path.display()
+                ),
+            ));
+        }
+        return Err(error);
+    }
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn remove_path_if_unchanged(path: &Path) -> io::Result<bool> {
+    let expected = match fs::symlink_metadata(path) {
+        Ok(metadata) => SocketIdentity::from_metadata(&metadata),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if !path_has_identity(path, expected)? {
+        return Ok(false);
+    }
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
+fn path_has_identity(path: &Path, expected: SocketIdentity) -> io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(SocketIdentity::from_metadata(&metadata) == expected),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
+fn path_to_cstring(path: &Path) -> io::Result<CString> {
+    CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "session socket path contains a NUL byte: {}",
+                path.display()
+            ),
+        )
+    })
+}
+
+/// Atomically move a socket pathname without replacing a destination that
+/// appeared after the ownership probe. This closes the legacy-server race at
+/// the actual filesystem mutation rather than relying only on cooperative
+/// lease holders.
+#[cfg(target_vendor = "apple")]
+fn rename_path_noreplace(old_path: &Path, new_path: &Path) -> io::Result<()> {
+    let old_path = path_to_cstring(old_path)?;
+    let new_path = path_to_cstring(new_path)?;
+    // SAFETY: both C strings remain alive for the call and contain no interior
+    // NUL bytes. RENAME_EXCL asks the kernel to fail if `new_path` exists.
+    let result = unsafe {
+        libc::renameatx_np(
+            libc::AT_FDCWD,
+            old_path.as_ptr(),
+            libc::AT_FDCWD,
+            new_path.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn rename_path_noreplace(old_path: &Path, new_path: &Path) -> io::Result<()> {
+    let old_path = path_to_cstring(old_path)?;
+    let new_path = path_to_cstring(new_path)?;
+    // SAFETY: both C strings remain alive for the call and contain no interior
+    // NUL bytes. RENAME_NOREPLACE asks the kernel to fail if `new_path` exists.
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            old_path.as_ptr(),
+            libc::AT_FDCWD,
+            new_path.as_ptr(),
+            libc::RENAME_NOREPLACE as _,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(all(
+    unix,
+    not(target_vendor = "apple"),
+    not(any(target_os = "linux", target_os = "android"))
+))]
+fn rename_path_noreplace(old_path: &Path, new_path: &Path) -> io::Result<()> {
+    // POSIX link is the portable no-clobber primitive for the remaining Unix
+    // targets. Session names share one socket directory, so this cannot cross
+    // filesystems. A brief second link is harmless: both names address the same
+    // listener inode until the old name is removed.
+    fs::hard_link(old_path, new_path)?;
+    if let Err(error) = fs::remove_file(old_path) {
+        let _ = fs::remove_file(new_path);
+        return Err(error);
+    }
+    Ok(())
+}
+
 // Deliberately no non-Unix implementation. Off Unix the session path is a
 // marker file and the listener is a named pipe whose name the OS refuses to
 // hand out twice, so `ipc_bind` — which writes the marker only after that bind
@@ -303,7 +688,100 @@ pub fn probe_socket_ownership(path: &std::path::Path) -> SocketOwnership {
 mod session_probe_timeout_tests {
     use super::*;
     use interprocess::local_socket::{GenericFilePath, ListenerOptions, prelude::*};
-    use std::time::Instant;
+    use std::{process::Command, thread, time::Instant};
+
+    const LEASE_CHILD_MODE: &str = "VC_FRAME_SOCKET_LEASE_CHILD_MODE";
+    const LEASE_CHILD_SOCKET: &str = "VC_FRAME_SOCKET_LEASE_CHILD_SOCKET";
+    const LEASE_CHILD_READY: &str = "VC_FRAME_SOCKET_LEASE_CHILD_READY";
+    const LEASE_CHILD_RELEASE: &str = "VC_FRAME_SOCKET_LEASE_CHILD_RELEASE";
+
+    fn wait_for_path(path: &Path, description: &str) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !path.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(path.exists(), "timed out waiting for {description}");
+    }
+
+    /// `flock` lives on the open file description, and sibling tests spawn
+    /// children through `Command`: between fork and exec such a child holds an
+    /// inherited copy of every parent fd — including this lease's lock fd —
+    /// until `O_CLOEXEC` closes it. Dropping a lease therefore releases the
+    /// lock "any moment now", not atomically-now, so post-drop expectations
+    /// must poll briefly instead of asserting on the first attempt.
+    fn acquire_after_release(socket: &Path, description: &str) -> SessionSocketLease {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match SessionSocketLease::acquire(socket) {
+                Ok(lease) => return lease,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "timed out waiting for {description}"
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                },
+                Err(error) => panic!("{description}: {error}"),
+            }
+        }
+    }
+
+    /// Same fork-window caveat as [`acquire_after_release`], for the cleanup
+    /// path: a transiently inherited lock makes the guard defer (`Ok(false)`)
+    /// even though no real owner remains.
+    fn eventually_removes_stale(socket: &Path, description: &str) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if remove_stale_socket_if_unowned(socket).expect(description) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {description}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn lease_child(mode: &str, socket: &Path, ready: &Path, release: &Path) -> std::process::Child {
+        Command::new(std::env::current_exe().expect("current test binary"))
+            .arg("--exact")
+            .arg("sessions::session_probe_timeout_tests::session_socket_lease_child_helper")
+            .arg("--nocapture")
+            .env(LEASE_CHILD_MODE, mode)
+            .env(LEASE_CHILD_SOCKET, socket)
+            .env(LEASE_CHILD_READY, ready)
+            .env(LEASE_CHILD_RELEASE, release)
+            .spawn()
+            .expect("spawn lease child")
+    }
+
+    #[test]
+    fn session_socket_lease_child_helper() {
+        let Ok(mode) = std::env::var(LEASE_CHILD_MODE) else {
+            return;
+        };
+        let socket = PathBuf::from(std::env::var_os(LEASE_CHILD_SOCKET).expect("child socket"));
+        let ready = PathBuf::from(std::env::var_os(LEASE_CHILD_READY).expect("child ready"));
+        let release = PathBuf::from(std::env::var_os(LEASE_CHILD_RELEASE).expect("child release"));
+
+        match mode.as_str() {
+            "hold" => {
+                let mut lease = SessionSocketLease::acquire(&socket).expect("child lease");
+                let _listener = lease.bind().expect("child bind");
+                fs::write(&ready, b"ready").expect("publish child readiness");
+                wait_for_path(&release, "parent release");
+                assert!(lease.remove_if_owned().expect("child teardown"));
+            },
+            "expect-busy" => {
+                let error = SessionSocketLease::acquire(&socket)
+                    .expect_err("second process must observe the held lease");
+                assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+                fs::write(&ready, b"busy").expect("publish busy result");
+            },
+            other => panic!("unknown lease child mode: {other}"),
+        }
+    }
 
     #[test]
     fn silent_session_socket_is_rejected_within_the_probe_deadline() {
@@ -384,6 +862,215 @@ mod session_probe_timeout_tests {
             probe_socket_ownership(&not_a_socket),
             SocketOwnership::Vacant
         );
+    }
+
+    #[test]
+    fn lifetime_lease_serializes_owners_and_releases_on_drop() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let socket = dir.path().join("leased-session.sock");
+        let first = SessionSocketLease::acquire(&socket).expect("first lease");
+
+        let error = SessionSocketLease::acquire(&socket).expect_err("second lease must fail");
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+
+        drop(first);
+        acquire_after_release(&socket, "lease released on final drop");
+    }
+
+    #[test]
+    fn lifetime_lease_serializes_independent_processes() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let socket = dir.path().join("cross-process-session.sock");
+        let holder_ready = dir.path().join("holder.ready");
+        let contender_ready = dir.path().join("contender.ready");
+        let release = dir.path().join("release");
+
+        let mut holder = lease_child("hold", &socket, &holder_ready, &release);
+        wait_for_path(&holder_ready, "holder readiness");
+        crate::consts::ipc_connect_timeout(&socket, Duration::from_millis(250))
+            .expect("winning listener remains connectable");
+
+        let mut contender = lease_child("expect-busy", &socket, &contender_ready, &release);
+        wait_for_path(&contender_ready, "contender result");
+        assert!(contender.wait().expect("wait contender").success());
+
+        fs::write(&release, b"release").expect("release holder");
+        assert!(holder.wait().expect("wait holder").success());
+        assert!(!socket.exists(), "winner performs its own teardown");
+    }
+
+    #[test]
+    fn socket_lease_descriptor_is_closed_by_exec() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let socket = dir.path().join("cloexec-session.sock");
+        let lease = SessionSocketLease::acquire(&socket).expect("lease");
+        let mut child = Command::new("/bin/sleep")
+            .arg("2")
+            .spawn()
+            .expect("spawn exec child");
+        drop(lease);
+
+        let deadline = Instant::now() + Duration::from_millis(750);
+        let reacquired = loop {
+            match SessionSocketLease::acquire(&socket) {
+                Ok(lease) => break Some(lease),
+                Err(error)
+                    if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(10));
+                },
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break None,
+                Err(error) => panic!("unexpected reacquire error: {error}"),
+            }
+        };
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            reacquired.is_some(),
+            "an exec child must not prolong the socket lease descriptor"
+        );
+    }
+
+    #[test]
+    fn lease_bind_preserves_a_live_legacy_listener() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let socket = dir.path().join("legacy-session.sock");
+        let listener = ListenerOptions::new()
+            .name(socket.as_path().to_fs_name::<GenericFilePath>().unwrap())
+            .create_sync()
+            .expect("bind legacy listener");
+        let mut lease = SessionSocketLease::acquire(&socket).expect("lease");
+
+        let error = lease.bind().expect_err("live legacy listener must win");
+        assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
+        assert!(
+            socket.exists(),
+            "the live legacy socket must not be unlinked"
+        );
+        drop(listener);
+    }
+
+    #[test]
+    fn teardown_does_not_unlink_a_replacement_inode() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let socket = dir.path().join("replacement-session.sock");
+        let mut lease = SessionSocketLease::acquire(&socket).expect("lease");
+        let listener = lease.bind().expect("bind owned listener");
+
+        fs::remove_file(&socket).expect("simulate hostile unlink");
+        let mut replacement = ListenerOptions::new()
+            .name(socket.as_path().to_fs_name::<GenericFilePath>().unwrap())
+            .create_sync()
+            .expect("bind replacement listener");
+        replacement.do_not_reclaim_name_on_drop();
+
+        assert!(!lease.remove_if_owned().expect("identity-safe teardown"));
+        assert!(
+            socket.exists(),
+            "replacement socket must survive old teardown"
+        );
+        drop(listener);
+        assert!(
+            socket.exists(),
+            "owned listener Drop must not reclaim by pathname"
+        );
+        drop(replacement);
+        fs::remove_file(&socket).expect("test cleanup");
+    }
+
+    #[test]
+    fn rename_transfers_lease_identity_and_teardown_target() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let old_socket = dir.path().join("old-session.sock");
+        let new_socket = dir.path().join("new-session.sock");
+        let mut lease = SessionSocketLease::acquire(&old_socket).expect("lease");
+        let listener = lease.bind().expect("bind owned listener");
+
+        lease
+            .rename_owned_socket(&new_socket)
+            .expect("transfer socket lease");
+        assert!(!old_socket.exists());
+        assert!(new_socket.exists());
+        assert!(SessionSocketLease::acquire(&new_socket).is_err());
+
+        assert!(lease.remove_if_owned().expect("remove renamed socket"));
+        assert!(!new_socket.exists());
+        drop(listener);
+        assert!(
+            !new_socket.exists(),
+            "listener Drop must not recreate or reclaim"
+        );
+    }
+
+    #[test]
+    fn rename_refuses_a_live_destination_without_changing_the_source() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let old_socket = dir.path().join("source-session.sock");
+        let new_socket = dir.path().join("occupied-session.sock");
+        let mut lease = SessionSocketLease::acquire(&old_socket).expect("source lease");
+        let source_listener = lease.bind().expect("bind source listener");
+        let destination_listener = ListenerOptions::new()
+            .name(
+                new_socket
+                    .as_path()
+                    .to_fs_name::<GenericFilePath>()
+                    .unwrap(),
+            )
+            .create_sync()
+            .expect("bind occupied destination");
+
+        let error = lease
+            .rename_owned_socket(&new_socket)
+            .expect_err("occupied destination must win");
+        assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
+        assert!(old_socket.exists(), "source ownership remains intact");
+        assert!(new_socket.exists(), "destination remains intact");
+
+        assert!(lease.remove_if_owned().expect("source teardown"));
+        drop(source_listener);
+        assert!(
+            new_socket.exists(),
+            "source teardown must not touch destination"
+        );
+        drop(destination_listener);
+    }
+
+    #[test]
+    fn atomic_no_replace_rename_preserves_a_late_destination() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let source = dir.path().join("source");
+        let destination = dir.path().join("destination");
+        fs::write(&source, b"source").expect("write source");
+        fs::write(&destination, b"destination").expect("write destination");
+
+        let error = rename_path_noreplace(&source, &destination)
+            .expect_err("no-replace rename must reject an existing destination");
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&source).expect("read source"), b"source");
+        assert_eq!(
+            fs::read(&destination).expect("read destination"),
+            b"destination"
+        );
+    }
+
+    #[test]
+    fn stale_cleanup_defers_to_an_active_lifetime_lease() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let socket = dir.path().join("starting-session.sock");
+        let mut stale = ListenerOptions::new()
+            .name(socket.as_path().to_fs_name::<GenericFilePath>().unwrap())
+            .create_sync()
+            .expect("bind stale socket");
+        stale.do_not_reclaim_name_on_drop();
+        drop(stale);
+        let lease = SessionSocketLease::acquire(&socket).expect("startup lease");
+
+        assert!(!remove_stale_socket_if_unowned(&socket).expect("defer cleanup"));
+        assert!(socket.exists(), "cleanup must not race the startup lease");
+
+        drop(lease);
+        eventually_removes_stale(&socket, "clean stale socket");
+        assert!(!socket.exists());
     }
 
     #[test]
@@ -515,8 +1202,17 @@ pub fn kill_session(name: &str, force: bool) {
                 io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
             );
             if force && already_dead {
-                let _ = std::fs::remove_file(path);
-                eprintln!("Session {name} was already dead — cleaned up its stale socket.");
+                #[cfg(unix)]
+                let cleaned = remove_stale_socket_if_unowned(path).unwrap_or(false);
+                #[cfg(not(unix))]
+                let cleaned = std::fs::remove_file(path).is_ok();
+                if cleaned {
+                    eprintln!("Session {name} was already dead — cleaned up its stale socket.");
+                } else {
+                    eprintln!(
+                        "Session {name} was already dead — socket cleanup deferred to its owner."
+                    );
+                }
             } else {
                 eprintln!("Failed to kill session {name}: {error}");
                 process::exit(1);

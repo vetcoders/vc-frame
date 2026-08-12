@@ -131,6 +131,24 @@ class SemgrepInventoryTests(unittest.TestCase):
             "rust.lang.security.unsafe-usage.unsafe-usage", path, lines[0]
         ))
 
+    def test_live_session_socket_unsafe_is_explicitly_allowed(self) -> None:
+        path = MODULE.SESSION_SOCKET_PATH
+        lines = self.live_lines(path, r"\bunsafe\s*\{")
+        self.assertEqual(len(lines), 4)
+        for line in lines:
+            with self.subTest(line=line):
+                MODULE.adjudicate(self.finding(
+                    "rust.lang.security.unsafe-usage.unsafe-usage", path, line
+                ))
+
+    def test_changed_session_socket_unsafe_shape_fails(self) -> None:
+        with self.assertRaisesRegex(MODULE.InventoryError, "source shape"):
+            MODULE.require_session_socket_unsafe_policy(
+                MODULE.SESSION_SOCKET_PATH,
+                ["let result = unsafe { libc::flock(other_fd, libc::LOCK_EX) };"],
+                1,
+            )
+
     def test_temp_dir_in_production_part_of_allowed_file_fails(self) -> None:
         path = "default-plugins/link/src/main.rs"
         with self.assertRaisesRegex(MODULE.InventoryError, "outside terminal"):

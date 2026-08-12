@@ -1,8 +1,8 @@
 # Semgrep adjudication evidence
 
 Receiver baseline: Semgrep 1.172.0, explicit registry pack `p/rust`, 60 resolved
-rules, 57 rules executed over 363 targets, 327 blocking findings and zero scan
-errors at `09656c0c`. The exact raw JSON hash is pinned in `baseline.json`;
+rules, 57 rules executed over 363 targets, 332 blocking findings and zero scan
+errors on the `b75e7bd2` source base. The exact raw JSON hash is pinned in `baseline.json`;
 `findings.jsonl` is the checked-in machine-verifiable verdict surface.
 The gate also hashes Semgrep's normalized resolved rule representation, so a
 registry rule-body change fails even when rule IDs stay the same. Scanner
@@ -13,9 +13,10 @@ The 2026-08-04 re-adjudication found one real product defect: the clinic's
 atomic config writer used a predictable process-ID temporary path and
 `File::create`, which could follow a pre-positioned symlink. The writer now
 uses an exclusively created random `NamedTempFile` in the destination
-directory before fsync and atomic persist. The fixed scan returns the same 326
-reviewed fingerprints as the prior inventory; the remaining broad audit hits
-are explicit review boundaries, test helpers, or false source-to-sink paths.
+directory before fsync and atomic persist. The current 332 reviewed
+fingerprints include five newly adjudicated session-socket lifecycle sites;
+the remaining broad audit hits are explicit review boundaries, test helpers,
+or false source-to-sink paths.
 Validator negative tests prove missing rows, empty owners, new fingerprints
 and broad ignores fail.
 
@@ -40,6 +41,16 @@ owns the descriptor, sockaddr length is checked, `poll` bounds connect time,
 
 Unix daemonization and local PID liveness probes are explicit lifecycle
 boundaries. They operate only at startup or on locally discovered session PIDs.
+
+## Session socket lifecycle
+
+Session ownership uses one `O_CLOEXEC`/`O_NOFOLLOW` lock file and a lifetime
+`flock`; the owned socket is removed only while its device and inode still
+match. Rename acquires the destination lease first and uses the platform's
+atomic no-replace syscall on Apple and Linux, with all pointer inputs held by
+validated `CString` values and every return code checked. Process-level tests
+cover two competing owners, exec descriptor closure, legacy listeners,
+replacement-inode teardown, and late rename destinations.
 
 ## Process environment
 
@@ -100,11 +111,12 @@ command-specific validation. It is input parsing, not authorization.
 
 ## Path traversal
 
-The nine Actix taint findings are outside an Actix HTTP source-to-sink flow:
+The Actix taint findings are outside an Actix HTTP source-to-sink flow:
 WASI preopens and watchers receive host-authorized paths; legacy migration uses
 fixed current-user ProjectDirs; plugin loading is the explicit operator plugin
 capability; protobuf hits only construct data; installer symlinks use a
-validated framework root; webserver IPC uses locally discovered sockets.
+validated framework root; webserver IPC and session lifecycle operations use
+locally discovered, validated current-user sockets.
 
 ## Vendored browser assets
 

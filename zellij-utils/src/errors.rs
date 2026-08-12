@@ -595,6 +595,7 @@ pub enum ServerContext {
     Log,
     LogError,
     SwitchSession,
+    RenameSessionSocket,
     UnblockCliPipeInput,
     CliPipeOutput,
     AssociatePipeWithClient,
