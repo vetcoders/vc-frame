@@ -51,6 +51,9 @@ const VC_CHROME_HEARTBEAT_MESSAGE: &str = "vc.fleet-live-count.v1";
 // windows turn exact counts into lower bounds instead of letting a dead
 // producer leave stale values looking authoritative forever.
 const SETTLEMENT_FEED_STALE_AFTER_TICKS: u8 = 15;
+/// Pre-server migration drawer. Keep its data intact, but never let this
+/// obsolete observer session consume operator-rail space.
+const LEGACY_LIVE_RUNS_SESSION_NAME: &str = "Live runs";
 
 // Floor for a renderable main-menu frame: anything below is a transient
 // startup event, not a legal surface. The menu needs at least a banner row
@@ -1080,7 +1083,10 @@ fn working_session_indices(sessions: &[SessionUiInfo]) -> Vec<usize> {
     sessions
         .iter()
         .enumerate()
-        .filter(|(_, session)| BucketKind::from_session_name(&session.name).is_none())
+        .filter(|(_, session)| {
+            BucketKind::from_session_name(&session.name).is_none()
+                && session.name != LEGACY_LIVE_RUNS_SESSION_NAME
+        })
         .map(|(index, _)| index)
         .collect()
 }
@@ -3315,8 +3321,9 @@ mod rail_tests {
             TabUiInfo::for_rail_test("audit-260718-130000-02000", false, "codex", 2),
         ];
         let beta = session("beta", false);
+        let legacy_live_runs = session(LEGACY_LIVE_RUNS_SESSION_NAME, false);
 
-        let rows = session_rail_rows(&[alpha, beta]);
+        let rows = session_rail_rows(&[alpha, beta, legacy_live_runs]);
         let text: Vec<&str> = rows.iter().map(|row| row.text.as_str()).collect();
 
         assert_eq!(

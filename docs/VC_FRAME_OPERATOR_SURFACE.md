@@ -46,6 +46,7 @@ backward-search is deliberately traded away, `/` still searches. The bottom
 CPU/memory/disk cockpit (fixed-width fields), health, and layout state. The
 `LIVE n↗` chip opens vc-server `/runs`. The left rail owns only physical
 sessions; it intentionally has no duplicate Live/process or F/X/N projection.
+Legacy `Live runs` sessions are left intact but hidden from this navigation.
 The diodes live in the resting mode only (LOCK when the base mode is locked,
 NORMAL otherwise) — action modes hand every column to the shortcut hints and
 keep just the swap-layout chip as arrangement context. On a narrow bar the
