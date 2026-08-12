@@ -1180,6 +1180,20 @@ def typed_tab_identity(
     }
 
 
+def is_same_durable_tab_identity(
+    left: dict[str, object], right: dict[str, object]
+) -> bool:
+    """Mirror OriginTabIdentity::is_same_durable_tab across server restarts."""
+    instance = left.get("tab_instance_id")
+    return (
+        left.get("session") == right.get("session")
+        and left.get("name") == right.get("name")
+        and isinstance(instance, str)
+        and bool(instance)
+        and instance == right.get("tab_instance_id")
+    )
+
+
 def terminal_capture_identity(
     session: str, tab_identity_value: dict[str, object], pane_id: int
 ) -> str:
@@ -4276,16 +4290,27 @@ def main() -> int:
             == empty_viewer_interrupted.observed_state.get("capture_sha256"),
             "empty-viewer recovery rewrote durable scrollback",
         )
+        empty_viewer_identity_after = empty_viewer_receipt_after.get(
+            "viewer_tab_identity"
+        )
         require(
-            empty_viewer_receipt_after.get("viewer_token")
+            isinstance(empty_viewer_identity_after, dict)
+            and empty_viewer_receipt_after.get("viewer_token")
             == empty_viewer_receipt_before.get("viewer_token")
-            and empty_viewer_receipt_after.get("viewer_tab_identity")
-            == empty_viewer_identity_before
+            and is_same_durable_tab_identity(
+                empty_viewer_identity_after, empty_viewer_identity_before
+            )
+            and isinstance(
+                empty_viewer_identity_after.get("session_incarnation"), str
+            )
+            and bool(empty_viewer_identity_after.get("session_incarnation"))
+            and empty_viewer_identity_after.get("session_incarnation")
+            != empty_viewer_identity_before.get("session_incarnation")
             and empty_viewer_receipt_after.get("viewer_creation_generation") == 2
             and empty_viewer_receipt_after.get("viewer_creation_pending") is False,
             "empty-viewer recovery changed ownership or skipped generation two",
         )
-        empty_viewer_final_id = empty_viewer_identity_before.get("id")
+        empty_viewer_final_id = empty_viewer_identity_after.get("id")
         require(
             isinstance(empty_viewer_final_id, int)
             and terminal_panes(
@@ -4294,7 +4319,7 @@ def main() -> int:
                 "Needs attention",
                 empty_viewer_final_id,
             ),
-            "empty-viewer recovery did not install a terminal on the same stable tab",
+            "empty-viewer recovery did not install a terminal on the durable tab",
         )
         require(
             all(
@@ -4309,7 +4334,10 @@ def main() -> int:
                 "scenario": "after_empty_viewer_reservation",
                 "phase": "recovered",
                 "triage_exit": empty_viewer_recovery.returncode,
-                "same_viewer_identity": empty_viewer_identity_before,
+                "viewer_identity_before": empty_viewer_identity_before,
+                "viewer_identity_after": empty_viewer_identity_after,
+                "same_durable_viewer": True,
+                "session_reincarnated": True,
                 "transfer": transfer_evidence(
                     control_plane,
                     empty_viewer_run,

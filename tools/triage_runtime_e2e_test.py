@@ -520,6 +520,39 @@ class EvidenceAndCleanupTests(unittest.TestCase):
             {"fixture-123", "incarnation-456", "instance-789"},
         )
 
+    def test_durable_tab_identity_survives_only_live_identity_rotation(self) -> None:
+        before = {
+            "session": "Needs attention",
+            "name": "run-1 [vc:0123456789abcdef0123456789abcdef]",
+            "id": 2,
+            "session_incarnation": "incarnation-before",
+            "tab_instance_id": "0123456789abcdef0123456789abcdef",
+        }
+        after = {
+            **before,
+            "id": 7,
+            "session_incarnation": "incarnation-after",
+        }
+        self.assertTrue(MODULE.is_same_durable_tab_identity(before, after))
+        for field, replacement in (
+            ("session", "Finalized runs"),
+            ("name", "another run"),
+            ("tab_instance_id", "f" * 32),
+        ):
+            with self.subTest(field=field):
+                self.assertFalse(
+                    MODULE.is_same_durable_tab_identity(
+                        before,
+                        {**after, field: replacement},
+                    )
+                )
+        self.assertFalse(
+            MODULE.is_same_durable_tab_identity(
+                {**before, "tab_instance_id": ""},
+                {**after, "tab_instance_id": ""},
+            )
+        )
+
     def test_evidence_recorder_persists_every_transition(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = pathlib.Path(temporary) / "evidence.json"
