@@ -640,14 +640,17 @@ fn rename_path_noreplace(old_path: &Path, new_path: &Path) -> io::Result<()> {
     let old_path = path_to_cstring(old_path)?;
     let new_path = path_to_cstring(new_path)?;
     // SAFETY: both C strings remain alive for the call and contain no interior
-    // NUL bytes. RENAME_NOREPLACE asks the kernel to fail if `new_path` exists.
+    // NUL bytes. The raw syscall is required because libc does not expose its
+    // renameat2 wrapper on musl. RENAME_NOREPLACE asks the kernel to fail if
+    // `new_path` exists.
     let result = unsafe {
-        libc::renameat2(
+        libc::syscall(
+            libc::SYS_renameat2,
             libc::AT_FDCWD,
             old_path.as_ptr(),
             libc::AT_FDCWD,
             new_path.as_ptr(),
-            libc::RENAME_NOREPLACE as _,
+            libc::RENAME_NOREPLACE,
         )
     };
     if result == 0 {
