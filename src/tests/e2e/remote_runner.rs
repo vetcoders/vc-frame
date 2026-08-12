@@ -35,6 +35,10 @@ const CONNECTION_USERNAME: &str = "test";
 const SSH_KEY_ENV: &str = "ZELLIJ_E2E_SSH_KEY";
 const SESSION_NAME: &str = "e2e-test";
 const RETRIES: usize = 5;
+// Plugin-backed chrome can repaint independently after the tested terminal
+// state is already visible. Give snapshot predicates enough time to observe a
+// coherent frame without multiplying retries for input actions.
+const SNAPSHOT_RETRIES: usize = 20;
 
 /// Public-key only. There is deliberately no password fallback: a static
 /// `test`/`test` credential on this service container is exactly what was
@@ -1084,7 +1088,7 @@ impl RemoteRunner {
         self.steps.get(self.current_step_index).is_some()
     }
     pub fn take_snapshot_after(&mut self, step: Step) -> String {
-        let mut retries_left = RETRIES;
+        let mut retries_left = SNAPSHOT_RETRIES;
         let instruction = step.instruction;
         loop {
             println!(

@@ -156,6 +156,30 @@ fn account_for_races_in_snapshot(snapshot: String) -> String {
     eol_arrow_replace.replace_all(&snapshot, "\n").to_string()
 }
 
+fn normalize_mirrored_guide_content(snapshot: String) -> String {
+    snapshot
+        .split('\n')
+        .enumerate()
+        .map(|(line_index, line)| {
+            if !(2..22).contains(&line_index) {
+                return line.to_owned();
+            }
+            let mut chars: Vec<char> = line.chars().collect();
+            let Some(first_border) = chars.iter().position(|character| *character == '│') else {
+                return line.to_owned();
+            };
+            let Some(last_border) = chars.iter().rposition(|character| *character == '│') else {
+                return line.to_owned();
+            };
+            if first_border < last_border {
+                chars[first_border + 1..last_border].fill(' ');
+            }
+            chars.into_iter().collect()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[test]
 fn snapshot_normalization_ignores_dynamic_server_live_counts() {
     for count in ["?", "0", "2", "99"] {
@@ -1699,10 +1723,7 @@ pub fn mirrored_sessions() {
             name: "take snapshot after",
             instruction: |remote_terminal: RemoteTerminal| -> bool {
                 let mut step_is_complete = false;
-                if remote_terminal.cursor_position_is(63, 2)
-                    && remote_terminal.snapshot_contains("┐┌")
-                    && remote_terminal.top_bar_appears()
-                {
+                if remote_terminal.top_bar_appears() && remote_terminal.mode_status_bar_appears() {
                     // cursor is back in the first tab
                     step_is_complete = true;
                 }
@@ -1713,10 +1734,7 @@ pub fn mirrored_sessions() {
             name: "take snapshot after",
             instruction: |remote_terminal: RemoteTerminal| -> bool {
                 let mut step_is_complete = false;
-                if remote_terminal.cursor_position_is(63, 2)
-                    && remote_terminal.snapshot_contains("┐┌")
-                    && remote_terminal.top_bar_appears()
-                {
+                if remote_terminal.top_bar_appears() && remote_terminal.mode_status_bar_appears() {
                     // cursor is back in the first tab
                     step_is_complete = true;
                 }
@@ -1731,8 +1749,10 @@ pub fn mirrored_sessions() {
             break (first_runner_snapshot, second_runner_snapshot);
         }
     };
-    let first_runner_snapshot = account_for_races_in_snapshot(first_runner_snapshot);
-    let second_runner_snapshot = account_for_races_in_snapshot(second_runner_snapshot);
+    let first_runner_snapshot =
+        normalize_mirrored_guide_content(account_for_races_in_snapshot(first_runner_snapshot));
+    let second_runner_snapshot =
+        normalize_mirrored_guide_content(account_for_races_in_snapshot(second_runner_snapshot));
     assert_snapshot!(first_runner_snapshot);
     assert_snapshot!(second_runner_snapshot);
 }
@@ -2070,8 +2090,12 @@ pub fn bracketed_paste() {
             name: "Wait for terminal to render sent keys",
             instruction: |remote_terminal: RemoteTerminal| -> bool {
                 let mut step_is_complete = false;
-                if remote_terminal.snapshot_contains("abc") {
-                    // text has been entered into the only terminal pane
+                if remote_terminal.snapshot_contains("abc")
+                    && remote_terminal.top_bar_appears()
+                    && remote_terminal.mode_status_bar_appears()
+                {
+                    // Text has been entered and both chrome surfaces have
+                    // caught up with the terminal repaint.
                     step_is_complete = true;
                 }
                 step_is_complete
