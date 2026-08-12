@@ -193,6 +193,7 @@ struct CliTriageIo {
 }
 
 const CLI_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+const SESSION_CREATE_TIMEOUT: Duration = Duration::from_secs(30);
 const NEW_TAB_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const VIEWER_CREATION_RECONCILIATION_TIMEOUT: Duration = Duration::from_secs(30);
 const INVENTORY_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -1614,7 +1615,10 @@ impl TriageIo for CliTriageIo {
         match session_exists(session) {
             Ok(true) => self.wait_for_session_ready(session),
             Ok(false) => {
-                self.run(&["attach", "--create-background", session])?;
+                self.run_with_timeout(
+                    &["attach", "--create-background", session],
+                    SESSION_CREATE_TIMEOUT,
+                )?;
                 self.wait_for_session_ready(session)
             },
             Err(e) => Err(format!("cannot check for session '{}': {:?}", session, e)),

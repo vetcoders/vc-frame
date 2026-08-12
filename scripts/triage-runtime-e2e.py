@@ -254,6 +254,7 @@ def validate_build_info(
 COMMAND_TIMEOUT_SECS = 30
 # Nested CLI budgets in src/run_triage_cli.rs for a full triage-run transfer:
 #   CLI_COMMAND_TIMEOUT = 10s (inventory / capture / close chain)
+#   SESSION_CREATE_TIMEOUT = 30s
 #   NEW_TAB_COMMAND_TIMEOUT = 30s
 #   VIEWER_CREATION_RECONCILIATION_TIMEOUT = 30s
 # Matching the outer harness to 30s races those inner budgets and kills
@@ -1868,6 +1869,76 @@ def is_isolated_foreground_server_member(
     return server_path.is_relative_to(socket_root)
 
 
+def detached_owned_servers_after_leader_exit(
+    process: subprocess.Popen[bytes],
+) -> list[dict[str, object]]:
+    """Re-prove exact foreground servers after their Popen leader has exited."""
+    if (
+        process.poll() is None
+        or getattr(process, "vc_frame_server_foreground", None) != "1"
+    ):
+        return []
+    socket_root_value = getattr(process, "vc_frame_socket_root", None)
+    owned_binary = getattr(process, "vc_frame_owned_binary", None)
+    if not isinstance(socket_root_value, str) or not isinstance(owned_binary, str):
+        return []
+    socket_root = pathlib.Path(socket_root_value).resolve()
+    owned_binary_path = pathlib.Path(owned_binary).resolve()
+    expected_uid = os.geteuid()
+    proven: list[dict[str, object]] = []
+    for member in process_group_members(process.pid):
+        if (
+            int(member.get("ppid", -1)) != 1
+            or int(member.get("pgid", -1)) != process.pid
+            or int(member.get("uid", -1)) != expected_uid
+            or member.get("sid") != process.pid
+            or "Z" in str(member.get("state", ""))
+        ):
+            continue
+        try:
+            member_args = shlex.split(str(member.get("command", "")))
+        except ValueError:
+            continue
+        if not member_args or pathlib.Path(member_args[0]).resolve() != owned_binary_path:
+            continue
+        server_paths = server_argument_paths(str(member.get("command", "")))
+        if len(server_paths) != 1:
+            continue
+        try:
+            server_path = server_paths[0].resolve()
+        except OSError:
+            continue
+        if server_path.is_relative_to(socket_root):
+            proven.append(dict(member))
+    return proven
+
+
+def kill_detached_owned_servers_after_leader_exit(
+    process: subprocess.Popen[bytes],
+) -> list[int]:
+    """Kill only exact reparented fixture servers, revalidating every PID."""
+    killed: list[int] = []
+    for candidate in detached_owned_servers_after_leader_exit(process):
+        candidate_pid = int(candidate["pid"])
+        refreshed = next(
+            (
+                member
+                for member in detached_owned_servers_after_leader_exit(process)
+                if int(member["pid"]) == candidate_pid
+                and member.get("command") == candidate.get("command")
+            ),
+            None,
+        )
+        if refreshed is None:
+            continue
+        try:
+            os.kill(candidate_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            continue
+        killed.append(candidate_pid)
+    return killed
+
+
 def annotate_owned_process_group_depths(
     process: subprocess.Popen[bytes],
     members: list[dict[str, object]],
@@ -2705,6 +2776,16 @@ def teardown_interrupted_process(
         errors.append(error)
         proof["leader_poll_error"] = cleanup_error_evidence(error)
         leader_alive = True
+
+    if not leader_alive and signal_process_group:
+        proof["detached_server_kill_attempted"] = True
+        try:
+            proof["detached_server_pids_killed"] = (
+                kill_detached_owned_servers_after_leader_exit(process)
+            )
+        except BaseException as error:
+            errors.append(error)
+            proof["detached_server_kill_error"] = cleanup_error_evidence(error)
 
     if leader_alive and signal_process_group:
         proof["owned_group_kill_attempted"] = True

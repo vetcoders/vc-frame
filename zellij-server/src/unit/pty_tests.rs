@@ -1000,10 +1000,18 @@ fn fast_exit_callback_waits_for_screen_commit_at_the_common_pty_fence() {
     resolution.expect("Screen commit must activate the process and release its callback fence");
     assert_eq!(ack, Ok(LayoutCommitAck::Resolved));
     callback_probe.fire_next_quit_callback(PaneId::Terminal(100), Some(0), command);
-    assert!(matches!(
-        screen_rx.try_recv(),
-        Ok((ScreenInstruction::ClosePane(PaneId::Terminal(100), ..), _))
-    ));
+    let screen_messages = screen_rx.try_iter().collect::<Vec<_>>();
+    assert_eq!(
+        screen_messages
+            .iter()
+            .filter(|(instruction, _)| matches!(
+                instruction,
+                ScreenInstruction::ClosePane(PaneId::Terminal(100), ..)
+            ))
+            .count(),
+        1,
+        "the exit callback must close its pane exactly once; an async EOF Render may race it"
+    );
     let (replayed_resolution, replayed_ack) =
         pty.resolve_layout_commit_with_ack(transaction_id, LayoutCommitOutcome::Committed);
     replayed_resolution.expect("a lost ACK retry must replay without reactivation");
@@ -1014,7 +1022,10 @@ fn fast_exit_callback_waits_for_screen_commit_at_the_common_pty_fence() {
         "receipt replay must not spawn a second process"
     );
     assert!(
-        screen_rx.try_recv().is_err(),
+        screen_rx.try_iter().all(|(instruction, _)| !matches!(
+            instruction,
+            ScreenInstruction::ClosePane(PaneId::Terminal(100), ..)
+        )),
         "a fast exit must fire exactly once"
     );
 }

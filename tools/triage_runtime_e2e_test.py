@@ -1463,6 +1463,50 @@ class EvidenceAndCleanupTests(unittest.TestCase):
             ):
                 MODULE.validated_owned_process_group_members(process)
 
+    def test_exited_leader_cleanup_kills_only_exact_detached_fixture_server(
+        self,
+    ) -> None:
+        process = mock.Mock()
+        process.pid = 9_741
+        process.poll.return_value = 2
+        process.vc_frame_server_foreground = "1"
+        process.vc_frame_socket_root = "/tmp/proof/sockets"
+        process.vc_frame_owned_binary = "/bin/vc-frame"
+        exact = {
+            "pid": 9_742,
+            "ppid": 1,
+            "pgid": process.pid,
+            "uid": 501,
+            "sid": process.pid,
+            "sid_errno": None,
+            "sid_error": None,
+            "state": "S",
+            "command": (
+                "/bin/vc-frame --server "
+                "'/tmp/proof/sockets/contract_version_2/Needs attention'"
+            ),
+        }
+        path_neighbor = {
+            **exact,
+            "pid": 9_743,
+            "command": (
+                "/bin/vc-frame --server "
+                "/tmp/proof/sockets-neighbor/contract_version_2/foreign"
+            ),
+        }
+        foreign_uid = {**exact, "pid": 9_744, "uid": 0}
+        with mock.patch.object(
+            MODULE.os, "geteuid", return_value=501
+        ), mock.patch.object(
+            MODULE,
+            "process_group_members",
+            return_value=[exact, path_neighbor, foreign_uid],
+        ), mock.patch.object(MODULE.os, "kill") as exact_kill:
+            killed = MODULE.kill_detached_owned_servers_after_leader_exit(process)
+
+        self.assertEqual(killed, [9_742])
+        exact_kill.assert_called_once_with(9_742, signal.SIGKILL)
+
     def test_transient_disconnected_live_member_disappears_without_signal(
         self,
     ) -> None:
