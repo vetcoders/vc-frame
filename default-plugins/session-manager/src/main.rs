@@ -42,9 +42,9 @@ const SETTLEMENT_COUNTS_PIPE: &str = "vc_settlement_counts";
 const SETTLEMENT_HISTORY_SCHEMA: &str = "vibecrafted.settlement-history.v1";
 const VC_CHROME_VISIBILITY_MESSAGE: &str = "vc.status-bar-visibility.v1";
 const VC_CHROME_HEARTBEAT_MESSAGE: &str = "vc.fleet-live-count.v1";
-// Semantic Live-runs truth: control-plane census of headless workers with a
-// live pid, produced by the server's session-metadata loop. Never derived
-// from Zellij tabs — a viewer tab is only an observer of a run.
+// Semantic Live-runs truth: Vibecrafted Server `active_runs`, relayed by the
+// vc-frame server's session-metadata loop. Never derived from local files,
+// PIDs, or Zellij tabs — a viewer tab is only an observer of a run.
 const VC_LIVE_RUNS_MESSAGE: &str = "vc.live-runs.v1";
 // Same freshness lease as the settlement feed: the producer re-sends at least
 // every five seconds, so three missed windows demote exact counts.
@@ -222,9 +222,12 @@ struct State {
     // Once a producer generation has been superseded, a delayed payload from
     // that retired generation must never roll the rail back.
     retired_settlement_generations: BTreeSet<String>,
-    // Control-plane Live census (`vc.live-runs.v1`). `None` until the first
+    // Vibecrafted Server Live census (`vc.live-runs.v1`). `None` until the first
     // valid payload → the pinned row renders `…`, never a guessed digit.
     live_runs_count: Option<u64>,
+    // Validated origin that produced the accepted snapshot. The clickable
+    // monitor receives this exact value; it never resolves a second endpoint.
+    live_runs_server_url: Option<String>,
     live_runs_feed_degraded: bool,
     live_runs_feed_age_ticks: Option<u8>,
     // One LIVE RUNS dashboard pane per rail: a second click focuses the
@@ -929,6 +932,19 @@ const RAIL_BUCKETS: [BucketKind; 3] = [
     BucketKind::NeedsAttention,
 ];
 
+/// Pre-unified triage used a physical Zellij session as the LIVE drawer.
+/// New VC Frame builds keep that session recoverable through ordinary Zellij
+/// tooling, but never render it beside the canonical semantic `● Live N` row.
+/// This makes an upgrade remove the duplicate/stale `impl-*` rail clutter
+/// without destructively killing tabs that may still contain user work.
+const LEGACY_LIVE_RUNS_SESSION_NAME: &str = "Live runs";
+
+/// Infrastructure drawers have dedicated product entry points and therefore
+/// must not masquerade as user work in the general Session Manager.
+fn is_internal_drawer_session(name: &str) -> bool {
+    name == LEGACY_LIVE_RUNS_SESSION_NAME || BucketKind::from_session_name(name).is_some()
+}
+
 /// Char offset of `needle` in `haystack`, searching from char offset `from`.
 /// Text::color_range speaks char offsets, while `str::find` returns bytes —
 /// this bridges the two for rows containing multi-byte glyphs (`◉`, `·`).
@@ -1160,13 +1176,13 @@ fn kill_fallback_target(sessions: &[SessionUiInfo]) -> Option<String> {
         .map(|(_, session)| session.name.clone())
 }
 
-/// Working sessions in rail order — bucket sessions are pinned separately and
-/// must not also appear in the ordinary listing.
+/// Working sessions in rail order — buckets and the retired physical LIVE
+/// drawer are represented by canonical semantic surfaces instead.
 fn working_session_indices(sessions: &[SessionUiInfo]) -> Vec<usize> {
     sessions
         .iter()
         .enumerate()
-        .filter(|(_, session)| BucketKind::from_session_name(&session.name).is_none())
+        .filter(|(_, session)| !is_internal_drawer_session(&session.name))
         .map(|(index, _)| index)
         .collect()
 }
@@ -1202,7 +1218,7 @@ fn settlement_read_coordinates() -> Option<FloatingPaneCoordinates> {
 }
 
 /// `● Live N` — the rail's one semantic row for running work, pinned to the
-/// top. Count comes from the control-plane feed; `…`/`~n` reuse the
+/// top. Count comes from Vibecrafted Server; `…`/`~n` reuse the
 /// bucket-count honesty language when the feed is absent or degraded.
 fn format_live_runs_rail_entry(
     count: Option<u64>,
@@ -1221,35 +1237,94 @@ fn format_live_runs_rail_entry(
 /// (CommandPaneOpened/Exited) can be told apart from other command panes.
 const VC_LIVE_DASHBOARD_CONTEXT_KEY: &str = "vc_live_dashboard";
 
-/// Floating LIVE RUNS dashboard: the interactive viewer owned by vibecrafted
-/// (`vibecrafted_core.live_dashboard`). Rows and count come from the same
-/// control-plane census that feeds this rail and the status-bar LIVE chip.
-/// The pane is only an observer — closing it never touches a run — and a
-/// second activation focuses the existing pane instead of duplicating it.
-fn open_live_runs_read_surface(existing_pane: Option<u32>) {
-    if let Some(pane_id) = existing_pane {
-        focus_pane_with_id(PaneId::Terminal(pane_id), true, false);
-        return;
-    }
-    // POSIX sh only (dash-clean): resolve a modern Python owned by the
-    // installed vibecrafted toolchain, then hand the terminal to the
-    // dashboard. No shell command echo, no tail(1) processes.
-    let script = r#"for candidate in \
+// POSIX sh only (dash-clean): resolve a Python already owned by the installed
+// Vibecrafted toolchain. The URL is a positional argument, not interpolated
+// shell text. The monitor has no local-file/PID fallback.
+const LIVE_RUNS_MONITOR_SCRIPT: &str = r#"server_url=$1
+if [ -z "$server_url" ]; then
+  printf '\n  LIVE RUNS donor unavailable\n  Waiting for a valid Vibecrafted Server snapshot.\n\n  [enter to close]\n'
+  read -r _ || true
+  exit 0
+fi
+for candidate in \
   "${VIBECRAFTED_PYTHON:-}" \
-  "${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools/vibecrafted-core/bin/python3" \
+  "${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools/vibecrafted/bin/python" \
   python3
 do
   [ -n "$candidate" ] || continue
   command -v "$candidate" >/dev/null 2>&1 || continue
-  if "$candidate" -c 'import vibecrafted_core.live_dashboard' 2>/dev/null; then
-    exec "$candidate" -m vibecrafted_core.live_dashboard
-  fi
+  exec "$candidate" - "$server_url" <<'PY'
+import json
+import os
+import sys
+import time
+import urllib.request
+
+origin = sys.argv[1].rstrip("/")
+endpoint = origin + "/api/control/state"
+last_good = None
+error = None
+
+try:
+    while True:
+        try:
+            with urllib.request.urlopen(endpoint, timeout=2.0) as response:
+                payload = json.load(response)
+            active_runs = payload["active_runs"]
+            if not isinstance(active_runs, list):
+                raise ValueError("active_runs is not a list")
+            last_good = active_runs
+            error = None
+        except Exception as exc:
+            error = str(exc)
+
+        os.write(1, b"\033[2J\033[H")
+        status = "DEGRADED" if error else "LIVE"
+        print(f"  LIVE RUNS  [{status}]  {origin}")
+        print("  " + "─" * 72)
+        if error:
+            print(f"  donor error: {error[:120]}")
+            print("  showing last accepted snapshot\n")
+        runs = last_good or []
+        if not runs:
+            print("  (no active runs)")
+        for run in runs:
+            run_id = str(run.get("run_id") or "?")
+            agent = str(run.get("agent") or "?")
+            skill = str(run.get("skill") or run.get("mode") or "")
+            root = str(run.get("root") or "")
+            repo = root.rstrip("/").rsplit("/", 1)[-1] if root else ""
+            print(f"  • {run_id}")
+            print(f"    {agent} · {skill} · {repo}")
+        print("\n  Ctrl-C closes · refresh 2s")
+        sys.stdout.flush()
+        time.sleep(2.0)
+except KeyboardInterrupt:
+    pass
+PY
 done
-printf '\n  LIVE RUNS dashboard needs an installed vibecrafted runtime\n'
-printf '  (vibecrafted_core.live_dashboard was not importable)\n\n  [enter to close]\n'
+printf '\n  LIVE RUNS monitor needs Python 3\n\n  [enter to close]\n'
 read -r _ || true
 "#;
-    let command = CommandToRun::new_with_args("sh", vec!["-c", script]);
+
+/// Floating LIVE RUNS monitor. Its origin is carried by the accepted server
+/// snapshot, so rows and count come from the same Vibecrafted Server donor.
+/// The pane is only an observer — closing it never touches a run — and a
+/// second activation focuses the existing pane instead of duplicating it.
+fn open_live_runs_read_surface(existing_pane: Option<u32>, server_url: Option<&str>) {
+    if let Some(pane_id) = existing_pane {
+        focus_pane_with_id(PaneId::Terminal(pane_id), true, false);
+        return;
+    }
+    let command = CommandToRun::new_with_args(
+        "sh",
+        vec![
+            "-c",
+            LIVE_RUNS_MONITOR_SCRIPT,
+            "vc-live-runs",
+            server_url.unwrap_or(""),
+        ],
+    );
     let mut context = BTreeMap::new();
     context.insert(VC_LIVE_DASHBOARD_CONTEXT_KEY.to_owned(), "true".to_owned());
     let _ = open_command_pane_floating(command, settlement_read_coordinates(), context);
@@ -1556,16 +1631,22 @@ impl State {
         self.mark_settlement_feed_degraded()
     }
 
-    /// Ingest a `vc.live-runs.v1` payload. The rail only needs the census
-    /// size; the read surface re-reads the control plane itself, so richer
-    /// per-run fields never have to survive this hop.
+    /// Ingest a `vc.live-runs.v1` payload. The rail keeps the census size and
+    /// the validated donor origin; the monitor re-reads that same server, so
+    /// richer per-run fields never have to survive this hop.
     fn apply_live_runs_payload(&mut self, payload: &str) -> bool {
         #[derive(Deserialize)]
         struct LiveRunsFeed {
             schema: String,
+            #[serde(default)]
+            server_url: Option<String>,
             runs: Vec<serde_json::Value>,
         }
-        let previous = (self.live_runs_count, self.live_runs_feed_degraded);
+        let previous = (
+            self.live_runs_count,
+            self.live_runs_server_url.clone(),
+            self.live_runs_feed_degraded,
+        );
         let parsed: Option<LiveRunsFeed> = serde_json::from_str(payload)
             .ok()
             .filter(|feed: &LiveRunsFeed| feed.schema == VC_LIVE_RUNS_MESSAGE);
@@ -1575,9 +1656,14 @@ impl State {
             return self.mark_live_runs_feed_degraded();
         };
         self.live_runs_count = Some(feed.runs.len() as u64);
+        self.live_runs_server_url = feed.server_url;
         self.live_runs_feed_degraded = false;
         self.live_runs_feed_age_ticks = Some(0);
-        (self.live_runs_count, self.live_runs_feed_degraded) != previous
+        (
+            self.live_runs_count,
+            self.live_runs_server_url.clone(),
+            self.live_runs_feed_degraded,
+        ) != previous
     }
 
     fn mark_live_runs_feed_degraded(&mut self) -> bool {
@@ -1674,7 +1760,7 @@ impl State {
         self.rail_click_map.clear();
 
         // Pinned `● Live N` row, right under the header: the ONE semantic
-        // entry for running work. Its truth is the control-plane census —
+        // entry for running work. Its truth is Vibecrafted Server —
         // the physical viewer tabs below are only observers of those runs.
         let mut chrome_rows = 1;
         if rows > 1 {
@@ -1969,7 +2055,10 @@ impl State {
                         // One interactive dashboard over the control plane;
                         // never a per-run tab hunt through the rail. A second
                         // click focuses the existing pane (no duplicates).
-                        open_live_runs_read_surface(self.live_dashboard_pane_id);
+                        open_live_runs_read_surface(
+                            self.live_dashboard_pane_id,
+                            self.live_runs_server_url.as_deref(),
+                        );
                         true
                     },
                 }
@@ -3745,15 +3834,19 @@ mod rail_tests {
         };
         assert!(state.update(Event::CustomMessage(
             VC_LIVE_RUNS_MESSAGE.to_owned(),
-            r#"{"schema":"vc.live-runs.v1","runs":[{"run_id":"a"},{"run_id":"b"}]}"#.to_owned(),
+            r#"{"schema":"vc.live-runs.v1","server_url":"http://100.82.232.70:3025","runs":[{"run_id":"a"},{"run_id":"b"}]}"#.to_owned(),
         )));
         assert_eq!(state.live_runs_count, Some(2));
+        assert_eq!(
+            state.live_runs_server_url.as_deref(),
+            Some("http://100.82.232.70:3025")
+        );
         assert!(!state.live_runs_feed_degraded);
 
         // Same census again: no repaint for an unchanged truth.
         assert!(!state.update(Event::CustomMessage(
             VC_LIVE_RUNS_MESSAGE.to_owned(),
-            r#"{"schema":"vc.live-runs.v1","runs":[{"run_id":"a"},{"run_id":"b"}]}"#.to_owned(),
+            r#"{"schema":"vc.live-runs.v1","server_url":"http://100.82.232.70:3025","runs":[{"run_id":"a"},{"run_id":"b"}]}"#.to_owned(),
         )));
 
         // A corrupt payload demotes the count to a lower bound, never a blank.
@@ -3763,6 +3856,16 @@ mod rail_tests {
         )));
         assert_eq!(state.live_runs_count, Some(2));
         assert!(state.live_runs_feed_degraded);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_runs_monitor_script_is_valid_posix_shell() {
+        let status = std::process::Command::new("sh")
+            .args(["-n", "-c", LIVE_RUNS_MONITOR_SCRIPT])
+            .status()
+            .expect("sh should validate the monitor script");
+        assert!(status.success());
     }
 
     #[test]
@@ -4273,6 +4376,25 @@ mod rail_tests {
         // Segment order is fixed by RAIL_BUCKETS, not by session creation
         // order. Without canonical truth every count collapses to `…`.
         assert_eq!(text, vec!["01 ◉ alpha", "02 ○ beta", " 🅵… · 🆇… · 🅽…",]);
+    }
+
+    #[test]
+    fn retired_live_runs_session_never_duplicates_the_semantic_live_row() {
+        let mut legacy = session(LEGACY_LIVE_RUNS_SESSION_NAME, false);
+        legacy.tabs = vec![
+            TabUiInfo::for_rail_test("Shell", false, "", 1),
+            TabUiInfo::for_rail_test("impl-260812-181952-48407", false, "", 1),
+            TabUiInfo::for_rail_test("work-260813-040733-12345", false, "", 1),
+        ];
+
+        let rows = session_rail_rows(&[session("vc-frame", true), legacy]);
+        let text = rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>();
+
+        assert_eq!(text, vec!["01 ◉ vc-frame", " 🅵… · 🆇… · 🅽…"]);
+        assert!(
+            text.iter()
+                .all(|row| !row.contains("impl-") && !row.contains("work-"))
+        );
     }
 
     #[test]

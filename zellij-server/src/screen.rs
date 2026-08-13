@@ -75,9 +75,9 @@ use zellij_utils::{
     position::Position,
 };
 
-/// Lightweight host-to-plugin signal carrying the fleet's live-run count —
-/// the control-plane census (workers with a live pid), the SAME selector that
-/// feeds the rail's `vc.live-runs.v1` rows. Never a Zellij tab census.
+/// Lightweight host-to-plugin signal carrying Vibecrafted Server's active-run
+/// count, the SAME snapshot that feeds the rail's `vc.live-runs.v1` rows.
+/// Never a Zellij tab, file, or local-process census.
 /// Keep this wire name in sync with the status-bar plugin.
 pub(crate) const VC_FLEET_LIVE_COUNT_MESSAGE: &str = "vc.fleet-live-count.v1";
 /// Exact per-plugin/client deactivation signal. Generic `Visible(false)` is
@@ -141,9 +141,9 @@ fn session_update_events(
     hidden_status_bar_plugin_targets: Vec<(PluginId, ClientId)>,
     fleet_live_run_count: usize,
 ) -> Vec<(Option<PluginId>, Option<ClientId>, Event)> {
-    // One canonical liveness selector: the control-plane run census
-    // (vc_live_runs::scan_live_runs) computed by the session-metadata loop.
-    // Zellij tabs never enter this number — a viewer tab only observes a run.
+    // One canonical liveness selector: Vibecrafted Server `active_runs`,
+    // fetched by the session-metadata loop. Zellij tabs never enter this
+    // number — a viewer tab only observes a run.
     let live_count = fleet_live_run_count.to_string();
 
     let mut updates = hidden_status_bar_plugin_targets
@@ -926,7 +926,7 @@ pub enum ScreenInstruction {
     UpdateSessionInfos(
         BTreeMap<String, SessionInfo>, // String is the session name
         BTreeMap<String, Duration>,    // resurrectable sessions - <name, created>
-        usize,                         // control-plane live-run census (fleet LIVE chip truth)
+        Option<usize>, // Vibecrafted Server active-run census; None preserves last good truth
     ),
     ReplacePane(
         PaneId,
@@ -6649,9 +6649,11 @@ impl Screen {
         &mut self,
         new_session_infos: BTreeMap<String, SessionInfo>,
         resurrectable_sessions: BTreeMap<String, Duration>,
-        live_run_count: usize,
+        live_run_count: Option<usize>,
     ) -> Result<()> {
-        self.fleet_live_run_count = live_run_count;
+        if let Some(live_run_count) = live_run_count {
+            self.fleet_live_run_count = live_run_count;
+        }
         self.peer_sessions_cache = new_session_infos;
         self.resurrectable_sessions_cache = resurrectable_sessions;
         let live_sessions: Vec<SessionInfo> = self.peer_sessions_cache.values().cloned().collect();

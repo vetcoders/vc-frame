@@ -347,7 +347,9 @@ pub(crate) fn background_jobs_main(
                     let current_session_plugin_list = current_session_plugin_list.clone();
                     let last_serialization_time = last_serialization_time.clone();
                     let has_clients = has_clients.clone();
+                    let http_client = http_client.clone();
                     async move {
+                        let mut live_runs_donor_was_degraded = false;
                         log::info!(
                             "session metadata loop started (disable_session_metadata: {})",
                             disable_session_metadata
@@ -410,23 +412,37 @@ pub(crate) fn background_jobs_main(
                                 &session_infos_on_machine,
                                 &ZELLIJ_SESSION_INFO_CACHE_DIR,
                             );
-                            // Control-plane Live census: headless workers with a
-                            // live pid, never Zellij tabs (a viewer tab only
-                            // observes a run). ONE scan per cycle feeds BOTH
-                            // surfaces — the rail's `● Live N` rows payload and
-                            // the status-bar LIVE chip count (via screen) — so
-                            // the two can never disagree. Re-sent every cycle so
-                            // the rail's freshness lease can tell a quiet feed
-                            // from a dead producer.
-                            let census = zellij_utils::run_triage::control_plane_root().map(
-                                |control_plane_root| {
-                                    crate::vc_live_runs::LiveRunsSnapshot::new(
-                                        crate::vc_live_runs::scan_live_runs(&control_plane_root),
-                                    )
-                                },
-                            );
+                            // Vibecrafted Server is the one semantic owner of
+                            // run lifecycle. VC Frame reads its configured
+                            // public URL and consumes only `active_runs`; local
+                            // files, PIDs, sessions, and tabs never substitute
+                            // for an unavailable donor.
+                            let census = if let Some(http_client) = http_client.as_ref() {
+                                match crate::vc_live_runs::fetch_live_runs(http_client).await {
+                                    Ok(snapshot) => {
+                                        if live_runs_donor_was_degraded {
+                                            log::info!("LIVE runs donor recovered");
+                                        }
+                                        live_runs_donor_was_degraded = false;
+                                        Some(snapshot)
+                                    },
+                                    Err(error) => {
+                                        if !live_runs_donor_was_degraded {
+                                            log::warn!("LIVE runs donor degraded: {error}");
+                                        }
+                                        live_runs_donor_was_degraded = true;
+                                        None
+                                    },
+                                }
+                            } else {
+                                if !live_runs_donor_was_degraded {
+                                    log::warn!("LIVE runs donor degraded: HTTP client unavailable");
+                                }
+                                live_runs_donor_was_degraded = true;
+                                None
+                            };
                             let live_run_count =
-                                census.as_ref().map_or(0, |snapshot| snapshot.runs.len());
+                                census.as_ref().map(|snapshot| snapshot.runs.len());
                             let _ = senders.send_to_screen(ScreenInstruction::UpdateSessionInfos(
                                 session_infos_on_machine,
                                 resurrectable_sessions,

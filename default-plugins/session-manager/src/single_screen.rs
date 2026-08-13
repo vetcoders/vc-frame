@@ -104,10 +104,16 @@ impl SingleScreenState {
         resurrectable_sessions: &[(String, Duration)],
     ) -> Vec<UnifiedSearchResult> {
         let mut results = Vec::new();
-        for session in active_sessions {
+        for session in active_sessions
+            .iter()
+            .filter(|session| !crate::is_internal_drawer_session(&session.name))
+        {
             results.push(Self::active_session_to_result(session, 0, vec![]));
         }
-        for (name, ctime) in resurrectable_sessions {
+        for (name, ctime) in resurrectable_sessions
+            .iter()
+            .filter(|(name, _)| !crate::is_internal_drawer_session(name))
+        {
             results.push(UnifiedSearchResult::ResurrectableSession {
                 score: 0,
                 indices: vec![],
@@ -128,13 +134,19 @@ impl SingleScreenState {
             .get_or_insert_with(|| SkimMatcherV2::default().use_cache(true));
         let mut results = Vec::new();
 
-        for session in active_sessions {
+        for session in active_sessions
+            .iter()
+            .filter(|session| !crate::is_internal_drawer_session(&session.name))
+        {
             if let Some((score, indices)) = matcher.fuzzy_indices(&session.name, &self.search_term)
             {
                 results.push(Self::active_session_to_result(session, score, indices));
             }
         }
-        for (name, ctime) in resurrectable_sessions {
+        for (name, ctime) in resurrectable_sessions
+            .iter()
+            .filter(|(name, _)| !crate::is_internal_drawer_session(name))
+        {
             if let Some((score, indices)) = matcher.fuzzy_indices(name, &self.search_term) {
                 results.push(UnifiedSearchResult::ResurrectableSession {
                     score,
@@ -408,6 +420,36 @@ mod tests {
     fn test_1_6_empty_sessions_list() {
         let mut state = SingleScreenState::default();
         state.update_search_term(&[], &[]);
+        assert!(state.unified_results.is_empty());
+    }
+
+    #[test]
+    fn test_1_7_internal_drawers_are_absent_from_default_and_search_results() {
+        let active = vec![
+            make_active_session("vc-frame", 2, 2, 1, true, 100),
+            make_active_session("Live runs", 8, 4, 0, false, 200),
+            make_active_session("Failed runs", 6, 2, 0, false, 300),
+            make_active_session("Needs attention", 13, 2, 0, false, 400),
+            make_active_session("Finalized runs", 31, 2, 0, false, 500),
+        ];
+        let resurrectable = vec![
+            make_resurrectable("vibecrafted", 600),
+            make_resurrectable("Live runs", 700),
+        ];
+        let mut state = SingleScreenState::default();
+
+        state.update_search_term(&active, &resurrectable);
+        assert_eq!(
+            state
+                .unified_results
+                .iter()
+                .map(UnifiedSearchResult::session_name)
+                .collect::<Vec<_>>(),
+            vec!["vc-frame", "vibecrafted"]
+        );
+
+        state.search_term = "runs".to_owned();
+        state.update_search_term(&active, &resurrectable);
         assert!(state.unified_results.is_empty());
     }
 
