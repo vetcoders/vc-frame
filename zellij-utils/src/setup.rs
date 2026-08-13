@@ -135,6 +135,18 @@ pub const VIBECRAFTED_LAYOUT: &[u8] = include_bytes!(concat!(
     "assets/layouts/vibecrafted.kdl"
 ));
 
+pub const VIBECRAFTED_HOST_LAYOUT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/",
+    "assets/layouts/vibecrafted-host.kdl"
+));
+
+pub const VIBECRAFTED_GUEST_LAYOUT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/",
+    "assets/layouts/vibecrafted-guest.kdl"
+));
+
 pub const VC_WORKFLOW_LAYOUT: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/",

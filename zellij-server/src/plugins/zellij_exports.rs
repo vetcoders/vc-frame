@@ -138,6 +138,16 @@ macro_rules! apply_action {
     };
 }
 
+const VC_FRAME_SELF_EXECUTABLE: &str = "vc-frame:self";
+
+fn resolve_command_path(path: PathBuf) -> PathBuf {
+    if path.as_os_str() == VC_FRAME_SELF_EXECUTABLE {
+        std::env::current_exe().unwrap_or(path)
+    } else {
+        path
+    }
+}
+
 fn translate_plugin_path(env: &PluginEnv, path: PathBuf) -> PathBuf {
     if let Ok(stripped) = path.strip_prefix("/host") {
         env.plugin_cwd.join(stripped)
@@ -2024,7 +2034,7 @@ fn open_command_pane_in_place_of_pane_id(
     close_replaced_pane: bool,
     context: BTreeMap<String, String>,
 ) {
-    let command = command_to_run.path;
+    let command = resolve_command_path(command_to_run.path);
     let cwd = command_to_run
         .cwd
         .map(|cwd| translate_plugin_path(env, cwd));
@@ -5505,4 +5515,23 @@ fn check_command_permission(
     }
 
     (PermissionStatus::Denied, Some(permission))
+}
+
+#[cfg(test)]
+mod vc_frame_command_path_tests {
+    use super::{VC_FRAME_SELF_EXECUTABLE, resolve_command_path};
+    use std::path::PathBuf;
+
+    #[test]
+    fn self_executable_token_resolves_to_the_running_binary() {
+        let resolved = resolve_command_path(PathBuf::from(VC_FRAME_SELF_EXECUTABLE));
+        assert!(resolved.is_absolute());
+        assert_ne!(resolved, PathBuf::from(VC_FRAME_SELF_EXECUTABLE));
+    }
+
+    #[test]
+    fn ordinary_plugin_commands_keep_their_path() {
+        let path = PathBuf::from("some-command");
+        assert_eq!(resolve_command_path(path.clone()), path);
+    }
 }

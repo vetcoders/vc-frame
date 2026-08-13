@@ -2130,6 +2130,7 @@ impl LayoutInfo {
     fn branded_builtin_label(name: &str) -> Option<&'static str> {
         match name {
             "vibecrafted" => Some("Vibecrafted Operator Shell"),
+            "vibecrafted-host" => Some("Vibecrafted Shared Frame"),
             "vc-dashboard" => Some("Vibecrafted Mission Control"),
             "vc-workflow" => Some("Vibecrafted Workflow Surface"),
             "vc-marbles" => Some("Vibecrafted Marbles Surface"),
@@ -2141,6 +2142,7 @@ impl LayoutInfo {
     fn branded_builtin_keywords(name: &str) -> &'static [&'static str] {
         match name {
             "vibecrafted" => &["operator shell", "operator mode", "vc start", "vc-start"],
+            "vibecrafted-host" => &["shared frame", "host", "guest surface", "visitor"],
             "vc-dashboard" => &[
                 "dashboard",
                 "mission control",
@@ -2215,10 +2217,11 @@ impl LayoutInfo {
             LayoutInfo::BuiltIn(name) => Some(match name.as_str() {
                 "default" => 0,
                 "vibecrafted" => 1,
-                "vc-dashboard" => 2,
-                "vc-workflow" => 3,
-                "vc-marbles" => 4,
-                "vc-research" => 5,
+                "vibecrafted-host" => 2,
+                "vc-dashboard" => 3,
+                "vc-workflow" => 4,
+                "vc-marbles" => 5,
+                "vc-research" => 6,
                 "compact" => 10,
                 "classic" => 11,
                 "strider" => 12,

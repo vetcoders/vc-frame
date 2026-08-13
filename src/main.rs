@@ -301,6 +301,12 @@ fn main() {
         commands::list_aliases(opts);
     } else if let Some(Command::Sessions(Sessions::Watch { ref session_name })) = opts.command {
         commands::watch_session(session_name.clone(), opts);
+    } else if let Some(Command::Sessions(Sessions::Visit {
+        ref session_name,
+        tab,
+    })) = opts.command
+    {
+        commands::visit_session(session_name.clone(), tab, opts);
     } else if let Some(Command::Sessions(Sessions::KillAllSessions { yes })) = opts.command {
         commands::kill_all_sessions(yes);
     } else if let Some(Command::Sessions(Sessions::KillSession {

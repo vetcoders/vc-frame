@@ -96,6 +96,10 @@ temp directory and contain only the current user's terminal dump.
 
 `current_exe` starts another internal mode of the already running vc-frame
 binary. It establishes no identity, trust, privilege or update provenance.
+The plugin host resolves the reserved `vc-frame:self` command token to that
+same executable so a frame-host visitor cannot drift to an older binary on
+`PATH`; the command remains behind the existing plugin `RunCommands`
+permission boundary.
 The clinic also resolves the current executable for a read-only mtime and
 local process-name drift diagnosis; it neither executes nor authorizes it.
 The triage transfer-lock tests additionally re-enter the same test executable

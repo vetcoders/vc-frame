@@ -1363,6 +1363,18 @@ pub enum Sessions {
         session_name: Option<String>,
     },
 
+    /// Visit a session as an interactive guest surface
+    #[clap(visible_alias = "v")]
+    Visit {
+        /// Name of the session to embed in a VC Frame host
+        #[clap(value_parser)]
+        session_name: String,
+
+        /// One-based tab number to focus after attaching
+        #[clap(long, value_parser)]
+        tab: Option<usize>,
+    },
+
     /// Kill a specific session
     #[clap(visible_alias = "k")]
     KillSession {
@@ -3049,5 +3061,26 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    #[test]
+    fn visit_parses_guest_session_and_one_based_tab() {
+        let parsed = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let cli = CliArgs::try_parse_from(["vc-frame", "visit", "my work", "--tab", "3"])
+                    .unwrap();
+                matches!(
+                    cli.command,
+                    Some(Command::Sessions(Sessions::Visit {
+                        session_name,
+                        tab: Some(3),
+                    })) if session_name == "my work"
+                )
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(parsed);
     }
 }

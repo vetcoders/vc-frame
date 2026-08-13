@@ -39,6 +39,7 @@ CURRENT_EXE_PATHS = {
     "xtask/src/pipelines.rs",
     "zellij-client/src/lib.rs",
     "zellij-client/src/web_client/mod.rs",
+    "zellij-server/src/plugins/zellij_exports.rs",
     "zellij-utils/src/sessions.rs",
 }
 TRANSFER_LOCK_PATH = "src/run_triage_cli.rs"
@@ -337,6 +338,19 @@ def require_current_exe_policy(path: str, lines: list[str], line: int) -> None:
                 f"current-exe is no longer passed directly to Command::new at {path}:{line}"
             )
         return
+    if path == "zellij-server/src/plugins/zellij_exports.rs":
+        nearby = [candidate.strip() for candidate in lines[line - 3:line + 2]]
+        if nearby != [
+            "fn resolve_command_path(path: PathBuf) -> PathBuf {",
+            "if path.as_os_str() == VC_FRAME_SELF_EXECUTABLE {",
+            "std::env::current_exe().unwrap_or(path)",
+            "} else {",
+            "path",
+        ]:
+            raise InventoryError(
+                f"current-exe self-command resolver source shape changed at {path}:{line}"
+            )
+        return
     if path == SESSION_SOCKET_PATH:
         nearby = [candidate.strip() for candidate in lines[line - 1:line + 5]]
         if nearby != [
@@ -358,7 +372,7 @@ def require_session_socket_unsafe_policy(path: str, lines: list[str], line: int)
     if path != SESSION_SOCKET_PATH:
         raise InventoryError(f"session socket unsafe policy used for {path}:{line}")
     source_line = lines[line - 1].strip()
-    previous = [candidate.strip() for candidate in lines[max(0, line - 4):line - 1]]
+    previous = [candidate.strip() for candidate in lines[max(0, line - 6):line - 1]]
     following = [candidate.strip() for candidate in lines[line:line + 10]]
     has_safety_comment = any(candidate.startswith("// SAFETY:") for candidate in previous)
 
@@ -380,6 +394,8 @@ def require_session_socket_unsafe_policy(path: str, lines: list[str], line: int)
             candidate in {"libc::renameatx_np(", "libc::renameat2("}
             for candidate in following
         ):
+            return
+        if "libc::syscall(" in following and "libc::SYS_renameat2," in following:
             return
     raise InventoryError(f"session socket unsafe source shape changed at {path}:{line}")
 

@@ -1,0 +1,11 @@
+// Durable PTY owner with no product chrome. It is meant to run detached and
+// be rendered interactively inside `vibecrafted-host` by `vc-frame visit`.
+layout {
+    default_tab_template {
+        pane { children; }
+    }
+
+    tab name="Shell" focus=true {
+        pane
+    }
+}

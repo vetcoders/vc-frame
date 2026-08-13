@@ -1135,6 +1135,73 @@ pub(crate) fn watch_session(session_name: Option<String>, opts: CliArgs) {
     );
 }
 
+/// Attach an interactive client intended to live inside the host frame's
+/// content pane. Unlike `watch`, this client forwards input. Unlike the normal
+/// attach command, it has a narrow contract: an existing local session and an
+/// optional initial tab. This keeps the replaceable visitor separate from the
+/// long-lived guest server that owns the PTYs.
+pub(crate) fn visit_session(session_name: String, tab: Option<usize>, opts: CliArgs) {
+    let (config, _, config_options, _, _) = match Setup::from_cli_args(&opts) {
+        Ok(results) => results,
+        Err(e) => {
+            if let ConfigError::KdlError(error) = e {
+                let report: Report = error.into();
+                eprintln!("{:?}", report);
+            } else {
+                eprintln!("{}", e);
+            }
+            process::exit(1);
+        },
+    };
+
+    let resolved_name = match match_session_name(&session_name).unwrap() {
+        SessionNameMatch::UniquePrefix(name) | SessionNameMatch::Exact(name) => name,
+        SessionNameMatch::AmbiguousPrefix(sessions) => {
+            eprintln!(
+                "Ambiguous selection: multiple session names start with '{}':",
+                session_name
+            );
+            print_sessions(
+                sessions
+                    .iter()
+                    .map(|name| (name.clone(), Duration::default(), false))
+                    .collect(),
+                false,
+                false,
+                true,
+            );
+            process::exit(1);
+        },
+        SessionNameMatch::None => {
+            eprintln!("No session with the name '{}' found!", session_name);
+            process::exit(1);
+        },
+    };
+    let tab_position_to_focus = tab.map(|tab| {
+        tab.checked_sub(1).unwrap_or_else(|| {
+            eprintln!("--tab is one-based and must be at least 1");
+            process::exit(2);
+        })
+    });
+    let client_info = ClientInfo::Attach(resolved_name.clone(), config_options.clone());
+    let mut opts = opts.clone();
+    opts.session = Some(resolved_name);
+
+    start_client_impl(
+        Box::new(get_os_input(get_client_os_input)),
+        opts,
+        config,
+        config_options,
+        client_info,
+        StartClientOptions {
+            tab_position_to_focus,
+            pane_id_to_focus: None,
+            is_a_reconnect: false,
+            start_detached_and_exit: false,
+        },
+    );
+}
+
 fn reload_config_from_disk(
     config_without_layout: &mut Config,
     config_options_without_layout: &mut Options,

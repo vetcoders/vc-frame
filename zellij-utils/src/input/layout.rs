@@ -1261,6 +1261,7 @@ impl Default for LayoutParts {
 const BUILTIN_LAYOUT_NAMES: &[&str] = &[
     "default",
     "vibecrafted",
+    "vibecrafted-host",
     "vc-dashboard",
     "vc-workflow",
     "vc-marbles",
@@ -1716,6 +1717,16 @@ impl Layout {
                 Self::stringified_vibecrafted_from_assets()?,
                 None,
             )),
+            Some("vibecrafted-host") => Ok((
+                "Vibecrafted shared frame host layout".into(),
+                Self::stringified_vibecrafted_host_from_assets()?,
+                None,
+            )),
+            Some("vibecrafted-guest") => Ok((
+                "Vibecrafted content-only guest layout".into(),
+                Self::stringified_vibecrafted_guest_from_assets()?,
+                None,
+            )),
             Some("vc-workflow") => Ok((
                 "Vibecrafted workflow layout".into(),
                 Self::stringified_vc_workflow_from_assets()?,
@@ -1778,6 +1789,12 @@ impl Layout {
     }
     pub fn stringified_vibecrafted_from_assets() -> Result<String, ConfigError> {
         Ok(String::from_utf8(setup::VIBECRAFTED_LAYOUT.to_vec())?)
+    }
+    pub fn stringified_vibecrafted_host_from_assets() -> Result<String, ConfigError> {
+        Ok(String::from_utf8(setup::VIBECRAFTED_HOST_LAYOUT.to_vec())?)
+    }
+    pub fn stringified_vibecrafted_guest_from_assets() -> Result<String, ConfigError> {
+        Ok(String::from_utf8(setup::VIBECRAFTED_GUEST_LAYOUT.to_vec())?)
     }
     pub fn stringified_vc_workflow_from_assets() -> Result<String, ConfigError> {
         Ok(String::from_utf8(setup::VC_WORKFLOW_LAYOUT.to_vec())?)

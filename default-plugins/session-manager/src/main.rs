@@ -46,6 +46,9 @@ const VC_CHROME_HEARTBEAT_MESSAGE: &str = "vc.fleet-live-count.v1";
 // vc-frame server's session-metadata loop. Never derived from local files,
 // PIDs, or Zellij tabs — a viewer tab is only an observer of a run.
 const VC_LIVE_RUNS_MESSAGE: &str = "vc.live-runs.v1";
+const VC_GUEST_PANE_TITLE: &str = "VC Guest";
+const VC_GUEST_COMMAND_CONTEXT_KEY: &str = "vc_frame_guest_surface";
+const VC_FRAME_SELF_EXECUTABLE: &str = "vc-frame:self";
 // Same freshness lease as the settlement feed: the producer re-sends at least
 // every five seconds, so three missed windows demote exact counts.
 const LIVE_RUNS_FEED_STALE_AFTER_TICKS: u8 = 15;
@@ -65,6 +68,24 @@ const MIN_MENU_RENDER_COLS: usize = 4;
 
 fn menu_dimensions_are_transient(rows: usize, cols: usize) -> bool {
     rows < MIN_MENU_RENDER_ROWS || cols < MIN_MENU_RENDER_COLS
+}
+
+fn guest_placeholder_pane_id(pane_manifest: &PaneManifest) -> Option<u32> {
+    pane_manifest
+        .panes
+        .values()
+        .flatten()
+        .find(|pane| !pane.is_plugin && pane.title == VC_GUEST_PANE_TITLE)
+        .map(|pane| pane.id)
+}
+
+fn guest_visit_command(session_name: &str, tab_position: Option<usize>) -> CommandToRun {
+    let mut args = vec!["visit".to_owned(), session_name.to_owned()];
+    if let Some(tab_position) = tab_position {
+        args.push("--tab".to_owned());
+        args.push(tab_position.saturating_add(1).to_string());
+    }
+    CommandToRun::new_with_args(VC_FRAME_SELF_EXECUTABLE, args)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -199,6 +220,11 @@ struct State {
     is_visible: bool,
     refresh_timer_armed: bool,
     is_rail: bool,
+    // A frame host owns the chrome once and projects other sessions into one
+    // replaceable terminal pane. Guest servers keep their PTYs; this plugin
+    // only swaps the interactive visitor process.
+    frame_host: bool,
+    guest_pane_id: Option<u32>,
     // screen row -> click target, rebuilt on every rail render so mouse
     // clicks resolve against exactly what is on screen (incl. scroll window).
     // Header / footer / blank gap rows are absent → click is a no-op.
@@ -244,6 +270,11 @@ impl ZellijPlugin for State {
             .get("rail")
             .map(|v| v == "true")
             .unwrap_or(false);
+        self.frame_host = self.is_rail
+            && configuration
+                .get("frame_host")
+                .map(|v| v == "true")
+                .unwrap_or(false);
         self.is_welcome_screen = configuration
             .get("welcome_screen")
             .map(|v| v == "true")
@@ -278,6 +309,9 @@ impl ZellijPlugin for State {
             EventType::CommandPaneOpened,
             EventType::CommandPaneExited,
         ];
+        if self.frame_host {
+            subscriptions.push(EventType::PaneUpdate);
+        }
         if self.is_visible {
             subscriptions.push(EventType::SessionUpdate);
         }
@@ -443,6 +477,22 @@ impl ZellijPlugin for State {
                 if self.is_rail && message == VC_LIVE_RUNS_MESSAGE =>
             {
                 should_render = self.apply_live_runs_payload(&payload);
+            },
+            Event::CommandPaneOpened(terminal_pane_id, context)
+                if context.contains_key(VC_GUEST_COMMAND_CONTEXT_KEY) =>
+            {
+                self.guest_pane_id = Some(terminal_pane_id);
+            },
+            Event::CommandPaneExited(terminal_pane_id, _exit_code, context)
+                if context.contains_key(VC_GUEST_COMMAND_CONTEXT_KEY) =>
+            {
+                // Command panes are held after exit and remain replaceable.
+                self.guest_pane_id = Some(terminal_pane_id);
+            },
+            Event::PaneUpdate(pane_manifest) if self.frame_host => {
+                if self.guest_pane_id.is_none() {
+                    self.guest_pane_id = guest_placeholder_pane_id(&pane_manifest);
+                }
             },
             Event::CommandPaneOpened(terminal_pane_id, context)
                 if context.contains_key(VC_LIVE_DASHBOARD_CONTEXT_KEY) =>
@@ -2040,7 +2090,7 @@ impl State {
                             // the plugin shim bumps it for Action::GoToTab.
                             go_to_tab(tab_position as u32);
                         } else {
-                            switch_session_with_focus(&session_name, Some(tab_position), None);
+                            self.activate_session(&session_name, Some(tab_position));
                             self.reset_selected_index();
                         }
                         true
@@ -2107,7 +2157,7 @@ impl State {
         match bucket_open_action(exists, is_current) {
             BucketOpenAction::Stay => {},
             BucketOpenAction::SwitchExisting => {
-                switch_session_with_focus(name, None, None);
+                self.activate_session(name, None);
                 self.reset_selected_index();
             },
             BucketOpenAction::ReadSurface => {
@@ -2120,7 +2170,7 @@ impl State {
         if let Some(target_session_name) =
             relative_session_target(&self.sessions.session_ui_infos, offset)
         {
-            switch_session_with_focus(&target_session_name, None, None);
+            self.activate_session(&target_session_name, None);
         }
     }
 
@@ -2222,9 +2272,37 @@ impl State {
             if self.sessions.selected_is_current_session() {
                 // Already here — quiet (same contract as jump_to_bucket).
             } else {
-                switch_session_with_focus(&selected_session_name, None, None);
+                self.activate_session(&selected_session_name, None);
                 self.reset_selected_index();
             }
+        }
+    }
+
+    fn activate_session(&mut self, session_name: &str, tab_position: Option<usize>) {
+        if !self.frame_host {
+            switch_session_with_focus(session_name, tab_position, None);
+            return;
+        }
+        let Some(pane_id) = self.guest_pane_id else {
+            self.show_error("VC Guest surface is not ready.");
+            return;
+        };
+        let mut context = BTreeMap::new();
+        context.insert(
+            VC_GUEST_COMMAND_CONTEXT_KEY.to_owned(),
+            session_name.to_owned(),
+        );
+        match open_command_pane_in_place_of_pane_id(
+            PaneId::Terminal(pane_id),
+            guest_visit_command(session_name, tab_position),
+            true,
+            context,
+        ) {
+            Some(PaneId::Terminal(new_pane_id)) => {
+                self.guest_pane_id = Some(new_pane_id);
+                self.error = None;
+            },
+            _ => self.show_error("Failed to open the selected session in VC Guest."),
         }
     }
     fn handle_key(&mut self, key: KeyWithModifier) -> bool {
@@ -4827,5 +4905,37 @@ mod rail_tests {
         assert_eq!(char_offset_of(row, " · ", 0), Some(8));
         assert_eq!(char_offset_of(row, "missing", 0), None);
         assert_eq!(char_offset_of("ab", "b", 5), None, "from beyond end");
+    }
+
+    #[test]
+    fn guest_surface_discovers_only_the_named_terminal_placeholder() {
+        let mut manifest = PaneManifest::default();
+        manifest.panes.insert(
+            0,
+            vec![
+                PaneInfo {
+                    id: 7,
+                    is_plugin: true,
+                    title: VC_GUEST_PANE_TITLE.to_owned(),
+                    ..Default::default()
+                },
+                PaneInfo {
+                    id: 11,
+                    title: VC_GUEST_PANE_TITLE.to_owned(),
+                    ..Default::default()
+                },
+            ],
+        );
+        assert_eq!(guest_placeholder_pane_id(&manifest), Some(11));
+    }
+
+    #[test]
+    fn guest_visit_command_preserves_session_boundaries_and_one_based_cli_tab() {
+        let command = guest_visit_command("my session", Some(2));
+        assert_eq!(
+            command.path,
+            std::path::PathBuf::from(VC_FRAME_SELF_EXECUTABLE)
+        );
+        assert_eq!(command.args, ["visit", "my session", "--tab", "3"]);
     }
 }

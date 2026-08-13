@@ -318,6 +318,7 @@ fn vibecrafted_layouts_are_available_as_builtins() {
 
     for layout_name in [
         "vibecrafted",
+        "vibecrafted-host",
         "vc-dashboard",
         "vc-workflow",
         "vc-marbles",
@@ -334,6 +335,7 @@ fn vibecrafted_layouts_are_available_as_builtins() {
 fn vibecrafted_layouts_can_be_loaded_from_builtin_assets() {
     for layout_name in [
         "vibecrafted",
+        "vibecrafted-host",
         "vc-dashboard",
         "vc-workflow",
         "vc-marbles",
@@ -453,6 +455,31 @@ fn vibecrafted_layout_has_start_here_and_shell_tabs() {
 }
 
 #[test]
+fn vibecrafted_host_and_guest_split_chrome_from_pty_ownership() {
+    let (_path, host_raw, _swap) =
+        Layout::stringified_from_default_assets(Path::new("vibecrafted-host")).unwrap();
+    let (host, _config) =
+        Layout::from_default_assets(Path::new("vibecrafted-host"), None, Config::default())
+            .unwrap();
+    assert!(host.session_layer.is_some());
+    assert!(host_raw.contains("frame_host true"));
+    assert!(host_raw.contains("pane name=\"VC Guest\""));
+
+    let (_path, guest_raw, _swap) =
+        Layout::stringified_from_default_assets(Path::new("vibecrafted-guest")).unwrap();
+    let (guest, _config) =
+        Layout::from_default_assets(Path::new("vibecrafted-guest"), None, Config::default())
+            .unwrap();
+    assert!(guest.session_layer.is_none());
+    for chrome in ["compact-bar", "session-manager", "status-bar"] {
+        assert!(
+            !guest_raw.contains(chrome),
+            "content-only guest must not load {chrome}"
+        );
+    }
+}
+
+#[test]
 fn default_layout_new_tabs_use_the_session_canvas() {
     let (layout, _config) =
         Layout::from_default_assets(Path::new("default"), None, Config::default()).unwrap();
@@ -502,6 +529,7 @@ fn product_layouts_always_include_sessions_rail() {
     for layout_name in [
         "default",
         "vibecrafted",
+        "vibecrafted-host",
         "vc-dashboard",
         "vc-workflow",
         "vc-marbles",
@@ -557,6 +585,7 @@ fn product_picker_excludes_legacy_no_rail_zellij_layouts() {
     for required in [
         "default",
         "vibecrafted",
+        "vibecrafted-host",
         "vc-dashboard",
         "vc-workflow",
         "vc-marbles",
@@ -573,6 +602,7 @@ fn product_picker_excludes_legacy_no_rail_zellij_layouts() {
 fn vibecrafted_layouts_parse_from_builtin_assets() {
     for layout_name in [
         "vibecrafted",
+        "vibecrafted-host",
         "vc-dashboard",
         "vc-workflow",
         "vc-marbles",
