@@ -1623,14 +1623,20 @@ impl TriageIo for CliTriageIo {
                 VIEWER_RESERVATION_LATCH_ENV
             ));
         }
+        let latch_name = latch_path
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .ok_or_else(|| format!("{} must name a latch file", VIEWER_RESERVATION_LATCH_ENV))?;
+        let staging_path =
+            latch_path.with_file_name(format!(".{}.{}.tmp", latch_name, std::process::id()));
         let mut latch = std::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
-            .open(&latch_path)
+            .open(&staging_path)
             .map_err(|error| {
                 format!(
-                    "cannot create viewer reservation latch {}: {}",
-                    latch_path.display(),
+                    "cannot create viewer reservation latch staging file {}: {}",
+                    staging_path.display(),
                     error
                 )
             })?;
@@ -1652,6 +1658,21 @@ impl TriageIo for CliTriageIo {
             format!(
                 "cannot sync viewer reservation latch {}: {}",
                 latch_path.display(),
+                error
+            )
+        })?;
+        if let Err(error) = std::fs::hard_link(&staging_path, &latch_path) {
+            let _ = std::fs::remove_file(&staging_path);
+            return Err(format!(
+                "cannot publish viewer reservation latch {}: {}",
+                latch_path.display(),
+                error
+            ));
+        }
+        std::fs::remove_file(&staging_path).map_err(|error| {
+            format!(
+                "cannot remove viewer reservation latch staging file {}: {}",
+                staging_path.display(),
                 error
             )
         })?;
