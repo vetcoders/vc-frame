@@ -1331,7 +1331,7 @@ fn open_live_runs_read_surface(existing_pane: Option<u32>, server_url: Option<&s
 }
 
 /// Floating diagnostic: control plane + loctree reports. No new Zellij session.
-fn open_settlement_read_surface(bucket: BucketKind) {
+fn open_settlement_read_surface(bucket: BucketKind, server_url: Option<&str>) {
     let letter = match bucket {
         BucketKind::Finalized => "f",
         BucketKind::Failed => "x",
@@ -1339,26 +1339,22 @@ fn open_settlement_read_surface(bucket: BucketKind) {
     };
     // POSIX sh only (dash-clean). Prints settlement truth then waits.
     let script = format!(
-        r#"b="{letter}"
+        r#"server_url=$1
+b="{letter}"
 printf '\n  VIBECRAFTED · settlement %s (read-only)\n' "$b"
 printf '  No god-session created. Counts come from the control plane feed.\n\n'
 shown=0
-for base in \
-  "http://127.0.0.1:3024" \
-  "http://127.0.0.1:3025" \
-  "http://100.82.232.70:3025"
-do
+if [ -n "$server_url" ]; then
   if command -v curl >/dev/null 2>&1 \
-    && curl -sf --max-time 2 "$base/api/control/state" 2>/dev/null \
+    && curl -sf --max-time 2 "$server_url/api/control/state" 2>/dev/null \
     | head -c 6000
   then
-    printf '\n  [eye] %s\n' "$base"
+    printf '\n  [eye] %s\n' "$server_url"
     shown=1
-    break
   fi
-done
+fi
 if [ "$shown" -eq 0 ]; then
-  printf '  control plane not reachable on 3024/3025 — try: vibecrafted server status\n'
+  printf '  configured Vibecrafted Server donor unavailable\n'
 fi
 printf '\n  loctree-suite reports (if present):\n'
 for d in \
@@ -1377,7 +1373,10 @@ printf '\n  [enter to close]\n'
 read -r _ || true
 "#
     );
-    let command = CommandToRun::new_with_args("sh", vec!["-c", &script]);
+    let command = CommandToRun::new_with_args(
+        "sh",
+        vec!["-c", &script, "vc-settlement", server_url.unwrap_or("")],
+    );
     let _ = open_command_pane_floating(command, settlement_read_coordinates(), BTreeMap::new());
 }
 
@@ -2112,7 +2111,7 @@ impl State {
                 self.reset_selected_index();
             },
             BucketOpenAction::ReadSurface => {
-                open_settlement_read_surface(bucket);
+                open_settlement_read_surface(bucket, self.live_runs_server_url.as_deref());
                 self.reset_selected_index();
             },
         }
@@ -3834,19 +3833,19 @@ mod rail_tests {
         };
         assert!(state.update(Event::CustomMessage(
             VC_LIVE_RUNS_MESSAGE.to_owned(),
-            r#"{"schema":"vc.live-runs.v1","server_url":"http://100.82.232.70:3025","runs":[{"run_id":"a"},{"run_id":"b"}]}"#.to_owned(),
+            r#"{"schema":"vc.live-runs.v1","server_url":"https://observer.example:8443","runs":[{"run_id":"a"},{"run_id":"b"}]}"#.to_owned(),
         )));
         assert_eq!(state.live_runs_count, Some(2));
         assert_eq!(
             state.live_runs_server_url.as_deref(),
-            Some("http://100.82.232.70:3025")
+            Some("https://observer.example:8443")
         );
         assert!(!state.live_runs_feed_degraded);
 
         // Same census again: no repaint for an unchanged truth.
         assert!(!state.update(Event::CustomMessage(
             VC_LIVE_RUNS_MESSAGE.to_owned(),
-            r#"{"schema":"vc.live-runs.v1","server_url":"http://100.82.232.70:3025","runs":[{"run_id":"a"},{"run_id":"b"}]}"#.to_owned(),
+            r#"{"schema":"vc.live-runs.v1","server_url":"https://observer.example:8443","runs":[{"run_id":"a"},{"run_id":"b"}]}"#.to_owned(),
         )));
 
         // A corrupt payload demotes the count to a lower bound, never a blank.
