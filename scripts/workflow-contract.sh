@@ -13,6 +13,7 @@
 #   4. The canonical test job invokes the repo-native gate (make ci),
 #      so the local gate and the remote gate mean the same thing.
 #   5. Superseded runs are cancelled per workflow/ref or pull request.
+#   6. Default workflow token permissions are read-only; jobs must opt into writes.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -76,6 +77,14 @@ for wf in "$rust_yml" "$e2e_yml"; do
         ok "$name: superseded workflow/ref runs are cancelled"
     else
         err "$name: concurrency cancellation contract missing"
+    fi
+
+    # 6. Keep the default GITHUB_TOKEN least-privileged. A job that genuinely
+    # needs a write scope must declare that exception on the job itself.
+    if grep -A1 '^permissions:$' "$wf" | grep -q '^  contents: read$'; then
+        ok "$name: default token permissions are contents: read"
+    else
+        err "$name: top-level permissions must be contents: read"
     fi
 done
 

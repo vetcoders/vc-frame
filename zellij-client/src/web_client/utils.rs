@@ -74,3 +74,29 @@ pub fn terminal_init_messages() -> Vec<&'static str> {
         enable_mouse_mode,
     ]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::should_use_https;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn should_use_https_allows_loopback_http_only_when_not_enforced() {
+        for ip in [
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ] {
+            assert_eq!(should_use_https(ip, false, false), Ok(false));
+            assert!(should_use_https(ip, false, true).is_err());
+            assert_eq!(should_use_https(ip, true, false), Ok(true));
+        }
+    }
+
+    #[test]
+    fn should_use_https_rejects_remote_http() {
+        let remote_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+
+        assert!(should_use_https(remote_ip, false, false).is_err());
+        assert_eq!(should_use_https(remote_ip, true, false), Ok(true));
+    }
+}

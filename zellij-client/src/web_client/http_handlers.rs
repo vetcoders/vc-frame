@@ -59,6 +59,8 @@ pub async fn login_handler(
         login_request.remember_me.unwrap_or(false),
     ) {
         Ok(session_token) => {
+            // `is_https` can only be false for a loopback listener. `should_use_https`
+            // rejects every non-loopback bind without a certificate before the server starts.
             let is_https = state.is_https;
             let cookie = if login_request.remember_me.unwrap_or(false) {
                 // Persistent cookie for remember_me

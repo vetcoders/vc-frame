@@ -46,9 +46,8 @@ pub async fn auth_middleware(request: Request, next: Next) -> Result<Response, S
                 .body(Body::empty())
                 .unwrap();
 
-            // Clear both secure and non-secure versions
-            // in case the user was on http before and is now on https
-            // or vice versa
+            // Clear both variants: loopback HTTP legitimately creates the non-secure
+            // cookie, and a later HTTPS request cannot remove it with a Secure tombstone.
             let clear_cookies = [
                 Cookie::build(("session_token", ""))
                     .http_only(true)

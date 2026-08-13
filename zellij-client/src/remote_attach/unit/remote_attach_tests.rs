@@ -86,6 +86,8 @@ mod mock_server {
             .unwrap()
             .insert(session_token.clone(), web_client_id);
 
+        // This mock server intentionally uses loopback HTTP. A Secure cookie would not be
+        // returned by the test client's cookie jar and would invalidate the mock contract.
         let cookie = Cookie::build(("session_token", session_token))
             .path("/")
             .http_only(true)
