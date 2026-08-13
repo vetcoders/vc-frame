@@ -4194,9 +4194,16 @@ def main() -> int:
             empty_viewer_origin_identity,
             empty_viewer_origin_pane,
         )
+        empty_viewer_latch = (
+            root / "interruptions" / "after_empty_viewer_reservation.latch"
+        ).resolve()
+        empty_viewer_interrupt_env = dict(env)
+        empty_viewer_interrupt_env[
+            "VC_FRAME_TRIAGE_E2E_VIEWER_RESERVATION_LATCH"
+        ] = str(empty_viewer_latch)
         empty_viewer_interrupted = interrupt_process_at_state(
             binary,
-            env,
+            empty_viewer_interrupt_env,
             triage_arguments(
                 empty_viewer_run,
                 -9,
@@ -4205,12 +4212,16 @@ def main() -> int:
             ),
             scenario="after_empty_viewer_reservation",
             artifact_root=root / "interruptions",
-            observe=lambda: pending_empty_viewer_killpoint_state(
-                binary,
-                env,
-                control_plane,
-                run=empty_viewer_run,
-                drawer="Needs attention",
+            observe=lambda: (
+                pending_empty_viewer_killpoint_state(
+                    binary,
+                    env,
+                    control_plane,
+                    run=empty_viewer_run,
+                    drawer="Needs attention",
+                )
+                if empty_viewer_latch.is_file()
+                else None
             ),
             before_interrupt=lambda snapshot: materialize_empty_reserved_viewer(
                 binary,
@@ -4223,6 +4234,16 @@ def main() -> int:
             pause_process_group=False,
             cleanup_proofs=interruption_cleanup_proofs,
             slice_seconds=0.00025,
+        )
+        empty_viewer_latch_evidence = empty_viewer_latch.read_text(
+            encoding="utf-8"
+        ).strip()
+        require(
+            "generation=1" in empty_viewer_latch_evidence,
+            "empty-viewer interruption did not bind the first durable reservation",
+        )
+        empty_viewer_interrupted.observed_state["reservation_latch"] = (
+            empty_viewer_latch_evidence
         )
         require(
             process_state(empty_viewer_interrupted.pid) is None,

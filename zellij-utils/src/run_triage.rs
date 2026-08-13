@@ -914,6 +914,15 @@ pub trait TriageIo {
     ) -> Result<CaptureEvidence, String>;
     fn load_receipt(&mut self, path: &Path) -> Result<Option<TransferReceipt>, String>;
     fn write_receipt(&mut self, path: &Path, receipt: &TransferReceipt) -> Result<(), String>;
+    /// Optional adapter boundary used after a viewer reservation is durable
+    /// and before the corresponding tab creation begins.
+    fn after_viewer_reservation(
+        &mut self,
+        _receipt_path: &Path,
+        _receipt: &TransferReceipt,
+    ) -> Result<(), String> {
+        Ok(())
+    }
     fn write_meta(&mut self, dest: &Path, meta: &RunMeta) -> Result<(), String>;
     /// Create the bucket session if it does not exist yet. Idempotent.
     fn ensure_bucket_session(&mut self, session: &str) -> Result<(), String>;
@@ -1376,6 +1385,16 @@ pub fn transfer_finished_run<Io: TriageIo>(
             receipt.viewer_creation_pending = true;
             advance_viewer_creation_generation(&mut receipt)?;
             persist_receipt(io, &receipt_dest, &mut receipt)?;
+            if let Err(message) = io.after_viewer_reservation(&receipt_dest, &receipt) {
+                return Err(fail_transfer(
+                    io,
+                    &receipt_dest,
+                    &mut receipt,
+                    TransferStep::WriteReceipt,
+                    message,
+                    current_origin_tab_state,
+                ));
+            }
             if let Err(message) = io.open_bucket_tab(
                 bucket.session_name(),
                 &viewer_tab_name,
@@ -2134,6 +2153,14 @@ mod tests {
             self.receipt = Some(receipt.clone());
             Ok(())
         }
+        fn after_viewer_reservation(
+            &mut self,
+            _receipt_path: &Path,
+            _receipt: &TransferReceipt,
+        ) -> Result<(), String> {
+            self.calls.push("reservation");
+            Ok(())
+        }
         fn write_meta(&mut self, _dest: &Path, _meta: &RunMeta) -> Result<(), String> {
             self.guard(TransferStep::WriteMeta, "meta")
         }
@@ -2424,8 +2451,20 @@ mod tests {
         assert_eq!(
             io.calls,
             vec![
-                "load", "capture", "receipt", "meta", "receipt", "ensure", "confirm", "receipt",
-                "open", "confirm", "receipt", "close", "receipt"
+                "load",
+                "capture",
+                "receipt",
+                "meta",
+                "receipt",
+                "ensure",
+                "confirm",
+                "receipt",
+                "reservation",
+                "open",
+                "confirm",
+                "receipt",
+                "close",
+                "receipt"
             ]
         );
         assert_eq!(report.bucket, BucketKind::Finalized);

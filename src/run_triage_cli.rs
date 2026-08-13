@@ -197,6 +197,8 @@ const NEW_TAB_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const VIEWER_CREATION_RECONCILIATION_TIMEOUT: Duration = Duration::from_secs(30);
 const INVENTORY_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
 const SESSION_READY_TIMEOUT: Duration = Duration::from_secs(20);
+const VIEWER_RESERVATION_LATCH_ENV: &str = "VC_FRAME_TRIAGE_E2E_VIEWER_RESERVATION_LATCH";
+const VIEWER_RESERVATION_LATCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn run_command_with_timeout(
     executable: &Path,
@@ -1604,6 +1606,68 @@ impl TriageIo for CliTriageIo {
 
     fn write_receipt(&mut self, path: &Path, receipt: &TransferReceipt) -> Result<(), String> {
         atomic_write_json(path, serde_json::to_vec_pretty(receipt), "transfer receipt")
+    }
+
+    fn after_viewer_reservation(
+        &mut self,
+        receipt_path: &Path,
+        receipt: &TransferReceipt,
+    ) -> Result<(), String> {
+        let Some(latch_path) = std::env::var_os(VIEWER_RESERVATION_LATCH_ENV) else {
+            return Ok(());
+        };
+        let latch_path = PathBuf::from(latch_path);
+        if !latch_path.is_absolute() {
+            return Err(format!(
+                "{} must name an absolute path",
+                VIEWER_RESERVATION_LATCH_ENV
+            ));
+        }
+        let mut latch = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&latch_path)
+            .map_err(|error| {
+                format!(
+                    "cannot create viewer reservation latch {}: {}",
+                    latch_path.display(),
+                    error
+                )
+            })?;
+        writeln!(
+            latch,
+            "receipt={} generation={} token={}",
+            receipt_path.display(),
+            receipt.viewer_creation_generation,
+            receipt.viewer_token
+        )
+        .map_err(|error| {
+            format!(
+                "cannot write viewer reservation latch {}: {}",
+                latch_path.display(),
+                error
+            )
+        })?;
+        latch.sync_all().map_err(|error| {
+            format!(
+                "cannot sync viewer reservation latch {}: {}",
+                latch_path.display(),
+                error
+            )
+        })?;
+
+        let deadline = Instant::now() + VIEWER_RESERVATION_LATCH_TIMEOUT;
+        while latch_path.exists() {
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "viewer reservation latch {} was not released within {:?}",
+                    latch_path.display(),
+                    VIEWER_RESERVATION_LATCH_TIMEOUT
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Ok(())
     }
 
     fn write_meta(&mut self, dest: &Path, meta: &RunMeta) -> Result<(), String> {

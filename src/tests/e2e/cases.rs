@@ -258,7 +258,10 @@ pub fn cannot_split_terminals_vertically_when_active_terminal_is_too_small() {
             name: "Split pane to the right",
             instruction: |mut remote_terminal: RemoteTerminal| -> bool {
                 let mut step_is_complete = false;
-                if remote_terminal.cursor_position_is(3, 2) {
+                if remote_terminal.cursor_position_is(3, 2)
+                    && remote_terminal.snapshot_contains("Tab#1")
+                    && remote_terminal.snapshot_contains("LIVE ")
+                {
                     remote_terminal.send_key(&PANE_MODE);
                     std::thread::sleep(std::time::Duration::from_millis(100));
                     remote_terminal.send_key(&SPLIT_RIGHT_IN_PANE_MODE);
@@ -273,7 +276,10 @@ pub fn cannot_split_terminals_vertically_when_active_terminal_is_too_small() {
             name: "Make sure only one pane appears",
             instruction: |remote_terminal: RemoteTerminal| -> bool {
                 let mut step_is_complete = false;
-                if remote_terminal.cursor_position_is(3, 2) {
+                if remote_terminal.cursor_position_is(3, 2)
+                    && remote_terminal.snapshot_contains("Tab#1")
+                    && remote_terminal.snapshot_contains("LIVE ")
+                {
                     // ... is the truncated tip line
                     step_is_complete = true;
                 }
@@ -1042,7 +1048,9 @@ pub fn lock_mode() {
             name: "Wait for terminal to render sent keys",
             instruction: |remote_terminal: RemoteTerminal| -> bool {
                 let mut step_is_complete = false;
-                if remote_terminal.cursor_position_is(7, 2) {
+                if remote_terminal.cursor_position_is(7, 2)
+                    && remote_terminal.snapshot_contains("LIVE 1")
+                {
                     // text has been entered into the only terminal pane
                     step_is_complete = true;
                 }
@@ -1686,6 +1694,7 @@ pub fn mirrored_sessions() {
                 if remote_terminal.cursor_position_is(63, 2)
                     && remote_terminal.snapshot_contains("┐┌")
                     && remote_terminal.top_bar_appears()
+                    && remote_terminal.snapshot_contains("Quick search")
                 {
                     // cursor is back in the first tab
                     step_is_complete = true;
@@ -1700,6 +1709,7 @@ pub fn mirrored_sessions() {
                 if remote_terminal.cursor_position_is(63, 2)
                     && remote_terminal.snapshot_contains("┐┌")
                     && remote_terminal.top_bar_appears()
+                    && remote_terminal.snapshot_contains("Quick search")
                 {
                     // cursor is back in the first tab
                     step_is_complete = true;
