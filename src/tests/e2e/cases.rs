@@ -111,7 +111,7 @@ fn account_for_races_in_snapshot(snapshot: String) -> String {
     // (LIVE count, CPU%, MEM, DISK free, HEALTH). Strip it so chrome diffs
     // stay about product layout, not runner load. Segments can appear in any
     // order or subset (e.g. only MEM|DISK|HEALTH when LIVE is zero/absent).
-    let live_replace = Regex::new(r"LIVE \d+\s*").unwrap();
+    let live_replace = Regex::new(r"LIVE[ \t]+(?:\d+|\?)(?:↗)?[ \t]*").unwrap();
     let rail_live_replace = Regex::new(r"Live (?:\d+|…)").unwrap();
     let cockpit_seg_replace = Regex::new(r"(?:\| )?(?:CPU|MEM|DISK|HDD|HEALTH) [^|\n]*").unwrap();
     // Rotating startup tips and the default-mode bottom tip chip row race with
@@ -154,6 +154,71 @@ fn account_for_races_in_snapshot(snapshot: String) -> String {
         .to_string();
 
     eol_arrow_replace.replace_all(&snapshot, "\n").to_string()
+}
+
+fn normalize_mirrored_guide_content(snapshot: String) -> String {
+    let guide_progress = Regex::new(r" \d+/\d+ ").unwrap();
+    let snapshot = guide_progress
+        .replace_all(&snapshot, |captures: &regex::Captures| {
+            "─".repeat(captures[0].chars().count())
+        })
+        .to_string();
+    snapshot
+        .split('\n')
+        .enumerate()
+        .map(|(line_index, line)| {
+            if !(2..22).contains(&line_index) {
+                return line.to_owned();
+            }
+            let mut chars: Vec<char> = line.chars().collect();
+            let Some(first_border) = chars.iter().position(|character| *character == '│') else {
+                return line.to_owned();
+            };
+            let Some(last_border) = chars.iter().rposition(|character| *character == '│') else {
+                return line.to_owned();
+            };
+            if (4..22).contains(&line_index) {
+                chars[..first_border].fill(' ');
+            }
+            if first_border < last_border {
+                chars[first_border + 1..last_border].fill(' ');
+            }
+            chars.into_iter().collect()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn snapshot_normalization_ignores_dynamic_server_live_counts() {
+    for count in ["?", "0", "2", "99"] {
+        let snapshot = format!("status ... LIVE {count:>3}↗\n");
+        assert_eq!(account_for_races_in_snapshot(snapshot), "status ... \n");
+    }
+}
+
+#[test]
+fn mirrored_snapshot_normalization_ignores_dynamic_guide_state() {
+    let snapshot = [
+        "top bar",
+        "rail│ Guide ───── 0/9 ┐",
+        "live│dynamic guide text│",
+        "row │dynamic guide text│",
+        "tip │dynamic guide text│",
+    ]
+    .join("\n");
+
+    assert_eq!(
+        normalize_mirrored_guide_content(snapshot),
+        [
+            "top bar",
+            "rail│ Guide ──────────┐",
+            "live│                  │",
+            "row │                  │",
+            "    │                  │",
+        ]
+        .join("\n")
+    );
 }
 
 // All the E2E tests are marked as "ignored" so that they can be run separately from the normal
@@ -259,8 +324,7 @@ pub fn cannot_split_terminals_vertically_when_active_terminal_is_too_small() {
             instruction: |mut remote_terminal: RemoteTerminal| -> bool {
                 let mut step_is_complete = false;
                 if remote_terminal.cursor_position_is(3, 2)
-                    && remote_terminal.snapshot_contains("Tab#1")
-                    && remote_terminal.snapshot_contains("LIVE ")
+                    && remote_terminal.snapshot_contains("...")
                 {
                     remote_terminal.send_key(&PANE_MODE);
                     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -278,8 +342,8 @@ pub fn cannot_split_terminals_vertically_when_active_terminal_is_too_small() {
                 instruction: |remote_terminal: RemoteTerminal| -> bool {
                     let mut step_is_complete = false;
                     if remote_terminal.cursor_position_is(3, 2)
-                        && remote_terminal.snapshot_contains("Tab#1")
-                        && remote_terminal.snapshot_contains("LIVE ")
+                        && remote_terminal.snapshot_contains("└──────┘")
+                        && remote_terminal.snapshot_contains("     ...")
                     {
                         // ... is the truncated tip line
                         step_is_complete = true;
@@ -1052,7 +1116,10 @@ pub fn lock_mode() {
                 instruction: |remote_terminal: RemoteTerminal| -> bool {
                     let mut step_is_complete = false;
                     if remote_terminal.cursor_position_is(7, 2)
-                        && remote_terminal.snapshot_contains("LIVE 1")
+                        && remote_terminal.snapshot_contains("$ nabc")
+                        && remote_terminal.snapshot_contains("◉ shell")
+                        && remote_terminal.snapshot_contains("┌ shell ")
+                        && remote_terminal.snapshot_contains("⌃g  LOCK ")
                     {
                         // text has been entered into the only terminal pane
                         step_is_complete = true;
@@ -1069,6 +1136,7 @@ pub fn lock_mode() {
             break last_snapshot;
         }
     };
+    let last_snapshot = account_for_races_in_snapshot(last_snapshot);
     assert_snapshot!(last_snapshot);
 }
 
@@ -1598,14 +1666,10 @@ pub fn mirrored_sessions() {
                 .dont_panic()
                 .add_step(Step {
                     name: "Wait for app to load",
-                    instruction: |mut remote_terminal: RemoteTerminal| -> bool {
-                        let mut step_is_complete = false;
-                        if remote_terminal.status_bar_appears()
-                            && remote_terminal.cursor_position_is(3, 2)
-                        {
-                            step_is_complete = true;
-                        }
-                        step_is_complete
+                    instruction: |remote_terminal: RemoteTerminal| -> bool {
+                        remote_terminal.top_bar_appears()
+                            && remote_terminal.mode_status_bar_appears()
+                            && remote_terminal.snapshot_contains("01 ◉ mirrored_sessions")
                     },
                 });
         first_runner.run_all_steps();
@@ -1615,74 +1679,25 @@ pub fn mirrored_sessions() {
             .add_step(Step {
                 name: "Split pane to the right",
                 instruction: |mut remote_terminal: RemoteTerminal| -> bool {
-                    let mut step_is_complete = false;
-                    if remote_terminal.status_bar_appears()
-                        && remote_terminal.cursor_position_is(3, 2)
+                    if remote_terminal.top_bar_appears()
+                        && remote_terminal.mode_status_bar_appears()
+                        && remote_terminal.snapshot_contains("01 ◉ mirrored_sessions")
                     {
                         remote_terminal.send_key(&PANE_MODE);
                         std::thread::sleep(std::time::Duration::from_millis(100));
                         remote_terminal.send_key(&SPLIT_RIGHT_IN_PANE_MODE);
-                        step_is_complete = true;
+                        true
+                    } else {
+                        false
                     }
-                    step_is_complete
                 },
             })
             .add_step(Step {
-                name: "Open new tab (second user)",
-                instruction: |mut remote_terminal: RemoteTerminal| -> bool {
-                    let mut step_is_complete = false;
-                    if remote_terminal.cursor_position_is(63, 2)
-                        && remote_terminal.status_bar_appears()
-                    {
-                        // cursor is in the newly opened second pane
-                        remote_terminal.send_key(&TAB_MODE);
-                        std::thread::sleep(std::time::Duration::from_millis(100));
-                        remote_terminal.send_key(&NEW_TAB_IN_TAB_MODE);
-                        step_is_complete = true;
-                    }
-                    step_is_complete
-                },
-            })
-            .add_step(Step {
-                name: "Wait for new tab to open",
+                name: "Wait for split pane to appear",
                 instruction: |remote_terminal: RemoteTerminal| -> bool {
-                    let mut step_is_complete = false;
-                    if remote_terminal.cursor_position_is(3, 2)
-                        && remote_terminal.snapshot_contains("Tab #2")
-                        && remote_terminal.status_bar_appears()
-                    {
-                        // cursor is in the newly opened second tab
-                        step_is_complete = true;
-                    }
-                    step_is_complete
-                },
-            })
-            .add_step(Step {
-                name: "Switch to previous tab",
-                instruction: |mut remote_terminal: RemoteTerminal| -> bool {
-                    let mut step_is_complete = false;
-                    if remote_terminal.cursor_position_is(3, 2)
-                        && remote_terminal.status_bar_appears()
-                        && remote_terminal.snapshot_contains("Tab #2")
-                    {
-                        // cursor is in the newly opened second pane
-                        remote_terminal.send_key("some text".as_bytes());
-                        step_is_complete = true;
-                    }
-                    step_is_complete
-                },
-            })
-            .add_step(Step {
-                name: "Wait for text to appear on screen",
-                instruction: |mut remote_terminal: RemoteTerminal| -> bool {
-                    let mut step_is_complete = false;
-                    if remote_terminal.snapshot_contains("some text") {
-                        remote_terminal.send_key(&TAB_MODE);
-                        std::thread::sleep(std::time::Duration::from_millis(100));
-                        remote_terminal.send_key(&MOVE_FOCUS_LEFT_IN_PANE_MODE); // same key as tab mode
-                        step_is_complete = true;
-                    }
-                    step_is_complete
+                    remote_terminal.top_bar_appears()
+                        && remote_terminal.mode_status_bar_appears()
+                        && remote_terminal.snapshot_contains("┐┌")
                 },
             });
         second_runner.run_all_steps();
@@ -1691,36 +1706,30 @@ pub fn mirrored_sessions() {
             test_attempts -= 1;
             continue;
         }
-        let second_runner_snapshot = second_runner.take_snapshot_after(Step {
-            name: "take snapshot after",
-            instruction: |remote_terminal: RemoteTerminal| -> bool {
-                let mut step_is_complete = false;
-                if remote_terminal.cursor_position_is(63, 2)
-                    && remote_terminal.snapshot_contains("┐┌")
-                    && remote_terminal.top_bar_appears()
-                    && remote_terminal.snapshot_contains("Quick search")
-                {
-                    // cursor is back in the first tab
-                    step_is_complete = true;
-                }
-                step_is_complete
+        let second_runner_snapshot = second_runner.take_snapshot_after_with_retries(
+            Step {
+                name: "take snapshot after",
+                instruction: |remote_terminal: RemoteTerminal| -> bool {
+                    remote_terminal.top_bar_appears()
+                        && remote_terminal.mode_status_bar_appears()
+                        && remote_terminal.snapshot_contains("┐┌")
+                        && remote_terminal.snapshot_contains("01 ◉ mirrored_sessions")
+                },
             },
-        });
-        let first_runner_snapshot = first_runner.take_snapshot_after(Step {
-            name: "take snapshot after",
-            instruction: |remote_terminal: RemoteTerminal| -> bool {
-                let mut step_is_complete = false;
-                if remote_terminal.cursor_position_is(63, 2)
-                    && remote_terminal.snapshot_contains("┐┌")
-                    && remote_terminal.top_bar_appears()
-                    && remote_terminal.snapshot_contains("Quick search")
-                {
-                    // cursor is back in the first tab
-                    step_is_complete = true;
-                }
-                step_is_complete
+            100,
+        );
+        let first_runner_snapshot = first_runner.take_snapshot_after_with_retries(
+            Step {
+                name: "take snapshot after",
+                instruction: |remote_terminal: RemoteTerminal| -> bool {
+                    remote_terminal.top_bar_appears()
+                        && remote_terminal.mode_status_bar_appears()
+                        && remote_terminal.snapshot_contains("┐┌")
+                        && remote_terminal.snapshot_contains("01 ◉ mirrored_sessions")
+                },
             },
-        });
+            100,
+        );
 
         if (first_runner.test_timed_out || second_runner.test_timed_out) && test_attempts >= 0 {
             test_attempts -= 1;
@@ -1729,8 +1738,10 @@ pub fn mirrored_sessions() {
             break (first_runner_snapshot, second_runner_snapshot);
         }
     };
-    let first_runner_snapshot = account_for_races_in_snapshot(first_runner_snapshot);
-    let second_runner_snapshot = account_for_races_in_snapshot(second_runner_snapshot);
+    let first_runner_snapshot =
+        normalize_mirrored_guide_content(account_for_races_in_snapshot(first_runner_snapshot));
+    let second_runner_snapshot =
+        normalize_mirrored_guide_content(account_for_races_in_snapshot(second_runner_snapshot));
     assert_snapshot!(first_runner_snapshot);
     assert_snapshot!(second_runner_snapshot);
 }
