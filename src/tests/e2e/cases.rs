@@ -272,20 +272,23 @@ pub fn cannot_split_terminals_vertically_when_active_terminal_is_too_small() {
             },
         });
         runner.run_all_steps();
-        let last_snapshot = runner.take_snapshot_after(Step {
-            name: "Make sure only one pane appears",
-            instruction: |remote_terminal: RemoteTerminal| -> bool {
-                let mut step_is_complete = false;
-                if remote_terminal.cursor_position_is(3, 2)
-                    && remote_terminal.snapshot_contains("Tab#1")
-                    && remote_terminal.snapshot_contains("LIVE ")
-                {
-                    // ... is the truncated tip line
-                    step_is_complete = true;
-                }
-                step_is_complete
+        let last_snapshot = runner.take_snapshot_after_with_retries(
+            Step {
+                name: "Make sure only one pane appears",
+                instruction: |remote_terminal: RemoteTerminal| -> bool {
+                    let mut step_is_complete = false;
+                    if remote_terminal.cursor_position_is(3, 2)
+                        && remote_terminal.snapshot_contains("Tab#1")
+                        && remote_terminal.snapshot_contains("LIVE ")
+                    {
+                        // ... is the truncated tip line
+                        step_is_complete = true;
+                    }
+                    step_is_complete
+                },
             },
-        });
+            100,
+        );
         if runner.test_timed_out && test_attempts > 0 {
             test_attempts -= 1;
             continue;
@@ -1043,19 +1046,22 @@ pub fn lock_mode() {
                 },
             });
         runner.run_all_steps();
-        let last_snapshot = runner.take_snapshot_after(Step {
-            name: "Wait for terminal to render sent keys",
-            instruction: |remote_terminal: RemoteTerminal| -> bool {
-                let mut step_is_complete = false;
-                if remote_terminal.cursor_position_is(7, 2)
-                    && remote_terminal.snapshot_contains("LIVE 1")
-                {
-                    // text has been entered into the only terminal pane
-                    step_is_complete = true;
-                }
-                step_is_complete
+        let last_snapshot = runner.take_snapshot_after_with_retries(
+            Step {
+                name: "Wait for terminal to render sent keys",
+                instruction: |remote_terminal: RemoteTerminal| -> bool {
+                    let mut step_is_complete = false;
+                    if remote_terminal.cursor_position_is(7, 2)
+                        && remote_terminal.snapshot_contains("LIVE 1")
+                    {
+                        // text has been entered into the only terminal pane
+                        step_is_complete = true;
+                    }
+                    step_is_complete
+                },
             },
-        });
+            100,
+        );
         if runner.test_timed_out && test_attempts > 0 {
             test_attempts -= 1;
             continue;

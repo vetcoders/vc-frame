@@ -1084,7 +1084,10 @@ impl RemoteRunner {
         self.steps.get(self.current_step_index).is_some()
     }
     pub fn take_snapshot_after(&mut self, step: Step) -> String {
-        let mut retries_left = RETRIES;
+        self.take_snapshot_after_with_retries(step, RETRIES)
+    }
+    pub fn take_snapshot_after_with_retries(&mut self, step: Step, retries: usize) -> String {
+        let mut retries_left = retries;
         let instruction = step.instruction;
         loop {
             println!(
