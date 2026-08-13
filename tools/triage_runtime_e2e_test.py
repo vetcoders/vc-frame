@@ -276,6 +276,84 @@ class SessionTruthTests(unittest.TestCase):
 
 
 class EvidenceAndCleanupTests(unittest.TestCase):
+    @mock.patch.object(MODULE, "wait_for_stable_tab_state")
+    @mock.patch.object(MODULE, "wait_for_tabs", return_value=[])
+    @mock.patch.object(MODULE, "command", return_value=completed(0))
+    @mock.patch.object(MODULE, "query_session")
+    def test_create_session_accepts_available_unstable_tabs(
+        self,
+        query: mock.Mock,
+        _command: mock.Mock,
+        wait_for_tabs: mock.Mock,
+        stable_tabs: mock.Mock,
+    ) -> None:
+        query.return_value = MODULE.SessionQuery(
+            state="absent",
+            tabs=None,
+            list_tabs_exit=1,
+            list_tabs_stderr="not found",
+            inventory_state="missing",
+        )
+
+        MODULE.create_session(pathlib.Path("vc-frame"), {}, "headless")
+
+        wait_for_tabs.assert_called_once_with(
+            pathlib.Path("vc-frame"), {}, "headless"
+        )
+        stable_tabs.assert_not_called()
+
+    @mock.patch.object(MODULE, "terminal_panes", return_value=[10, 11])
+    @mock.patch.object(MODULE, "tab_identity", return_value=7)
+    @mock.patch.object(MODULE, "wait_for_tabs", return_value=[])
+    @mock.patch.object(
+        MODULE,
+        "command",
+        return_value=completed(2, stderr="did not acknowledge completion within 25s"),
+    )
+    def test_marker_tab_reconciles_ambiguous_new_tab_acknowledgement(
+        self,
+        command: mock.Mock,
+        _wait_for_tabs: mock.Mock,
+        _tab_identity: mock.Mock,
+        _terminal_panes: mock.Mock,
+    ) -> None:
+        self.assertEqual(
+            MODULE.create_marker_tab_with_markers(
+                pathlib.Path("vc-frame"),
+                {},
+                "headless",
+                "transcript",
+                ["ONE", "TWO"],
+            ),
+            (7, [10, 11]),
+        )
+        self.assertIsNone(command.call_args.kwargs["expect_success"])
+
+    @mock.patch.object(MODULE.time, "monotonic", side_effect=[0.0, 16.0])
+    @mock.patch.object(MODULE, "wait_for_tabs", return_value=[])
+    @mock.patch.object(
+        MODULE,
+        "command",
+        return_value=completed(2, stderr="did not acknowledge completion within 25s"),
+    )
+    def test_marker_tab_rejects_unmaterialized_failed_action(
+        self,
+        _command: mock.Mock,
+        _wait_for_tabs: mock.Mock,
+        _monotonic: mock.Mock,
+    ) -> None:
+        with self.assertRaisesRegex(
+            AssertionError,
+            "did not materialize 1 new terminal pane.*did not acknowledge completion",
+        ):
+            MODULE.create_marker_tab_with_markers(
+                pathlib.Path("vc-frame"),
+                {},
+                "headless",
+                "transcript",
+                ["ONE"],
+            )
+
     def test_artifact_snapshot_records_path_size_and_digest(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)

@@ -293,7 +293,6 @@ pub fn cannot_split_terminals_vertically_when_active_terminal_is_too_small() {
             break last_snapshot;
         }
     };
-    let last_snapshot = account_for_races_in_snapshot(last_snapshot);
     assert_snapshot!(last_snapshot);
 }
 
@@ -1064,7 +1063,6 @@ pub fn lock_mode() {
             break last_snapshot;
         }
     };
-    let last_snapshot = account_for_races_in_snapshot(last_snapshot);
     assert_snapshot!(last_snapshot);
 }
 

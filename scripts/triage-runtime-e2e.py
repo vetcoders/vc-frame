@@ -1264,7 +1264,7 @@ def create_session(binary: pathlib.Path, env: dict[str, str], session: str) -> N
     # A detached/background session can truthfully expose an empty bootstrap
     # pane inventory. Session readiness is therefore proven through list-tabs;
     # the first marker tab below separately proves terminal-pane usability.
-    wait_for_stable_tab_state(binary, env, session)
+    wait_for_tabs(binary, env, session)
 
 
 def create_marker_tab(
@@ -1292,7 +1292,12 @@ def create_marker_tab_with_markers(
     name: str,
     markers: list[str],
 ) -> tuple[int, list[int]]:
-    command(
+    existing_tab_ids = {
+        int(tab["tab_id"])
+        for tab in wait_for_tabs(binary, env, session)
+        if tab.get("name") == name and isinstance(tab.get("tab_id"), int)
+    }
+    new_tab_result = command(
         binary,
         env,
         "-s",
@@ -1303,19 +1308,21 @@ def create_marker_tab_with_markers(
         name,
         "--layout-string",
         marker_layout_for_markers(markers),
+        expect_success=None,
     )
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         try:
             tab_id = tab_identity(binary, env, session, name)
             panes = terminal_panes(binary, env, session, tab_id)
-            if len(panes) == len(markers):
+            if tab_id not in existing_tab_ids and len(panes) == len(markers):
                 return tab_id, panes
         except AssertionError:
             pass
         time.sleep(0.1)
     raise AssertionError(
-        f"tab {session}/{name} did not materialize {len(markers)} terminal pane(s)"
+        f"tab {session}/{name} did not materialize {len(markers)} new terminal pane(s); "
+        f"new-tab exit={new_tab_result.returncode}, stderr={new_tab_result.stderr!r}"
     )
 
 
