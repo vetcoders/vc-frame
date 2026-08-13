@@ -138,7 +138,9 @@ LOCAL_BIN_DIR ?= $(HOME)/.local/bin
 LOCAL_VC_FRAME_ALIAS ?= $(LOCAL_BIN_DIR)/vc-frame
 install: doctor-quiet doctor-install-quiet
 	@./scripts/plugins-parity.zsh check
-	$(CARGO) xtask install --no-plugins $(DEST)
+	@install_target="$${CARGO_TARGET_DIR:-$${XDG_CACHE_HOME:-$$HOME/.cache}/vc-frame/build}"; \
+		mkdir -p "$$install_target"; \
+		CARGO_TARGET_DIR="$$install_target" $(CARGO) xtask install --no-plugins $(DEST)
 	@mkdir -p "$(LOCAL_BIN_DIR)"
 	@installed="$(DEST)"; \
 	if [ -d "$$installed" ]; then installed="$$installed/vc-frame"; fi; \

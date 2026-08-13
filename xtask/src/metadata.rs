@@ -1,6 +1,7 @@
 //! Helper functions for querying cargo metadata
 use anyhow::Context;
 use serde_json::Value;
+use std::path::PathBuf;
 use xshell::{Shell, cmd};
 
 /// Get cargo metadata for the workspace
@@ -11,6 +12,15 @@ pub fn get_cargo_metadata(sh: &Shell) -> anyhow::Result<Value> {
         .context("Failed to run cargo metadata")?;
 
     serde_json::from_str(&metadata_json).context("Failed to parse cargo metadata JSON")
+}
+
+/// Resolve Cargo's effective target directory, including CARGO_TARGET_DIR.
+pub fn target_directory(sh: &Shell) -> anyhow::Result<PathBuf> {
+    let metadata = get_cargo_metadata(sh)?;
+    metadata["target_directory"]
+        .as_str()
+        .map(PathBuf::from)
+        .context("Cargo metadata has no target_directory")
 }
 
 /// Get the appropriate features string for a crate when --no-web is enabled

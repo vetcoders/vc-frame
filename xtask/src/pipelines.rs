@@ -99,7 +99,9 @@ pub fn install(sh: &Shell, flags: flags::Install) -> anyhow::Result<()> {
             .join(&flags.destination)
     };
     sh.change_dir(crate::project_root());
-    let source = crate::project_root().join("target/release/vc-frame");
+    let source = metadata::target_directory(sh)
+        .context("failed to resolve Cargo target directory")?
+        .join("release/vc-frame");
     install_binary(sh, &source, &destination).with_context(err_context)?;
 
     Ok(())
