@@ -489,10 +489,8 @@ impl ZellijPlugin for State {
                 // Command panes are held after exit and remain replaceable.
                 self.guest_pane_id = Some(terminal_pane_id);
             },
-            Event::PaneUpdate(pane_manifest) if self.frame_host => {
-                if self.guest_pane_id.is_none() {
-                    self.guest_pane_id = guest_placeholder_pane_id(&pane_manifest);
-                }
+            Event::PaneUpdate(pane_manifest) if self.frame_host && self.guest_pane_id.is_none() => {
+                self.guest_pane_id = guest_placeholder_pane_id(&pane_manifest);
             },
             Event::CommandPaneOpened(terminal_pane_id, context)
                 if context.contains_key(VC_LIVE_DASHBOARD_CONTEXT_KEY) =>
