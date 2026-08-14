@@ -14,7 +14,7 @@
 #   - protobuf compiler (protoc)
 
 .PHONY: all build plugins plugins-assets plugins-parity plugins-parity-double \
-        plugins-parity-self-test chrome-contract binary run test test-server test-utils \
+        plugins-parity-self-test chrome-contract binary release-binary run test test-server test-utils \
         test-client test-no-web check clippy precheck semgrep fmt clean doctor \
         doctor-quiet help release-contract-test \
         triage-runtime-e2e-static triage-runtime-e2e \
@@ -126,6 +126,12 @@ binary: doctor-quiet
 ## Build in release mode
 release: doctor-quiet
 	$(CARGO) xtask build --release
+
+## Build the release host binary without rewriting committed plugin assets.
+## Vibecrafted.app consumes this provenance-stable donor target after verifying
+## that the checked-in plugin receipt matches the embedded asset fleet.
+release-binary: doctor-quiet plugins-parity
+	$(CARGO) xtask build --release --no-plugins
 
 ## Run the locally built vc-frame
 run: doctor-quiet
@@ -347,6 +353,7 @@ help:
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "plugins-parity" "Verify assets match SHA256SUMS"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "binary" "Build only host binary (plugins must exist)"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "release" "Build everything in release mode (cargo; not publish)"
+	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "release-binary" "Build provenance-stable donor binary for Vibecrafted.app"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "run" "Run the locally built vc-frame"
 	@printf "\n  $(C_YELLOW)QUALITY GATES$(C_RESET)\n"
 	@printf "    $(C_GREEN)%-16s$(C_RESET) %s\n" "precheck" "Format check + clippy -D warnings + workspace typecheck"

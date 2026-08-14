@@ -32,6 +32,17 @@ def main() -> int:
         re.search(r"(?m)^release: doctor-quiet$", makefile) is not None,
         "vc-frame must retain the donor release-build target",
     )
+    require(
+        re.search(
+            r"(?m)^release-binary: doctor-quiet plugins-parity$", makefile
+        )
+        is not None,
+        "vc-frame must expose the provenance-stable Vibecrafted.app donor target",
+    )
+    require(
+        "$(CARGO) xtask build --release --no-plugins" in makefile,
+        "the Vibecrafted.app donor target must not rewrite committed plugin assets",
+    )
     for target in ("install", "package", "release-tag", "release-push"):
         require(
             re.search(rf"(?m)^{re.escape(target)}\s*:", makefile) is None,
