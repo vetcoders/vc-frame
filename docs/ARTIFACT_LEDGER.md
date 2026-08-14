@@ -37,7 +37,7 @@ plugins separately from the single test-only fixture.
 | `assets/zellij.desktop` | untracked legacy twin | **None.** Dist copies `assets/vc-frame.desktop` (`xtask/src/pipelines.rs`). | **REMOVE** | Diff vs `vc-frame.desktop` is name/Exec/Icon only (`zellij` brand). No code path references `zellij.desktop`. Fixture snapshots only list the historical filename as terminal text. |
 | `assets/zellij.rc` | untracked twin of `vc-frame.rc` | **None.** `src/build.rs` embeds `assets/vc-frame.rc`. | **REMOVE** | Byte-identical icon resource; unused path. |
 | `wix/Zellij.wxl` | untracked legacy localization | **None.** `wix/main.wxs` builds with `wix/VcFrame.wxl`. | **REMOVE** | Diff is "Zellij" → "Vc-Frame" string localization only. |
-| `build/` (`build/Vibecrafted.app/…`) | untracked packager output | Produced by `scripts/package-vibecrafted-app.zsh`; not a source surface. | **REMOVE + gitignore `/build/`** | Local assembly dir; must never be committed. |
+| `build/` | ignored legacy packager output | **None.** The retired `scripts/package-vibecrafted-app.zsh` split-product packager was removed; Vibecrafted owns app assembly. | **KEEP IGNORED** | `/build/` remains ignored so stale local output can never enter the donor payload. |
 
 ## Keep (canonical distribution sources)
 

@@ -24,6 +24,7 @@ def main() -> int:
         ROOT / ".github" / "workflows" / "release.yml",
         ROOT / "tools" / "install.sh",
         ROOT / "scripts" / "release-provenance.zsh",
+        ROOT / "scripts" / "package-vibecrafted-app.zsh",
     )
     for path in forbidden_paths:
         require(not path.exists(), f"split-product surface must stay absent: {path}")
