@@ -1,6 +1,0 @@
-# Self-hosted runners retired from this public repo on 2026-08-02; all
-# workflows run on GitHub-hosted runners, so no custom labels are declared.
-paths:
-  .github/workflows/release.yml:
-    ignore:
-      - 'shellcheck reported issue in this script: SC2016:'

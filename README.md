@@ -10,15 +10,22 @@
 </p>
 <h4 align="center">
   [<a href="docs/VC_FRAME_OPERATOR_SURFACE.md">Operator Surface</a>]
-  [<a href="#how-do-i-install-it">Install</a>]
-  [<a href="docs/RELEASE.md">Release Runbook</a>]
+  [<a href="#how-do-i-get-it">Product boundary</a>]
+  [<a href="docs/RELEASE.md">Donor contract</a>]
   [<a href="docs/TERMINOLOGY.md">Terminology</a>]
   [<a href="https://zellij.dev/documentation/">Upstream Zellij Docs</a>]
 </h4>
 
 # What is this?
 
-vc-frame is a vibecrafted runtime and terminal workspace built on the Zellij core. It is aimed at developers, operators, AI-agent workflows, and anyone who lives in the terminal. Similar programs are sometimes called "Terminal Multiplexers".
+vc-frame is the session interior shipped inside `Vibecrafted.app`, built on the
+Zellij core. It is aimed at developers, operators, AI-agent workflows, and
+anyone who lives in the terminal. Similar programs are sometimes called
+"Terminal Multiplexers".
+
+**Vibecrafted.app owns** the application, DMG, install, update and runtime
+boundary. This repository supplies a deterministic donor binary; it does not
+publish or install a separate product.
 
 vc-frame keeps the Zellij philosophy that one must not sacrifice simplicity for power, while adding a fork-owned surface for Vibecrafted operator workflows.
 
@@ -28,7 +35,8 @@ vc-frame is geared toward beginner and power users alike - allowing deep customi
 
 vc-frame includes a built-in [web-client](https://zellij.dev/tutorials/web-client/), making a terminal optional.
 
-You can get started from a tagged release or build `vc-frame` locally.
+End users get vc-frame from the single `Vibecrafted.dmg`. Contributors can
+build it locally.
 
 For the redesign promise, proof, and quick-start path, read [docs/VC_FRAME_OPERATOR_SURFACE.md](docs/VC_FRAME_OPERATOR_SURFACE.md).
 
@@ -43,32 +51,17 @@ The default layout has two rails:
 
 The Vibecrafted fleet contracts are still release-blocking: `list-sessions --no-formatting` keeps `[Created ...]` / `(current)` liveness output, and panes still receive `VC_FRAME_PANE_ID` / `VC_FRAME_SESSION_NAME`.
 
-## How do I install it?
+## How do I get it?
 
-For a published release, use the signed GitHub Release installer:
+End users install or update the signed and notarized `Vibecrafted.dmg` from the
+[`vetcoders/vibecrafted` releases](https://github.com/vetcoders/vibecrafted/releases).
+That app carries vc-frame, vc-terminal and the complete matching runtime.
 
-```bash
-VCFRAME_GPG_FINGERPRINT=<pinned-fingerprint> \
-  sh -c "$(curl -fsSL https://github.com/vetcoders/vc-frame/releases/latest/download/install.sh)"
-vc-frame --version
-```
-
-Before the first release is published, use a source checkout:
-
-```bash
-make install
-```
-
-This installs `vc-frame`. Existing Zellij configuration and layout concepts
-remain compatible, but vc-frame does not claim ownership of the public
-`zellij` executable or package channel.
-
-This is not the same as a public package channel. Upstream distro/Homebrew packages named `zellij` install upstream Zellij, not this Vetcoders `vc-frame` runtime. See [docs/THIRD_PARTY_INSTALL.md](docs/THIRD_PARTY_INSTALL.md) for that compatibility boundary and [docs/RELEASE.md](docs/RELEASE.md) for the release-grade `curl ... | sh` path.
-
-#### Installing from `main`
-Installing vc-frame from an arbitrary development branch is not recommended for daily use. Development branches represent pre-release code, are constantly being worked on, and may contain broken or unusable features.
-
-That being said - no-one will stop you from using it (and bug reports involving new features are greatly appreciated), but outside users should prefer a tagged vc-frame release once one is published.
+There is intentionally no standalone vc-frame installer or package channel.
+Upstream distro/Homebrew packages named `zellij` install upstream Zellij, not
+this donor. See [docs/THIRD_PARTY_INSTALL.md](docs/THIRD_PARTY_INSTALL.md) for
+that compatibility boundary and [docs/RELEASE.md](docs/RELEASE.md) for the
+ownership fence.
 
 ## How do I start a development environment?
 

@@ -131,7 +131,7 @@ Symptom → cause → fix:
 |---|---|---|
 | L0 | Any terminal, no setup — vc-frame works, minus Alt gestures on macOS | works |
 | L1 | Imported preset (`tools/alacritty/vc-frame.toml`) | **shipped** |
-| L2 | `tools/install.sh` offers to install the preset + import line | planned |
+| L2 | `Vibecrafted.app` supplies the host preset inside its app-owned config root | shipped |
 | L3 | `workspace-designer` exports paired themes: `themes/<name>.kdl` + an Alacritty color TOML from the same palette | roadmap |
 
 L3 closes the last seam: one palette source generating both the vc-frame

@@ -13,8 +13,8 @@ session rail.
 
 For vc-frame itself:
 
-- Source-build preview: `make install`
-- Release-grade path: [RELEASE.md](RELEASE.md)
+- Local donor build: `make release`
+- End-user product path: the single `Vibecrafted.dmg`; see [RELEASE.md](RELEASE.md)
 - Product surface: [VC_FRAME_OPERATOR_SURFACE.md](VC_FRAME_OPERATOR_SURFACE.md)
 
 ## Packages

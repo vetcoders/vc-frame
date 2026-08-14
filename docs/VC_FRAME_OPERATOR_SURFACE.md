@@ -126,30 +126,22 @@ requirements (macOS `option_as_alt`, hints, glyph width) live in
 ## Try It From Source
 
 ```bash
-make install
-vc-frame setup --check
-vc-frame setup --dump-layout default
-vc-frame setup --dump-config
-vc-frame
+make release
+target/release/vc-frame setup --check
+target/release/vc-frame setup --dump-layout default
+target/release/vc-frame setup --dump-config
+target/release/vc-frame
 ```
 
 Public packages and executables named `zellij` belong to upstream Zellij, not
 the Vetcoders vc-frame runtime.
 
-## Release Channel
+## Product Channel
 
-The release-grade path is documented in [RELEASE.md](RELEASE.md). A real public
-release should provide prebuilt `vc-frame-*` artifacts, checksums, signatures,
-`manifest.json`, and a served installer:
-
-```bash
-VCFRAME_GPG_FINGERPRINT=<pinned-fingerprint> \
-  sh -c "$(curl -fsSL https://github.com/vetcoders/vc-frame/releases/latest/download/install.sh)"
-vc-frame --version
-```
-
-Until those artifacts are published for a tag, this repository should be
-described as source-build preview for outside users.
+The release-grade ownership fence is documented in [RELEASE.md](RELEASE.md).
+`vc-frame` is embedded in the signed `Vibecrafted.app`; it does not publish
+prebuilt archives, an installer or an independent update channel. End users
+install the single `Vibecrafted.dmg` from `vetcoders/vibecrafted`.
 
 ## Verified Runtime Evidence
 
