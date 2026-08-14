@@ -158,10 +158,17 @@ fn account_for_races_in_snapshot(snapshot: String) -> String {
 
 fn normalize_mirrored_guide_content(snapshot: String) -> String {
     let guide_progress = Regex::new(r" \d+/\d+ ").unwrap();
+    // Mode is client-local: the client that issued the split can still paint
+    // PANE while its passive mirror paints NORMAL. The test owns shared pane
+    // geometry, not each client's transient input mode, so normalize the badge.
+    let client_mode_badge = Regex::new(r"⎮  . [A-Z]   ◉").unwrap();
     let snapshot = guide_progress
         .replace_all(&snapshot, |captures: &regex::Captures| {
             "─".repeat(captures[0].chars().count())
         })
+        .to_string();
+    let snapshot = client_mode_badge
+        .replace_all(&snapshot, "⎮  ▷ N   ◉")
         .to_string();
     snapshot
         .split('\n')
@@ -218,6 +225,16 @@ fn mirrored_snapshot_normalization_ignores_dynamic_guide_state() {
             "    │                  │",
         ]
         .join("\n")
+    );
+}
+
+#[test]
+fn mirrored_snapshot_normalization_ignores_client_local_mode() {
+    let normal = "𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. ⎮  ▷ N   ◉ Start here";
+    let pane = "𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. ⎮  ◫ P   ◉ Start here";
+    assert_eq!(
+        normalize_mirrored_guide_content(normal.to_owned()),
+        normalize_mirrored_guide_content(pane.to_owned())
     );
 }
 
@@ -2075,17 +2092,16 @@ pub fn bracketed_paste() {
         });
         runner.run_all_steps();
 
-        let last_snapshot = runner.take_snapshot_after(Step {
-            name: "Wait for terminal to render sent keys",
-            instruction: |remote_terminal: RemoteTerminal| -> bool {
-                let mut step_is_complete = false;
-                if remote_terminal.snapshot_contains("abc") {
-                    // text has been entered into the only terminal pane
-                    step_is_complete = true;
-                }
-                step_is_complete
+        let last_snapshot = runner.take_snapshot_after_with_retries(
+            Step {
+                name: "Wait for terminal and stable mode chrome",
+                instruction: |remote_terminal: RemoteTerminal| -> bool {
+                    remote_terminal.snapshot_contains("abc")
+                        && remote_terminal.mode_status_bar_appears()
+                },
             },
-        });
+            100,
+        );
         if runner.test_timed_out && test_attempts > 0 {
             test_attempts -= 1;
             continue;
