@@ -13,7 +13,7 @@ use zellij_tile_utils::style;
 ///
 /// Grid (Row 0 chrome), anchored to the Sessions-rail partition datum `⎮`:
 /// ```text
-///   [left_inset][Z0 brand 14][gap 4][⎮][gap 1][Z1 mode 8][Z2 tabs flex][Z3 toolbar 36]
+///   [left_inset][Z0 brand 14][gap 4][⎮][gap 1][Z1 mode 8][Z2 tabs flex][Z3 toolbar 38]
 /// ```
 /// With the default operator layout (`left_inset=6`, rail `size=24`):
 /// brand ends at col 20, 4-col gap, datum at col 24 (= rail width), mode at 26.
@@ -34,8 +34,10 @@ pub const AFTER_BRAND_FIXED_COLS: usize =
 pub const COMPOSER_CHIP_COLS: usize = 14;
 /// Leading seam + `❯_ Quick cmd ⇧⌘.` padded to 22 grid cells (Z3 right half).
 pub const QUICK_CMD_CHIP_COLS: usize = 22;
+/// Theme state/action glyph (`☾` dark, `☼` light) with one-cell leading seam.
+pub const THEME_CHIP_COLS: usize = 2;
 /// Protected right toolbar total — immutable position; tabs never push it out.
-pub const ENTRY_ZONE_COLS: usize = COMPOSER_CHIP_COLS + QUICK_CMD_CHIP_COLS; // 36
+pub const ENTRY_ZONE_COLS: usize = COMPOSER_CHIP_COLS + QUICK_CMD_CHIP_COLS + THEME_CHIP_COLS; // 38
 
 pub fn tab_line(
     mode_info: &ModeInfo,
@@ -55,6 +57,7 @@ pub struct TabLineConfig {
     pub brand_text: Option<String>,
     pub brand_text_short: Option<String>,
     pub left_inset: usize,
+    pub theme_indicator: String,
 }
 
 fn calculate_total_length(parts: &[LinePart]) -> usize {
@@ -530,22 +533,47 @@ impl TabLinePrefixBuilder {
 
 struct RightSideElementsBuilder {
     palette: Styling,
+    theme_indicator: String,
 }
 
 impl RightSideElementsBuilder {
-    fn new(palette: Styling) -> Self {
-        Self { palette }
+    fn new(palette: Styling, theme_indicator: String) -> Self {
+        Self {
+            palette,
+            theme_indicator,
+        }
     }
 
-    /// Protected Z3 only — Composer + Quick cmd. Never includes optional chrome.
+    /// Protected Z3 only — Composer + Quick cmd + terminal theme. Never
+    /// includes optional chrome.
     fn build_protected_zone(&self) -> Vec<LinePart> {
-        let elements = vec![self.create_composer_chip(), self.create_quick_cmd_chip()];
+        let elements = vec![
+            self.create_composer_chip(),
+            self.create_quick_cmd_chip(),
+            self.create_theme_chip(),
+        ];
         debug_assert_eq!(
-            elements[0].len + elements[1].len,
+            elements.iter().map(|element| element.len).sum::<usize>(),
             ENTRY_ZONE_COLS,
-            "composer+quick entry zone must be exactly {ENTRY_ZONE_COLS} cols"
+            "composer+quick+theme entry zone must be exactly {ENTRY_ZONE_COLS} cols"
         );
         elements
+    }
+
+    fn create_theme_chip(&self) -> LinePart {
+        let text = pad_to_cols(&format!(" {}", self.theme_indicator), THEME_CHIP_COLS);
+        let styled = style!(
+            self.palette.text_unselected.emphasis_2,
+            self.palette.text_unselected.background
+        )
+        .bold()
+        .paint(text);
+
+        LinePart {
+            part: styled.to_string(),
+            len: THEME_CHIP_COLS,
+            tab_index: Some(crate::THEME_CLICK_SENTINEL),
+        }
     }
 
     /// The Quick cmd chip — floating dispatch shell to type into, not an
@@ -725,7 +753,8 @@ impl TabLineBuilder {
     fn add_right_side_elements(&self, prefix: &mut Vec<LinePart>) {
         // Right Guard: Z3 (Composer + Quick cmd) is always placed. Optional
         // tooltip may follow only when free columns remain after Z3.
-        let right_builder = RightSideElementsBuilder::new(self.palette);
+        let right_builder =
+            RightSideElementsBuilder::new(self.palette, self.config.theme_indicator.clone());
         let mut right_elements = right_builder.build_protected_zone();
         let z3_len = calculate_total_length(&right_elements);
         debug_assert_eq!(z3_len, ENTRY_ZONE_COLS);
@@ -884,9 +913,12 @@ mod tests {
     }
 
     #[test]
-    fn entry_chips_sum_to_protected_z3_36() {
-        assert_eq!(ENTRY_ZONE_COLS, 36);
-        assert_eq!(COMPOSER_CHIP_COLS + QUICK_CMD_CHIP_COLS, ENTRY_ZONE_COLS);
+    fn entry_chips_sum_to_protected_z3_38() {
+        assert_eq!(ENTRY_ZONE_COLS, 38);
+        assert_eq!(
+            COMPOSER_CHIP_COLS + QUICK_CMD_CHIP_COLS + THEME_CHIP_COLS,
+            ENTRY_ZONE_COLS
+        );
         assert_eq!(
             display_width(&pad_to_cols("✍ Composer ⌘E", COMPOSER_CHIP_COLS)),
             COMPOSER_CHIP_COLS
@@ -895,6 +927,8 @@ mod tests {
             display_width(&pad_to_cols(" · ❯_ Quick cmd ⇧⌘.", QUICK_CMD_CHIP_COLS)),
             QUICK_CMD_CHIP_COLS
         );
+        assert_eq!(display_width(&pad_to_cols(" ☾", THEME_CHIP_COLS)), 2);
+        assert_eq!(display_width(&pad_to_cols(" ☼", THEME_CHIP_COLS)), 2);
     }
 
     #[test]
@@ -926,8 +960,8 @@ mod tests {
 
     #[test]
     fn reserved_z3_constant_matches_toolbar_budget() {
-        // Spec: Protected Toolbar Fixed 36 cols.
-        assert_eq!(ENTRY_ZONE_COLS, 36);
+        // Spec: Protected Toolbar Fixed 38 cols.
+        assert_eq!(ENTRY_ZONE_COLS, 38);
         assert_eq!(BRAND_ZONE_COLS, 14);
         // 5 since the mode chip was tightened from the original 8-col budget
         // (f5b8dff65); this freeze-test guards against accidental drift, so

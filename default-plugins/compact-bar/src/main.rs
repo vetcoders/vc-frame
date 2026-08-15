@@ -31,6 +31,7 @@ const CONFIG_BRAND_TEXT_SHORT: &str = "brand_text_short";
 const CONFIG_LEFT_INSET: &str = "left_inset";
 const MSG_TOGGLE_TOOLTIP: &str = "toggle_tooltip";
 const MSG_OPEN_QUICK_CMD: &str = "vc_quick_cmd";
+const THEME_COMMAND_CONTEXT_KEY: &str = "vc_terminal_theme";
 // the status-bar shows up in the pane manifest as "vc-frame:status-bar" when
 // loaded by url and as "status-bar" when loaded through its config alias
 const STATUS_BAR_PLUGIN_URLS: [&str; 3] =
@@ -50,10 +51,36 @@ pub const COMPOSER_CLICK_SENTINEL: usize = usize::MAX;
 /// mini console (interactive terminal) over the current tab. LIVE pulse
 /// lives on the bottom status-bar — no tool rides on it.
 pub const AGENTS_CLICK_SENTINEL: usize = usize::MAX - 2;
+/// Sentinel for the terminal theme action at the far-right edge of the bar.
+pub const THEME_CLICK_SENTINEL: usize = usize::MAX - 3;
 /// Pane title for the Quick cmd mini console (matches the bar chip glyph).
 const QUICK_CMD_PANE_NAME: &str = "❯_ Quick cmd";
 /// Pane title for the Composer atelier — header carries the Paste stack affordance.
 const COMPOSER_PANE_NAME: &str = "✍ Composer · ⧉ Paste stack";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum TerminalTheme {
+    #[default]
+    Dark,
+    Light,
+}
+
+impl TerminalTheme {
+    fn indicator(self) -> &'static str {
+        match self {
+            Self::Dark => "☾",
+            Self::Light => "☼",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "dark" => Some(Self::Dark),
+            "light" => Some(Self::Light),
+            _ => None,
+        }
+    }
+}
 /// Same drafting contract as Super+e (Cmd+E) in the default config — the
 /// single product key. Prefer installed paste-stack-aware `vc-composer.sh`
 /// (vim profile: number, laststatus=0, Ctrl+p paste-stack pick).
@@ -98,6 +125,7 @@ struct State {
     brand_text: Option<String>,
     brand_text_short: Option<String>,
     left_inset: usize,
+    terminal_theme: TerminalTheme,
 
     // Tooltip state
     is_tooltip: bool,
@@ -133,6 +161,9 @@ impl ZellijPlugin for State {
         self.initialize_configuration(configuration);
         self.setup_subscriptions();
         self.configure_keybinds();
+        if !self.is_tooltip {
+            self.query_terminal_theme();
+        }
     }
 
     fn update(&mut self, event: Event) -> bool {
@@ -167,6 +198,9 @@ impl ZellijPlugin for State {
             Event::Timer(_) => self.handle_clipboard_hint_timeout(),
             Event::InputReceived => self.handle_input_received(),
             Event::PermissionRequestResult(_) => true,
+            Event::RunCommandResult(exit_code, stdout, _stderr, context) => {
+                self.handle_theme_command_result(exit_code, &stdout, &context)
+            },
             Event::CustomMessage(message, payload) if message == VC_CHROME_VISIBILITY_MESSAGE => {
                 let was_visible = self.is_visible;
                 match payload.as_str() {
@@ -288,6 +322,7 @@ impl State {
                 EventType::PermissionRequestResult,
                 EventType::CustomMessage,
                 EventType::Visible,
+                EventType::RunCommandResult,
             ]
         };
 
@@ -506,6 +541,10 @@ impl State {
     }
 
     fn handle_tab_click(&mut self, col: usize) {
+        if self.sentinel_clicked(col, THEME_CLICK_SENTINEL) {
+            self.toggle_terminal_theme();
+            return;
+        }
         if self.sentinel_clicked(col, COMPOSER_CLICK_SENTINEL) {
             open_composer();
             return;
@@ -530,6 +569,40 @@ impl State {
             offset += part.len;
         }
         false
+    }
+
+    fn query_terminal_theme(&self) {
+        self.run_theme_command("current");
+    }
+
+    fn toggle_terminal_theme(&self) {
+        self.run_theme_command("toggle");
+    }
+
+    fn run_theme_command(&self, action: &str) {
+        let mut context = BTreeMap::new();
+        context.insert(THEME_COMMAND_CONTEXT_KEY.to_owned(), action.to_owned());
+        run_command(&["vc-theme", action], context);
+    }
+
+    fn handle_theme_command_result(
+        &mut self,
+        exit_code: Option<i32>,
+        stdout: &[u8],
+        context: &BTreeMap<String, String>,
+    ) -> bool {
+        if !context.contains_key(THEME_COMMAND_CONTEXT_KEY) || exit_code != Some(0) {
+            return false;
+        }
+        let Ok(stdout) = std::str::from_utf8(stdout) else {
+            return false;
+        };
+        let Some(theme) = TerminalTheme::parse(stdout) else {
+            return false;
+        };
+        let changed = self.terminal_theme != theme;
+        self.terminal_theme = theme;
+        changed
     }
 
     fn scroll_tab_up(&self) {
@@ -753,6 +826,7 @@ impl State {
             brand_text: self.brand_text.clone(),
             brand_text_short: self.brand_text_short.clone(),
             left_inset: self.left_inset,
+            theme_indicator: self.terminal_theme.indicator().to_owned(),
         };
         self.tab_line = tab_line(&self.mode_info, tab_data, cols, config);
 
@@ -864,5 +938,20 @@ mod transient_dimension_guard_tests {
         let public_message =
             PipeMessage::new(PipeSource::Keybind, MSG_OPEN_QUICK_CMD, &None, &None, false);
         assert!(!state.quick_cmd_message_targets_active_bar(&public_message));
+    }
+
+    #[test]
+    fn theme_command_result_tracks_dark_and_light_without_accepting_noise() {
+        let mut state = State::default();
+        let mut context = BTreeMap::new();
+        context.insert(THEME_COMMAND_CONTEXT_KEY.to_owned(), "current".to_owned());
+
+        assert!(!state.handle_theme_command_result(Some(0), b"dark\n", &context));
+        assert_eq!(state.terminal_theme.indicator(), "☾");
+        assert!(state.handle_theme_command_result(Some(0), b"light\n", &context));
+        assert_eq!(state.terminal_theme.indicator(), "☼");
+        assert!(!state.handle_theme_command_result(Some(1), b"dark\n", &context));
+        assert!(!state.handle_theme_command_result(Some(0), b"sepia\n", &context));
+        assert_eq!(state.terminal_theme.indicator(), "☼");
     }
 }
