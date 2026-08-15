@@ -657,7 +657,7 @@ impl Page {
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new(
-                        "  · Right side: Quick cmd Cmd+K · Composer Cmd+E — or click either chip",
+                        "  · Right side: Quick cmd Shift+Cmd+. · Composer Cmd+E — or click either chip",
                     )
                     .color_substring(2, "Quick cmd")
                     .color_substring(2, "Composer"),
@@ -742,8 +742,8 @@ impl Page {
                         .color_substring(3, "Cmd+Up/Down"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new("  Cmd+K / Cmd+E     Quick cmd / Command Composer")
-                        .color_substring(3, "Cmd+K")
+                    Text::new("  Shift+Cmd+. / Cmd+E     Quick cmd / Command Composer")
+                        .color_substring(3, "Shift+Cmd+.")
                         .color_substring(3, "Cmd+E"),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(

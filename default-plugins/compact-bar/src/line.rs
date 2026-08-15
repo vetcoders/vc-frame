@@ -30,9 +30,9 @@ pub const MODE_ZONE_COLS: usize = 5;
 /// Fixed prefix after brand: gap + datum + lead + mode.
 pub const AFTER_BRAND_FIXED_COLS: usize =
     BRAND_DATUM_GAP_COLS + DATUM_PARTITION_COLS + MODE_LEAD_GAP_COLS + MODE_ZONE_COLS;
-/// `✍ Composer` padded to 14 grid cells (Z3 left half).
+/// `✍ Composer ⌘E` padded to 14 grid cells (Z3 left half).
 pub const COMPOSER_CHIP_COLS: usize = 14;
-/// Leading seam + `❯_ Quick cmd` padded to 22 grid cells (Z3 right half).
+/// Leading seam + `❯_ Quick cmd ⇧⌘.` padded to 22 grid cells (Z3 right half).
 pub const QUICK_CMD_CHIP_COLS: usize = 22;
 /// Protected right toolbar total — immutable position; tabs never push it out.
 pub const ENTRY_ZONE_COLS: usize = COMPOSER_CHIP_COLS + QUICK_CMD_CHIP_COLS; // 36
@@ -553,9 +553,9 @@ impl RightSideElementsBuilder {
     /// [`QUICK_CMD_CHIP_COLS`] so the entry zone never breathes. LIVE pulse
     /// lives on the bottom status-bar.
     fn create_quick_cmd_chip(&self) -> LinePart {
-        let plain = pad_to_cols(" · ❯_ Quick cmd", QUICK_CMD_CHIP_COLS);
+        let plain = pad_to_cols(" · ❯_ Quick cmd ⇧⌘.", QUICK_CMD_CHIP_COLS);
         // Style the visible label; trailing pad spaces inherit the bar ground.
-        let label = "❯_ Quick cmd";
+        let label = "❯_ Quick cmd ⇧⌘.";
         let seam = " · ";
         let pad_tail = " ".repeat(
             display_width(&plain).saturating_sub(display_width(seam) + display_width(label)),
@@ -590,7 +590,7 @@ impl RightSideElementsBuilder {
     /// tab_index. Fixed [`COMPOSER_CHIP_COLS`]. ✍ (text-presentation) says
     /// "drafting" — onboarding and the tooltip teach Cmd+E / Alt+e.
     fn create_composer_chip(&self) -> LinePart {
-        let text = pad_to_cols("✍ Composer", COMPOSER_CHIP_COLS);
+        let text = pad_to_cols("✍ Composer ⌘E", COMPOSER_CHIP_COLS);
         let styled = style!(
             self.palette.text_unselected.base,
             self.palette.text_unselected.background
@@ -888,11 +888,11 @@ mod tests {
         assert_eq!(ENTRY_ZONE_COLS, 36);
         assert_eq!(COMPOSER_CHIP_COLS + QUICK_CMD_CHIP_COLS, ENTRY_ZONE_COLS);
         assert_eq!(
-            display_width(&pad_to_cols("✍ Composer", COMPOSER_CHIP_COLS)),
+            display_width(&pad_to_cols("✍ Composer ⌘E", COMPOSER_CHIP_COLS)),
             COMPOSER_CHIP_COLS
         );
         assert_eq!(
-            display_width(&pad_to_cols(" · ❯_ Quick cmd", QUICK_CMD_CHIP_COLS)),
+            display_width(&pad_to_cols(" · ❯_ Quick cmd ⇧⌘.", QUICK_CMD_CHIP_COLS)),
             QUICK_CMD_CHIP_COLS
         );
     }

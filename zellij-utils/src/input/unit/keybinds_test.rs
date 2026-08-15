@@ -496,14 +496,20 @@ fn can_define_shared_keybinds_for_all_modes() {
 #[test]
 fn shipped_quick_cmd_keybind_targets_compact_bar_in_every_mode() {
     let config = Config::from_default_assets().unwrap();
-    let super_k = KeyWithModifier::new(BareKey::Char('k')).with_super_modifier();
+    let quick_cmd_key = KeyWithModifier::new(BareKey::Char('.'))
+        .with_super_modifier()
+        .with_shift_modifier();
 
     for mode in InputMode::iter() {
         let actions = config
             .keybinds
-            .get_actions_for_key_in_mode(&mode, &super_k)
-            .unwrap_or_else(|| panic!("Super+k must be bound in {mode:?}"));
-        assert_eq!(actions.len(), 1, "Super+k must have one owner in {mode:?}");
+            .get_actions_for_key_in_mode(&mode, &quick_cmd_key)
+            .unwrap_or_else(|| panic!("Super+Shift+. must be bound in {mode:?}"));
+        assert_eq!(
+            actions.len(),
+            1,
+            "Super+Shift+. must have one owner in {mode:?}"
+        );
         match &actions[0] {
             Action::KeybindPipe {
                 name,
@@ -515,8 +521,18 @@ fn shipped_quick_cmd_keybind_targets_compact_bar_in_every_mode() {
                 assert_eq!(plugin.as_deref(), Some("compact-bar"));
                 assert!(!launch_new, "Quick cmd must reuse the loaded compact-bar");
             },
-            action => panic!("Super+k must message compact-bar, got {action:?}"),
+            action => panic!("Super+Shift+. must message compact-bar, got {action:?}"),
         }
+        assert!(
+            config
+                .keybinds
+                .get_actions_for_key_in_mode(
+                    &mode,
+                    &KeyWithModifier::new(BareKey::Char('k')).with_super_modifier(),
+                )
+                .is_none(),
+            "Super+k must be free in {mode:?}"
+        );
     }
 }
 

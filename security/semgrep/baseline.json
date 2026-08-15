@@ -70,7 +70,7 @@
     "skills.command-execution.skill-rust-command-dev-tcp.skill-rust-command-dev-tcp",
     "skills.command-execution.skill-rust-command-network-tools.skill-rust-command-network-tools"
   ],
-  "target_count": 357,
+  "target_count": 356,
   "finding_count": 333,
   "finding_counts_by_rule": {
     "rust.actix.path-traversal.tainted-path.tainted-path": 10,
