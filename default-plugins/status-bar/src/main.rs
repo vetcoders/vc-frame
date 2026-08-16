@@ -59,6 +59,11 @@ const STATUS_SEAM_CELLS: usize = 2;
 /// Columns the resting-mode hint ("Ctrl g LOCK") keeps for itself before
 /// the status segment may claim the rest of the bar.
 const RESTING_HINT_RESERVE: usize = 16;
+/// Product entry shortcuts belong to the persistent bottom bar. Their labels
+/// stay clickable in the top chrome, but the keyboard teaching must not move
+/// between rows or modes.
+const ENTRY_SHORTCUTS_FULL: &str = "⌘E Composer · ⇧⌘. Quick cmd";
+const ENTRY_SHORTCUTS_COMPACT: &str = "⌘E · ⇧⌘.";
 /// Unlocked modes hand the width to the shortcut cheat-sheet; the
 /// swap-layout chip may claim at most 1/N of the row.
 const SWAP_CHIP_MAX_BAR_FRACTION: usize = 4;
@@ -429,15 +434,7 @@ impl ZellijPlugin for State {
             // arrangement context, not telemetry. (Operator regression
             // 2026-08-05: gating on a derived "resting mode" hid the
             // cockpit in LOCK whenever the base mode was Normal.)
-            let right = if self.mode_info.mode == InputMode::Locked {
-                self.right_status_segment(active_tab, cols.saturating_sub(RESTING_HINT_RESERVE))
-            } else {
-                // Unlocked modes: the width belongs to the full shortcut
-                // cheat-sheet — no telemetry. Only the swap-layout chip
-                // ("BASE") keeps the right edge: manipulation modes are
-                // exactly when the operator is arranging.
-                self.swap_chip_segment(active_tab, cols / SWAP_CHIP_MAX_BAR_FRACTION)
-            };
+            let right = self.bottom_right_segment(active_tab, cols);
             let seam = if right.len > 0 { STATUS_SEAM_CELLS } else { 0 };
             let ui_cols = cols.saturating_sub(right.len + seam);
             let line = one_line_ui(
@@ -663,6 +660,67 @@ impl State {
             Some(chip) if chip.len <= max_len => chip,
             _ => LinePart::default(),
         }
+    }
+
+    /// Stable product teaching lane. The full labels are preferred; narrow
+    /// bars keep the chords alone. It is independent of input mode so LOCK,
+    /// PANE, TAB and the other working modes never move these hints upstairs.
+    fn entry_shortcuts_segment(&self, max_len: usize) -> LinePart {
+        let full_len = ENTRY_SHORTCUTS_FULL.width();
+        let compact_len = ENTRY_SHORTCUTS_COMPACT.width();
+        let (text, len) = if full_len <= max_len {
+            (ENTRY_SHORTCUTS_FULL, full_len)
+        } else if compact_len <= max_len {
+            (ENTRY_SHORTCUTS_COMPACT, compact_len)
+        } else {
+            return LinePart::default();
+        };
+        let palette = self.mode_info.style.colors;
+        LinePart {
+            part: style!(
+                palette.text_unselected.emphasis_1,
+                palette.text_unselected.background
+            )
+            .bold()
+            .paint(text)
+            .to_string(),
+            len,
+        }
+    }
+
+    /// Compose the protected product shortcuts with the mode-dependent status
+    /// payload. Entry chords win the width negotiation; telemetry and the swap
+    /// chip degrade after them, never the other way around.
+    fn bottom_right_segment(&self, active_tab: Option<&TabInfo>, cols: usize) -> LinePart {
+        let mut segment = self.entry_shortcuts_segment(cols.saturating_sub(RESTING_HINT_RESERVE));
+        let between = if segment.len > 0 {
+            STATUS_SEAM_CELLS
+        } else {
+            0
+        };
+        let optional_budget = cols.saturating_sub(RESTING_HINT_RESERVE + segment.len + between);
+        let optional = if self.mode_info.mode == InputMode::Locked {
+            self.right_status_segment(active_tab, optional_budget)
+        } else {
+            self.swap_chip_segment(
+                active_tab,
+                optional_budget.min(cols / SWAP_CHIP_MAX_BAR_FRACTION),
+            )
+        };
+        if segment.len > 0 && optional.len > 0 {
+            let palette = self.mode_info.style.colors;
+            segment.append(&LinePart {
+                part: style!(
+                    palette.text_unselected.background,
+                    palette.text_unselected.background
+                )
+                .paint(" ".repeat(STATUS_SEAM_CELLS))
+                .to_string(),
+                len: STATUS_SEAM_CELLS,
+            });
+        }
+        segment.append(&optional);
+        segment
     }
 
     fn swap_layout_status(&self, active_tab: Option<&TabInfo>) -> Option<LinePart> {
@@ -1146,6 +1204,33 @@ pub mod tests {
         assert_eq!(bare.len, "LIVE  3".width());
         // ...and an impossible budget yields empty, never an overflow.
         assert_eq!(state.right_status_segment(None, 3).len, 0);
+    }
+
+    #[test]
+    fn entry_shortcuts_stay_in_the_bottom_bar_across_widths() {
+        let state = State::default();
+
+        let full = state.entry_shortcuts_segment(ENTRY_SHORTCUTS_FULL.width());
+        assert_eq!(full.len, ENTRY_SHORTCUTS_FULL.width());
+        assert!(full.part.contains(ENTRY_SHORTCUTS_FULL));
+
+        let compact = state.entry_shortcuts_segment(ENTRY_SHORTCUTS_COMPACT.width());
+        assert_eq!(compact.len, ENTRY_SHORTCUTS_COMPACT.width());
+        assert!(compact.part.contains(ENTRY_SHORTCUTS_COMPACT));
+
+        assert_eq!(
+            state
+                .entry_shortcuts_segment(ENTRY_SHORTCUTS_COMPACT.width() - 1)
+                .len,
+            0
+        );
+    }
+
+    #[test]
+    fn bottom_right_prioritizes_entry_shortcuts_before_optional_status() {
+        let state = State::default();
+        let segment = state.bottom_right_segment(None, 80);
+        assert!(segment.part.contains(ENTRY_SHORTCUTS_FULL));
     }
 
     #[test]

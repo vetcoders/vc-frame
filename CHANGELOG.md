@@ -5,10 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 ## [Unreleased]
 
+* fix(chrome): Composer and Quick cmd remain clickable, label-only actions in the top bar while their `⌘E` / `⇧⌘.` teaching lane stays permanently in the bottom bar across input modes; the theme glyph keeps a one-column trailing inset in borderless hosts
 * fix(server): a starting server no longer unlinks and re-binds a session socket that a live server still owns — it probes the path first and refuses to start when someone is listening, even if that server is too busy to answer a health probe; only missing, stale or non-socket paths are cleaned up. A server already running a session likewise rejects a second new-session request instead of re-initializing over live state
 * fix(chrome): the chrome a client had visible is parked when that client detaches, so a server with nobody attached stops refreshing the cross-session list once a second; attaching re-activates it and rebuilds the list on the spot
 * perf(plugins): `get_session_list` no longer feeds its result back into Screen — a plugin-initiated read used to trigger a `SessionUpdate` broadcast to every plugin (including the caller), a self-sustaining loop whose cost grew with the square of the live session count
-* feat(input): `Shift+Cmd+.` / `Super+Shift+.` opens the existing `❯_ Quick cmd` mini-console in every mode including LOCK; `Cmd+K` is free again, the keybind messages the active compact-bar so keyboard and click share one runner, geometry and pane-title contract, and both right-side chips advertise their shortcuts (`✍ Composer ⌘E` / `❯_ Quick cmd ⇧⌘.`)
+* feat(input): `Shift+Cmd+.` / `Super+Shift+.` opens the existing `❯_ Quick cmd` mini-console in every mode including LOCK; `Cmd+K` is free again, and the keybind messages the active compact-bar so keyboard and click share one runner, geometry and pane-title contract
 
 ## [0.47.3] - 2026-08-06
 
