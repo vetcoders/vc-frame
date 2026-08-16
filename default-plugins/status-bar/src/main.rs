@@ -59,11 +59,6 @@ const STATUS_SEAM_CELLS: usize = 2;
 /// Columns the resting-mode hint ("Ctrl g LOCK") keeps for itself before
 /// the status segment may claim the rest of the bar.
 const RESTING_HINT_RESERVE: usize = 16;
-/// Product entry shortcuts belong to the persistent bottom bar. Their labels
-/// stay clickable in the top chrome, but the keyboard teaching must not move
-/// between rows or modes.
-const ENTRY_SHORTCUTS_FULL: &str = "⌘E Composer · ⇧⌘. Quick cmd";
-const ENTRY_SHORTCUTS_COMPACT: &str = "⌘E · ⇧⌘.";
 /// Unlocked modes hand the width to the shortcut cheat-sheet; the
 /// swap-layout chip may claim at most 1/N of the row.
 const SWAP_CHIP_MAX_BAR_FRACTION: usize = 4;
@@ -662,65 +657,16 @@ impl State {
         }
     }
 
-    /// Stable product teaching lane. The full labels are preferred; narrow
-    /// bars keep the chords alone. It is independent of input mode so LOCK,
-    /// PANE, TAB and the other working modes never move these hints upstairs.
-    fn entry_shortcuts_segment(&self, max_len: usize) -> LinePart {
-        let full_len = ENTRY_SHORTCUTS_FULL.width();
-        let compact_len = ENTRY_SHORTCUTS_COMPACT.width();
-        let (text, len) = if full_len <= max_len {
-            (ENTRY_SHORTCUTS_FULL, full_len)
-        } else if compact_len <= max_len {
-            (ENTRY_SHORTCUTS_COMPACT, compact_len)
-        } else {
-            return LinePart::default();
-        };
-        let palette = self.mode_info.style.colors;
-        LinePart {
-            part: style!(
-                palette.text_unselected.emphasis_1,
-                palette.text_unselected.background
-            )
-            .bold()
-            .paint(text)
-            .to_string(),
-            len,
-        }
-    }
-
-    /// Compose the protected product shortcuts with the mode-dependent status
-    /// payload. Entry chords win the width negotiation; telemetry and the swap
-    /// chip degrade after them, never the other way around.
+    /// Compose the mode-dependent right edge. Composer and Quick cmd already
+    /// have stable clickable homes in the top chrome; repeating them here
+    /// turns the resting status lane into a second toolbar. LOCK owns the
+    /// cockpit, while unlocked manipulation modes keep only layout context.
     fn bottom_right_segment(&self, active_tab: Option<&TabInfo>, cols: usize) -> LinePart {
-        let mut segment = self.entry_shortcuts_segment(cols.saturating_sub(RESTING_HINT_RESERVE));
-        let between = if segment.len > 0 {
-            STATUS_SEAM_CELLS
+        if self.mode_info.mode == InputMode::Locked {
+            self.right_status_segment(active_tab, cols.saturating_sub(RESTING_HINT_RESERVE))
         } else {
-            0
-        };
-        let optional_budget = cols.saturating_sub(RESTING_HINT_RESERVE + segment.len + between);
-        let optional = if self.mode_info.mode == InputMode::Locked {
-            self.right_status_segment(active_tab, optional_budget)
-        } else {
-            self.swap_chip_segment(
-                active_tab,
-                optional_budget.min(cols / SWAP_CHIP_MAX_BAR_FRACTION),
-            )
-        };
-        if segment.len > 0 && optional.len > 0 {
-            let palette = self.mode_info.style.colors;
-            segment.append(&LinePart {
-                part: style!(
-                    palette.text_unselected.background,
-                    palette.text_unselected.background
-                )
-                .paint(" ".repeat(STATUS_SEAM_CELLS))
-                .to_string(),
-                len: STATUS_SEAM_CELLS,
-            });
+            self.swap_chip_segment(active_tab, cols / SWAP_CHIP_MAX_BAR_FRACTION)
         }
-        segment.append(&optional);
-        segment
     }
 
     fn swap_layout_status(&self, active_tab: Option<&TabInfo>) -> Option<LinePart> {
@@ -1207,30 +1153,21 @@ pub mod tests {
     }
 
     #[test]
-    fn entry_shortcuts_stay_in_the_bottom_bar_across_widths() {
-        let state = State::default();
+    fn bottom_right_is_status_not_a_duplicate_toolbar() {
+        let mut state = State {
+            live_count: 2,
+            ..Default::default()
+        };
+        state.mode_info.mode = InputMode::Locked;
+        let locked = state.bottom_right_segment(None, 80);
+        assert!(locked.part.contains("LIVE  2"));
+        assert!(!locked.part.contains("Composer"));
+        assert!(!locked.part.contains("Quick cmd"));
 
-        let full = state.entry_shortcuts_segment(ENTRY_SHORTCUTS_FULL.width());
-        assert_eq!(full.len, ENTRY_SHORTCUTS_FULL.width());
-        assert!(full.part.contains(ENTRY_SHORTCUTS_FULL));
-
-        let compact = state.entry_shortcuts_segment(ENTRY_SHORTCUTS_COMPACT.width());
-        assert_eq!(compact.len, ENTRY_SHORTCUTS_COMPACT.width());
-        assert!(compact.part.contains(ENTRY_SHORTCUTS_COMPACT));
-
-        assert_eq!(
-            state
-                .entry_shortcuts_segment(ENTRY_SHORTCUTS_COMPACT.width() - 1)
-                .len,
-            0
-        );
-    }
-
-    #[test]
-    fn bottom_right_prioritizes_entry_shortcuts_before_optional_status() {
-        let state = State::default();
-        let segment = state.bottom_right_segment(None, 80);
-        assert!(segment.part.contains(ENTRY_SHORTCUTS_FULL));
+        state.mode_info.mode = InputMode::Normal;
+        let normal = state.bottom_right_segment(None, 80);
+        assert!(!normal.part.contains("Composer"));
+        assert!(!normal.part.contains("Quick cmd"));
     }
 
     #[test]
