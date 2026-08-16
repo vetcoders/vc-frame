@@ -1294,6 +1294,9 @@ if [ -z "$server_url" ]; then
   read -r _ || true
   exit 0
 fi
+if command -v voc >/dev/null 2>&1; then
+  exec voc --view observe --server "$server_url"
+fi
 for candidate in \
   "${VIBECRAFTED_PYTHON:-}" \
   "${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools/vibecrafted/bin/python" \
