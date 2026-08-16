@@ -8,6 +8,7 @@ mod tooltip;
 use std::cmp::{max, min};
 use std::collections::BTreeMap;
 use std::convert::TryInto;
+use std::path::PathBuf;
 
 use tab::get_tab_to_focus;
 use zellij_tile::prelude::*;
@@ -582,7 +583,20 @@ impl State {
     fn run_theme_command(&self, action: &str) {
         let mut context = BTreeMap::new();
         context.insert(THEME_COMMAND_CONTEXT_KEY.to_owned(), action.to_owned());
-        run_command(&["vc-theme", action], context);
+        // Plugin background jobs start with an empty environment. Pass the
+        // authoritative session explicitly so `vc-theme` can switch the
+        // host palette and vc-frame's theme as one transaction; otherwise a
+        // light terminal is left behind stale dark plugin ink.
+        let mut environment = BTreeMap::new();
+        if let Some(session_name) = self.mode_info.session_name.as_ref() {
+            environment.insert("ZELLIJ_SESSION_NAME".to_owned(), session_name.clone());
+        }
+        run_command_with_env_variables_and_cwd(
+            &["vc-theme", action],
+            environment,
+            PathBuf::from("."),
+            context,
+        );
     }
 
     fn handle_theme_command_result(

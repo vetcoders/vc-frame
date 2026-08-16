@@ -13,7 +13,7 @@ use zellij_tile_utils::style;
 ///
 /// Grid (Row 0 chrome), anchored to the Sessions-rail partition datum `⎮`:
 /// ```text
-///   [left_inset][Z0 brand 14][gap 4][⎮][gap 1][Z1 mode 8][Z2 tabs flex][Z3 toolbar 38]
+///   [left_inset][Z0 brand 14][gap 4][⎮][gap 1][Z1 mode 5][Z2 tabs flex][Z3 toolbar 30]
 /// ```
 /// With the default operator layout (`left_inset=6`, rail `size=24`):
 /// brand ends at col 20, 4-col gap, datum at col 24 (= rail width), mode at 26.
@@ -30,14 +30,17 @@ pub const MODE_ZONE_COLS: usize = 5;
 /// Fixed prefix after brand: gap + datum + lead + mode.
 pub const AFTER_BRAND_FIXED_COLS: usize =
     BRAND_DATUM_GAP_COLS + DATUM_PARTITION_COLS + MODE_LEAD_GAP_COLS + MODE_ZONE_COLS;
-/// `✍ Composer ⌘E` padded to 14 grid cells (Z3 left half).
-pub const COMPOSER_CHIP_COLS: usize = 14;
-/// Leading seam + `❯_ Quick cmd ⇧⌘.` padded to 22 grid cells (Z3 right half).
-pub const QUICK_CMD_CHIP_COLS: usize = 22;
-/// Theme state/action glyph (`☾` dark, `☼` light) with one-cell leading seam.
-pub const THEME_CHIP_COLS: usize = 2;
+/// `✍ Composer` padded to 11 grid cells (Z3 left half). Its shortcut lives
+/// permanently in the bottom status bar, never in the clickable chrome.
+pub const COMPOSER_CHIP_COLS: usize = 11;
+/// Leading seam + `❯_ Quick cmd` padded to 16 grid cells (Z3 right half).
+/// Its shortcut lives permanently in the bottom status bar as well.
+pub const QUICK_CMD_CHIP_COLS: usize = 16;
+/// Theme state/action glyph (`☾` dark, `☼` light) with a leading seam and a
+/// one-cell trailing inset, so borderless windows never pin it to the edge.
+pub const THEME_CHIP_COLS: usize = 3;
 /// Protected right toolbar total — immutable position; tabs never push it out.
-pub const ENTRY_ZONE_COLS: usize = COMPOSER_CHIP_COLS + QUICK_CMD_CHIP_COLS + THEME_CHIP_COLS; // 38
+pub const ENTRY_ZONE_COLS: usize = COMPOSER_CHIP_COLS + QUICK_CMD_CHIP_COLS + THEME_CHIP_COLS; // 30
 
 pub fn tab_line(
     mode_info: &ModeInfo,
@@ -581,9 +584,9 @@ impl RightSideElementsBuilder {
     /// [`QUICK_CMD_CHIP_COLS`] so the entry zone never breathes. LIVE pulse
     /// lives on the bottom status-bar.
     fn create_quick_cmd_chip(&self) -> LinePart {
-        let plain = pad_to_cols(" · ❯_ Quick cmd ⇧⌘.", QUICK_CMD_CHIP_COLS);
+        let plain = pad_to_cols(" · ❯_ Quick cmd", QUICK_CMD_CHIP_COLS);
         // Style the visible label; trailing pad spaces inherit the bar ground.
-        let label = "❯_ Quick cmd ⇧⌘.";
+        let label = "❯_ Quick cmd";
         let seam = " · ";
         let pad_tail = " ".repeat(
             display_width(&plain).saturating_sub(display_width(seam) + display_width(label)),
@@ -616,9 +619,9 @@ impl RightSideElementsBuilder {
 
     /// Always-visible Composer entry point, clickable via the sentinel
     /// tab_index. Fixed [`COMPOSER_CHIP_COLS`]. ✍ (text-presentation) says
-    /// "drafting" — onboarding and the tooltip teach Cmd+E / Alt+e.
+    /// "drafting" — the persistent bottom status bar teaches Cmd+E.
     fn create_composer_chip(&self) -> LinePart {
-        let text = pad_to_cols("✍ Composer ⌘E", COMPOSER_CHIP_COLS);
+        let text = pad_to_cols("✍ Composer", COMPOSER_CHIP_COLS);
         let styled = style!(
             self.palette.text_unselected.base,
             self.palette.text_unselected.background
@@ -913,22 +916,22 @@ mod tests {
     }
 
     #[test]
-    fn entry_chips_sum_to_protected_z3_38() {
-        assert_eq!(ENTRY_ZONE_COLS, 38);
+    fn entry_chips_sum_to_protected_z3_30() {
+        assert_eq!(ENTRY_ZONE_COLS, 30);
         assert_eq!(
             COMPOSER_CHIP_COLS + QUICK_CMD_CHIP_COLS + THEME_CHIP_COLS,
             ENTRY_ZONE_COLS
         );
         assert_eq!(
-            display_width(&pad_to_cols("✍ Composer ⌘E", COMPOSER_CHIP_COLS)),
+            display_width(&pad_to_cols("✍ Composer", COMPOSER_CHIP_COLS)),
             COMPOSER_CHIP_COLS
         );
         assert_eq!(
-            display_width(&pad_to_cols(" · ❯_ Quick cmd ⇧⌘.", QUICK_CMD_CHIP_COLS)),
+            display_width(&pad_to_cols(" · ❯_ Quick cmd", QUICK_CMD_CHIP_COLS)),
             QUICK_CMD_CHIP_COLS
         );
-        assert_eq!(display_width(&pad_to_cols(" ☾", THEME_CHIP_COLS)), 2);
-        assert_eq!(display_width(&pad_to_cols(" ☼", THEME_CHIP_COLS)), 2);
+        assert_eq!(display_width(&pad_to_cols(" ☾", THEME_CHIP_COLS)), 3);
+        assert_eq!(display_width(&pad_to_cols(" ☼", THEME_CHIP_COLS)), 3);
     }
 
     #[test]
@@ -960,8 +963,8 @@ mod tests {
 
     #[test]
     fn reserved_z3_constant_matches_toolbar_budget() {
-        // Spec: Protected Toolbar Fixed 38 cols.
-        assert_eq!(ENTRY_ZONE_COLS, 38);
+        // Spec: Protected Toolbar Fixed 30 cols.
+        assert_eq!(ENTRY_ZONE_COLS, 30);
         assert_eq!(BRAND_ZONE_COLS, 14);
         // 5 since the mode chip was tightened from the original 8-col budget
         // (f5b8dff65); this freeze-test guards against accidental drift, so
