@@ -6,7 +6,7 @@ mod tab;
 mod tooltip;
 
 use std::cmp::{max, min};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::convert::TryInto;
 use std::path::PathBuf;
 
@@ -104,6 +104,7 @@ struct State {
     // Tab state
     tabs: Vec<TabInfo>,
     active_tab_idx: usize,
+    failed_tab_positions: BTreeSet<usize>,
 
     // Display state
     mode_info: ModeInfo,
@@ -411,14 +412,29 @@ impl State {
 
     fn handle_pane_update(&mut self, pane_manifest: PaneManifest) -> bool {
         self.status_bar_is_present = self.detect_status_bar_presence(&pane_manifest);
-        if self.toggle_tooltip_key.is_some() {
+        let failed_tab_positions = pane_manifest
+            .panes
+            .iter()
+            .filter_map(|(tab_position, panes)| {
+                panes
+                    .iter()
+                    .any(|pane| !pane.is_plugin && pane.exited && pane.exit_status != Some(0))
+                    .then_some(*tab_position)
+            })
+            .collect();
+        let failures_changed = self.failed_tab_positions != failed_tab_positions;
+        self.failed_tab_positions = failed_tab_positions;
+
+        let tooltip_changed = if self.toggle_tooltip_key.is_some() {
             let previous_tooltip_state = self.tooltip_is_active;
             self.tooltip_is_active = self.detect_tooltip_presence(&pane_manifest);
             self.own_tab_index = self.find_own_tab_index(&pane_manifest);
             previous_tooltip_state != self.tooltip_is_active
         } else {
             false
-        }
+        };
+
+        failures_changed || tooltip_changed
     }
 
     fn handle_mouse_event(&mut self, mouse_event: Mouse) {
@@ -870,6 +886,7 @@ impl State {
                 is_alternate_tab,
                 self.mode_info.style.colors,
                 self.mode_info.capabilities,
+                self.failed_tab_positions.contains(&tab.position),
             );
 
             is_alternate_tab = !is_alternate_tab;
@@ -967,5 +984,35 @@ mod transient_dimension_guard_tests {
         assert!(!state.handle_theme_command_result(Some(1), b"dark\n", &context));
         assert!(!state.handle_theme_command_result(Some(0), b"sepia\n", &context));
         assert_eq!(state.terminal_theme.indicator(), "☼");
+    }
+
+    #[test]
+    fn failed_command_panes_warn_only_their_tab_until_the_manifest_clears() {
+        let mut state = State::default();
+        let failed_pane = PaneInfo {
+            exited: true,
+            exit_status: Some(1),
+            ..Default::default()
+        };
+        let failed_manifest = PaneManifest {
+            panes: std::collections::HashMap::from([(2, vec![failed_pane])]),
+        };
+
+        assert!(state.handle_pane_update(failed_manifest.clone()));
+        assert_eq!(state.failed_tab_positions, BTreeSet::from([2]));
+        assert!(!state.handle_pane_update(failed_manifest));
+
+        let successful_manifest = PaneManifest {
+            panes: std::collections::HashMap::from([(
+                2,
+                vec![PaneInfo {
+                    exited: true,
+                    exit_status: Some(0),
+                    ..Default::default()
+                }],
+            )]),
+        };
+        assert!(state.handle_pane_update(successful_manifest));
+        assert!(state.failed_tab_positions.is_empty());
     }
 }

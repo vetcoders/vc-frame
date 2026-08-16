@@ -37,6 +37,7 @@ pub fn render_tab(
     tab: &TabInfo,
     is_alternate_tab: bool,
     palette: Styling,
+    has_failed_pane: bool,
 ) -> LinePart {
     let focused_clients = tab.other_focused_clients.as_slice();
     // The tab zone speaks the exact chip language of the bottom status-bar
@@ -51,7 +52,7 @@ pub fn render_tab(
     } else {
         palette.ribbon_unselected.background
     };
-    let foreground_color = if tab.is_flashing_bell {
+    let foreground_color = if has_failed_pane || tab.is_flashing_bell {
         palette.ribbon_unselected.emphasis_3
     } else if tab.active {
         palette.ribbon_selected.base
@@ -107,6 +108,7 @@ pub fn tab_style(
     is_alternate_tab: bool,
     palette: Styling,
     _capabilities: PluginCapabilities,
+    has_failed_pane: bool,
 ) -> LinePart {
     // Grapheme-safe soft truncate so long tab titles never explode Z2 width.
     tabname = truncate_display_width(&tabname, TAB_LABEL_MAX_COLS);
@@ -118,7 +120,10 @@ pub fn tab_style(
     if tab.has_bell_notification || tab.is_flashing_bell {
         tabname.push_str(" [!]");
     }
-    render_tab(tabname, tab, is_alternate_tab, palette)
+    if has_failed_pane {
+        tabname.push_str(" ⚠");
+    }
+    render_tab(tabname, tab, is_alternate_tab, palette, has_failed_pane)
 }
 
 pub(crate) fn get_tab_to_focus(
@@ -148,4 +153,33 @@ pub(crate) fn get_clicked_line_part(
         len += tab_line_part.len;
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_pane_marker_is_visible_only_for_failed_tabs() {
+        let tab = TabInfo::default();
+        let warning = tab_style(
+            "resume-codex".to_owned(),
+            &tab,
+            false,
+            Styling::default(),
+            PluginCapabilities::default(),
+            true,
+        );
+        let healthy = tab_style(
+            "resume-codex".to_owned(),
+            &tab,
+            false,
+            Styling::default(),
+            PluginCapabilities::default(),
+            false,
+        );
+
+        assert!(warning.part.contains('⚠'));
+        assert!(!healthy.part.contains('⚠'));
+    }
 }
