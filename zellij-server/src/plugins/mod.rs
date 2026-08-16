@@ -1862,9 +1862,12 @@ fn pipe_to_specific_plugins(params: PipeToSpecificPluginsParams) {
     let size = Size::default();
     match RunPluginOrAlias::from_url(plugin_url, configuration, Some(plugin_aliases), cwd.clone()) {
         Ok(run_plugin_or_alias) => {
+            let match_plugin_location_only =
+                configless_message_matches_plugin_location(configuration, &run_plugin_or_alias);
             let initial_cwd = run_plugin_or_alias.get_initial_cwd();
             let all_plugin_ids = wasm_bridge.get_or_load_plugins(GetOrLoadPluginsParams {
                 run_plugin_or_alias,
+                match_plugin_location_only,
                 size,
                 cwd: initial_cwd.or_else(|| cwd.clone()),
                 skip_cache,
@@ -1897,6 +1900,19 @@ fn pipe_to_specific_plugins(params: PipeToSpecificPluginsParams) {
             },
         },
     }
+}
+
+/// A configless message to a configless plugin alias selects the plugin kind,
+/// regardless of layout-owned instance options. Aliases that intentionally
+/// carry configuration (eg. `session-rail { rail true }`) remain exact.
+fn configless_message_matches_plugin_location(
+    requested_configuration: &Option<BTreeMap<String, String>>,
+    run_plugin_or_alias: &RunPluginOrAlias,
+) -> bool {
+    requested_configuration.is_none()
+        && run_plugin_or_alias
+            .get_configuration()
+            .is_some_and(|configuration| configuration.inner().is_empty())
 }
 
 fn mark_layout_completion_failed(completion: Option<&mut NotificationEnd>, message: &str) {

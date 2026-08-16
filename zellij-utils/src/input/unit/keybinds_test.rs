@@ -515,11 +515,16 @@ fn shipped_quick_cmd_keybind_targets_compact_bar_in_every_mode() {
                 name,
                 plugin,
                 launch_new,
+                configuration,
                 ..
             } => {
                 assert_eq!(name.as_deref(), Some("vc_quick_cmd"));
                 assert_eq!(plugin.as_deref(), Some("compact-bar"));
                 assert!(!launch_new, "Quick cmd must reuse the loaded compact-bar");
+                assert!(
+                    configuration.is_none(),
+                    "Quick cmd must select compact-bar by location, independent of layout config"
+                );
             },
             action => panic!("Super+Shift+. must message compact-bar, got {action:?}"),
         }

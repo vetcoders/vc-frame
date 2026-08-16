@@ -1,4 +1,7 @@
-use super::{PluginThreadParams, plugin_thread_main as plugin_thread_main_impl};
+use super::{
+    PluginThreadParams, configless_message_matches_plugin_location,
+    plugin_thread_main as plugin_thread_main_impl,
+};
 
 // Test adapter preserves the established fixture call shape while production
 // passes one PluginThreadParams value.
@@ -88,6 +91,33 @@ type PluginThreadOutput = (
     Receiver<(ScreenInstruction, ErrorContext)>,
     Box<dyn FnOnce()>,
 );
+
+#[test]
+fn configless_message_wildcards_layout_config_but_not_configured_aliases() {
+    let no_requested_configuration = None;
+    let configless_plugin =
+        RunPluginOrAlias::RunPlugin(RunPlugin::from_url("vc-frame:compact-bar").unwrap());
+    assert!(configless_message_matches_plugin_location(
+        &no_requested_configuration,
+        &configless_plugin,
+    ));
+
+    let configured_alias = RunPluginOrAlias::RunPlugin(
+        RunPlugin::from_url("vc-frame:session-manager")
+            .unwrap()
+            .with_configuration(BTreeMap::from([("rail".to_owned(), "true".to_owned())])),
+    );
+    assert!(!configless_message_matches_plugin_location(
+        &no_requested_configuration,
+        &configured_alias,
+    ));
+
+    let explicit_configuration = Some(BTreeMap::from([("left_inset".to_owned(), "6".to_owned())]));
+    assert!(!configless_message_matches_plugin_location(
+        &explicit_configuration,
+        &configless_plugin,
+    ));
+}
 
 type PluginThreadWithServerOutput = (
     SenderWithContext<PluginInstruction>,

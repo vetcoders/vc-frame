@@ -785,6 +785,9 @@ pub struct WasmBridgeOptions {
 /// eleven positional arguments behind a lint silencer.
 pub(crate) struct GetOrLoadPluginsParams {
     pub run_plugin_or_alias: RunPluginOrAlias,
+    /// A configless message names the plugin kind, not one layout instance.
+    /// Reuse every loaded instance at this location before considering a load.
+    pub match_plugin_location_only: bool,
     pub size: Size,
     pub cwd: Option<PathBuf>,
     pub skip_cache: bool,
@@ -3473,6 +3476,22 @@ impl WasmBridge {
             None => vec![],
         }
     }
+
+    fn all_plugin_and_client_ids_for_plugin_location_regardless_of_configuration(
+        &mut self,
+        plugin_location: &RunPluginLocation,
+    ) -> Vec<(PluginId, Option<ClientId>)> {
+        if self.cached_plugin_map.is_empty() {
+            self.cached_plugin_map = self.plugin_map.lock().unwrap().clone_plugin_assets();
+        }
+        self.cached_plugin_map
+            .get(plugin_location)
+            .into_iter()
+            .flat_map(|configured_plugins| configured_plugins.values())
+            .flatten()
+            .map(|(plugin_id, client_id)| (*plugin_id, Some(*client_id)))
+            .collect()
+    }
     pub fn all_plugin_ids(&self) -> Vec<(PluginId, ClientId)> {
         self.plugin_map.lock().unwrap().all_plugin_ids()
     }
@@ -3631,6 +3650,7 @@ impl WasmBridge {
     ) -> Vec<(PluginId, Option<ClientId>)> {
         let GetOrLoadPluginsParams {
             run_plugin_or_alias,
+            match_plugin_location_only,
             size,
             cwd,
             skip_cache,
@@ -3645,15 +3665,31 @@ impl WasmBridge {
         let run_plugin = run_plugin_or_alias.get_run_plugin();
         match run_plugin {
             Some(run_plugin) => {
-                let all_plugin_ids = self.all_plugin_and_client_ids_for_plugin_location(
-                    &run_plugin.location,
-                    &run_plugin.configuration,
-                );
-                if all_plugin_ids.is_empty() {
-                    if let Some(loading_plugin_id) = self.plugin_id_of_loading_plugin(
+                let all_plugin_ids = if match_plugin_location_only {
+                    self.all_plugin_and_client_ids_for_plugin_location_regardless_of_configuration(
+                        &run_plugin.location,
+                    )
+                } else {
+                    self.all_plugin_and_client_ids_for_plugin_location(
                         &run_plugin.location,
                         &run_plugin.configuration,
-                    ) {
+                    )
+                };
+                if all_plugin_ids.is_empty() {
+                    let loading_plugin_id = if match_plugin_location_only {
+                        self.loading_plugins
+                            .iter()
+                            .find_map(|(plugin_id, loading_plugin)| {
+                                (loading_plugin.location == run_plugin.location)
+                                    .then_some(*plugin_id)
+                            })
+                    } else {
+                        self.plugin_id_of_loading_plugin(
+                            &run_plugin.location,
+                            &run_plugin.configuration,
+                        )
+                    };
+                    if let Some(loading_plugin_id) = loading_plugin_id {
                         return vec![(loading_plugin_id, None)];
                     }
                     match self.load_plugin(
@@ -4434,6 +4470,39 @@ mod layout_plugin_transaction_tests {
             &engine,
         ));
         bridge
+    }
+
+    #[test]
+    fn configless_message_reuses_plugin_with_layout_configuration() {
+        let mut bridge = test_bridge(1);
+        let configured_plugin = RunPlugin::from_url("vc-frame:compact-bar")
+            .unwrap()
+            .with_configuration(BTreeMap::from([
+                ("left_inset".to_owned(), "6".to_owned()),
+                ("brand_text".to_owned(), "Vibecrafted.".to_owned()),
+            ]));
+        let location = configured_plugin.location.clone();
+        bridge.cached_plugin_map.insert(
+            location.clone(),
+            HashMap::from([(configured_plugin.configuration.clone(), vec![(41, 7)])]),
+        );
+
+        assert!(
+            bridge
+                .all_plugin_and_client_ids_for_plugin_location(
+                    &location,
+                    &PluginUserConfiguration::default(),
+                )
+                .is_empty(),
+            "the old exact-config lookup reproduces the duplicate-plugin path"
+        );
+        assert_eq!(
+            bridge.all_plugin_and_client_ids_for_plugin_location_regardless_of_configuration(
+                &location,
+            ),
+            vec![(41, Some(7))],
+            "a configless MessagePlugin must target the configured layout instance"
+        );
     }
 
     fn local_request(client_id: ClientId) -> LayoutPluginReservationRequest {
