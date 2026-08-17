@@ -18,21 +18,27 @@ fn validate_session(name: &str) -> Result<String, String> {
     {
         use crate::consts::ZELLIJ_SOCK_MAX_LENGTH;
 
-        let mut socket_path = crate::consts::ZELLIJ_SOCK_DIR.clone();
+        let sock_dir = crate::consts::ZELLIJ_SOCK_DIR.clone();
+        let mut socket_path = sock_dir.clone();
         socket_path.push(name);
+        let path_len = socket_path.as_os_str().len();
 
-        if socket_path.as_os_str().len() >= ZELLIJ_SOCK_MAX_LENGTH {
-            // socket path must be less than 108 bytes
-            let available_length = ZELLIJ_SOCK_MAX_LENGTH
-                .saturating_sub(socket_path.as_os_str().len())
-                .saturating_sub(1);
-
+        if path_len >= ZELLIJ_SOCK_MAX_LENGTH {
+            // Remaining budget is dir + separator, not the already-overflowed
+            // full path. Subtracting path_len produced "less than 0 characters".
+            let dir_len = sock_dir.as_os_str().len();
+            let available = ZELLIJ_SOCK_MAX_LENGTH.saturating_sub(dir_len.saturating_add(1));
             return Err(format!(
-                "session name must be less than {} characters",
-                available_length
+                "session name {name:?} is {name_len} characters; Unix socket path would be {path_len} bytes (limit {max}). Socket dir {dir} leaves {available} characters for the name. On macOS use VC_FRAME_SOCKET_DIR=/tmp/vc-frame-$UID",
+                name = name,
+                name_len = name.len(),
+                path_len = path_len,
+                max = ZELLIJ_SOCK_MAX_LENGTH,
+                dir = sock_dir.display(),
+                available = available,
             ));
-        };
-    };
+        }
+    }
 
     Ok(name.to_owned())
 }

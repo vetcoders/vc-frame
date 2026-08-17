@@ -615,6 +615,7 @@ mod unix_only {
     pub use crate::shared::set_permissions;
     use lazy_static::lazy_static;
     use nix::unistd::Uid;
+    #[cfg(not(target_os = "macos"))]
     use std::env::temp_dir;
 
     // Maximum length of a Unix domain socket path (from sockaddr_un.sun_path).
@@ -630,15 +631,34 @@ mod unix_only {
 
     lazy_static! {
         static ref UID: Uid = Uid::current();
-        pub static ref ZELLIJ_TMP_DIR: PathBuf = temp_dir().join(format!("vc-frame-{}", *UID));
+        pub static ref ZELLIJ_TMP_DIR: PathBuf = {
+            // macOS sockaddr_un is 104 bytes. std::env::temp_dir() is
+            // /var/folders/.../T (~50) and already overflows once we append
+            // /vc-frame-$UID/contract_version_N + a workspace-bound name.
+            #[cfg(target_os = "macos")]
+            {
+                PathBuf::from("/tmp").join(format!("vc-frame-{}", *UID))
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                temp_dir().join(format!("vc-frame-{}", *UID))
+            }
+        };
         pub static ref ZELLIJ_TMP_LOG_DIR: PathBuf = ZELLIJ_TMP_DIR.join("vc-frame-log");
         pub static ref ZELLIJ_TMP_LOG_FILE: PathBuf = ZELLIJ_TMP_LOG_DIR.join("zellij.log");
         pub static ref ZELLIJ_SOCK_DIR: PathBuf = {
             let mut ipc_dir = envs::get_socket_dir().map_or_else(
                 |_| {
-                    ZELLIJ_PROJ_DIR
-                        .runtime_dir()
-                        .map_or_else(|| ZELLIJ_TMP_DIR.clone(), |p| p.to_owned())
+                    #[cfg(target_os = "macos")]
+                    {
+                        ZELLIJ_TMP_DIR.clone()
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        ZELLIJ_PROJ_DIR
+                            .runtime_dir()
+                            .map_or_else(|| ZELLIJ_TMP_DIR.clone(), |p| p.to_owned())
+                    }
                 },
                 PathBuf::from,
             );
