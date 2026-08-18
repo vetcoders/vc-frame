@@ -30,6 +30,7 @@ fn main() {
         "VC_FRAME_GIT_DIRTY",
         "VC_FRAME_BUILD_TIME_UTC",
         "VC_FRAME_SOURCE_ORIGIN_URL",
+        "VC_FRAME_SOURCE_MANIFEST_DIR",
     ] {
         println!("cargo:rerun-if-env-changed={var}");
     }
@@ -73,7 +74,10 @@ fn main() {
     println!("cargo:rustc-env=VC_FRAME_BUILD_TIME_UTC={build_time}");
     println!("cargo:rustc-env=VC_FRAME_BUILD_PROFILE={profile}");
     println!("cargo:rustc-env=VC_FRAME_HUMAN_VERSION={human_version}");
-    println!("cargo:rustc-env=VC_FRAME_SOURCE_MANIFEST_DIR={manifest_dir}");
+    println!(
+        "cargo:rustc-env=VC_FRAME_SOURCE_MANIFEST_DIR={}",
+        baked_source_manifest_dir(&manifest_dir, std::env::var("VC_FRAME_SOURCE_MANIFEST_DIR").ok())
+    );
     println!("cargo:rustc-env=VC_FRAME_SOURCE_ORIGIN_URL={source_origin_url}");
     println!("cargo:rustc-env=VC_FRAME_SOURCE_PROJECT={SOURCE_PROJECT}");
 }
@@ -209,6 +213,22 @@ fn nearest_existing_parent(path: &Path, boundary: &Path) -> Option<PathBuf> {
 }
 
 /// `(sha, dirty)` — environment override first, then git, then unknown.
+/// The manifest dir baked into the binary for install-freshness.
+///
+/// A dev build wants the real `CARGO_MANIFEST_DIR`, so the running binary can
+/// find its own checkout and compare HEADs. A release build's checkout is a
+/// donor snapshot that is reaped minutes after linking, so the real path is
+/// useless at runtime and leaks the build host into a signed artifact
+/// (measured 2026-08-19: `.../donor-snapshots/vc-frame/zellij-utils` inside
+/// Contents/Helpers/vc-frame). Release builders pin an override; git metadata
+/// is still resolved from the real checkout, only the baked string changes.
+fn baked_source_manifest_dir(manifest_dir: &str, override_dir: Option<String>) -> String {
+    match override_dir {
+        Some(dir) if !dir.trim().is_empty() => dir,
+        _ => manifest_dir.to_string(),
+    }
+}
+
 fn resolve_commit(manifest_dir: &str) -> (String, bool) {
     if let Ok(sha) = std::env::var("VC_FRAME_GIT_SHA") {
         let sha = sha.trim().to_string();
@@ -511,6 +531,29 @@ mod tests {
     #[test]
     fn rebuilds_when_loose_symbolic_head_ref_advances_without_source_touch() {
         assert_head_advance_is_rebuilt(false);
+    }
+
+    #[test]
+    fn baked_manifest_dir_defaults_to_the_real_checkout() {
+        assert_eq!(
+            baked_source_manifest_dir("/Volumes/w/vc-frame/zellij-utils", None),
+            "/Volumes/w/vc-frame/zellij-utils"
+        );
+        assert_eq!(
+            baked_source_manifest_dir("/Volumes/w/vc-frame/zellij-utils", Some("  ".into())),
+            "/Volumes/w/vc-frame/zellij-utils"
+        );
+    }
+
+    #[test]
+    fn baked_manifest_dir_honours_the_release_override() {
+        assert_eq!(
+            baked_source_manifest_dir(
+                "/Users/op/build/donor-snapshots/vc-frame/zellij-utils",
+                Some("/usr/src/vc-frame/zellij-utils".into())
+            ),
+            "/usr/src/vc-frame/zellij-utils"
+        );
     }
 
     #[test]
