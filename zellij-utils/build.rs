@@ -76,7 +76,10 @@ fn main() {
     println!("cargo:rustc-env=VC_FRAME_HUMAN_VERSION={human_version}");
     println!(
         "cargo:rustc-env=VC_FRAME_SOURCE_MANIFEST_DIR={}",
-        baked_source_manifest_dir(&manifest_dir, std::env::var("VC_FRAME_SOURCE_MANIFEST_DIR").ok())
+        baked_source_manifest_dir(
+            &manifest_dir,
+            std::env::var("VC_FRAME_SOURCE_MANIFEST_DIR").ok()
+        )
     );
     println!("cargo:rustc-env=VC_FRAME_SOURCE_ORIGIN_URL={source_origin_url}");
     println!("cargo:rustc-env=VC_FRAME_SOURCE_PROJECT={SOURCE_PROJECT}");
