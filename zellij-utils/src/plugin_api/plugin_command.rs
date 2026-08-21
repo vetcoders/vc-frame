@@ -1,5 +1,8 @@
 pub use super::generated_api::api::{
-    action::{Action as ProtobufAction, PaneIdAndShouldFloat, SwitchToModePayload},
+    action::{
+        Action as ProtobufAction, PaneIdAndShouldFloat, Position as ProtobufPosition,
+        SwitchToModePayload,
+    },
     event::{
         EventNameList as ProtobufEventNameList, Header,
         ResurrectableSession as ProtobufResurrectableSession,
@@ -55,10 +58,11 @@ pub use super::generated_api::api::{
         HighlightStyle as ProtobufHighlightStyle, HttpVerb as ProtobufHttpVerb, IdAndNewName,
         KeyToRebind, KeyToUnbind, KillSessionsPayload,
         KillSessionsResponse as ProtobufKillSessionsResponse, ListTokensResponse,
-        LoadNewPluginPayload, MessageToPluginPayload, MovePaneWithPaneIdInDirectionPayload,
-        MovePaneWithPaneIdPayload, MovePayload, NewPluginArgs as ProtobufNewPluginArgs,
-        NewTabPayload, NewTabResponse as ProtobufNewTabResponse,
-        NewTabsResponse as ProtobufNewTabsResponse, NewTabsWithLayoutInfoPayload,
+        LoadNewPluginPayload, MessageToPluginPayload, MouseScrollInPaneIdPayload,
+        MovePaneWithPaneIdInDirectionPayload, MovePaneWithPaneIdPayload, MovePayload,
+        NewPluginArgs as ProtobufNewPluginArgs, NewTabPayload,
+        NewTabResponse as ProtobufNewTabResponse, NewTabsResponse as ProtobufNewTabsResponse,
+        NewTabsWithLayoutInfoPayload,
         OpenCommandPaneBackgroundResponse as ProtobufOpenCommandPaneBackgroundResponse,
         OpenCommandPaneFloatingNearPluginPayload,
         OpenCommandPaneFloatingNearPluginResponse as ProtobufOpenCommandPaneFloatingNearPluginResponse,
@@ -1446,6 +1450,46 @@ impl TryFrom<ProtobufPluginCommand> for PluginCommand {
             },
             Some(CommandName::DeleteAllDeadSessionsAndReply) => {
                 Ok(PluginCommand::DeleteAllDeadSessionsAndReply)
+            },
+            Some(CommandName::MouseScrollUpInPaneId) => match protobuf_plugin_command.payload {
+                Some(Payload::MouseScrollUpInPaneIdPayload(payload)) => {
+                    let pane_id = payload
+                        .pane_id
+                        .ok_or("MouseScrollUpInPaneId requires a pane id")?
+                        .try_into()?;
+                    let position = payload
+                        .position
+                        .ok_or("MouseScrollUpInPaneId requires a position")?
+                        .try_into()?;
+                    let lines = payload
+                        .lines
+                        .try_into()
+                        .map_err(|_| "MouseScrollUpInPaneId line count does not fit usize")?;
+                    Ok(PluginCommand::MouseScrollUpInPaneId(
+                        pane_id, position, lines,
+                    ))
+                },
+                _ => Err("Mismatched payload for MouseScrollUpInPaneId"),
+            },
+            Some(CommandName::MouseScrollDownInPaneId) => match protobuf_plugin_command.payload {
+                Some(Payload::MouseScrollDownInPaneIdPayload(payload)) => {
+                    let pane_id = payload
+                        .pane_id
+                        .ok_or("MouseScrollDownInPaneId requires a pane id")?
+                        .try_into()?;
+                    let position = payload
+                        .position
+                        .ok_or("MouseScrollDownInPaneId requires a position")?
+                        .try_into()?;
+                    let lines = payload
+                        .lines
+                        .try_into()
+                        .map_err(|_| "MouseScrollDownInPaneId line count does not fit usize")?;
+                    Ok(PluginCommand::MouseScrollDownInPaneId(
+                        pane_id, position, lines,
+                    ))
+                },
+                _ => Err("Mismatched payload for MouseScrollDownInPaneId"),
             },
             Some(CommandName::DumpSessionLayout) => match protobuf_plugin_command.payload {
                 Some(Payload::DumpSessionLayoutPayload(payload)) => {
@@ -3315,6 +3359,34 @@ impl TryFrom<PluginCommand> for ProtobufPluginCommand {
                 name: CommandName::DeleteAllDeadSessionsAndReply as i32,
                 payload: None,
             }),
+            PluginCommand::MouseScrollUpInPaneId(pane_id, position, lines) => {
+                Ok(ProtobufPluginCommand {
+                    name: CommandName::MouseScrollUpInPaneId as i32,
+                    payload: Some(Payload::MouseScrollUpInPaneIdPayload(
+                        MouseScrollInPaneIdPayload {
+                            pane_id: Some(pane_id.try_into()?),
+                            position: Some(ProtobufPosition::try_from(position)?),
+                            lines: lines
+                                .try_into()
+                                .map_err(|_| "MouseScrollUpInPaneId line count does not fit u64")?,
+                        },
+                    )),
+                })
+            },
+            PluginCommand::MouseScrollDownInPaneId(pane_id, position, lines) => {
+                Ok(ProtobufPluginCommand {
+                    name: CommandName::MouseScrollDownInPaneId as i32,
+                    payload: Some(Payload::MouseScrollDownInPaneIdPayload(
+                        MouseScrollInPaneIdPayload {
+                            pane_id: Some(pane_id.try_into()?),
+                            position: Some(ProtobufPosition::try_from(position)?),
+                            lines: lines.try_into().map_err(
+                                |_| "MouseScrollDownInPaneId line count does not fit u64",
+                            )?,
+                        },
+                    )),
+                })
+            },
             PluginCommand::DumpSessionLayout { tab_index } => Ok(ProtobufPluginCommand {
                 name: CommandName::DumpSessionLayout as i32,
                 payload: tab_index.map(|idx| {
@@ -5050,6 +5122,36 @@ impl From<OpenPluginPaneFloatingResponse> for ProtobufOpenPluginPaneFloatingResp
     fn from(response: OpenPluginPaneFloatingResponse) -> Self {
         ProtobufOpenPluginPaneFloatingResponse {
             pane_id: response.map(|p| p.try_into().unwrap()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::position::Position;
+
+    #[test]
+    fn mouse_scroll_in_pane_id_roundtrips() {
+        for command in [
+            PluginCommand::MouseScrollUpInPaneId(PaneId::Terminal(7), Position::new(3, 11), 2),
+            PluginCommand::MouseScrollDownInPaneId(PaneId::Terminal(8), Position::new(4, 12), 5),
+        ] {
+            let protobuf: ProtobufPluginCommand = command.try_into().unwrap();
+            let decoded = PluginCommand::try_from(protobuf).unwrap();
+            match decoded {
+                PluginCommand::MouseScrollUpInPaneId(pane_id, position, lines) => {
+                    assert_eq!(pane_id, PaneId::Terminal(7));
+                    assert_eq!(position, Position::new(3, 11));
+                    assert_eq!(lines, 2);
+                },
+                PluginCommand::MouseScrollDownInPaneId(pane_id, position, lines) => {
+                    assert_eq!(pane_id, PaneId::Terminal(8));
+                    assert_eq!(position, Position::new(4, 12));
+                    assert_eq!(lines, 5);
+                },
+                other => panic!("unexpected roundtrip command: {other:?}"),
+            }
         }
     }
 }

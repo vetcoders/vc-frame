@@ -10,9 +10,7 @@ use std::convert::TryInto;
 use std::path::PathBuf;
 
 use tab::get_tab_to_focus;
-use zellij_tile::prelude::actions::Action;
 use zellij_tile::prelude::*;
-use zellij_utils::position::Position;
 
 use crate::clipboard_utils::{system_clipboard_error, text_copied_hint};
 use crate::line::tab_line;
@@ -448,8 +446,8 @@ impl State {
 
         match mouse_event {
             Mouse::LeftClick(_, col) => self.handle_tab_click(col),
-            Mouse::ScrollUp(_) => self.forward_scroll_to_focused_pane(true),
-            Mouse::ScrollDown(_) => self.forward_scroll_to_focused_pane(false),
+            Mouse::ScrollUp(lines) => self.forward_scroll_to_focused_pane(true, lines),
+            Mouse::ScrollDown(lines) => self.forward_scroll_to_focused_pane(false, lines),
             _ => {},
         }
     }
@@ -639,25 +637,27 @@ impl State {
         changed
     }
 
-    fn forward_scroll_to_focused_pane(&self, scroll_up: bool) {
+    fn forward_scroll_to_focused_pane(&self, scroll_up: bool, lines: usize) {
         let Ok((_, focused_pane_id)) = get_focused_pane_info() else {
             return;
         };
-        let Some(position) = focused_terminal_content_center(focused_pane_id, &self.pane_manifest)
+        let Some((pane_id, position)) =
+            focused_terminal_scroll_target(focused_pane_id, &self.pane_manifest)
         else {
             return;
         };
-        run_action(
-            scroll_action_at_position(scroll_up, position),
-            BTreeMap::new(),
-        );
+        if scroll_up {
+            mouse_scroll_up_in_pane_id(pane_id, position, lines);
+        } else {
+            mouse_scroll_down_in_pane_id(pane_id, position, lines);
+        }
     }
 }
 
-fn focused_terminal_content_center(
+fn focused_terminal_scroll_target(
     focused_pane_id: PaneId,
     pane_manifest: &PaneManifest,
-) -> Option<Position> {
+) -> Option<(PaneId, Position)> {
     let focused_pane = pane_manifest.panes.values().flatten().find(|pane| {
         let pane_id = if pane.is_plugin {
             PaneId::Plugin(pane.id)
@@ -673,20 +673,31 @@ fn focused_terminal_content_center(
         return None;
     }
 
-    let line = focused_pane.pane_content_y + focused_pane.pane_content_rows / 2;
-    let column = focused_pane.pane_content_x + focused_pane.pane_content_columns / 2;
-    Some(Position::new(
-        line.try_into().ok()?,
-        column.try_into().ok()?,
+    let content_offset_column = focused_pane
+        .pane_content_x
+        .saturating_sub(focused_pane.pane_x);
+    let content_offset_line = focused_pane
+        .pane_content_y
+        .saturating_sub(focused_pane.pane_y);
+    let (column, line) = focused_pane
+        .cursor_coordinates_in_pane
+        .and_then(|(column, line)| {
+            Some((
+                column.checked_sub(content_offset_column)?,
+                line.checked_sub(content_offset_line)?,
+            ))
+        })
+        .filter(|(column, line)| {
+            *column < focused_pane.pane_content_columns && *line < focused_pane.pane_content_rows
+        })
+        .unwrap_or((
+            focused_pane.pane_content_columns / 2,
+            focused_pane.pane_content_rows / 2,
+        ));
+    Some((
+        focused_pane_id,
+        Position::new(line.try_into().ok()?, column.try_into().ok()?),
     ))
-}
-
-fn scroll_action_at_position(scroll_up: bool, position: Position) -> Action {
-    if scroll_up {
-        Action::ScrollUpAt { position }
-    } else {
-        Action::ScrollDownAt { position }
-    }
 }
 
 /// Quick cmd mini console: shallow, wide, upper-center — non-ephemeral
@@ -1015,13 +1026,16 @@ mod transient_dimension_guard_tests {
     }
 
     #[test]
-    fn wheel_actions_target_the_focused_terminal_content_center() {
+    fn wheel_actions_target_the_focused_terminal_cursor() {
         let focused_terminal = PaneInfo {
             is_focused: true,
+            pane_x: 23,
+            pane_y: 1,
             pane_content_x: 24,
             pane_content_y: 2,
             pane_content_columns: 80,
             pane_content_rows: 20,
+            cursor_coordinates_in_pane: Some((8, 4)),
             ..Default::default()
         };
         let focused_plugin = PaneInfo {
@@ -1035,16 +1049,28 @@ mod transient_dimension_guard_tests {
             panes: std::collections::HashMap::from([(1, vec![focused_plugin, focused_terminal])]),
         };
 
-        let position = focused_terminal_content_center(PaneId::Terminal(0), &manifest).unwrap();
-        assert_eq!(position, Position::new(12, 64));
-        assert!(matches!(
-            scroll_action_at_position(true, position),
-            Action::ScrollUpAt { position: target } if target == position
-        ));
-        assert!(matches!(
-            scroll_action_at_position(false, position),
-            Action::ScrollDownAt { position: target } if target == position
-        ));
+        let target = focused_terminal_scroll_target(PaneId::Terminal(0), &manifest).unwrap();
+        assert_eq!(target, (PaneId::Terminal(0), Position::new(3, 7)));
+    }
+
+    #[test]
+    fn wheel_actions_fall_back_to_the_content_center() {
+        let manifest = PaneManifest {
+            panes: std::collections::HashMap::from([(
+                1,
+                vec![PaneInfo {
+                    id: 4,
+                    pane_content_x: 24,
+                    pane_content_y: 2,
+                    pane_content_columns: 80,
+                    pane_content_rows: 20,
+                    ..Default::default()
+                }],
+            )]),
+        };
+
+        let target = focused_terminal_scroll_target(PaneId::Terminal(4), &manifest).unwrap();
+        assert_eq!(target, (PaneId::Terminal(4), Position::new(10, 40)));
     }
 
     #[test]
@@ -1062,7 +1088,7 @@ mod transient_dimension_guard_tests {
             )]),
         };
         assert_eq!(
-            focused_terminal_content_center(PaneId::Plugin(0), &plugin_only),
+            focused_terminal_scroll_target(PaneId::Plugin(0), &plugin_only),
             None
         );
 
@@ -1078,7 +1104,7 @@ mod transient_dimension_guard_tests {
             )]),
         };
         assert_eq!(
-            focused_terminal_content_center(PaneId::Terminal(0), &empty_terminal),
+            focused_terminal_scroll_target(PaneId::Terminal(0), &empty_terminal),
             None
         );
     }

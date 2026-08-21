@@ -568,7 +568,6 @@ dependencies = [
  "unicode-width 0.1.10",
  "zellij-tile",
  "zellij-tile-utils",
- "zellij-utils",
 ]
 
 [[package]]

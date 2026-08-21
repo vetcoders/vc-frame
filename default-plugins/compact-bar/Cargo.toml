@@ -12,4 +12,3 @@ unicode-segmentation = "1.12"
 unicode-width = "0.1.8"
 zellij-tile = { path = "../../zellij-tile" }
 zellij-tile-utils = { path = "../../zellij-tile-utils" }
-zellij-utils = { path = "../../zellij-utils" }

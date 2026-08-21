@@ -5063,6 +5063,36 @@ fn pane_faux_scrolling_in_alternate_mode() {
 }
 
 #[test]
+fn mouse_scroll_in_pane_id_preserves_the_exact_local_position() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 1;
+    let mut pty_instruction_bus = MockPtyInstructionBus::new();
+    let mut tab = create_new_tab_with_mock_pty_writer(
+        size,
+        ModeInfo::default(),
+        pty_instruction_bus.pty_write_sender(),
+    );
+    pty_instruction_bus.start();
+
+    tab.handle_pty_bytes(1, b"\x1b[?1002;1006h".to_vec())
+        .unwrap();
+    tab.handle_scrollwheel_up_in_pane(PaneId::Terminal(1), &Position::new(3, 7), 2, client_id)
+        .unwrap();
+    tab.handle_scrollwheel_down_in_pane(PaneId::Terminal(1), &Position::new(3, 7), 2, client_id)
+        .unwrap();
+
+    pty_instruction_bus.exit();
+
+    assert_eq!(
+        pty_instruction_bus.clone_output(),
+        vec!["\x1b[<64;8;4M", "\x1b[<65;8;4M"]
+    );
+}
+
+#[test]
 fn move_pane_focus_sends_tty_csi_event() {
     let size = Size {
         cols: 121,

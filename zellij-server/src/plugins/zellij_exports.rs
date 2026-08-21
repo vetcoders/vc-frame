@@ -43,6 +43,7 @@ use zellij_utils::data::{
 use zellij_utils::home::default_layout_dir;
 use zellij_utils::input::permission::PermissionCache;
 use zellij_utils::ipc::{ClientToServerMsg, IpcSenderWithContext};
+use zellij_utils::position::Position;
 use zellij_utils::sessions::generate_random_name as generate_random_name_impl;
 #[cfg(feature = "web_server_capability")]
 use zellij_utils::web_authentication_tokens::{
@@ -516,6 +517,12 @@ fn host_run_plugin_command(mut caller: Caller<'_, PluginEnv>) {
                     },
                     PluginCommand::ScrollDownInPaneId(pane_id) => {
                         scroll_down_in_pane_id(env, pane_id.into())
+                    },
+                    PluginCommand::MouseScrollUpInPaneId(pane_id, position, lines) => {
+                        mouse_scroll_up_in_pane_id(env, pane_id.into(), position, lines)
+                    },
+                    PluginCommand::MouseScrollDownInPaneId(pane_id, position, lines) => {
+                        mouse_scroll_down_in_pane_id(env, pane_id.into(), position, lines)
                     },
                     PluginCommand::ScrollToTopInPaneId(pane_id) => {
                         scroll_to_top_in_pane_id(env, pane_id.into())
@@ -4689,6 +4696,33 @@ fn scroll_down_in_pane_id(env: &PluginEnv, pane_id: PaneId) {
         .send_to_screen(ScreenInstruction::ScrollDownInPaneId(pane_id));
 }
 
+fn mouse_scroll_up_in_pane_id(env: &PluginEnv, pane_id: PaneId, position: Position, lines: usize) {
+    let _ = env
+        .senders
+        .send_to_screen(ScreenInstruction::MouseScrollUpInPaneId(
+            pane_id,
+            position,
+            lines,
+            env.client_id,
+        ));
+}
+
+fn mouse_scroll_down_in_pane_id(
+    env: &PluginEnv,
+    pane_id: PaneId,
+    position: Position,
+    lines: usize,
+) {
+    let _ = env
+        .senders
+        .send_to_screen(ScreenInstruction::MouseScrollDownInPaneId(
+            pane_id,
+            position,
+            lines,
+            env.client_id,
+        ));
+}
+
 fn scroll_to_top_in_pane_id(env: &PluginEnv, pane_id: PaneId) {
     let _ = env
         .senders
@@ -5383,6 +5417,8 @@ fn check_command_permission(
         | PluginCommand::ScrollUpInPaneId(..)
         | PluginCommand::ScrollDown
         | PluginCommand::ScrollDownInPaneId(..)
+        | PluginCommand::MouseScrollUpInPaneId(..)
+        | PluginCommand::MouseScrollDownInPaneId(..)
         | PluginCommand::ScrollToTop
         | PluginCommand::ScrollToTopInPaneId(..)
         | PluginCommand::ScrollToBottom

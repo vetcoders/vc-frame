@@ -1723,6 +1723,79 @@ impl MouseHandler {
         Ok(MouseEffect::default())
     }
 
+    pub(crate) fn handle_scrollwheel_up_in_pane(
+        tab: &mut Tab,
+        pane_id: PaneId,
+        relative_position: &Position,
+        lines: usize,
+        client_id: ClientId,
+    ) -> Result<()> {
+        let err_context = || {
+            format!("failed to handle scrollwheel up in pane {pane_id:?} at {relative_position:?}")
+        };
+        let Some(pane) = tab.get_pane_with_id_mut(pane_id) else {
+            return Ok(());
+        };
+        let input_bytes = if let Some(mouse_event) = pane.mouse_scroll_up(relative_position) {
+            vec![mouse_event.into_bytes()]
+        } else if pane.is_alternate_mode_active() {
+            vec!["\u{1b}[A".as_bytes().to_owned(); lines]
+        } else {
+            pane.scroll_up(lines, client_id);
+            vec![]
+        };
+
+        for input_bytes in input_bytes {
+            tab.write_to_pane_id(&None, input_bytes, false, pane_id, Some(client_id), None)
+                .with_context(err_context)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn handle_scrollwheel_down_in_pane(
+        tab: &mut Tab,
+        pane_id: PaneId,
+        relative_position: &Position,
+        lines: usize,
+        client_id: ClientId,
+    ) -> Result<()> {
+        let err_context = || {
+            format!(
+                "failed to handle scrollwheel down in pane {pane_id:?} at {relative_position:?}"
+            )
+        };
+        let Some(pane) = tab.get_pane_with_id_mut(pane_id) else {
+            return Ok(());
+        };
+        let (input_bytes, pending_vte_pane_id) =
+            if let Some(mouse_event) = pane.mouse_scroll_down(relative_position) {
+                (vec![mouse_event.into_bytes()], None)
+            } else if pane.is_alternate_mode_active() {
+                (vec!["\u{1b}[B".as_bytes().to_owned(); lines], None)
+            } else {
+                pane.scroll_down(lines, client_id);
+                let pending_vte_pane_id = if !pane.is_scrolled() {
+                    match pane.pid() {
+                        PaneId::Terminal(pid) => Some(pid),
+                        PaneId::Plugin(_) => None,
+                    }
+                } else {
+                    None
+                };
+                (vec![], pending_vte_pane_id)
+            };
+
+        for input_bytes in input_bytes {
+            tab.write_to_pane_id(&None, input_bytes, false, pane_id, Some(client_id), None)
+                .with_context(err_context)?;
+        }
+        if let Some(pid) = pending_vte_pane_id {
+            tab.process_pending_vte_events(pid)
+                .with_context(err_context)?;
+        }
+        Ok(())
+    }
+
     fn handle_resize_scroll_up(
         tab: &mut Tab,
         pane_id: PaneId,
