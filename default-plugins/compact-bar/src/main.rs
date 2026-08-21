@@ -5,13 +5,14 @@ mod line;
 mod tab;
 mod tooltip;
 
-use std::cmp::{max, min};
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::TryInto;
 use std::path::PathBuf;
 
 use tab::get_tab_to_focus;
+use zellij_tile::prelude::actions::Action;
 use zellij_tile::prelude::*;
+use zellij_utils::position::Position;
 
 use crate::clipboard_utils::{system_clipboard_error, text_copied_hint};
 use crate::line::tab_line;
@@ -111,6 +112,7 @@ struct State {
     tab_line: Vec<LinePart>,
     display_area_rows: usize,
     display_area_cols: usize,
+    pane_manifest: PaneManifest,
 
     // Clipboard state
     text_copy_destination: Option<CopyDestination>,
@@ -434,6 +436,8 @@ impl State {
             false
         };
 
+        self.pane_manifest = pane_manifest;
+
         failures_changed || tooltip_changed
     }
 
@@ -444,8 +448,8 @@ impl State {
 
         match mouse_event {
             Mouse::LeftClick(_, col) => self.handle_tab_click(col),
-            Mouse::ScrollUp(_) => self.scroll_tab_up(),
-            Mouse::ScrollDown(_) => self.scroll_tab_down(),
+            Mouse::ScrollUp(_) => self.forward_scroll_to_focused_pane(true),
+            Mouse::ScrollDown(_) => self.forward_scroll_to_focused_pane(false),
             _ => {},
         }
     }
@@ -635,9 +639,53 @@ impl State {
         changed
     }
 
-    fn scroll_tab_up(&self) {
-        let next_tab = min(self.active_tab_idx + 1, self.tabs.len());
-        switch_tab_to(next_tab as u32);
+    fn forward_scroll_to_focused_pane(&self, scroll_up: bool) {
+        let Ok((_, focused_pane_id)) = get_focused_pane_info() else {
+            return;
+        };
+        let Some(position) = focused_terminal_content_center(focused_pane_id, &self.pane_manifest)
+        else {
+            return;
+        };
+        run_action(
+            scroll_action_at_position(scroll_up, position),
+            BTreeMap::new(),
+        );
+    }
+}
+
+fn focused_terminal_content_center(
+    focused_pane_id: PaneId,
+    pane_manifest: &PaneManifest,
+) -> Option<Position> {
+    let focused_pane = pane_manifest.panes.values().flatten().find(|pane| {
+        let pane_id = if pane.is_plugin {
+            PaneId::Plugin(pane.id)
+        } else {
+            PaneId::Terminal(pane.id)
+        };
+        pane_id == focused_pane_id
+    })?;
+    if focused_pane.is_plugin {
+        return None;
+    }
+    if focused_pane.pane_content_rows == 0 || focused_pane.pane_content_columns == 0 {
+        return None;
+    }
+
+    let line = focused_pane.pane_content_y + focused_pane.pane_content_rows / 2;
+    let column = focused_pane.pane_content_x + focused_pane.pane_content_columns / 2;
+    Some(Position::new(
+        line.try_into().ok()?,
+        column.try_into().ok()?,
+    ))
+}
+
+fn scroll_action_at_position(scroll_up: bool, position: Position) -> Action {
+    if scroll_up {
+        Action::ScrollUpAt { position }
+    } else {
+        Action::ScrollDownAt { position }
     }
 }
 
@@ -704,11 +752,6 @@ fn open_composer() {
 }
 
 impl State {
-    fn scroll_tab_down(&self) {
-        let prev_tab = max(self.active_tab_idx.saturating_sub(1), 1);
-        switch_tab_to(prev_tab as u32);
-    }
-
     fn clear_clipboard_state(&mut self) {
         self.text_copy_destination = None;
         self.display_system_clipboard_failure = false;
@@ -969,6 +1012,75 @@ mod transient_dimension_guard_tests {
         let public_message =
             PipeMessage::new(PipeSource::Keybind, MSG_OPEN_QUICK_CMD, &None, &None, false);
         assert!(!state.quick_cmd_message_targets_active_bar(&public_message));
+    }
+
+    #[test]
+    fn wheel_actions_target_the_focused_terminal_content_center() {
+        let focused_terminal = PaneInfo {
+            is_focused: true,
+            pane_content_x: 24,
+            pane_content_y: 2,
+            pane_content_columns: 80,
+            pane_content_rows: 20,
+            ..Default::default()
+        };
+        let focused_plugin = PaneInfo {
+            is_focused: true,
+            is_plugin: true,
+            pane_content_columns: 1,
+            pane_content_rows: 1,
+            ..Default::default()
+        };
+        let manifest = PaneManifest {
+            panes: std::collections::HashMap::from([(1, vec![focused_plugin, focused_terminal])]),
+        };
+
+        let position = focused_terminal_content_center(PaneId::Terminal(0), &manifest).unwrap();
+        assert_eq!(position, Position::new(12, 64));
+        assert!(matches!(
+            scroll_action_at_position(true, position),
+            Action::ScrollUpAt { position: target } if target == position
+        ));
+        assert!(matches!(
+            scroll_action_at_position(false, position),
+            Action::ScrollDownAt { position: target } if target == position
+        ));
+    }
+
+    #[test]
+    fn wheel_forwarding_ignores_plugin_only_and_empty_content_surfaces() {
+        let plugin_only = PaneManifest {
+            panes: std::collections::HashMap::from([(
+                0,
+                vec![PaneInfo {
+                    is_focused: true,
+                    is_plugin: true,
+                    pane_content_columns: 80,
+                    pane_content_rows: 20,
+                    ..Default::default()
+                }],
+            )]),
+        };
+        assert_eq!(
+            focused_terminal_content_center(PaneId::Plugin(0), &plugin_only),
+            None
+        );
+
+        let empty_terminal = PaneManifest {
+            panes: std::collections::HashMap::from([(
+                0,
+                vec![PaneInfo {
+                    is_focused: true,
+                    pane_content_columns: 0,
+                    pane_content_rows: 20,
+                    ..Default::default()
+                }],
+            )]),
+        };
+        assert_eq!(
+            focused_terminal_content_center(PaneId::Terminal(0), &empty_terminal),
+            None
+        );
     }
 
     #[test]
