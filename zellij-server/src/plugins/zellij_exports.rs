@@ -5389,7 +5389,9 @@ fn check_command_permission(
         PluginCommand::Write(..)
         | PluginCommand::WriteChars(..)
         | PluginCommand::WriteToPaneId(..)
-        | PluginCommand::WriteCharsToPaneId(..) => PermissionType::WriteToStdin,
+        | PluginCommand::WriteCharsToPaneId(..)
+        | PluginCommand::MouseScrollUpInPaneId(..)
+        | PluginCommand::MouseScrollDownInPaneId(..) => PermissionType::WriteToStdin,
         PluginCommand::CopyToClipboard(..) => PermissionType::WriteToClipboard,
         PluginCommand::SwitchTabTo(..)
         | PluginCommand::SwitchToMode(..)
@@ -5417,8 +5419,6 @@ fn check_command_permission(
         | PluginCommand::ScrollUpInPaneId(..)
         | PluginCommand::ScrollDown
         | PluginCommand::ScrollDownInPaneId(..)
-        | PluginCommand::MouseScrollUpInPaneId(..)
-        | PluginCommand::MouseScrollDownInPaneId(..)
         | PluginCommand::ScrollToTop
         | PluginCommand::ScrollToTopInPaneId(..)
         | PluginCommand::ScrollToBottom

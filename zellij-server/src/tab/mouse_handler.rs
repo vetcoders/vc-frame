@@ -1736,18 +1736,28 @@ impl MouseHandler {
         let Some(pane) = tab.get_pane_with_id_mut(pane_id) else {
             return Ok(());
         };
-        let input_bytes = if let Some(mouse_event) = pane.mouse_scroll_up(relative_position) {
-            vec![mouse_event.into_bytes()]
-        } else if pane.is_alternate_mode_active() {
-            vec!["\u{1b}[A".as_bytes().to_owned(); lines]
-        } else {
-            pane.scroll_up(lines, client_id);
-            vec![]
-        };
+        let (input_bytes, repetitions) =
+            if let Some(mouse_event) = pane.mouse_scroll_up(relative_position) {
+                (Some(mouse_event.into_bytes()), 1)
+            } else if pane.is_alternate_mode_active() {
+                (Some("\u{1b}[A".as_bytes().to_owned()), lines)
+            } else {
+                pane.scroll_up(lines, client_id);
+                (None, 0)
+            };
 
-        for input_bytes in input_bytes {
-            tab.write_to_pane_id(&None, input_bytes, false, pane_id, Some(client_id), None)
+        if let Some(input_bytes) = input_bytes {
+            for _ in 0..repetitions {
+                tab.write_to_pane_id(
+                    &None,
+                    input_bytes.clone(),
+                    false,
+                    pane_id,
+                    Some(client_id),
+                    None,
+                )
                 .with_context(err_context)?;
+            }
         }
         Ok(())
     }
@@ -1767,11 +1777,11 @@ impl MouseHandler {
         let Some(pane) = tab.get_pane_with_id_mut(pane_id) else {
             return Ok(());
         };
-        let (input_bytes, pending_vte_pane_id) =
+        let (input_bytes, repetitions, pending_vte_pane_id) =
             if let Some(mouse_event) = pane.mouse_scroll_down(relative_position) {
-                (vec![mouse_event.into_bytes()], None)
+                (Some(mouse_event.into_bytes()), 1, None)
             } else if pane.is_alternate_mode_active() {
-                (vec!["\u{1b}[B".as_bytes().to_owned(); lines], None)
+                (Some("\u{1b}[B".as_bytes().to_owned()), lines, None)
             } else {
                 pane.scroll_down(lines, client_id);
                 let pending_vte_pane_id = if !pane.is_scrolled() {
@@ -1782,12 +1792,21 @@ impl MouseHandler {
                 } else {
                     None
                 };
-                (vec![], pending_vte_pane_id)
+                (None, 0, pending_vte_pane_id)
             };
 
-        for input_bytes in input_bytes {
-            tab.write_to_pane_id(&None, input_bytes, false, pane_id, Some(client_id), None)
+        if let Some(input_bytes) = input_bytes {
+            for _ in 0..repetitions {
+                tab.write_to_pane_id(
+                    &None,
+                    input_bytes.clone(),
+                    false,
+                    pane_id,
+                    Some(client_id),
+                    None,
+                )
                 .with_context(err_context)?;
+            }
         }
         if let Some(pid) = pending_vte_pane_id {
             tab.process_pending_vte_events(pid)

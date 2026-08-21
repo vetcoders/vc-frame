@@ -5034,7 +5034,6 @@ fn pane_faux_scrolling_in_alternate_mode() {
         .unwrap();
     tab.handle_scrollwheel_down(&Position::new(1, 1), lines_to_scroll, client_id)
         .unwrap();
-
     tab.handle_pty_bytes(1, enable_alternate_screen.as_bytes().to_vec())
         .unwrap();
     // CSI A * lines_to_scroll, CSI B * lines_to_scroll
@@ -5050,12 +5049,28 @@ fn pane_faux_scrolling_in_alternate_mode() {
         .unwrap();
     tab.handle_scrollwheel_down(&Position::new(1, 1), lines_to_scroll, client_id)
         .unwrap();
+    tab.handle_scrollwheel_up_in_pane(
+        PaneId::Terminal(1),
+        &Position::new(1, 1),
+        lines_to_scroll,
+        client_id,
+    )
+    .unwrap();
+    tab.handle_scrollwheel_down_in_pane(
+        PaneId::Terminal(1),
+        &Position::new(1, 1),
+        lines_to_scroll,
+        client_id,
+    )
+    .unwrap();
 
     pty_instruction_bus.exit();
 
     let mut expected: Vec<&str> = Vec::new();
     expected.append(&mut vec!["\u{1b}[A"; lines_to_scroll]);
     expected.append(&mut vec!["\u{1b}[B"; lines_to_scroll]);
+    expected.append(&mut vec!["\u{1b}OA"; lines_to_scroll]);
+    expected.append(&mut vec!["\u{1b}OB"; lines_to_scroll]);
     expected.append(&mut vec!["\u{1b}OA"; lines_to_scroll]);
     expected.append(&mut vec!["\u{1b}OB"; lines_to_scroll]);
 
