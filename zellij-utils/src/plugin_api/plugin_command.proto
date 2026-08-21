@@ -207,6 +207,8 @@ enum CommandName {
   KillSessionsAndReply = 212;
   DeleteDeadSessionAndReply = 213;
   DeleteAllDeadSessionsAndReply = 214;
+  MouseScrollUpInPaneId = 215;
+  MouseScrollDownInPaneId = 216;
 }
 
 message PluginCommand {
@@ -361,6 +363,8 @@ message PluginCommand {
     GetSessionListPayload get_session_list_payload = 161;
     KillSessionsPayload kill_sessions_and_reply_payload = 162;
     string delete_dead_session_and_reply_payload = 163;
+    MouseScrollInPaneIdPayload mouse_scroll_up_in_pane_id_payload = 164;
+    MouseScrollInPaneIdPayload mouse_scroll_down_in_pane_id_payload = 165;
   }
 }
 
@@ -564,6 +568,12 @@ message ScrollUpInPaneIdPayload {
 
 message ScrollDownInPaneIdPayload {
   PaneId pane_id = 1;
+}
+
+message MouseScrollInPaneIdPayload {
+  PaneId pane_id = 1;
+  action.Position position = 2;
+  uint64 lines = 3;
 }
 
 message ScrollToTopInPaneIdPayload {

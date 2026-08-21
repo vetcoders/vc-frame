@@ -5,7 +5,6 @@ mod line;
 mod tab;
 mod tooltip;
 
-use std::cmp::{max, min};
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::TryInto;
 use std::path::PathBuf;
@@ -444,8 +443,8 @@ impl State {
 
         match mouse_event {
             Mouse::LeftClick(_, col) => self.handle_tab_click(col),
-            Mouse::ScrollUp(_) => self.scroll_tab_up(),
-            Mouse::ScrollDown(_) => self.scroll_tab_down(),
+            Mouse::ScrollUp(lines) => self.forward_scroll_to_focused_pane(true, lines),
+            Mouse::ScrollDown(lines) => self.forward_scroll_to_focused_pane(false, lines),
             _ => {},
         }
     }
@@ -635,10 +634,72 @@ impl State {
         changed
     }
 
-    fn scroll_tab_up(&self) {
-        let next_tab = min(self.active_tab_idx + 1, self.tabs.len());
-        switch_tab_to(next_tab as u32);
+    fn forward_scroll_to_focused_pane(&self, scroll_up: bool, lines: usize) {
+        let Ok((_, focused_pane_id)) = get_focused_pane_info() else {
+            return;
+        };
+        let Some(focused_pane) = get_pane_info(focused_pane_id) else {
+            return;
+        };
+        let Some((pane_id, position)) =
+            focused_terminal_scroll_target(focused_pane_id, &focused_pane)
+        else {
+            return;
+        };
+        let lines = bounded_mouse_scroll_lines(lines);
+        if scroll_up {
+            mouse_scroll_up_in_pane_id(pane_id, position, lines);
+        } else {
+            mouse_scroll_down_in_pane_id(pane_id, position, lines);
+        }
     }
+}
+
+fn bounded_mouse_scroll_lines(lines: usize) -> usize {
+    lines.min(plugin_api::plugin_command::MAX_MOUSE_SCROLL_LINES_IN_PANE_ID)
+}
+
+fn focused_terminal_scroll_target(
+    focused_pane_id: PaneId,
+    focused_pane: &PaneInfo,
+) -> Option<(PaneId, Position)> {
+    let pane_id = if focused_pane.is_plugin {
+        PaneId::Plugin(focused_pane.id)
+    } else {
+        PaneId::Terminal(focused_pane.id)
+    };
+    if focused_pane.is_plugin || pane_id != focused_pane_id {
+        return None;
+    }
+    if focused_pane.pane_content_rows == 0 || focused_pane.pane_content_columns == 0 {
+        return None;
+    }
+
+    let content_offset_column = focused_pane
+        .pane_content_x
+        .saturating_sub(focused_pane.pane_x);
+    let content_offset_line = focused_pane
+        .pane_content_y
+        .saturating_sub(focused_pane.pane_y);
+    let (column, line) = focused_pane
+        .cursor_coordinates_in_pane
+        .and_then(|(column, line)| {
+            Some((
+                column.checked_sub(content_offset_column)?,
+                line.checked_sub(content_offset_line)?,
+            ))
+        })
+        .filter(|(column, line)| {
+            *column < focused_pane.pane_content_columns && *line < focused_pane.pane_content_rows
+        })
+        .unwrap_or((
+            focused_pane.pane_content_columns / 2,
+            focused_pane.pane_content_rows / 2,
+        ));
+    Some((
+        focused_pane_id,
+        Position::new(line.try_into().ok()?, column.try_into().ok()?),
+    ))
 }
 
 /// Quick cmd mini console: shallow, wide, upper-center — non-ephemeral
@@ -704,11 +765,6 @@ fn open_composer() {
 }
 
 impl State {
-    fn scroll_tab_down(&self) {
-        let prev_tab = max(self.active_tab_idx.saturating_sub(1), 1);
-        switch_tab_to(prev_tab as u32);
-    }
-
     fn clear_clipboard_state(&mut self) {
         self.text_copy_destination = None;
         self.display_system_clipboard_failure = false;
@@ -969,6 +1025,73 @@ mod transient_dimension_guard_tests {
         let public_message =
             PipeMessage::new(PipeSource::Keybind, MSG_OPEN_QUICK_CMD, &None, &None, false);
         assert!(!state.quick_cmd_message_targets_active_bar(&public_message));
+    }
+
+    #[test]
+    fn wheel_actions_target_the_focused_terminal_cursor() {
+        let focused_terminal = PaneInfo {
+            is_focused: true,
+            pane_x: 23,
+            pane_y: 1,
+            pane_content_x: 24,
+            pane_content_y: 2,
+            pane_content_columns: 80,
+            pane_content_rows: 20,
+            cursor_coordinates_in_pane: Some((8, 4)),
+            ..Default::default()
+        };
+        let target =
+            focused_terminal_scroll_target(PaneId::Terminal(0), &focused_terminal).unwrap();
+        assert_eq!(target, (PaneId::Terminal(0), Position::new(3, 7)));
+    }
+
+    #[test]
+    fn wheel_actions_fall_back_to_the_content_center() {
+        let focused_terminal = PaneInfo {
+            id: 4,
+            pane_content_x: 24,
+            pane_content_y: 2,
+            pane_content_columns: 80,
+            pane_content_rows: 20,
+            ..Default::default()
+        };
+
+        let target =
+            focused_terminal_scroll_target(PaneId::Terminal(4), &focused_terminal).unwrap();
+        assert_eq!(target, (PaneId::Terminal(4), Position::new(10, 40)));
+    }
+
+    #[test]
+    fn wheel_forwarding_bounds_large_trackpad_deltas() {
+        assert_eq!(bounded_mouse_scroll_lines(3), 3);
+        assert_eq!(bounded_mouse_scroll_lines(100), 100);
+        assert_eq!(bounded_mouse_scroll_lines(usize::MAX), 100);
+    }
+
+    #[test]
+    fn wheel_forwarding_ignores_plugin_only_and_empty_content_surfaces() {
+        let plugin_only = PaneInfo {
+            is_focused: true,
+            is_plugin: true,
+            pane_content_columns: 80,
+            pane_content_rows: 20,
+            ..Default::default()
+        };
+        assert_eq!(
+            focused_terminal_scroll_target(PaneId::Plugin(0), &plugin_only),
+            None
+        );
+
+        let empty_terminal = PaneInfo {
+            is_focused: true,
+            pane_content_columns: 0,
+            pane_content_rows: 20,
+            ..Default::default()
+        };
+        assert_eq!(
+            focused_terminal_scroll_target(PaneId::Terminal(0), &empty_terminal),
+            None
+        );
     }
 
     #[test]

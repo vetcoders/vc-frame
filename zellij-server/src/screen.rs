@@ -977,6 +977,8 @@ pub enum ScreenInstruction {
     ClearScreenForPaneId(PaneId),
     ScrollUpInPaneId(PaneId),
     ScrollDownInPaneId(PaneId),
+    MouseScrollUpInPaneId(PaneId, Position, usize, ClientId),
+    MouseScrollDownInPaneId(PaneId, Position, usize, ClientId),
     ScrollToTopInPaneId(PaneId),
     ScrollToBottomInPaneId(PaneId),
     PageScrollUpInPaneId(PaneId),
@@ -1329,6 +1331,10 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::ClearScreenForPaneId(..) => ScreenContext::ClearScreenForPaneId,
             ScreenInstruction::ScrollUpInPaneId(..) => ScreenContext::ScrollUpInPaneId,
             ScreenInstruction::ScrollDownInPaneId(..) => ScreenContext::ScrollDownInPaneId,
+            ScreenInstruction::MouseScrollUpInPaneId(..) => ScreenContext::MouseScrollUpInPaneId,
+            ScreenInstruction::MouseScrollDownInPaneId(..) => {
+                ScreenContext::MouseScrollDownInPaneId
+            },
             ScreenInstruction::ScrollToTopInPaneId(..) => ScreenContext::ScrollToTopInPaneId,
             ScreenInstruction::ScrollToBottomInPaneId(..) => ScreenContext::ScrollToBottomInPaneId,
             ScreenInstruction::PageScrollUpInPaneId(..) => ScreenContext::PageScrollUpInPaneId,
@@ -14995,6 +15001,26 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                                 "Currently only terminal panes are supported for scrolling down"
                             );
                         }
+                        break;
+                    }
+                }
+                screen.render(None)?;
+            },
+            ScreenInstruction::MouseScrollUpInPaneId(pane_id, position, lines, client_id) => {
+                let all_tabs = screen.get_tabs_mut();
+                for tab in all_tabs.values_mut() {
+                    if tab.has_pane_with_pid(&pane_id) {
+                        tab.handle_scrollwheel_up_in_pane(pane_id, &position, lines, client_id)?;
+                        break;
+                    }
+                }
+                screen.render(None)?;
+            },
+            ScreenInstruction::MouseScrollDownInPaneId(pane_id, position, lines, client_id) => {
+                let all_tabs = screen.get_tabs_mut();
+                for tab in all_tabs.values_mut() {
+                    if tab.has_pane_with_pid(&pane_id) {
+                        tab.handle_scrollwheel_down_in_pane(pane_id, &position, lines, client_id)?;
                         break;
                     }
                 }

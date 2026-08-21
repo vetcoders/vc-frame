@@ -5795,6 +5795,22 @@ impl Tab {
         MouseHandler::handle_scrollwheel_up(self, point, lines, client_id)
     }
 
+    pub fn handle_scrollwheel_up_in_pane(
+        &mut self,
+        pane_id: PaneId,
+        relative_position: &Position,
+        lines: usize,
+        client_id: ClientId,
+    ) -> Result<()> {
+        MouseHandler::handle_scrollwheel_up_in_pane(
+            self,
+            pane_id,
+            relative_position,
+            lines,
+            client_id,
+        )
+    }
+
     pub fn handle_scrollwheel_down(
         &mut self,
         point: &Position,
@@ -5802,6 +5818,22 @@ impl Tab {
         client_id: ClientId,
     ) -> Result<MouseEffect> {
         MouseHandler::handle_scrollwheel_down(self, point, lines, client_id)
+    }
+
+    pub fn handle_scrollwheel_down_in_pane(
+        &mut self,
+        pane_id: PaneId,
+        relative_position: &Position,
+        lines: usize,
+        client_id: ClientId,
+    ) -> Result<()> {
+        MouseHandler::handle_scrollwheel_down_in_pane(
+            self,
+            pane_id,
+            relative_position,
+            lines,
+            client_id,
+        )
     }
 
     fn get_pane_id_at(
