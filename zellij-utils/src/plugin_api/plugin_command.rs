@@ -150,6 +150,19 @@ use std::collections::BTreeMap;
 use std::convert::TryFrom;
 use std::path::PathBuf;
 
+fn mouse_scroll_position_from_protobuf(
+    protobuf_position: ProtobufPosition,
+) -> Result<crate::position::Position, &'static str> {
+    let line = i32::try_from(protobuf_position.line)
+        .map_err(|_| "Mouse scroll pane position line does not fit i32")?;
+    if line < 0 {
+        return Err("Mouse scroll pane position line cannot be negative");
+    }
+    let column = u16::try_from(protobuf_position.column)
+        .map_err(|_| "Mouse scroll pane position column does not fit u16")?;
+    Ok(crate::position::Position::new(line, column))
+}
+
 impl From<ProtobufFloatingPaneCoordinates> for FloatingPaneCoordinates {
     fn from(val: ProtobufFloatingPaneCoordinates) -> Self {
         FloatingPaneCoordinates {
@@ -1457,10 +1470,11 @@ impl TryFrom<ProtobufPluginCommand> for PluginCommand {
                         .pane_id
                         .ok_or("MouseScrollUpInPaneId requires a pane id")?
                         .try_into()?;
-                    let position = payload
-                        .position
-                        .ok_or("MouseScrollUpInPaneId requires a position")?
-                        .try_into()?;
+                    let position = mouse_scroll_position_from_protobuf(
+                        payload
+                            .position
+                            .ok_or("MouseScrollUpInPaneId requires a position")?,
+                    )?;
                     let lines = payload
                         .lines
                         .try_into()
@@ -1477,10 +1491,11 @@ impl TryFrom<ProtobufPluginCommand> for PluginCommand {
                         .pane_id
                         .ok_or("MouseScrollDownInPaneId requires a pane id")?
                         .try_into()?;
-                    let position = payload
-                        .position
-                        .ok_or("MouseScrollDownInPaneId requires a position")?
-                        .try_into()?;
+                    let position = mouse_scroll_position_from_protobuf(
+                        payload
+                            .position
+                            .ok_or("MouseScrollDownInPaneId requires a position")?,
+                    )?;
                     let lines = payload
                         .lines
                         .try_into()
@@ -5131,6 +5146,29 @@ mod tests {
     use super::*;
     use crate::position::Position;
 
+    fn protobuf_mouse_scroll_command(
+        scroll_up: bool,
+        line: i64,
+        column: i64,
+    ) -> ProtobufPluginCommand {
+        let payload = MouseScrollInPaneIdPayload {
+            pane_id: Some(PaneId::Terminal(7).try_into().unwrap()),
+            position: Some(ProtobufPosition { line, column }),
+            lines: 1,
+        };
+        if scroll_up {
+            ProtobufPluginCommand {
+                name: CommandName::MouseScrollUpInPaneId as i32,
+                payload: Some(Payload::MouseScrollUpInPaneIdPayload(payload)),
+            }
+        } else {
+            ProtobufPluginCommand {
+                name: CommandName::MouseScrollDownInPaneId as i32,
+                payload: Some(Payload::MouseScrollDownInPaneIdPayload(payload)),
+            }
+        }
+    }
+
     #[test]
     fn mouse_scroll_in_pane_id_roundtrips() {
         for command in [
@@ -5151,6 +5189,34 @@ mod tests {
                     assert_eq!(lines, 5);
                 },
                 other => panic!("unexpected roundtrip command: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn mouse_scroll_in_pane_id_rejects_invalid_positions() {
+        let invalid_positions = [
+            (-1, 0, "Mouse scroll pane position line cannot be negative"),
+            (
+                i64::from(i32::MAX) + 1,
+                0,
+                "Mouse scroll pane position line does not fit i32",
+            ),
+            (0, -1, "Mouse scroll pane position column does not fit u16"),
+            (
+                0,
+                i64::from(u16::MAX) + 1,
+                "Mouse scroll pane position column does not fit u16",
+            ),
+        ];
+
+        for scroll_up in [true, false] {
+            for (line, column, expected_error) in invalid_positions {
+                let protobuf = protobuf_mouse_scroll_command(scroll_up, line, column);
+                assert_eq!(
+                    PluginCommand::try_from(protobuf).unwrap_err(),
+                    expected_error
+                );
             }
         }
     }
