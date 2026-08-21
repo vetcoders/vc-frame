@@ -110,7 +110,6 @@ struct State {
     tab_line: Vec<LinePart>,
     display_area_rows: usize,
     display_area_cols: usize,
-    pane_manifest: PaneManifest,
 
     // Clipboard state
     text_copy_destination: Option<CopyDestination>,
@@ -434,8 +433,6 @@ impl State {
             false
         };
 
-        self.pane_manifest = pane_manifest;
-
         failures_changed || tooltip_changed
     }
 
@@ -641,8 +638,11 @@ impl State {
         let Ok((_, focused_pane_id)) = get_focused_pane_info() else {
             return;
         };
+        let Some(focused_pane) = get_pane_info(focused_pane_id) else {
+            return;
+        };
         let Some((pane_id, position)) =
-            focused_terminal_scroll_target(focused_pane_id, &self.pane_manifest)
+            focused_terminal_scroll_target(focused_pane_id, &focused_pane)
         else {
             return;
         };
@@ -656,17 +656,14 @@ impl State {
 
 fn focused_terminal_scroll_target(
     focused_pane_id: PaneId,
-    pane_manifest: &PaneManifest,
+    focused_pane: &PaneInfo,
 ) -> Option<(PaneId, Position)> {
-    let focused_pane = pane_manifest.panes.values().flatten().find(|pane| {
-        let pane_id = if pane.is_plugin {
-            PaneId::Plugin(pane.id)
-        } else {
-            PaneId::Terminal(pane.id)
-        };
-        pane_id == focused_pane_id
-    })?;
-    if focused_pane.is_plugin {
+    let pane_id = if focused_pane.is_plugin {
+        PaneId::Plugin(focused_pane.id)
+    } else {
+        PaneId::Terminal(focused_pane.id)
+    };
+    if focused_pane.is_plugin || pane_id != focused_pane_id {
         return None;
     }
     if focused_pane.pane_content_rows == 0 || focused_pane.pane_content_columns == 0 {
@@ -1038,70 +1035,46 @@ mod transient_dimension_guard_tests {
             cursor_coordinates_in_pane: Some((8, 4)),
             ..Default::default()
         };
-        let focused_plugin = PaneInfo {
-            is_focused: true,
-            is_plugin: true,
-            pane_content_columns: 1,
-            pane_content_rows: 1,
-            ..Default::default()
-        };
-        let manifest = PaneManifest {
-            panes: std::collections::HashMap::from([(1, vec![focused_plugin, focused_terminal])]),
-        };
-
-        let target = focused_terminal_scroll_target(PaneId::Terminal(0), &manifest).unwrap();
+        let target =
+            focused_terminal_scroll_target(PaneId::Terminal(0), &focused_terminal).unwrap();
         assert_eq!(target, (PaneId::Terminal(0), Position::new(3, 7)));
     }
 
     #[test]
     fn wheel_actions_fall_back_to_the_content_center() {
-        let manifest = PaneManifest {
-            panes: std::collections::HashMap::from([(
-                1,
-                vec![PaneInfo {
-                    id: 4,
-                    pane_content_x: 24,
-                    pane_content_y: 2,
-                    pane_content_columns: 80,
-                    pane_content_rows: 20,
-                    ..Default::default()
-                }],
-            )]),
+        let focused_terminal = PaneInfo {
+            id: 4,
+            pane_content_x: 24,
+            pane_content_y: 2,
+            pane_content_columns: 80,
+            pane_content_rows: 20,
+            ..Default::default()
         };
 
-        let target = focused_terminal_scroll_target(PaneId::Terminal(4), &manifest).unwrap();
+        let target =
+            focused_terminal_scroll_target(PaneId::Terminal(4), &focused_terminal).unwrap();
         assert_eq!(target, (PaneId::Terminal(4), Position::new(10, 40)));
     }
 
     #[test]
     fn wheel_forwarding_ignores_plugin_only_and_empty_content_surfaces() {
-        let plugin_only = PaneManifest {
-            panes: std::collections::HashMap::from([(
-                0,
-                vec![PaneInfo {
-                    is_focused: true,
-                    is_plugin: true,
-                    pane_content_columns: 80,
-                    pane_content_rows: 20,
-                    ..Default::default()
-                }],
-            )]),
+        let plugin_only = PaneInfo {
+            is_focused: true,
+            is_plugin: true,
+            pane_content_columns: 80,
+            pane_content_rows: 20,
+            ..Default::default()
         };
         assert_eq!(
             focused_terminal_scroll_target(PaneId::Plugin(0), &plugin_only),
             None
         );
 
-        let empty_terminal = PaneManifest {
-            panes: std::collections::HashMap::from([(
-                0,
-                vec![PaneInfo {
-                    is_focused: true,
-                    pane_content_columns: 0,
-                    pane_content_rows: 20,
-                    ..Default::default()
-                }],
-            )]),
+        let empty_terminal = PaneInfo {
+            is_focused: true,
+            pane_content_columns: 0,
+            pane_content_rows: 20,
+            ..Default::default()
         };
         assert_eq!(
             focused_terminal_scroll_target(PaneId::Terminal(0), &empty_terminal),
