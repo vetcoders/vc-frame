@@ -150,6 +150,8 @@ use std::collections::BTreeMap;
 use std::convert::TryFrom;
 use std::path::PathBuf;
 
+const MAX_MOUSE_SCROLL_LINES_IN_PANE_ID: usize = 100;
+
 fn mouse_scroll_position_from_protobuf(
     protobuf_position: ProtobufPosition,
 ) -> Result<crate::position::Position, &'static str> {
@@ -161,6 +163,15 @@ fn mouse_scroll_position_from_protobuf(
     let column = u16::try_from(protobuf_position.column)
         .map_err(|_| "Mouse scroll pane position column does not fit u16")?;
     Ok(crate::position::Position::new(line, column))
+}
+
+fn mouse_scroll_lines_from_protobuf(lines: u64) -> Result<usize, &'static str> {
+    let lines =
+        usize::try_from(lines).map_err(|_| "Mouse scroll pane line count does not fit usize")?;
+    if lines > MAX_MOUSE_SCROLL_LINES_IN_PANE_ID {
+        return Err("Mouse scroll pane line count exceeds maximum");
+    }
+    Ok(lines)
 }
 
 impl From<ProtobufFloatingPaneCoordinates> for FloatingPaneCoordinates {
@@ -1475,10 +1486,7 @@ impl TryFrom<ProtobufPluginCommand> for PluginCommand {
                             .position
                             .ok_or("MouseScrollUpInPaneId requires a position")?,
                     )?;
-                    let lines = payload
-                        .lines
-                        .try_into()
-                        .map_err(|_| "MouseScrollUpInPaneId line count does not fit usize")?;
+                    let lines = mouse_scroll_lines_from_protobuf(payload.lines)?;
                     Ok(PluginCommand::MouseScrollUpInPaneId(
                         pane_id, position, lines,
                     ))
@@ -1496,10 +1504,7 @@ impl TryFrom<ProtobufPluginCommand> for PluginCommand {
                             .position
                             .ok_or("MouseScrollDownInPaneId requires a position")?,
                     )?;
-                    let lines = payload
-                        .lines
-                        .try_into()
-                        .map_err(|_| "MouseScrollDownInPaneId line count does not fit usize")?;
+                    let lines = mouse_scroll_lines_from_protobuf(payload.lines)?;
                     Ok(PluginCommand::MouseScrollDownInPaneId(
                         pane_id, position, lines,
                     ))
@@ -5150,11 +5155,12 @@ mod tests {
         scroll_up: bool,
         line: i64,
         column: i64,
+        lines: u64,
     ) -> ProtobufPluginCommand {
         let payload = MouseScrollInPaneIdPayload {
             pane_id: Some(PaneId::Terminal(7).try_into().unwrap()),
             position: Some(ProtobufPosition { line, column }),
-            lines: 1,
+            lines,
         };
         if scroll_up {
             ProtobufPluginCommand {
@@ -5212,12 +5218,55 @@ mod tests {
 
         for scroll_up in [true, false] {
             for (line, column, expected_error) in invalid_positions {
-                let protobuf = protobuf_mouse_scroll_command(scroll_up, line, column);
+                let protobuf = protobuf_mouse_scroll_command(scroll_up, line, column, 1);
                 assert_eq!(
                     PluginCommand::try_from(protobuf).unwrap_err(),
                     expected_error
                 );
             }
+        }
+    }
+
+    #[test]
+    fn mouse_scroll_in_pane_id_rejects_excessive_line_counts() {
+        for scroll_up in [true, false] {
+            let maximum = protobuf_mouse_scroll_command(
+                scroll_up,
+                0,
+                0,
+                MAX_MOUSE_SCROLL_LINES_IN_PANE_ID as u64,
+            );
+            assert!(PluginCommand::try_from(maximum).is_ok());
+
+            let excessive = protobuf_mouse_scroll_command(
+                scroll_up,
+                0,
+                0,
+                MAX_MOUSE_SCROLL_LINES_IN_PANE_ID as u64 + 1,
+            );
+            assert_eq!(
+                PluginCommand::try_from(excessive).unwrap_err(),
+                "Mouse scroll pane line count exceeds maximum"
+            );
+        }
+
+        for excessive_command in [
+            PluginCommand::MouseScrollUpInPaneId(
+                PaneId::Terminal(7),
+                Position::new(0, 0),
+                MAX_MOUSE_SCROLL_LINES_IN_PANE_ID + 1,
+            ),
+            PluginCommand::MouseScrollDownInPaneId(
+                PaneId::Terminal(7),
+                Position::new(0, 0),
+                MAX_MOUSE_SCROLL_LINES_IN_PANE_ID + 1,
+            ),
+        ] {
+            let protobuf = ProtobufPluginCommand::try_from(excessive_command).unwrap();
+            assert_eq!(
+                PluginCommand::try_from(protobuf).unwrap_err(),
+                "Mouse scroll pane line count exceeds maximum"
+            );
         }
     }
 }

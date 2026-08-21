@@ -2264,6 +2264,7 @@ pub fn scroll_down_in_pane_id(pane_id: PaneId) {
 }
 
 /// Send a mouse-wheel-up event to an exact pane at a position relative to its content.
+/// A single command can request at most 100 lines.
 pub fn mouse_scroll_up_in_pane_id(pane_id: PaneId, position: Position, lines: usize) {
     let plugin_command = PluginCommand::MouseScrollUpInPaneId(pane_id, position, lines);
     let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
@@ -2272,6 +2273,7 @@ pub fn mouse_scroll_up_in_pane_id(pane_id: PaneId, position: Position, lines: us
 }
 
 /// Send a mouse-wheel-down event to an exact pane at a position relative to its content.
+/// A single command can request at most 100 lines.
 pub fn mouse_scroll_down_in_pane_id(pane_id: PaneId, position: Position, lines: usize) {
     let plugin_command = PluginCommand::MouseScrollDownInPaneId(pane_id, position, lines);
     let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
