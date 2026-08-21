@@ -150,7 +150,7 @@ use std::collections::BTreeMap;
 use std::convert::TryFrom;
 use std::path::PathBuf;
 
-const MAX_MOUSE_SCROLL_LINES_IN_PANE_ID: usize = 100;
+pub const MAX_MOUSE_SCROLL_LINES_IN_PANE_ID: usize = 100;
 
 fn mouse_scroll_position_from_protobuf(
     protobuf_position: ProtobufPosition,

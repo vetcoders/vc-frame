@@ -646,12 +646,17 @@ impl State {
         else {
             return;
         };
+        let lines = bounded_mouse_scroll_lines(lines);
         if scroll_up {
             mouse_scroll_up_in_pane_id(pane_id, position, lines);
         } else {
             mouse_scroll_down_in_pane_id(pane_id, position, lines);
         }
     }
+}
+
+fn bounded_mouse_scroll_lines(lines: usize) -> usize {
+    lines.min(plugin_api::plugin_command::MAX_MOUSE_SCROLL_LINES_IN_PANE_ID)
 }
 
 fn focused_terminal_scroll_target(
@@ -1054,6 +1059,13 @@ mod transient_dimension_guard_tests {
         let target =
             focused_terminal_scroll_target(PaneId::Terminal(4), &focused_terminal).unwrap();
         assert_eq!(target, (PaneId::Terminal(4), Position::new(10, 40)));
+    }
+
+    #[test]
+    fn wheel_forwarding_bounds_large_trackpad_deltas() {
+        assert_eq!(bounded_mouse_scroll_lines(3), 3);
+        assert_eq!(bounded_mouse_scroll_lines(100), 100);
+        assert_eq!(bounded_mouse_scroll_lines(usize::MAX), 100);
     }
 
     #[test]

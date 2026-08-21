@@ -18,6 +18,24 @@ fn plugin_hover_leave_event() -> MouseEvent {
     MouseEvent::new_buttonless_motion(Position::new(-1, 0))
 }
 
+fn bounded_content_position(pane: &dyn Pane, requested_position: &Position) -> Option<Position> {
+    let content_rows = pane.get_content_rows();
+    let content_columns = pane.get_content_columns();
+    if content_rows == 0 || content_columns == 0 {
+        return None;
+    }
+
+    let mut bounded_position = *requested_position;
+    let last_content_row = isize::try_from(content_rows.saturating_sub(1)).unwrap_or(isize::MAX);
+    bounded_position.change_line(requested_position.line().clamp(0, last_content_row));
+    bounded_position.change_column(
+        requested_position
+            .column()
+            .min(content_columns.saturating_sub(1)),
+    );
+    Some(bounded_position)
+}
+
 /// Pure UpdateHover policy — no Tab, no focus steal.
 ///
 /// `focus_follows_mouse` is intentionally out of this path: hover highlights
@@ -1736,8 +1754,12 @@ impl MouseHandler {
         let Some(pane) = tab.get_pane_with_id_mut(pane_id) else {
             return Ok(());
         };
+        let Some(relative_position) = bounded_content_position(pane.as_ref(), relative_position)
+        else {
+            return Ok(());
+        };
         let (input_bytes, repetitions) =
-            if let Some(mouse_event) = pane.mouse_scroll_up(relative_position) {
+            if let Some(mouse_event) = pane.mouse_scroll_up(&relative_position) {
                 (Some(mouse_event.into_bytes()), 1)
             } else if pane.is_alternate_mode_active() {
                 (Some("\u{1b}[A".as_bytes().to_owned()), lines)
@@ -1777,8 +1799,12 @@ impl MouseHandler {
         let Some(pane) = tab.get_pane_with_id_mut(pane_id) else {
             return Ok(());
         };
+        let Some(relative_position) = bounded_content_position(pane.as_ref(), relative_position)
+        else {
+            return Ok(());
+        };
         let (input_bytes, repetitions, pending_vte_pane_id) =
-            if let Some(mouse_event) = pane.mouse_scroll_down(relative_position) {
+            if let Some(mouse_event) = pane.mouse_scroll_down(&relative_position) {
                 (Some(mouse_event.into_bytes()), 1, None)
             } else if pane.is_alternate_mode_active() {
                 (Some("\u{1b}[B".as_bytes().to_owned()), lines, None)

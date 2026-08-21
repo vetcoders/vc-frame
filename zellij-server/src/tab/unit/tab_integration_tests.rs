@@ -5108,6 +5108,44 @@ fn mouse_scroll_in_pane_id_preserves_the_exact_local_position() {
 }
 
 #[test]
+fn mouse_scroll_in_pane_id_bounds_stale_positions_to_current_content() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 1;
+    let mut pty_instruction_bus = MockPtyInstructionBus::new();
+    let mut tab = create_new_tab_with_mock_pty_writer(
+        size,
+        ModeInfo::default(),
+        pty_instruction_bus.pty_write_sender(),
+    );
+    pty_instruction_bus.start();
+
+    tab.handle_pty_bytes(1, b"\x1b[?1002;1006h".to_vec())
+        .unwrap();
+    let (content_columns, content_rows) = {
+        let pane = tab.get_pane_with_id(PaneId::Terminal(1)).unwrap();
+        (pane.get_content_columns(), pane.get_content_rows())
+    };
+    let stale_position = Position::new(i32::MAX, u16::MAX);
+    tab.handle_scrollwheel_up_in_pane(PaneId::Terminal(1), &stale_position, 2, client_id)
+        .unwrap();
+    tab.handle_scrollwheel_down_in_pane(PaneId::Terminal(1), &stale_position, 2, client_id)
+        .unwrap();
+
+    pty_instruction_bus.exit();
+
+    assert_eq!(
+        pty_instruction_bus.clone_output(),
+        vec![
+            format!("\x1b[<64;{content_columns};{content_rows}M"),
+            format!("\x1b[<65;{content_columns};{content_rows}M"),
+        ]
+    );
+}
+
+#[test]
 fn move_pane_focus_sends_tty_csi_event() {
     let size = Size {
         cols: 121,
