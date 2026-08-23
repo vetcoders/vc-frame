@@ -62,6 +62,21 @@ impl Default for App {
     }
 }
 
+/// The product line the Guide opens with. A layout that names its product
+/// gets "<name> <version>"; a version the build did not stamp (still an
+/// `@PLACEHOLDER@`, or empty) is dropped rather than shown raw; no name at all
+/// means the frame is running bare and the caller keeps its vc-frame line.
+fn product_label(name: Option<&str>, version: Option<&str>) -> Option<String> {
+    let name = name.map(str::trim).filter(|n| !n.is_empty())?;
+    match version
+        .map(str::trim)
+        .filter(|v| !v.is_empty() && !v.starts_with('@'))
+    {
+        Some(version) => Some(format!("{name} {version}")),
+        None => Some(name.to_owned()),
+    }
+}
+
 register_plugin!(App);
 
 impl ZellijPlugin for App {
@@ -76,6 +91,10 @@ impl ZellijPlugin for App {
             .unwrap_or(false);
         self.guide_mode = configuration.get("guide_mode").cloned();
         self.pane_title = configuration.get("pane_title").cloned();
+        pages::set_product_label(product_label(
+            configuration.get("product_name").map(String::as_str),
+            configuration.get("product_version").map(String::as_str),
+        ));
         subscribe(&[
             EventType::Key,
             EventType::Mouse,
@@ -371,5 +390,36 @@ impl App {
             self.base_mode.clone(),
             self.tip_index,
         );
+    }
+}
+
+#[cfg(test)]
+mod product_label_tests {
+    use super::product_label;
+
+    #[test]
+    fn name_and_stamped_version() {
+        assert_eq!(
+            product_label(Some("Vibecrafted"), Some("4.2.4")),
+            Some("Vibecrafted 4.2.4".to_owned())
+        );
+    }
+
+    #[test]
+    fn unstamped_placeholder_is_dropped() {
+        assert_eq!(
+            product_label(Some("Vibecrafted"), Some("@VIBECRAFTED_VERSION@")),
+            Some("Vibecrafted".to_owned())
+        );
+        assert_eq!(
+            product_label(Some("Vibecrafted"), Some("  ")),
+            Some("Vibecrafted".to_owned())
+        );
+    }
+
+    #[test]
+    fn no_name_means_bare_frame() {
+        assert_eq!(product_label(None, Some("4.2.4")), None);
+        assert_eq!(product_label(Some(""), None), None);
     }
 }

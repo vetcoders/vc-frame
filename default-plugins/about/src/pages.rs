@@ -169,6 +169,22 @@ impl ClickAction {
     }
 }
 
+thread_local! {
+    /// "Vibecrafted 4.2.4" — handed down once by the layout through the plugin
+    /// configuration (`product_name` / `product_version`). Every page that
+    /// returns to the first-run map reads it here, so sub-pages need not carry
+    /// it through their closures. None = the frame runs bare.
+    static PRODUCT_LABEL: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+pub fn set_product_label(label: Option<String>) {
+    PRODUCT_LABEL.with(|slot| *slot.borrow_mut() = label);
+}
+
+fn product_label() -> Option<String> {
+    PRODUCT_LABEL.with(|slot| slot.borrow().clone())
+}
+
 impl Page {
     pub fn new_main_screen(
         link_executable: Rc<RefCell<String>>,
@@ -303,20 +319,23 @@ impl Page {
     }
     /// First-run map for the vibecrafted operator layout (Guide / Start here tab).
     /// Written for people who have never used a multiplexor — plain labels, no jargon.
+    ///
+    /// The first line names the product this frame ships inside ("Vibecrafted
+    /// 4.2.4", see [`set_product_label`]); without one it names the bare frame.
     pub fn new_vibecrafted_mission_control(
         link_executable: Rc<RefCell<String>>,
         zellij_version: String,
         base_mode: Rc<RefCell<InputMode>>,
     ) -> Self {
+        let identity_line = product_label().unwrap_or_else(|| {
+            format!("vc-frame {} · Vibecrafted operator layout", zellij_version)
+        });
         Page::new()
             .main_screen()
             .with_title(Text::new("Start here — map of this workspace").color_range(0, ..))
             .with_paragraph(vec![
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
-                    Text::new(format!(
-                        "vc-frame {} · Vibecrafted operator layout",
-                        zellij_version
-                    )),
+                    Text::new(identity_line).color_range(2, ..),
                 ))]),
                 ComponentLine::new(vec![ActiveComponent::new(TextOrCustomRender::Text(
                     Text::new(
