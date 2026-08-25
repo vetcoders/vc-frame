@@ -353,6 +353,22 @@ fn vibecrafted_layouts_can_be_loaded_from_builtin_assets() {
 }
 
 #[test]
+fn vibecrafted_agent_workspace_layout_parses_with_product_tabs() {
+    let (_path, raw_layout, _swap_layout) =
+        Layout::stringified_from_default_assets(Path::new("vibecrafted")).unwrap();
+
+    Layout::from_kdl(&raw_layout, Some("builtin:vibecrafted".into()), None, None)
+        .expect("the shipped Agent Workspaces layout must parse");
+    for tab_name in ["Start here", "Agents", "Shell", "voc"] {
+        assert!(
+            raw_layout.contains(&format!("tab name=\"{tab_name}\"")),
+            "missing product tab {tab_name}"
+        );
+    }
+    assert!(raw_layout.contains("vc-agent-workshop.py"));
+}
+
+#[test]
 fn vibecrafted_layouts_include_companion_repo_fallbacks() {
     let expected_companion_root =
         "${VIBECRAFTED_COMPANION_ROOT:-$HOME/Libraxis/vibecrafted}/skills/vc-agents";
