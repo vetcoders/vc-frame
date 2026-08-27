@@ -197,6 +197,188 @@ impl SettlementHistory {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+struct AgentRunUiInfo {
+    run_id: String,
+    #[serde(default)]
+    agent: String,
+    #[serde(default)]
+    skill: String,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    root: String,
+    #[serde(default)]
+    repo: String,
+    #[serde(default)]
+    workspace_title: Option<String>,
+    #[serde(default)]
+    task_title: Option<String>,
+    #[serde(default)]
+    plan_title: Option<String>,
+    #[serde(default)]
+    operator_session: String,
+    #[serde(default)]
+    health: String,
+    #[serde(default)]
+    execution_state: String,
+    #[serde(default)]
+    proof_state: String,
+    #[serde(default)]
+    delivery_state: String,
+    #[serde(default)]
+    started_at: String,
+}
+
+impl AgentRunUiInfo {
+    fn primary_title(&self) -> String {
+        if let Some(title) = human_title_field(self.workspace_title.as_deref()) {
+            return title;
+        }
+
+        let repo = human_title_field(Some(&self.repo)).or_else(|| repository_from_root(&self.root));
+        let task = human_title_field(self.task_title.as_deref())
+            .or_else(|| human_title_field(self.plan_title.as_deref()))
+            .or_else(|| dispatch_task_from_root(&self.root));
+        match (repo, task) {
+            (Some(repo), Some(task)) if repo != task => format!("{repo} · {task}"),
+            (Some(repo), _) => repo,
+            (None, Some(task)) => task,
+            (None, None) => {
+                friendly_path_fallback(&self.root).unwrap_or_else(|| "Agent workspace".to_owned())
+            },
+        }
+    }
+
+    fn status_summary(&self) -> String {
+        let agent = nonempty_title(Some(&self.agent)).unwrap_or_else(|| "agent unavailable".into());
+        let skill = nonempty_title(Some(&self.skill))
+            .or_else(|| nonempty_title(Some(&self.mode)))
+            .unwrap_or_else(|| "skill unavailable".into());
+        let state = nonempty_title(Some(&self.execution_state))
+            .or_else(|| nonempty_title(Some(&self.health)))
+            .unwrap_or_else(|| "status unavailable".into());
+        format!("{agent} · {skill} · {state}")
+    }
+}
+
+fn nonempty_title(value: Option<&str>) -> Option<String> {
+    value
+        .map(sanitize_display_label)
+        .filter(|value| !value.is_empty())
+}
+
+fn human_title_field(value: Option<&str>) -> Option<String> {
+    nonempty_title(value).filter(|value| !looks_like_runtime_identity(value))
+}
+
+fn looks_like_runtime_identity(value: &str) -> bool {
+    Uuid::parse_str(value).is_ok()
+        || [
+            "impl-", "work-", "audi-", "rese-", "marb-", "pola-", "fwup-",
+        ]
+        .iter()
+        .any(|prefix| value.to_ascii_lowercase().starts_with(prefix))
+}
+
+fn path_components(path: &str) -> Vec<&str> {
+    path.split(['/', '\\'])
+        .filter(|component| !component.is_empty())
+        .collect()
+}
+
+fn is_dispatch_day(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 9
+        && bytes[4] == b'_'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| index == 4 || byte.is_ascii_digit())
+}
+
+fn humanize_path_component(value: &str) -> Option<String> {
+    let value = sanitize_display_label(value);
+    if value.is_empty() || Uuid::parse_str(&value).is_ok() {
+        return None;
+    }
+    let humanized = value
+        .split(['-', '_'])
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!humanized.is_empty()).then_some(humanized)
+}
+
+fn repository_from_root(root: &str) -> Option<String> {
+    let components = path_components(root);
+    components
+        .windows(2)
+        .find_map(|window| is_dispatch_day(window[1]).then(|| humanize_path_component(window[0])))
+        .flatten()
+        .or_else(|| {
+            components
+                .last()
+                .and_then(|value| humanize_path_component(value))
+        })
+}
+
+fn dispatch_task_from_root(root: &str) -> Option<String> {
+    let components = path_components(root);
+    components.windows(2).find_map(|window| {
+        is_dispatch_day(window[0])
+            .then(|| humanize_path_component(window[1]))
+            .flatten()
+    })
+}
+
+fn friendly_path_fallback(root: &str) -> Option<String> {
+    path_components(root)
+        .into_iter()
+        .rev()
+        .find_map(humanize_path_component)
+}
+
+fn agent_workspace_lines(runs: Option<&[AgentRunUiInfo]>, degraded: bool) -> Vec<String> {
+    let mut lines = vec!["AGENT WORKSPACES".to_owned()];
+    if degraded {
+        lines.push("DEGRADED · showing last accepted server projection".to_owned());
+    } else {
+        lines.push("LIVE · Vibecrafted Server projection".to_owned());
+    }
+    lines.push(String::new());
+    match runs {
+        None => lines.push("UNAVAILABLE · waiting for canonical workspace data".to_owned()),
+        Some([]) => lines.push("EMPTY · no active agent runs".to_owned()),
+        Some(runs) => {
+            for run in runs {
+                lines.push(format!("● {}", run.primary_title()));
+                lines.push(format!("  {}", run.status_summary()));
+                lines.push(format!("  run {}", sanitize_display_label(&run.run_id)));
+                lines.push(String::new());
+            }
+        },
+    }
+    lines
+}
+
+fn project_canonical_session_titles(
+    runs: Option<&[AgentRunUiInfo]>,
+    sessions: &mut [SessionUiInfo],
+) {
+    let Some(runs) = runs else {
+        return;
+    };
+    for session in sessions {
+        if let Some(run) = runs
+            .iter()
+            .find(|run| !run.operator_session.is_empty() && run.operator_session == session.name)
+        {
+            session.title = run.primary_title();
+        }
+    }
+}
+
 #[derive(Default)]
 struct State {
     session_name: Option<String>,
@@ -220,6 +402,11 @@ struct State {
     is_visible: bool,
     refresh_timer_armed: bool,
     is_rail: bool,
+    // Full-canvas Agent Workspaces view. It consumes the same server-owned
+    // projection as the rail and never scans runtime directories or invents
+    // mock workers.
+    workspace_dashboard: bool,
+    agent_runs: Option<Vec<AgentRunUiInfo>>,
     // A frame host owns the chrome once and projects other sessions into one
     // replaceable terminal pane. Guest servers keep their PTYs; this plugin
     // only swaps the interactive visitor process.
@@ -270,6 +457,10 @@ impl ZellijPlugin for State {
             .get("rail")
             .map(|v| v == "true")
             .unwrap_or(false);
+        self.workspace_dashboard = configuration
+            .get("workspace_dashboard")
+            .map(|value| value == "true")
+            .unwrap_or(false);
         self.frame_host = self.is_rail
             && configuration
                 .get("frame_host")
@@ -316,7 +507,12 @@ impl ZellijPlugin for State {
             subscriptions.push(EventType::SessionUpdate);
         }
         subscribe(&subscriptions);
-        let pane_title = if self.is_rail {
+        let pane_title = if self.workspace_dashboard {
+            configuration
+                .get("pane_title")
+                .cloned()
+                .unwrap_or_else(|| "Agent Workspaces".to_owned())
+        } else if self.is_rail {
             configuration
                 .get("pane_title")
                 .cloned()
@@ -474,7 +670,8 @@ impl ZellijPlugin for State {
                 }
             },
             Event::CustomMessage(message, payload)
-                if self.is_rail && message == VC_LIVE_RUNS_MESSAGE =>
+                if (self.is_rail || self.workspace_dashboard)
+                    && message == VC_LIVE_RUNS_MESSAGE =>
             {
                 should_render = self.apply_live_runs_payload(&payload);
             },
@@ -569,6 +766,10 @@ impl ZellijPlugin for State {
     }
 
     fn render(&mut self, rows: usize, cols: usize) {
+        if self.workspace_dashboard {
+            self.render_agent_workspaces(rows, cols);
+            return;
+        }
         if self.is_rail {
             self.render_session_rail(rows, cols);
             if let Some(error) = self.error.as_ref() {
@@ -912,7 +1113,7 @@ fn format_session_rail_entry(
         "{:02} {} {}",
         ordinal,
         status,
-        sanitize_display_label(&session.name)
+        sanitize_display_label(&session.title)
     )
 }
 
@@ -1681,21 +1882,21 @@ impl State {
         self.mark_settlement_feed_degraded()
     }
 
-    /// Ingest a `vc.live-runs.v1` payload. The rail keeps the census size and
-    /// the validated donor origin; the monitor re-reads that same server, so
-    /// richer per-run fields never have to survive this hop.
+    /// Ingest the server-owned `vc.live-runs.v1` projection. The rail uses the
+    /// census while Agent Workspaces preserves the cards and status fields.
     fn apply_live_runs_payload(&mut self, payload: &str) -> bool {
         #[derive(Deserialize)]
         struct LiveRunsFeed {
             schema: String,
             #[serde(default)]
             server_url: Option<String>,
-            runs: Vec<serde_json::Value>,
+            runs: Vec<AgentRunUiInfo>,
         }
         let previous = (
             self.live_runs_count,
             self.live_runs_server_url.clone(),
             self.live_runs_feed_degraded,
+            self.agent_runs.clone(),
         );
         let parsed: Option<LiveRunsFeed> = serde_json::from_str(payload)
             .ok()
@@ -1705,7 +1906,22 @@ impl State {
             // the last accepted count into a lower bound, never a blank.
             return self.mark_live_runs_feed_degraded();
         };
-        self.live_runs_count = Some(feed.runs.len() as u64);
+        let mut runs = feed.runs;
+        runs.sort_by(|left, right| {
+            left.started_at
+                .cmp(&right.started_at)
+                .then_with(|| left.run_id.cmp(&right.run_id))
+        });
+        self.live_runs_count = Some(runs.len() as u64);
+        self.agent_runs = Some(runs);
+        project_canonical_session_titles(
+            self.agent_runs.as_deref(),
+            &mut self.sessions.session_ui_infos,
+        );
+        project_canonical_session_titles(
+            self.agent_runs.as_deref(),
+            &mut self.sessions.forbidden_sessions,
+        );
         self.live_runs_server_url = feed.server_url;
         self.live_runs_feed_degraded = false;
         self.live_runs_feed_age_ticks = Some(0);
@@ -1713,6 +1929,7 @@ impl State {
             self.live_runs_count,
             self.live_runs_server_url.clone(),
             self.live_runs_feed_degraded,
+            self.agent_runs.clone(),
         ) != previous
     }
 
@@ -1730,6 +1947,21 @@ impl State {
             return false;
         }
         self.mark_live_runs_feed_degraded()
+    }
+
+    fn render_agent_workspaces(&self, rows: usize, cols: usize) {
+        if rows == 0 || cols == 0 {
+            return;
+        }
+        for (row, line) in
+            agent_workspace_lines(self.agent_runs.as_deref(), self.live_runs_feed_degraded)
+                .into_iter()
+                .take(rows)
+                .enumerate()
+        {
+            let text = fit_rail_line(&line, cols);
+            print_text_with_coordinates(Text::new(text), 0, row, None, None);
+        }
     }
 
     fn reset_selected_index(&mut self) {
@@ -1781,7 +2013,7 @@ impl State {
             .session_ui_infos
             .iter()
             .find(|s| s.is_current_session)
-            .map(|s| s.name.as_str());
+            .map(|s| s.title.as_str());
         // Anchor offset only exists in Wide — the other modes drop the name.
         let anchor_start = format!("SESSIONS {}", session_count).width() + 3; // " · "
         let header_text = rail_header_text(mode, session_count, current_session_name);
@@ -3184,7 +3416,7 @@ impl State {
                 RailWidthMode::Wide,
             )
         });
-        let session_ui_infos: Vec<SessionUiInfo> = session_infos
+        let mut session_ui_infos: Vec<SessionUiInfo> = session_infos
             .iter()
             .filter_map(|s| {
                 if self.is_web_client && !s.web_clients_allowed {
@@ -3201,7 +3433,7 @@ impl State {
                 }
             })
             .collect();
-        let forbidden_sessions: Vec<SessionUiInfo> = session_infos
+        let mut forbidden_sessions: Vec<SessionUiInfo> = session_infos
             .iter()
             .filter_map(|s| {
                 if self.is_web_client && !s.web_clients_allowed {
@@ -3211,6 +3443,8 @@ impl State {
                 }
             })
             .collect();
+        project_canonical_session_titles(self.agent_runs.as_deref(), &mut session_ui_infos);
+        project_canonical_session_titles(self.agent_runs.as_deref(), &mut forbidden_sessions);
         let current_session_name = session_infos.iter().find_map(|s| {
             if s.is_current_session {
                 Some(s.name.clone())
@@ -3452,6 +3686,7 @@ mod rail_tests {
     fn session(name: &str, is_current_session: bool) -> SessionUiInfo {
         SessionUiInfo {
             name: name.to_owned(),
+            title: name.to_owned(),
             tabs: vec![],
             connected_users: 1,
             is_current_session,
@@ -3476,6 +3711,86 @@ mod rail_tests {
             creation_time: Duration::from_secs(secs),
             ..session(name, is_current_session)
         }
+    }
+
+    fn agent_run(payload: &str) -> AgentRunUiInfo {
+        serde_json::from_str(payload).unwrap()
+    }
+
+    #[test]
+    fn human_workspace_title_precedence_is_deterministic() {
+        let explicit = agent_run(
+            r#"{"run_id":"impl-raw","workspace_title":"Cancer Trial Review","repo":"vc-frame","task_title":"FUX","root":"/tmp/ignored"}"#,
+        );
+        assert_eq!(explicit.primary_title(), "Cancer Trial Review");
+
+        let repo_and_task =
+            agent_run(r#"{"run_id":"impl-raw","repo":"vc-frame","plan_title":"Unified layout"}"#);
+        assert_eq!(repo_and_task.primary_title(), "vc-frame · Unified layout");
+
+        let dispatched = agent_run(
+            r#"{"run_id":"impl-260827-132005-98719","root":"/Users/operator/.vibecrafted/worktrees/vetcoders/vc-frame/2026_0827/FUX"}"#,
+        );
+        assert_eq!(dispatched.primary_title(), "vc frame · FUX");
+        assert_ne!(dispatched.primary_title(), dispatched.run_id);
+
+        let raw_explicit = agent_run(
+            r#"{"run_id":"impl-raw","workspace_title":"impl-260827-132005-98719","repo":"vc-frame","task_title":"FUX"}"#,
+        );
+        assert_eq!(raw_explicit.primary_title(), "vc-frame · FUX");
+    }
+
+    #[test]
+    fn agent_workspaces_has_real_empty_unavailable_and_degraded_states() {
+        assert!(agent_workspace_lines(None, false)[3].starts_with("UNAVAILABLE"));
+        assert!(agent_workspace_lines(Some(&[]), false)[3].starts_with("EMPTY"));
+        assert!(agent_workspace_lines(Some(&[]), true)[1].starts_with("DEGRADED"));
+
+        let run = agent_run(
+            r#"{"run_id":"impl-260827-132005-98719","repo":"vc-frame","task_title":"FUX","agent":"codex","skill":"implement","execution_state":"running"}"#,
+        );
+        let lines = agent_workspace_lines(Some(std::slice::from_ref(&run)), false);
+        assert_eq!(lines[3], "● vc-frame · FUX");
+        assert_eq!(lines[4], "  codex · implement · running");
+        assert!(lines[5].contains(&run.run_id));
+        assert!(!lines[3].contains(&run.run_id));
+    }
+
+    #[test]
+    fn canonical_operator_session_title_overlays_raw_session_identity() {
+        let run = agent_run(
+            r#"{"run_id":"impl-raw","operator_session":"fux-impl-raw","repo":"vc-frame","task_title":"FUX"}"#,
+        );
+        let mut sessions = vec![session("fux-impl-raw", true)];
+        project_canonical_session_titles(Some(std::slice::from_ref(&run)), &mut sessions);
+        assert_eq!(sessions[0].name, "fux-impl-raw");
+        assert_eq!(sessions[0].title, "vc-frame · FUX");
+        assert_eq!(
+            format_session_rail_entry(&sessions[0], 1, RailWidthMode::Wide),
+            "01 ◉ vc-frame · FUX"
+        );
+    }
+
+    #[test]
+    fn session_updates_preserve_selection_by_identity_after_resort() {
+        let mut list = SessionList::default();
+        list.set_sessions(
+            vec![
+                session_launched_at("alpha", true, 10),
+                session_launched_at("beta", false, 20),
+            ],
+            vec![],
+        );
+        list.select_session_index(1);
+        list.set_sessions(
+            vec![
+                session_launched_at("new-first", false, 1),
+                session_launched_at("alpha", true, 10),
+                session_launched_at("beta", false, 20),
+            ],
+            vec![],
+        );
+        assert_eq!(list.get_selected_session_name().as_deref(), Some("beta"));
     }
 
     /// Killing next to live buckets must hop into a bucket, never take the
@@ -3952,7 +4267,10 @@ mod rail_tests {
             is_rail: true,
             ..Default::default()
         };
-        assert!(state.apply_live_runs_payload(r#"{"schema":"vc.live-runs.v1","runs":[{}]}"#));
+        assert!(
+            state
+                .apply_live_runs_payload(r#"{"schema":"vc.live-runs.v1","runs":[{"run_id":"a"}]}"#)
+        );
         for _ in 1..LIVE_RUNS_FEED_STALE_AFTER_TICKS {
             assert!(!state.age_live_runs_feed());
             assert!(!state.live_runs_feed_degraded);
@@ -3961,7 +4279,10 @@ mod rail_tests {
         assert!(state.live_runs_feed_degraded);
 
         // A fresh payload restores exact truth.
-        assert!(state.apply_live_runs_payload(r#"{"schema":"vc.live-runs.v1","runs":[{}]}"#));
+        assert!(
+            state
+                .apply_live_runs_payload(r#"{"schema":"vc.live-runs.v1","runs":[{"run_id":"a"}]}"#)
+        );
         assert!(!state.live_runs_feed_degraded);
     }
 

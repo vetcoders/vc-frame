@@ -2,7 +2,7 @@
 //
 // Tabs:
 //   "Start here"  — first-run product map
-//   "Agents"      — one workspace, interactive Agent faces and New agent card
+//   "Agents"      — canonical server projection of Agent Workspaces
 //   "Shell"       — work shell with banner + zsh (not a silent suspended pane)
 //   "voc"         — eyes for the current workspace, not a launcher
 //
@@ -55,8 +55,11 @@ layout {
     }
 
     tab name="Agents" {
-        pane command="bash" name="Agent Workspaces" {
-            args "-lc" "root=\"${VC_FRAME_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-frame}\"; launcher=\"$root/vc-agent-workshop.py\"; if [ -x \"$launcher\" ]; then exec \"$launcher\" home; fi; printf '\\n  AGENT WORKSPACES\\n\\n  Launcher missing: %s\\n  Run: vibecrafted config install --force\\n\\n' \"$launcher\"; exec \"${SHELL:-/bin/zsh}\" -l"
+        pane name="Agent Workspaces" {
+            plugin location="session-manager" {
+                workspace_dashboard true
+                pane_title "Agent Workspaces"
+            }
         }
     }
 

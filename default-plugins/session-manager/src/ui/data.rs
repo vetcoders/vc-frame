@@ -41,7 +41,11 @@ impl SelectedIndex {
 
 #[derive(Debug, Clone)]
 pub struct SessionUiInfo {
+    /// Raw Zellij session identity used for attach/kill/switch operations.
     pub name: String,
+    /// Human-facing title. Canonical control-plane projections may replace the
+    /// fallback without changing the session identity.
+    pub title: String,
     pub tabs: Vec<TabUiInfo>,
     pub connected_users: usize,
     pub is_current_session: bool,
@@ -52,6 +56,7 @@ impl SessionUiInfo {
     pub fn from_session_info(session_info: &SessionInfo) -> Self {
         SessionUiInfo {
             name: session_info.name.clone(),
+            title: friendly_session_title(&session_info.name),
             tabs: session_info
                 .tabs
                 .iter()
@@ -93,6 +98,46 @@ impl SessionUiInfo {
             span.render(None, &mut line_to_render, &mut max_cols);
         }
         line_to_render
+    }
+}
+
+fn friendly_session_title(name: &str) -> String {
+    let trimmed = name.trim();
+    if trimmed.is_empty() || uuid::Uuid::parse_str(trimmed).is_ok() {
+        return "Workspace".to_owned();
+    }
+    let identity_suffixes = [
+        "-impl-", "-work-", "-audi-", "-rese-", "-marb-", "-pola-", "-fwup-",
+    ];
+    let stem = identity_suffixes
+        .iter()
+        .filter_map(|marker| trimmed.find(marker))
+        .min()
+        .map(|index| &trimmed[..index])
+        .unwrap_or(trimmed);
+    if stem.is_empty()
+        || identity_suffixes
+            .iter()
+            .any(|marker| trimmed.starts_with(marker.trim_start_matches('-')))
+    {
+        return "Agent workspace".to_owned();
+    }
+    let title = stem
+        .split(['-', '_'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !title.is_empty() {
+        title
+    } else {
+        "Workspace".to_owned()
     }
 }
 
@@ -257,6 +302,22 @@ impl PaneUiInfo {
 #[cfg(test)]
 mod process_projection_tests {
     use super::*;
+
+    #[test]
+    fn raw_session_identity_is_never_the_primary_title() {
+        assert_eq!(
+            friendly_session_title("fux-impl-260827-132005-98719"),
+            "Fux"
+        );
+        assert_eq!(
+            friendly_session_title("impl-260827-132005-98719"),
+            "Agent workspace"
+        );
+        assert_eq!(
+            friendly_session_title("50042b41-2eda-4da5-87c7-472eae3726df"),
+            "Workspace"
+        );
+    }
 
     fn terminal(title: &str, command: Option<&str>) -> PaneInfo {
         PaneInfo {

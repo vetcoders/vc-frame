@@ -365,7 +365,12 @@ fn vibecrafted_agent_workspace_layout_parses_with_product_tabs() {
             "missing product tab {tab_name}"
         );
     }
-    assert!(raw_layout.contains("vc-agent-workshop.py"));
+    assert!(raw_layout.contains("workspace_dashboard true"));
+    assert!(raw_layout.contains("pane_title \"Agent Workspaces\""));
+    assert!(
+        !raw_layout.contains("vc-agent-workshop.py"),
+        "Agent Workspaces must consume the server projection, not an external launcher"
+    );
 }
 
 #[test]
@@ -460,7 +465,22 @@ fn vibecrafted_layout_has_start_here_and_shell_tabs() {
             assert_eq!(
                 runs.iter()
                     .filter(|run| run.as_ref().is_some_and(|run| {
-                        matches!(run, Run::Plugin(plugin) if plugin.location_string() == chrome)
+                        let Run::Plugin(plugin) = run else {
+                            return false;
+                        };
+                        if plugin.location_string() != chrome {
+                            return false;
+                        }
+                        match plugin {
+                            RunPluginOrAlias::RunPlugin(plugin) => Some(&plugin.configuration),
+                            RunPluginOrAlias::Alias(alias) => alias.configuration.as_ref(),
+                        }
+                        .is_some_and(|configuration| {
+                            configuration
+                                .inner()
+                                .get("session_canvas_kind")
+                                .is_some_and(|kind| kind == chrome)
+                        })
                     }))
                     .count(),
                 1,
@@ -503,7 +523,7 @@ fn default_layout_new_tabs_use_the_session_canvas() {
     let runs = tiled.extract_run_instructions();
 
     for (chrome, kind) in [
-        ("tab-bar", "compact-bar"),
+        ("compact-bar", "compact-bar"),
         ("session-manager", "session-manager"),
         ("status-bar", "status-bar"),
     ] {
@@ -569,9 +589,15 @@ fn product_layouts_always_include_sessions_rail() {
         let (layout, _config) =
             Layout::from_default_assets(Path::new(layout_name), None, Config::default()).unwrap();
         assert!(
-            layout.has_tabs() || !layout.is_empty(),
-            "{layout_name}: empty after parse"
+            layout.session_layer.is_some(),
+            "{layout_name}: shell must live in one session_layer"
         );
+        for kind in ["compact-bar", "session-manager", "status-bar"] {
+            assert!(
+                combined.contains(&format!("session_canvas_kind \"{kind}\"")),
+                "{layout_name}: unified shell omitted the {kind} role"
+            );
+        }
     }
 }
 

@@ -289,6 +289,7 @@ mod tests {
     ) -> SessionUiInfo {
         SessionUiInfo {
             name: name.to_string(),
+            title: name.to_string(),
             tabs: (0..tabs)
                 .map(|i| {
                     let mut tab =
