@@ -1,34 +1,15 @@
 #!/usr/bin/env zsh
-# plugins-parity — deterministic bundled-plugin truth for vc-frame
+# Build-derived plugin truth for vc-frame.
 #
-# Canonical asset producer:
-#   cargo xtask build --release --plugins-only
-#   (Makefile: make plugins-assets)
-#
-# Modes:
-#   check            Verify assets match SHA256SUMS (CI-fast; default)
-#   write-manifest   Hash current assets into SHA256SUMS
-#   receipt-json     Emit machine-readable artifact/runtime inventory
-#   rebuild-once     Release-build plugins into assets/
-#   double-rebuild   Two isolated rebuilds; hashes must match exactly
-#   self-test        Deliberate perturbation fails check; restore passes
-#
-# 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
+# Plugin WASM is never a source-controlled input. zellij-utils/build.rs builds
+# this fleet into a lock-isolated Cargo target and embeds exactly those bytes.
 set -euo pipefail
 
-# Ensure standard userland tools (shasum/awk/sort) are visible even when the
-# invoking environment has a minimal PATH (agent/runtime sandboxes).
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:${HOME}/.cargo/bin:${PATH:-}"
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-ASSETS="$REPO/zellij-utils/assets/plugins"
-MANIFEST="$ASSETS/SHA256SUMS"
-TARGET_WASM="$REPO/target/wasm32-wasip1/release"
-ASSET_MAP_SOURCE="$REPO/zellij-utils/src/consts.rs"
 CARGO="${CARGO:-cargo}"
 
-# Plugin crates whose release .wasm is copied into assets/ (xtask workspace list).
-# fixture-plugin-for-tests is built and tracked but not embedded in ASSET_MAP.
 PLUGIN_WASMS=(
   about.wasm
   compact-bar.wasm
@@ -46,7 +27,6 @@ PLUGIN_WASMS=(
   vc-tab-title.wasm
 )
 
-# Runtime-embedded plugins (zellij-utils ASSET_MAP) — excludes fixture-only.
 RUNTIME_WASMS=(
   about.wasm
   compact-bar.wasm
@@ -63,54 +43,36 @@ RUNTIME_WASMS=(
   vc-tab-title.wasm
 )
 
-TEST_ONLY_WASMS=(
-  fixture-plugin-for-tests.wasm
-)
+plugin_target_root() {
+  local target_root="${CARGO_TARGET_DIR:-$REPO/target}"
+  [[ "$target_root" == /* ]] || target_root="$REPO/$target_root"
+  print -r -- "$target_root/vc-frame-plugins/wasm32-wasip1/release"
+}
 
 sha_file() {
   /usr/bin/shasum -a 256 "$1" | /usr/bin/awk '{print $1}'
 }
 
-array_contains() {
-  local needle="$1"
-  shift
-  local item
-  for item in "$@"; do
-    [[ "$item" == "$needle" ]] && return 0
-  done
-  return 1
+build_release() {
+  (cd "$REPO" && "$CARGO" xtask build --release --plugins-only)
+}
+
+hash_dir_receipt() {
+  local dir="$1"
+  local name artifact
+  for name in "${PLUGIN_WASMS[@]}"; do
+    artifact="$dir/$name"
+    if [[ ! -f "$artifact" ]]; then
+      print -u2 "ERROR: missing plugin artifact: $artifact"
+      return 1
+    fi
+    print "$(sha_file "$artifact")  $name"
+  done | /usr/bin/sort -k2
 }
 
 check_runtime_partition() {
-  local name
-  for name in "${RUNTIME_WASMS[@]}"; do
-    array_contains "$name" "${PLUGIN_WASMS[@]}" || {
-      print -u2 "ERROR: runtime plugin is absent from build inventory: $name"
-      return 1
-    }
-    array_contains "$name" "${TEST_ONLY_WASMS[@]}" && {
-      print -u2 "ERROR: plugin cannot be both runtime and test-only: $name"
-      return 1
-    }
-  done
-  for name in "${TEST_ONLY_WASMS[@]}"; do
-    array_contains "$name" "${PLUGIN_WASMS[@]}" || {
-      print -u2 "ERROR: test-only plugin is absent from build inventory: $name"
-      return 1
-    }
-  done
-  for name in "${PLUGIN_WASMS[@]}"; do
-    array_contains "$name" "${RUNTIME_WASMS[@]}" \
-      || array_contains "$name" "${TEST_ONLY_WASMS[@]}" || {
-        print -u2 "ERROR: built plugin has no runtime/test-only ownership: $name"
-        return 1
-      }
-  done
-
-  # RUNTIME_WASMS is release metadata, while ASSET_MAP is executable truth.
-  # Fail closed if those two surfaces ever drift.
   RUNTIME_WASM_LIST="$(printf '%s\n' "${RUNTIME_WASMS[@]}")" \
-    python3 - "$ASSET_MAP_SOURCE" <<'PY'
+    python3 - "$REPO/zellij-utils/src/consts.rs" <<'PY'
 import os
 import pathlib
 import re
@@ -136,239 +98,113 @@ if asset_map != declared:
 PY
 }
 
-hash_dir_receipt() {
-  local dir="$1"
-  local name
-  local artifact
-  for name in "${PLUGIN_WASMS[@]}"; do
-    artifact="$dir/$name"
-    if [[ ! -f "$artifact" ]]; then
-      print -u2 "ERROR: missing plugin artifact: $artifact"
-      return 1
-    fi
-    print "$(sha_file "$artifact")  $name"
-  done | /usr/bin/sort -k2
-}
-
-write_manifest_from_assets() {
-  hash_dir_receipt "$ASSETS" >"$MANIFEST"
-  print "wrote $MANIFEST ($(wc -l <"$MANIFEST" | tr -d ' ') entries)"
-}
-
-check_manifest() {
+check_contract() {
   check_runtime_partition
-  if [[ ! -f "$MANIFEST" ]]; then
-    print -u2 "ERROR: missing $MANIFEST — run: $0 write-manifest"
+  build_release
+  local receipt
+  receipt="$(hash_dir_receipt "$(plugin_target_root)")"
+  [[ "$(print -r -- "$receipt" | /usr/bin/wc -l | tr -d ' ')" == 14 ]]
+  print "✓ current source built 14 derived plugins (13 runtime, 1 test-only)"
+  (cd "$REPO" && "$CARGO" test -p zellij-utils \
+    asset_map_matches_current_source_plugin_build -- --nocapture)
+}
+
+self_test() {
+  check_runtime_partition
+  local tmp="$(mktemp -d "${TMPDIR:-/tmp}/vc-frame-plugin-negative.XXXXXX")"
+  trap "rm -rf '$tmp'" EXIT
+  if hash_dir_receipt "$tmp" >/dev/null 2>&1; then
+    print -u2 "ERROR: missing-artifact negative unexpectedly passed"
     return 1
   fi
-  local expected actual
-  expected="$(/usr/bin/sort -k2 "$MANIFEST")"
-  actual="$(hash_dir_receipt "$ASSETS")"
-  if [[ "$expected" != "$actual" ]]; then
-    print -u2 "ERROR: plugin artifact hash mismatch vs SHA256SUMS"
-    print -u2 -- "--- expected (manifest) ---"
-    print -u2 -- "$expected"
-    print -u2 -- "--- actual (assets) ---"
-    print -u2 -- "$actual"
-    return 1
-  fi
-  print "✓ assets match SHA256SUMS ($(print -r -- "$actual" | /usr/bin/wc -l | tr -d ' ') plugins)"
+  print "✓ missing-artifact negative failed closed"
+  check_contract
 }
 
 receipt_json() {
-  check_manifest >/dev/null
+  build_release
+  local dir="$(plugin_target_root)"
   RUNTIME_WASM_LIST="$(printf '%s\n' "${RUNTIME_WASMS[@]}")" \
-  TEST_ONLY_WASM_LIST="$(printf '%s\n' "${TEST_ONLY_WASMS[@]}")" \
-    python3 - "$MANIFEST" "$ASSETS" <<'PY'
+    python3 - "$dir" "${PLUGIN_WASMS[@]}" <<'PY'
 import hashlib
 import json
 import os
 import pathlib
 import sys
 
-manifest = pathlib.Path(sys.argv[1])
-assets = pathlib.Path(sys.argv[2])
+directory = pathlib.Path(sys.argv[1])
 runtime = set(os.environ["RUNTIME_WASM_LIST"].splitlines())
-test_only = set(os.environ["TEST_ONLY_WASM_LIST"].splitlines())
 artifacts = []
-
-for raw_line in manifest.read_text(encoding="utf-8").splitlines():
-    expected_sha256, name = raw_line.split(maxsplit=1)
-    artifact = assets / name
-    contents = artifact.read_bytes()
-    actual_sha256 = hashlib.sha256(contents).hexdigest()
-    if actual_sha256 != expected_sha256:
-        raise SystemExit(f"artifact drift while producing receipt: {name}")
-    artifacts.append(
-        {
-            "name": name,
-            "sha256": actual_sha256,
-            "bytes": len(contents),
-            "runtime_embedded": name in runtime,
-            "test_only": name in test_only,
-        }
-    )
-
-payload = {
-    "manifest": "zellij-utils/assets/plugins/SHA256SUMS",
-    "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+for name in sys.argv[2:]:
+    contents = (directory / name).read_bytes()
+    artifacts.append({
+        "name": name,
+        "sha256": hashlib.sha256(contents).hexdigest(),
+        "bytes": len(contents),
+        "runtime_embedded": name in runtime,
+        "test_only": name not in runtime,
+    })
+json.dump({
+    "source": "target/vc-frame-plugins/wasm32-wasip1/release",
     "count": len(artifacts),
     "runtime_embedded_count": sum(item["runtime_embedded"] for item in artifacts),
     "test_only_count": sum(item["test_only"] for item in artifacts),
-    "artifacts": sorted(artifacts, key=lambda item: item["name"]),
-}
-json.dump(payload, sys.stdout, indent=2, sort_keys=True)
+    "artifacts": artifacts,
+}, sys.stdout, indent=2, sort_keys=True)
 sys.stdout.write("\n")
 PY
 }
 
-rebuild_once() {
-  cd "$REPO"
-  print "→ cargo xtask build --release --plugins-only"
-  "$CARGO" xtask build --release --plugins-only
-  # Confirm every expected artifact landed.
-  local name
-  for name in "${PLUGIN_WASMS[@]}"; do
-    [[ -f "$ASSETS/$name" ]] || {
-      print -u2 "ERROR: rebuild did not produce $ASSETS/$name"
+double_rebuild() {
+  local tmp="$(mktemp -d "${TMPDIR:-/tmp}/vc-frame-plugin-double.XXXXXX")"
+  trap "rm -rf '$tmp'" EXIT
+  local receipts=()
+  local round
+  for round in 1 2; do
+    print "══ isolated rebuild #$round ══"
+    (
+      export CARGO_TARGET_DIR="$tmp/target-$round"
+      cd "$REPO"
+      "$CARGO" xtask build --release --plugins-only
+    )
+    receipts+=("$tmp/receipt-$round")
+    CARGO_TARGET_DIR="$tmp/target-$round" \
+      hash_dir_receipt "$tmp/target-$round/vc-frame-plugins/wasm32-wasip1/release" \
+      >"${receipts[-1]}"
+  done
+  diff -u "${receipts[1]}" "${receipts[2]}"
+  print "✓ two isolated source builds produced identical plugin receipts"
+}
+
+clean_clone() {
+  local tmp="$(mktemp -d "${TMPDIR:-/tmp}/vc-frame-plugin-clean-clone.XXXXXX")"
+  trap "rm -rf '$tmp'" EXIT
+  git clone --local --no-hardlinks "$REPO" "$tmp/vc-frame"
+  (
+    cd "$tmp/vc-frame"
+    "$CARGO" xtask build
+    "$CARGO" build --release
+    "$CARGO" test -p zellij-utils asset_map_matches_current_source_plugin_build -- --nocapture
+    [[ -z "$(git status --porcelain)" ]] || {
+      git status --short
+      print -u2 "ERROR: clean-clone builds dirtied the source tree"
       return 1
     }
-  done
-}
-
-isolate_wasm_target() {
-  # Drop only the plugin product binaries so the next build re-links them.
-  # Full clean of wasm32-wasip1 is optional via PLUGINS_PARITY_FULL_CLEAN=1.
-  if [[ "${PLUGINS_PARITY_FULL_CLEAN:-0}" == "1" ]]; then
-    print "→ full clean: cargo clean --target wasm32-wasip1"
-    (cd "$REPO" && "$CARGO" clean --target wasm32-wasip1)
-    return 0
-  fi
-  mkdir -p "$TARGET_WASM"
-  local name
-  for name in "${PLUGIN_WASMS[@]}"; do
-    rm -f "$TARGET_WASM/$name" "$TARGET_WASM/${name%.wasm}.d"
-  done
-  # Force recompile of plugin crates by touching a shared dependency stamp.
-  # Removing .wasm alone is enough for move_plugin_to_assets; cargo still
-  # rebuilds if sources changed. For isolated double-build we also delete
-  # the crate output fingerprints for plugin packages when present.
-  if [[ -d "$REPO/target/wasm32-wasip1/release/.fingerprint" ]]; then
-    setopt local_options null_glob
-    local p
-    for p in about compact-bar configuration fixture-plugin-for-tests \
-      layout-manager link multiple-select plugin-manager session-manager \
-      share status-bar strider tab-bar; do
-      rm -rf "$REPO/target/wasm32-wasip1/release/.fingerprint/${p}-"*
-      rm -rf "$REPO/target/wasm32-wasip1/release/deps/${p}-"*
-    done
-  fi
-}
-
-double_rebuild() {
-  local tmp
-  tmp="$(mktemp -d "${TMPDIR:-/tmp}/vc-frame-plugins-parity.XXXXXX")"
-  trap "rm -rf '$tmp'" EXIT
-
-  print "══ rebuild #1 (isolated) ══"
-  isolate_wasm_target
-  rebuild_once
-  hash_dir_receipt "$ASSETS" >"$tmp/build1.sha256"
-  print "receipt #1:"
-  cat "$tmp/build1.sha256"
-
-  print "══ rebuild #2 (isolated) ══"
-  isolate_wasm_target
-  rebuild_once
-  hash_dir_receipt "$ASSETS" >"$tmp/build2.sha256"
-  print "receipt #2:"
-  cat "$tmp/build2.sha256"
-
-  if ! diff -u "$tmp/build1.sha256" "$tmp/build2.sha256"; then
-    print -u2 "ERROR: consecutive rebuilds produced different hashes (nondeterministic)"
-    return 1
-  fi
-  print "✓ two isolated rebuilds produced identical hashes"
-
-  # Refresh committed manifest to the proven receipt.
-  cp "$tmp/build2.sha256" "$MANIFEST"
-  print "✓ updated SHA256SUMS from double-rebuild receipt"
-}
-
-self_test() {
-  print "══ self-test: positive check ══"
-  check_manifest
-
-  print "══ self-test: release receipt inventory ══"
-  receipt_json | python3 -c '
-import json, sys
-receipt = json.load(sys.stdin)
-assert receipt["count"] == 14, receipt
-assert receipt["runtime_embedded_count"] == 13, receipt
-assert receipt["test_only_count"] == 1, receipt
-assert len(receipt["artifacts"]) == receipt["count"], receipt
-assert {
-    item["name"] for item in receipt["artifacts"] if item["test_only"]
-} == {"fixture-plugin-for-tests.wasm"}, receipt
-assert all(
-    item["runtime_embedded"] != item["test_only"]
-    for item in receipt["artifacts"]
-), receipt
-'
-  print "✓ release receipt names 14 artifacts (13 runtime, 1 test-only)"
-
-  local victim="$ASSETS/about.wasm"
-  local backup
-  backup="$(mktemp "${TMPDIR:-/tmp}/about.wasm.bak.XXXXXX")"
-  # Preserve mode/ownership/xattrs so restore does not dirty git on content-identical files.
-  cp -p "$victim" "$backup"
-
-  print "══ self-test: deliberate perturbation (expect FAIL) ══"
-  print 'perturbed' >>"$victim"
-  if check_manifest; then
-    cp -p "$backup" "$victim"
-    rm -f "$backup"
-    print -u2 "ERROR: parity check did not fail after artifact perturbation"
-    return 1
-  fi
-  print "✓ perturbation correctly failed parity"
-
-  print "══ self-test: restore (expect PASS) ══"
-  cp -p "$backup" "$victim"
-  rm -f "$backup"
-  check_manifest
-  print "✓ restoration passed parity"
-  print "✓ plugins-parity self-test complete"
+  )
+  print "✓ debug + release builds kept a clean clone clean"
 }
 
 usage() {
-  cat <<EOF
-Usage: $0 <check|write-manifest|receipt-json|rebuild-once|double-rebuild|self-test>
-
-  check            Verify assets == SHA256SUMS (default)
-  write-manifest   Write SHA256SUMS from current assets
-  receipt-json     Emit hashes, sizes, and runtime/test-only ownership as JSON
-  rebuild-once     cargo xtask build --release --plugins-only
-  double-rebuild   Two isolated rebuilds; require identical hashes
-  self-test        Positive + negative (perturb) + restore
-
-Env:
-  CARGO                      cargo binary (default: cargo)
-  PLUGINS_PARITY_FULL_CLEAN  set to 1 for cargo clean --target wasm32-wasip1
-EOF
+  print "Usage: $0 <check|receipt-json|rebuild-once|double-rebuild|self-test|clean-clone>"
 }
 
-mode="${1:-check}"
-case "$mode" in
-  check) check_manifest ;;
-  write-manifest) write_manifest_from_assets ;;
+case "${1:-check}" in
+  check) check_contract ;;
   receipt-json) receipt_json ;;
-  rebuild-once) rebuild_once ;;
+  rebuild-once) build_release ;;
   double-rebuild) double_rebuild ;;
   self-test) self_test ;;
+  clean-clone) clean_clone ;;
   -h|--help|help) usage ;;
-  *)
-    usage
-    exit 2
-    ;;
+  *) usage; exit 2 ;;
 esac

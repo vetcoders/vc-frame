@@ -195,7 +195,8 @@ fn e2e_test(sh: &Shell, args: Vec<OsString>) -> anyhow::Result<()> {
 
     let _pd = sh.push_dir(crate::project_root());
 
-    // set --no-default-features so the test binary gets built with the plugins from assets/plugins that just got built
+    // set --no-default-features while zellij-utils/build.rs still guarantees
+    // current-source plugins in the derived plugin target directory
     crate::cargo()
         .and_then(|cargo| {
             // e2e tests

@@ -1373,7 +1373,7 @@ fn diagnose_assets(diagnosis: &mut Diagnosis) {
                         Section::AssetIntegrity,
                         Severity::Warn,
                         "the plugin receipt and the embedded plugin set disagree",
-                        "rebuild plugin assets (make plugins-assets) and reinstall",
+                        "rebuild vc-frame; build.rs regenerates and embeds the current plugin fleet",
                     )
                     .with_detail(detail),
                 );

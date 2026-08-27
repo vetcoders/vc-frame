@@ -43,7 +43,9 @@ pub fn build(sh: &Shell, flags: flags::Build) -> anyhow::Result<()> {
             crate::status(msg);
             println!("{}", msg);
 
-            let mut base_cmd = cmd!(sh, "{cargo} build --target wasm32-wasip1");
+            let plugin_target_root = plugin_build_target_root();
+            let mut base_cmd = cmd!(sh, "{cargo} build --target wasm32-wasip1")
+                .env("CARGO_TARGET_DIR", plugin_target_root);
             if flags.release {
                 base_cmd = base_cmd.arg("--release");
             }
@@ -56,17 +58,6 @@ pub fn build(sh: &Shell, flags: flags::Build) -> anyhow::Result<()> {
                 base_cmd = base_cmd.args(["-p", plugin_name]);
             }
             base_cmd.run().context("failed to build plugins")?;
-
-            if flags.release {
-                for member in &plugin_members {
-                    let plugin_name = member
-                        .crate_name
-                        .rsplit_once('/')
-                        .context("Cannot determine plugin name from crate path")?
-                        .1;
-                    move_plugin_to_assets(sh, plugin_name)?;
-                }
-            }
         }
     }
 
@@ -112,6 +103,20 @@ pub fn build(sh: &Shell, flags: flags::Build) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn plugin_build_target_root() -> PathBuf {
+    let target_root = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                crate::project_root().join(path)
+            }
+        })
+        .unwrap_or_else(|| crate::project_root().join("target"));
+    target_root.join("vc-frame-plugins")
 }
 
 fn run_proto_codegen(sh: &Shell) {
@@ -258,36 +263,6 @@ fn postprocess_prost_for_clippy(out_dir: &Path, include_file: &str) {
             std::fs::write(event_path, event_contents).unwrap();
         }
     }
-}
-
-fn move_plugin_to_assets(sh: &Shell, plugin_name: &str) -> anyhow::Result<()> {
-    let err_context = || format!("failed to move plugin '{plugin_name}' to assets folder");
-
-    // Get asset path
-    let asset_name = crate::asset_dir()
-        .join("plugins")
-        .join(plugin_name)
-        .with_extension("wasm");
-
-    // Get plugin path
-    let plugin = PathBuf::from(
-        std::env::var_os("CARGO_TARGET_DIR")
-            .unwrap_or(crate::project_root().join("target").into_os_string()),
-    )
-    .join("wasm32-wasip1")
-    .join("release")
-    .join(plugin_name)
-    .with_extension("wasm");
-
-    if !plugin.is_file() {
-        return Err(anyhow::anyhow!("No plugin found at '{}'", plugin.display()))
-            .with_context(err_context);
-    }
-
-    // This is a plugin we want to move
-    let from = plugin.as_path();
-    let to = asset_name.as_path();
-    sh.copy_file(from, to).with_context(err_context)
 }
 
 /// Build the manpage with `mandown`.

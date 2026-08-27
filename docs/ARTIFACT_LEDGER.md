@@ -1,62 +1,47 @@
-# Artifact ledger — bundled plugins & distribution residue
+# Artifact ledger — build-derived bundled plugins
 
-Owner wave: **W0-C** (Make bundled artifacts truthful).  
-Canonical producer: `make plugins-assets` → `cargo xtask build --release --plugins-only`  
-Parity validator: `make plugins-parity` → `scripts/plugins-parity.zsh`  
-Hash receipt: `zellij-utils/assets/plugins/SHA256SUMS`
+Plugin source under `default-plugins/` is the only source of truth. WASM files
+and their SHA-256 receipt are derived outputs and never belong in Git.
 
-## Tracked plugin source → artifact ownership
+## Ownership
 
-| Source crate | Bundled artifact | Runtime embedded (ASSET_MAP) |
+| Surface | Owner | Contract |
 | --- | --- | --- |
-| `default-plugins/about` | `zellij-utils/assets/plugins/about.wasm` | yes |
-| `default-plugins/compact-bar` | `…/compact-bar.wasm` | yes |
-| `default-plugins/configuration` | `…/configuration.wasm` | yes |
-| `default-plugins/fixture-plugin-for-tests` | `…/fixture-plugin-for-tests.wasm` | no (tests only) |
-| `default-plugins/layout-manager` | `…/layout-manager.wasm` | yes |
-| `default-plugins/link` | `…/link.wasm` | yes |
-| `default-plugins/multiple-select` | `…/multiple-select.wasm` | yes |
-| `default-plugins/plugin-manager` | `…/plugin-manager.wasm` | yes |
-| `default-plugins/session-manager` | `…/session-manager.wasm` | yes |
-| `default-plugins/share` | `…/share.wasm` | yes |
-| `default-plugins/status-bar` | `…/status-bar.wasm` | yes |
-| `default-plugins/strider` | `…/strider.wasm` | yes |
-| `default-plugins/tab-bar` | `…/tab-bar.wasm` | yes |
-| `default-plugins/vc-tab-title` | `…/vc-tab-title.wasm` | yes |
+| Plugin sources | `default-plugins/*` | Reviewed and committed product input |
+| Debug WASM | `target/vc-frame-plugins/wasm32-wasip1/debug/*.wasm` | Built automatically before every native debug embed |
+| Release WASM | `target/vc-frame-plugins/wasm32-wasip1/release/*.wasm` | Built automatically before every native release embed |
+| Build receipt | `zellij-utils` build-script `OUT_DIR/plugin-SHA256SUMS` | Generated from the exact target bytes embedded by `ASSET_MAP` |
+| Runtime bytes | `zellij-utils/src/consts.rs::ASSET_MAP` | `include_bytes!` reads only the build-script-selected target directory |
 
-Copy path is owned by `xtask/src/build.rs` (`move_plugin_to_assets`, release-only).  
-Runtime identity is owned by `zellij-utils/src/consts.rs` (`ASSET_MAP` + `include_bytes!`).
-`scripts/plugins-parity.zsh receipt-json` is the release-facing inventory: it
-binds all 14 artifact hashes and sizes while recording the 13 runtime-embedded
-plugins separately from the single test-only fixture.
+`zellij-utils/build.rs` is the one writer. It runs the complete plugin build in
+a lock-isolated Cargo target, emits the profile-specific path, generates the
+receipt, and fails with `rustup target add wasm32-wasip1` when the target is
+missing. `xtask` uses the same derived target and no longer copies anything
+into the source tree.
 
-## Residue decisions (W0-C)
+The runtime fleet contains 13 plugins. `fixture-plugin-for-tests.wasm` is the
+fourteenth built artifact and is receipt-only, never embedded in `ASSET_MAP`.
 
-| Path | State at audit | Consumers (packaging / code) | Decision | Evidence |
-| --- | --- | --- | --- | --- |
-| `assets/zellij.desktop` | untracked legacy twin | **None.** Dist copies `assets/vc-frame.desktop` (`xtask/src/pipelines.rs`). | **REMOVE** | Diff vs `vc-frame.desktop` is name/Exec/Icon only (`zellij` brand). No code path references `zellij.desktop`. Fixture snapshots only list the historical filename as terminal text. |
-| `assets/zellij.rc` | untracked twin of `vc-frame.rc` | **None.** `src/build.rs` embeds `assets/vc-frame.rc`. | **REMOVE** | Byte-identical icon resource; unused path. |
-| `wix/Zellij.wxl` | untracked legacy localization | **None.** `wix/main.wxs` builds with `wix/VcFrame.wxl`. | **REMOVE** | Diff is "Zellij" → "Vc-Frame" string localization only. |
-| `build/` | ignored legacy packager output | **None.** The retired `scripts/package-vibecrafted-app.zsh` split-product packager was removed; Vibecrafted owns app assembly. | **KEEP IGNORED** | `/build/` remains ignored so stale local output can never enter the donor payload. |
+## Distribution
 
-## Keep (canonical distribution sources)
+Vibecrafted Runtime Pack consumes the compiled `vc-frame` helper only. It does
+not copy `zellij-utils/assets/plugins/`; therefore removing tracked blobs does
+not remove plugins from the DMG or Runtime Pack. They remain inside the binary.
 
-| Path | Owner |
-| --- | --- |
-| `assets/vc-frame.desktop` | `xtask` dist pipeline |
-| `assets/vc-frame.rc` | Windows resource embed (`src/build.rs`) |
-| `wix/VcFrame.wxl` + `wix/main.wxs` | Windows MSI localization / installer |
-| `zellij-utils/assets/plugins/*.wasm` | Release-bundled plugins (tracked this cycle) |
-| `zellij-utils/assets/plugins/SHA256SUMS` | Parity receipt for double-rebuild truth |
+The Debian metadata likewise no longer installs a second loose-plugin fleet.
+Automatic asset installation can still dump the embedded `ASSET_MAP` bytes at
+runtime, preserving one binary-owned generation.
 
 ## Gates
 
 ```bash
-make plugins-parity            # assets == SHA256SUMS
-make plugins-parity-self-test  # perturb fails, restore passes
-make plugins-parity-double     # two isolated rebuilds, identical hashes
+make plugins-parity
+make plugins-parity-self-test
+make plugins-parity-double
 scripts/plugins-parity.zsh receipt-json
-cargo test -p zellij-utils asset_map_matches_bundled_plugin_files -- --nocapture
+scripts/plugins-parity.zsh clean-clone
+cargo test -p zellij-utils asset_map_matches_current_source_plugin_build -- --nocapture
 ```
 
-Out of scope for this ledger: untracking all WASM, upstream feature sync, release publication.
+`clean-clone` builds debug and release in a local clone, runs the byte-match
+test, and requires `git status --porcelain` to remain empty.

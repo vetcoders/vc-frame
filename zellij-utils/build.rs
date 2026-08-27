@@ -21,8 +21,27 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use sha2::{Digest, Sha256};
+
 const UNKNOWN_SHA: &str = "unknown";
 const SOURCE_PROJECT: &str = "vc-frame";
+const PLUGIN_TARGET: &str = "wasm32-wasip1";
+const PLUGIN_PACKAGES: [&str; 14] = [
+    "about",
+    "compact-bar",
+    "configuration",
+    "fixture-plugin-for-tests",
+    "layout-manager",
+    "link",
+    "multiple-select",
+    "plugin-manager",
+    "session-manager",
+    "share",
+    "status-bar",
+    "strider",
+    "tab-bar",
+    "vc-tab-title",
+];
 
 fn main() {
     for var in [
@@ -36,6 +55,12 @@ fn main() {
     }
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
     emit_git_rerun_paths(&manifest_dir);
+
+    let is_provenance_fixture =
+        std::env::var("CARGO_PKG_NAME").as_deref() == Ok("provenance-fixture");
+    if std::env::var("TARGET").as_deref() != Ok(PLUGIN_TARGET) && !is_provenance_fixture {
+        build_plugins_and_emit_contract(Path::new(&manifest_dir));
+    }
 
     let profile = std::env::var("PROFILE").unwrap_or_else(|_| "unknown".to_string());
     let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
@@ -76,10 +101,155 @@ fn main() {
     println!("cargo:rustc-env=VC_FRAME_HUMAN_VERSION={human_version}");
     println!(
         "cargo:rustc-env=VC_FRAME_SOURCE_MANIFEST_DIR={}",
-        baked_source_manifest_dir(&manifest_dir, std::env::var("VC_FRAME_SOURCE_MANIFEST_DIR").ok())
+        baked_source_manifest_dir(
+            &manifest_dir,
+            std::env::var("VC_FRAME_SOURCE_MANIFEST_DIR").ok()
+        )
     );
     println!("cargo:rustc-env=VC_FRAME_SOURCE_ORIGIN_URL={source_origin_url}");
     println!("cargo:rustc-env=VC_FRAME_SOURCE_PROJECT={SOURCE_PROJECT}");
+}
+
+/// Make plugin compilation a dependency of every native zellij-utils build.
+///
+/// Cargo cannot express a workspace binary as a normal crate dependency. The
+/// build script therefore drives one nested, target-distinct Cargo invocation.
+/// That invocation compiles zellij-utils for wasm32-wasip1; the TARGET guard
+/// above prevents recursion. Cargo's own fingerprints decide whether each
+/// plugin is fresh, so a default-plugins source edit cannot leave stale bytes
+/// embedded in the host binary.
+fn build_plugins_and_emit_contract(manifest_dir: &Path) {
+    let workspace_root = manifest_dir.parent().unwrap_or_else(|| {
+        panic!(
+            "zellij-utils has no workspace parent: {}",
+            manifest_dir.display()
+        )
+    });
+
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_root.join("default-plugins").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_root.join("Cargo.lock").display()
+    );
+    println!("cargo:rerun-if-env-changed=CARGO_TARGET_DIR");
+    println!("cargo:rerun-if-env-changed=RUSTC");
+
+    require_installed_plugin_target();
+
+    let target_root = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                workspace_root.join(path)
+            }
+        })
+        .unwrap_or_else(|| workspace_root.join("target"));
+    // A build script cannot safely start Cargo against the parent Cargo
+    // process's target directory: both processes contend for the same package
+    // locks and deadlock. Keep the plugin graph derived but lock-isolated.
+    let plugin_target_root = target_root.join("vc-frame-plugins");
+
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_owned());
+    let release = profile == "release";
+    let mut command = Command::new(cargo);
+    command
+        .current_dir(workspace_root)
+        .env("VC_FRAME_BUILDING_PLUGINS", "1")
+        .env("CARGO_TARGET_DIR", &plugin_target_root)
+        .args(["build", "--target", PLUGIN_TARGET]);
+    if release {
+        command.arg("--release");
+    }
+    for package in PLUGIN_PACKAGES {
+        command.args(["-p", package]);
+    }
+
+    let status = command.status().unwrap_or_else(|error| {
+        panic!(
+            "could not launch Cargo to build vc-frame plugins: {error}\n\
+             retry with: cargo xtask build --{}plugins-only",
+            if release { "release --" } else { "" }
+        )
+    });
+    if !status.success() {
+        panic!(
+            "vc-frame plugin build failed with {status}.\n\
+             The host binary is not allowed to embed stale plugins.\n\
+             Fix the plugin build above, then retry the host build."
+        );
+    }
+
+    let plugin_dir =
+        plugin_target_root
+            .join(PLUGIN_TARGET)
+            .join(if release { "release" } else { "debug" });
+
+    let mut receipt = String::new();
+    for package in PLUGIN_PACKAGES {
+        let artifact = plugin_dir.join(format!("{package}.wasm"));
+        let bytes = fs::read(&artifact).unwrap_or_else(|error| {
+            panic!(
+                "plugin build succeeded but {} is missing: {error}",
+                artifact.display()
+            )
+        });
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        receipt.push_str(&format!("{digest}  {package}.wasm\n"));
+    }
+
+    let receipt_path = PathBuf::from(
+        std::env::var_os("OUT_DIR").expect("Cargo must provide OUT_DIR to zellij-utils/build.rs"),
+    )
+    .join("plugin-SHA256SUMS");
+    fs::write(&receipt_path, receipt).unwrap_or_else(|error| {
+        panic!(
+            "could not write plugin build receipt {}: {error}",
+            receipt_path.display()
+        )
+    });
+
+    println!(
+        "cargo:rustc-env=VC_FRAME_PLUGIN_WASM_DIR={}",
+        plugin_dir.display()
+    );
+    println!(
+        "cargo:rustc-env=VC_FRAME_PLUGIN_RECEIPT_PATH={}",
+        receipt_path.display()
+    );
+}
+
+fn require_installed_plugin_target() {
+    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let sysroot = Command::new(rustc)
+        .args(["--print", "sysroot"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|output| PathBuf::from(output.trim()));
+    let installed = sysroot.as_ref().is_some_and(|root| {
+        root.join("lib/rustlib")
+            .join(PLUGIN_TARGET)
+            .join("lib")
+            .is_dir()
+    });
+    if !installed {
+        panic!("{}", missing_plugin_target_message());
+    }
+}
+
+fn missing_plugin_target_message() -> String {
+    format!(
+        "vc-frame requires the Rust target '{PLUGIN_TARGET}' to build bundled plugins.\n\
+         Install it, then retry:\n\
+         \n    rustup target add {PLUGIN_TARGET}\n"
+    )
 }
 
 /// Tell Cargo which pieces of Git metadata can change the embedded identity.
@@ -313,6 +483,13 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
+    #[test]
+    fn missing_plugin_target_error_names_the_install_command() {
+        let message = missing_plugin_target_message();
+        assert!(message.contains("Rust target 'wasm32-wasip1'"));
+        assert!(message.contains("rustup target add wasm32-wasip1"));
+    }
+
     struct TempRepo {
         _temp_dir: tempfile::TempDir,
         root: PathBuf,
@@ -330,7 +507,7 @@ mod tests {
             fs::create_dir_all(crate_dir.join("src")).expect("create fixture crate");
             fs::write(
                 crate_dir.join("Cargo.toml"),
-                "[package]\nname = \"provenance-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\nbuild = \"build.rs\"\n",
+                "[package]\nname = \"provenance-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\nbuild = \"build.rs\"\n\n[build-dependencies]\nsha2 = \"0.10\"\n",
             )
             .expect("write fixture manifest");
             fs::write(crate_dir.join("build.rs"), include_str!("build.rs"))

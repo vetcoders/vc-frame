@@ -42,7 +42,7 @@ def main() -> int:
     )
     require(
         "$(CARGO) xtask build --release --no-plugins" in makefile,
-        "the Vibecrafted.app donor target must not rewrite committed plugin assets",
+        "the Vibecrafted.app donor target must delegate plugin freshness to build.rs",
     )
     for target in ("install", "package", "release-tag", "release-push"):
         require(
