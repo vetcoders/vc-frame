@@ -1,5 +1,6 @@
 ---
 source: zellij-utils/src/kdl/mod.rs
+assertion_line: 7331
 expression: fake_config_stringified
 ---
 keybinds clear-defaults=true {
@@ -220,7 +221,7 @@ keybinds clear-defaults=true {
             }
         }
         bind "Super right" { GoToNextTab; }
-        bind "Super k" {
+        bind "Shift Super ." {
             MessagePlugin "compact-bar" {
                 name "vc_quick_cmd"
                 floating false
