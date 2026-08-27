@@ -4875,6 +4875,15 @@ impl Screen {
         self.client_sizes.insert(client_id, size);
     }
 
+    /// Record the viewport a client announced when it attached, unless a
+    /// newer `TerminalResize` already reached the screen. The attach size
+    /// travels through the server thread and can arrive *after* a resize the
+    /// client sent right behind it; letting the older value win would size
+    /// the tab for a terminal that no longer exists and paint past its edge.
+    pub fn record_initial_client_size(&mut self, client_id: ClientId, size: Size) {
+        self.client_sizes.entry(client_id).or_insert(size);
+    }
+
     /// Recompute the size of `tab_id` from the viewports of every client whose
     /// `active_tab_ids` entry equals `tab_id`. `rows` and `cols` are sorted
     /// independently — each axis takes the minimum across viewers. If the tab
@@ -12717,8 +12726,9 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
             ) => {
                 // Record the client's viewport BEFORE add_client so that
                 // add_client's internal recompute sees this client's size and
-                // sizes the destination tab against all of its viewers.
-                screen.set_client_size(client_id, client_size);
+                // sizes the destination tab against all of its viewers. A
+                // resize that overtook this attach keeps precedence.
+                screen.record_initial_client_size(client_id, client_size);
                 screen.add_client(client_id, is_web_client)?;
                 let pane_id = pane_id_to_focus.map(|(pane_id, is_plugin)| {
                     if is_plugin {

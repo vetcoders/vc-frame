@@ -2602,15 +2602,20 @@ pub(crate) fn route_thread_main(
                                     .with_context(err_context)?
                                     .set_client_size(client_id, new_size);
                                 // Per-tab sizing: Screen's RecomputeTabSize
-                                // handler is a no-op for clients without an
-                                // active tab yet (i.e. resizes arriving
-                                // before AddClient is processed), so no
-                                // session-level gating is needed.
-                                let _ = senders.as_ref().map(|s| {
-                                    s.send_to_screen(ScreenInstruction::RecomputeTabSize(
-                                        client_id, new_size,
-                                    ))
-                                });
+                                // handler records the viewport even for
+                                // clients without an active tab yet (resizes
+                                // arriving before AddClient is processed).
+                                // While the session is still booting the
+                                // instruction is queued rather than dropped —
+                                // a lost resize leaves the tab sized for a
+                                // terminal that no longer exists.
+                                send_to_screen_or_retry_queue!(
+                                    senders.clone(),
+                                    ScreenInstruction::RecomputeTabSize(client_id, new_size),
+                                    instruction,
+                                    retry_queue
+                                )
+                                .with_context(err_context)?;
                             }
                         },
                         ClientToServerMsg::TerminalPixelDimensions { pixel_dimensions } => {

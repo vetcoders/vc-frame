@@ -4583,6 +4583,51 @@ mod rail_tests {
     }
 
     #[test]
+    fn constant_settlement_state_never_flickers_between_exact_and_approximate() {
+        // Guardian replays the same canonical snapshot every ~5s (well inside
+        // the 15-tick lease). With nothing changing, the dense f/x/n line
+        // must stay exact, must never flip to `~n`, and must not request a
+        // repaint the rail cannot justify — a flickering counter is either a
+        // producer outage or a bug, never steady state.
+        let mut state = State::default();
+        let accepted = settlement_payload(10, (4, 3, 3), (2, 1, 1));
+        assert!(state.pipe(settlement_pipe(accepted.clone())));
+        let exact_rows = session_rail_rows_with_truth(
+            &[],
+            state.settlement_history.as_ref(),
+            state.settlement_feed_degraded,
+            RailWidthMode::Wide,
+        );
+        assert_eq!(exact_rows[0].text, " 🅵2 · 🆇1 · 🅽1");
+
+        for round in 0..20 {
+            // Five silent ticks, then an identical replay: the lease renews
+            // before it can expire, the truth stays exact, and the identical
+            // replay is acknowledged without a render.
+            for _ in 0..5 {
+                assert!(
+                    !state.age_settlement_feed(),
+                    "round {round}: no repaint on a quiet tick"
+                );
+                assert!(!state.settlement_feed_degraded);
+            }
+            assert!(
+                !state.pipe(settlement_pipe(accepted.clone())),
+                "round {round}: an identical replay must not repaint"
+            );
+            assert!(!state.settlement_feed_degraded);
+            assert_eq!(state.settlement_feed_age_ticks, Some(0));
+            let rows = session_rail_rows_with_truth(
+                &[],
+                state.settlement_history.as_ref(),
+                state.settlement_feed_degraded,
+                RailWidthMode::Wide,
+            );
+            assert_eq!(rows, exact_rows, "round {round}: rail projection is stable");
+        }
+    }
+
+    #[test]
     fn settlement_pipe_rejects_stale_decrease_divergence_and_malformed_truth() {
         let mut state = State::default();
         let accepted = settlement_payload(10, (4, 3, 3), (2, 1, 1));

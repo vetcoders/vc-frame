@@ -15201,6 +15201,44 @@ fn create_non_mirrored_screen(size: Size) -> Screen {
 }
 
 #[test]
+fn resize_that_overtakes_attach_keeps_the_newer_viewport() {
+    // AttachClient travels through the server thread; a TerminalResize the
+    // client sends right behind it goes straight to Screen and can land
+    // first. The attach-time size must not overwrite the newer one, otherwise
+    // the tab is sized for a terminal that no longer exists and every frame
+    // paints past the real edge (wrapped frame fragments, ghost titles).
+    let initial_size = Size {
+        cols: 200,
+        rows: 60,
+    };
+    let mut screen = create_new_screen(initial_size, true, true);
+    new_tab(&mut screen, 1, 0);
+
+    let client_id = 1;
+    let attach_size = Size {
+        cols: 200,
+        rows: 60,
+    };
+    let resized = Size {
+        cols: 100,
+        rows: 30,
+    };
+    screen.set_client_size(client_id, resized);
+    screen.record_initial_client_size(client_id, attach_size);
+    screen.recompute_tab_size(0).expect("TEST");
+    assert_eq!(
+        screen.tabs.get(&0).unwrap().size,
+        resized,
+        "the resize that overtook the attach wins"
+    );
+
+    // Without an earlier resize the attach size is the only truth.
+    let late_client = 2;
+    screen.record_initial_client_size(late_client, attach_size);
+    assert_eq!(screen.client_sizes.get(&late_client), Some(&attach_size));
+}
+
+#[test]
 fn recompute_tab_size_uses_lone_viewer_size() {
     let initial_size = Size {
         cols: 200,

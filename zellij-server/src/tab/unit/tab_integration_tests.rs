@@ -15508,3 +15508,89 @@ fn drag_selection_pinned_at_screen_bottom_scrolls_viewport_down() {
         "dragging a selection against the last screen row scrolls the viewport back down"
     );
 }
+
+/// Regression: dragging a pinned floating pane by its frame while floating
+/// panes are hidden used to leave the previous frame position painted on the
+/// client terminal (a diagonal trail of `── PIN ◉ ┐` corners). Feeding the
+/// pre-drag frame and the post-drag frame through one emulator must yield
+/// exactly one pinned frame.
+#[test]
+fn moving_pinned_floating_pane_leaves_no_frame_trail() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+    let floating_pane_id = PaneId::Terminal(2);
+    let coordinates = FloatingPaneCoordinates {
+        x: Some(PercentOrFixed::Fixed(5)),
+        y: Some(PercentOrFixed::Fixed(5)),
+        width: Some(PercentOrFixed::Fixed(25)),
+        height: Some(PercentOrFixed::Fixed(10)),
+        pinned: Some(true),
+        borderless: Some(false),
+    };
+    tab.new_pane_compat(
+        floating_pane_id,
+        None,
+        None,
+        false,
+        true,
+        NewPanePlacement::Floating(Some(coordinates)),
+        Some(client_id),
+        None,
+    )
+    .unwrap();
+    tab.handle_pty_bytes(2, Vec::from("pinned content".as_bytes()))
+        .unwrap();
+
+    let mut output = Output::default();
+    tab.render(&mut output, None).unwrap();
+    let before = output.serialize().unwrap().remove(&client_id).unwrap();
+    let snapshot_before = take_snapshot(&before, size.rows, size.cols, Palette::default());
+    assert_eq!(
+        snapshot_before.matches("PIN").count(),
+        1,
+        "one pinned frame before the drag:\n{snapshot_before}"
+    );
+
+    // Grab the top frame line (not the pin button) and drag it diagonally.
+    tab.handle_mouse_event(
+        &MouseEvent::new_left_press_event(Position::new(5, 8)),
+        client_id,
+    )
+    .unwrap();
+    let mut dragged = String::new();
+    for (line, column) in [(7, 14), (9, 20), (11, 26)] {
+        tab.handle_mouse_event(
+            &MouseEvent::new_left_motion_event(Position::new(line, column)),
+            client_id,
+        )
+        .unwrap();
+        let mut output = Output::default();
+        tab.render(&mut output, None).unwrap();
+        if let Some(frame) = output.serialize().unwrap().remove(&client_id) {
+            dragged.push_str(&frame);
+        }
+    }
+    tab.handle_mouse_event(
+        &MouseEvent::new_left_release_event(Position::new(11, 26)),
+        client_id,
+    )
+    .unwrap();
+    let mut output = Output::default();
+    tab.render(&mut output, None).unwrap();
+    if let Some(frame) = output.serialize().unwrap().remove(&client_id) {
+        dragged.push_str(&frame);
+    }
+
+    let combined = format!("{before}{dragged}");
+    let snapshot_after = take_snapshot(&combined, size.rows, size.cols, Palette::default());
+    assert_eq!(
+        snapshot_after.matches("PIN").count(),
+        1,
+        "dragging must not leave frame trails behind:\n{snapshot_after}"
+    );
+    assert_ne!(snapshot_before, snapshot_after, "the pane actually moved");
+}
