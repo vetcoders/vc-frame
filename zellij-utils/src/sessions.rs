@@ -359,14 +359,44 @@ impl SessionSocketLease {
     /// The live-owner probe remains necessary during migration: an older
     /// vc-frame binary can own the socket without owning the new lockfile.
     pub fn bind(&mut self) -> io::Result<interprocess::local_socket::Listener> {
-        use interprocess::local_socket::prelude::*;
-
         if self.bound_identity.is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "session socket lease is already bound",
             ));
         }
+
+        self.bind_owned_listener()
+    }
+
+    /// Re-publish the owned endpoint when its filesystem pathname disappeared.
+    ///
+    /// An open Unix listener remains alive after its pathname (or containing
+    /// contract directory) is unlinked, but no new client can discover or
+    /// connect to it. The lifetime lease survives outside that volatile
+    /// contract directory, so the same server can safely recreate the root and
+    /// bind a replacement listener while duplicate starters remain excluded.
+    pub fn ensure_discoverable(
+        &mut self,
+    ) -> io::Result<Option<interprocess::local_socket::Listener>> {
+        if let Some(identity) = self.bound_identity
+            && path_has_identity(&self.socket_path, identity)?
+        {
+            return Ok(None);
+        }
+
+        let previous_identity = self.bound_identity.take();
+        match self.bind_owned_listener() {
+            Ok(listener) => Ok(Some(listener)),
+            Err(error) => {
+                self.bound_identity = previous_identity;
+                Err(error)
+            },
+        }
+    }
+
+    fn bind_owned_listener(&mut self) -> io::Result<interprocess::local_socket::Listener> {
+        use interprocess::local_socket::prelude::*;
 
         match probe_socket_ownership(&self.socket_path) {
             SocketOwnership::Vacant => {
@@ -386,11 +416,13 @@ impl SessionSocketLease {
             },
         }
 
+        ensure_socket_parent(&self.socket_path)?;
         let mut listener = crate::consts::ipc_bind(&self.socket_path)?;
         // `interprocess` otherwise unlinks the original pathname from its Drop
         // implementation without checking inode identity. That can erase a
         // replacement listener after rename or an ownership race.
         listener.do_not_reclaim_name_on_drop();
+        fs::set_permissions(&self.socket_path, fs::Permissions::from_mode(0o1700))?;
 
         let metadata = fs::symlink_metadata(&self.socket_path)?;
         if !metadata.file_type().is_socket() {
@@ -515,23 +547,53 @@ fn socket_lease_path(socket_path: &Path) -> io::Result<PathBuf> {
             format!("session socket has no file name: {}", socket_path.display()),
         )
     })?;
-    let lock_dir = parent.join(".vc-frame-socket-leases");
-    match fs::create_dir(&lock_dir) {
-        Ok(()) => fs::set_permissions(&lock_dir, fs::Permissions::from_mode(0o700))?,
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            let metadata = fs::symlink_metadata(&lock_dir)?;
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                return Err(io::Error::other(format!(
-                    "session socket lease directory is not a real directory: {}",
-                    lock_dir.display()
-                )));
-            }
-        },
-        Err(error) => return Err(error),
-    }
+    // Keep the lock outside the versioned socket namespace. Deleting
+    // `contract_version_N` must not create a second lock inode that allows a
+    // duplicate server to start while the original listener is still alive.
+    let namespace = parent.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("session socket namespace has no name: {}", parent.display()),
+        )
+    })?;
+    let lease_parent = parent.parent().unwrap_or(parent);
+    let lock_root = lease_parent.join(".vc-frame-socket-leases");
+    create_private_directory(&lock_root)?;
+    let lock_dir = lock_root.join(namespace);
+    create_private_directory(&lock_dir)?;
     let mut lock_name = OsString::from(file_name);
     lock_name.push(".lock");
     Ok(lock_dir.join(lock_name))
+}
+
+#[cfg(unix)]
+fn create_private_directory(path: &Path) -> io::Result<()> {
+    match fs::create_dir_all(path) {
+        Ok(()) => {},
+        Err(error) => return Err(error),
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(io::Error::other(format!(
+            "session ownership directory is not a real directory: {}",
+            path.display()
+        )));
+    }
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(unix)]
+fn ensure_socket_parent(socket_path: &Path) -> io::Result<()> {
+    let parent = socket_path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("session socket has no parent: {}", socket_path.display()),
+        )
+    })?;
+    if !parent.exists() {
+        create_private_directory(parent)?;
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -878,6 +940,66 @@ mod session_probe_timeout_tests {
 
         drop(first);
         acquire_after_release(&socket, "lease released on final drop");
+    }
+
+    #[test]
+    fn live_owner_rebinds_after_contract_namespace_is_unlinked() {
+        let root = tempfile::TempDir::new().expect("tempdir");
+        let namespace = root.path().join("contract_version_2");
+        fs::create_dir(&namespace).expect("create socket namespace");
+        let socket = namespace.join("durable-session");
+        let mut lease = SessionSocketLease::acquire(&socket).expect("owner lease");
+        let original_listener = lease.bind().expect("original listener");
+
+        fs::remove_dir_all(&namespace).expect("unlink live socket namespace");
+        let duplicate_error = SessionSocketLease::acquire(&socket)
+            .expect_err("namespace loss must not create a second owner");
+        assert_eq!(duplicate_error.kind(), io::ErrorKind::WouldBlock);
+
+        let rebound_listener = lease
+            .ensure_discoverable()
+            .expect("recover discovery endpoint")
+            .expect("missing endpoint must be rebound");
+        assert!(socket.exists(), "recovery recreates the discoverable path");
+        crate::consts::ipc_connect_timeout(&socket, Duration::from_millis(250))
+            .expect("rebound endpoint accepts new clients");
+        assert!(
+            lease
+                .ensure_discoverable()
+                .expect("stable endpoint")
+                .is_none(),
+            "an intact endpoint is not rebound repeatedly"
+        );
+
+        drop(original_listener);
+        assert!(
+            socket.exists(),
+            "old listener drop cannot unlink replacement"
+        );
+        drop(rebound_listener);
+        assert!(lease.remove_if_owned().expect("owned teardown"));
+    }
+
+    #[test]
+    fn dead_owner_reclaims_after_contract_namespace_loss() {
+        let root = tempfile::TempDir::new().expect("tempdir");
+        let namespace = root.path().join("contract_version_2");
+        fs::create_dir(&namespace).expect("create socket namespace");
+        let socket = namespace.join("reclaimed-session");
+        let mut original_lease = SessionSocketLease::acquire(&socket).expect("original lease");
+        let original_listener = original_lease.bind().expect("original listener");
+
+        fs::remove_dir_all(&namespace).expect("unlink live socket namespace");
+        drop(original_listener);
+        drop(original_lease);
+
+        let mut successor = acquire_after_release(&socket, "dead-owner lease reclaim");
+        let successor_listener = successor
+            .bind()
+            .expect("successor bind recreates namespace");
+        assert!(socket.exists());
+        drop(successor_listener);
+        assert!(successor.remove_if_owned().expect("successor teardown"));
     }
 
     #[test]

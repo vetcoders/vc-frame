@@ -36,7 +36,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::{
     net::{IpAddr, Ipv4Addr},
     path::PathBuf,
-    sync::{Arc, RwLock, atomic::AtomicBool},
+    sync::{Arc, Mutex, RwLock, atomic::AtomicBool},
     thread,
     time::{Duration, Instant},
 };
@@ -704,17 +704,6 @@ impl SessionState {
     pub fn get_pipe(&self, pipe_name: &str) -> Option<ClientId> {
         self.pipes.get(pipe_name).copied()
     }
-    pub fn active_clients_are_connected(&self) -> bool {
-        let ids_of_pipe_clients: HashSet<ClientId> = self.pipes.values().copied().collect();
-        let mut active_clients_connected = false;
-        for client_id in self.clients.keys() {
-            if ids_of_pipe_clients.contains(client_id) {
-                continue;
-            }
-            active_clients_connected = true;
-        }
-        active_clients_connected
-    }
     pub fn convert_client_to_watcher(&mut self, client_id: ClientId, is_web_client: bool) {
         self.clients.remove(&client_id);
         self.watchers.insert(client_id, is_web_client);
@@ -804,7 +793,7 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
     });
 
     #[cfg(unix)]
-    let (mut socket_lease, listener) = {
+    let (socket_lease, listener) = {
         let mut socket_lease = SessionSocketLease::acquire(&socket_path).unwrap_or_else(|error| {
             log::error!(
                 "Refusing to start: cannot acquire ownership of {} ({error})",
@@ -820,7 +809,7 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
             std::process::exit(1);
         });
         drop(zellij_utils::shared::set_permissions(&socket_path, 0o1700));
-        (socket_lease, listener)
+        (Arc::new(Mutex::new(socket_lease)), listener)
     };
 
     #[cfg(windows)]
@@ -845,9 +834,17 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
             let session_data = session_data.clone();
             let session_state = session_state.clone();
             let to_server = to_server.clone();
+            #[cfg(unix)]
+            let socket_lease = socket_lease.clone();
             #[cfg(windows)]
             let socket_path = socket_path.clone();
             move || {
+                #[cfg(unix)]
+                listener
+                    .set_nonblocking(interprocess::local_socket::ListenerNonblockingMode::Accept)
+                    .expect("failed to make session listener recoverable");
+                let mut listener = listener;
+
                 // On Windows, named pipes are half-duplex, so we need a separate
                 // reply pipe for server→client messages.
                 #[cfg(windows)]
@@ -857,9 +854,58 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                 // error storm (eg. EMFILE during accept or stream cloning) backs
                 // off instead of spinning and flooding the log.
                 let mut consecutive_connection_errors: u64 = 0;
-                for stream in listener.incoming() {
+                loop {
+                    let stream = listener.accept();
+                    #[cfg(unix)]
+                    if stream
+                        .as_ref()
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
+                    {
+                        let recovery = socket_lease
+                            .lock()
+                            .map_err(|_| "session socket lease lock poisoned".to_string())
+                            .and_then(|mut lease| {
+                                lease
+                                    .ensure_discoverable()
+                                    .map_err(|error| error.to_string())
+                            });
+                        match recovery {
+                            Ok(Some(rebound_listener)) => {
+                                rebound_listener
+                                    .set_nonblocking(
+                                        interprocess::local_socket::ListenerNonblockingMode::Accept,
+                                    )
+                                    .expect("failed to make rebound session listener recoverable");
+                                listener = rebound_listener;
+                                log::warn!(
+                                    "session discovery pathname disappeared; rebound owned endpoint"
+                                );
+                            },
+                            Ok(None) => {},
+                            Err(error) => {
+                                if consecutive_connection_errors == 0
+                                    || consecutive_connection_errors.is_multiple_of(50)
+                                {
+                                    log::error!(
+                                        "failed to recover session discovery endpoint: {error}"
+                                    );
+                                }
+                                consecutive_connection_errors =
+                                    consecutive_connection_errors.saturating_add(1);
+                            },
+                        }
+                        thread::sleep(std::time::Duration::from_millis(100));
+                        continue;
+                    }
                     match stream {
                         Ok(stream) => {
+                            #[cfg(unix)]
+                            if let Err(error) = stream.set_nonblocking(false) {
+                                log::error!(
+                                    "failed to restore blocking mode on accepted client: {error}"
+                                );
+                                continue;
+                            }
                             let mut os_input = os_input.clone();
                             let client_id = session_state.write().unwrap().new_client();
 
@@ -967,7 +1013,9 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
     if let Err(error) = listener_thread {
         log::error!("failed to spawn session listener thread: {error}");
         #[cfg(unix)]
-        let _ = socket_lease.remove_if_owned();
+        if let Ok(mut lease) = socket_lease.lock() {
+            let _ = lease.remove_if_owned();
+        }
         #[cfg(windows)]
         let _ = std::fs::remove_file(&current_socket_path);
         std::process::exit(1);
@@ -1392,33 +1440,6 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                         .senders
                         .send_to_plugin(PluginInstruction::RemoveClient(client_id))
                         .unwrap();
-                    if !session_state.read().unwrap().active_clients_are_connected() {
-                        *session_data.write().unwrap() = None;
-                        let client_ids_to_cleanup: Vec<ClientId> = session_state
-                            .read()
-                            .unwrap()
-                            .clients
-                            .keys()
-                            .copied()
-                            .collect();
-                        // these are just the pipes
-                        for client_id in client_ids_to_cleanup {
-                            remove_client!(client_id, os_input, session_state, session_data);
-                        }
-
-                        let watcher_client_ids: Vec<ClientId> =
-                            session_state.read().unwrap().watcher_client_ids();
-                        for watcher_id in watcher_client_ids {
-                            let _ = os_input.send_to_client(
-                                watcher_id,
-                                ServerToClientMsg::Exit {
-                                    exit_reason: ExitReason::Normal,
-                                },
-                            );
-                        }
-
-                        break;
-                    }
                 }
             },
             ServerInstruction::RemoveClient(client_id) => {
@@ -1685,7 +1706,10 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                 response_channel,
             } => {
                 #[cfg(unix)]
-                let rename_result = socket_lease.rename_owned_socket(&new_socket_path);
+                let rename_result = socket_lease
+                    .lock()
+                    .map_err(|_| std::io::Error::other("session socket lease lock poisoned"))
+                    .and_then(|mut lease| lease.rename_owned_socket(&new_socket_path));
                 #[cfg(windows)]
                 let rename_result = std::fs::rename(&current_socket_path, &new_socket_path);
 
@@ -1971,8 +1995,13 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
     drop(cached_session);
 
     #[cfg(unix)]
-    if let Err(error) = socket_lease.remove_if_owned() {
-        log::error!("Failed to remove owned session socket: {error}");
+    match socket_lease.lock() {
+        Ok(mut lease) => {
+            if let Err(error) = lease.remove_if_owned() {
+                log::error!("Failed to remove owned session socket: {error}");
+            }
+        },
+        Err(_) => log::error!("Failed to remove owned session socket: lease lock poisoned"),
     }
     #[cfg(windows)]
     drop(std::fs::remove_file(&current_socket_path));

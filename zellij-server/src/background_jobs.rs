@@ -987,21 +987,19 @@ pub(crate) fn overlay_current_session_info(
     current_session_info: &SessionInfo,
     current_session_plugin_list: &BTreeMap<PluginId, RunPlugin>,
 ) {
-    if current_session_info.name == current_session_name
-        && session_infos.contains_key(current_session_name)
-    {
-        // The socket scan is the canonical source for launch age. The live
-        // screen snapshot can be uninitialized during startup or rounded to
-        // whole seconds, so replacing this value can reshuffle the session
-        // rail whenever the current-session overlay refreshes.
+    if current_session_info.name == current_session_name {
+        // Preserve the oldest authoritative launch age. A recovered socket
+        // has a fresh filesystem timestamp, while the in-process snapshot
+        // still knows how long the session has actually lived.
         let scanned_creation_time = session_infos
             .get(current_session_name)
             .map(|session_info| session_info.creation_time)
-            .unwrap_or(current_session_info.creation_time);
+            .unwrap_or_default();
         let mut live_current_session = current_session_info.clone();
         live_current_session.name = current_session_name.to_string();
         live_current_session.is_current_session = true;
-        live_current_session.creation_time = scanned_creation_time;
+        live_current_session.creation_time =
+            scanned_creation_time.max(current_session_info.creation_time);
         live_current_session.populate_plugin_list(current_session_plugin_list.clone());
         session_infos.insert(current_session_name.to_string(), live_current_session);
     }
@@ -1333,6 +1331,58 @@ mod tests {
         assert!(current.is_current_session);
         assert_eq!(current.creation_time, scanned_creation_time);
         assert_eq!(scanned_sessions.get("peer").unwrap().name, "peer");
+    }
+
+    #[test]
+    fn live_current_session_truth_survives_missing_discovery_namespace() {
+        let mut panes = HashMap::new();
+        panes.insert(
+            0,
+            vec![PaneInfo {
+                title: "detached-agent".to_string(),
+                terminal_command: Some("codex".to_string()),
+                ..Default::default()
+            }],
+        );
+        let mut current_session = SessionInfo::new("me".to_string());
+        current_session.panes = PaneManifest { panes };
+        current_session.connected_clients = 0;
+        let mut scanned_sessions = BTreeMap::new();
+
+        overlay_current_session_info(
+            &mut scanned_sessions,
+            "me",
+            &current_session,
+            &BTreeMap::new(),
+        );
+
+        let current = scanned_sessions
+            .get("me")
+            .expect("in-process current session must be represented");
+        assert!(current.is_current_session);
+        assert_eq!(current.connected_clients, 0);
+        assert_eq!(current.panes, current_session.panes);
+    }
+
+    #[test]
+    fn recovered_socket_does_not_reset_live_session_age() {
+        let mut recovered_socket_info = SessionInfo::new("me".to_string());
+        recovered_socket_info.creation_time = Duration::from_secs(1);
+        let mut scanned_sessions = BTreeMap::from([("me".to_string(), recovered_socket_info)]);
+        let mut current_session = SessionInfo::new("me".to_string());
+        current_session.creation_time = Duration::from_secs(137);
+
+        overlay_current_session_info(
+            &mut scanned_sessions,
+            "me",
+            &current_session,
+            &BTreeMap::new(),
+        );
+
+        assert_eq!(
+            scanned_sessions.get("me").unwrap().creation_time,
+            Duration::from_secs(137)
+        );
     }
 
     #[test]
