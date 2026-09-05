@@ -179,14 +179,37 @@ pub(crate) fn resolve_reserved_terminal_spawn<T>(
 // this client and we'll stop sending messages to it.
 // If the client ever becomes responsive again, we'll send one final "Buffer full" message so it
 // knows what happened.
+//
+// A hangup (Broken pipe) is fatal for this client. Logging it as non_fatal and
+// keeping the pump alive lets Screen enqueue full render frames into the 5000
+// slot buffer forever — observed as a 1 Hz `os_input_output.rs:207` storm and
+// multi-GB RSS on a live operator session.
 #[derive(Clone)]
 struct ClientSender {
     client_id: ClientId,
     client_buffer_sender: channels::Sender<ServerToClientMsg>,
 }
 
+fn pump_client_ipc(
+    client_id: ClientId,
+    mut sender: IpcSenderWithContext<ServerToClientMsg>,
+    client_buffer_receiver: channels::Receiver<ServerToClientMsg>,
+) {
+    let err_context = || format!("failed to send message to client {client_id}");
+    for msg in client_buffer_receiver.iter() {
+        let send_result = sender.send_server_msg(msg).with_context(err_context);
+        if send_result.is_err() {
+            send_result.non_fatal();
+            break;
+        }
+    }
+    let _ = sender.send_server_msg(ServerToClientMsg::Exit {
+        exit_reason: ExitReason::Disconnect,
+    });
+}
+
 impl ClientSender {
-    pub fn new(client_id: ClientId, mut sender: IpcSenderWithContext<ServerToClientMsg>) -> Self {
+    pub fn new(client_id: ClientId, sender: IpcSenderWithContext<ServerToClientMsg>) -> Self {
         // FIXME(hartan): This queue is responsible for buffering messages between server and
         // client. If it fills up, the client is disconnected with a "Buffer full" sort of error
         // message. It was previously found to be too small (with depth 50), so it was increased to
@@ -198,18 +221,12 @@ impl ClientSender {
         // queue for the time being because we want to prevent e.g. the whole session being killed
         // (by OOM-killers or some other mechanism) just because a single client doesn't respond.
         let (client_buffer_sender, client_buffer_receiver) = channels::bounded(5000);
-        std::thread::spawn(move || {
-            let err_context = || format!("failed to send message to client {client_id}");
-            for msg in client_buffer_receiver.iter() {
-                sender
-                    .send_server_msg(msg)
-                    .with_context(err_context)
-                    .non_fatal();
-            }
-            let _ = sender.send_server_msg(ServerToClientMsg::Exit {
-                exit_reason: ExitReason::Disconnect,
+        std::thread::Builder::new()
+            .name(format!("ipc-client-{client_id}"))
+            .spawn(move || pump_client_ipc(client_id, sender, client_buffer_receiver))
+            .unwrap_or_else(|error| {
+                panic!("failed to spawn ipc-client-{client_id}: {error}");
             });
-        });
         ClientSender {
             client_id,
             client_buffer_sender,
@@ -432,17 +449,23 @@ impl ServerOsApi for ServerOsInputOutput {
     }
     fn send_to_client(&self, client_id: ClientId, msg: ServerToClientMsg) -> Result<()> {
         let err_context = || format!("failed to send message to client {client_id}");
-
-        if let Some(sender) = self
+        let mut client_senders = self
             .client_senders
             .lock()
             .to_anyhow()
-            .with_context(err_context)?
-            .get_mut(&client_id)
-        {
-            sender.send_or_buffer(msg).with_context(err_context)
-        } else {
-            Ok(())
+            .with_context(err_context)?;
+        let Some(sender) = client_senders.get(&client_id) else {
+            return Ok(());
+        };
+        match sender.send_or_buffer(msg).with_context(err_context) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                // Drop the 5000-deep render buffer even when the caller uses
+                // `let _ = send_to_client(...)`. Full / disconnected pumps are
+                // how a dead client turned into gigabytes of queued frames.
+                client_senders.remove(&client_id);
+                Err(error)
+            },
         }
     }
 
