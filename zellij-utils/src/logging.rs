@@ -17,7 +17,7 @@ use log4rs::append::rolling_file::{
 use log4rs::config::{Appender, Config, Logger, Root};
 use log4rs::encode::pattern::PatternEncoder;
 
-use crate::consts::{ZELLIJ_TMP_DIR, ZELLIJ_TMP_LOG_DIR, ZELLIJ_TMP_LOG_FILE};
+use crate::consts::{ZELLIJ_TMP_DIR, ZELLIJ_TMP_LOG_DIR, ZELLIJ_TMP_LOG_FILE, ZELLIJ_TMP_LOG_ROOT};
 use crate::shared::set_permissions;
 
 const LOG_MAX_BYTES: u64 = 1024 * 1024 * 16; // 16 MiB per log
@@ -26,6 +26,7 @@ const PLUGIN_EVENT_DIAGNOSTICS_TARGET: &str = "vc_frame::plugin_event_rate";
 
 pub fn configure_logger() {
     atomic_create_dir(&ZELLIJ_TMP_DIR).unwrap();
+    atomic_create_dir(&ZELLIJ_TMP_LOG_ROOT).unwrap();
     atomic_create_dir(&ZELLIJ_TMP_LOG_DIR).unwrap();
     atomic_create_file(&ZELLIJ_TMP_LOG_FILE).unwrap();
 
@@ -33,7 +34,7 @@ pub fn configure_logger() {
     let roller = FixedWindowRoller::builder()
         .build(
             ZELLIJ_TMP_LOG_DIR
-                .join("zellij.log.old.{}")
+                .join("vc-frame.log.old.{}")
                 .to_str()
                 .unwrap(),
             1,
@@ -56,24 +57,13 @@ pub fn configure_logger() {
         )
         .unwrap();
 
-    // plugin appender. To be used in logging_pipe to forward stderr output from plugins. We do some formatting
-    // in logging_pipe to print plugin name as 'module' and plugin_id instead of thread.
-    let log_plugin = RollingFileAppender::builder()
-        .encoder(Box::new(PatternEncoder::new(
-            "{highlight({level:<6})} {message} {n}",
-        )))
-        .build(
-            &*ZELLIJ_TMP_LOG_FILE,
-            Box::new(CompoundPolicy::new(Box::new(trigger), Box::new(roller))),
-        )
-        .unwrap();
-
-    // Set the default logging level to "info" and log it to zellij.log file
+    // Set the default logging level to "info" and log it to the process-owned
+    // vc-frame.log file. One appender owns rotation; independent appenders and
+    // server processes must never rename a shared inode underneath each other.
     // Decrease verbosity for `wasmtime_wasi` module because it has a lot of useless info logs
-    // For `zellij_server::logging_pipe`, we use custom format as we use logging macros to forward stderr output from plugins
+    // `zellij_server::logging_pipe` already formats plugin identity in its message.
     let mut config_builder = Config::builder()
         .appender(Appender::builder().build("logFile", Box::new(log_file)))
-        .appender(Appender::builder().build("logPlugin", Box::new(log_plugin)))
         // reduce the verbosity of isahc, otherwise it logs on every failed web request
         .logger(
             Logger::builder()
@@ -82,12 +72,12 @@ pub fn configure_logger() {
         )
         .logger(
             Logger::builder()
-                .appender("logPlugin")
+                .appender("logFile")
                 .build("wasmtime_wasi", LevelFilter::Warn),
         )
         .logger(
             Logger::builder()
-                .appender("logPlugin")
+                .appender("logFile")
                 .additive(false)
                 .build("zellij_server::logging_pipe", LevelFilter::Trace),
         );
@@ -133,7 +123,7 @@ pub fn atomic_create_dir(dir_name: &Path) -> io::Result<()> {
 pub fn debug_to_file(message: &[u8], terminal_id: i32) -> io::Result<()> {
     let mut path = PathBuf::new();
     path.push(&*ZELLIJ_TMP_LOG_DIR);
-    path.push(format!("zellij-{}.log", terminal_id));
+    path.push(format!("pane-{}.log", terminal_id));
 
     let mut file = fs::OpenOptions::new()
         .append(true)

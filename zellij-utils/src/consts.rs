@@ -5,6 +5,7 @@ use directories::ProjectDirs;
 use include_dir::{Dir, include_dir};
 use lazy_static::lazy_static;
 use std::{
+    ffi::OsString,
     path::{Path, PathBuf},
     sync::OnceLock,
 };
@@ -16,6 +17,25 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const DEFAULT_SCROLL_BUFFER_SIZE: usize = 10_000;
 pub static SCROLL_BUFFER_SIZE: OnceLock<usize> = OnceLock::new();
 pub static DEBUG_MODE: OnceLock<bool> = OnceLock::new();
+
+fn process_log_scope() -> OsString {
+    let mut args = std::env::args_os();
+    while let Some(argument) = args.next() {
+        if argument == "--server" {
+            if let Some(socket_path) = args.next()
+                && let Some(socket_name) = Path::new(&socket_path).file_name()
+            {
+                return socket_name.to_os_string();
+            }
+        } else if let Some(argument) = argument.to_str()
+            && let Some(socket_path) = argument.strip_prefix("--server=")
+            && let Some(socket_name) = Path::new(socket_path).file_name()
+        {
+            return socket_name.to_os_string();
+        }
+    }
+    format!("client-{}", std::process::id()).into()
+}
 
 #[cfg(not(windows))]
 pub const SYSTEM_DEFAULT_CONFIG_DIR: &str = "/etc/vc-frame";
@@ -628,8 +648,10 @@ mod unix_only {
                 temp_dir().join(format!("vc-frame-{}", *UID))
             }
         };
-        pub static ref ZELLIJ_TMP_LOG_DIR: PathBuf = ZELLIJ_TMP_DIR.join("vc-frame-log");
-        pub static ref ZELLIJ_TMP_LOG_FILE: PathBuf = ZELLIJ_TMP_LOG_DIR.join("zellij.log");
+        pub static ref ZELLIJ_TMP_LOG_ROOT: PathBuf = ZELLIJ_TMP_DIR.join("vc-frame-log");
+        pub static ref ZELLIJ_TMP_LOG_DIR: PathBuf =
+            ZELLIJ_TMP_LOG_ROOT.join(process_log_scope());
+        pub static ref ZELLIJ_TMP_LOG_FILE: PathBuf = ZELLIJ_TMP_LOG_DIR.join("vc-frame.log");
         pub static ref ZELLIJ_SOCK_DIR: PathBuf = {
             let mut ipc_dir = envs::get_socket_dir().map_or_else(
                 |_| {
@@ -683,8 +705,9 @@ mod not_unix {
             let tmp_dir = canonicalize_path(temp_dir());
             tmp_dir.join("vc-frame")
         };
-        pub static ref ZELLIJ_TMP_LOG_DIR: PathBuf = ZELLIJ_TMP_DIR.join("vc-frame-log");
-        pub static ref ZELLIJ_TMP_LOG_FILE: PathBuf = ZELLIJ_TMP_LOG_DIR.join("zellij.log");
+        pub static ref ZELLIJ_TMP_LOG_ROOT: PathBuf = ZELLIJ_TMP_DIR.join("vc-frame-log");
+        pub static ref ZELLIJ_TMP_LOG_DIR: PathBuf = ZELLIJ_TMP_LOG_ROOT.join(process_log_scope());
+        pub static ref ZELLIJ_TMP_LOG_FILE: PathBuf = ZELLIJ_TMP_LOG_DIR.join("vc-frame.log");
         pub static ref ZELLIJ_SOCK_DIR: PathBuf = {
             let mut ipc_dir = canonicalize_path(envs::get_socket_dir().map_or_else(
                 |_| {

@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 ## [Unreleased]
 
+* fix(logging): every server now owns a session-scoped `vc-frame.log` and one rolling appender; concurrent servers no longer rotate a shared `zellij.log` into detached inodes, and debug pane captures live beside their owning server log
 * perf(pty): remove the host-wide `ps -ao ppid,args` subprocess from the 1 Hz session metadata path; foreground command discovery now reads the kernel-owned PTY foreground process group and queries only that process, so cost scales with active panes instead of every process on the machine
 * fix(pty): spawned panes now advertise `TERM=xterm-256color` at their PTY boundary instead of inheriting `TERM=dumb` from a headless launcher, so interactive TUIs do not stop for a false unsupported-terminal prompt
 * fix(build): bundled plugin WASM is now derived from the current checkout into `target/vc-frame-plugins/` for both debug and release builds; tracked blobs and their committed receipt are gone, builds stay clean, and a missing `wasm32-wasip1` target reports the exact `rustup target add` remedy
