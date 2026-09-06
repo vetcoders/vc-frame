@@ -341,8 +341,13 @@ pub trait ServerOsApi: Send + Sync {
     fn get_cwds(&self, _pids: Vec<u32>) -> (HashMap<u32, PathBuf>, HashMap<u32, Vec<String>>) {
         (HashMap::new(), HashMap::new())
     }
-    /// Get a list of all running commands by their parent process id
-    fn get_all_cmds_by_ppid(&self, _post_hook: &Option<String>) -> HashMap<String, Vec<String>> {
+    /// Return the foreground command for each terminal without scanning the
+    /// host-wide process table. The tuple is `(terminal_id, shell_pid)`.
+    fn get_foreground_commands(
+        &self,
+        _terminals: &[(u32, u32)],
+        _post_hook: &Option<String>,
+    ) -> HashMap<u32, Vec<String>> {
         HashMap::new()
     }
     /// Writes the given buffer to a string
@@ -575,91 +580,44 @@ impl ServerOsApi for ServerOsInputOutput {
 
         (cwds, cmds)
     }
-    #[cfg(unix)]
-    fn get_all_cmds_by_ppid(&self, post_hook: &Option<String>) -> HashMap<String, Vec<String>> {
-        // the key is the stringified ppid
-        let mut cmds = HashMap::new();
-        if let Ok(output) = Command::new("ps").args(vec!["-ao", "ppid,args"]).output() {
-            let output = String::from_utf8(output.stdout.clone())
-                .unwrap_or_else(|_| String::from_utf8_lossy(&output.stdout).to_string());
-            for line in output.lines() {
-                let line_parts: Vec<String> = line
-                    .trim()
-                    .split_ascii_whitespace()
-                    .map(|p| p.to_owned())
-                    .collect();
-                let mut line_parts = line_parts.into_iter();
-                let ppid = line_parts.next();
-                if let Some(ppid) = ppid {
-                    match &post_hook {
-                        Some(post_hook) => {
-                            let command: Vec<String> = line_parts.clone().collect();
-                            let stringified = command.join(" ");
-                            let cmd = match run_command_hook(&stringified, post_hook) {
-                                Ok(command) => command,
-                                Err(e) => {
-                                    log::error!("Post command hook failed to run: {}", e);
-                                    stringified.to_owned()
-                                },
-                            };
-                            let line_parts: Vec<String> = cmd
-                                .trim()
-                                .split_ascii_whitespace()
-                                .map(|p| p.to_owned())
-                                .collect();
-                            cmds.insert(ppid, line_parts);
-                        },
-                        None => {
-                            cmds.insert(ppid, line_parts.collect());
-                        },
-                    }
-                }
-            }
-        }
-        cmds
-    }
+    fn get_foreground_commands(
+        &self,
+        terminals: &[(u32, u32)],
+        post_hook: &Option<String>,
+    ) -> HashMap<u32, Vec<String>> {
+        #[cfg(unix)]
+        {
+            let foreground_pids: HashMap<u32, u32> = terminals
+                .iter()
+                .filter_map(|(terminal_id, shell_pid)| {
+                    self.pty_backend
+                        .foreground_process_id(*terminal_id)
+                        .filter(|foreground_pid| foreground_pid != shell_pid)
+                        .map(|foreground_pid| (*terminal_id, foreground_pid))
+                })
+                .collect();
+            let (_, commands_by_pid) = self.get_cwds(foreground_pids.values().copied().collect());
 
-    #[cfg(not(unix))]
-    fn get_all_cmds_by_ppid(&self, post_hook: &Option<String>) -> HashMap<String, Vec<String>> {
-        let mut system_info = System::new();
-        let refresh_kind = ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always);
-        system_info.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
-        let mut cmds = HashMap::new();
-        for (_pid, process) in system_info.processes() {
-            if let Some(parent_pid) = process.parent() {
-                let ppid_str = format!("{}", parent_pid);
-                let command: Vec<String> = process
-                    .cmd()
-                    .iter()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .collect();
-                if command.is_empty() {
-                    continue;
-                }
-                match post_hook {
-                    Some(post_hook) => {
-                        let stringified = command.join(" ");
-                        let cmd = match run_command_hook(&stringified, post_hook) {
-                            Ok(command) => command,
-                            Err(e) => {
-                                log::error!("Post command hook failed to run: {}", e);
-                                stringified.to_owned()
-                            },
-                        };
-                        let line_parts: Vec<String> = cmd
-                            .trim()
-                            .split_ascii_whitespace()
-                            .map(|p| p.to_owned())
-                            .collect();
-                        cmds.insert(ppid_str, line_parts);
-                    },
-                    None => {
-                        cmds.insert(ppid_str, command);
-                    },
-                }
-            }
+            foreground_pids
+                .into_iter()
+                .filter_map(|(terminal_id, foreground_pid)| {
+                    commands_by_pid
+                        .get(&foreground_pid)
+                        .cloned()
+                        .map(|command| {
+                            (
+                                terminal_id,
+                                apply_command_discovery_hook(command, post_hook),
+                            )
+                        })
+                })
+                .collect()
         }
-        cmds
+        #[cfg(not(unix))]
+        {
+            let _ = (terminals, post_hook);
+            HashMap::new()
+        }
     }
 
     fn write_to_file(&mut self, buf: String, name: Option<String>) -> Result<()> {
@@ -714,6 +672,25 @@ impl ServerOsApi for ServerOsInputOutput {
             }
         }
     }
+}
+
+fn apply_command_discovery_hook(command: Vec<String>, post_hook: &Option<String>) -> Vec<String> {
+    let Some(post_hook) = post_hook else {
+        return command;
+    };
+    let original_command = command.join(" ");
+    let command = match run_command_hook(&original_command, post_hook) {
+        Ok(command) => command,
+        Err(error) => {
+            log::error!("Post command hook failed to run: {}", error);
+            original_command
+        },
+    };
+    command
+        .trim()
+        .split_ascii_whitespace()
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 impl Clone for Box<dyn ServerOsApi> {

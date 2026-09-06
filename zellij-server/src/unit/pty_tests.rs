@@ -341,8 +341,21 @@ impl ServerOsApi for MockOsApi {
             .collect();
         (cwds, cmds)
     }
-    fn get_all_cmds_by_ppid(&self, _: &Option<String>) -> HashMap<String, Vec<String>> {
-        self.cmds_by_ppid.lock().unwrap().clone()
+    fn get_foreground_commands(
+        &self,
+        terminals: &[(u32, u32)],
+        _: &Option<String>,
+    ) -> HashMap<u32, Vec<String>> {
+        let commands = self.cmds_by_ppid.lock().unwrap();
+        terminals
+            .iter()
+            .filter_map(|(terminal_id, shell_pid)| {
+                commands
+                    .get(&shell_pid.to_string())
+                    .cloned()
+                    .map(|command| (*terminal_id, command))
+            })
+            .collect()
     }
     fn write_to_file(&mut self, _: String, _: Option<String>) -> anyhow::Result<()> {
         Ok(())
