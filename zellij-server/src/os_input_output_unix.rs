@@ -376,6 +376,10 @@ where
     unsafe {
         command
             .args(&cmd.args)
+            // A vc-frame pane is a fresh pseudo-terminal. It must advertise
+            // its own capabilities instead of inheriting `TERM=dumb` from a
+            // headless launcher or daemonized server.
+            .env("TERM", "xterm-256color")
             .env(envs::VC_FRAME_PANE_ID_ENV_KEY, format!("{}", terminal_id))
             .env(envs::PANE_ID_ENV_KEY, format!("{}", terminal_id))
             .pre_exec(pre_exec)

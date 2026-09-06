@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 ## [Unreleased]
 
 * perf(pty): remove the host-wide `ps -ao ppid,args` subprocess from the 1 Hz session metadata path; foreground command discovery now reads the kernel-owned PTY foreground process group and queries only that process, so cost scales with active panes instead of every process on the machine
+* fix(pty): spawned panes now advertise `TERM=xterm-256color` at their PTY boundary instead of inheriting `TERM=dumb` from a headless launcher, so interactive TUIs do not stop for a false unsupported-terminal prompt
 * fix(build): bundled plugin WASM is now derived from the current checkout into `target/vc-frame-plugins/` for both debug and release builds; tracked blobs and their committed receipt are gone, builds stay clean, and a missing `wasm32-wasip1` target reports the exact `rustup target add` remedy
 * fix(chrome): Composer and Quick cmd remain clickable, label-only actions in the top bar while their `⌘E` / `⇧⌘.` teaching lane stays permanently in the bottom bar across input modes; the theme glyph keeps a one-column trailing inset in borderless hosts
 * fix(server): a starting server no longer unlinks and re-binds a session socket that a live server still owns — it probes the path first and refuses to start when someone is listening, even if that server is too busy to answer a health probe; only missing, stale or non-socket paths are cleaned up. A server already running a session likewise rejects a second new-session request instead of re-initializing over live state
