@@ -1735,9 +1735,10 @@ tail -f /tmp/my-live-logfile | vc-frame pipe --name logs --plugin https://exampl
         plugin_configuration: Option<PluginUserConfiguration>,
     },
 
-    /// Transfer a finished run's tab into its status bucket session
+    /// Legacy/manual: copy a finished run into a historical bucket session
     ///
-    /// Captures the pane's scrollback and the run metadata to durable storage,
+    /// Not used by supervised Vibecrafted lifecycle paths. Captures the pane's
+    /// scrollback and the run metadata to durable storage,
     /// recreates a viewer/rerun tab in "Finalized runs", "Failed runs" or
     /// "Needs attention", and only then closes the origin tab. A PTY cannot
     /// migrate between sessions, so this recreates rather than moves.
