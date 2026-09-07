@@ -5224,7 +5224,7 @@ fn override_layout(
 
     // Convert all tabs to Vec<TabLayoutInfo>
     let tabs: Vec<TabLayoutInfo> = layout
-        .tabs
+        .tabs()
         .iter()
         .enumerate()
         .map(|(index, (tab_name, tiled, floating))| TabLayoutInfo {

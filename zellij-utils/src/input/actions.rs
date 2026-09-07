@@ -1852,7 +1852,7 @@ impl Action {
 
                 // Convert all tabs to Vec<TabLayoutInfo>
                 let tabs: Vec<TabLayoutInfo> = layout
-                    .tabs
+                    .tabs()
                     .iter()
                     .enumerate()
                     .map(|(index, (tab_name, tiled, floating))| TabLayoutInfo {
@@ -3773,6 +3773,187 @@ mod tests {
                 assert!(!tabs.is_empty());
             },
             _ => panic!("Expected OverrideLayout action"),
+        }
+    }
+
+    #[test]
+    fn test_override_layout_mounts_session_canvas() {
+        use super::super::layout::Run;
+
+        let raw_layout = r#"
+            layout {
+                session_layer {
+                    pane size=1 borderless=true {
+                        plugin location="compact-bar" {
+                            session_canvas true
+                            session_canvas_kind "compact-bar"
+                        }
+                    }
+                    pane split_direction="vertical" {
+                        pane size=24 borderless=true {
+                            plugin location="session-manager" {
+                                session_canvas true
+                                session_canvas_kind "session-manager"
+                            }
+                        }
+                        pane { children; }
+                    }
+                    pane size=1 borderless=true {
+                        plugin location="status-bar" {
+                            session_canvas true
+                            session_canvas_kind "status-bar"
+                        }
+                    }
+                }
+                tab name="First" vc_tab_instance_id="first-instance" hide_floating_panes=true {
+                    pane command="sleep" { args "600"; }
+                    floating_panes { pane command="sleep" { args "601"; }; }
+                }
+                tab name="Second" vc_tab_instance_id="second-instance" {
+                    pane command="sleep" { args "602"; }
+                }
+                swap_tiled_layout name="vertical" {
+                    tab { pane split_direction="vertical" { children; }; }
+                }
+            }
+        "#;
+        let parsed = Layout::from_str(raw_layout, "test".into(), None, None).unwrap();
+        // Raw tab content contains no chrome: using it would reproduce the regression.
+        for (_, tiled, _) in &parsed.tabs {
+            assert!(
+                tiled
+                    .extract_run_instructions()
+                    .iter()
+                    .all(|run| { !matches!(run, Some(Run::Plugin(_))) })
+            );
+        }
+        for (retain_terminals, retain_plugins, active_only) in
+            [(true, false, false), (false, true, true)]
+        {
+            let actions = Action::actions_from_cli(
+                CliAction::OverrideLayout {
+                    layout: None,
+                    layout_string: Some(raw_layout.into()),
+                    layout_dir: None,
+                    retain_existing_terminal_panes: retain_terminals,
+                    retain_existing_plugin_panes: retain_plugins,
+                    apply_only_to_active_tab: active_only,
+                },
+                Box::new(|| PathBuf::from("/tmp")),
+                None,
+            )
+            .unwrap();
+            assert_eq!(actions.len(), 1);
+            let Action::OverrideLayout {
+                tabs,
+                retain_existing_terminal_panes,
+                retain_existing_plugin_panes,
+                apply_only_to_active_tab,
+            } = &actions[0]
+            else {
+                panic!("Expected OverrideLayout action");
+            };
+            assert_eq!(*retain_existing_terminal_panes, retain_terminals);
+            assert_eq!(*retain_existing_plugin_panes, retain_plugins);
+            assert_eq!(*apply_only_to_active_tab, active_only);
+            assert_eq!(tabs.len(), 2);
+            for (index, tab) in tabs.iter().enumerate() {
+                assert_eq!(tab.tab_index, index);
+                assert_eq!(tab.tab_name, parsed.tabs[index].0);
+                assert_eq!(
+                    tab.tiled_layout.tab_instance_id,
+                    parsed.tabs[index].1.tab_instance_id
+                );
+                assert_eq!(tab.tiled_layout.hide_floating_panes, index == 0);
+                assert_eq!(tab.floating_layouts, parsed.tabs[index].2);
+                assert_eq!(
+                    tab.swap_tiled_layouts.as_ref(),
+                    Some(&parsed.swap_tiled_layouts)
+                );
+                assert_eq!(
+                    tab.swap_floating_layouts.as_ref(),
+                    Some(&parsed.swap_floating_layouts)
+                );
+                let runs = tab.tiled_layout.extract_run_instructions();
+                assert_eq!(
+                    runs.iter()
+                        .filter(|run| matches!(run, Some(Run::Command(_))))
+                        .count(),
+                    1
+                );
+                for chrome in ["compact-bar", "session-manager", "status-bar"] {
+                    assert_eq!(
+                        runs.iter()
+                            .filter(|run| {
+                                let Some(Run::Plugin(plugin)) = run else {
+                                    return false;
+                                };
+                                if plugin.location_string() != chrome {
+                                    return false;
+                                }
+                                let configuration = match plugin {
+                                    RunPluginOrAlias::RunPlugin(plugin) => {
+                                        Some(&plugin.configuration)
+                                    },
+                                    RunPluginOrAlias::Alias(alias) => alias.configuration.as_ref(),
+                                };
+                                configuration.is_some_and(|configuration| {
+                                    configuration
+                                        .inner()
+                                        .get("session_canvas_kind")
+                                        .is_some_and(|kind| kind == chrome)
+                                        && configuration
+                                            .inner()
+                                            .get("session_canvas")
+                                            .is_some_and(|value| value == "true")
+                                })
+                            })
+                            .count(),
+                        1,
+                        "tab {index} must carry {chrome} exactly once"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_override_layout_preserves_legacy_tabs() {
+        let raw_layout = r#"
+            layout {
+                tab name="First" vc_tab_instance_id="first-instance" {
+                    pane
+                }
+                tab name="Second" hide_floating_panes=true {
+                    pane
+                    floating_panes { pane; }
+                }
+            }
+        "#;
+        let parsed = Layout::from_str(raw_layout, "test".into(), None, None).unwrap();
+        assert!(parsed.session_layer.is_none());
+        let actions = Action::actions_from_cli(
+            CliAction::OverrideLayout {
+                layout: None,
+                layout_string: Some(raw_layout.into()),
+                layout_dir: None,
+                retain_existing_terminal_panes: false,
+                retain_existing_plugin_panes: false,
+                apply_only_to_active_tab: false,
+            },
+            Box::new(|| PathBuf::from("/tmp")),
+            None,
+        )
+        .unwrap();
+        let Action::OverrideLayout { tabs, .. } = &actions[0] else {
+            panic!("Expected OverrideLayout action");
+        };
+        assert_eq!(tabs.len(), 2);
+        for (index, tab) in tabs.iter().enumerate() {
+            assert_eq!(tab.tab_index, index);
+            assert_eq!(tab.tab_name, parsed.tabs[index].0);
+            assert_eq!(tab.tiled_layout, parsed.tabs[index].1);
+            assert_eq!(tab.floating_layouts, parsed.tabs[index].2);
         }
     }
 
