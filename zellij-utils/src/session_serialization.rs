@@ -110,6 +110,8 @@ fn serialize_tab(
             let tiled_panes = if tiled_panes_layout.children_split_direction
                 != SplitDirection::default()
                 || tiled_panes_layout.children_are_stacked
+                // A real single pane is the root itself, not a grouping node.
+                || (!tiled_panes.is_empty() && tiled_panes_layout.children.is_empty())
             {
                 vec![tiled_panes_layout]
             } else {
@@ -1206,6 +1208,199 @@ mod tests {
             r#"{ "x": 0, "y": 41, "rows": { "constraint": "Fixed(5)", "inner": 5 }, "cols": { "constraint": "Percent(100.0)", "inner": 211 }, "is_stacked": false }"#,
         ],
     ];
+
+    #[test]
+    fn can_serialize_single_terminal_snapshot() {
+        use crate::input::command::RunCommand;
+
+        // Command panes intentionally omit scrollback; ordinary shells retain it.
+        for command in [false, true] {
+            let cwd = PathBuf::from("/tmp/snapshot work");
+            let title = "single terminal";
+            let contents = "saved shell output\n";
+            let manifest = GlobalLayoutManifest {
+                tabs: vec![(
+                    "proof-sleep".to_owned(),
+                    TabLayoutManifest {
+                        tiled_panes: vec![PaneLayoutManifest {
+                            geom: PaneGeom {
+                                rows: Dimension::fixed(24),
+                                cols: Dimension::fixed(80),
+                                ..Default::default()
+                            },
+                            run: command.then(|| {
+                                Run::Command(RunCommand {
+                                    command: PathBuf::from("sleep"),
+                                    args: vec!["600".to_owned()],
+                                    ..Default::default()
+                                })
+                            }),
+                            cwd: Some(cwd.clone()),
+                            title: Some(title.to_owned()),
+                            is_focused: true,
+                            pane_contents: Some(contents.to_owned()),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    },
+                )],
+                ..Default::default()
+            };
+            let (serialized, contents_files) = serialize_session_layout(manifest).unwrap();
+            let document: KdlDocument = serialized.parse().unwrap();
+            let tab = document
+                .get("layout")
+                .unwrap()
+                .children()
+                .unwrap()
+                .get("tab")
+                .unwrap()
+                .children()
+                .unwrap();
+            assert_eq!(tab.nodes().len(), 1, "must serialize the actual leaf");
+            let pane_node = tab.get("pane").unwrap();
+            assert_eq!(
+                pane_node.get("name").unwrap().value().as_string(),
+                Some(title)
+            );
+            assert_eq!(contents_files.len(), usize::from(!command));
+
+            let directory = tempfile::tempdir().unwrap();
+            for (filename, value) in &contents_files {
+                std::fs::write(directory.path().join(filename), value).unwrap();
+            }
+            if !command {
+                let filename = pane_node
+                    .get("contents_file")
+                    .unwrap()
+                    .value()
+                    .as_string()
+                    .unwrap();
+                assert_eq!(
+                    contents_files.get(filename).map(String::as_str),
+                    Some(contents)
+                );
+            }
+            let parsed = Layout::from_kdl(
+                &serialized,
+                Some(
+                    directory
+                        .path()
+                        .join("session-layout.kdl")
+                        .display()
+                        .to_string(),
+                ),
+                None,
+                None,
+            )
+            .unwrap();
+            assert_eq!(parsed.tabs.len(), 1);
+            let (tab_name, tiled, floating) = &parsed.tabs[0];
+            assert_eq!(tab_name.as_deref(), Some("proof-sleep"));
+            assert!(floating.is_empty());
+            assert_eq!(tiled.children.len(), 1);
+            let pane = &tiled.children[0];
+            assert!(pane.children.is_empty());
+            assert_eq!(pane.name.as_deref(), Some(title));
+            assert_eq!(pane.focus, Some(true));
+            assert_eq!(pane.run.as_ref().and_then(Run::get_cwd), Some(cwd));
+            if command {
+                let Some(Run::Command(run)) = &pane.run else {
+                    panic!("single terminal command was lost");
+                };
+                assert_eq!(run.command, PathBuf::from("sleep"));
+                assert_eq!(run.args, vec!["600".to_owned()]);
+                assert!(run.hold_on_start);
+                assert!(pane.pane_initial_contents.is_none());
+            } else {
+                assert_eq!(pane.pane_initial_contents.as_deref(), Some(contents));
+            }
+        }
+    }
+
+    #[test]
+    fn tab_snapshot_preserves_tiled_and_floating_structure() {
+        for tiled_count in [0, 1, 2] {
+            for floating_count in [0, 1] {
+                let manifest = GlobalLayoutManifest {
+                    tabs: vec![(
+                        "topology".to_owned(),
+                        TabLayoutManifest {
+                            tiled_panes: (0..tiled_count)
+                                .map(|index| PaneLayoutManifest {
+                                    geom: PaneGeom {
+                                        y: index * 10,
+                                        rows: Dimension::fixed(10),
+                                        cols: Dimension::fixed(80),
+                                        ..Default::default()
+                                    },
+                                    title: Some(format!("tiled-{index}")),
+                                    ..Default::default()
+                                })
+                                .collect(),
+                            floating_panes: (0..floating_count)
+                                .map(|_| PaneLayoutManifest {
+                                    geom: PaneGeom {
+                                        rows: Dimension::fixed(5),
+                                        cols: Dimension::fixed(20),
+                                        ..Default::default()
+                                    },
+                                    title: Some("floating".to_owned()),
+                                    ..Default::default()
+                                })
+                                .collect(),
+                            ..Default::default()
+                        },
+                    )],
+                    ..Default::default()
+                };
+                let (serialized, _) = serialize_session_layout(manifest).unwrap();
+                let document: KdlDocument = serialized.parse().unwrap();
+                let tab = document
+                    .get("layout")
+                    .unwrap()
+                    .children()
+                    .unwrap()
+                    .get("tab")
+                    .unwrap()
+                    .children()
+                    .unwrap();
+                let tiled: Vec<_> = tab
+                    .nodes()
+                    .iter()
+                    .filter(|node| node.name().value() == "pane")
+                    .collect();
+                assert_eq!(tiled.len(), tiled_count);
+                for (index, pane) in tiled.iter().enumerate() {
+                    assert_eq!(
+                        pane.get("name").unwrap().value().as_string(),
+                        Some(format!("tiled-{index}").as_str())
+                    );
+                    assert!(
+                        pane.children().is_none(),
+                        "must not add grouping around default splits"
+                    );
+                }
+                let floating = tab.get("floating_panes");
+                assert_eq!(usize::from(floating.is_some()), floating_count);
+                if let Some(floating) = floating {
+                    let panes = floating.children().unwrap();
+                    assert_eq!(panes.nodes().len(), 1);
+                    assert_eq!(
+                        panes
+                            .get("pane")
+                            .unwrap()
+                            .get("name")
+                            .unwrap()
+                            .value()
+                            .as_string(),
+                        Some("floating")
+                    );
+                }
+                Layout::from_kdl(&serialized, None, None, None).unwrap();
+            }
+        }
+    }
 
     #[test]
     fn geoms() {
