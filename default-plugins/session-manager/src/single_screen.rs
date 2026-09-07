@@ -104,16 +104,10 @@ impl SingleScreenState {
         resurrectable_sessions: &[(String, Duration)],
     ) -> Vec<UnifiedSearchResult> {
         let mut results = Vec::new();
-        for session in active_sessions
-            .iter()
-            .filter(|session| !crate::is_internal_drawer_session(&session.name))
-        {
+        for session in active_sessions {
             results.push(Self::active_session_to_result(session, 0, vec![]));
         }
-        for (name, ctime) in resurrectable_sessions
-            .iter()
-            .filter(|(name, _)| !crate::is_internal_drawer_session(name))
-        {
+        for (name, ctime) in resurrectable_sessions {
             results.push(UnifiedSearchResult::ResurrectableSession {
                 score: 0,
                 indices: vec![],
@@ -134,19 +128,13 @@ impl SingleScreenState {
             .get_or_insert_with(|| SkimMatcherV2::default().use_cache(true));
         let mut results = Vec::new();
 
-        for session in active_sessions
-            .iter()
-            .filter(|session| !crate::is_internal_drawer_session(&session.name))
-        {
+        for session in active_sessions {
             if let Some((score, indices)) = matcher.fuzzy_indices(&session.name, &self.search_term)
             {
                 results.push(Self::active_session_to_result(session, score, indices));
             }
         }
-        for (name, ctime) in resurrectable_sessions
-            .iter()
-            .filter(|(name, _)| !crate::is_internal_drawer_session(name))
-        {
+        for (name, ctime) in resurrectable_sessions {
             if let Some((score, indices)) = matcher.fuzzy_indices(name, &self.search_term) {
                 results.push(UnifiedSearchResult::ResurrectableSession {
                     score,
@@ -425,7 +413,7 @@ mod tests {
     }
 
     #[test]
-    fn test_1_7_internal_drawers_are_absent_from_default_and_search_results() {
+    fn test_1_7_historical_drawer_names_are_ordinary_search_results() {
         let active = vec![
             make_active_session("vc-frame", 2, 2, 1, true, 100),
             make_active_session("Live runs", 8, 4, 0, false, 200),
@@ -446,12 +434,27 @@ mod tests {
                 .iter()
                 .map(UnifiedSearchResult::session_name)
                 .collect::<Vec<_>>(),
-            vec!["vc-frame", "vibecrafted"]
+            vec![
+                "vc-frame",
+                "Live runs",
+                "Failed runs",
+                "Needs attention",
+                "Finalized runs",
+                "vibecrafted",
+                "Live runs",
+            ]
         );
 
-        state.search_term = "runs".to_owned();
+        state.search_term = "attention".to_owned();
         state.update_search_term(&active, &resurrectable);
-        assert!(state.unified_results.is_empty());
+        assert_eq!(
+            state
+                .unified_results
+                .iter()
+                .map(UnifiedSearchResult::session_name)
+                .collect::<Vec<_>>(),
+            vec!["Needs attention"]
+        );
     }
 
     // ---------------------------------------------------------------

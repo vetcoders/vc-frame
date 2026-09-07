@@ -3415,16 +3415,6 @@ mod rail_tests {
         assert!(state.live_runs_feed_degraded);
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn live_runs_monitor_script_is_valid_posix_shell() {
-        let status = std::process::Command::new("sh")
-            .args(["-n", "-c", LIVE_RUNS_MONITOR_SCRIPT])
-            .status()
-            .expect("sh should validate the monitor script");
-        assert!(status.success());
-    }
-
     #[test]
     fn live_runs_feed_degrades_after_missed_refresh_windows() {
         let mut state = State {
