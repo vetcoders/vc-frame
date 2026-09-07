@@ -4343,6 +4343,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::TiledPaneLay
         });
 
         Ok(TiledPaneLayout {
+            canvas_phase: Default::default(), // protobuf inputs are authored content
             children_split_direction,
             name: layout.name,
             children: children?,

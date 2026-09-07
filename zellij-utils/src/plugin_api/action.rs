@@ -3057,6 +3057,7 @@ impl TryFrom<ProtobufTiledPaneLayout> for TiledPaneLayout {
         });
         let run_instructions_to_ignore = vec![]; // Not serialized in protobuf
         Ok(TiledPaneLayout {
+            canvas_phase: Default::default(), // protobuf inputs are authored content
             tab_instance_id: None,
             children_split_direction,
             name: protobuf.name,

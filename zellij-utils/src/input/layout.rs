@@ -856,8 +856,19 @@ impl From<&TiledPaneLayout> for FloatingPaneLayout {
     }
 }
 
+/// Resolution state of a tab or tiled-swap root, never pane ownership or permission.
+/// Semantic templates stay Content; snapshots describe an already resolved canvas.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CanvasLayoutPhase {
+    #[default]
+    Content,
+    Materialized,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
 pub struct TiledPaneLayout {
+    #[serde(default)]
+    pub canvas_phase: CanvasLayoutPhase,
     /// Internal durable tab identity carried by serialized resurrection
     /// layouts. Fresh tabs leave this unset and receive a new UUID server-side.
     #[serde(default)]
@@ -1274,7 +1285,11 @@ impl Layout {
         mut content: TiledPaneLayout,
         mut floating_panes: Vec<FloatingPaneLayout>,
     ) -> (TiledPaneLayout, Vec<FloatingPaneLayout>) {
+        if content.canvas_phase == CanvasLayoutPhase::Materialized {
+            return (content, floating_panes);
+        }
         let Some((session_layer, session_floating_panes)) = &self.session_layer else {
+            content.canvas_phase = CanvasLayoutPhase::Materialized;
             return (content, floating_panes);
         };
         let original_content = content.clone();
@@ -1285,6 +1300,7 @@ impl Layout {
         if !canvas.insert_children_layout(&mut content).unwrap_or(false) {
             return (original_content, floating_panes);
         }
+        canvas.canvas_phase = CanvasLayoutPhase::Materialized;
         canvas.tab_instance_id = tab_instance_id;
         canvas.hide_floating_panes = hide_floating_panes;
         floating_panes.extend(session_floating_panes.iter().cloned());

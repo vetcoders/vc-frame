@@ -9,6 +9,9 @@ fn strip_unassigned_layout_metadata(s: String) -> String {
             !matches!(
                 line.trim(),
                 "tab_instance_id: None," | "session_layer: None,"
+                    // Phase semantics have explicit assertions below; keep legacy
+                    // geometry/debug snapshots focused on their original contract.
+                    | "canvas_phase: Content," | "canvas_phase: Materialized,"
             )
         })
         .collect::<Vec<_>>()
@@ -2937,4 +2940,116 @@ fn tiled_pane_still_rejects_zero_percent() {
     // But 1% should work
     let result = SplitSize::from_str("1%");
     assert!(result.is_ok());
+}
+
+#[test]
+fn canvas_phase_is_explicit_root_only_and_defaults_to_content() {
+    let raw = r#"layout {
+        session_layer { pane name="chrome"; children; }
+        default_tab_template { pane name="template"; children; }
+        tab { pane name="authored"; }
+        tab canvas_state="materialized" { pane name="saved"; }
+        swap_tiled_layout { tab canvas_state="materialized" { pane name="swap"; }; }
+    }"#;
+    let layout = Layout::from_kdl(raw, None, None, None).unwrap();
+    assert_eq!(layout.tabs[0].1.canvas_phase, CanvasLayoutPhase::Content);
+    assert_eq!(
+        layout.tabs[1].1.canvas_phase,
+        CanvasLayoutPhase::Materialized
+    );
+    assert_eq!(layout.tabs()[0].1.pane_count(), 3);
+    assert_eq!(layout.tabs()[1].1.pane_count(), 1);
+    assert_eq!(
+        layout.swap_tiled_layouts[0]
+            .0
+            .values()
+            .next()
+            .unwrap()
+            .pane_count(),
+        1
+    );
+    assert_eq!(
+        layout.new_tab().0.canvas_phase,
+        CanvasLayoutPhase::Materialized
+    );
+    assert_eq!(
+        layout.template.as_ref().unwrap().0.canvas_phase,
+        CanvasLayoutPhase::Content
+    );
+}
+
+#[test]
+fn malformed_and_nested_canvas_phases_reject() {
+    for raw in [
+        r#"layout { tab canvas_state="unknown" { pane; }; }"#,
+        r#"layout { tab canvas_state=true { pane; }; }"#,
+        r#"layout { tab canvas_state=1 { pane; }; }"#,
+        r#"layout canvas_state="materialized" { pane; }"#,
+        r#"layout { tab { canvas_state "materialized"; pane; }; }"#,
+        r#"layout { tab { pane canvas_state="materialized"; }; }"#,
+        r#"layout { new_tab_template canvas_state="materialized"; }"#,
+        r#"layout { default_tab_template canvas_state="materialized" { children; }; }"#,
+        r#"layout { tab_template name="x" canvas_state="content" { children; }; }"#,
+        r#"layout { session_layer canvas_state="materialized" { children; }; }"#,
+        r#"layout { swap_tiled_layout canvas_state="materialized" { tab { pane; }; }; }"#,
+        r#"layout { swap_floating_layout { floating_panes canvas_state="materialized" { pane; }; }; }"#,
+    ] {
+        let error = Layout::from_kdl(raw, None, None, None).unwrap_err();
+        assert!(
+            format!("{error:?}").contains("canvas_state"),
+            "{raw}: {error:?}"
+        );
+    }
+    let external = r#"swap_tiled_layout { tab { pane canvas_state="materialized"; }; }"#;
+    assert!(Layout::from_kdl("layout", None, Some(("swap.kdl", external)), None).is_err());
+}
+
+#[test]
+fn materialized_phase_does_not_bypass_plugin_or_layer_validation() {
+    for phase in ["content", "materialized"] {
+        let invalid_plugin =
+            format!(r#"layout {{ tab canvas_state="{phase}" {{ pane {{ plugin; }}; }}; }}"#);
+        assert!(Layout::from_kdl(&invalid_plugin, None, None, None).is_err());
+        let floating_layer = format!(
+            r#"layout {{
+            session_layer {{ children; floating_panes {{ pane; }}; }}
+            tab canvas_state="{phase}" {{ pane; }}
+        }}"#
+        );
+        let error = Layout::from_kdl(&floating_layer, None, None, None).unwrap_err();
+        assert!(format!("{error:?}").contains("cannot contain floating panes"));
+    }
+    // This is plugin configuration, not a layout phase marker. Ownership validation
+    // remains in the server reservation transaction, which consumes it unchanged.
+    let layout = Layout::from_kdl(
+        r#"layout {
+        tab canvas_state="materialized" {
+            pane { plugin location="zellij:compact-bar" {
+                session_canvas true
+                session_canvas_kind "invalid-role"
+                canvas_state "user-value"
+            }; }
+        }
+    }"#,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let resolved = layout.tabs();
+    let Some(Run::Plugin(plugin)) = &resolved[0].1.children[0].run else {
+        panic!("lost plugin");
+    };
+    let config = plugin.get_configuration().unwrap();
+    assert_eq!(
+        config
+            .inner()
+            .get("session_canvas_kind")
+            .map(String::as_str),
+        Some("invalid-role")
+    );
+    assert_eq!(
+        config.inner().get("canvas_state").map(String::as_str),
+        Some("user-value")
+    );
 }
