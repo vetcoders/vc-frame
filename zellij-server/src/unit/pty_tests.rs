@@ -2799,3 +2799,160 @@ fn osc7_then_poll_skips_terminal() {
         "poll after osc7 should skip terminal since flag was cleared"
     );
 }
+
+fn snapshot_completeness_metadata(incomplete: bool) -> SessionLayoutMetadata {
+    use crate::session_layout_metadata::PaneLayoutMetadata;
+    use zellij_utils::pane_size::{Dimension, PaneGeom};
+    let pane = PaneLayoutMetadata {
+        id: PaneId::Terminal(1),
+        geom: PaneGeom {
+            rows: Dimension::fixed(10),
+            cols: Dimension::fixed(10),
+            ..Default::default()
+        },
+        run: None,
+        cwd: None,
+        is_borderless: false,
+        title: None,
+        is_focused: false,
+        pane_contents: Some("capture".to_owned()),
+        focused_clients: vec![],
+        default_fg: None,
+        default_bg: None,
+    };
+    let mut metadata = SessionLayoutMetadata::default();
+    metadata.add_tab(
+        "first".into(),
+        "first-id".into(),
+        true,
+        false,
+        vec![pane.clone()],
+        vec![],
+    );
+    let mut second_pane = pane.clone();
+    second_pane.id = PaneId::Terminal(2);
+    let mut second = vec![second_pane];
+    if incomplete {
+        let mut displaced = pane;
+        displaced.id = PaneId::Terminal(3);
+        displaced.geom.x = 20;
+        second.push(displaced);
+    }
+    metadata.add_tab(
+        "second".into(),
+        "second-id".into(),
+        false,
+        false,
+        second,
+        vec![],
+    );
+    assert!(metadata.is_dirty());
+    metadata
+}
+
+#[test]
+fn explicit_save_instruction_rejects_incomplete_capture_without_durable_success() {
+    // Absolute session paths resolve inside this private temporary directory
+    // even if this regression erroneously reaches the production disk writer.
+    let root = tempfile::tempdir().unwrap();
+    let session = root.path().to_str().unwrap().to_owned();
+    assert!(root.path().is_absolute());
+    assert_eq!(
+        zellij_utils::consts::session_info_folder_for_session(&session),
+        root.path()
+    );
+    let layout = root.path().join("session-layout.kdl");
+    let contents = root.path().join("initial_contents_1");
+    std::fs::write(&layout, "previous complete checkpoint").unwrap();
+    std::fs::write(&contents, "previous contents").unwrap();
+    let (pty_tx, pty_rx) = channels::unbounded();
+    let (background_tx, background_rx) = channels::unbounded();
+    let (plugin_tx, plugin_rx) = channels::unbounded();
+    let bus = Bus::new(
+        vec![pty_rx],
+        ThreadSenders {
+            to_background_jobs: Some(SenderWithContext::new(background_tx)),
+            to_plugin: Some(SenderWithContext::new(plugin_tx)),
+            should_silently_fail: true,
+            ..Default::default()
+        },
+        Some(Box::new(MockOsApi::new())),
+    );
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    let sender = SenderWithContext::new(pty_tx);
+    sender
+        .send(PtyInstruction::SaveSessionToDisk {
+            generation: crate::background_jobs::reserve_session_state_generation(&session).unwrap(),
+            session_name: session,
+            session_info: zellij_utils::data::SessionInfo::default(),
+            session_layout_metadata: snapshot_completeness_metadata(true),
+            completion_tx: Some(NotificationEnd::new(tx)),
+        })
+        .unwrap();
+    sender.send(PtyInstruction::Exit).unwrap();
+    pty_thread_main(Pty::new(bus, false, None, None)).unwrap();
+    let receipt = rx.try_recv().unwrap();
+    assert_eq!(receipt.exit_status, Some(1));
+    assert!(
+        receipt
+            .error_message
+            .unwrap()
+            .contains("Incomplete session snapshot")
+    );
+    assert!(receipt.stdout_message.is_none());
+    assert!(
+        background_rx.try_recv().is_err(),
+        "rejected capture must not update periodic cache"
+    );
+    assert!(
+        plugin_rx.try_recv().is_err(),
+        "rejected capture must not announce durable save time"
+    );
+    assert_eq!(
+        std::fs::read_to_string(layout).unwrap(),
+        "previous complete checkpoint"
+    );
+    assert_eq!(
+        std::fs::read_to_string(contents).unwrap(),
+        "previous contents"
+    );
+}
+
+#[test]
+fn periodic_capture_instruction_rejects_incomplete_then_reports_complete_retry() {
+    let (pty_tx, pty_rx) = channels::unbounded();
+    let (background_tx, background_rx) = channels::unbounded();
+    let bus = Bus::new(
+        vec![pty_rx],
+        ThreadSenders {
+            to_background_jobs: Some(SenderWithContext::new(background_tx)),
+            should_silently_fail: true,
+            ..Default::default()
+        },
+        Some(Box::new(MockOsApi::new())),
+    );
+    let sender = SenderWithContext::new(pty_tx);
+    for (generation, incomplete) in [(1, true), (2, false)] {
+        sender
+            .send(PtyInstruction::LogLayoutToHd {
+                session_name: "private-periodic-fixture".to_owned(),
+                generation,
+                session_layout_metadata: snapshot_completeness_metadata(incomplete),
+            })
+            .unwrap();
+    }
+    sender.send(PtyInstruction::Exit).unwrap();
+    pty_thread_main(Pty::new(bus, false, None, None)).unwrap();
+    let (job, _) = background_rx.try_recv().unwrap();
+    let BackgroundJob::ReportLayoutInfo(snapshot) = job else {
+        panic!("expected complete retry")
+    };
+    assert_eq!(
+        snapshot.generation, 2,
+        "incomplete generation must never be published"
+    );
+    assert!(snapshot.layout.0.contains("first-id"));
+    assert!(snapshot.layout.0.contains("second-id"));
+    assert_eq!(snapshot.layout.1.len(), 2);
+    assert!(background_rx.try_recv().is_err());
+}

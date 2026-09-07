@@ -38,6 +38,22 @@ use zellij_utils::{
     session_serialization,
 };
 
+/// Shared admission for explicit saves and periodic capture. No partial layout
+/// or content map escapes this boundary, and explicit callers receive failure.
+pub(crate) fn serialize_session_layout_for_save(
+    manifest: session_serialization::GlobalLayoutManifest,
+    completion: Option<&mut NotificationEnd>,
+) -> std::result::Result<(String, BTreeMap<String, String>), &'static str> {
+    let result = session_serialization::serialize_session_layout(manifest);
+    if let Err(error) = &result
+        && let Some(completion) = completion
+    {
+        completion.set_exit_status(1);
+        completion.set_error_message(format!("Failed to serialize layout: {}", error));
+    }
+    result
+}
+
 pub type VteBytes = Vec<u8>;
 pub type TabIndex = u32;
 /// Zero is reserved for legacy/test Screen instructions without a PTY owner.
@@ -1155,9 +1171,7 @@ fn pty_thread_main_loop(pty: &mut Pty) -> Result<()> {
                 let err_context = || "Failed to dump layout".to_string();
                 pty.populate_session_layout_metadata(&mut session_layout_metadata);
                 if session_layout_metadata.is_dirty() {
-                    match session_serialization::serialize_session_layout(
-                        session_layout_metadata.into(),
-                    ) {
+                    match serialize_session_layout_for_save(session_layout_metadata.into(), None) {
                         Ok(kdl_layout_and_pane_contents) => {
                             pty.bus
                                 .senders
@@ -1184,8 +1198,9 @@ fn pty_thread_main_loop(pty: &mut Pty) -> Result<()> {
                 mut completion_tx,
             } => {
                 pty.populate_session_layout_metadata(&mut session_layout_metadata);
-                match session_serialization::serialize_session_layout(
+                match serialize_session_layout_for_save(
                     session_layout_metadata.into(),
+                    completion_tx.as_mut(),
                 ) {
                     Ok(kdl_and_files) => {
                         match write_session_state_to_disk(
@@ -1246,11 +1261,6 @@ fn pty_thread_main_loop(pty: &mut Pty) -> Result<()> {
                     },
                     Err(e) => {
                         log::error!("Failed to serialize layout: {}", e);
-                        if let Some(completion_tx) = completion_tx.as_mut() {
-                            completion_tx.set_exit_status(1);
-                            completion_tx
-                                .set_error_message(format!("Failed to serialize layout: {}", e));
-                        }
                     },
                 };
             },

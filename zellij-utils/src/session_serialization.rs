@@ -724,10 +724,9 @@ fn serialize_multiple_tabs(
     tabs: Vec<(String, TabLayoutManifest)>,
     pane_contents: &mut BTreeMap<String, String>,
 ) -> Result<Vec<KdlNode>, &'static str> {
-    // Best-effort: a tab whose pane geometry is transiently indecomposable
-    // (mid-resize, chrome swap) must not block persisting every other tab —
-    // an all-or-nothing failure here means the session never reaches disk.
-    let had_tabs = !tabs.is_empty();
+    // A durable resurrection checkpoint must represent every captured tab.
+    // Reject transiently indecomposable geometry so the previous complete
+    // checkpoint survives until a later complete capture can replace it.
     let mut serialized_tabs: Vec<KdlNode> = vec![];
     for (tab_name, tab_layout_manifest) in tabs {
         let tiled_panes = tab_layout_manifest.tiled_panes;
@@ -747,13 +746,11 @@ fn serialize_multiple_tabs(
         } else {
             log::warn!(
                 "Failed to serialize tab '{}' (pane geometry did not decompose into splits); \
-                 skipping it in this session snapshot",
+                 rejecting incomplete session snapshot",
                 tab_name
             );
+            return Err("Incomplete session snapshot: failed to serialize a captured tab");
         }
-    }
-    if had_tabs && serialized_tabs.is_empty() {
-        return Err("Failed to serialize session state");
     }
     Ok(serialized_tabs)
 }
@@ -2374,6 +2371,115 @@ mod tests {
         let kdl = serialize_session_layout(global_layout_manifest).unwrap();
         assert_snapshot!(kdl.0);
     }
+    fn completeness_tab(second_pane_x: Option<usize>) -> TabLayoutManifest {
+        let pane = PaneLayoutManifest {
+            geom: PaneGeom {
+                rows: Dimension::fixed(10),
+                cols: Dimension::fixed(10),
+                ..Default::default()
+            },
+            pane_contents: Some("captured contents".to_owned()),
+            ..Default::default()
+        };
+        let mut tiled_panes = vec![pane.clone()];
+        if let Some(x) = second_pane_x {
+            let mut second = pane;
+            second.geom.x = x;
+            tiled_panes.push(second);
+        }
+        TabLayoutManifest {
+            tiled_panes,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn incomplete_capture_rejects_valid_and_invalid_tabs_in_either_order() {
+        let valid = completeness_tab(None);
+        // Two 10-column panes with a 10-column hole cannot form a split layout.
+        let invalid = completeness_tab(Some(20));
+        assert!(get_tiled_panes_layout_from_panegeoms(&invalid.tiled_panes, None).is_none());
+        for tabs in [
+            vec![
+                ("valid".into(), valid.clone()),
+                ("invalid".into(), invalid.clone()),
+            ],
+            vec![("invalid".into(), invalid), ("valid".into(), valid)],
+        ] {
+            let result = serialize_session_layout(GlobalLayoutManifest {
+                tabs,
+                ..Default::default()
+            });
+            assert_eq!(
+                result.unwrap_err(),
+                "Incomplete session snapshot: failed to serialize a captured tab"
+            );
+        }
+    }
+
+    #[test]
+    fn all_invalid_capture_rejects() {
+        let invalid = completeness_tab(Some(20));
+        assert!(
+            serialize_session_layout(GlobalLayoutManifest {
+                tabs: vec![
+                    ("invalid-1".into(), invalid.clone()),
+                    ("invalid-2".into(), invalid)
+                ],
+                ..Default::default()
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn complete_and_empty_captures_preserve_existing_semantics() {
+        let (kdl, contents) = serialize_session_layout(GlobalLayoutManifest {
+            tabs: vec![
+                ("one".into(), completeness_tab(None)),
+                ("two".into(), completeness_tab(Some(10))),
+            ],
+            ..Default::default()
+        })
+        .unwrap();
+        let document: KdlDocument = kdl.parse().unwrap();
+        let tabs: Vec<_> = document
+            .get("layout")
+            .unwrap()
+            .children()
+            .unwrap()
+            .nodes()
+            .iter()
+            .filter(|node| node.name().value() == "tab")
+            .collect();
+        assert_eq!(tabs.len(), 2);
+        assert_eq!(
+            tabs[0].get("name").unwrap().value().as_string(),
+            Some("one")
+        );
+        assert_eq!(
+            tabs[1].get("name").unwrap().value().as_string(),
+            Some("two")
+        );
+        assert_eq!(contents.len(), 3);
+
+        // A genuinely empty capture is not an incomplete capture. It retains
+        // the existing layout document semantics without inventing a tab.
+        let (kdl, contents) = serialize_session_layout(GlobalLayoutManifest::default()).unwrap();
+        let document: KdlDocument = kdl.parse().unwrap();
+        assert!(
+            document
+                .get("layout")
+                .unwrap()
+                .children()
+                .unwrap()
+                .nodes()
+                .iter()
+                .all(|node| node.name().value() != "tab")
+        );
+        assert!(contents.is_empty());
+    }
+
     #[test]
     fn can_serialize_multiple_tabs() {
         let tab_1_layout_manifest = TabLayoutManifest {

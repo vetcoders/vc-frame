@@ -3,7 +3,7 @@
 #[cfg_attr(not(feature = "web_server_capability"), allow(unused_imports))]
 use zellij_utils::consts::{
     VERSION, ZELLIJ_SESSION_INFO_CACHE_DIR, ZELLIJ_SOCK_DIR, session_info_cache_file_name,
-    session_info_folder_for_session, session_layout_cache_file_name,
+    session_info_folder_for_session,
 };
 #[cfg_attr(not(feature = "web_server_capability"), allow(unused_imports))]
 use zellij_utils::data::{Event, HttpVerb, LayoutInfo, SessionInfo, WebServerStatus};
@@ -932,9 +932,28 @@ pub fn write_session_state_to_disk(
     current_session_info: SessionInfo,
     current_session_layout: (String, BTreeMap<String, String>),
 ) -> Result<bool, String> {
-    session_state_persistence().commit_if_current(&current_session_name, generation, || {
-        let session_info_folder = session_info_folder_for_session(&current_session_name);
-        std::fs::create_dir_all(&session_info_folder).map_err(|error| {
+    write_session_state_to_disk_in(
+        session_state_persistence(),
+        &session_info_folder_for_session(&current_session_name),
+        generation,
+        current_session_name,
+        current_session_info,
+        current_session_layout,
+    )
+}
+
+// Keep the real writer injectable so publication regressions use a private
+// temporary directory and coordinator, never a live session or Founder cache.
+fn write_session_state_to_disk_in(
+    persistence: &SessionStatePersistenceCoordinator,
+    session_info_folder: &Path,
+    generation: u64,
+    current_session_name: String,
+    current_session_info: SessionInfo,
+    current_session_layout: (String, BTreeMap<String, String>),
+) -> Result<bool, String> {
+    persistence.commit_if_current(&current_session_name, generation, || {
+        std::fs::create_dir_all(session_info_folder).map_err(|error| {
             format!(
                 "cannot create session cache directory {}: {}",
                 session_info_folder.display(),
@@ -942,7 +961,7 @@ pub fn write_session_state_to_disk(
             )
         })?;
 
-        let metadata_cache_file_name = session_info_cache_file_name(&current_session_name);
+        let metadata_cache_file_name = session_info_folder.join("session-metadata.kdl");
         let (current_session_layout, layout_files_to_write) = current_session_layout;
         let new_metadata = current_session_info.to_string();
         write_file_durably(&metadata_cache_file_name, new_metadata.as_bytes())?;
@@ -954,7 +973,7 @@ pub fn write_session_state_to_disk(
             }
             // The layout is the resurrection commit point. Publish it only after
             // every referenced external pane-content file is durable.
-            let layout_cache_file_name = session_layout_cache_file_name(&current_session_name);
+            let layout_cache_file_name = session_info_folder.join("session-layout.kdl");
             write_file_durably(&layout_cache_file_name, current_session_layout.as_bytes())?;
         }
         Ok(())
@@ -1195,6 +1214,174 @@ mod tests {
 
         assert!(error.contains("cannot atomically replace cache file"));
         assert_eq!(std::fs::read_to_string(marker).unwrap(), "still here");
+    }
+
+    fn checkpoint_capture(
+        contents: &str,
+        incomplete: bool,
+    ) -> zellij_utils::session_serialization::GlobalLayoutManifest {
+        use zellij_utils::pane_size::{Dimension, PaneGeom};
+        use zellij_utils::session_serialization::{
+            GlobalLayoutManifest, PaneLayoutManifest, TabLayoutManifest,
+        };
+        let pane = PaneLayoutManifest {
+            geom: PaneGeom {
+                rows: Dimension::fixed(10),
+                cols: Dimension::fixed(10),
+                ..Default::default()
+            },
+            pane_contents: Some(contents.to_owned()),
+            ..Default::default()
+        };
+        let first = TabLayoutManifest {
+            tiled_panes: vec![pane.clone()],
+            ..Default::default()
+        };
+        let mut second = first.clone();
+        if incomplete {
+            let mut displaced = pane;
+            displaced.geom.x = 20; // missing columns 10..20: undecomposable
+            second.tiled_panes.push(displaced);
+        }
+        GlobalLayoutManifest {
+            tabs: vec![("first".to_owned(), first), ("second".to_owned(), second)],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn incomplete_snapshot_preserves_previous_checkpoint() {
+        use crate::pty::serialize_session_layout_for_save;
+        use crate::route::NotificationEnd;
+
+        // Exercise the explicit-save and periodic-capture admission used by
+        // PTY, followed by the same writer used by both publication paths.
+        for explicit_save in [true, false] {
+            let root = tempdir().unwrap();
+            let persistence = SessionStatePersistenceCoordinator::default();
+            let session = "private-checkpoint-fixture";
+            let info = SessionInfo {
+                name: session.to_owned(),
+                ..Default::default()
+            };
+            let original_generation = persistence.reserve(session).unwrap();
+            let original =
+                serialize_session_layout_for_save(checkpoint_capture("original", false), None)
+                    .unwrap();
+            assert_eq!(original.1.len(), 2);
+            assert!(
+                write_session_state_to_disk_in(
+                    &persistence,
+                    root.path(),
+                    original_generation,
+                    session.to_owned(),
+                    info.clone(),
+                    original.clone()
+                )
+                .unwrap()
+            );
+            let layout_path = root.path().join("session-layout.kdl");
+            let metadata_path = root.path().join("session-metadata.kdl");
+            let old_layout = fs::read(&layout_path).unwrap();
+            let old_metadata = fs::read(&metadata_path).unwrap();
+            let old_contents: BTreeMap<_, _> = original
+                .1
+                .keys()
+                .map(|name| (name.clone(), fs::read(root.path().join(name)).unwrap()))
+                .collect();
+            for name in old_contents.keys() {
+                assert!(
+                    original.0.contains(name),
+                    "checkpoint must reference its content files"
+                );
+            }
+
+            let failed_generation = persistence.reserve(session).unwrap();
+            let (tx, mut rx) = tokio::sync::oneshot::channel();
+            let mut completion = explicit_save.then(|| NotificationEnd::new(tx));
+            let mut published = false;
+            let failed = serialize_session_layout_for_save(
+                checkpoint_capture("must not overwrite old contents", true),
+                completion.as_mut(),
+            )
+            .map_err(str::to_owned)
+            .and_then(|layout| {
+                published = true;
+                write_session_state_to_disk_in(
+                    &persistence,
+                    root.path(),
+                    failed_generation,
+                    session.to_owned(),
+                    info.clone(),
+                    layout,
+                )
+            });
+            assert!(failed.unwrap_err().contains("Incomplete session snapshot"));
+            assert!(!published);
+            drop(completion);
+            if explicit_save {
+                let receipt = rx.try_recv().unwrap();
+                assert_eq!(receipt.exit_status, Some(1));
+                assert!(
+                    receipt
+                        .error_message
+                        .unwrap()
+                        .contains("Incomplete session snapshot")
+                );
+                assert!(receipt.stdout_message.is_none());
+            }
+            assert_eq!(fs::read(&layout_path).unwrap(), old_layout);
+            assert_eq!(fs::read(&metadata_path).unwrap(), old_metadata);
+            for (name, bytes) in &old_contents {
+                assert_eq!(fs::read(root.path().join(name)).unwrap(), *bytes);
+            }
+
+            // A failed newest capture still fences a delayed older periodic
+            // publication; it does not grant stale snapshots admission.
+            assert!(
+                !write_session_state_to_disk_in(
+                    &persistence,
+                    root.path(),
+                    original_generation,
+                    session.to_owned(),
+                    info.clone(),
+                    ("stale layout".into(), BTreeMap::new())
+                )
+                .unwrap()
+            );
+            assert_eq!(fs::read(&layout_path).unwrap(), old_layout);
+
+            let retry_generation = persistence.reserve(session).unwrap();
+            let retry = serialize_session_layout_for_save(checkpoint_capture("retry", false), None)
+                .unwrap();
+            // Periodic publication carries only an admitted complete payload.
+            let job = BackgroundJob::ReportLayoutInfo(SessionLayoutSnapshot {
+                session_name: session.to_owned(),
+                generation: retry_generation,
+                layout: retry.clone(),
+            });
+            let BackgroundJob::ReportLayoutInfo(snapshot) = job else {
+                unreachable!()
+            };
+            assert!(
+                write_session_state_to_disk_in(
+                    &persistence,
+                    root.path(),
+                    snapshot.generation,
+                    snapshot.session_name,
+                    info,
+                    snapshot.layout
+                )
+                .unwrap()
+            );
+            assert_eq!(fs::read_to_string(&layout_path).unwrap(), retry.0);
+            for (name, contents) in retry.1 {
+                assert_eq!(
+                    fs::read_to_string(root.path().join(name)).unwrap(),
+                    contents
+                );
+            }
+        }
     }
 
     #[test]
