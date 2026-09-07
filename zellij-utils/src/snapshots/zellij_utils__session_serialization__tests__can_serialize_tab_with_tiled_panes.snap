@@ -4,7 +4,7 @@ assertion_line: 1799
 expression: kdl.0
 ---
 layout {
-    tab name="Tab with \"tiled panes\"" {
+    tab canvas_state="materialized" name="Tab with \"tiled panes\"" {
         pane size=10
         pane cwd="/tmp/\"my/cool cwd" size=10
         pane edit="/tmp/\"my/cool cwd/my-file" size=10

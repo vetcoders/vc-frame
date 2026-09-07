@@ -4,9 +4,9 @@ assertion_line: 2025
 expression: kdl.0
 ---
 layout {
-    tab name="First tab" {
+    tab canvas_state="materialized" name="First tab" {
     }
-    tab name="Second tab" {
+    tab canvas_state="materialized" name="Second tab" {
         pane split_direction="vertical" {
             pane size=10
             pane size=10
