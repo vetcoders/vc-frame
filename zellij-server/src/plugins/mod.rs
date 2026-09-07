@@ -44,7 +44,7 @@ use zellij_utils::{
         actions::Action,
         command::TerminalAction,
         keybinds::Keybinds,
-        layout::{FloatingPaneLayout, Layout, Run, RunPlugin, RunPluginOrAlias, TiledPaneLayout},
+        layout::{FloatingPaneLayout, Run, RunPlugin, RunPluginOrAlias, TiledPaneLayout},
         plugins::PluginAliases,
     },
     pane_size::Size,
@@ -146,7 +146,7 @@ pub enum PluginInstruction {
     NewTab(
         Option<PathBuf>,
         Option<TerminalAction>,
-        Option<TiledPaneLayout>,
+        TiledPaneLayout, // resolved by Screen; empty floating layouts are intentional
         Vec<FloatingPaneLayout>,
         usize,                        // tab_id
         LayoutTransactionId,          // allocated by Screen before any layout resource
@@ -384,7 +384,6 @@ pub(crate) struct PluginThreadParams {
     pub bus: Bus<PluginInstruction>,
     pub engine: Engine,
     pub data_dir: PathBuf,
-    pub layout: Box<Layout>,
     pub layout_dir: Option<PathBuf>,
     pub available_layouts: Vec<LayoutInfo>,
     pub available_layout_errors: Vec<LayoutWithError>,
@@ -404,7 +403,6 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
         bus,
         engine,
         data_dir,
-        mut layout,
         layout_dir,
         available_layouts,
         available_layout_errors,
@@ -421,7 +419,6 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
     info!("Wasm main thread starts");
     let plugin_dir = data_dir.join("plugins/");
     let plugin_global_data_dir = plugin_dir.join("data");
-    layout.populate_plugin_aliases_in_layout(&plugin_aliases);
 
     // use this channel to ensure that tasks spawned from this thread terminate before exiting
     // https://tokio.rs/tokio/topics/shutdown#waiting-for-things-to-finish-shutting-down
@@ -648,15 +645,11 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                     client_id
                 };
 
-                tab_layout = tab_layout.or_else(|| Some(layout.new_tab().0));
-
                 // Match initial_panes plugins to empty slots in the layout
-                if let Some(ref initial_panes_vec) = initial_panes
-                    && let Some(ref mut tiled_layout) = tab_layout
-                {
+                if let Some(ref initial_panes_vec) = initial_panes {
                     for initial_pane in initial_panes_vec.iter() {
                         if let CommandOrPlugin::Plugin(run_plugin_or_alias) = initial_pane
-                            && !tiled_layout.replace_next_empty_slot_with_run(Run::Plugin(
+                            && !tab_layout.replace_next_empty_slot_with_run(Run::Plugin(
                                 run_plugin_or_alias.clone(),
                             ))
                         {
@@ -666,27 +659,17 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                         // Skip CommandOrPlugin::Command entries (handled by pty thread)
                     }
                 }
-                if let Some(t) = tab_layout.as_mut() {
-                    t.populate_plugin_aliases_in_layout(&plugin_aliases);
-                    if let Some(cwd) = cwd.as_ref() {
-                        t.add_cwd_to_layout(cwd);
-                    }
+                tab_layout.populate_plugin_aliases_in_layout(&plugin_aliases);
+                if let Some(cwd) = cwd.as_ref() {
+                    tab_layout.add_cwd_to_layout(cwd);
                 }
                 floating_panes_layout.iter_mut().for_each(|f| {
                     if let Some(f) = f.run.as_mut() {
                         f.populate_run_plugin_if_needed(&plugin_aliases)
                     }
                 });
-                let extracted_run_instructions = tab_layout
-                    .clone()
-                    .unwrap_or_else(|| layout.new_tab().0)
-                    .extract_run_instructions();
+                let extracted_run_instructions = tab_layout.extract_run_instructions();
                 let size = Size::default();
-                let floating_panes_layout = if floating_panes_layout.is_empty() {
-                    layout.new_tab().1
-                } else {
-                    floating_panes_layout
-                };
                 let mut extracted_floating_plugins: Vec<Option<Run>> = floating_panes_layout
                     .iter()
                     .filter(|f| !f.already_running)

@@ -2182,7 +2182,6 @@ fn init_session(params: SessionInitParams) -> SessionMetaData {
     let pty_thread = thread::Builder::new()
         .name("pty".to_string())
         .spawn({
-            let layout = layout.clone();
             let pty = Pty::new(
                 Bus::new(
                     vec![pty_receiver],
@@ -2201,7 +2200,7 @@ fn init_session(params: SessionInitParams) -> SessionMetaData {
                 config_options.post_command_discovery_hook.clone(),
             );
 
-            move || pty_thread_main(pty, layout.clone()).fatal()
+            move || pty_thread_main(pty).fatal()
         })
         .unwrap();
 
@@ -2273,8 +2272,6 @@ fn init_session(params: SessionInitParams) -> SessionMetaData {
                 None,
             );
             let engine = get_engine();
-
-            let layout = layout.clone();
             let default_shell = default_shell.clone();
             let layout_dir = config_options
                 .layout_dir
@@ -2287,7 +2284,6 @@ fn init_session(params: SessionInitParams) -> SessionMetaData {
                     bus: plugin_bus,
                     engine,
                     data_dir,
-                    layout,
                     layout_dir,
                     available_layouts,
                     available_layout_errors,

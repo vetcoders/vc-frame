@@ -454,7 +454,7 @@ fn new_tab_spawn_failure_does_not_terminate_pty_thread() {
         .send(PtyInstruction::NewTab(
             None,
             None,
-            Box::new(Some(TiledPaneLayout::default())),
+            Box::new(TiledPaneLayout::default()),
             vec![],
             0,
             1,
@@ -477,7 +477,7 @@ fn new_tab_spawn_failure_does_not_terminate_pty_thread() {
         .unwrap();
     pty_sender.send(PtyInstruction::Exit).unwrap();
 
-    let result = pty_thread_main(pty, Box::<Layout>::default());
+    let result = pty_thread_main(pty);
 
     assert!(
         result.is_ok(),
@@ -524,7 +524,7 @@ fn pty_channel_disconnect_rolls_back_and_rejects_every_pending_layout() {
         .send(PtyInstruction::NewTab(
             None,
             None,
-            Box::new(Some(TiledPaneLayout::default())),
+            Box::new(TiledPaneLayout::default()),
             vec![],
             7,
             61,
@@ -539,7 +539,7 @@ fn pty_channel_disconnect_rolls_back_and_rejects_every_pending_layout() {
         .unwrap();
     drop(pty_sender);
 
-    let result = pty_thread_main(pty, Box::<Layout>::default());
+    let result = pty_thread_main(pty);
     assert!(
         result.is_ok(),
         "a disconnected producer must close PTY cleanly instead of panicking"
@@ -1514,8 +1514,7 @@ fn close_kill_failure_stays_as_debt_without_terminating_the_pty_loop() {
         .unwrap();
     pty_sender.send(PtyInstruction::Exit).unwrap();
 
-    pty_thread_main_loop(&mut pty, Box::<Layout>::default())
-        .expect("strict close failure must not terminate the PTY owner");
+    pty_thread_main_loop(&mut pty).expect("strict close failure must not terminate the PTY owner");
 
     assert!(pty.pending_terminal_cleanups.contains_key(&100));
     assert_eq!(pty.id_to_child_pid.get(&100), Some(&4242));
@@ -1686,8 +1685,7 @@ fn layout_terminal_cleanup_instruction_acks_without_terminating_the_pty_loop() {
         .unwrap();
     pty_sender.send(PtyInstruction::Exit).unwrap();
 
-    pty_thread_main_loop(&mut pty, Box::<Layout>::default())
-        .expect("a certified cleanup ACK must keep the PTY loop healthy");
+    pty_thread_main_loop(&mut pty).expect("a certified cleanup ACK must keep the PTY loop healthy");
 
     assert_eq!(ack_rx.recv().unwrap(), Ok(vec![100]));
     assert_eq!(probe.killed_child_pids(), vec![4242]);

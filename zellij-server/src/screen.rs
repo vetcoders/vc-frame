@@ -7282,6 +7282,25 @@ impl Screen {
             log::error!("Failed to find pane with id: {:?} to resize", pane_id);
         }
     }
+    /// Resolve an implicit tab once, before plugin/terminal reservations. An explicit tiled
+    /// layout owns its floating vector, including an intentionally empty one.
+    pub(crate) fn resolve_new_tab_layout(
+        &self,
+        tiled: Option<TiledPaneLayout>,
+        floating: Vec<FloatingPaneLayout>,
+    ) -> (TiledPaneLayout, Vec<FloatingPaneLayout>) {
+        if let Some(tiled) = tiled {
+            return (tiled, floating);
+        }
+        let (tiled, default_floating) = self.default_layout.new_tab();
+        let floating = if floating.is_empty() {
+            default_floating
+        } else {
+            floating
+        };
+        (tiled, floating)
+    }
+
     pub fn break_pane(
         &mut self,
         default_shell: Option<TerminalAction>,
@@ -7506,7 +7525,7 @@ impl Screen {
         let instruction = PluginInstruction::NewTab(
             None,
             default_shell,
-            Some(tiled_panes_layout),
+            tiled_panes_layout,
             floating_panes_layout,
             tab_index,
             transaction_id,
@@ -7937,7 +7956,7 @@ impl Screen {
         let instruction = PluginInstruction::NewTab(
             None,
             default_shell,
-            Some(tiled_panes_layout),
+            tiled_panes_layout,
             floating_panes_layout,
             tab_index,
             transaction_id,
@@ -11359,6 +11378,8 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                         }
                     },
                     Ok(None) => {
+                        let (layout, floating_panes_layout) =
+                            screen.resolve_new_tab_layout(layout, floating_panes_layout);
                         let tab_index = screen.get_new_tab_id();
                         pending_tab_ids.insert(tab_index);
                         let client_id_for_new_tab = if should_change_focus_to_new_tab {
@@ -12466,11 +12487,13 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                                     continue;
                                 }
                                 pending_tab_ids.insert(tab_index);
+                                let (layout, floating_panes_layout) =
+                                    screen.resolve_new_tab_layout(None, vec![]);
                                 let instruction = PluginInstruction::NewTab(
                                     None,
                                     default_shell,
-                                    None,
-                                    vec![],
+                                    layout,
+                                    floating_panes_layout,
                                     tab_index,
                                     transaction_id,
                                     None,  // initial_panes

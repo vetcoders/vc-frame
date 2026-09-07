@@ -10,7 +10,6 @@ fn plugin_thread_main(
     bus: Bus<PluginInstruction>,
     engine: Engine,
     data_dir: PathBuf,
-    layout: Box<Layout>,
     layout_dir: Option<PathBuf>,
     available_layouts: Vec<LayoutInfo>,
     available_layout_errors: Vec<LayoutWithError>,
@@ -28,7 +27,6 @@ fn plugin_thread_main(
         bus,
         engine,
         data_dir,
-        layout,
         layout_dir,
         available_layouts,
         available_layout_errors,
@@ -66,8 +64,8 @@ use zellij_utils::input::actions::Action;
 use zellij_utils::input::command::TerminalAction;
 use zellij_utils::input::keybinds::Keybinds;
 use zellij_utils::input::layout::{
-    Layout, PluginAlias, PluginUserConfiguration, Run, RunPlugin, RunPluginLocation,
-    RunPluginOrAlias, TiledPaneLayout,
+    PluginAlias, PluginUserConfiguration, Run, RunPlugin, RunPluginLocation, RunPluginOrAlias,
+    TiledPaneLayout,
 };
 use zellij_utils::input::permission::PermissionCache;
 use zellij_utils::input::plugins::PluginAliases;
@@ -466,7 +464,6 @@ fn create_plugin_thread(
                 plugin_bus,
                 engine,
                 data_dir,
-                Box::default(),
                 Some(layout_dir),
                 vec![],
                 vec![],
@@ -554,7 +551,6 @@ fn create_plugin_thread_with_server_receiver(
                 plugin_bus,
                 engine,
                 data_dir,
-                Box::default(),
                 None,
                 vec![],
                 vec![],
@@ -594,6 +590,20 @@ fn create_plugin_thread_with_pty_receiver(
     zellij_cwd: Option<PathBuf>,
     layout_dir: Option<PathBuf>,
     session_env_vars: Option<std::collections::BTreeMap<String, String>>,
+) -> PluginThreadWithPtyOutput {
+    create_plugin_thread_with_pty_receiver_and_aliases(
+        zellij_cwd,
+        layout_dir,
+        session_env_vars,
+        PluginAliases::default(),
+    )
+}
+
+fn create_plugin_thread_with_pty_receiver_and_aliases(
+    zellij_cwd: Option<PathBuf>,
+    layout_dir: Option<PathBuf>,
+    session_env_vars: Option<std::collections::BTreeMap<String, String>>,
+    plugin_aliases: PluginAliases,
 ) -> PluginThreadWithPtyOutput {
     let zellij_cwd = zellij_cwd.unwrap_or_else(|| PathBuf::from("."));
     let session_env_vars = session_env_vars.unwrap_or_else(|| std::env::vars().collect());
@@ -650,7 +660,6 @@ fn create_plugin_thread_with_pty_receiver(
                 plugin_bus,
                 engine,
                 data_dir,
-                Box::default(),
                 Some(layout_dir),
                 vec![],
                 vec![],
@@ -658,7 +667,7 @@ fn create_plugin_thread_with_pty_receiver(
                 zellij_cwd,
                 session_env_vars,
                 default_shell_action,
-                PluginAliases::default(),
+                plugin_aliases,
                 InputMode::Normal,
                 Keybinds::default(),
                 Default::default(),
@@ -746,7 +755,6 @@ fn create_plugin_thread_with_background_jobs_receiver(
                 plugin_bus,
                 engine,
                 data_dir,
-                Box::default(),
                 None,
                 vec![],
                 vec![],
@@ -795,6 +803,80 @@ lazy_static! {
 }
 
 #[test]
+fn new_tab_keeps_resolved_floating_plugin_alias() {
+    use zellij_utils::input::layout::FloatingPaneLayout;
+    let run_plugin = RunPlugin::from_url("file:/vc-frame-unloaded-floating-alias.wasm").unwrap();
+    let aliases = PluginAliases::from_data(BTreeMap::from([(
+        "floating-alias".into(),
+        run_plugin.clone(),
+    )]));
+    let (plugin_sender, pty_receiver, _screen_receiver, teardown) =
+        create_plugin_thread_with_pty_receiver_and_aliases(None, None, None, aliases.clone());
+    let mut alias = RunPluginOrAlias::Alias(PluginAlias {
+        name: "floating-alias".into(),
+        configuration: None,
+        initial_cwd: None,
+        run_plugin: None,
+    });
+    let floating = FloatingPaneLayout {
+        run: Some(Run::Plugin(alias.clone())),
+        ..Default::default()
+    };
+    plugin_sender
+        .send(PluginInstruction::NewTab(
+            None,
+            None,
+            TiledPaneLayout::default(),
+            vec![floating],
+            8,
+            703,
+            None,
+            false,
+            true,
+            (1, false),
+            None,
+            None,
+        ))
+        .unwrap();
+    alias.populate_run_plugin_if_needed(&aliases);
+    let (instruction, _) = pty_receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+    let ids = match instruction {
+        PtyInstruction::NewTab(_, _, tiled, floating, _, transaction_id, plugin_ids, ..) => {
+            assert_eq!(*tiled, TiledPaneLayout::default());
+            assert_eq!(transaction_id, 703);
+            assert_eq!(floating.len(), 1);
+            assert_eq!(floating[0].run, Some(Run::Plugin(alias.clone())));
+            let Some(Run::Plugin(forwarded_alias)) = &floating[0].run else {
+                panic!("resolved floating plugin must be preserved");
+            };
+            assert_eq!(forwarded_alias.get_run_plugin(), Some(run_plugin));
+            plugin_ids
+                .get(&alias)
+                .cloned()
+                .expect("floating alias must be reserved")
+        },
+        other => panic!("expected resolved NewTab, got {other:?}"),
+    };
+    assert_eq!(ids.len(), 1);
+    let (ack, ack_rx) = channels::bounded(1);
+    plugin_sender
+        .send(PluginInstruction::ResolveLayoutPlugins {
+            transaction_id: 703,
+            resolution: LayoutPluginResolution::Release {
+                reason: "test finished before activation".into(),
+            },
+            expected_plugin_ids: ids.clone(),
+            ack,
+        })
+        .unwrap();
+    assert_eq!(
+        ack_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        Ok(LayoutPluginReceipt::Released { plugin_ids: ids })
+    );
+    teardown();
+}
+
+#[test]
 fn new_tab_pty_handoff_failure_preserves_completion_and_rejects_once() {
     let (plugin_sender, pty_receiver, screen_receiver, teardown) =
         create_plugin_thread_with_pty_receiver(None, None, None);
@@ -807,7 +889,7 @@ fn new_tab_pty_handoff_failure_preserves_completion_and_rejects_once() {
         .send(PluginInstruction::NewTab(
             None,
             None,
-            Some(TiledPaneLayout::default()),
+            TiledPaneLayout::default(),
             vec![],
             7,
             701,
@@ -884,7 +966,7 @@ fn failed_local_plugin_release_is_reported_as_retryable_cleanup_debt() {
         .send(PluginInstruction::NewTab(
             None,
             None,
-            Some(tiled_layout),
+            tiled_layout,
             vec![],
             9,
             transaction_id,
@@ -958,7 +1040,7 @@ fn layout_plugins_remain_suspended_until_resolution_and_release_replays() {
         .send(PluginInstruction::NewTab(
             None,
             None,
-            Some(tiled_layout),
+            tiled_layout,
             vec![],
             8,
             702,

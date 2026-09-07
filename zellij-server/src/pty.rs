@@ -30,7 +30,7 @@ use zellij_utils::{
     input::{
         command::{OpenFilePayload, RunCommand, TerminalAction},
         layout::{
-            FloatingPaneLayout, Layout, Run, RunPluginOrAlias, SwapFloatingLayout, SwapTiledLayout,
+            FloatingPaneLayout, Run, RunPluginOrAlias, SwapFloatingLayout, SwapTiledLayout,
             TabLayoutInfo, TiledPaneLayout,
         },
     },
@@ -201,7 +201,7 @@ pub enum PtyInstruction {
     NewTab(
         Option<PathBuf>,
         Option<TerminalAction>,
-        Box<Option<TiledPaneLayout>>,
+        Box<TiledPaneLayout>, // resolved by Screen before plugin reservation
         Vec<FloatingPaneLayout>,
         usize,                               // tab_index
         LayoutTransactionId,                 // allocated by Screen before any layout resource
@@ -580,8 +580,8 @@ pub(crate) struct Pty {
     resolved_layout_commits: BTreeMap<LayoutTransactionId, LayoutCommitReceipt>,
 }
 
-pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
-    let result = pty_thread_main_loop(&mut pty, layout);
+pub(crate) fn pty_thread_main(mut pty: Pty) -> Result<()> {
+    let result = pty_thread_main_loop(&mut pty);
     // This is intentionally unconditional: any `?` in the instruction loop is
     // another thread-exit path. Draining here makes those failures obey the
     // same transaction rollback contract as explicit Exit and channel
@@ -596,7 +596,7 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
     result
 }
 
-fn pty_thread_main_loop(pty: &mut Pty, layout: Box<Layout>) -> Result<()> {
+fn pty_thread_main_loop(pty: &mut Pty) -> Result<()> {
     loop {
         let (event, mut err_ctx) = match pty.bus.recv() {
             Ok(event) => event,
@@ -899,14 +899,9 @@ fn pty_thread_main_loop(pty: &mut Pty, layout: Box<Layout>) -> Result<()> {
                     tab_index
                 );
 
-                let floating_panes_layout = if floating_panes_layout.is_empty() {
-                    layout.new_tab().1
-                } else {
-                    floating_panes_layout
-                };
                 if let Err(e) = pty.spawn_terminals_for_layout(SpawnTerminalsForLayoutParams {
                     cwd,
-                    layout: (*tab_layout).unwrap_or_else(|| layout.new_tab().0),
+                    layout: *tab_layout,
                     floating_panes_layout,
                     default_shell: terminal_action.clone(),
                     plugin_ids,

@@ -1014,6 +1014,83 @@ impl ServerOsApi for FakeInputOutput {
     }
 }
 
+#[test]
+fn screen_resolves_current_template_and_preserves_explicit_floating() {
+    let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
+    let template = Layout::from_str(
+        r#"
+            layout {
+                session_layer {
+                    pane name="canvas" size=1 {
+                        plugin location="compact-bar" {
+                            session_canvas true
+                            session_canvas_kind "compact-bar"
+                        }
+                    }
+                    pane { children; }
+                }
+                default_tab_template {
+                    pane name="content"
+                    floating_panes { pane name="default-floating"; }
+                }
+            }
+        "#,
+        "test".into(),
+        None,
+        None,
+    )
+    .unwrap();
+    screen.default_layout = Box::new(template);
+    let expected_default = screen.default_layout.new_tab();
+    assert_eq!(
+        screen.resolve_new_tab_layout(None, vec![]),
+        expected_default
+    );
+    assert_eq!(expected_default.1.len(), 1);
+    assert_eq!(
+        expected_default
+            .0
+            .extract_run_instructions()
+            .iter()
+            .filter(|run| matches!(run, Some(Run::Plugin(_))))
+            .count(),
+        1
+    );
+
+    let explicit = TiledPaneLayout {
+        name: Some("explicit".into()),
+        ..Default::default()
+    };
+    // Explicit startup/CLI tab layouts with no floating panes must stay empty.
+    assert_eq!(
+        screen.resolve_new_tab_layout(Some(explicit.clone()), vec![]),
+        (explicit.clone(), vec![])
+    );
+    let floating = vec![FloatingPaneLayout {
+        name: Some("explicit-floating".into()),
+        ..Default::default()
+    }];
+    assert_eq!(
+        screen.resolve_new_tab_layout(Some(explicit.clone()), floating.clone()),
+        (explicit.clone(), floating.clone())
+    );
+    // A floating-only request still needs the session's tiled template, not its floating default.
+    assert_eq!(
+        screen.resolve_new_tab_layout(None, floating.clone()),
+        (expected_default.0, floating)
+    );
+
+    // Future adoption can update this one owner; no startup snapshot may win afterward.
+    screen.default_layout = Box::new(Layout {
+        template: Some((explicit.clone(), vec![])),
+        ..Default::default()
+    });
+    assert_eq!(
+        screen.resolve_new_tab_layout(None, vec![]),
+        (explicit, vec![])
+    );
+}
+
 fn create_new_screen(
     size: Size,
     advanced_mouse_actions: bool,
@@ -1229,6 +1306,7 @@ fn missing_tab_name_preserves_focus_and_reports_absence() {
 }
 
 struct MockScreen {
+    default_layout: Box<Layout>,
     pub main_client_id: u16,
     pub pty_receiver: Option<Receiver<(PtyInstruction, ErrorContext)>>,
     pub pty_writer_receiver: Option<Receiver<(PtyWriteInstruction, ErrorContext)>>,
@@ -1281,6 +1359,7 @@ impl MockScreen {
         .should_silently_fail();
         let debug = false;
         let session_name = self.session_name.clone();
+        let default_layout = self.default_layout.clone();
         let (thread_id_tx, thread_id_rx) = std::sync::mpsc::sync_channel(1);
         let screen_thread = std::thread::Builder::new()
             .name("screen_thread".to_string())
@@ -1294,7 +1373,7 @@ impl MockScreen {
                     client_attributes,
                     config,
                     debug,
-                    default_layout: Box::default(),
+                    default_layout,
                     has_clients_flag: Arc::new(AtomicBool::new(false)),
                     session_name_override: Some(session_name),
                 })
@@ -1677,6 +1756,7 @@ impl MockScreen {
             })
             .unwrap();
         MockScreen {
+            default_layout: Box::default(),
             main_client_id,
             pty_receiver: Some(pty_receiver),
             pty_writer_receiver: Some(pty_writer_receiver),
@@ -7093,8 +7173,7 @@ fn dispatch_transactional_new_tab(
         let (instruction, _) = plugin_receiver
             .recv_timeout(std::time::Duration::from_secs(2))
             .expect("transactional NewTab must reach Plugin");
-        if let PluginInstruction::NewTab(_, _, Some(layout), _, tab_id, transaction_id, ..) =
-            instruction
+        if let PluginInstruction::NewTab(_, _, layout, _, tab_id, transaction_id, ..) = instruction
         {
             return (tab_id, layout, transaction_id);
         }
@@ -7159,7 +7238,7 @@ fn dispatch_test_fenced_new_tab(
         if let PluginInstruction::NewTab(
             _,
             _,
-            Some(layout),
+            layout,
             _,
             tab_id,
             transaction_id,
@@ -8214,20 +8293,8 @@ pub fn newer_receipt_generation_rejects_an_old_request_before_allocation() {
         let (instruction, _) = plugin_receiver
             .recv_timeout(std::time::Duration::from_secs(1))
             .expect("the current generation must dispatch");
-        if let PluginInstruction::NewTab(
-            _,
-            _,
-            Some(layout),
-            _,
-            _,
-            _,
-            _,
-            _,
-            _,
-            _,
-            _,
-            Some(generation),
-        ) = instruction
+        if let PluginInstruction::NewTab(_, _, layout, _, _, _, _, _, _, _, _, Some(generation)) =
+            instruction
         {
             assert_eq!(layout.tab_instance_id.as_deref(), Some(new_token));
             break generation;
@@ -8742,6 +8809,99 @@ pub fn override_pty_preparation_failure_releases_exact_plugin_union() {
 }
 
 #[test]
+pub fn new_tab_routes_resolve_screen_default_before_plugin_handoff() {
+    let default_layout = Layout::from_str(
+        r#"layout {
+            session_layer {
+                pane name="canvas" size=1
+                pane { children; }
+            }
+            default_tab_template {
+                pane name="default-content"
+                floating_panes { pane name="default-floating"; }
+            }
+        }"#,
+        "test".into(),
+        None,
+        None,
+    )
+    .unwrap();
+    let (default_tiled, default_floating) = default_layout.new_tab();
+    let explicit = TiledPaneLayout {
+        name: Some("explicit-content".into()),
+        ..Default::default()
+    };
+    let explicit_floating = vec![FloatingPaneLayout {
+        name: Some("explicit-floating".into()),
+        ..Default::default()
+    }];
+    for route in 0..4 {
+        let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 24 });
+        mock_screen.default_layout = Box::new(default_layout.clone());
+        let screen_thread = mock_screen.run(Some(explicit.clone()), vec![]);
+        let plugin_receiver = mock_screen.plugin_receiver.take().unwrap();
+        // Startup supplies an explicit layout. Its empty floating vector must not borrow defaults.
+        loop {
+            let (instruction, _) = plugin_receiver
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("startup must reach Plugin before the next request");
+            if let PluginInstruction::NewTab(_, _, tiled, floating, ..) = instruction {
+                assert_eq!(tiled, explicit);
+                assert!(floating.is_empty());
+                break;
+            }
+        }
+        let (tiled, floating, expected) = match route {
+            0 => (
+                None,
+                vec![],
+                (default_tiled.clone(), default_floating.clone()),
+            ),
+            1 => (Some(explicit.clone()), vec![], (explicit.clone(), vec![])),
+            2 => (
+                None,
+                explicit_floating.clone(),
+                (default_tiled.clone(), explicit_floating.clone()),
+            ),
+            _ => (
+                None,
+                vec![],
+                (default_tiled.clone(), default_floating.clone()),
+            ),
+        };
+        let instruction = if route == 3 {
+            ScreenInstruction::GoToTabName("new-with-default".into(), None, true, Some(1), None)
+        } else {
+            ScreenInstruction::NewTab(
+                None,
+                None,
+                tiled,
+                floating,
+                None,
+                (None, None),
+                None,
+                false,
+                true,
+                TabPlacement::Append,
+                (1, false),
+                None,
+            )
+        };
+        mock_screen.to_screen.send(instruction).unwrap();
+        loop {
+            let (instruction, _) = plugin_receiver
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("NewTab route must reach Plugin with resolved layout");
+            if let PluginInstruction::NewTab(_, _, tiled, floating, ..) = instruction {
+                assert_eq!((tiled, floating), expected, "route {route}");
+                break;
+            }
+        }
+        mock_screen.teardown(vec![screen_thread]);
+    }
+}
+
+#[test]
 pub fn go_to_existing_tab_name_with_create_true_keeps_legacy_success_completion() {
     let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 20 });
     let screen_thread = mock_screen.run(Some(TiledPaneLayout::default()), vec![]);
@@ -8953,7 +9113,7 @@ pub fn break_pane_apply_rejection_preserves_live_pane_after_cleanup_ack() {
         ) = instruction
         {
             break (
-                tiled_layout.expect("break layout must be explicit"),
+                tiled_layout,
                 floating_layout,
                 tab_id,
                 transaction_id,
@@ -9592,7 +9752,7 @@ pub fn old_request_that_finishes_after_reclassification_self_cleans_exact_resour
         if let PluginInstruction::NewTab(
             _,
             _,
-            Some(layout),
+            layout,
             _,
             tab_id,
             transaction_id,
@@ -9670,7 +9830,7 @@ pub fn old_request_that_finishes_after_reclassification_self_cleans_exact_resour
         let (instruction, _) = new_plugin_receiver
             .recv_timeout(std::time::Duration::from_secs(1))
             .expect("new drawer owner must dispatch after old self-cleanup");
-        if let PluginInstruction::NewTab(_, _, Some(layout), _, _, _, _, _, _, _, _, Some(_)) =
+        if let PluginInstruction::NewTab(_, _, layout, _, _, _, _, _, _, _, _, Some(_)) =
             instruction
         {
             assert_eq!(layout.tab_instance_id.as_deref(), Some(new_token));
@@ -9808,7 +9968,7 @@ pub fn receipt_change_after_install_is_caught_by_the_final_fence() {
         if let PluginInstruction::NewTab(
             _,
             _,
-            Some(layout),
+            layout,
             _,
             tab_id,
             transaction_id,
@@ -10264,7 +10424,7 @@ pub fn durable_empty_tab_retry_is_generation_fenced_and_does_not_duplicate_resou
         if let PluginInstruction::NewTab(
             _,
             _,
-            Some(layout),
+            layout,
             _,
             tab_id,
             transaction_id,
