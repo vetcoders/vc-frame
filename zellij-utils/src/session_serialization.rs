@@ -398,7 +398,17 @@ fn serialize_pane_title_and_attributes(
         && command.is_none()
         && edit.is_none()
     {
-        let file_name = format!("initial_contents_{}", pane_contents.keys().len() + 1);
+        // Content paths belong to immutable bytes, not to a pane's position in
+        // this capture. Old layouts must remain readable until publication.
+        #[cfg(not(target_family = "wasm"))]
+        let digest = crate::asset_integrity::sha256_hex(initial_pane_contents.as_bytes());
+        // asset_integrity embeds a native build receipt and is absent on Wasm.
+        #[cfg(target_family = "wasm")]
+        let digest = {
+            use sha2::{Digest, Sha256};
+            format!("{:x}", Sha256::digest(initial_pane_contents.as_bytes()))
+        };
+        let file_name = format!("pane_contents_sha256_{digest}");
         kdl_node
             .entries_mut()
             .push(KdlEntry::new_prop("contents_file", file_name.clone()));
@@ -2394,6 +2404,138 @@ mod tests {
     }
 
     #[test]
+    fn content_addressed_names_preserve_every_pane_and_content_policy() {
+        use crate::input::command::RunCommand;
+        let contents = [
+            Some("same"),
+            Some("same"),
+            Some("different"),
+            Some(""),
+            None,
+            Some("command output"),
+        ];
+        let tabs = contents
+            .iter()
+            .enumerate()
+            .map(|(index, contents)| {
+                let mut tab = completeness_tab(None);
+                tab.tab_instance_id = format!("id-{index}");
+                let pane = &mut tab.tiled_panes[0];
+                pane.title = Some(format!("pane-{index}"));
+                pane.pane_contents = contents.map(str::to_owned);
+                if index == 5 {
+                    pane.run = Some(Run::Command(RunCommand {
+                        command: PathBuf::from("sleep"),
+                        args: vec!["600".into()],
+                        ..Default::default()
+                    }));
+                }
+                (format!("tab-{index}"), tab)
+            })
+            .collect();
+        let manifest = GlobalLayoutManifest {
+            tabs,
+            ..Default::default()
+        };
+        let first = serialize_session_layout(manifest.clone()).unwrap();
+        assert_eq!(
+            serialize_session_layout(manifest).unwrap(),
+            first,
+            "stable across captures"
+        );
+        assert_eq!(
+            first.1.len(),
+            3,
+            "same, different, and empty bytes; all six panes remain"
+        );
+        // Fixed independent SHA-256 witness for an empty blob, including all 64 digits.
+        assert_eq!(first.1.get("pane_contents_sha256_e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855").map(String::as_str), Some(""));
+        let directory = tempfile::tempdir().unwrap();
+        for (name, bytes) in &first.1 {
+            let digest = name.strip_prefix("pane_contents_sha256_").unwrap();
+            assert_eq!(digest.len(), 64);
+            assert!(
+                digest
+                    .bytes()
+                    .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+            );
+            std::fs::write(directory.path().join(name), bytes).unwrap();
+        }
+        let document: KdlDocument = first.0.parse().unwrap();
+        let tabs: Vec<_> = document
+            .get("layout")
+            .unwrap()
+            .children()
+            .unwrap()
+            .nodes()
+            .iter()
+            .filter(|node| node.name().value() == "tab")
+            .collect();
+        assert_eq!(tabs.len(), 6);
+        let reference = |index: usize| {
+            tabs[index]
+                .children()
+                .unwrap()
+                .get("pane")
+                .unwrap()
+                .get("contents_file")
+                .and_then(|entry| entry.value().as_string())
+        };
+        assert_eq!(reference(0), reference(1));
+        assert_ne!(reference(0), reference(2));
+        assert!(
+            reference(3).is_some(),
+            "Some(empty) still has an empty blob"
+        );
+        assert!(
+            reference(4).is_none(),
+            "absent scrollback still has no blob"
+        );
+        assert!(
+            reference(5).is_none(),
+            "command output is intentionally omitted"
+        );
+        let parsed = Layout::from_kdl(
+            &first.0,
+            Some(
+                directory
+                    .path()
+                    .join("session-layout.kdl")
+                    .display()
+                    .to_string(),
+            ),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(parsed.tabs.len(), 6);
+        for (index, (name, tiled, floating)) in parsed.tabs.iter().enumerate() {
+            assert_eq!(name.as_ref().unwrap(), &format!("tab-{index}"));
+            assert_eq!(
+                tiled.tab_instance_id.as_ref().unwrap(),
+                &format!("id-{index}")
+            );
+            assert!(floating.is_empty());
+            assert_eq!(tiled.children.len(), 1);
+            let pane = &tiled.children[0];
+            assert!(pane.children.is_empty());
+            assert_eq!(pane.name.as_ref().unwrap(), &format!("pane-{index}"));
+            assert_eq!(
+                pane.pane_initial_contents.as_deref(),
+                if index == 5 { None } else { contents[index] }
+            );
+            if index == 5 {
+                let Some(Run::Command(run)) = &pane.run else {
+                    panic!("lost command");
+                };
+                assert_eq!(run.command, PathBuf::from("sleep"));
+                assert_eq!(run.args, vec!["600"]);
+                assert!(run.hold_on_start);
+            }
+        }
+    }
+
+    #[test]
     fn incomplete_capture_rejects_valid_and_invalid_tabs_in_either_order() {
         let valid = completeness_tab(None);
         // Two 10-column panes with a 10-column hole cannot form a split layout.
@@ -2461,7 +2603,36 @@ mod tests {
             tabs[1].get("name").unwrap().value().as_string(),
             Some("two")
         );
-        assert_eq!(contents.len(), 3);
+        assert_eq!(contents.len(), 1, "three panes share identical bytes");
+        assert_eq!(kdl.matches("contents_file=").count(), 3);
+        let directory = tempfile::tempdir().unwrap();
+        for (name, bytes) in &contents {
+            std::fs::write(directory.path().join(name), bytes).unwrap();
+        }
+        let parsed = Layout::from_kdl(
+            &kdl,
+            Some(
+                directory
+                    .path()
+                    .join("session-layout.kdl")
+                    .display()
+                    .to_string(),
+            ),
+            None,
+            None,
+        )
+        .unwrap();
+        for (index, (_, tiled, floating)) in parsed.tabs.iter().enumerate() {
+            assert!(floating.is_empty());
+            let panes = canvas_leaves(tiled);
+            assert_eq!(panes.len(), index + 1);
+            for pane in panes {
+                assert_eq!(
+                    pane.pane_initial_contents.as_deref(),
+                    Some("captured contents")
+                );
+            }
+        }
 
         // A genuinely empty capture is not an incomplete capture. It retains
         // the existing layout document semantics without inventing a tab.
@@ -2804,6 +2975,11 @@ mod tests {
         layout.session_layer = builtin.session_layer;
         layout.tabs[0].1.children[0].pane_initial_contents =
             Some("exact shell\n\u{1b}[31mred\u{1b}[0m\n".into());
+        // Shared immutable bytes must restore both distinct panes on every
+        // roundtrip; command-pane output must remain intentionally omitted.
+        layout.tabs[0].2[0].pane_initial_contents =
+            layout.tabs[0].1.children[0].pane_initial_contents.clone();
+        layout.tabs[0].1.children[1].pane_initial_contents = Some("discard command output".into());
         let original_layer = layout.session_layer.clone();
         let expected_roles = BTreeMap::from([
             ("compact-bar".into(), 1),
@@ -2858,6 +3034,7 @@ mod tests {
             assert!(command.pane_initial_contents.is_none());
             assert_eq!(tabs[0].2.len(), 1);
             let float = &tabs[0].2[0];
+            assert_eq!(float.pane_initial_contents, shell.pane_initial_contents);
             assert_eq!(float.x, Some(PercentOrFixed::Fixed(7)));
             assert_eq!(float.y, Some(PercentOrFixed::Fixed(8)));
             assert_eq!(float.width, Some(PercentOrFixed::Fixed(30)));

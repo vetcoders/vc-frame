@@ -877,6 +877,10 @@ fn sync_parent_directory(path: &Path) -> Result<(), String> {
 }
 
 fn write_file_durably(path: &Path, contents: &[u8]) -> Result<(), String> {
+    write_cache_file_durably(path, contents, false)
+}
+
+fn write_cache_file_durably(path: &Path, contents: &[u8], immutable: bool) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("cache path has no parent: {}", path.display()))?;
@@ -888,7 +892,28 @@ fn write_file_durably(path: &Path, contents: &[u8]) -> Result<(), String> {
         )
     })?;
 
-    if !file_content_changed(path, contents) {
+    let unchanged = if immutable {
+        match std::fs::read(path) {
+            Ok(existing) if existing == contents => true,
+            Ok(_) => {
+                return Err(format!(
+                    "immutable pane content mismatch: {}",
+                    path.display()
+                ));
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => {
+                return Err(format!(
+                    "cannot read immutable pane content {}: {}",
+                    path.display(),
+                    error
+                ));
+            },
+        }
+    } else {
+        !file_content_changed(path, contents)
+    };
+    if unchanged {
         std::fs::File::open(path)
             .and_then(|file| file.sync_all())
             .map_err(|error| format!("cannot sync cache file {}: {}", path.display(), error))?;
@@ -916,7 +941,14 @@ fn write_file_durably(path: &Path, contents: &[u8]) -> Result<(), String> {
             error
         )
     })?;
-    temporary.persist(path).map_err(|error| {
+    // Never replace an immutable name, including a file created after our
+    // initial read. A concurrent creator causes a retry, not an overwrite.
+    let publication = if immutable {
+        temporary.persist_noclobber(path)
+    } else {
+        temporary.persist(path)
+    };
+    publication.map_err(|error| {
         format!(
             "cannot atomically replace cache file {}: {}",
             path.display(),
@@ -952,6 +984,35 @@ fn write_session_state_to_disk_in(
     current_session_info: SessionInfo,
     current_session_layout: (String, BTreeMap<String, String>),
 ) -> Result<bool, String> {
+    write_session_state_to_disk_with_writer(
+        persistence,
+        session_info_folder,
+        generation,
+        current_session_name,
+        current_session_info,
+        current_session_layout,
+        |path, contents, immutable| {
+            if immutable {
+                write_cache_file_durably(path, contents, true)
+            } else {
+                write_file_durably(path, contents)
+            }
+        },
+    )
+}
+
+fn write_session_state_to_disk_with_writer<F>(
+    persistence: &SessionStatePersistenceCoordinator,
+    session_info_folder: &Path,
+    generation: u64,
+    current_session_name: String,
+    current_session_info: SessionInfo,
+    current_session_layout: (String, BTreeMap<String, String>),
+    mut write: F,
+) -> Result<bool, String>
+where
+    F: FnMut(&Path, &[u8], bool) -> Result<(), String>,
+{
     persistence.commit_if_current(&current_session_name, generation, || {
         std::fs::create_dir_all(session_info_folder).map_err(|error| {
             format!(
@@ -964,17 +1025,31 @@ fn write_session_state_to_disk_in(
         let metadata_cache_file_name = session_info_folder.join("session-metadata.kdl");
         let (current_session_layout, layout_files_to_write) = current_session_layout;
         let new_metadata = current_session_info.to_string();
-        write_file_durably(&metadata_cache_file_name, new_metadata.as_bytes())?;
+        write(&metadata_cache_file_name, new_metadata.as_bytes(), false)?;
 
         if !current_session_layout.is_empty() {
             for (external_file_name, external_file_contents) in layout_files_to_write {
+                let expected_name = format!(
+                    "pane_contents_sha256_{}",
+                    zellij_utils::asset_integrity::sha256_hex(external_file_contents.as_bytes())
+                );
+                if external_file_name != expected_name {
+                    return Err(format!(
+                        "invalid immutable pane content name: {}",
+                        external_file_name
+                    ));
+                }
                 let external_file_path = session_info_folder.join(&external_file_name);
-                write_file_durably(&external_file_path, external_file_contents.as_bytes())?;
+                write(&external_file_path, external_file_contents.as_bytes(), true)?;
             }
             // The layout is the resurrection commit point. Publish it only after
             // every referenced external pane-content file is durable.
             let layout_cache_file_name = session_info_folder.join("session-layout.kdl");
-            write_file_durably(&layout_cache_file_name, current_session_layout.as_bytes())?;
+            write(
+                &layout_cache_file_name,
+                current_session_layout.as_bytes(),
+                false,
+            )?;
         }
         Ok(())
     })
@@ -1234,10 +1309,12 @@ mod tests {
             ..Default::default()
         };
         let first = TabLayoutManifest {
+            tab_instance_id: "first-id".into(),
             tiled_panes: vec![pane.clone()],
             ..Default::default()
         };
         let mut second = first.clone();
+        second.tab_instance_id = "second-id".into();
         if incomplete {
             let mut displaced = pane;
             displaced.geom.x = 20; // missing columns 10..20: undecomposable
@@ -1247,6 +1324,263 @@ mod tests {
             tabs: vec![("first".to_owned(), first), ("second".to_owned(), second)],
             ..Default::default()
         }
+    }
+
+    fn assert_checkpoint_panes(root: &Path, layout: &str, expected_contents: &str) {
+        use zellij_utils::input::layout::Layout;
+        let parsed = Layout::from_kdl(
+            layout,
+            Some(root.join("session-layout.kdl").display().to_string()),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(parsed.tabs.len(), 2);
+        for (index, (name, tiled, floating)) in parsed.tabs.iter().enumerate() {
+            assert_eq!(
+                name.as_deref(),
+                Some(if index == 0 { "first" } else { "second" })
+            );
+            assert_eq!(
+                tiled.tab_instance_id.as_deref(),
+                Some(if index == 0 { "first-id" } else { "second-id" })
+            );
+            assert!(floating.is_empty());
+            assert_eq!(tiled.children.len(), 1);
+            let pane = &tiled.children[0];
+            assert!(pane.children.is_empty());
+            assert_eq!(
+                pane.pane_initial_contents.as_deref(),
+                Some(expected_contents)
+            );
+        }
+    }
+
+    #[test]
+    fn interrupted_snapshot_preserves_previous_content() {
+        use crate::pty::serialize_session_layout_for_save;
+        let root = tempdir().unwrap();
+        let persistence = SessionStatePersistenceCoordinator::default();
+        let session = "interrupted-publication";
+        let info = SessionInfo::new(session.to_owned());
+        let a =
+            serialize_session_layout_for_save(checkpoint_capture("A bytes", false), None).unwrap();
+        let a_generation = persistence.reserve(session).unwrap();
+        assert!(
+            write_session_state_to_disk_in(
+                &persistence,
+                root.path(),
+                a_generation,
+                session.to_owned(),
+                info.clone(),
+                a.clone()
+            )
+            .unwrap()
+        );
+        assert_checkpoint_panes(root.path(), &a.0, "A bytes");
+        assert_eq!(a.1.len(), 1, "two panes, one immutable blob");
+        let old_layout = fs::read(root.path().join("session-layout.kdl")).unwrap();
+        let old_contents: BTreeMap<_, _> =
+            a.1.keys()
+                .map(|name| (name.clone(), fs::read(root.path().join(name)).unwrap()))
+                .collect();
+
+        let b =
+            serialize_session_layout_for_save(checkpoint_capture("B bytes", false), None).unwrap();
+        assert_eq!(b.1.len(), 1);
+        assert!(b.1.keys().all(|name| !a.1.contains_key(name)));
+        let b_generation = persistence.reserve(session).unwrap();
+        let mut reached_publication = false;
+        let error = write_session_state_to_disk_with_writer(
+            &persistence,
+            root.path(),
+            b_generation,
+            session.to_owned(),
+            info.clone(),
+            b.clone(),
+            |path, bytes, immutable| {
+                if path.file_name().unwrap() == "session-layout.kdl" {
+                    reached_publication = true;
+                    for (name, contents) in &b.1 {
+                        assert_eq!(
+                            fs::read(root.path().join(name)).unwrap(),
+                            contents.as_bytes()
+                        );
+                    }
+                    return Err("injected before layout publication".into());
+                }
+                write_cache_file_durably(path, bytes, immutable)
+            },
+        )
+        .unwrap_err();
+        assert!(
+            reached_publication,
+            "all B blobs must be durable before injection"
+        );
+        assert_eq!(error, "injected before layout publication");
+        assert_eq!(
+            fs::read(root.path().join("session-layout.kdl")).unwrap(),
+            old_layout
+        );
+        for (name, bytes) in &old_contents {
+            assert_eq!(fs::read(root.path().join(name)).unwrap(), *bytes);
+        }
+        assert_checkpoint_panes(root.path(), &a.0, "A bytes");
+        let mut stale_write = false;
+        assert!(
+            !write_session_state_to_disk_with_writer(
+                &persistence,
+                root.path(),
+                a_generation,
+                session.to_owned(),
+                info.clone(),
+                a.clone(),
+                |_, _, _| {
+                    stale_write = true;
+                    Ok(())
+                }
+            )
+            .unwrap()
+        );
+        assert!(
+            !stale_write,
+            "stale generation must never reach any file writer"
+        );
+
+        // Retry the same generation with its already-durable blobs, then repeat
+        // unchanged bytes in a new generation. Neither operation rewrites A.
+        assert!(
+            write_session_state_to_disk_in(
+                &persistence,
+                root.path(),
+                b_generation,
+                session.to_owned(),
+                info.clone(),
+                b.clone()
+            )
+            .unwrap()
+        );
+        let repeated_generation = persistence.reserve(session).unwrap();
+        assert!(
+            write_session_state_to_disk_in(
+                &persistence,
+                root.path(),
+                repeated_generation,
+                session.to_owned(),
+                info,
+                b.clone()
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("session-layout.kdl")).unwrap(),
+            b.0
+        );
+        assert_checkpoint_panes(root.path(), &b.0, "B bytes");
+        for (name, bytes) in &old_contents {
+            assert_eq!(fs::read(root.path().join(name)).unwrap(), *bytes);
+        }
+        assert_eq!(
+            fs::read_dir(root.path())
+                .unwrap()
+                .filter(|entry| entry
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("pane_contents_sha256_"))
+                .count(),
+            2,
+            "only the A and B blobs; no orphan deletion"
+        );
+    }
+
+    #[test]
+    fn corrupt_immutable_content_rejects_publication_without_repair() {
+        use crate::pty::serialize_session_layout_for_save;
+        let root = tempdir().unwrap();
+        let persistence = SessionStatePersistenceCoordinator::default();
+        let session = "corrupt-immutable";
+        let info = SessionInfo::new(session.into());
+        let a = serialize_session_layout_for_save(checkpoint_capture("A", false), None).unwrap();
+        assert!(
+            write_session_state_to_disk_in(
+                &persistence,
+                root.path(),
+                persistence.reserve(session).unwrap(),
+                session.into(),
+                info.clone(),
+                a.clone()
+            )
+            .unwrap()
+        );
+        let b = serialize_session_layout_for_save(checkpoint_capture("B", false), None).unwrap();
+        let name = b.1.keys().next().unwrap().clone();
+        fs::write(root.path().join(&name), "corrupt bytes").unwrap();
+        let error = write_session_state_to_disk_in(
+            &persistence,
+            root.path(),
+            persistence.reserve(session).unwrap(),
+            session.into(),
+            info,
+            b,
+        )
+        .unwrap_err();
+        assert!(error.contains("immutable pane content mismatch"));
+        assert_eq!(
+            fs::read_to_string(root.path().join(&name)).unwrap(),
+            "corrupt bytes"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("session-layout.kdl")).unwrap(),
+            a.0
+        );
+        assert_checkpoint_panes(root.path(), &a.0, "A");
+    }
+
+    #[test]
+    fn legacy_checkpoint_contents_survive_new_publication() {
+        use crate::pty::serialize_session_layout_for_save;
+        let root = tempdir().unwrap();
+        let legacy = "layout { tab name=\"old\" { pane contents_file=\"initial_contents_1\"; }; }";
+        fs::write(root.path().join("session-layout.kdl"), legacy).unwrap();
+        fs::write(root.path().join("initial_contents_1"), "legacy bytes").unwrap();
+        let read_legacy = || {
+            let parsed = zellij_utils::input::layout::Layout::from_kdl(
+                legacy,
+                Some(root.path().join("session-layout.kdl").display().to_string()),
+                None,
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                parsed.tabs[0].1.children[0]
+                    .pane_initial_contents
+                    .as_deref(),
+                Some("legacy bytes")
+            );
+        };
+        read_legacy();
+        let persistence = SessionStatePersistenceCoordinator::default();
+        let next = serialize_session_layout_for_save(checkpoint_capture("new bytes", false), None)
+            .unwrap();
+        assert!(
+            write_session_state_to_disk_in(
+                &persistence,
+                root.path(),
+                persistence.reserve("legacy").unwrap(),
+                "legacy".into(),
+                SessionInfo::new("legacy".into()),
+                next.clone()
+            )
+            .unwrap()
+        );
+        read_legacy();
+        assert_checkpoint_panes(root.path(), &next.0, "new bytes");
+        assert_eq!(
+            fs::read_to_string(root.path().join("initial_contents_1")).unwrap(),
+            "legacy bytes"
+        );
     }
 
     #[test]
@@ -1268,7 +1602,7 @@ mod tests {
             let original =
                 serialize_session_layout_for_save(checkpoint_capture("original", false), None)
                     .unwrap();
-            assert_eq!(original.1.len(), 2);
+            assert_eq!(original.1.len(), 1, "identical panes share immutable bytes");
             assert!(
                 write_session_state_to_disk_in(
                     &persistence,

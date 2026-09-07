@@ -2846,7 +2846,6 @@ fn snapshot_completeness_metadata(incomplete: bool) -> SessionLayoutMetadata {
         second,
         vec![],
     );
-    assert!(metadata.is_dirty());
     metadata
 }
 
@@ -2953,6 +2952,194 @@ fn periodic_capture_instruction_rejects_incomplete_then_reports_complete_retry()
     );
     assert!(snapshot.layout.0.contains("first-id"));
     assert!(snapshot.layout.0.contains("second-id"));
-    assert_eq!(snapshot.layout.1.len(), 2);
+    assert_eq!(snapshot.layout.1.len(), 1, "identical contents deduplicate");
+    assert_eq!(snapshot.layout.1.values().next().unwrap(), "capture");
+    assert_eq!(snapshot.layout.0.matches("contents_file=").count(), 2);
     assert!(background_rx.try_recv().is_err());
+}
+
+#[test]
+fn periodic_default_shaped_capture_is_persisted() {
+    use crate::session_layout_metadata::PaneLayoutMetadata;
+    use zellij_utils::input::layout::{Layout, SplitDirection};
+    use zellij_utils::pane_size::{Dimension, PaneGeom};
+
+    let root = tempfile::tempdir().unwrap();
+    let session = root.path().to_str().unwrap().to_owned();
+    assert_eq!(
+        zellij_utils::consts::session_info_folder_for_session(&session),
+        root.path()
+    );
+    let initial = r#"layout {
+        tab name="initial" vc_tab_instance_id="periodic-tab" {
+            pane name="left"; pane name="right";
+            floating_panes { pane name="float" x=1 y=2 width=20 height=8; }
+        }
+    }"#;
+    let mut base = Layout::from_kdl(initial, None, None, None).unwrap();
+    // pane_count includes the parser-generated future template; this fixture
+    // models a default containing exactly the three currently captured panes.
+    base.template = None;
+    assert_eq!(base.pane_count(), 3);
+    std::fs::write(root.path().join("session-layout.kdl"), initial).unwrap();
+    let capture = |invalid| {
+        let mut metadata = SessionLayoutMetadata::new(Box::new(base.clone()));
+        metadata.default_shell = Some(PathBuf::from("/bin/sh"));
+        let left = PaneLayoutMetadata {
+            id: PaneId::Terminal(11),
+            geom: PaneGeom {
+                rows: Dimension::fixed(10),
+                cols: Dimension::fixed(10),
+                ..Default::default()
+            },
+            run: Some(Run::Command(RunCommand {
+                command: PathBuf::from("/bin/sh"),
+                ..Default::default()
+            })),
+            cwd: None,
+            is_borderless: false,
+            title: Some("renamed-left".into()),
+            is_focused: false,
+            pane_contents: Some("left bytes".into()),
+            focused_clients: vec![],
+            default_fg: None,
+            default_bg: None,
+        };
+        let mut right = left.clone();
+        right.id = PaneId::Terminal(22);
+        right.geom.x = if invalid { 20 } else { 10 };
+        right.geom.cols = Dimension::fixed(20);
+        right.title = Some("renamed-right".into());
+        right.is_focused = true;
+        right.pane_contents = Some("right bytes".into());
+        let mut floating = left.clone();
+        floating.id = PaneId::Terminal(33);
+        floating.geom.x = 7;
+        floating.geom.y = 8;
+        floating.geom.cols = Dimension::fixed(30);
+        floating.geom.rows = Dimension::fixed(12);
+        floating.title = Some("renamed-float".into());
+        floating.pane_contents = Some("float bytes".into());
+        metadata.add_tab(
+            "renamed-tab".into(),
+            "periodic-tab".into(),
+            true,
+            false,
+            vec![left, right],
+            vec![floating],
+        );
+        assert_eq!(
+            metadata
+                .all_terminal_ids()
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([11, 22, 33])
+        );
+        // These are the old predicate's inputs: exactly the default pane count,
+        // with every captured command equal to the configured default shell.
+        assert_eq!(metadata.all_terminal_ids().len(), base.pane_count());
+        let manifest: zellij_utils::session_serialization::GlobalLayoutManifest =
+            metadata.clone().into();
+        for pane in manifest
+            .tabs
+            .iter()
+            .flat_map(|(_, tab)| tab.tiled_panes.iter().chain(&tab.floating_panes))
+        {
+            let Some(Run::Command(command)) = &pane.run else {
+                panic!("fixture lost shell");
+            };
+            assert_eq!(command.command, PathBuf::from("/bin/sh"));
+            assert!(command.args.is_empty());
+        }
+        metadata
+    };
+    let (pty_tx, pty_rx) = channels::unbounded();
+    let (background_tx, background_rx) = channels::unbounded();
+    let bus = Bus::new(
+        vec![pty_rx],
+        ThreadSenders {
+            to_background_jobs: Some(SenderWithContext::new(background_tx)),
+            should_silently_fail: true,
+            ..Default::default()
+        },
+        Some(Box::new(MockOsApi::new())),
+    );
+    let sender = SenderWithContext::new(pty_tx);
+    let invalid_generation =
+        crate::background_jobs::reserve_session_state_generation(&session).unwrap();
+    let valid_generation =
+        crate::background_jobs::reserve_session_state_generation(&session).unwrap();
+    for (generation, invalid) in [(invalid_generation, true), (valid_generation, false)] {
+        sender
+            .send(PtyInstruction::LogLayoutToHd {
+                session_name: session.clone(),
+                generation,
+                session_layout_metadata: capture(invalid),
+            })
+            .unwrap();
+    }
+    sender.send(PtyInstruction::Exit).unwrap();
+    pty_thread_main(Pty::new(bus, false, None, None)).unwrap();
+    let (job, _) = background_rx.try_recv().unwrap();
+    let BackgroundJob::ReportLayoutInfo(snapshot) = job else {
+        panic!("expected valid capture");
+    };
+    assert_eq!(snapshot.generation, valid_generation);
+    assert!(
+        background_rx.try_recv().is_err(),
+        "invalid capture must not be reported"
+    );
+    assert!(
+        crate::background_jobs::write_session_state_to_disk(
+            snapshot.generation,
+            snapshot.session_name,
+            zellij_utils::data::SessionInfo::new(session),
+            snapshot.layout.clone(),
+        )
+        .unwrap()
+    );
+    let serialized = std::fs::read_to_string(root.path().join("session-layout.kdl")).unwrap();
+    assert_eq!(serialized, snapshot.layout.0);
+    assert_ne!(serialized, initial);
+    let parsed = Layout::from_kdl(
+        &serialized,
+        Some(root.path().join("session-layout.kdl").display().to_string()),
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(parsed.tabs.len(), 1);
+    assert_eq!(parsed.focused_tab_index, Some(0));
+    let (name, tiled, floating) = &parsed.tabs[0];
+    assert_eq!(name.as_deref(), Some("renamed-tab"));
+    assert_eq!(tiled.tab_instance_id.as_deref(), Some("periodic-tab"));
+    assert_eq!(tiled.children.len(), 1);
+    let split = &tiled.children[0];
+    assert_eq!(split.children_split_direction, SplitDirection::Vertical);
+    assert_eq!(split.children.len(), 2);
+    for (pane, name, bytes, width, focused) in [
+        (&split.children[0], "renamed-left", "left bytes", 10, false),
+        (&split.children[1], "renamed-right", "right bytes", 20, true),
+    ] {
+        assert_eq!(pane.name.as_deref(), Some(name));
+        assert_eq!(pane.pane_initial_contents.as_deref(), Some(bytes));
+        assert_eq!(
+            pane.split_size,
+            Some(zellij_utils::input::layout::SplitSize::Fixed(width))
+        );
+        assert_eq!(pane.focus.unwrap_or(false), focused);
+        assert!(!matches!(pane.run, Some(Run::Command(_))));
+    }
+    assert_eq!(floating.len(), 1);
+    let floating = &floating[0];
+    assert_eq!(floating.name.as_deref(), Some("renamed-float"));
+    assert_eq!(
+        floating.pane_initial_contents.as_deref(),
+        Some("float bytes")
+    );
+    use zellij_utils::input::layout::PercentOrFixed;
+    assert_eq!(floating.x, Some(PercentOrFixed::Fixed(7)));
+    assert_eq!(floating.y, Some(PercentOrFixed::Fixed(8)));
+    assert_eq!(floating.width, Some(PercentOrFixed::Fixed(30)));
+    assert_eq!(floating.height, Some(PercentOrFixed::Fixed(12)));
 }

@@ -1170,24 +1170,24 @@ fn pty_thread_main_loop(pty: &mut Pty) -> Result<()> {
             } => {
                 let err_context = || "Failed to dump layout".to_string();
                 pty.populate_session_layout_metadata(&mut session_layout_metadata);
-                if session_layout_metadata.is_dirty() {
-                    match serialize_session_layout_for_save(session_layout_metadata.into(), None) {
-                        Ok(kdl_layout_and_pane_contents) => {
-                            pty.bus
-                                .senders
-                                .send_to_background_jobs(BackgroundJob::ReportLayoutInfo(
-                                    SessionLayoutSnapshot {
-                                        session_name,
-                                        generation,
-                                        layout: kdl_layout_and_pane_contents,
-                                    },
-                                ))
-                                .with_context(err_context)?;
-                        },
-                        Err(e) => {
-                            log::error!("Failed to log layout to HD: {}", e);
-                        },
-                    }
+                // Defaults are not the last durable state. Capture every complete
+                // layout; the disk writer deduplicates unchanged bytes.
+                match serialize_session_layout_for_save(session_layout_metadata.into(), None) {
+                    Ok(kdl_layout_and_pane_contents) => {
+                        pty.bus
+                            .senders
+                            .send_to_background_jobs(BackgroundJob::ReportLayoutInfo(
+                                SessionLayoutSnapshot {
+                                    session_name,
+                                    generation,
+                                    layout: kdl_layout_and_pane_contents,
+                                },
+                            ))
+                            .with_context(err_context)?;
+                    },
+                    Err(e) => {
+                        log::error!("Failed to log layout to HD: {}", e);
+                    },
                 }
             },
             PtyInstruction::SaveSessionToDisk {
