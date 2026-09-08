@@ -3499,7 +3499,7 @@ impl WasmBridge {
 
     fn session_chrome_authority_targets_for_client(
         &self,
-        plugin_ids: Vec<(PluginId, Option<ClientId>)>,
+        plugin_ids: &[(PluginId, Option<ClientId>)],
         origin_client_id: ClientId,
     ) -> Option<Vec<(PluginId, Option<ClientId>)>> {
         let authority_targets = plugin_ids
@@ -3714,7 +3714,7 @@ impl WasmBridge {
                 if let Some(origin_client_id) = session_chrome_origin_client_id {
                     if let Some(authority_targets) = self
                         .session_chrome_authority_targets_for_client(
-                            all_plugin_ids,
+                            &all_plugin_ids,
                             origin_client_id,
                         )
                     {
@@ -4579,7 +4579,7 @@ mod layout_plugin_transaction_tests {
         let candidates = bridge
             .all_plugin_and_client_ids_for_plugin_location_regardless_of_configuration(&location);
         assert_eq!(
-            bridge.session_chrome_authority_targets_for_client(candidates, 8),
+            bridge.session_chrome_authority_targets_for_client(&candidates, 8),
             Some(vec![(41, Some(8))]),
             "Quick cmd must reach exactly the originating client's shared canvas when attached clients reuse the authority plugin id"
         );
@@ -4599,7 +4599,7 @@ mod layout_plugin_transaction_tests {
         let candidates = vec![(41, Some(7)), (41, Some(8)), (42, Some(7))];
 
         assert_eq!(
-            bridge.session_chrome_authority_targets_for_client(candidates, 9),
+            bridge.session_chrome_authority_targets_for_client(&candidates, 9),
             Some(vec![]),
             "a missing origin-client tuple must not fall back to another attached client"
         );
@@ -4611,7 +4611,7 @@ mod layout_plugin_transaction_tests {
         let legacy_candidates = vec![(41, Some(7)), (42, Some(7))];
 
         assert_eq!(
-            bridge.session_chrome_authority_targets_for_client(legacy_candidates, 7),
+            bridge.session_chrome_authority_targets_for_client(&legacy_candidates, 7),
             None,
             "normal configless plugin messages must preserve legacy fan-out without a session canvas"
         );
