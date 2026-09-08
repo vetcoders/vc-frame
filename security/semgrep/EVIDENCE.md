@@ -111,7 +111,10 @@ can prove signing and strict verification; it does not execute that copy.
 ## CLI arguments
 
 `args_os` preserves platform arguments for direct typed clap parsing and
-command-specific validation. It is input parsing, not authorization.
+command-specific validation. It is input parsing, not authorization. The one
+non-clap use (`process_log_scope`) only selects a single filename component for
+the current-user temporary log directory; it falls back to the process ID and
+does not authorize a server, select a socket, or execute an argument.
 
 ## Path traversal
 
