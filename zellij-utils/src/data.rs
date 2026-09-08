@@ -1370,6 +1370,17 @@ pub struct Style {
     pub colors: Styling,
     pub rounded_corners: bool,
     pub hide_session_name: bool,
+    /// When true, vc-frame is the live theme owner: cells an application left
+    /// at the *default* foreground/background (SGR reset / never styled) are
+    /// painted with `colors.text_unselected.{base,background}` instead of
+    /// falling through to whatever the host terminal paints as its default.
+    /// Explicit ANSI/RGB colors an application sets are never touched, and a
+    /// pane's own OSC 10/11 defaults still win over the theme. Engaged by the
+    /// server when both `theme_dark` and `theme_light` are configured — the
+    /// same gate that enables the dark/light switch — so plain single-theme
+    /// setups keep host-default passthrough.
+    #[serde(default)]
+    pub theme_owns_pane_defaults: bool,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]

@@ -20,8 +20,9 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use zellij_utils::cli::CliAction;
 use zellij_utils::data::{
-    Event, EventType, ListPanesResponse, ListTabsResponse, PaneInfo, PaneManifest, PermissionType,
-    PluginPermission, Resize, SessionInfo, Style, TabInfo, TabPlacement, WebSharing,
+    Event, EventType, ListPanesResponse, ListTabsResponse, PaletteColor, PaneInfo, PaneManifest,
+    PermissionType, PluginPermission, Resize, SessionInfo, Style, Styling, TabInfo, TabPlacement,
+    WebSharing,
 };
 use zellij_utils::errors::{ErrorContext, prelude::*};
 use zellij_utils::input::actions::Action;
@@ -14943,6 +14944,280 @@ fn host_theme_emits_again_on_mode_flip() {
         )),
         "mode flip must re-emit the plugin event, got: {:?}",
         events
+    );
+}
+
+// ---------------------------------------------------------------------
+// vc-frame owns the live theme (FRAME-theme)
+// ---------------------------------------------------------------------
+
+/// Two palettes that differ in the one slot the canvas paints with.
+fn dark_and_light_stylings() -> (Styling, Styling) {
+    let mut dark = Styling::default();
+    dark.text_unselected.background = PaletteColor::Rgb((10, 10, 10));
+    dark.text_unselected.base = PaletteColor::Rgb((230, 230, 230));
+    let mut light = Styling::default();
+    light.text_unselected.background = PaletteColor::Rgb((250, 250, 250));
+    light.text_unselected.base = PaletteColor::Rgb((20, 20, 20));
+    (dark, light)
+}
+
+fn engage_theme_owner(screen: &mut Screen) -> (Styling, Styling) {
+    let (dark, light) = dark_and_light_stylings();
+    screen.host_theme_dark_styling = Some(dark);
+    screen.host_theme_light_styling = Some(light);
+    let engaged = screen.theme_owner_engaged();
+    screen.set_theme_owns_pane_defaults(engaged);
+    (dark, light)
+}
+
+#[test]
+fn manual_theme_choice_pins_frame_against_host_reports() {
+    let size = Size { cols: 80, rows: 20 };
+    let (mut screen, capture) = create_new_screen_with_theme_capture(size);
+    let (dark, light) = engage_theme_owner(&mut screen);
+
+    // host seeds dark on attach
+    screen
+        .update_host_terminal_theme_mode(zellij_utils::data::HostTerminalThemeMode::Dark)
+        .expect("host seed ok");
+    assert_eq!(screen.style.colors, dark);
+
+    // user picks light inside the frame
+    let mut completion = None;
+    screen
+        .apply_manual_host_terminal_theme_mode(
+            zellij_utils::data::HostTerminalThemeMode::Light,
+            &mut completion,
+        )
+        .expect("manual ok");
+    assert_eq!(screen.style.colors, light);
+    let _ = capture.drain_plugin_events();
+
+    // host flips back to dark — the frame no longer listens
+    screen
+        .update_host_terminal_theme_mode(zellij_utils::data::HostTerminalThemeMode::Dark)
+        .expect("host report ok");
+    assert_eq!(
+        screen.host_terminal_theme_mode,
+        Some(zellij_utils::data::HostTerminalThemeMode::Light),
+        "a host report must not override the user's explicit choice"
+    );
+    assert_eq!(screen.style.colors, light);
+    assert!(
+        !capture.drain_plugin_events().iter().any(|e| matches!(
+            e,
+            Event::HostTerminalThemeChanged(zellij_utils::data::HostTerminalThemeMode::Dark)
+        )),
+        "ignored host reports must not be announced to plugins either"
+    );
+}
+
+#[test]
+fn repeated_toggle_flips_canvas_palette_every_time_and_new_tabs_inherit() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let (mut screen, _capture) = create_new_screen_with_theme_capture(size);
+    let (dark, light) = engage_theme_owner(&mut screen);
+    new_tab(&mut screen, 1, 1);
+
+    let mut expected = [light, dark, light, dark].into_iter();
+    for round in 0..4 {
+        let next = match screen.host_terminal_theme_mode {
+            Some(zellij_utils::data::HostTerminalThemeMode::Light) => {
+                zellij_utils::data::HostTerminalThemeMode::Dark
+            },
+            // None (nothing learned yet) toggles to Light, like the CLI action
+            _ => zellij_utils::data::HostTerminalThemeMode::Light,
+        };
+        let mut completion = None;
+        screen
+            .apply_manual_host_terminal_theme_mode(next, &mut completion)
+            .expect("toggle ok");
+        let want = expected.next().unwrap();
+        assert_eq!(screen.style.colors, want, "round {round}: Screen.style");
+        for tab in screen.get_tabs_mut().values() {
+            assert_eq!(tab.style.colors, want, "round {round}: existing tab");
+            assert!(tab.style.theme_owns_pane_defaults);
+        }
+    }
+
+    // a tab opened after the switches is born with the live palette
+    new_tab(&mut screen, 2, 2);
+    let tab2 = screen.get_tabs_mut().get(&2).expect("tab 2");
+    assert_eq!(
+        tab2.style.colors, dark,
+        "new tab inherits the canonical choice"
+    );
+    assert!(tab2.style.theme_owns_pane_defaults);
+}
+
+#[test]
+fn theme_switch_reaches_every_connected_client_mode_info() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let (mut screen, _capture) = create_new_screen_with_theme_capture(size);
+    let (_dark, light) = engage_theme_owner(&mut screen);
+    new_tab(&mut screen, 1, 1);
+    screen.add_client(2, false).expect("TEST");
+
+    let mut completion = None;
+    screen
+        .apply_manual_host_terminal_theme_mode(
+            zellij_utils::data::HostTerminalThemeMode::Light,
+            &mut completion,
+        )
+        .expect("manual ok");
+
+    for client_id in [1u16, 2u16] {
+        let mode_info = screen
+            .mode_info
+            .get(&client_id)
+            .unwrap_or_else(|| panic!("client {client_id} has no mode_info"));
+        assert_eq!(
+            mode_info.style.colors, light,
+            "one session, one theme: client {client_id} must see the switch"
+        );
+    }
+    assert_eq!(screen.default_mode_info.style.colors, light);
+}
+
+#[test]
+fn theme_owner_gate_controls_pane_default_painting() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let (mut screen, _capture) = create_new_screen_with_theme_capture(size);
+    new_tab(&mut screen, 1, 1);
+    assert!(
+        !screen.theme_owner_engaged(),
+        "no theme_dark/theme_light: host passthrough stays the default"
+    );
+    assert!(!screen.style.theme_owns_pane_defaults);
+
+    engage_theme_owner(&mut screen);
+    assert!(screen.style.theme_owns_pane_defaults);
+    assert!(screen.default_mode_info.style.theme_owns_pane_defaults);
+    for tab in screen.get_tabs_mut().values() {
+        assert!(
+            tab.style.theme_owns_pane_defaults,
+            "existing tab learns the policy"
+        );
+    }
+
+    // and a config reload that drops one palette disengages everything again
+    screen.host_theme_light_styling = None;
+    let engaged = screen.theme_owner_engaged();
+    screen.set_theme_owns_pane_defaults(engaged);
+    assert!(!screen.style.theme_owns_pane_defaults);
+    for tab in screen.get_tabs_mut().values() {
+        assert!(!tab.style.theme_owns_pane_defaults);
+    }
+}
+
+#[test]
+fn reconfigure_keeps_the_live_mode_palette_instead_of_static_theme() {
+    let size = Size { cols: 80, rows: 20 };
+    let (mut screen, _capture) = create_new_screen_with_theme_capture(size);
+    let static_theme = Styling::default();
+
+    // owner not engaged: static theme is authoritative
+    assert_eq!(
+        screen.effective_reconfigure_theme(static_theme),
+        static_theme
+    );
+
+    let (dark, light) = engage_theme_owner(&mut screen);
+    // engaged but nothing learned yet: still static
+    assert_eq!(
+        screen.effective_reconfigure_theme(static_theme),
+        static_theme
+    );
+
+    let mut completion = None;
+    screen
+        .apply_manual_host_terminal_theme_mode(
+            zellij_utils::data::HostTerminalThemeMode::Light,
+            &mut completion,
+        )
+        .expect("manual ok");
+    assert_eq!(
+        screen.effective_reconfigure_theme(static_theme),
+        light,
+        "a config reload must not flip a light canvas back to the static dark theme"
+    );
+    screen
+        .apply_manual_host_terminal_theme_mode(
+            zellij_utils::data::HostTerminalThemeMode::Dark,
+            &mut completion,
+        )
+        .expect("manual ok");
+    assert_eq!(screen.effective_reconfigure_theme(static_theme), dark);
+}
+
+#[test]
+fn plugin_state_refresh_replays_live_theme_mode() {
+    let size = Size { cols: 80, rows: 20 };
+    let (mut screen, capture) = create_new_screen_with_theme_capture(size);
+
+    // nothing learned yet: nothing to replay
+    screen.replay_theme_mode_to_plugins().expect("ok");
+    assert!(capture.drain_plugin_events().is_empty());
+
+    engage_theme_owner(&mut screen);
+    let mut completion = None;
+    screen
+        .apply_manual_host_terminal_theme_mode(
+            zellij_utils::data::HostTerminalThemeMode::Light,
+            &mut completion,
+        )
+        .expect("manual ok");
+    let _ = capture.drain_plugin_events();
+
+    // a plugin (re)load asks for state: the switcher must learn ☼ without guessing
+    screen.replay_theme_mode_to_plugins().expect("ok");
+    let events = capture.drain_plugin_events();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            Event::HostTerminalThemeChanged(zellij_utils::data::HostTerminalThemeMode::Light)
+        )),
+        "replay must announce the live mode, got: {:?}",
+        events
+    );
+}
+
+#[test]
+fn manual_theme_without_both_palettes_is_refused_and_does_not_pin() {
+    let size = Size { cols: 80, rows: 20 };
+    let (mut screen, _capture) = create_new_screen_with_theme_capture(size);
+    screen.host_theme_dark_styling = Some(Styling::default());
+
+    let mut completion = None;
+    screen
+        .apply_manual_host_terminal_theme_mode(
+            zellij_utils::data::HostTerminalThemeMode::Light,
+            &mut completion,
+        )
+        .expect("refusal is not an error");
+    assert!(screen.host_terminal_theme_mode.is_none());
+    assert!(
+        !screen.theme_mode_pinned,
+        "a refused switch must not pin the frame"
+    );
+
+    // host reports keep working in the unpinned state
+    screen
+        .update_host_terminal_theme_mode(zellij_utils::data::HostTerminalThemeMode::Dark)
+        .expect("host ok");
+    assert_eq!(
+        screen.host_terminal_theme_mode,
+        Some(zellij_utils::data::HostTerminalThemeMode::Dark)
     );
 }
 

@@ -781,6 +781,9 @@ pub trait Pane {
         None
     } // only relevant to terminal panes
     fn update_theme(&mut self, _theme: Styling) {}
+    /// See `Style::theme_owns_pane_defaults`. Only panes that render a grid
+    /// (terminal, plugin) care; everything else keeps the no-op.
+    fn update_theme_owns_pane_defaults(&mut self, _theme_owns_pane_defaults: bool) {}
     fn update_arrow_fonts(&mut self, _should_support_arrow_fonts: bool) {}
     fn update_rounded_corners(&mut self, _rounded_corners: bool) {}
     fn set_should_be_suppressed(&mut self, _should_be_suppressed: bool) {}
@@ -6938,6 +6941,20 @@ impl Tab {
         self.tiled_panes.update_pane_themes(theme);
         for (_, pane) in self.suppressed_panes.values_mut() {
             pane.update_theme(theme);
+        }
+    }
+    /// Propagate the theme-owner policy (see `Style::theme_owns_pane_defaults`)
+    /// to every existing pane. New panes copy `self.style`, so updating the
+    /// tab's own style here is what makes them inherit it.
+    pub fn update_theme_owns_pane_defaults(&mut self, theme_owns_pane_defaults: bool) {
+        self.style.theme_owns_pane_defaults = theme_owns_pane_defaults;
+        self.default_mode_info.style.theme_owns_pane_defaults = theme_owns_pane_defaults;
+        self.floating_panes
+            .update_pane_theme_owns_pane_defaults(theme_owns_pane_defaults);
+        self.tiled_panes
+            .update_pane_theme_owns_pane_defaults(theme_owns_pane_defaults);
+        for (_, pane) in self.suppressed_panes.values_mut() {
+            pane.update_theme_owns_pane_defaults(theme_owns_pane_defaults);
         }
     }
     pub fn update_rounded_corners(&mut self, rounded_corners: bool) {
