@@ -277,7 +277,13 @@ impl State {
         message.name == MSG_OPEN_QUICK_CMD
             && message.is_private
             && message.source == PipeSource::Keybind
-            && self.own_tab_index == Some(self.active_tab_idx.saturating_sub(1))
+            // A session canvas is a singleton runtime projected into every
+            // tab, so its runtime plugin id is deliberately absent from the
+            // per-tab PaneManifest. It is already selected by the server as
+            // the canvas authority; asking it for a tab index would reject
+            // every keyboard Quick cmd. Legacy bars remain tab-scoped.
+            && (self.parse_bool_config("session_canvas", false)
+                || self.own_tab_index == Some(self.active_tab_idx.saturating_sub(1)))
     }
 
     fn initialize_configuration(&mut self, configuration: BTreeMap<String, String>) {
@@ -965,6 +971,24 @@ mod transient_dimension_guard_tests {
 
         state.own_tab_index = Some(0);
         assert!(!state.quick_cmd_message_targets_active_bar(&message));
+
+        let public_message =
+            PipeMessage::new(PipeSource::Keybind, MSG_OPEN_QUICK_CMD, &None, &None, false);
+        assert!(!state.quick_cmd_message_targets_active_bar(&public_message));
+    }
+
+    #[test]
+    fn quick_cmd_keybind_accepts_the_projected_session_canvas_without_a_tab_manifest_entry() {
+        let mut state = State {
+            active_tab_idx: 2,
+            ..Default::default()
+        };
+        state
+            .config
+            .insert("session_canvas".to_owned(), "true".to_owned());
+        let message = PipeMessage::new(PipeSource::Keybind, MSG_OPEN_QUICK_CMD, &None, &None, true);
+
+        assert!(state.quick_cmd_message_targets_active_bar(&message));
 
         let public_message =
             PipeMessage::new(PipeSource::Keybind, MSG_OPEN_QUICK_CMD, &None, &None, false);

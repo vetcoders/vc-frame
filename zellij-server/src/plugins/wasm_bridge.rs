@@ -788,6 +788,10 @@ pub(crate) struct GetOrLoadPluginsParams {
     /// A configless message names the plugin kind, not one layout instance.
     /// Reuse every loaded instance at this location before considering a load.
     pub match_plugin_location_only: bool,
+    /// Prefer a shared session-canvas authority when one owns this location.
+    /// This is intentionally opt-in: ordinary configless messages still fan
+    /// out to their legacy instances.
+    pub prefer_session_chrome_authority: bool,
     pub size: Size,
     pub cwd: Option<PathBuf>,
     pub skip_cache: bool,
@@ -3492,6 +3496,26 @@ impl WasmBridge {
             .map(|(plugin_id, client_id)| (*plugin_id, Some(*client_id)))
             .collect()
     }
+
+    fn prefer_session_chrome_authority(
+        &self,
+        plugin_ids: Vec<(PluginId, Option<ClientId>)>,
+    ) -> Vec<(PluginId, Option<ClientId>)> {
+        let authority_targets = plugin_ids
+            .iter()
+            .filter(|(plugin_id, _)| {
+                self.session_chrome_authorities
+                    .values()
+                    .any(|authority| *plugin_id == authority.runtime_plugin_id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if authority_targets.is_empty() {
+            plugin_ids
+        } else {
+            authority_targets
+        }
+    }
     pub fn all_plugin_ids(&self) -> Vec<(PluginId, ClientId)> {
         self.plugin_map.lock().unwrap().all_plugin_ids()
     }
@@ -3651,6 +3675,7 @@ impl WasmBridge {
         let GetOrLoadPluginsParams {
             run_plugin_or_alias,
             match_plugin_location_only,
+            prefer_session_chrome_authority,
             size,
             cwd,
             skip_cache,
@@ -3674,6 +3699,11 @@ impl WasmBridge {
                         &run_plugin.location,
                         &run_plugin.configuration,
                     )
+                };
+                let all_plugin_ids = if prefer_session_chrome_authority {
+                    self.prefer_session_chrome_authority(all_plugin_ids)
+                } else {
+                    all_plugin_ids
                 };
                 if all_plugin_ids.is_empty() {
                     let loading_plugin_id = if match_plugin_location_only {
@@ -4502,6 +4532,49 @@ mod layout_plugin_transaction_tests {
             ),
             vec![(41, Some(7))],
             "a configless MessagePlugin must target the configured layout instance"
+        );
+    }
+
+    #[test]
+    fn quick_cmd_prefers_the_shared_compact_bar_authority_over_legacy_instances() {
+        let mut bridge = test_bridge(1);
+        let location = RunPlugin::from_url(&format!(
+            "file:{}/session-layer-compact-bar.wasm",
+            std::env::temp_dir().display()
+        ))
+        .unwrap()
+        .location;
+        bridge.cached_plugin_map.insert(
+            location.clone(),
+            HashMap::from([(PluginUserConfiguration::default(), vec![(41, 7), (42, 7)])]),
+        );
+        bridge.session_chrome_authorities.insert(
+            SessionChromeKind::CompactBar,
+            SingletonAuthority {
+                runtime_plugin_id: 41,
+                projector_count: 3,
+                reserved_by: 99,
+            },
+        );
+
+        let candidates = bridge
+            .all_plugin_and_client_ids_for_plugin_location_regardless_of_configuration(&location);
+        assert_eq!(
+            bridge.prefer_session_chrome_authority(candidates),
+            vec![(41, Some(7))],
+            "Quick cmd must reach the shared canvas once, even when its session-layer location is resolved"
+        );
+    }
+
+    #[test]
+    fn quick_cmd_keeps_legacy_compact_bar_targets_when_no_shared_authority_exists() {
+        let bridge = test_bridge(1);
+        let legacy_candidates = vec![(41, Some(7)), (42, Some(7))];
+
+        assert_eq!(
+            bridge.prefer_session_chrome_authority(legacy_candidates.clone()),
+            legacy_candidates,
+            "normal configless plugin messages must preserve legacy fan-out without a session canvas"
         );
     }
 

@@ -1851,6 +1851,8 @@ fn pipe_to_specific_plugins(params: PipeToSpecificPluginsParams) {
             let all_plugin_ids = wasm_bridge.get_or_load_plugins(GetOrLoadPluginsParams {
                 run_plugin_or_alias,
                 match_plugin_location_only,
+                prefer_session_chrome_authority: pipe_source == PipeSource::Keybind
+                    && name == "vc_quick_cmd",
                 size,
                 cwd: initial_cwd.or_else(|| cwd.clone()),
                 skip_cache,
