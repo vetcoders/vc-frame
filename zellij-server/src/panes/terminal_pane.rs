@@ -997,6 +997,11 @@ impl Pane for TerminalPane {
             self.render_first_run_banner();
         }
     }
+    fn update_theme_owns_pane_defaults(&mut self, theme_owns_pane_defaults: bool) {
+        self.style.theme_owns_pane_defaults = theme_owns_pane_defaults;
+        self.grid
+            .update_theme_owns_pane_defaults(theme_owns_pane_defaults);
+    }
     fn update_arrow_fonts(&mut self, should_support_arrow_fonts: bool) {
         self.arrow_fonts = should_support_arrow_fonts;
         self.grid.update_arrow_fonts(should_support_arrow_fonts);

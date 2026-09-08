@@ -2830,6 +2830,12 @@ impl TiledPanes {
             pane.update_theme(theme);
         }
     }
+    pub fn update_pane_theme_owns_pane_defaults(&mut self, theme_owns_pane_defaults: bool) {
+        self.style.theme_owns_pane_defaults = theme_owns_pane_defaults;
+        for pane in self.panes.values_mut() {
+            pane.update_theme_owns_pane_defaults(theme_owns_pane_defaults);
+        }
+    }
     pub fn update_pane_arrow_fonts(&mut self, should_support_arrow_fonts: bool) {
         for pane in self.panes.values_mut() {
             pane.update_arrow_fonts(should_support_arrow_fonts);

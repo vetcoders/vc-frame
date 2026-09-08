@@ -771,13 +771,15 @@ pub enum ScreenInstruction {
     /// `HostTerminalThemeChanged` plugin event, and per-pane DSR forwarding
     /// for panes that opted in via `CSI ? 2031 h`.
     HostTerminalThemeChanged(HostTerminalThemeMode),
-    /// Manual theme actions issued via the CLI (e.g. `zellij action set-dark-theme`)
-    /// or a keybinding. They share the same convergence point as
-    /// `HostTerminalThemeChanged`, but additionally surface a CLI-friendly error
-    /// via `NotificationEnd` if `theme_dark` and `theme_light` are not both set
-    /// (the auto-switch gate). "Last one wins": these compete naively with
-    /// terminal-driven notifications via the dedupe in
-    /// `update_host_terminal_theme_mode`.
+    /// Manual theme actions issued via the CLI (`vc-frame action set-dark-theme`
+    /// / `toggle-theme`), a keybinding, or the compact-bar ☾/☼ switcher (which
+    /// runs `Action::ToggleTheme` through the plugin `run_action` API). They
+    /// share the convergence point `apply_theme_mode` with
+    /// `HostTerminalThemeChanged`, surface a CLI-friendly error via
+    /// `NotificationEnd` if `theme_dark` and `theme_light` are not both set
+    /// (the theme-owner gate), and *pin* the frame's mode: after the first
+    /// manual choice the host terminal's CSI 2031 reports are ignored, so the
+    /// frame — not the outer terminal app — owns the live theme.
     SetDarkTheme(Option<NotificationEnd>),
     SetLightTheme(Option<NotificationEnd>),
     ToggleTheme(Option<NotificationEnd>),
@@ -1736,6 +1738,13 @@ pub(crate) struct Screen {
     /// Resolved styling to apply when `host_terminal_theme_mode == Light`.
     /// `None` disables auto-switch. Refreshed on each reconfigure.
     host_theme_light_styling: Option<Styling>,
+    /// Set once a user picks a mode explicitly (switcher click, keybind,
+    /// `vc-frame action set-*-theme` / `toggle-theme`). From then on vc-frame
+    /// is the sole owner of the live theme: host-terminal CSI 2031 reports are
+    /// ignored instead of silently flipping the canvas back. Session-wide and
+    /// shared by every attached client — there is one canvas, so there is one
+    /// theme. Cleared only by a server restart.
+    theme_mode_pinned: bool,
 }
 
 struct PreparedApplyLayout {
@@ -2813,6 +2822,7 @@ impl Screen {
             host_terminal_theme_mode: None,
             host_theme_dark_styling: None,
             host_theme_light_styling: None,
+            theme_mode_pinned: false,
         }
     }
 
@@ -6960,7 +6970,11 @@ impl Screen {
             active_pane.store_pane_name();
         }
 
+        // `mode_info.style` may come from a client that never learned the
+        // theme-owner policy; the policy is server truth, keep it.
+        let theme_owns_pane_defaults = self.style.theme_owns_pane_defaults;
         self.style = mode_info.style;
+        self.style.theme_owns_pane_defaults = theme_owns_pane_defaults;
         self.mode_info.insert(client_id, mode_info.clone());
         for tab in self.tabs.values_mut() {
             tab.change_mode_info(mode_info.clone(), client_id);
@@ -8306,6 +8320,10 @@ impl Screen {
 
         // global configuration
         self.default_mode_info.update_theme(theme);
+        // `new_tab` copies `self.style` into every future tab (and through it
+        // into every future pane), so the live palette has to land here too —
+        // otherwise a tab opened after a switch is born with the stale theme.
+        self.style.colors = theme;
         self.default_mode_info
             .update_rounded_corners(rounded_corners);
         // `default_mode_info` is the fallback used by `change_mode` for
@@ -8390,6 +8408,76 @@ impl Screen {
     /// 4. forwards a `CSI ?997;{1|2}n` DSR onto the pty of every terminal pane
     ///    whose app opted in via `CSI ? 2031 h`.
     pub fn update_host_terminal_theme_mode(&mut self, mode: HostTerminalThemeMode) -> Result<()> {
+        if self.theme_mode_pinned {
+            // The user chose a mode inside the frame; the host terminal no
+            // longer gets a vote. Dropping (not forwarding) keeps panes that
+            // asked via CSI 2031 in sync with what vc-frame actually paints.
+            log::debug!(
+                "ignoring host terminal theme report {:?}: frame theme is pinned to {:?}",
+                mode,
+                self.host_terminal_theme_mode
+            );
+            return Ok(());
+        }
+        self.apply_theme_mode(mode)
+    }
+    /// Both palettes resolved — the live theme owner is engaged. This is the
+    /// single gate for the dark/light switch *and* for the frame painting
+    /// default-colored pane cells with its own palette.
+    pub fn theme_owner_engaged(&self) -> bool {
+        self.host_theme_dark_styling.is_some() && self.host_theme_light_styling.is_some()
+    }
+    /// Push the theme-owner policy (see `Style::theme_owns_pane_defaults`) to
+    /// every place a `Style` is copied from: `Screen`, both mode-info maps and
+    /// every tab (which in turn reaches every pane, existing and future).
+    pub fn set_theme_owns_pane_defaults(&mut self, engaged: bool) {
+        self.style.theme_owns_pane_defaults = engaged;
+        self.default_mode_info.style.theme_owns_pane_defaults = engaged;
+        for mode_info in self.mode_info.values_mut() {
+            mode_info.style.theme_owns_pane_defaults = engaged;
+        }
+        for tab in self.tabs.values_mut() {
+            tab.update_theme_owns_pane_defaults(engaged);
+        }
+    }
+    /// The palette a reconfigure must apply: when the frame owns the theme
+    /// and a mode is already live, the mode's palette — not the static
+    /// `theme` — is the truth, otherwise a config reload would silently
+    /// flip a light canvas back to dark until the next switch.
+    pub fn effective_reconfigure_theme(&self, static_theme: Styling) -> Styling {
+        if !self.theme_owner_engaged() {
+            return static_theme;
+        }
+        match self.host_terminal_theme_mode {
+            Some(HostTerminalThemeMode::Dark) => {
+                self.host_theme_dark_styling.unwrap_or(static_theme)
+            },
+            Some(HostTerminalThemeMode::Light) => {
+                self.host_theme_light_styling.unwrap_or(static_theme)
+            },
+            None => static_theme,
+        }
+    }
+    /// Re-announce the live mode to plugins. Called on
+    /// `RequestStateUpdateForPlugins` (fired after every plugin (re)load) so a
+    /// freshly loaded switcher renders the real ☾/☼ state instead of guessing.
+    pub fn replay_theme_mode_to_plugins(&self) -> Result<()> {
+        let Some(mode) = self.host_terminal_theme_mode else {
+            return Ok(());
+        };
+        self.bus
+            .senders
+            .send_to_plugin(PluginInstruction::Update(vec![(
+                None,
+                None,
+                Event::HostTerminalThemeChanged(mode),
+            )]))
+            .with_context(|| "Failed to replay theme mode to plugins".to_string())
+    }
+    /// Convergence point for every theme-mode source (host report, CLI
+    /// action, switcher). Dedupes, repaints chrome + canvas, tells plugins and
+    /// opted-in panes.
+    fn apply_theme_mode(&mut self, mode: HostTerminalThemeMode) -> Result<()> {
         let err_context = || "Failed to update host terminal theme mode".to_string();
 
         // dedupe
@@ -8407,11 +8495,12 @@ impl Screen {
         // theme propagation when both keys configured and the resolved
         // styling exists. (If only one of theme_dark/theme_light is set,
         // skip auto-switch; the static `theme` stays authoritative.)
-        let auto_switch_enabled =
-            self.host_theme_dark_styling.is_some() && self.host_theme_light_styling.is_some();
+        let auto_switch_enabled = self.theme_owner_engaged();
         if auto_switch_enabled {
             if let Some(theme) = resolved {
                 self.default_mode_info.update_theme(theme);
+                // Future tabs copy `self.style` — keep it live too.
+                self.style.colors = theme;
                 for tab in self.tabs.values_mut() {
                     tab.update_theme(theme);
                 }
@@ -8496,9 +8585,7 @@ impl Screen {
         mode: HostTerminalThemeMode,
         completion_tx: &mut Option<NotificationEnd>,
     ) -> Result<()> {
-        let auto_switch_enabled =
-            self.host_theme_dark_styling.is_some() && self.host_theme_light_styling.is_some();
-        if !auto_switch_enabled {
+        if !self.theme_owner_engaged() {
             if let Some(c) = completion_tx.as_mut() {
                 c.set_exit_status(1);
                 c.set_error_message(
@@ -8508,7 +8595,10 @@ impl Screen {
             }
             return Ok(());
         }
-        self.update_host_terminal_theme_mode(mode)
+        // An explicit choice makes vc-frame the owner: from here on the host
+        // terminal's CSI 2031 reports are ignored (see `theme_mode_pinned`).
+        self.theme_mode_pinned = true;
+        self.apply_theme_mode(mode)
     }
     pub fn toggle_pane_pinned(&mut self, client_id: ClientId) {
         active_tab_and_connected_client_id!(
@@ -9769,6 +9859,8 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
     });
     screen.host_theme_dark_styling = host_theme_dark_styling;
     screen.host_theme_light_styling = host_theme_light_styling;
+    let theme_owner_engaged = screen.theme_owner_engaged();
+    screen.set_theme_owns_pane_defaults(theme_owner_engaged);
 
     let mut pending_tab_ids: HashSet<usize> = HashSet::new();
     let mut durable_tab_layout_generations: HashMap<String, DurableTabLayoutGeneration> =
@@ -14089,6 +14181,7 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                 for tab in all_tabs.values_mut() {
                     tab.update_input_modes()?;
                 }
+                screen.replay_theme_mode_to_plugins()?;
                 screen.log_and_report_session_state()?;
                 screen.render(None)?;
             },
@@ -14832,6 +14925,9 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                 } = *params;
                 screen.host_theme_dark_styling = host_theme_dark;
                 screen.host_theme_light_styling = host_theme_light;
+                let engaged = screen.theme_owner_engaged();
+                screen.set_theme_owns_pane_defaults(engaged);
+                let theme = screen.effective_reconfigure_theme(theme);
                 screen
                     .reconfigure(ScreenReconfigureParams {
                         new_keybinds: keybinds,

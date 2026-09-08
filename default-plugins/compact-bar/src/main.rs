@@ -8,7 +8,6 @@ mod tooltip;
 use std::cmp::{max, min};
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::TryInto;
-use std::path::PathBuf;
 
 use tab::get_tab_to_focus;
 use zellij_tile::prelude::*;
@@ -32,7 +31,9 @@ const CONFIG_BRAND_TEXT_SHORT: &str = "brand_text_short";
 const CONFIG_LEFT_INSET: &str = "left_inset";
 const MSG_TOGGLE_TOOLTIP: &str = "toggle_tooltip";
 const MSG_OPEN_QUICK_CMD: &str = "vc_quick_cmd";
-const THEME_COMMAND_CONTEXT_KEY: &str = "vc_terminal_theme";
+/// Context key stamped on the `ToggleTheme` action the ☾/☼ chip dispatches,
+/// so the originating plugin is identifiable in server logs.
+const THEME_ACTION_CONTEXT_KEY: &str = "vc_frame_theme";
 // the status-bar shows up in the pane manifest as "vc-frame:status-bar" when
 // loaded by url and as "status-bar" when loaded through its config alias
 const STATUS_BAR_PLUGIN_URLS: [&str; 3] =
@@ -52,33 +53,38 @@ pub const COMPOSER_CLICK_SENTINEL: usize = usize::MAX;
 /// mini console (interactive terminal) over the current tab. LIVE pulse
 /// lives on the bottom status-bar — no tool rides on it.
 pub const AGENTS_CLICK_SENTINEL: usize = usize::MAX - 2;
-/// Sentinel for the terminal theme action at the far-right edge of the bar.
+/// Sentinel for the frame theme switcher (☾/☼) at the far-right edge of the bar.
 pub const THEME_CLICK_SENTINEL: usize = usize::MAX - 3;
 /// Pane title for the Quick cmd mini console (matches the bar chip glyph).
 const QUICK_CMD_PANE_NAME: &str = "❯_ Quick cmd";
 /// Pane title for the Composer atelier — header carries the Paste stack affordance.
 const COMPOSER_PANE_NAME: &str = "✍ Composer · ⧉ Paste stack";
 
+/// The frame's live theme mode as the server announces it
+/// (`Event::HostTerminalThemeChanged`). The name of that event is historical:
+/// since the frame owns the theme, the mode it carries is vc-frame's canonical
+/// choice, seeded from the host terminal only until the user picks one.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-enum TerminalTheme {
+enum FrameTheme {
     #[default]
     Dark,
     Light,
 }
 
-impl TerminalTheme {
+impl From<HostTerminalThemeMode> for FrameTheme {
+    fn from(mode: HostTerminalThemeMode) -> Self {
+        match mode {
+            HostTerminalThemeMode::Dark => FrameTheme::Dark,
+            HostTerminalThemeMode::Light => FrameTheme::Light,
+        }
+    }
+}
+
+impl FrameTheme {
     fn indicator(self) -> &'static str {
         match self {
             Self::Dark => "☾",
             Self::Light => "☼",
-        }
-    }
-
-    fn parse(value: &str) -> Option<Self> {
-        match value.trim() {
-            "dark" => Some(Self::Dark),
-            "light" => Some(Self::Light),
-            _ => None,
         }
     }
 }
@@ -127,7 +133,7 @@ struct State {
     brand_text: Option<String>,
     brand_text_short: Option<String>,
     left_inset: usize,
-    terminal_theme: TerminalTheme,
+    frame_theme: FrameTheme,
 
     // Tooltip state
     is_tooltip: bool,
@@ -163,9 +169,9 @@ impl ZellijPlugin for State {
         self.initialize_configuration(configuration);
         self.setup_subscriptions();
         self.configure_keybinds();
-        if !self.is_tooltip {
-            self.query_terminal_theme();
-        }
+        // No theme query here: the server replays the live mode as
+        // `Event::HostTerminalThemeChanged` right after every plugin load
+        // (RequestStateUpdateForPlugins), so the chip starts truthful.
     }
 
     fn update(&mut self, event: Event) -> bool {
@@ -200,9 +206,7 @@ impl ZellijPlugin for State {
             Event::Timer(_) => self.handle_clipboard_hint_timeout(),
             Event::InputReceived => self.handle_input_received(),
             Event::PermissionRequestResult(_) => true,
-            Event::RunCommandResult(exit_code, stdout, _stderr, context) => {
-                self.handle_theme_command_result(exit_code, &stdout, &context)
-            },
+            Event::HostTerminalThemeChanged(mode) => self.handle_frame_theme_changed(mode),
             Event::CustomMessage(message, payload) if message == VC_CHROME_VISIBILITY_MESSAGE => {
                 let was_visible = self.is_visible;
                 match payload.as_str() {
@@ -324,7 +328,7 @@ impl State {
                 EventType::PermissionRequestResult,
                 EventType::CustomMessage,
                 EventType::Visible,
-                EventType::RunCommandResult,
+                EventType::HostTerminalThemeChanged,
             ]
         };
 
@@ -559,7 +563,7 @@ impl State {
 
     fn handle_tab_click(&mut self, col: usize) {
         if self.sentinel_clicked(col, THEME_CLICK_SENTINEL) {
-            self.toggle_terminal_theme();
+            toggle_frame_theme();
             return;
         }
         if self.sentinel_clicked(col, COMPOSER_CLICK_SENTINEL) {
@@ -588,50 +592,13 @@ impl State {
         false
     }
 
-    fn query_terminal_theme(&self) {
-        self.run_theme_command("current");
-    }
-
-    fn toggle_terminal_theme(&self) {
-        self.run_theme_command("toggle");
-    }
-
-    fn run_theme_command(&self, action: &str) {
-        let mut context = BTreeMap::new();
-        context.insert(THEME_COMMAND_CONTEXT_KEY.to_owned(), action.to_owned());
-        // Plugin background jobs start with an empty environment. Pass the
-        // authoritative session explicitly so `vc-theme` can switch the
-        // host palette and vc-frame's theme as one transaction; otherwise a
-        // light terminal is left behind stale dark plugin ink.
-        let mut environment = BTreeMap::new();
-        if let Some(session_name) = self.mode_info.session_name.as_ref() {
-            environment.insert("ZELLIJ_SESSION_NAME".to_owned(), session_name.clone());
-        }
-        run_command_with_env_variables_and_cwd(
-            &["vc-theme", action],
-            environment,
-            PathBuf::from("."),
-            context,
-        );
-    }
-
-    fn handle_theme_command_result(
-        &mut self,
-        exit_code: Option<i32>,
-        stdout: &[u8],
-        context: &BTreeMap<String, String>,
-    ) -> bool {
-        if !context.contains_key(THEME_COMMAND_CONTEXT_KEY) || exit_code != Some(0) {
-            return false;
-        }
-        let Ok(stdout) = std::str::from_utf8(stdout) else {
-            return false;
-        };
-        let Some(theme) = TerminalTheme::parse(stdout) else {
-            return false;
-        };
-        let changed = self.terminal_theme != theme;
-        self.terminal_theme = theme;
+    /// The server announced the frame's live theme mode. Rerender only when
+    /// the chip actually flips — replays after plugin (re)loads and duplicate
+    /// reports are idempotent.
+    fn handle_frame_theme_changed(&mut self, mode: HostTerminalThemeMode) -> bool {
+        let theme = FrameTheme::from(mode);
+        let changed = self.frame_theme != theme;
+        self.frame_theme = theme;
         changed
     }
 
@@ -666,6 +633,19 @@ fn composer_coordinates() -> Option<FloatingPaneCoordinates> {
         Some(false),
         None,
     )
+}
+
+/// The ☾/☼ chip: flip the frame's live theme through the server-owned
+/// `ToggleTheme` action. The server (Screen) is the single theme owner — it
+/// swaps chrome + canvas palettes for every client and tab, pins the choice
+/// against host-terminal reports, and announces the result back as
+/// `Event::HostTerminalThemeChanged`, which is what repaints this chip. No
+/// external command, no host-terminal palette file: other terminal engines
+/// see exactly what VC Terminal sees.
+fn toggle_frame_theme() {
+    let mut context = BTreeMap::new();
+    context.insert(THEME_ACTION_CONTEXT_KEY.to_owned(), "toggle".to_owned());
+    run_action(actions::Action::ToggleTheme, context);
 }
 
 /// Quick cmd: non-ephemeral floating *terminal* at a fixed upper-center
@@ -856,7 +836,7 @@ impl State {
             brand_text: self.brand_text.clone(),
             brand_text_short: self.brand_text_short.clone(),
             left_inset: self.left_inset,
-            theme_indicator: self.terminal_theme.indicator().to_owned(),
+            theme_indicator: self.frame_theme.indicator().to_owned(),
         };
         self.tab_line = tab_line(&self.mode_info, tab_data, cols, config);
 
@@ -972,18 +952,27 @@ mod transient_dimension_guard_tests {
     }
 
     #[test]
-    fn theme_command_result_tracks_dark_and_light_without_accepting_noise() {
+    fn frame_theme_event_flips_chip_only_on_real_change() {
         let mut state = State::default();
-        let mut context = BTreeMap::new();
-        context.insert(THEME_COMMAND_CONTEXT_KEY.to_owned(), "current".to_owned());
+        assert_eq!(
+            state.frame_theme.indicator(),
+            "☾",
+            "dark until the server says otherwise"
+        );
 
-        assert!(!state.handle_theme_command_result(Some(0), b"dark\n", &context));
-        assert_eq!(state.terminal_theme.indicator(), "☾");
-        assert!(state.handle_theme_command_result(Some(0), b"light\n", &context));
-        assert_eq!(state.terminal_theme.indicator(), "☼");
-        assert!(!state.handle_theme_command_result(Some(1), b"dark\n", &context));
-        assert!(!state.handle_theme_command_result(Some(0), b"sepia\n", &context));
-        assert_eq!(state.terminal_theme.indicator(), "☼");
+        // replay of the current (dark) mode after plugin load: no repaint
+        assert!(!state.handle_frame_theme_changed(HostTerminalThemeMode::Dark));
+        assert_eq!(state.frame_theme.indicator(), "☾");
+        // first real switch repaints
+        assert!(state.handle_frame_theme_changed(HostTerminalThemeMode::Light));
+        assert_eq!(state.frame_theme.indicator(), "☼");
+        // duplicate report is idempotent
+        assert!(!state.handle_frame_theme_changed(HostTerminalThemeMode::Light));
+        // repeated toggles keep tracking the server
+        assert!(state.handle_frame_theme_changed(HostTerminalThemeMode::Dark));
+        assert_eq!(state.frame_theme.indicator(), "☾");
+        assert!(state.handle_frame_theme_changed(HostTerminalThemeMode::Light));
+        assert_eq!(state.frame_theme.indicator(), "☼");
     }
 
     #[test]

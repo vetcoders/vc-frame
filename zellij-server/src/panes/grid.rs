@@ -698,6 +698,24 @@ pub struct Grid {
     pub cached_hover_tooltip: Option<String>,
 }
 
+/// The fg/bg the live vc-frame theme lends to cells an application left at
+/// default colors. `(None, None)` unless the frame owns pane defaults, in
+/// which case the chrome ground (`text_unselected`) is the pane ground too —
+/// one palette for chrome and canvas, independent of the host terminal.
+pub(crate) fn theme_owned_pane_defaults(style: &Style) -> (Option<AnsiCode>, Option<AnsiCode>) {
+    if !style.theme_owns_pane_defaults {
+        return (None, None);
+    }
+    let to_ansi = |c: PaletteColor| -> AnsiCode {
+        match c {
+            PaletteColor::Rgb(rgb) => AnsiCode::RgbCode(rgb),
+            PaletteColor::EightBit(i) => AnsiCode::ColorIndex(i),
+        }
+    };
+    let ground = &style.colors.text_unselected;
+    (Some(to_ansi(ground.base)), Some(to_ansi(ground.background)))
+}
+
 impl Grid {
     pub fn set_pane_default_colors(&mut self, fg: Option<String>, bg: Option<String>) {
         // Parse inputs; anything that isn't literal RGB (palette
@@ -1596,9 +1614,18 @@ impl Grid {
             // `CharacterStyles.{foreground,background}` (themselves
             // `Option<AnsiCode>`). Re-wrap the narrow RGB at the
             // boundary so the downstream pipeline stays uniform.
+            // Precedence for cells the app left at default colors:
+            //   1. the pane's own OSC 10/11 defaults (app-provided),
+            //   2. the live vc-frame theme, when the frame owns pane
+            //      defaults (`theme_dark` + `theme_light` configured),
+            //   3. host-terminal passthrough (SGR reset), the legacy path.
+            // Explicit ANSI/RGB colors never enter this branch — see
+            // `adjust_styles_for_custom_bg_fg`, which only rewrites
+            // `None` / `Reset` slots.
+            let (theme_fg, theme_bg) = theme_owned_pane_defaults(style);
             character_chunk.add_pane_defaults(
-                self.pane_default_fg.map(AnsiCode::RgbCode),
-                self.pane_default_bg.map(AnsiCode::RgbCode),
+                self.pane_default_fg.map(AnsiCode::RgbCode).or(theme_fg),
+                self.pane_default_bg.map(AnsiCode::RgbCode).or(theme_bg),
             );
             if self
                 .selection
@@ -3308,6 +3335,20 @@ impl Grid {
     }
     pub fn update_theme(&mut self, theme: Styling) {
         self.style.colors = theme;
+        // Theme-owned default colors are resolved at render time from the
+        // pane's style, so every visible line must be repainted — the same
+        // invalidation `set_pane_default_colors` performs for OSC 10/11.
+        self.output_buffer.update_all_lines();
+    }
+    /// Flip whether the live theme paints default-colored cells (see
+    /// `Style::theme_owns_pane_defaults`). Repaints everything, since the
+    /// effective default fg/bg of every unstyled cell just changed.
+    pub fn update_theme_owns_pane_defaults(&mut self, theme_owns_pane_defaults: bool) {
+        if self.style.theme_owns_pane_defaults == theme_owns_pane_defaults {
+            return;
+        }
+        self.style.theme_owns_pane_defaults = theme_owns_pane_defaults;
+        self.output_buffer.update_all_lines();
     }
     pub fn update_arrow_fonts(&mut self, should_support_arrow_fonts: bool) {
         self.arrow_fonts = should_support_arrow_fonts;

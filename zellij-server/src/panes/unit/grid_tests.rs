@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use vte;
 use zellij_utils::{
-    data::{Palette, Style},
+    data::{Palette, PaletteColor, Style},
     pane_size::SizeInPixels,
     position::Position,
 };
@@ -4603,6 +4603,156 @@ fn osc_11_set_bg_produces_ansi_in_render_output() {
             "Chunk should carry pane default background"
         );
     }
+}
+
+// =====================================================================
+// Theme-owned pane defaults (FRAME-theme)
+// =====================================================================
+
+fn grid_for_theme_defaults(content: &[u8]) -> Grid {
+    let mut vte_parser = vte::Parser::new();
+    let sixel_image_store = Rc::new(RefCell::new(SixelImageStore::default()));
+    let terminal_emulator_color_codes = Rc::new(RefCell::new(HashMap::new()));
+    let mut grid = new_grid(
+        5,
+        20,
+        Rc::new(RefCell::new(Palette::default())),
+        terminal_emulator_color_codes,
+        Rc::new(RefCell::new(LinkHandler::new())),
+        Rc::new(RefCell::new(None)),
+        sixel_image_store,
+        Style::default(),
+        false,
+        true,
+        true,
+        true,
+        false,
+    );
+    for byte in content {
+        vte_parser.advance(&mut grid, *byte);
+    }
+    grid
+}
+
+fn owning_style() -> Style {
+    let mut style = Style::default();
+    style.theme_owns_pane_defaults = true;
+    style.colors.text_unselected.base = PaletteColor::Rgb((20, 20, 20));
+    style.colors.text_unselected.background = PaletteColor::Rgb((250, 250, 250));
+    style
+}
+
+#[test]
+fn theme_owner_paints_default_cells_but_never_explicit_colors() {
+    use crate::output::adjust_styles_for_custom_bg_fg;
+
+    // "red" carries an explicit fg, "plain" is left at defaults
+    let mut grid = grid_for_theme_defaults(b"\x1b[31mred\x1b[0m plain");
+    let style = owning_style();
+    let (chunks, _, _) = grid.render(0, 0, &style).unwrap().expect("render output");
+    assert!(!chunks.is_empty());
+    for chunk in &chunks {
+        assert_eq!(
+            chunk.pane_default_fg,
+            Some(AnsiCode::RgbCode((20, 20, 20))),
+            "frame theme lends its ground fg to default cells"
+        );
+        assert_eq!(
+            chunk.pane_default_bg,
+            Some(AnsiCode::RgbCode((250, 250, 250))),
+            "frame theme lends its ground bg to default cells"
+        );
+    }
+    let row = chunks.iter().find(|c| c.y == 0).expect("first row");
+    let red = adjust_styles_for_custom_bg_fg(
+        *row.terminal_characters[0].styles,
+        row.pane_default_fg,
+        row.pane_default_bg,
+    );
+    assert_eq!(
+        red.foreground,
+        Some(AnsiCode::NamedColor(
+            crate::panes::terminal_character::NamedColor::Red
+        )),
+        "an explicit ANSI color set by the app survives untouched"
+    );
+    assert_eq!(red.background, Some(AnsiCode::RgbCode((250, 250, 250))));
+    let plain = adjust_styles_for_custom_bg_fg(
+        *row.terminal_characters[4].styles,
+        row.pane_default_fg,
+        row.pane_default_bg,
+    );
+    assert_eq!(plain.foreground, Some(AnsiCode::RgbCode((20, 20, 20))));
+    assert_eq!(plain.background, Some(AnsiCode::RgbCode((250, 250, 250))));
+}
+
+#[test]
+fn theme_owner_disengaged_keeps_host_passthrough() {
+    let mut grid = grid_for_theme_defaults(b"plain");
+    let mut style = owning_style();
+    style.theme_owns_pane_defaults = false;
+    let (chunks, _, _) = grid.render(0, 0, &style).unwrap().expect("render output");
+    for chunk in &chunks {
+        assert_eq!(
+            chunk.pane_default_fg, None,
+            "no owner: SGR reset reaches the host"
+        );
+        assert_eq!(chunk.pane_default_bg, None);
+    }
+}
+
+#[test]
+fn app_provided_osc_defaults_win_over_theme_owner() {
+    let mut grid = grid_for_theme_defaults(b"\x1b]11;#001a3a\x07plain");
+    let style = owning_style();
+    let (chunks, _, _) = grid.render(0, 0, &style).unwrap().expect("render output");
+    for chunk in &chunks {
+        assert_eq!(
+            chunk.pane_default_bg,
+            Some(AnsiCode::RgbCode((0, 26, 58))),
+            "OSC 11 from the app is the pane's own truth"
+        );
+        assert_eq!(
+            chunk.pane_default_fg,
+            Some(AnsiCode::RgbCode((20, 20, 20))),
+            "the slot the app did not claim still falls back to the theme"
+        );
+    }
+}
+
+#[test]
+fn theme_change_and_owner_flip_repaint_every_line() {
+    let mut grid = grid_for_theme_defaults(b"plain");
+    let style = owning_style();
+    let dirty_rows = |grid: &mut Grid| -> usize {
+        grid.render(0, 0, &style)
+            .unwrap()
+            .map(|(chunks, _, _)| chunks.len())
+            .unwrap_or(0)
+    };
+    // drain the initial paint
+    let _ = dirty_rows(&mut grid);
+    assert_eq!(
+        dirty_rows(&mut grid),
+        0,
+        "precondition: nothing dirty after a render"
+    );
+
+    grid.update_theme(style.colors);
+    assert_eq!(
+        dirty_rows(&mut grid),
+        5,
+        "a palette change must repaint every row of default-colored cells"
+    );
+
+    grid.update_theme_owns_pane_defaults(true);
+    assert_eq!(dirty_rows(&mut grid), 5, "engaging the owner must repaint");
+    grid.update_theme_owns_pane_defaults(true);
+    assert_eq!(
+        dirty_rows(&mut grid),
+        0,
+        "re-applying the same policy is a no-op"
+    );
 }
 
 // =====================================================================

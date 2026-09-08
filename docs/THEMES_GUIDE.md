@@ -148,6 +148,77 @@ Checklist before shipping a theme:
 - [ ] Bell flash distinguishable from the accent
 - [ ] Bilecik (`frame_highlight`) ≠ focused frame (`frame_selected`)
 
+## Live theme owner — dark/light without the host terminal
+
+Since 2026-09-08 (`FRAME-theme`) **vc-frame is the single owner of the live
+theme**. The ☾/☼ chip in the top bar, `vc-frame action toggle-theme` /
+`set-dark-theme` / `set-light-theme`, and a keybinding all end in the same
+place: `Screen::apply_theme_mode` in the server. Nothing in that path touches
+the host terminal, its palette files, or any third-party TUI's colors.
+
+### The gate
+
+Both keys must be set in `config.kdl`:
+
+```kdl
+theme       "monochrome"          // static fallback when the owner is off
+theme_dark  "monochrome"
+theme_light "vibecrafted-ivory"
+```
+
+With only one (or none) vc-frame behaves like upstream zellij: static `theme`,
+host-default passthrough for pane cells, manual switch refused with a clear
+CLI error. With both, the **theme owner is engaged**, which means:
+
+1. **Chrome + canvas swap together.** Every tab, every pane, every attached
+   client receives the mode's palette live — no restart, no pane recreation.
+   `Screen.style` is kept in sync, so tabs and panes created *after* a switch
+   are born with the current choice.
+2. **Default-colored pane cells are painted by the frame.** Cells an
+   application left at the default foreground/background (SGR reset, never
+   styled) render with `text_unselected.base` / `text_unselected.background`
+   of the live palette instead of falling through to whatever the host
+   terminal paints as its default. This is `Style::theme_owns_pane_defaults`
+   and it is resolved at render time in `Grid::render`.
+   Precedence per cell slot: app-provided **OSC 10/11** default → live theme →
+   host passthrough (owner off). **Explicit ANSI/RGB colors an app sets are
+   never touched** — no blanket recolor.
+3. **An explicit choice pins the frame.** Until the user picks, the host
+   terminal's CSI 2031 / DSR 997 report seeds the mode (VC Terminal supports
+   it; most other engines never report, so the static theme stays). After the
+   first click/action the host no longer gets a vote: later host reports are
+   ignored, not forwarded. Pinning is session-wide and survives `config.kdl`
+   reloads (a reconfigure re-applies the live mode's palette, not the static
+   `theme`). Only a server restart clears it.
+4. **One session, one theme.** All clients attached to a session share the
+   mode; there is no per-client theme. A toggle flips based on the current
+   canonical mode (unknown → light), any number of times.
+
+### What the switcher plugin does (and does not)
+
+`compact-bar` dispatches `Action::ToggleTheme` through the plugin
+`run_action` API and paints ☾/☼ from `Event::HostTerminalThemeChanged`,
+which the server fans out on every switch **and replays after each plugin
+(re)load** (`RequestStateUpdateForPlugins`), so a freshly loaded bar never
+guesses. The event name is historical — what it carries is vc-frame's
+canonical mode. The bar no longer runs `vc-theme` and no longer publishes a
+host palette; switching the outer terminal app's own theme is that app's
+business.
+
+### Propagation contract for panes and TUIs (e.g. `vc-start-here.py`)
+
+- Paint with **default colors** (`curses.use_default_colors()`, plain
+  `\e[0m` text) and you get the live frame palette for free, live, on every
+  switch — the frame repaints every line of every pane.
+- Set **explicit** colors and they are yours; the frame never overrides them.
+  Pick colors that read on both grounds, or…
+- …ask for the mode: `CSI ? 2031 h` subscribes, `CSI ? 996 n` queries, the
+  reply/notification is `CSI ? 997 ; 1 n` (dark) / `CSI ? 997 ; 2 n`
+  (light). The frame answers from its **canonical** mode, so a TUI that
+  follows this protocol follows the ☾/☼ chip, not the host terminal.
+- Per-pane `OSC 10` / `OSC 11` defaults still win over the theme for the
+  slot they claim (`OSC 110/111` hand it back).
+
 ## Roadmap: the workspace designer
 
 A planned `workspace-designer` plugin turns this guide into a tool: a
