@@ -788,10 +788,10 @@ pub(crate) struct GetOrLoadPluginsParams {
     /// A configless message names the plugin kind, not one layout instance.
     /// Reuse every loaded instance at this location before considering a load.
     pub match_plugin_location_only: bool,
-    /// Prefer a shared session-canvas authority when one owns this location.
-    /// This is intentionally opt-in: ordinary configless messages still fan
-    /// out to their legacy instances.
-    pub prefer_session_chrome_authority: bool,
+    /// The input client for a Quick cmd keybind. When a session-canvas
+    /// authority is among the candidates, this selects its exact client tuple
+    /// and deliberately does not fall back to another attached client.
+    pub session_chrome_origin_client_id: Option<ClientId>,
     pub size: Size,
     pub cwd: Option<PathBuf>,
     pub skip_cache: bool,
@@ -3497,23 +3497,34 @@ impl WasmBridge {
             .collect()
     }
 
-    fn prefer_session_chrome_authority(
+    fn session_chrome_authority_targets_for_client(
         &self,
         plugin_ids: Vec<(PluginId, Option<ClientId>)>,
-    ) -> Vec<(PluginId, Option<ClientId>)> {
+        origin_client_id: ClientId,
+    ) -> Option<Vec<(PluginId, Option<ClientId>)>> {
         let authority_targets = plugin_ids
             .iter()
-            .filter(|(plugin_id, _)| {
+            .filter(|(plugin_id, client_id)| {
                 self.session_chrome_authorities
                     .values()
                     .any(|authority| *plugin_id == authority.runtime_plugin_id)
+                    && *client_id == Some(origin_client_id)
             })
             .cloned()
             .collect::<Vec<_>>();
-        if authority_targets.is_empty() {
-            plugin_ids
+        let authority_was_candidate = plugin_ids.iter().any(|(plugin_id, _)| {
+            self.session_chrome_authorities
+                .values()
+                .any(|authority| *plugin_id == authority.runtime_plugin_id)
+        });
+        if authority_was_candidate {
+            // An empty vector is intentional: the correct authority exists,
+            // but not for the client that triggered this keybind. Returning it
+            // prevents get_or_load_plugins from loading or targeting an
+            // arbitrary attached client's compact bar.
+            Some(authority_targets)
         } else {
-            authority_targets
+            None
         }
     }
     pub fn all_plugin_ids(&self) -> Vec<(PluginId, ClientId)> {
@@ -3675,7 +3686,7 @@ impl WasmBridge {
         let GetOrLoadPluginsParams {
             run_plugin_or_alias,
             match_plugin_location_only,
-            prefer_session_chrome_authority,
+            session_chrome_origin_client_id,
             size,
             cwd,
             skip_cache,
@@ -3700,11 +3711,16 @@ impl WasmBridge {
                         &run_plugin.configuration,
                     )
                 };
-                let all_plugin_ids = if prefer_session_chrome_authority {
-                    self.prefer_session_chrome_authority(all_plugin_ids)
-                } else {
-                    all_plugin_ids
-                };
+                if let Some(origin_client_id) = session_chrome_origin_client_id {
+                    if let Some(authority_targets) = self
+                        .session_chrome_authority_targets_for_client(
+                            all_plugin_ids,
+                            origin_client_id,
+                        )
+                    {
+                        return authority_targets;
+                    }
+                }
                 if all_plugin_ids.is_empty() {
                     let loading_plugin_id = if match_plugin_location_only {
                         self.loading_plugins
@@ -4536,7 +4552,7 @@ mod layout_plugin_transaction_tests {
     }
 
     #[test]
-    fn quick_cmd_prefers_the_shared_compact_bar_authority_over_legacy_instances() {
+    fn quick_cmd_routes_only_to_the_origin_clients_shared_compact_bar_authority() {
         let mut bridge = test_bridge(1);
         let location = RunPlugin::from_url(&format!(
             "file:{}/session-layer-compact-bar.wasm",
@@ -4546,7 +4562,10 @@ mod layout_plugin_transaction_tests {
         .location;
         bridge.cached_plugin_map.insert(
             location.clone(),
-            HashMap::from([(PluginUserConfiguration::default(), vec![(41, 7), (42, 7)])]),
+            HashMap::from([(
+                PluginUserConfiguration::default(),
+                vec![(41, 7), (41, 8), (42, 7)],
+            )]),
         );
         bridge.session_chrome_authorities.insert(
             SessionChromeKind::CompactBar,
@@ -4560,20 +4579,40 @@ mod layout_plugin_transaction_tests {
         let candidates = bridge
             .all_plugin_and_client_ids_for_plugin_location_regardless_of_configuration(&location);
         assert_eq!(
-            bridge.prefer_session_chrome_authority(candidates),
-            vec![(41, Some(7))],
-            "Quick cmd must reach the shared canvas once, even when its session-layer location is resolved"
+            bridge.session_chrome_authority_targets_for_client(candidates, 8),
+            Some(vec![(41, Some(8))]),
+            "Quick cmd must reach exactly the originating client's shared canvas when attached clients reuse the authority plugin id"
         );
     }
 
     #[test]
-    fn quick_cmd_keeps_legacy_compact_bar_targets_when_no_shared_authority_exists() {
+    fn quick_cmd_drops_a_shared_authority_when_the_origin_client_has_no_matching_tuple() {
+        let mut bridge = test_bridge(1);
+        bridge.session_chrome_authorities.insert(
+            SessionChromeKind::CompactBar,
+            SingletonAuthority {
+                runtime_plugin_id: 41,
+                projector_count: 3,
+                reserved_by: 99,
+            },
+        );
+        let candidates = vec![(41, Some(7)), (41, Some(8)), (42, Some(7))];
+
+        assert_eq!(
+            bridge.session_chrome_authority_targets_for_client(candidates, 9),
+            Some(vec![]),
+            "a missing origin-client tuple must not fall back to another attached client"
+        );
+    }
+
+    #[test]
+    fn quick_cmd_keeps_legacy_compact_bar_targets_when_no_shared_authority_is_a_candidate() {
         let bridge = test_bridge(1);
         let legacy_candidates = vec![(41, Some(7)), (42, Some(7))];
 
         assert_eq!(
-            bridge.prefer_session_chrome_authority(legacy_candidates.clone()),
-            legacy_candidates,
+            bridge.session_chrome_authority_targets_for_client(legacy_candidates, 7),
+            None,
             "normal configless plugin messages must preserve legacy fan-out without a session canvas"
         );
     }

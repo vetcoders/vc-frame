@@ -1851,8 +1851,14 @@ fn pipe_to_specific_plugins(params: PipeToSpecificPluginsParams) {
             let all_plugin_ids = wasm_bridge.get_or_load_plugins(GetOrLoadPluginsParams {
                 run_plugin_or_alias,
                 match_plugin_location_only,
-                prefer_session_chrome_authority: pipe_source == PipeSource::Keybind
-                    && name == "vc_quick_cmd",
+                // `cli_client_id` is the originating client for KeybindPipe:
+                // RouteAction supplies it directly from the input client's
+                // `client_id`, despite this inherited field name. Quick cmd
+                // must target that client's session-canvas projection only.
+                session_chrome_origin_client_id: (pipe_source == PipeSource::Keybind
+                    && name == "vc_quick_cmd")
+                    .then_some(cli_client_id)
+                    .flatten(),
                 size,
                 cwd: initial_cwd.or_else(|| cwd.clone()),
                 skip_cache,
