@@ -426,6 +426,47 @@ def require_transfer_lock_fd_policy(path: str, lines: list[str], line: int) -> N
         )
 
 
+def require_process_log_scope_args_os_policy(path: str, lines: list[str], line: int) -> None:
+    nearby = [candidate.strip() for candidate in lines[max(0, line - 2):line + 18]]
+    required = (
+        "fn process_log_scope() -> OsString {",
+        "let mut args = std::env::args_os();",
+        'if argument == "--server" {',
+        "Path::new(&socket_path).file_name()",
+        'argument.strip_prefix("--server=")',
+        "Path::new(socket_path).file_name()",
+    )
+    if (
+        path != "zellij-utils/src/consts.rs"
+        or lines[line - 1].strip() != "let mut args = std::env::args_os();"
+        or not all(any(fragment in candidate for candidate in nearby) for fragment in required)
+        or "format!(\"client-{}\", std::process::id()).into()"
+        not in [candidate.strip() for candidate in lines[line:line + 24]]
+    ):
+        raise InventoryError(f"process log scope args_os source shape changed at {path}:{line}")
+
+
+def require_spawn_error_test_unsafe_policy(path: str, lines: list[str], line: int) -> None:
+    nearby = [candidate.strip() for candidate in lines[max(0, line - 8):line + 10]]
+    required = (
+        "fn spawn_command_in_pty_returns_spawn_errors() {",
+        "let err = unsafe {",
+        "spawn_command_in_pty(&cmd, 0, || Err(io::Error::from_raw_os_error(libc::EMFILE)))",
+        '.expect_err("spawn errors should be returned, not panic");',
+        "assert_eq!(err.raw_os_error(), Some(libc::EMFILE));",
+    )
+    if (
+        path != "zellij-server/src/os_input_output_unix.rs"
+        or lines[line - 1].strip() != "let err = unsafe {"
+        or not all(any(fragment in candidate for candidate in nearby) for fragment in required)
+        or not any(
+            candidate.strip() == "#[test]"
+            for candidate in lines[max(0, line - 10):line]
+        )
+    ):
+        raise InventoryError(f"spawn error test unsafe source shape changed at {path}:{line}")
+
+
 def read_json(path: Path) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -665,6 +706,15 @@ def adjudicate(
             require_transfer_lock_fd_policy(path, lines, line)
         elif path == SESSION_SOCKET_PATH:
             require_session_socket_unsafe_policy(path, lines, line)
+        elif path == "zellij-server/src/os_input_output_unix.rs" and line == 1109:
+            require_spawn_error_test_unsafe_policy(path, lines, line)
+            return (
+                "accepted_unsafe_boundary",
+                "The test-only call exercises the documented pre_exec failure path with a fixed EMFILE result.",
+                "The closure contains no descriptor mutation or external input, returns the fixed injected error, and the assertion requires that error to propagate instead of publishing a terminal.",
+                "Unix PTY test harness",
+                ["security/semgrep/EVIDENCE.md#unix-platform-ffi", "zellij-server/src/os_input_output_unix.rs#spawn_command_in_pty_returns_spawn_errors"],
+            )
         owner, invariant, evidence = unsafe_policy(path)
         return (
             "accepted_unsafe_boundary",
@@ -720,6 +770,15 @@ def adjudicate(
             "Client process lifecycle", ["security/semgrep/EVIDENCE.md#current-executable", path],
         )
     if rule == "rust.lang.security.args-os.args-os":
+        if path == "zellij-utils/src/consts.rs":
+            require_process_log_scope_args_os_policy(path, lines, line)
+            return (
+                "scoped_false_positive",
+                "args_os only derives a local log-directory label from the optional --server socket filename.",
+                "The value is reduced to one Path::file_name component and used only below the current-user temporary log root; it authorizes no action and falls back to the process ID.",
+                "Runtime logging",
+                ["security/semgrep/EVIDENCE.md#cli-arguments", "zellij-utils/src/consts.rs#process_log_scope"],
+            )
         return (
             "scoped_false_positive",
             "args_os is the CLI entrypoint preserving platform arguments for typed clap parsing.",

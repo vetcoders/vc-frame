@@ -149,6 +149,34 @@ class SemgrepInventoryTests(unittest.TestCase):
                 1,
             )
 
+    def test_process_log_scope_args_os_is_explicitly_allowed(self) -> None:
+        path = "zellij-utils/src/consts.rs"
+        lines = self.live_lines(path, r"std::env::args_os\(\)")
+        self.assertEqual(lines, [22])
+        MODULE.adjudicate(self.finding(
+            "rust.lang.security.args-os.args-os", path, lines[0]
+        ))
+
+    def test_changed_process_log_scope_args_os_shape_fails(self) -> None:
+        with self.assertRaisesRegex(MODULE.InventoryError, "process log scope args_os source shape"):
+            MODULE.require_process_log_scope_args_os_policy(
+                "zellij-utils/src/consts.rs", ["let mut args = std::env::args_os();"], 1
+            )
+
+    def test_spawn_error_test_unsafe_is_explicitly_allowed(self) -> None:
+        path = "zellij-server/src/os_input_output_unix.rs"
+        lines = self.live_lines(path, r"let err = unsafe \{")
+        self.assertEqual(lines, [1109])
+        MODULE.adjudicate(self.finding(
+            "rust.lang.security.unsafe-usage.unsafe-usage", path, lines[0]
+        ))
+
+    def test_changed_spawn_error_test_unsafe_shape_fails(self) -> None:
+        with self.assertRaisesRegex(MODULE.InventoryError, "spawn error test unsafe source shape"):
+            MODULE.require_spawn_error_test_unsafe_policy(
+                "zellij-server/src/os_input_output_unix.rs", ["let err = unsafe {"], 1
+            )
+
     def test_temp_dir_in_production_part_of_allowed_file_fails(self) -> None:
         path = "default-plugins/link/src/main.rs"
         with self.assertRaisesRegex(MODULE.InventoryError, "outside terminal"):
