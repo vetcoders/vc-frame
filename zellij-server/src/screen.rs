@@ -946,6 +946,7 @@ pub enum ScreenInstruction {
         guest: String,
         tab: Option<usize>,
         pipe_id: Option<String>,
+        pipe_client: Option<ClientId>,
         reply: std::sync::mpsc::Sender<std::result::Result<PaneId, String>>,
     },
     ReplacePane(
@@ -2601,6 +2602,7 @@ struct WorkspaceSurface {
 #[derive(Clone, Debug)]
 struct WorkspaceProjection {
     pipe_id: Option<String>,
+    pipe_client: Option<ClientId>,
     installed: bool,
     ready: Option<zellij_utils::workspace::WorkspaceProjectionReady>,
     request: String,
@@ -2736,6 +2738,7 @@ impl Screen {
         }
         self.pending_workspace_projection = Some(WorkspaceProjection {
             pipe_id,
+            pipe_client: None,
             installed: false,
             ready: None,
             request,
@@ -2826,6 +2829,11 @@ impl Screen {
                 pipe_id.clone(),
                 serde_json::to_string(&receipt)? + "\n",
             ))?;
+        // The project-workspace CLI waits on UnblockCliPipeInput for this exact
+        // pipe. Do not depend only on plugin pending-pipe bookkeeping.
+        self.bus
+            .senders
+            .send_to_server(ServerInstruction::UnblockCliPipeInput(pipe_id.clone()))?;
         self.bus
             .senders
             .send_to_plugin(PluginInstruction::UnblockCliPipes(vec![
@@ -6549,6 +6557,14 @@ impl Screen {
                 zellij_utils::workspace::ProjectionStatus::Refused,
                 "owning interactive client detached",
             )?;
+        } else if self
+            .pending_workspace_projection
+            .as_ref()
+            .is_some_and(|pending| pending.pipe_client == Some(client_id))
+        {
+            // The project-workspace CLI watchdog exits without a receipt. Drop
+            // the reservation so a late visitor ACK cannot act after expiry.
+            self.pending_workspace_projection = None;
         }
         self.client_sizes.remove(&client_id);
         self.has_clients_flag.store(
@@ -15051,11 +15067,17 @@ pub(crate) fn screen_thread_main(params: ScreenThreadParams) -> Result<()> {
                 guest,
                 tab,
                 pipe_id,
+                pipe_client,
                 reply,
             } => {
                 let result = screen.prepare_workspace_projection(
                     plugin_id, client_id, request_id, guest, tab, pipe_id,
                 );
+                if result.is_ok()
+                    && let Some(pending) = screen.pending_workspace_projection.as_mut()
+                {
+                    pending.pipe_client = pipe_client;
+                }
                 let _ = reply.send(result);
             },
             ScreenInstruction::ReplacePane(
@@ -16694,6 +16716,7 @@ mod workspace_projection_receipt_tests {
     fn reservation() -> WorkspaceProjection {
         WorkspaceProjection {
             pipe_id: None,
+            pipe_client: None,
             installed: false,
             ready: None,
             request: "request-new".into(),

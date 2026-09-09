@@ -809,10 +809,10 @@ fn send_workspace_projection_readiness(
         &ZELLIJ_SOCK_DIR.join(&ready.host),
         std::time::Duration::from_secs(2),
     )?;
-    // A notification must never strand the visitor on a blocked socket or arm
-    // the CLI's process-exit watchdog. The small frame is attempted once;
-    // backpressure fails closed and the original projection request expires.
-    socket.set_nonblocking(true)?;
+    // This runs on a visitor background thread, not under the project-workspace
+    // CLI watchdog. Blocking delivery is required: a non-blocking fail-closed
+    // write drops the correlated ACK when the host is busy, and the caller
+    // then self-retires while the reservation can still complete later.
     let mut sender: IpcSenderWithContext<ClientToServerMsg> = IpcSenderWithContext::new(socket);
     sender.send_client_msg(ClientToServerMsg::DeclareCaller {
         caller: "workspace-visitor-readiness".to_owned(),
@@ -1684,6 +1684,19 @@ mod workspace_projection_readiness_tests {
         );
         assert!(
             workspace_projection_readiness(Some("{}"), "workspace-a", Some(1), Some("17")).is_err()
+        );
+    }
+
+    #[test]
+    fn readiness_send_source_does_not_use_fail_closed_nonblocking() {
+        let source = include_str!("lib.rs");
+        assert!(
+            source.contains("Blocking delivery is required"),
+            "visitor readiness must stay a blocking host notification"
+        );
+        assert!(
+            !source.contains("socket.set_nonblocking(true)"),
+            "non-blocking fail-closed readiness is the W2 expiry path"
         );
     }
 }

@@ -428,8 +428,13 @@ impl ZellijPlugin for State {
                 ) {
                     let ids = get_plugin_ids();
                     block_cli_pipe_input(pipe_id);
-                    let pane_id =
-                        self.activate_session_request(&session, tab, request_id, Some(pipe_id));
+                    let pane_id = self.activate_session_request(
+                        &session,
+                        tab,
+                        request_id,
+                        Some(pipe_id),
+                        pipe_message.args.get("pipe_client_id").map(String::as_str),
+                    );
                     if pane_id.is_some() {
                         // Screen owns the final acknowledgment after the visitor
                         // receives guest output. Keep this exact pipe pending.
@@ -1822,6 +1827,7 @@ impl State {
             tab_position,
             &Uuid::new_v4().to_string(),
             None,
+            None,
         );
     }
 
@@ -1831,6 +1837,7 @@ impl State {
         tab_position: Option<usize>,
         request_id: &str,
         pipe_id: Option<&str>,
+        pipe_client: Option<&str>,
     ) -> Option<u32> {
         self.pending_guest_create = None;
         self.pending_guest_visit = None;
@@ -1848,6 +1855,9 @@ impl State {
         ]);
         if let Some(pipe_id) = pipe_id {
             context.insert("vc_workspace_pipe".to_owned(), pipe_id.to_owned());
+        }
+        if let Some(pipe_client) = pipe_client {
+            context.insert("vc_workspace_pipe_client".to_owned(), pipe_client.to_owned());
         }
         // The Screen owner resolves the registered surface and reserves this exact
         // generation. This placeholder argument is never pane authority.

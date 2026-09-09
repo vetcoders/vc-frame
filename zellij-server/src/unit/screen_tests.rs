@@ -16718,3 +16718,44 @@ fn workspace_owner_cancel_and_supersession_reject_late_readiness() {
     );
     assert!(!screen.complete_workspace_projection(&ready).unwrap());
 }
+
+#[test]
+fn workspace_owner_retires_reservation_when_pipe_caller_disconnects() {
+    let mut screen = workspace_owner_screen(true);
+    screen
+        .prepare_workspace_projection(90, 1, "ready".into(), "guest-a".into(), Some(0), None)
+        .unwrap();
+    screen.pending_workspace_projection.as_mut().unwrap().pipe_client = Some(9);
+    screen.remove_client(9).unwrap();
+    assert!(screen.pending_workspace_projection.is_none());
+    let ready = zellij_utils::workspace::WorkspaceProjectionReady {
+        request_id: "ready".into(),
+        host: screen.session_name.clone(),
+        client_id: 1,
+        plugin_id: 90,
+        guest: "guest-a".into(),
+        tab: Some(0),
+        pane_id: 50,
+    };
+    assert!(!screen.complete_workspace_projection(&ready).unwrap());
+}
+
+#[test]
+fn workspace_owner_keeps_reservation_when_unrelated_client_disconnects() {
+    let mut screen = workspace_owner_screen(true);
+    screen
+        .prepare_workspace_projection(90, 1, "ready".into(), "guest-a".into(), Some(0), None)
+        .unwrap();
+    screen.pending_workspace_projection.as_mut().unwrap().pipe_client = Some(9);
+    screen.connected_clients.borrow_mut().insert(8, false);
+    screen.remove_client(8).unwrap();
+    assert!(screen.pending_workspace_projection.is_some());
+    assert_eq!(
+        screen
+            .pending_workspace_projection
+            .as_ref()
+            .unwrap()
+            .pipe_client,
+        Some(9)
+    );
+}

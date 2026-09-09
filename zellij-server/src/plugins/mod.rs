@@ -1428,6 +1428,9 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                         args
                     );
                     if let [(plugin_id, client_id)] = owners.as_slice() {
+                        let mut delivery_args = args.clone().unwrap_or_default();
+                        delivery_args
+                            .insert("pipe_client_id".to_owned(), cli_client_id.to_string());
                         wasm_bridge.pipe_messages(
                             vec![(
                                 Some(*plugin_id),
@@ -1436,7 +1439,7 @@ pub(crate) fn plugin_thread_main(params: PluginThreadParams) -> Result<()> {
                                     PipeSource::Cli(pipe_id.clone()),
                                     &name,
                                     &payload,
-                                    &args,
+                                    &Some(delivery_args),
                                     true,
                                 ),
                             )],

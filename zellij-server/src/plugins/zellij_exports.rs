@@ -2075,6 +2075,9 @@ fn open_command_pane_in_place_of_pane_id(
                     guest: guest.clone(),
                     tab,
                     pipe_id: context.get("vc_workspace_pipe").cloned(),
+                    pipe_client: context
+                        .get("vc_workspace_pipe_client")
+                        .and_then(|value| value.parse().ok()),
                     reply,
                 })
                 .is_ok();
@@ -2166,7 +2169,7 @@ fn open_command_pane_in_place_of_pane_id(
     let result = wait_for_action_completion(
         completion_rx,
         "open_command_pane_in_place_of_pane_id",
-        false,
+        context.contains_key("vc_workspace_request"),
     );
     if result.affected_pane_id.is_none() {
         if let Some(request_id) = context.get("vc_workspace_request") {

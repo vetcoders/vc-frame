@@ -173,6 +173,7 @@ fn run_frame(socket_dir: &Path, home: &Path, args: &[&str]) -> (bool, String) {
         command.env(key, value);
     }
     command.env("VC_FRAME_ACTION_TTL_SECONDS", "20");
+    command.env("VC_FRAME_CALLER", "workspace-project-cli");
     let mut child = command.spawn().expect("spawn vc-frame");
     fixture_receipt(
         home,
