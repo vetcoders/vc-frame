@@ -378,6 +378,21 @@ impl WorkspaceProjectionReceipt {
     }
 }
 
+/// A peer `SessionInfo` discovered from a live socket often has empty `tabs`
+/// until metadata lands. Empty is unknown, not "tab 0 does not exist".
+/// Only a non-empty tab list may refuse a requested 0-based position.
+pub fn guest_projection_tab_is_available(
+    session: &SessionInfo,
+    requested_tab: Option<usize>,
+) -> bool {
+    match requested_tab {
+        None => true,
+        Some(position) => {
+            session.tabs.is_empty() || session.tabs.iter().any(|tab| tab.position == position)
+        },
+    }
+}
+
 pub fn prove_unique_owning_client<'a, C>(
     clients: impl IntoIterator<Item = &'a C>,
     is_cli: impl Fn(&C) -> bool,
@@ -517,6 +532,7 @@ pub fn layout_cli_token(layout: &LayoutInfo) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::TabInfo;
     use std::collections::BTreeMap;
 
     fn builtin(name: &str) -> LayoutInfo {
@@ -798,6 +814,36 @@ mod tests {
             }
             .acknowledges("new", "a", Some(1))
         );
+    }
+
+    #[test]
+    fn empty_peer_tabs_are_unknown_not_a_missing_first_tab() {
+        let unknown = SessionInfo {
+            name: "workspace-a".into(),
+            ..SessionInfo::default()
+        };
+        assert!(
+            guest_projection_tab_is_available(&unknown, Some(0)),
+            "socket-discovered guests with empty tabs must accept --tab 1 / position 0"
+        );
+        assert!(guest_projection_tab_is_available(&unknown, Some(1)));
+        assert!(guest_projection_tab_is_available(&unknown, None));
+        let listed = SessionInfo {
+            name: "workspace-a".into(),
+            tabs: vec![
+                TabInfo {
+                    position: 1,
+                    ..Default::default()
+                },
+            ],
+            ..SessionInfo::default()
+        };
+        assert!(
+            !guest_projection_tab_is_available(&listed, Some(0)),
+            "a materialized tab list still refuses a position it does not contain"
+        );
+        assert!(guest_projection_tab_is_available(&listed, Some(1)));
+        assert!(guest_projection_tab_is_available(&listed, None));
     }
 
     #[test]

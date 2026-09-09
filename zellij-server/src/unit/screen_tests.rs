@@ -16826,6 +16826,31 @@ fn workspace_owner_requires_canonical_placeholder_not_terminal_command() {
 }
 
 #[test]
+fn workspace_owner_accepts_socket_discovered_guest_with_empty_tabs() {
+    let mut screen = workspace_owner_screen(true);
+    screen
+        .peer_sessions_cache
+        .get_mut("guest-a")
+        .unwrap()
+        .tabs
+        .clear();
+    assert_eq!(
+        screen
+            .prepare_workspace_projection(90, 1, "r".into(), "guest-a".into(), Some(0), None)
+            .unwrap(),
+        PaneId::Plugin(41)
+    );
+    assert!(
+        screen
+            .validate_workspace_projection(
+                &workspace_owner_completion("r", "0"),
+                &ClientTabIndexOrPaneId::PaneId(PaneId::Plugin(41))
+            )
+            .is_ok()
+    );
+}
+
+#[test]
 fn workspace_owner_rechecks_runtime_host_and_guest_tab() {
     let mut screen = workspace_owner_screen(true);
     assert!(

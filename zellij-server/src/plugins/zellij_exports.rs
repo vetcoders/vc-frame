@@ -2082,11 +2082,36 @@ fn open_command_pane_in_place_of_pane_id(
                 })
                 .is_ok();
         let result = if prepared {
-            receiver
-                .recv_timeout(std::time::Duration::from_secs(5))
-                .ok()
-                .and_then(|result| result.ok())
+            match receiver.recv_timeout(std::time::Duration::from_secs(5)) {
+                Ok(Ok(pane_id)) => Some(pane_id),
+                Ok(Err(error)) => {
+                    log::warn!(
+                        "workspace_projection prepare refused request={} plugin={} client={} reason={}",
+                        request_id,
+                        env.plugin_id,
+                        env.client_id,
+                        error
+                    );
+                    None
+                },
+                Err(_) => {
+                    log::warn!(
+                        "workspace_projection prepare timed out request={} plugin={} client={}",
+                        request_id,
+                        env.plugin_id,
+                        env.client_id
+                    );
+                    None
+                },
+            }
         } else {
+            log::warn!(
+                "workspace_projection prepare skipped request={} plugin={} client={} valid_command={}",
+                request_id,
+                env.plugin_id,
+                env.client_id,
+                valid_command
+            );
             None
         };
         match result {
@@ -2117,12 +2142,6 @@ fn open_command_pane_in_place_of_pane_id(
                 );
             },
             None => {
-                log::warn!(
-                    "workspace_projection prepare refused request={} plugin={} client={}",
-                    request_id,
-                    env.plugin_id,
-                    env.client_id
-                );
                 let response = ProtobufOpenCommandPaneInPlaceOfPaneIdResponse::from(None);
                 wasi_write_object(env, &response.encode_to_vec()).non_fatal();
                 return;

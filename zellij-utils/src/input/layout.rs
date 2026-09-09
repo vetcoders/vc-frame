@@ -155,6 +155,24 @@ impl RunPluginOrAlias {
     pub fn get_configuration(&self) -> Option<PluginUserConfiguration> {
         self.get_run_plugin().map(|r| r.configuration.clone())
     }
+    /// Layout authority for host/surface matching. Prefer the resolved plugin
+    /// configuration; if the alias has not been populated yet, use the keys
+    /// written on the alias itself (frame_host/rail/workspace_surface).
+    pub fn effective_plugin_configuration(&self) -> Option<&BTreeMap<String, String>> {
+        match self {
+            RunPluginOrAlias::RunPlugin(run_plugin) => Some(run_plugin.configuration.inner()),
+            RunPluginOrAlias::Alias(plugin_alias) => plugin_alias
+                .run_plugin
+                .as_ref()
+                .map(|run_plugin| run_plugin.configuration.inner())
+                .or_else(|| {
+                    plugin_alias
+                        .configuration
+                        .as_ref()
+                        .map(|configuration| configuration.inner())
+                }),
+        }
+    }
     pub fn get_initial_cwd(&self) -> Option<PathBuf> {
         self.get_run_plugin().and_then(|r| r.initial_cwd.clone())
     }

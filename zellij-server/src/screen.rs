@@ -2672,11 +2672,11 @@ impl Screen {
                 let Some(Run::Plugin(plugin)) = pane.invoked_with().as_ref() else {
                     continue;
                 };
-                let Some(config) = plugin.get_configuration() else {
+                let Some(config) = plugin.effective_plugin_configuration() else {
                     continue;
                 };
-                if config.inner().get("frame_host").map(String::as_str) == Some("true")
-                    && config.inner().get("rail").map(String::as_str) == Some("true")
+                if config.get("frame_host").map(String::as_str) == Some("true")
+                    && config.get("rail").map(String::as_str) == Some("true")
                 {
                     let PaneId::Plugin(projector) = pane_id else {
                         continue;
@@ -2710,14 +2710,20 @@ impl Screen {
         if request.is_empty() || guest == self.session_name {
             return Err("invalid workspace projection identity".into());
         }
-        let session = self
-            .peer_sessions_cache
-            .get(&guest)
-            .ok_or_else(|| "workspace guest is unavailable".to_owned())?;
-        if requested_tab
-            .is_some_and(|position| !session.tabs.iter().any(|tab| tab.position == position))
-        {
-            return Err("requested workspace tab is unavailable".into());
+        match self.peer_sessions_cache.get(&guest) {
+            Some(session) => {
+                if !zellij_utils::workspace::guest_projection_tab_is_available(
+                    session,
+                    requested_tab,
+                ) {
+                    return Err("requested workspace tab is unavailable".into());
+                }
+            },
+            None => {
+                if !zellij_utils::sessions::session_exists(&guest).unwrap_or(false) {
+                    return Err("workspace guest is unavailable".into());
+                }
+            },
         }
         if self.workspace_surface.is_none() {
             let tab = &self.tabs[&tab_id];
@@ -2727,8 +2733,8 @@ impl Screen {
                     let Some(Run::Plugin(plugin)) = pane.invoked_with().as_ref() else {
                         return None;
                     };
-                    let config = plugin.get_configuration()?;
-                    (config.inner().get("workspace_surface").map(String::as_str) == Some("true"))
+                    let config = plugin.effective_plugin_configuration()?;
+                    (config.get("workspace_surface").map(String::as_str) == Some("true"))
                         .then_some(*id)
                 })
                 .collect();
@@ -2819,10 +2825,7 @@ impl Screen {
             .peer_sessions_cache
             .get(&pending.guest)
             .ok_or("workspace guest disappeared")?;
-        if pending
-            .tab
-            .is_some_and(|position| !guest.tabs.iter().any(|tab| tab.position == position))
-        {
+        if !zellij_utils::workspace::guest_projection_tab_is_available(guest, pending.tab) {
             return Err("workspace requested tab disappeared".into());
         }
         Ok(())

@@ -472,15 +472,6 @@ impl RunningPlugin {
     pub fn atomic_event_gate(&self) -> AtomicEventGateHandle {
         self.atomic_events.clone()
     }
-    pub fn next_event_id(&mut self, atomic_event: AtomicEvent) -> usize {
-        self.atomic_events.next_event_id(atomic_event)
-    }
-    pub fn apply_event_id(&mut self, atomic_event: AtomicEvent, event_id: usize) -> bool {
-        self.atomic_events.apply_event_id(atomic_event, event_id)
-    }
-    pub fn bump_atomic_epoch(&mut self) {
-        self.atomic_events.bump_epoch();
-    }
     pub fn update_keybinds(&mut self, keybinds: Keybinds) {
         self.store.data_mut().keybinds = keybinds;
     }
